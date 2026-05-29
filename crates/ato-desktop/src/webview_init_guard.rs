@@ -39,34 +39,63 @@
 use std::cell::Cell;
 
 thread_local! {
-    static IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
+    static IN_PROGRESS: Cell<u32> = const { Cell::new(0) };
 }
 
 /// RAII guard that marks the main thread as being inside `build_as_child`.
 ///
 /// Created with [`WebviewInitGuard::new`]; cleared on [`Drop`].
 /// Drain loops check [`WebviewInitGuard::is_active`] and skip the
-/// current iteration while this guard is held.
+/// current iteration while this guard is held. Uses a depth counter so
+/// that (defensively) nested guards on the same thread compose correctly:
+/// the flag only clears once the outermost guard is dropped.
 pub struct WebviewInitGuard;
 
 impl WebviewInitGuard {
     /// Acquire the guard.  Must only be called on the GPUI main thread.
     #[inline]
     pub fn new() -> Self {
-        IN_PROGRESS.with(|f| f.set(true));
+        IN_PROGRESS.with(|f| f.set(f.get() + 1));
         WebviewInitGuard
     }
 
     /// Returns `true` while any `WebviewInitGuard` is live on this thread.
     #[inline]
     pub fn is_active() -> bool {
-        IN_PROGRESS.with(|f| f.get())
+        IN_PROGRESS.with(|f| f.get() > 0)
+    }
+}
+
+impl Default for WebviewInitGuard {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Drop for WebviewInitGuard {
     #[inline]
     fn drop(&mut self) {
-        IN_PROGRESS.with(|f| f.set(false));
+        IN_PROGRESS.with(|f| f.set(f.get().saturating_sub(1)));
+    }
+}
+
+/// Yield (re-arming a short background timer) until no `WebviewInitGuard`
+/// is active on the main thread.
+///
+/// Foreground tasks that resume from an `.await` and then call
+/// `AsyncApp::update` MUST `await` this first when there is any chance they
+/// resume during another window's `build_as_child`: otherwise the resumed
+/// poll runs *inside* Wry's pumped WebView2 init while an outer `App` borrow
+/// is held, and the `update` double-borrows (`RefCell already borrowed`).
+///
+/// Periodic drain loops can instead use the cheaper
+/// `if WebviewInitGuard::is_active() { continue; }` pattern at the top of
+/// each iteration; this helper is for one-shot continuations that have no
+/// natural "skip this tick" loop to fall back to.
+pub async fn wait_until_idle(background: &gpui::BackgroundExecutor) {
+    use std::time::Duration;
+    while WebviewInitGuard::is_active() {
+        background.timer(Duration::from_millis(2)).await;
     }
 }
