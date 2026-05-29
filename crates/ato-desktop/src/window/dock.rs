@@ -766,7 +766,13 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                 crate::window::macos::hide_window_in_handler(window);
                 false
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                tracing::info!("dock: close intercepted, hiding instead of destroying");
+                crate::window::windows::hide_window_in_handler(window);
+                false
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 let _ = window;
                 true
