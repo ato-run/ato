@@ -418,7 +418,9 @@ fn collect_podman_diagnostics() -> serde_json::Value {
             "machine": "not_configured",
             "guidance": "No Podman machine found. Run: podman machine init && podman machine start",
         }),
-        Ok(serde_json::Value::Array(machines)) => podman_diagnostics_from_machine_entries(&machines),
+        Ok(serde_json::Value::Array(machines)) => {
+            podman_diagnostics_from_machine_entries(&machines)
+        }
         Ok(_) => serde_json::json!({
             "binary": "found",
             "machine": "unknown",
