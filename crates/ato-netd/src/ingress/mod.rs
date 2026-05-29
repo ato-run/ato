@@ -215,7 +215,16 @@ impl IngressManager {
             self.alloc.snapshot().values().copied().collect();
         let port = self.ephemeral_alloc.assign(session_key, &stable_occupied)?;
 
-        let listener = bind_listener(port)?;
+        let listener = match bind_listener(port) {
+            Ok(l) => l,
+            Err(e) => {
+                // Roll back the allocation so the port is not permanently
+                // stranded in the allocator when bind fails (e.g., the OS
+                // refused to bind that specific port).
+                self.ephemeral_alloc.release(session_key);
+                return Err(e);
+            }
+        };
         let upstream = Arc::new(RwLock::new(upstream_url));
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let join_set = Arc::new(tokio::sync::Mutex::new(JoinSet::<()>::new()));
