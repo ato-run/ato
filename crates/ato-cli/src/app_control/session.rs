@@ -1195,8 +1195,7 @@ pub(super) fn start_orchestration_session_in_process(
     runtime_handle
         .block_on(async { oci_provider.ensure_ready().await })
         .map_err(|err| {
-            anyhow::Error::from(err)
-                .context("OCI provider not ready before session start")
+            anyhow::Error::from(err).context("OCI provider not ready before session start")
         })?;
     let detached = runtime_handle
         .block_on(
