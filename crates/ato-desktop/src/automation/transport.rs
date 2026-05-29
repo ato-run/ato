@@ -354,14 +354,20 @@ mod tests {
     fn parse_command_restart_active_session_takes_no_args() {
         let params = serde_json::json!({});
         let cmd = super::parse_command("restart_active_session", &params).expect("parse");
-        assert!(matches!(cmd, super::AutomationCommand::RestartActiveSession));
+        assert!(matches!(
+            cmd,
+            super::AutomationCommand::RestartActiveSession
+        ));
     }
 
     #[test]
     fn parse_command_restart_active_session_ignores_unknown_params() {
         let params = serde_json::json!({"pane_id": 0, "extra": "ignored"});
         let cmd = super::parse_command("restart_active_session", &params).expect("parse");
-        assert!(matches!(cmd, super::AutomationCommand::RestartActiveSession));
+        assert!(matches!(
+            cmd,
+            super::AutomationCommand::RestartActiveSession
+        ));
     }
 
     #[test]
