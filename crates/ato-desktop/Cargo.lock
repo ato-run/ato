@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "ato-desktop"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "ato-net",
@@ -539,6 +539,7 @@ dependencies = [
  "chrono",
  "cookie",
  "dirs 5.0.1",
+ "embed-resource",
  "gpui",
  "gpui-component",
  "gpui-component-assets",

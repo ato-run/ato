@@ -3021,6 +3021,7 @@ target = "app"
         assert!(details.contains("must reference a source/python target"));
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn resolve_run_target_rejects_ato_home_paths_with_helpful_error() {
         let ato_home = tempfile::TempDir::new().expect("ato_home");
