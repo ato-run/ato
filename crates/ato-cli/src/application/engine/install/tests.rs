@@ -10,7 +10,6 @@ use crate::publish_ci::build_capsule_artifact as build_publish_capsule_artifact;
 use crate::reporters::CliReporter;
 use filetime::{set_file_mtime, FileTime};
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use axum::extract::{Path as AxumPath, State};
@@ -36,13 +35,17 @@ fn assert_json_object_has_keys(value: &serde_json::Value, keys: &[&str]) {
     }
 }
 
-fn test_env_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+// Delegate to the crate-wide env lock so all ATO_HOME-mutating test groups
+// (lib_tests, install/tests, executors/source) are serialised by one mutex.
+fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    crate::tests::env_lock()
 }
 
-async fn acquire_test_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    test_env_lock().lock().await
+// Returns a guard that holds the env lock. Declared async so all call-sites
+// can keep the uniform `acquire_test_env_lock().await` pattern unchanged;
+// the function never actually yields.
+async fn acquire_test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    test_env_lock().lock().expect("env lock")
 }
 
 struct EnvVarGuard {
