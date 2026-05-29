@@ -16,7 +16,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::Value;
 use std::sync::mpsc::Sender;
 use tracing::warn;
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{GetLastError, SetLastError, HWND};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_HWNDPARENT,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
@@ -25,7 +25,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 // ── HWND helpers ──────────────────────────────────────────────────────────────
 
 fn hwnd_for_window(window: &Window) -> Option<HWND> {
-    let rwh = match window.window_handle() {
+    // `Window::window_handle()` (inherent) returns `AnyWindowHandle`; we need
+    // the `HasWindowHandle` trait method which returns `Result<WindowHandle<'_>>`.
+    let rwh = match <Window as HasWindowHandle>::window_handle(window) {
         Ok(h) => h,
         Err(e) => {
             warn!(error = %e, "window.window_handle() failed");
@@ -99,8 +101,8 @@ pub fn resize_window_in_handler(window: &mut Window, new_w: f32, new_h: f32) {
     unsafe {
         SetWindowPos(
             hwnd,
-            0, // ignored when SWP_NOZORDER
-            0, // ignored when SWP_NOMOVE
+            std::ptr::null_mut(), // hWndInsertAfter: ignored when SWP_NOZORDER
+            0,                    // ignored when SWP_NOMOVE
             0,
             new_w as i32,
             new_h as i32,
@@ -152,13 +154,23 @@ pub fn attach_as_child(
     parent: AnyWindowHandle,
     child: AnyWindowHandle,
 ) -> Result<(), String> {
-    let parent_hwnd =
-        hwnd_for(cx, parent).ok_or_else(|| "parent HWND unavailable".to_string())?;
-    let child_hwnd =
-        hwnd_for(cx, child).ok_or_else(|| "child HWND unavailable".to_string())?;
+    let parent_hwnd = hwnd_for(cx, parent).ok_or_else(|| "parent HWND unavailable".to_string())?;
+    let child_hwnd = hwnd_for(cx, child).ok_or_else(|| "child HWND unavailable".to_string())?;
 
     unsafe {
-        SetWindowLongPtrW(child_hwnd, GWLP_HWNDPARENT, parent_hwnd as isize);
+        // Per MSDN: SetWindowLongPtrW returns the previous value on success and
+        // 0 on failure. However it can also return 0 legitimately (previous value
+        // was 0), so we must clear LastError first and test it afterwards.
+        SetLastError(0);
+        let prev = SetWindowLongPtrW(child_hwnd, GWLP_HWNDPARENT, parent_hwnd as isize);
+        if prev == 0 {
+            let err = GetLastError();
+            if err != 0 {
+                return Err(format!(
+                    "SetWindowLongPtrW(GWLP_HWNDPARENT) failed: Win32 error {err}"
+                ));
+            }
+        }
     }
     tracing::info!("SetWindowLongPtrW(GWLP_HWNDPARENT) attached child window to parent");
     Ok(())
