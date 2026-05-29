@@ -290,6 +290,7 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
             .into(),
         };
         let queue_for_ipc = queue.clone();
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_html(SWITCHER_HTML)
             .with_initialization_script(init_script.as_str())
@@ -342,10 +343,14 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
                 be.timer(Duration::from_millis(300)).await;
                 for (window_id, window_handle) in window_id_to_handle {
                     let (tx, rx) = mpsc::channel();
+                    crate::webview_init_guard::wait_until_idle(&be).await;
                     aa.update(|cx| request_snapshot(cx, window_handle, tx));
                     let deadline = Instant::now() + Duration::from_millis(1500);
                     loop {
                         be.timer(Duration::from_millis(50)).await;
+                        if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                            continue;
+                        }
                         match rx.try_recv() {
                             Ok(Some(data_url)) => {
                                 aa.update(|cx| {
@@ -404,6 +409,9 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
                     });
                     loop {
                         be.timer(Duration::from_millis(100)).await;
+                        if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                            continue;
+                        }
                         match rx.try_recv() {
                             Ok(Ok(snapshots)) => {
                                 aa.update(|cx| {

@@ -202,6 +202,7 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
             .into(),
         };
         let queue_for_ipc = queue.clone();
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_html(IDENTITY_HTML)
             .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(

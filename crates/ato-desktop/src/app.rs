@@ -323,6 +323,7 @@ impl OpenUrlBridge {
                 // to the GPUI event loop so the original borrow drops
                 // before refresh() runs.
                 bg.timer(std::time::Duration::from_millis(16)).await;
+                crate::webview_init_guard::wait_until_idle(&bg).await;
                 refresh_app.refresh();
                 refresh_scheduled.store(false, Ordering::Release);
             })
@@ -1207,10 +1208,12 @@ pub fn run(skip_onboarding: bool) {
                 .spawn(async move {
                     // One frame is enough for the macOS RunLoop to complete
                     // its first pass and for WKWebView to initialize normally.
+                    let bg_exec = async_cx.background_executor();
                     async_cx
                         .background_executor()
                         .timer(std::time::Duration::from_millis(32))
                         .await;
+                    crate::webview_init_guard::wait_until_idle(bg_exec).await;
                     let _ = async_cx.update(|cx| {
                         if show_onboarding {
                             match crate::window::onboarding_window::open_onboarding_window(cx) {
