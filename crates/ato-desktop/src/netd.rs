@@ -256,7 +256,9 @@ pub(crate) fn deregister_ephemeral_ingress(key: &str) {
     {
         match SyncClient::connect_default() {
             Ok(mut client) => match client.deregister_ephemeral_ingress(key) {
-                Ok(()) => tracing::debug!(key = %key, "deregistered ato-netd ephemeral ingress route"),
+                Ok(()) => {
+                    tracing::debug!(key = %key, "deregistered ato-netd ephemeral ingress route")
+                }
                 Err(err) => tracing::warn!(
                     key = %key,
                     error = %err,
