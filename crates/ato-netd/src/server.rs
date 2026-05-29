@@ -240,6 +240,39 @@ async fn dispatch(request: Request, state: &DaemonState) -> Response {
                 result: ResponseResult::Empty {},
             }
         }
+        Request::RegisterEphemeralIngress {
+            session_key,
+            upstream_url,
+        } => {
+            match state
+                .ingress()
+                .lock()
+                .await
+                .register_ephemeral(&session_key, &upstream_url)
+                .await
+            {
+                Ok(info) => Response::Ok {
+                    result: ResponseResult::IngressRegistered(info),
+                },
+                Err(e) => Response::Error {
+                    error: ErrorPayload {
+                        code: "ephemeral_ingress_register_failed".into(),
+                        message: e.to_string(),
+                    },
+                },
+            }
+        }
+        Request::DeregisterEphemeralIngress { session_key } => {
+            state
+                .ingress()
+                .lock()
+                .await
+                .deregister_ephemeral(&session_key)
+                .await;
+            Response::Ok {
+                result: ResponseResult::Empty {},
+            }
+        }
     }
 }
 
