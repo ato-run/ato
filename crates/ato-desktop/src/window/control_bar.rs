@@ -20,10 +20,11 @@ use std::rc::Rc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, hsla, point, px, rgb, size, svg, AnyElement, AnyWindowHandle, App, Bounds,
-    BoxShadow, ClipboardItem, Context, DispatchPhase, Entity, FontWeight, IntoElement, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    canvas, div, hsla, point, px, rgb, size, svg, transparent_black, AnyElement, AnyWindowHandle,
+    App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase, Entity, FontWeight, IntoElement,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
+    SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
@@ -1203,7 +1204,7 @@ fn open_info_popup(
             model: model.clone(),
             locale,
         });
-        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+        cx.new(|cx| gpui_component::Root::new(shell, window, cx).bg(transparent_black()))
     })?;
 
     cx.set_global(InfoPopupWindowSlot(Some(*handle)));
@@ -1332,7 +1333,7 @@ fn open_control_bar_inner(
     let handle = cx.open_window(options, move |window, cx| {
         let shell = cx.new(|cx| ControlBarShellPlaceholder::new(&route, window, cx));
         *shell_slot_for_window.borrow_mut() = Some(shell.clone());
-        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+        cx.new(|cx| gpui_component::Root::new(shell, window, cx).bg(transparent_black()))
     })?;
     if let Some(shell) = shell_slot.borrow().clone() {
         cx.global_mut::<ControlBarController>()
