@@ -27,6 +27,7 @@ use crate::system_capsule::ato_onboarding::{OnboardingCommand, ONBOARDING_VERSIO
 use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::dock::DockEntitySlot;
+use crate::window::focus_guest_panes::{is_focus_guest_pane_id, FocusGuestPaneRegistry};
 
 /// Start the Focus-mode automation dispatcher. Spawns the socket
 /// listener (`AutomationHost::start`) plus a foreground polling task
@@ -151,26 +152,174 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                     continue;
                 }
 
+                // Guest capsule panes (#370): route MCP browser_* commands to
+                // the private WebView owned by an `AppCapsuleShell`. Explicit
+                // dock-pane commands were already handled above; everything
+                // here targets a guest pane, defaulting `pane_id = 0` to the
+                // frontmost guest (or the dock when no guest is open).
+                if is_browser_pane_command(&req.command) {
+                    let host_clone = host.clone();
+                    let pending_ref = &pending;
+                    let has_pending_ref = &has_pending;
+                    let _ = async_app_for_loop.update(|cx| {
+                        // Resolve the target pane.
+                        let pane_id = if req.pane_id == 0 {
+                            frontmost_guest_pane_id(cx)
+                        } else if is_focus_guest_pane_id(req.pane_id) {
+                            Some(req.pane_id)
+                        } else {
+                            None
+                        };
+                        let pane_id = match pane_id {
+                            Some(p) => p,
+                            None => {
+                                // No guest pane resolved. For an unspecified
+                                // pane, fall back to the dock if it is open;
+                                // otherwise surface the honest "no pane" error.
+                                if req.pane_id == 0 {
+                                    let dock_open = cx
+                                        .try_global::<DockEntitySlot>()
+                                        .and_then(|s| s.0.as_ref())
+                                        .is_some();
+                                    if dock_open {
+                                        let mut req = req;
+                                        req.pane_id = DOCK_AUTOMATION_PANE_ID;
+                                        if let Ok(mut q) = pending_ref.lock() {
+                                            q.push(req);
+                                            has_pending_ref.store(true, Ordering::Relaxed);
+                                        }
+                                    } else {
+                                        req.send(Err("no WebView pane".into()));
+                                    }
+                                } else {
+                                    req.send(Err(format!(
+                                        "unknown pane {} (no such guest capsule)",
+                                        req.pane_id
+                                    )));
+                                }
+                                return;
+                            }
+                        };
+
+                        // Page-load guard, mirroring the dock path: JS-bearing
+                        // commands wait until the page is ready; navigation and
+                        // screenshots are exempt.
+                        let needs_loaded = !matches!(
+                            &req.command,
+                            AutomationCommand::Navigate { .. }
+                                | AutomationCommand::NavigateBack
+                                | AutomationCommand::NavigateForward
+                                | AutomationCommand::Screenshot
+                        );
+                        if needs_loaded && !host_clone.is_page_loaded(pane_id) {
+                            if req.is_expired() {
+                                req.send(Err("guest capsule page not loaded; timed out".into()));
+                            } else if let Ok(mut q) = pending_ref.lock() {
+                                q.push(req);
+                                has_pending_ref.store(true, Ordering::Relaxed);
+                            }
+                            return;
+                        }
+
+                        // Upgrade the shell and dispatch through its private
+                        // WebView. A dead weak means the window closed.
+                        let entry = cx.global::<FocusGuestPaneRegistry>().get(pane_id).cloned();
+                        match entry.and_then(|e| e.shell.upgrade()) {
+                            Some(shell) => {
+                                shell.update(cx, |shell, _cx| {
+                                    shell.dispatch_automation_request(req, pane_id, &host_clone);
+                                });
+                            }
+                            None => {
+                                req.send(Err("guest capsule pane is not available".into()));
+                            }
+                        }
+                    });
+                    continue;
+                }
+
                 match &req.command {
                     AutomationCommand::ListPanes => {
-                        // In Focus mode the only WebView pane is the dock
-                        // (when open). Report it if `DockEntitySlot` is set.
-                        let dock_open = async_app_for_loop
-                            .update(|cx| {
-                                cx.try_global::<DockEntitySlot>()
-                                    .and_then(|s| s.0.as_ref())
-                                    .is_some()
-                            });
-                        let panes = if dock_open {
-                            serde_json::json!([{
-                                "pane_id": DOCK_AUTOMATION_PANE_ID,
-                                "kind": "dock",
-                                "url": "ato://dock",
-                            }])
-                        } else {
-                            serde_json::json!([])
-                        };
+                        // Report every live guest capsule pane (#370), plus
+                        // the dock pane when it is open. This is the fix for
+                        // `browser_tabs -> []`: guest WebViews owned by
+                        // `AppCapsuleShell` are now first-class automation
+                        // panes.
+                        let panes = async_app_for_loop.update(|cx| {
+                            let dock_open = cx
+                                .try_global::<DockEntitySlot>()
+                                .and_then(|s| s.0.as_ref())
+                                .is_some();
+                            let entries = cx.global::<FocusGuestPaneRegistry>().list();
+                            let mut guests = Vec::with_capacity(entries.len());
+                            for entry in entries {
+                                // Skip panes whose window has gone away.
+                                let Some(shell) = entry.shell.upgrade() else {
+                                    continue;
+                                };
+                                let shell_ref = shell.read(cx);
+                                let url = shell_ref.current_url_for_automation();
+                                let session_id = shell_ref.current_session_id();
+                                let has_webview = shell_ref.has_webview();
+                                // `OpenContentWindows` is the metadata source of
+                                // truth for the user-facing title.
+                                let title = cx
+                                    .global::<OpenContentWindows>()
+                                    .get(entry.window_id)
+                                    .map(|e| e.title.to_string())
+                                    .unwrap_or_else(|| short_handle_title(&entry.handle));
+                                let status = if has_webview { "Ready" } else { "Starting" };
+                                guests.push(GuestPaneMeta {
+                                    pane_id: entry.pane_id,
+                                    window_id: entry.window_id,
+                                    url,
+                                    title,
+                                    handle: entry.handle.clone(),
+                                    session_id,
+                                    status: status.to_string(),
+                                });
+                            }
+                            build_pane_list(&guests, dock_open)
+                        });
                         req.send(Ok(serde_json::json!({ "panes": panes })));
+                    }
+                    AutomationCommand::FocusPane { pane_id } => {
+                        let pane_id = *pane_id;
+                        let result: Result<serde_json::Value, String> =
+                            async_app_for_loop.update(|cx| {
+                                if is_focus_guest_pane_id(pane_id) {
+                                    let entry = cx
+                                        .global::<FocusGuestPaneRegistry>()
+                                        .get(pane_id)
+                                        .cloned();
+                                    let Some(entry) = entry else {
+                                        return Err(format!(
+                                            "unknown guest pane {pane_id} (no such guest capsule)"
+                                        ));
+                                    };
+                                    // Bump MRU so a later `pane_id = 0` browser
+                                    // command defaults to this pane, and raise
+                                    // its window so screenshots capture it.
+                                    cx.global_mut::<OpenContentWindows>().focus(entry.window_id);
+                                    let handle = cx
+                                        .global::<OpenContentWindows>()
+                                        .get(entry.window_id)
+                                        .map(|e| e.handle);
+                                    if let Some(handle) = handle {
+                                        let _ = handle
+                                            .update(cx, |_, window, _| window.activate_window());
+                                    }
+                                    Ok(serde_json::json!({ "ok": true, "pane_id": pane_id }))
+                                } else if pane_id == DOCK_AUTOMATION_PANE_ID {
+                                    Ok(serde_json::json!({ "ok": true, "pane_id": pane_id }))
+                                } else {
+                                    Err(format!("unknown pane {pane_id}"))
+                                }
+                            });
+                        match result {
+                            Ok(json) => req.send(Ok(json)),
+                            Err(msg) => req.send(Err(msg)),
+                        };
                     }
                     AutomationCommand::HostDispatchAction { action, url } => {
                         let action_name = action.clone();
@@ -813,4 +962,177 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
     .detach();
 
     tracing::info!("Focus-mode automation dispatcher started");
+}
+
+/// Metadata for one pane reported by `browser_tabs` (ListPanes).
+#[derive(Debug, Clone)]
+pub(crate) struct GuestPaneMeta {
+    pub pane_id: usize,
+    pub window_id: u64,
+    pub url: String,
+    pub title: String,
+    pub handle: String,
+    pub session_id: Option<String>,
+    pub status: String,
+}
+
+/// Build the `browser_tabs` pane array: every live guest capsule pane,
+/// followed by the dock pane when it is open. Kept pure (no GPUI globals) so
+/// the JSON shape is unit-testable (#370).
+pub(crate) fn build_pane_list(
+    guests: &[GuestPaneMeta],
+    dock_open: bool,
+) -> Vec<serde_json::Value> {
+    let mut panes: Vec<serde_json::Value> = guests
+        .iter()
+        .map(|g| {
+            serde_json::json!({
+                "pane_id": g.pane_id,
+                "kind": "guest-capsule",
+                "window_id": g.window_id,
+                "url": g.url,
+                "title": g.title,
+                "handle": g.handle,
+                "session_id": g.session_id,
+                "status": g.status,
+            })
+        })
+        .collect();
+    if dock_open {
+        panes.push(serde_json::json!({
+            "pane_id": DOCK_AUTOMATION_PANE_ID,
+            "kind": "dock",
+            "url": "ato://dock",
+        }));
+    }
+    panes
+}
+
+/// True for MCP browser commands that operate on a specific WebView pane and
+/// are dispatched via `webview::dispatch_automation_command`. These are the
+/// commands the Focus dispatcher routes to a guest capsule pane (#370).
+fn is_browser_pane_command(cmd: &AutomationCommand) -> bool {
+    use AutomationCommand::*;
+    matches!(
+        cmd,
+        Snapshot
+            | Screenshot
+            | Click { .. }
+            | ClickAt { .. }
+            | Fill { .. }
+            | Type { .. }
+            | SelectOption { .. }
+            | Check { .. }
+            | PressKey { .. }
+            | Evaluate { .. }
+            | VerifyTextVisible { .. }
+            | VerifyElementVisible { .. }
+            | WaitFor { .. }
+            | Navigate { .. }
+            | NavigateBack
+            | NavigateForward
+            | ConsoleMessages
+    )
+}
+
+/// Most-recently-focused live guest capsule pane, used to default
+/// `pane_id = 0` browser commands to the frontmost guest.
+fn frontmost_guest_pane_id(cx: &App) -> Option<usize> {
+    let registry = cx.global::<FocusGuestPaneRegistry>();
+    cx.global::<OpenContentWindows>()
+        .mru_order()
+        .into_iter()
+        .find_map(|entry| {
+            let window_id = entry.handle.window_id().as_u64();
+            let pane_id = registry.pane_id_for_window(window_id)?;
+            registry
+                .get(pane_id)
+                .filter(|p| p.shell.upgrade().is_some())
+                .map(|_| pane_id)
+        })
+}
+
+/// Short, user-facing title derived from a capsule handle string. Fallback
+/// used when `OpenContentWindows` has no entry for the pane's window.
+fn short_handle_title(handle: &str) -> String {
+    handle
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(handle)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::window::focus_guest_panes::focus_guest_pane_id;
+
+    fn meta(pane_id: usize, window_id: u64, title: &str) -> GuestPaneMeta {
+        GuestPaneMeta {
+            pane_id,
+            window_id,
+            url: format!("http://127.0.0.1:5000/{title}"),
+            title: title.to_string(),
+            handle: format!("capsule://example/{title}"),
+            session_id: Some(format!("sess-{window_id}")),
+            status: "Ready".to_string(),
+        }
+    }
+
+    #[test]
+    fn focus_list_panes_includes_guest_capsule_panes() {
+        let guests = vec![meta(focus_guest_pane_id(12), 12, "memos")];
+        let panes = build_pane_list(&guests, false);
+        assert_eq!(panes.len(), 1, "dock closed → only the guest pane");
+        let p = &panes[0];
+        assert_eq!(p["kind"], "guest-capsule");
+        assert_eq!(p["pane_id"], focus_guest_pane_id(12));
+        assert_eq!(p["window_id"], 12);
+        assert_eq!(p["title"], "memos");
+        assert_eq!(p["handle"], "capsule://example/memos");
+        assert_eq!(p["session_id"], "sess-12");
+        assert_eq!(p["status"], "Ready");
+    }
+
+    #[test]
+    fn focus_list_panes_includes_dock_and_guest_when_both_open() {
+        let guests = vec![
+            meta(focus_guest_pane_id(1), 1, "memos"),
+            meta(focus_guest_pane_id(2), 2, "blinko"),
+        ];
+        let panes = build_pane_list(&guests, true);
+        assert_eq!(panes.len(), 3, "two guests + dock");
+        // Guests come first, dock appended last.
+        assert_eq!(panes[0]["kind"], "guest-capsule");
+        assert_eq!(panes[1]["kind"], "guest-capsule");
+        assert_eq!(panes[2]["kind"], "dock");
+        assert_eq!(panes[2]["pane_id"], DOCK_AUTOMATION_PANE_ID);
+    }
+
+    #[test]
+    fn empty_registry_with_closed_dock_lists_nothing() {
+        assert!(build_pane_list(&[], false).is_empty());
+    }
+
+    #[test]
+    fn browser_commands_are_classified_for_guest_routing() {
+        use AutomationCommand::*;
+        assert!(is_browser_pane_command(&Snapshot));
+        assert!(is_browser_pane_command(&Screenshot));
+        assert!(is_browser_pane_command(&Navigate {
+            url: "http://x".into()
+        }));
+        assert!(is_browser_pane_command(&Click {
+            ref_id: "e1".into()
+        }));
+        // Non-pane / app-level commands must NOT be routed to a guest pane.
+        assert!(!is_browser_pane_command(&ListPanes));
+        assert!(!is_browser_pane_command(&FocusPane { pane_id: 1 }));
+        assert!(!is_browser_pane_command(&ListSessions));
+        assert!(!is_browser_pane_command(&StopActiveSession));
+        assert!(!is_browser_pane_command(&HostDispatchAction {
+            action: "X".into(),
+            url: None
+        }));
+    }
 }
