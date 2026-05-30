@@ -57,6 +57,13 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
+            // While a Wry `build_as_child` is pumping the Win32 message loop
+            // on the main thread (Windows), an outer GPUI `App` borrow may be
+            // held. Resuming here and calling `update` would double-borrow and
+            // panic, so defer this drain until the guard clears.
+            if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                continue;
+            }
             // Drain only when the socket flagged work OR something
             // slipped into the queue without flagging (defensive
             // against missed wakeups on the polling boundary).
@@ -76,6 +83,33 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
 
                 // Dock-pane commands: route browser_* to the DockWebView.
                 if req.pane_id == DOCK_AUTOMATION_PANE_ID {
+                    // OpenUrl is an app-level navigation command that
+                    // dispatch_automation_command cannot handle (it is
+                    // intercepted upstream in WebViewManager mode).  In
+                    // Focus mode we treat it as a Navigate to the same URL
+                    // so the caller gets consistent behaviour.
+                    if let AutomationCommand::OpenUrl { url } = &req.command {
+                        let url = url.clone();
+                        let _ = async_app_for_loop.update(|cx| {
+                            let entity_opt = cx
+                                .try_global::<DockEntitySlot>()
+                                .and_then(|s| s.0.clone());
+                            if let Some(entity) = entity_opt {
+                                let dock = entity.read(cx);
+                                match dock.webview.load_url(&url) {
+                                    Ok(()) => {
+                                        req.send(Ok(serde_json::json!({ "ok": true })));
+                                    }
+                                    Err(e) => {
+                                        req.send(Err(e.to_string()));
+                                    }
+                                }
+                            } else {
+                                req.send(Err("dock is not open".into()));
+                            }
+                        });
+                        continue;
+                    }
                     // Page-load guard: most JS commands require the page to
                     // be ready.  Navigate/Screenshot are exempt.
                     let needs_loaded = !matches!(

@@ -7,6 +7,11 @@ fn main() {
         env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set by Cargo"),
     );
 
+    // Embed the app icon into the Windows executable so Explorer,
+    // the taskbar, and the Start Menu shortcut all show the Ato icon.
+    #[cfg(windows)]
+    embed_windows_icon(&manifest_dir);
+
     // ato-onboarding system capsule (Vite + React)
     check_onboarding_dist(&manifest_dir);
 
@@ -22,6 +27,29 @@ fn main() {
     // ato-cli + nacelle helpers — rebuild in lockstep with ato-desktop so
     // `cargo run --bin ato-desktop` never picks up a stale binary.
     rebuild_helpers(&manifest_dir);
+}
+
+/// Embeds `assets/AppIcon.ico` into the Windows executable using an RC
+/// resource file so Explorer, the taskbar, and the Start Menu shortcut
+/// all display the Ato icon without requiring an explicit `Icon` entry in
+/// the WiX shortcut element (Windows inherits the first icon resource from
+/// the exe automatically).
+///
+/// Only active when the build host is Windows (`#[cfg(windows)]`).
+/// The `embed-resource` crate is declared under
+/// `[target.'cfg(windows)'.build-dependencies]` so it is not even resolved
+/// on macOS/Linux builds.
+#[cfg(windows)]
+fn embed_windows_icon(manifest_dir: &PathBuf) {
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("assets/AppIcon.ico").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("assets/windows/ato-desktop.rc").display()
+    );
+    embed_resource::compile("assets/windows/ato-desktop.rc", embed_resource::NONE);
 }
 
 /// Keep the `ato` and `nacelle` helper binaries in sync with the current

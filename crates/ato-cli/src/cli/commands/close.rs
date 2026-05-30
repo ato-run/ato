@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::adapters::runtime::oci_session_store::{
-    apply_stop_result, stop_oci_session, stop_oci_session_by_id, OciSessionStatus, OciSessionStore,
-    StopByIdAttempt,
+    apply_stop_result, stop_oci_session, stop_oci_session_by_id, stop_podman_machines_if_idle,
+    OciSessionStore, PodmanMachineStopResult, StopByIdAttempt,
 };
 use crate::reporters::CliReporter;
 use crate::runtime::process::{ImportPreviewStopResult, ImportPreviewStopStatus, ProcessManager};
@@ -37,15 +37,14 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
             .map(|sessions| {
                 sessions
                     .into_iter()
-                    .filter(|s| {
-                        s.status == OciSessionStatus::Running
-                            || s.status == OciSessionStatus::StopFailed
-                    })
+                    .filter(|s| s.status.is_active())
                     .count()
             })
             .unwrap_or(0);
 
         if running.is_empty() && import_previews.is_empty() && oci_running == 0 {
+            let machine_result = stop_podman_machine_if_idle(&reporter)?;
+            report_podman_machine_stop_result(&machine_result, &reporter)?;
             futures::executor::block_on(reporter.notify("No active capsules.".to_string()))?;
             return Ok(());
         }
@@ -87,6 +86,8 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
 
         // Stop OCI sessions.
         stop_all_oci_sessions(&args, &reporter)?;
+        let machine_result = stop_podman_machine_if_idle(&reporter)?;
+        report_podman_machine_stop_result(&machine_result, &reporter)?;
 
         return Ok(());
     }
@@ -108,6 +109,8 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
                     }
                 } else if let Some(attempt) = stop_oci_by_id(id, args.force)? {
                     report_oci_stop_attempt(&attempt, &reporter)?;
+                    let machine_result = stop_podman_machine_if_idle(&reporter)?;
+                    report_podman_machine_stop_result(&machine_result, &reporter)?;
                 } else {
                     futures::executor::block_on(
                         reporter.warn(format!("⚠️  Capsule {} is not running", id)),
@@ -172,6 +175,27 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn stop_podman_machine_if_idle(reporter: &Arc<CliReporter>) -> Result<PodmanMachineStopResult> {
+    let store = match OciSessionStore::new() {
+        Ok(store) => store,
+        Err(err) => {
+            futures::executor::block_on(reporter.warn(format!(
+                "⚠️  Skipped Podman VM stop: could not open OCI session store: {err}"
+            )))?;
+            return Ok(PodmanMachineStopResult {
+                status_before:
+                    crate::adapters::runtime::oci_session_store::PodmanMachineStatus::Unknown {
+                        reason: "session store unavailable".to_string(),
+                    },
+                stopped_machines: vec![],
+                errors: vec![],
+                skipped_reason: Some("could not open OCI session store".to_string()),
+            });
+        }
+    };
+    Ok(stop_podman_machines_if_idle(&store))
 }
 
 fn stop_all_import_preview_sessions(
@@ -261,12 +285,7 @@ fn stop_all_oci_sessions(args: &CloseArgs, reporter: &Arc<CliReporter>) -> Resul
     let sessions = store.list_sessions().unwrap_or_default();
     // Retry both Running and StopFailed sessions so that a previous partial
     // failure can be recovered on the next invocation.
-    let to_stop: Vec<_> = sessions
-        .iter()
-        .filter(|s| {
-            s.status == OciSessionStatus::Running || s.status == OciSessionStatus::StopFailed
-        })
-        .collect();
+    let to_stop: Vec<_> = sessions.iter().filter(|s| s.status.is_active()).collect();
 
     for session in to_stop {
         futures::executor::block_on(reporter.notify(format!(
@@ -317,6 +336,32 @@ fn report_oci_stop_result(
         futures::executor::block_on(
             reporter.notify(format!("  🔗 Removed network: {network_name}")),
         )?;
+    }
+    Ok(())
+}
+
+fn report_podman_machine_stop_result(
+    result: &PodmanMachineStopResult,
+    reporter: &Arc<CliReporter>,
+) -> Result<()> {
+    if let Some(reason) = &result.skipped_reason {
+        futures::executor::block_on(
+            reporter.warn(format!("  ⚠️  Skipped Podman VM stop: {reason}")),
+        )?;
+        return Ok(());
+    }
+
+    for name in &result.stopped_machines {
+        futures::executor::block_on(reporter.notify(format!("  ✅ Stopped Podman VM: {name}")))?;
+    }
+    if !result.errors.is_empty() {
+        futures::executor::block_on(reporter.warn(format!(
+            "  ⚠️  Podman VM before stop: {}",
+            result.status_before.display_status()
+        )))?;
+    }
+    for error in &result.errors {
+        futures::executor::block_on(reporter.warn(format!("  ⚠️  {error}")))?;
     }
     Ok(())
 }

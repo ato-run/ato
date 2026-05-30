@@ -6,26 +6,18 @@
 //! plane (`status`, `shutdown`) so subsequent slices can build on a
 //! stable client / server boundary defined in `ato_net::control`.
 //!
-//! **Platform note.** The daemon binds a Unix domain socket and is
-//! therefore Unix-only in this slice. On non-Unix targets the binary
-//! still compiles and runs — it just prints a clear error and exits
-//! non-zero. #294 tracks the `127.0.0.1:<ephemeral>` + discovery-file
-//! TCP fallback that will land before Windows is a real target.
+//! **Platform note.** The daemon uses a Unix domain socket on Unix
+//! and a Windows named pipe on Windows. Both transports share the
+//! same newline-delimited JSON control protocol from `ato_net::control`.
 
-#[cfg(unix)]
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-#[cfg(unix)]
 use clap::Parser;
 
-#[cfg(unix)]
 mod egress;
-#[cfg(unix)]
 mod ingress;
-#[cfg(unix)]
 mod server;
-#[cfg(unix)]
 mod state;
 
 /// Command-line surface. Same binary handles two callers:
@@ -37,7 +29,6 @@ mod state;
 ///   daemon owns the canonical socket and print its JSON status
 ///   envelope. If no daemon is running, print `{"status":"not_running"}`
 ///   and exit non-zero. This is the user-facing diagnostic surface.
-#[cfg(unix)]
 #[derive(Debug, Parser)]
 #[command(
     name = "ato-netd",
@@ -56,23 +47,12 @@ struct Cli {
     #[arg(long)]
     shutdown: bool,
 
-    /// Override the control socket path. Defaults to
-    /// `${ATO_HOME}/run/netd.sock`.
+    /// Override the control endpoint path. Defaults to the canonical
+    /// Unix socket path or Windows named-pipe path.
     #[arg(long)]
     socket: Option<PathBuf>,
 }
 
-#[cfg(not(unix))]
-fn main() -> ExitCode {
-    eprintln!(
-        "ato-netd is Unix-only in slice A of #294 (UDS control socket). \
-         The TCP fallback that will enable Windows support is tracked \
-         under the same umbrella issue."
-    );
-    ExitCode::from(1)
-}
-
-#[cfg(unix)]
 fn main() -> ExitCode {
     init_tracing();
     let cli = Cli::parse();
@@ -101,7 +81,6 @@ fn main() -> ExitCode {
     exit
 }
 
-#[cfg(unix)]
 fn init_tracing() {
     // Pick up RUST_LOG=ato_netd=debug etc. Default is `info` so a
     // freshly-spawned daemon doesn't drown the parent's stderr.
@@ -115,7 +94,6 @@ fn init_tracing() {
         .ok();
 }
 
-#[cfg(unix)]
 fn resolve_socket_path(override_path: Option<PathBuf>) -> Result<PathBuf, String> {
     if let Some(path) = override_path {
         return Ok(path);
@@ -124,7 +102,6 @@ fn resolve_socket_path(override_path: Option<PathBuf>) -> Result<PathBuf, String
 }
 
 /// `--status` codepath. Connects, prints, exits. Never starts a daemon.
-#[cfg(unix)]
 async fn run_status_client(override_path: Option<PathBuf>) -> ExitCode {
     let socket = match resolve_socket_path(override_path) {
         Ok(p) => p,
@@ -166,7 +143,6 @@ async fn run_status_client(override_path: Option<PathBuf>) -> ExitCode {
 /// `--shutdown` codepath. Mirrors `Client::shutdown`. Useful for shell
 /// smoke tests; not part of the production lifecycle (the daemon is
 /// session-scoped and exits when the parent's cleanup scope drops it).
-#[cfg(unix)]
 async fn run_shutdown_client(override_path: Option<PathBuf>) -> ExitCode {
     let socket = match resolve_socket_path(override_path) {
         Ok(p) => p,
@@ -197,7 +173,6 @@ async fn run_shutdown_client(override_path: Option<PathBuf>) -> ExitCode {
 
 /// Daemon codepath. Binds the control socket and serves requests until
 /// `shutdown` arrives or the runtime is cancelled.
-#[cfg(unix)]
 async fn run_daemon(override_path: Option<PathBuf>) -> ExitCode {
     let socket = match resolve_socket_path(override_path) {
         Ok(p) => p,
