@@ -508,21 +508,33 @@ mod tests {
             .expect("resolve");
         let mut env = std::collections::BTreeMap::new();
         merge_resolved_into_env(&resolved, &mut env);
+        // `merge_resolved_into_env` canonicalizes each path via
+        // `env_path_value` so callers see the real filesystem location
+        // (matters on macOS where `/var → /private/var`). Compare against
+        // the canonicalized form of each resolved field; otherwise this
+        // assertion fails on macOS even when the production code is
+        // emitting exactly the right path.
+        let canonical = |p: &std::path::Path| {
+            std::fs::canonicalize(p)
+                .unwrap_or_else(|_| p.to_path_buf())
+                .display()
+                .to_string()
+        };
         assert_eq!(
             env.get("ATO_TOOL_DEMO_ROOT"),
-            Some(&resolved.root.display().to_string())
+            Some(&canonical(&resolved.root))
         );
         assert_eq!(
             env.get("ATO_TOOL_DEMO_BIN_DIR"),
-            Some(&resolved.bin_dir.display().to_string())
+            Some(&canonical(&resolved.bin_dir))
         );
         assert_eq!(
             env.get("ATO_TOOL_DEMO_LIB_DIR"),
-            Some(&resolved.lib_dir.display().to_string())
+            Some(&canonical(&resolved.lib_dir))
         );
         assert_eq!(
             env.get("ATO_TOOL_DEMO_SHARE_DIR"),
-            Some(&resolved.share_dir.display().to_string())
+            Some(&canonical(&resolved.share_dir))
         );
         assert!(env.contains_key("ATO_TOOL_DEMO"));
         // No DYLD_LIBRARY_PATH / LD_LIBRARY_PATH leaks from this layer.

@@ -25,9 +25,12 @@ At runtime:
   `--write`, and `--read-write`
 - sandbox grant resolution rejects symlink traversal and resolves relative paths
   against the effective caller cwd
-- nacelle discovery prefers explicit path, then `NACELLE_PATH`, then manifest /
-  compat engine settings, then registered default engine, then portable mode
-  next to the binary; PATH lookup is intentionally disabled
+- canonical `discover_nacelle()` prefers explicit path, then `NACELLE_PATH`,
+  then manifest / compat engine settings, then registered default engine, then
+  portable mode next to the binary; this canonical path intentionally disables
+  PATH lookup
+- legacy / specialized nacelle resolution paths used by share execution and
+  bundle packing have additional fallbacks, including PATH lookup
 
 ## Specification
 
@@ -38,7 +41,7 @@ At runtime:
 - sandbox grants that traverse symlinks MUST be rejected.
 - execution MUST allow only explicitly approved env, filesystem, and network surfaces.
 - nacelle MUST act as sandbox enforcer, not as the policy decision layer.
-- engine resolution MUST NOT fall back to PATH search.
+- `discover_nacelle()` in `capsule-core` intentionally disables PATH fallback for security; however `resolve_nacelle_binary()` (executor path) and `find_nacelle_binary()` (bundle path) MAY fall back to PATH search as a last resort.
 
 References:
 

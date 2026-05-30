@@ -76,7 +76,7 @@ fn oci_run_once_timeout_secs() -> u64 {
 pub(crate) async fn execute_multi_service(
     plan: &ManifestData,
     reporter: Arc<CliReporter>,
-    _launch_ctx: &RuntimeLaunchContext,
+    launch_ctx: &RuntimeLaunchContext,
 ) -> Result<i32> {
     // Validate all services are OCI before proceeding.
     if !plan.all_services_are_oci() {
@@ -216,6 +216,7 @@ pub(crate) async fn execute_multi_service(
             source_path,
             source_hash: None,
         }),
+        launch_ctx,
     )
     .await
 }
@@ -295,6 +296,7 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     reporter: &Arc<CliReporter>,
     provider: &P,
     session_meta: Option<OciSessionMeta>,
+    launch_ctx: &RuntimeLaunchContext,
 ) -> Result<i32> {
     // Gate: policy enforcement
     enforce_multi_service_policy_gate(policy_mode, egress_allow)?;
@@ -326,6 +328,19 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     let ingress_route_targets: HashSet<String> = ingress_config
         .map(|ic| ic.routes.values().map(|r| r.target.clone()).collect())
         .unwrap_or_default();
+
+    // Pre-collect all service aliases across the entire orchestration plan so
+    // they can be placed in NO_PROXY: inter-service traffic must not route through
+    // the egress proxy.
+    let all_service_aliases: Vec<&str> = orch_plan
+        .services
+        .iter()
+        .flat_map(|s| s.network.aliases.iter().map(String::as_str))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let launch_ctx_merged = launch_ctx.merged_env();
 
     let mut started: Vec<ServiceStartRecord> = Vec::new();
     let mut graph_error: Option<anyhow::Error> = None;
@@ -402,10 +417,37 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
             );
             let pull_ref = build_digest_pull_ref(image);
 
-            // Build env: merge target env with connection env from already-started dependencies.
+            // Build env: merge target env → launch context env → connection env.
             // All services in earlier layers have already passed readiness; sibling services in
             // this layer are never dependencies of each other.
-            let env = build_service_env(service, &started, &target_runtime.env);
+            let mut env =
+                build_service_env(service, &started, &target_runtime.env, &launch_ctx_merged);
+
+            // Per-service proxy env override:
+            // - egress_proxy=true:  replace host-loopback proxy URL with host.containers.internal
+            //   (127.0.0.1 is unreachable from inside a container).
+            // - egress_proxy=false: strip all proxy vars inherited from launch_ctx to ensure this
+            //   service's traffic is never routed through the egress proxy.
+            let extra_hosts = if let Some(port) = launch_ctx.egress_proxy_port() {
+                if service.network.egress_proxy {
+                    let container_proxy = crate::common::proxy::proxy_env_for_oci_container(
+                        port,
+                        &all_service_aliases,
+                    );
+                    for (k, v) in crate::common::proxy::proxy_env_to_pairs(&container_proxy) {
+                        env.insert(k, v);
+                    }
+                    vec![crate::common::proxy::OCI_HOST_GATEWAY_ENTRY.to_string()]
+                } else {
+                    // Opt-out: strip any proxy vars that may have been injected by launch_ctx.
+                    for key in crate::common::proxy::PROXY_ENV_KEYS {
+                        env.remove(key);
+                    }
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
 
             // Ports: publish for the main/user-facing service AND for services
             // that are declared as ingress route targets.
@@ -457,6 +499,7 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
                     network: Some(network_name.clone()),
                     aliases: service.network.aliases.clone(),
                     platform: Some(image.platform.clone()),
+                    extra_hosts,
                 })
                 .await
             {
@@ -981,15 +1024,24 @@ async fn await_layer_readiness(
 
 /// Build the env map for a service container.
 ///
-/// Merges target-level env with connection env vars for already-started dependencies.
+/// Merges, in precedence order:
+/// 1. service/target-level env (from the resolved manifest)
+/// 2. session-scoped env from the launch context (e.g. proxy vars injected by ato-netd)
+/// 3. connection env vars for already-started dependencies
+///
 /// Internal connections use the Podman network alias (not localhost) so containers
 /// reach each other inside the session network.
 pub(crate) fn build_service_env(
     service: &ResolvedService,
     started: &[ServiceStartRecord],
     base_env: &HashMap<String, String>,
+    launch_ctx_env: &HashMap<String, String>,
 ) -> HashMap<String, String> {
+    // Layer 1: target env.
     let mut env = base_env.clone();
+    // Layer 2: session-scoped env (higher priority than target env).
+    env.extend(launch_ctx_env.clone());
+    // Layer 3: connection env (highest priority — overrides everything).
     for conn in &service.connections {
         // Find the dependency among already-started services.
         if let Some(dep_record) = started.iter().find(|r| r.service_name == conn.dependency) {
@@ -1317,6 +1369,7 @@ mod tests {
                 aliases: vec![name.to_string()],
                 publish,
                 allow_from: vec![],
+                egress_proxy: true,
             },
             run_once: false,
             runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
@@ -1400,6 +1453,7 @@ mod tests {
             &Arc::new(crate::reporters::CliReporter::new(false)),
             provider,
             None,
+            &RuntimeLaunchContext::empty(),
         )
         .await
     }
@@ -1447,7 +1501,7 @@ mod tests {
             container_name: "ato-blinko-db-xx".to_string(),
             host_port: Some(54321),
         }];
-        let env = build_service_env(&service, &started, &HashMap::new());
+        let env = build_service_env(&service, &started, &HashMap::new(), &HashMap::new());
 
         // Internal connection uses the network alias, not localhost.
         assert_eq!(env.get("ATO_SERVICE_DB_HOST"), Some(&"db".to_string()));
@@ -1527,7 +1581,7 @@ mod tests {
         }];
         let mut base = HashMap::new();
         base.insert("POSTGRES_PASSWORD".to_string(), "s3cr3t".to_string());
-        let env = build_service_env(&service, &started, &base);
+        let env = build_service_env(&service, &started, &base, &HashMap::new());
 
         // ATO_SERVICE_DB_HOST and ATO_SERVICE_DB_PORT are safe connection metadata.
         assert_eq!(env.get("ATO_SERVICE_DB_HOST"), Some(&"db".to_string()));
@@ -1562,7 +1616,7 @@ mod tests {
             container_name: "ato-blinko-db-xx".to_string(),
             host_port: Some(54321),
         }];
-        let env = build_service_env(&service, &started, &HashMap::new());
+        let env = build_service_env(&service, &started, &HashMap::new(), &HashMap::new());
         let host = env.get("ATO_SERVICE_DB_HOST").cloned().unwrap_or_default();
         let port = env.get("ATO_SERVICE_DB_PORT").cloned().unwrap_or_default();
         // A consumer would build: postgresql://<host>:<port>/db  — no password in the address.
@@ -1703,6 +1757,7 @@ mod tests {
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
+            &RuntimeLaunchContext::empty(),
         )
         .await;
         assert!(result.is_ok(), "multi-leaf plan must start: {result:?}");
@@ -1872,6 +1927,7 @@ mod tests {
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
+            &RuntimeLaunchContext::empty(),
         )
         .await;
         assert!(result.is_err());
@@ -1915,6 +1971,7 @@ mod tests {
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
+            &RuntimeLaunchContext::empty(),
         )
         .await;
         assert!(result.is_err());
@@ -2015,6 +2072,7 @@ volumes:
                 &Arc::new(crate::reporters::CliReporter::new(false)),
                 &provider,
                 None,
+                &RuntimeLaunchContext::empty(),
             ))
             .unwrap();
         assert_eq!(exit_code, 0);
@@ -2078,6 +2136,7 @@ volumes:
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
+            &RuntimeLaunchContext::empty(),
         )
         .await;
 
@@ -2131,6 +2190,7 @@ volumes:
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
+            &RuntimeLaunchContext::empty(),
         )
         .await
         .expect("execution must succeed");
@@ -2259,6 +2319,7 @@ volumes:
             &Arc::new(crate::reporters::CliReporter::new(false)),
             provider,
             None,
+            &RuntimeLaunchContext::empty(),
         )
         .await
     }
@@ -2581,6 +2642,7 @@ volumes:
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
+            &RuntimeLaunchContext::empty(),
         )
         .await;
         assert!(result.is_ok(), "shared state plan must start: {result:?}");
@@ -2622,5 +2684,280 @@ volumes:
     fn run_once_test_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    // ── OCI proxy env tests ───────────────────────────────────────────────────
+
+    fn make_service_with_egress_proxy(egress_proxy: bool) -> ResolvedService {
+        use capsule_core::types::orchestration::ResolvedServiceNetwork;
+        let svc = make_service("app", "app", vec![], true, Some(8080), vec![]);
+        ResolvedService {
+            network: ResolvedServiceNetwork {
+                egress_proxy,
+                ..svc.network
+            },
+            ..svc
+        }
+    }
+
+    #[test]
+    fn proxy_env_for_oci_container_uses_host_containers_internal() {
+        let proxy = crate::common::proxy::proxy_env_for_oci_container(9876, &[]);
+        assert!(
+            proxy.http_proxy.contains("host.containers.internal"),
+            "http_proxy must use host.containers.internal, got: {}",
+            proxy.http_proxy
+        );
+        assert!(
+            proxy.https_proxy.contains("host.containers.internal"),
+            "https_proxy must use host.containers.internal"
+        );
+        assert!(
+            proxy.all_proxy.contains("host.containers.internal"),
+            "all_proxy must use host.containers.internal"
+        );
+        assert!(proxy.http_proxy.contains("9876"), "port must be present");
+    }
+
+    #[test]
+    fn proxy_env_for_oci_container_no_proxy_includes_loopback() {
+        let proxy = crate::common::proxy::proxy_env_for_oci_container(9876, &[]);
+        let no_proxy = &proxy.no_proxy;
+        assert!(
+            no_proxy.contains("localhost"),
+            "NO_PROXY must include localhost"
+        );
+        assert!(
+            no_proxy.contains("127.0.0.1"),
+            "NO_PROXY must include 127.0.0.1"
+        );
+        assert!(no_proxy.contains("::1"), "NO_PROXY must include ::1");
+    }
+
+    #[test]
+    fn proxy_env_for_oci_container_includes_service_aliases() {
+        let aliases = ["db", "redis", "minio"];
+        let proxy = crate::common::proxy::proxy_env_for_oci_container(9876, &aliases);
+        for alias in &aliases {
+            assert!(
+                proxy.no_proxy.contains(alias),
+                "NO_PROXY must include service alias '{}', got: {}",
+                alias,
+                proxy.no_proxy
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_multi_service_injects_container_proxy_when_enabled() {
+        use crate::adapters::runtime::executors::launch_context::RuntimeLaunchContext;
+
+        let provider = FakeOciProvider::ready();
+        let plan = blinko_plan(); // egress_proxy = true (default)
+
+        let mut ctx = RuntimeLaunchContext::empty();
+        ctx.set_egress_proxy_port(9999);
+
+        let result = execute_service_graph_with_provider(
+            &plan,
+            &images_for_blinko(),
+            OciPolicyMode::Strict,
+            &[],
+            "blinko",
+            &HashSet::new(),
+            None,
+            &Arc::new(crate::reporters::CliReporter::new(false)),
+            &provider,
+            None,
+            &ctx,
+        )
+        .await;
+        assert!(result.is_ok(), "execution must succeed: {result:?}");
+
+        let requests = provider.create_container_requests.lock().unwrap();
+        for req in requests.iter() {
+            // All services have egress_proxy=true (default), so all should get container proxy.
+            let http_proxy = req
+                .env
+                .get("HTTP_PROXY")
+                .or_else(|| req.env.get("http_proxy"));
+            assert!(
+                http_proxy
+                    .map(|v| v.contains("host.containers.internal"))
+                    .unwrap_or(false),
+                "HTTP_PROXY must use host.containers.internal in container '{}', got: {:?}",
+                req.name,
+                http_proxy
+            );
+            // extra_hosts must include the gateway entry.
+            assert!(
+                req.extra_hosts
+                    .iter()
+                    .any(|h| h == crate::common::proxy::OCI_HOST_GATEWAY_ENTRY),
+                "extra_hosts must include '{}' for container '{}'",
+                crate::common::proxy::OCI_HOST_GATEWAY_ENTRY,
+                req.name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_multi_service_strips_proxy_when_egress_proxy_false() {
+        use crate::adapters::runtime::executors::launch_context::RuntimeLaunchContext;
+        use capsule_core::types::orchestration::{
+            ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
+        };
+
+        // Build a single-service plan with egress_proxy = false.
+        let svc = make_service("app", "blinko", vec![], true, Some(3000), vec![]);
+        let svc = ResolvedService {
+            network: ResolvedServiceNetwork {
+                egress_proxy: false,
+                ..svc.network
+            },
+            ..svc
+        };
+        let plan = OrchestrationPlan {
+            startup_order: vec!["app".to_string()],
+            services: vec![svc],
+        };
+        let mut images = HashMap::new();
+        // Image map is keyed by target label, not service name.
+        images.insert(
+            "blinko".to_string(),
+            make_image("blinkospace/blinko:latest"),
+        );
+
+        let provider = FakeOciProvider::ready();
+        let mut ctx = RuntimeLaunchContext::empty();
+        ctx.set_egress_proxy_port(9999);
+        // Simulate that launch_ctx already has proxy vars injected (as session.rs does).
+        ctx.extend_injected_env({
+            let mut m = HashMap::new();
+            m.insert(
+                "HTTP_PROXY".to_string(),
+                "http://127.0.0.1:9999".to_string(),
+            );
+            m.insert(
+                "http_proxy".to_string(),
+                "http://127.0.0.1:9999".to_string(),
+            );
+            m
+        });
+
+        let result = execute_service_graph_with_provider(
+            &plan,
+            &images,
+            OciPolicyMode::Strict,
+            &[],
+            "blinko",
+            &HashSet::new(),
+            None,
+            &Arc::new(crate::reporters::CliReporter::new(false)),
+            &provider,
+            None,
+            &ctx,
+        )
+        .await;
+        assert!(result.is_ok(), "execution must succeed: {result:?}");
+
+        let requests = provider.create_container_requests.lock().unwrap();
+        let req = requests.first().expect("one container request");
+        // Proxy vars must be stripped — both uppercase and lowercase.
+        for key in crate::common::proxy::PROXY_ENV_KEYS {
+            assert!(
+                !req.env.contains_key(key),
+                "proxy var '{}' must be stripped when egress_proxy=false, found: {:?}",
+                key,
+                req.env.get(key)
+            );
+        }
+        // No extra_hosts when proxy is disabled.
+        assert!(
+            req.extra_hosts.is_empty(),
+            "extra_hosts must be empty when egress_proxy=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn oci_multi_service_no_proxy_includes_all_service_aliases() {
+        use crate::adapters::runtime::executors::launch_context::RuntimeLaunchContext;
+
+        // blinko_plan has "blinko" and "postgres" services with their aliases.
+        let provider = FakeOciProvider::ready();
+        let plan = blinko_plan();
+        let all_aliases: Vec<String> = plan
+            .services
+            .iter()
+            .flat_map(|s| s.network.aliases.iter().cloned())
+            .collect();
+
+        let mut ctx = RuntimeLaunchContext::empty();
+        ctx.set_egress_proxy_port(9999);
+
+        let result = execute_service_graph_with_provider(
+            &plan,
+            &images_for_blinko(),
+            OciPolicyMode::Strict,
+            &[],
+            "blinko",
+            &HashSet::new(),
+            None,
+            &Arc::new(crate::reporters::CliReporter::new(false)),
+            &provider,
+            None,
+            &ctx,
+        )
+        .await;
+        assert!(result.is_ok(), "execution must succeed: {result:?}");
+
+        let requests = provider.create_container_requests.lock().unwrap();
+        for req in requests.iter() {
+            let no_proxy = req
+                .env
+                .get("NO_PROXY")
+                .or_else(|| req.env.get("no_proxy"))
+                .expect("NO_PROXY must be set");
+            for alias in &all_aliases {
+                assert!(
+                    no_proxy.contains(alias.as_str()),
+                    "NO_PROXY must include alias '{}' for container '{}', got: {}",
+                    alias,
+                    req.name,
+                    no_proxy
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_multi_service_no_extra_hosts_when_no_proxy_port() {
+        // No egress_proxy_port set → extra_hosts must be empty.
+        let provider = FakeOciProvider::ready();
+
+        let result = execute_service_graph_with_provider(
+            &blinko_plan(),
+            &images_for_blinko(),
+            OciPolicyMode::Strict,
+            &[],
+            "blinko",
+            &HashSet::new(),
+            None,
+            &Arc::new(crate::reporters::CliReporter::new(false)),
+            &provider,
+            None,
+            &RuntimeLaunchContext::empty(), // no egress_proxy_port
+        )
+        .await;
+        assert!(result.is_ok(), "execution must succeed: {result:?}");
+
+        let requests = provider.create_container_requests.lock().unwrap();
+        for req in requests.iter() {
+            assert!(
+                req.extra_hosts.is_empty(),
+                "extra_hosts must be empty when no egress_proxy_port, container: {}",
+                req.name
+            );
+        }
     }
 }
