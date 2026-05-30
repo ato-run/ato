@@ -18,6 +18,7 @@ use std::io::Cursor;
 use std::sync::mpsc::Sender;
 use tracing::warn;
 use windows_sys::Win32::Foundation::{GetLastError, SetLastError, HWND, RECT};
+use windows_sys::Win32::Graphics::Dwm::{DwmEnableBlurBehindWindow, DWM_BLURBEHIND, DWM_BB_ENABLE};
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
     GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -25,8 +26,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::Storage::Xps::PrintWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    GWLP_HWNDPARENT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    GetWindowLongPtrW, GetWindowRect, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, GWL_EXSTYLE, GWLP_HWNDPARENT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOW, WS_EX_NOREDIRECTIONBITMAP,
 };
 
 // ── HWND helpers ──────────────────────────────────────────────────────────────
@@ -47,6 +49,34 @@ fn hwnd_for_window(window: &Window) -> Option<HWND> {
             warn!(handle = ?other, "raw window handle is not Win32");
             None
         }
+    }
+}
+
+/// Prepare a GPUI host window for child WebView composition on Windows by
+/// removing WS_EX_NOREDIRECTIONBITMAP when present.
+pub fn prepare_window_for_webview(window: &Window) {
+    let Some(hwnd) = hwnd_for_window(window) else {
+        return;
+    };
+
+    unsafe {
+        SetLastError(0);
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if ex_style == 0 && GetLastError() != 0 {
+            warn!("GetWindowLongPtrW(GWL_EXSTYLE) failed");
+            return;
+        }
+        let desired = ex_style & !(WS_EX_NOREDIRECTIONBITMAP as isize);
+        if desired == ex_style {
+            return;
+        }
+        SetLastError(0);
+        let prev = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired);
+        if prev == 0 && GetLastError() != 0 {
+            warn!("SetWindowLongPtrW(GWL_EXSTYLE) failed while preparing WebView host window");
+            return;
+        }
+        tracing::debug!("cleared WS_EX_NOREDIRECTIONBITMAP on WebView host window");
     }
 }
 
@@ -83,6 +113,28 @@ pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, _radius: f64)
             &corner_pref as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as u32,
         );
+    }
+}
+
+/// Apply DWM blur-behind to the entire window surface.
+///
+/// This is useful for transparent popup overlays (for example the Control Bar)
+/// where composition alpha can otherwise appear as an opaque black backing on
+/// some Windows setups.
+pub fn enable_blur_behind(cx: &mut App, handle: AnyWindowHandle) {
+    let Some(hwnd) = hwnd_for(cx, handle) else {
+        return;
+    };
+
+    let blur = DWM_BLURBEHIND {
+        dwFlags: DWM_BB_ENABLE,
+        fEnable: 1,
+        hRgnBlur: std::ptr::null_mut(),
+        fTransitionOnMaximized: 0,
+    };
+
+    unsafe {
+        let _ = DwmEnableBlurBehindWindow(hwnd, &blur);
     }
 }
 

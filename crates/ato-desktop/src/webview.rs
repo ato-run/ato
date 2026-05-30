@@ -510,6 +510,8 @@ impl WebViewManager {
             return;
         }
         self.prewarmed = true;
+        #[cfg(target_os = "windows")]
+        crate::window::windows::prepare_window_for_webview(window);
 
         use wry::dpi::{LogicalPosition, LogicalSize};
         // Position off-screen and 1×1 so the prewarm view is invisible
@@ -2550,6 +2552,8 @@ impl WebViewManager {
         };
         crate::surface_timing::emit_stage("webview_create_start", "ok", 0, None, &extras_at_start);
         let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
+        #[cfg(target_os = "windows")]
+        crate::window::windows::prepare_window_for_webview(window);
         let webview = builder
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child webview for {url}"))?;
