@@ -85,10 +85,44 @@ jobs:
           # ato-store dist is committed; verify it's present
           test -f crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
 
-      - name: Build ato-cli + nacelle helpers
-        # Build helpers once at the top level so ato-desktop/build.rs
-        # doesn't recursively invoke cargo during bundle packaging.
-        run: cargo build --release -p ato-cli -p nacelle
+      - name: Fetch released ato + nacelle helper artifacts
+        # Desktop still ships ato + nacelle as private bundled helpers, but
+        # no longer rebuilds them here (issue #366). Consume the archives the
+        # CLI release pipeline (cargo-dist / release.yml) already published
+        # to the matching release tag. We poll because on a unified `v*` tag
+        # cargo-dist's host/announce job uploads these assets a few minutes
+        # after the desktop bundle jobs start.
+        id: helpers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          raw_tag="${GITHUB_REF##*/}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            raw_tag="${{ inputs.tag }}"
+          fi
+          # Legacy ato-desktop-vX.Y.Z tags map to the vX.Y.Z CLI release.
+          helper_tag="${raw_tag#ato-desktop-}"
+          dir="$RUNNER_TEMP/helper-artifacts"
+          mkdir -p "$dir"
+          ato="ato-cli-${RUST_TARGET}.tar.xz"
+          nac="nacelle-${RUST_TARGET}.tar.xz"
+          echo "Resolving $ato + $nac from release $helper_tag"
+          for attempt in $(seq 1 60); do
+            names="$(gh release view "$helper_tag" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            if grep -qx "$ato" <<<"$names" && grep -qx "$nac" <<<"$names"; then
+              break
+            fi
+            echo "helpers not on $helper_tag yet (attempt $attempt/60); sleeping 30s"
+            sleep 30
+          done
+          gh release download "$helper_tag" --dir "$dir" \
+            --pattern "$ato" --pattern "$ato.sha256" \
+            --pattern "$nac" --pattern "$nac.sha256" --clobber
+          test -f "$dir/$ato" || { echo "ERROR: $ato not on release $helper_tag"; exit 1; }
+          test -f "$dir/$nac" || { echo "ERROR: $nac not on release $helper_tag"; exit 1; }
+          echo "artifact_dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Bundle, sign, and package .zip
         # xtask resolves CodesignMode at runtime: ad-hoc when
@@ -97,6 +131,8 @@ jobs:
         # is missing. We emit a `ditto`-built .zip instead of .dmg so
         # the Safari/curl quarantine attribute does not get attached
         # on download (.dmg gets tainted, .zip from curl does not).
+        # --helper-source=release stages the prebuilt ato/nacelle fetched
+        # above instead of rebuilding them (issue #366).
         env:
           ATO_DESKTOP_SKIP_HELPER_BUILD: "1"
           MAC_DEVELOPER_ID_NAME: ${{ secrets.MAC_DEVELOPER_ID_NAME }}
@@ -107,6 +143,8 @@ jobs:
         run: |
           cargo run --release -- bundle \
             --target ${{ matrix.target }} \
+            --helper-source release \
+            --helper-artifact-dir "${{ steps.helpers.outputs.artifact_dir }}" \
             --sign \
             --notarize \
             --zip
@@ -173,20 +211,54 @@ jobs:
             choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
           }
 
-      - name: Build ato-cli + nacelle helpers
-        run: cargo build --release -p ato-cli -p nacelle
+      - name: Fetch released ato + nacelle helper artifacts
+        # See the macOS job for the rationale. Windows cargo-dist archives
+        # are `.zip` (not `.tar.xz`); xtask's release path extracts both via
+        # bsdtar. `shell: bash` works on the windows-2022 runner.
+        id: helpers
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          raw_tag="${GITHUB_REF##*/}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            raw_tag="${{ inputs.tag }}"
+          fi
+          helper_tag="${raw_tag#ato-desktop-}"
+          dir="$RUNNER_TEMP/helper-artifacts"
+          mkdir -p "$dir"
+          ato="ato-cli-${RUST_TARGET}.zip"
+          nac="nacelle-${RUST_TARGET}.zip"
+          echo "Resolving $ato + $nac from release $helper_tag"
+          for attempt in $(seq 1 60); do
+            names="$(gh release view "$helper_tag" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            if grep -qx "$ato" <<<"$names" && grep -qx "$nac" <<<"$names"; then
+              break
+            fi
+            echo "helpers not on $helper_tag yet (attempt $attempt/60); sleeping 30s"
+            sleep 30
+          done
+          gh release download "$helper_tag" --dir "$dir" \
+            --pattern "$ato" --pattern "$ato.sha256" \
+            --pattern "$nac" --pattern "$nac.sha256" --clobber
+          test -f "$dir/$ato" || { echo "ERROR: $ato not on release $helper_tag"; exit 1; }
+          test -f "$dir/$nac" || { echo "ERROR: $nac not on release $helper_tag"; exit 1; }
+          echo "artifact_dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Bundle and package .msi + .zip
         # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
         # default for v0.5 (D-4) — xtask emits an unsigned MSI.
         # We also emit a .zip alongside so install.sh can curl + extract
-        # without invoking the MSI installer.
+        # without invoking the MSI installer. --helper-source=release stages
+        # the prebuilt ato/nacelle fetched above instead of rebuilding them.
         env:
           ATO_DESKTOP_SKIP_HELPER_BUILD: "1"
           WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
           WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
         working-directory: crates/ato-desktop/xtask
-        run: cargo run --release -- bundle --target ${{ matrix.target }} --msi --zip
+        run: cargo run --release -- bundle --target ${{ matrix.target }} --helper-source release --helper-artifact-dir "${{ steps.helpers.outputs.artifact_dir }}" --msi --zip
 
       - name: Upload .msi + .zip artifacts
         uses: actions/upload-artifact@v4
@@ -261,14 +333,47 @@ jobs:
           chmod +x "$RUNNER_TEMP/appimagetool"
           sudo mv "$RUNNER_TEMP/appimagetool" /usr/local/bin/appimagetool
 
-      - name: Build ato-cli + nacelle helpers
-        run: cargo build --release -p ato-cli -p nacelle
+      - name: Fetch released ato + nacelle helper artifacts
+        # See the macOS job for the rationale (issue #366).
+        id: helpers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          raw_tag="${GITHUB_REF##*/}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            raw_tag="${{ inputs.tag }}"
+          fi
+          helper_tag="${raw_tag#ato-desktop-}"
+          dir="$RUNNER_TEMP/helper-artifacts"
+          mkdir -p "$dir"
+          ato="ato-cli-${RUST_TARGET}.tar.xz"
+          nac="nacelle-${RUST_TARGET}.tar.xz"
+          echo "Resolving $ato + $nac from release $helper_tag"
+          for attempt in $(seq 1 60); do
+            names="$(gh release view "$helper_tag" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            if grep -qx "$ato" <<<"$names" && grep -qx "$nac" <<<"$names"; then
+              break
+            fi
+            echo "helpers not on $helper_tag yet (attempt $attempt/60); sleeping 30s"
+            sleep 30
+          done
+          gh release download "$helper_tag" --dir "$dir" \
+            --pattern "$ato" --pattern "$ato.sha256" \
+            --pattern "$nac" --pattern "$nac.sha256" --clobber
+          test -f "$dir/$ato" || { echo "ERROR: $ato not on release $helper_tag"; exit 1; }
+          test -f "$dir/$nac" || { echo "ERROR: $nac not on release $helper_tag"; exit 1; }
+          echo "artifact_dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Bundle and package .AppImage
+        # --helper-source=release stages the prebuilt ato/nacelle fetched
+        # above instead of rebuilding them (issue #366). ato-netd is still
+        # built locally — it is not a released cargo-dist artifact.
         env:
           ATO_DESKTOP_SKIP_HELPER_BUILD: "1"
         working-directory: crates/ato-desktop/xtask
-        run: cargo run --release -- bundle --target ${{ matrix.target }} --appimage
+        run: cargo run --release -- bundle --target ${{ matrix.target }} --helper-source release --helper-artifact-dir "${{ steps.helpers.outputs.artifact_dir }}" --appimage
 
       - name: Upload .AppImage artifact
         uses: actions/upload-artifact@v4
