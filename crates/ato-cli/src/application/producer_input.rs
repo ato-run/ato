@@ -595,6 +595,7 @@ mod tests {
         assert!(!desktop_source_publish_framework_supported("custom-native"));
     }
 
+    #[serial_test::serial]
     #[test]
     fn canonical_lock_is_authoritative_over_diverging_manifest() {
         // Canonical-lock-first contract: when `ato.lock.json` is present
@@ -691,6 +692,7 @@ run = "main.ts"
         );
     }
 
+    #[serial_test::serial]
     #[test]
     #[cfg_attr(
         not(target_os = "macos"),
@@ -825,6 +827,7 @@ run = "main.ts""#
         assert!(error.to_string().contains("default_target"));
     }
 
+    #[serial_test::serial]
     #[test]
     fn source_only_producer_materialization_sanitizes_distributed_lock() {
         let dir = tempdir().expect("tempdir");
@@ -909,6 +912,7 @@ run = "main.ts""#
         assert!(metadata.provenance_limited);
     }
 
+    #[serial_test::serial]
     #[test]
     fn compatibility_accessors_ignore_lock_derived_legacy_bridge() {
         let dir = tempdir().expect("tempdir");

@@ -1608,10 +1608,7 @@ mod tests {
             config.runtime.backend_engines.source,
             SourceBackendEngine::Nacelle
         );
-        assert_eq!(
-            config.runtime.backend_engines.oci,
-            OciBackendEngine::Podman
-        );
+        assert_eq!(config.runtime.backend_engines.oci, OciBackendEngine::Podman);
         assert_eq!(
             config.runtime.backend_engines.wasm,
             WasmBackendEngine::Wasmtime
@@ -1629,10 +1626,7 @@ mod tests {
             parsed.runtime.backend_engines.source,
             SourceBackendEngine::Host
         );
-        assert_eq!(
-            parsed.runtime.backend_engines.oci,
-            OciBackendEngine::Docker
-        );
+        assert_eq!(parsed.runtime.backend_engines.oci, OciBackendEngine::Docker);
         assert_eq!(
             parsed.runtime.backend_engines.wasm,
             WasmBackendEngine::Wasmtime
@@ -1648,10 +1642,7 @@ mod tests {
             parsed.runtime.backend_engines.source,
             SourceBackendEngine::Nacelle
         );
-        assert_eq!(
-            parsed.runtime.backend_engines.oci,
-            OciBackendEngine::Podman
-        );
+        assert_eq!(parsed.runtime.backend_engines.oci, OciBackendEngine::Podman);
         assert_eq!(
             parsed.runtime.backend_engines.wasm,
             WasmBackendEngine::Wasmtime

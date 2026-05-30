@@ -148,6 +148,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         };
         let start_url = format!("{START_SCHEME}://localhost/");
         let start_run_dir_for_protocol = start_run_dir.clone();
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(
                 START_SCHEME.to_string(),

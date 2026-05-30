@@ -20,10 +20,11 @@ use std::rc::Rc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, hsla, point, px, rgb, size, svg, AnyElement, AnyWindowHandle, App, Bounds,
-    BoxShadow, ClipboardItem, Context, DispatchPhase, Entity, FontWeight, IntoElement, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    canvas, div, hsla, point, px, rgb, size, svg, transparent_black, AnyElement, AnyWindowHandle,
+    App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase, Entity, FontWeight, IntoElement,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
+    SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
@@ -229,7 +230,9 @@ fn resize_bar_window_in_handler(window: &mut Window, expanded: bool) {
     };
     #[cfg(target_os = "macos")]
     super::macos::resize_window_in_handler(window, new_w, new_h);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    super::windows::resize_window_in_handler(window, new_w, new_h);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (new_w, new_h, window);
 }
 
@@ -245,7 +248,9 @@ fn resize_bar_window(cx: &mut App, expanded: bool) {
     };
     #[cfg(target_os = "macos")]
     super::macos::resize_window_to(cx, handle, new_w, new_h);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    super::windows::resize_window_to(cx, handle, new_w, new_h);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (new_w, new_h, handle);
 }
 
@@ -585,6 +590,30 @@ impl Render for ControlBarShellPlaceholder {
     }
 }
 
+/// Apply the platform-appropriate surface shape to a Control Bar pill.
+///
+/// macOS: the host window is transparent and rounded to a full pill, so the
+/// inner surface is `rounded_full()` with a hairline border that defines the
+/// floating pill against the desktop.
+///
+/// Windows: the host window is opaque with DWM-rounded corners (the full pill
+/// shape is macOS-only — see `open_control_bar_inner`). Keep the inner surface
+/// square and clip overflow so neither the opaque window background nor a
+/// border halo can show in the gap between a rounded inner pill and the
+/// DWM-rounded window edge — the very "blur/black around the bar" this is
+/// meant to avoid.
+#[cfg(target_os = "windows")]
+fn bar_surface_shape(d: gpui::Div, _border_alpha: f32) -> gpui::Div {
+    d.overflow_hidden()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bar_surface_shape(d: gpui::Div, border_alpha: f32) -> gpui::Div {
+    d.rounded_full()
+        .border_1()
+        .border_color(hsla(0.0, 0.0, 0.0, border_alpha))
+}
+
 fn bar_pill(
     omnibar: Entity<InputState>,
     is_capsule: bool,
@@ -592,21 +621,21 @@ fn bar_pill(
     window_count: usize,
     locale: LocaleCode,
 ) -> impl IntoElement {
-    div()
-        .size_full()
-        .px(px(6.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .bg(rgb(0xffffff))
-        .rounded_full()
-        .border_1()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.04))
-        .child(left_action_group(locale))
-        .child(pill_separator())
-        .child(url_pill(omnibar, is_capsule, is_starred))
-        .child(pill_separator())
-        .child(right_action_group(window_count, locale))
+    bar_surface_shape(
+        div()
+            .size_full()
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .bg(rgb(0xffffff)),
+        0.04,
+    )
+    .child(left_action_group(locale))
+    .child(pill_separator())
+    .child(url_pill(omnibar, is_capsule, is_starred))
+    .child(pill_separator())
+    .child(right_action_group(window_count, locale))
 }
 
 /// Left group: [Settings]
@@ -653,13 +682,13 @@ fn pill_separator() -> impl IntoElement {
 }
 
 fn compact_pill() -> impl IntoElement {
-    div()
-        .w(px(COMPACT_BAR_WIDTH))
-        .h(px(COMPACT_HEIGHT))
-        .rounded_full()
-        .bg(hsla(0.0, 0.0, 1.0, 0.90))
-        .border_1()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.08))
+    bar_surface_shape(
+        div()
+            .w(px(COMPACT_BAR_WIDTH))
+            .h(px(COMPACT_HEIGHT))
+            .bg(hsla(0.0, 0.0, 1.0, 0.90)),
+        0.08,
+    )
 }
 
 fn my_dock_button() -> impl IntoElement {
@@ -1190,7 +1219,7 @@ fn open_info_popup(
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(popup_bounds)),
         window_decorations: Some(WindowDecorations::Client),
-        window_background: WindowBackgroundAppearance::Transparent,
+        window_background: popup_background_appearance(),
         ..Default::default()
     };
 
@@ -1199,7 +1228,7 @@ fn open_info_popup(
             model: model.clone(),
             locale,
         });
-        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+        cx.new(|cx| gpui_component::Root::new(shell, window, cx).bg(transparent_black()))
     })?;
 
     cx.set_global(InfoPopupWindowSlot(Some(*handle)));
@@ -1208,6 +1237,38 @@ fn open_info_popup(
 
 pub(crate) fn dismiss_info_popup(cx: &mut App) {
     let _ = close_info_popup_if_live(cx);
+}
+
+#[cfg(target_os = "windows")]
+fn popup_background_appearance() -> WindowBackgroundAppearance {
+    // With GPUI DirectComposition disabled on Windows (so child WebView2
+    // surfaces composite), a fully transparent popup window presents as
+    // opaque black. Blurred keeps the floating pill readable while preserving
+    // transparent rounded corners.
+    WindowBackgroundAppearance::Blurred
+}
+
+#[cfg(not(target_os = "windows"))]
+fn popup_background_appearance() -> WindowBackgroundAppearance {
+    WindowBackgroundAppearance::Transparent
+}
+
+/// Background appearance for the Control Bar window.
+///
+/// On macOS the window is transparent so the rounded "pill" floats over the
+/// desktop. On Windows DirectComposition is disabled (so child WebView2
+/// surfaces composite), which means a transparent surface paints black and a
+/// blurred one shows acrylic frost in the corners between the rounded content
+/// and the DWM-rounded window. An opaque window avoids both — the bar reads as
+/// a clean rounded rectangle (corners rounded via DWM).
+#[cfg(target_os = "windows")]
+fn control_bar_background_appearance() -> WindowBackgroundAppearance {
+    WindowBackgroundAppearance::Opaque
+}
+
+#[cfg(not(target_os = "windows"))]
+fn control_bar_background_appearance() -> WindowBackgroundAppearance {
+    WindowBackgroundAppearance::Transparent
 }
 
 fn close_info_popup_if_live(cx: &mut App) -> bool {
@@ -1319,7 +1380,7 @@ fn open_control_bar_inner(
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_decorations: Some(WindowDecorations::Client),
-        window_background: WindowBackgroundAppearance::Transparent,
+        window_background: control_bar_background_appearance(),
         ..Default::default()
     };
     let shell_slot: Rc<RefCell<Option<Entity<ControlBarShellPlaceholder>>>> =
@@ -1328,7 +1389,7 @@ fn open_control_bar_inner(
     let handle = cx.open_window(options, move |window, cx| {
         let shell = cx.new(|cx| ControlBarShellPlaceholder::new(&route, window, cx));
         *shell_slot_for_window.borrow_mut() = Some(shell.clone());
-        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+        cx.new(|cx| gpui_component::Root::new(shell, window, cx).bg(transparent_black()))
     })?;
     if let Some(shell) = shell_slot.borrow().clone() {
         cx.global_mut::<ControlBarController>()
@@ -1348,6 +1409,26 @@ fn open_control_bar_inner(
         // window so macOS orders them correctly and they move together.
         if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
             if let Err(err) = super::macos::attach_as_child(cx, entry.handle, *handle) {
+                tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // DirectComposition is disabled on Windows (so child WebView2 surfaces
+        // composite), which means a GPUI window cannot present a
+        // per-pixel-alpha transparent surface. Rather than a full pill (which
+        // would require region-clipping that leaves visible blur/black around
+        // the bar), the window is opaque and we simply round its corners via
+        // DWM. The pill shape stays macOS-only.
+        let initial_h = if cx.global::<ControlBarController>().should_render_expanded() {
+            BAR_HEIGHT
+        } else {
+            COMPACT_HEIGHT
+        };
+        super::windows::round_window_corners(cx, *handle, (initial_h / 2.0) as f64);
+        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
+            if let Err(err) = super::windows::attach_as_child(cx, entry.handle, *handle) {
                 tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
             }
         }

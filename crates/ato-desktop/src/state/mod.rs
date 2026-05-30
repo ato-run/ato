@@ -623,6 +623,9 @@ pub struct WebPane {
     pub healthcheck_url: Option<String>,
     pub invoke_url: Option<String>,
     pub served_by: Option<String>,
+    /// Stable install profile key (`ipk_<32hex>`) from the session record.
+    /// `None` for transient, preview, or LocalManifest sessions.
+    pub install_profile_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -644,6 +647,9 @@ pub struct CapsuleStatusPane {
     pub healthcheck_url: Option<String>,
     pub invoke_url: Option<String>,
     pub served_by: Option<String>,
+    /// Stable install profile key (`ipk_<32hex>`) from the session record.
+    /// `None` for transient, preview, or LocalManifest sessions.
+    pub install_profile_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1046,6 +1052,9 @@ pub struct ActiveWebPane {
     pub healthcheck_url: Option<String>,
     pub invoke_url: Option<String>,
     pub served_by: Option<String>,
+    /// Stable install profile key (`ipk_<32hex>`) from the session record.
+    /// `None` for transient, preview, or LocalManifest sessions.
+    pub install_profile_key: Option<String>,
     pub auth_flow: bool,
     pub bounds: PaneBounds,
 }
@@ -1071,6 +1080,9 @@ pub struct ActiveCapsulePane {
     pub healthcheck_url: Option<String>,
     pub invoke_url: Option<String>,
     pub served_by: Option<String>,
+    /// Stable install profile key (`ipk_<32hex>`) from the session record.
+    /// `None` for transient, preview, or LocalManifest sessions.
+    pub install_profile_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1294,6 +1306,7 @@ impl AppState {
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    install_profile_key: None,
                     auth_flow: false,
                 }),
             }],
@@ -1439,6 +1452,7 @@ impl AppState {
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    install_profile_key: None,
                     auth_flow: false,
                 }),
             }],
@@ -1487,6 +1501,7 @@ impl AppState {
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    install_profile_key: None,
                     auth_flow: false,
                 }),
             }],
@@ -2323,6 +2338,7 @@ impl AppState {
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    install_profile_key: None,
                     auth_flow: false,
                 });
                 navigated = Some(pane_id);
@@ -3135,6 +3151,7 @@ impl AppState {
                 healthcheck_url: web.healthcheck_url.clone(),
                 invoke_url: web.invoke_url.clone(),
                 served_by: web.served_by.clone(),
+                install_profile_key: web.install_profile_key.clone(),
                 auth_flow: web.auth_flow,
                 bounds: pane.bounds,
             }),
@@ -3170,6 +3187,7 @@ impl AppState {
                 healthcheck_url: None,
                 invoke_url: None,
                 served_by: None,
+                install_profile_key: None,
                 auth_flow: false,
                 bounds: pane.bounds,
             }),
@@ -3209,6 +3227,7 @@ impl AppState {
                     healthcheck_url: web.healthcheck_url.clone(),
                     invoke_url: web.invoke_url.clone(),
                     served_by: web.served_by.clone(),
+                    install_profile_key: web.install_profile_key.clone(),
                 })
             }
             PaneSurface::CapsuleStatus(capsule) => Some(ActiveCapsulePane {
@@ -3231,6 +3250,7 @@ impl AppState {
                 healthcheck_url: capsule.healthcheck_url.clone(),
                 invoke_url: capsule.invoke_url.clone(),
                 served_by: capsule.served_by.clone(),
+                install_profile_key: capsule.install_profile_key.clone(),
             }),
             _ => None,
         }
@@ -3374,6 +3394,7 @@ impl AppState {
                         healthcheck_url: web.healthcheck_url.clone(),
                         invoke_url: web.invoke_url.clone(),
                         served_by: web.served_by.clone(),
+                        install_profile_key: web.install_profile_key.clone(),
                     })
                 }
                 PaneSurface::CapsuleStatus(capsule) => Some(ActiveCapsulePane {
@@ -3396,6 +3417,7 @@ impl AppState {
                     healthcheck_url: capsule.healthcheck_url.clone(),
                     invoke_url: capsule.invoke_url.clone(),
                     served_by: capsule.served_by.clone(),
+                    install_profile_key: capsule.install_profile_key.clone(),
                 }),
                 _ => None,
             })?;
@@ -3651,6 +3673,7 @@ impl AppState {
         healthcheck_url: Option<String>,
         invoke_url: Option<String>,
         served_by: Option<String>,
+        install_profile_key: Option<String>,
     ) {
         self.update_pane(pane_id, |pane| match &mut pane.surface {
             PaneSurface::Web(web) => {
@@ -3669,6 +3692,7 @@ impl AppState {
                 web.healthcheck_url = healthcheck_url.clone();
                 web.invoke_url = invoke_url.clone();
                 web.served_by = served_by.clone();
+                web.install_profile_key = install_profile_key.clone();
             }
             PaneSurface::CapsuleStatus(capsule) => {
                 capsule.canonical_handle = canonical_handle.clone();
@@ -3686,6 +3710,7 @@ impl AppState {
                 capsule.healthcheck_url = healthcheck_url.clone();
                 capsule.invoke_url = invoke_url.clone();
                 capsule.served_by = served_by.clone();
+                capsule.install_profile_key = install_profile_key.clone();
             }
             _ => {}
         });
@@ -3711,6 +3736,7 @@ impl AppState {
         healthcheck_url: Option<String>,
         invoke_url: Option<String>,
         served_by: Option<String>,
+        install_profile_key: Option<String>,
     ) {
         self.update_pane(pane_id, |pane| {
             pane.title = route.to_string();
@@ -3732,6 +3758,7 @@ impl AppState {
                 healthcheck_url: healthcheck_url.clone(),
                 invoke_url: invoke_url.clone(),
                 served_by: served_by.clone(),
+                install_profile_key: install_profile_key.clone(),
             });
         });
         self.command_bar_text = route.to_string();
@@ -4660,6 +4687,7 @@ mod tests {
             Some("http://127.0.0.1:4173/health".to_string()),
             Some("http://127.0.0.1:4173/invoke".to_string()),
             Some("deno".to_string()),
+            None, // install_profile_key: transient test capsule
         );
         state.push_capsule_log(
             pane_id,
