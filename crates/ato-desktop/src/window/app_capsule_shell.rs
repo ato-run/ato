@@ -638,6 +638,11 @@ impl AppCapsuleShell {
     ) -> Self {
         let win_size = window.bounds().size;
         let handle = session.handle.clone();
+        tracing::info!(
+            handle = %handle,
+            session_id = %session.session_id,
+            "AppCapsuleShell::new_ready: created with pre-resolved session"
+        );
         Self {
             handle,
             launch_configs: configs,
@@ -891,12 +896,15 @@ impl Drop for AppCapsuleShell {
         if let Some(Ok(session)) = &self.pending_result {
             tracing::warn!(
                 session_id = %session.session_id,
+                window_id = ?self.content_window_id,
                 "AppCapsuleShell drop: pending session was not consumed by close handler"
             );
         }
         if let CapsuleBootState::Ready { session } = &self.boot_state {
+            let window_id = self.content_window_id;
             tracing::warn!(
                 session_id = %session.session_id,
+                ?window_id,
                 "AppCapsuleShell drop: ready session was not detached by close handler"
             );
         }

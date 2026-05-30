@@ -159,6 +159,64 @@ fn looks_like_github_repo_input(input: &str) -> bool {
     PREFIXES.iter().any(|p| lower.starts_with(p))
 }
 
+/// Classify a closing GPUI window so the `on_window_closed` log makes it
+/// clear whether the boot wizard, an AppWindow, or chrome was closed.
+/// This is diagnostic-only (#370 lifecycle investigation).
+fn classify_closed_window_kind(cx: &App, window_id: u64) -> &'static str {
+    // Check if the window id belongs to the boot wizard slot.
+    let boot_matches = cx
+        .try_global::<crate::window::launch_window::BootWindowSlot>()
+        .and_then(|s| s.boot_window)
+        .map(|h| h.window_id().as_u64() == window_id)
+        .unwrap_or(false);
+    if boot_matches {
+        return "boot-wizard";
+    }
+
+    // Check if registered as an AppWindow in the registry.
+    if cx
+        .global::<crate::state::AppWindowRegistry>()
+        .find_by_gpui_window_id(window_id)
+        .is_some()
+    {
+        return "app-window";
+    }
+
+    // Check singleton chrome windows.
+    if let Some(c) = cx.try_global::<crate::window::ControlBarController>() {
+        if c.handle.map(|h| h.window_id().as_u64() == window_id).unwrap_or(false) {
+            return "control-bar";
+        }
+    }
+    if cx
+        .global::<crate::window::card_switcher::CardSwitcherWindowSlot>()
+        .0
+        .map(|h| h.window_id().as_u64() == window_id)
+        .unwrap_or(false)
+    {
+        return "card-switcher";
+    }
+    if cx
+        .global::<crate::window::settings_window::SettingsWindowSlot>()
+        .0
+        .map(|h| h.window_id().as_u64() == window_id)
+        .unwrap_or(false)
+    {
+        return "settings";
+    }
+
+    // Check content windows (dock, store, onboarding, start, etc.)
+    if cx
+        .global::<crate::window::content_windows::OpenContentWindows>()
+        .get(window_id)
+        .is_some()
+    {
+        return "content-window";
+    }
+
+    "unknown"
+}
+
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = ato_desktop, no_json)]
 pub struct SetControlBarMode {
@@ -560,7 +618,14 @@ pub fn run(skip_onboarding: bool) {
             // Card Switcher / MRU stay accurate. The registry uses
             // the GPUI WindowId u64 it stamped at open time.
             let closed_id = window_id.as_u64();
-            tracing::info!(closed_id, "on_window_closed observed window close");
+            // Classify the closed window so the log makes it clear
+            // whether the boot wizard, an AppWindow, or chrome closed.
+            let closed_kind = classify_closed_window_kind(cx, closed_id);
+            tracing::info!(
+                closed_id,
+                %closed_kind,
+                "on_window_closed observed window close"
+            );
             let removed_id = cx
                 .global_mut::<crate::state::AppWindowRegistry>()
                 .find_by_gpui_window_id(closed_id);
