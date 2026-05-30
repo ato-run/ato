@@ -273,7 +273,7 @@ fn resolve_ato_binary(override_path: Option<&Path>) -> Result<PathBuf> {
     // Search PATH
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     for entry in std::env::split_paths(&path_var) {
-        let candidate = entry.join("ato");
+        let candidate = entry.join(platform_binary_name("ato"));
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -310,7 +310,7 @@ fn resolve_nacelle_binary(override_path: Option<&Path>) -> Result<PathBuf> {
             // Fallback: search PATH
             let path_var = std::env::var_os("PATH").unwrap_or_default();
             for entry in std::env::split_paths(&path_var) {
-                let candidate = entry.join("nacelle");
+                let candidate = entry.join(platform_binary_name("nacelle"));
                 if candidate.is_file() {
                     return Ok(candidate);
                 }
@@ -319,6 +319,15 @@ fn resolve_nacelle_binary(override_path: Option<&Path>) -> Result<PathBuf> {
                 "nacelle binary not found — set NACELLE_PATH or install nacelle on PATH".into(),
             ))
         }
+    }
+}
+
+fn platform_binary_name(name: &str) -> String {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    if suffix.is_empty() || name.ends_with(suffix) {
+        name.to_string()
+    } else {
+        format!("{name}{suffix}")
     }
 }
 
