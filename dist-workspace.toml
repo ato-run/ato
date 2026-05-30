@@ -12,9 +12,13 @@
 # and CLI MSI installer.
 #
 # Tag prefix routing:
-#   - `v*`             → triggers cargo-dist's CLI release.yml
+#   - `v*`             → triggers cargo-dist's release.yml AND
+#                        .github/workflows/desktop-release.yml (unified).
+#                        desktop-release.yml's publish-release job waits
+#                        for the cargo-dist release to exist, then appends
+#                        .dmg/.msi/.AppImage artifacts to the same release.
 #   - `ato-desktop-v*` → triggers .github/workflows/desktop-release.yml
-# The two workflows are never invoked by the same tag.
+#                        alone (legacy desktop-only release path).
 
 [workspace]
 members = ["cargo:."]
