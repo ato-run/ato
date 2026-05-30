@@ -407,6 +407,7 @@ pub fn run(skip_onboarding: bool) {
         cx.set_global(crate::window::content_windows::OpenContentWindows::default());
         cx.set_global(crate::state::session::SessionRegistry::default());
         cx.set_global(crate::window::launch_window::PendingLaunches::default());
+        cx.set_global(crate::window::focus_guest_panes::FocusGuestPaneRegistry::default());
         cx.set_global(crate::state::capsule_state::CapsuleStateStore::default());
         cx.set_global(
             crate::system_capsule::window_registry::SystemCapsuleWindowRegistry::default(),
@@ -559,6 +560,7 @@ pub fn run(skip_onboarding: bool) {
             // Card Switcher / MRU stay accurate. The registry uses
             // the GPUI WindowId u64 it stamped at open time.
             let closed_id = window_id.as_u64();
+            tracing::info!(closed_id, "on_window_closed observed window close");
             let removed_id = cx
                 .global_mut::<crate::state::AppWindowRegistry>()
                 .find_by_gpui_window_id(closed_id);
@@ -583,6 +585,24 @@ pub fn run(skip_onboarding: bool) {
                 tracing::info!(
                     gpui_window_id = closed_id,
                     "content window evicted from registry on close"
+                );
+            }
+
+            // Evict the Focus guest capsule automation pane (#370) so a
+            // stale pane is never reported by `browser_tabs` after its
+            // window closes, and fail any in-flight MCP browser requests
+            // still queued against it so callers don't hang.
+            if let Some(entry) = cx
+                .global_mut::<crate::window::focus_guest_panes::FocusGuestPaneRegistry>()
+                .unregister_window(closed_id)
+            {
+                if let Some(host) = cx.try_global::<crate::automation::AutomationHost>() {
+                    host.fail_requests_for_pane(entry.pane_id);
+                }
+                tracing::info!(
+                    gpui_window_id = closed_id,
+                    pane_id = entry.pane_id,
+                    "focus guest capsule pane unregistered on close"
                 );
             }
             if let Some(handle) = cx.global::<crate::window::ControlBarController>().handle {
