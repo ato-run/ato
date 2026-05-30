@@ -162,6 +162,42 @@ Desktop → CLI → nacelle / runtime process
 
 Desktop is responsible for UI, orchestration, WebView management, and user-facing lifecycle state. CLI is responsible for manifest handling, lock handling, execution planning, sandbox setup, process launch, session records, and typed errors.
 
+### Bundled helpers vs. shell CLI vs. private sidecar
+
+Desktop ships `ato` and `nacelle` *inside* the application bundle. Three roles
+must not be conflated:
+
+| Term | What it is | On the user's `PATH`? |
+|---|---|---|
+| **Bundled helper** (`ato`) | A private copy of the CLI shipped inside Desktop for Desktop-internal orchestration. Desktop spawns it directly by absolute path. | No. |
+| **User shell CLI** (`ato`) | The `ato` command a user runs in a terminal. Available **only** after an explicit CLI expose/install step — installing or running Desktop does not add `ato` to your shell. | Only after an explicit expose step. |
+| **Private sidecar** (`nacelle`) | The internal runtime engine. The bundled `ato` resolves it adjacent to itself (portable mode); it is never exposed on `PATH`. | No. |
+
+Runtime resolution preserves a strict precedence so the bundled copies win:
+
+```text
+packaged Desktop  → resolves bundled `ato` first  (Contents/Helpers/ato, …)
+bundled `ato`     → resolves adjacent `nacelle` first (portable, next to ato)
+PATH lookup       → secondary fallback only
+```
+
+**Distribution (build-time, not runtime).** Release bundles do not rebuild the
+helpers. The Desktop release pipeline consumes the already-published `ato` /
+`nacelle` artifacts from the CLI release (cargo-dist) and stages them into the
+bundle, then signs/notarizes/packages. There is **no runtime download** of
+helpers — they are present offline in the bundle. Local development still builds
+the helpers from source (`cargo xtask bundle <target>`, default
+`--helper-source=local`); release uses `--helper-source=release`. `ato-netd` is
+always built locally because it is not a released artifact.
+
+Per-platform bundled helper layout:
+
+| Platform | `ato` | `nacelle` |
+|---|---|---|
+| macOS | `Ato Desktop.app/Contents/Helpers/ato` | `…/Contents/Helpers/nacelle` |
+| Windows | `Ato\bin\ato.exe` | `Ato\bin\nacelle.exe` |
+| Linux (AppImage) | `AppDir/usr/bin/ato` | `AppDir/usr/bin/nacelle` |
+
 ### Long-term goal
 
 > Every launch becomes one managed execution graph, no matter whether it starts from CLI foreground, CLI background, automation, or Desktop.

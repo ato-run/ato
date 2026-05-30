@@ -94,6 +94,7 @@ pub fn open_onboarding_window(cx: &mut App) -> Result<()> {
             .into(),
         };
         let onboarding_url = format!("{ONBOARDING_SCHEME}://localhost/");
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(
                 ONBOARDING_SCHEME.to_string(),

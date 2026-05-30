@@ -56,6 +56,11 @@ pub struct OciContainerRequest {
     /// Optional platform override for emulated execution (e.g., linux/amd64 on arm64 host).
     /// When set and different from host platform, the provider must pass `--platform` to create.
     pub platform: Option<OciPlatform>,
+    /// Additional `/etc/hosts` entries injected via `--add-host`.
+    ///
+    /// Each entry is in `name:address` form as accepted by `podman create --add-host`.
+    /// Use `host.containers.internal:host-gateway` to let containers reach the host.
+    pub extra_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -206,6 +211,7 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
                     .collect()
             }),
             port_bindings: (!port_bindings.is_empty()).then_some(port_bindings),
+            extra_hosts: (!request.extra_hosts.is_empty()).then(|| request.extra_hosts.clone()),
             ..Default::default()
         };
 

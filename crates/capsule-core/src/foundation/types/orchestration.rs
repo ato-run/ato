@@ -12,6 +12,15 @@ pub struct ResolvedServiceNetwork {
     pub publish: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_from: Vec<String>,
+    /// Whether to route this service's outbound HTTP(S) through the `ato-netd` egress proxy.
+    ///
+    /// Mirrors `ServiceNetworkSpec::egress_proxy`. Defaults to `true`.
+    #[serde(default = "default_egress_proxy")]
+    pub egress_proxy: bool,
+}
+
+fn default_egress_proxy() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

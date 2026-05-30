@@ -141,7 +141,10 @@ CLI の front-door は `run`, `decap`, `encap` の 3 つに固定する。物語
 ### 3.2 Management Commands
 
 - `ato ps [--all] [--json]`
+  - OCI セッションを扱う環境では Podman machine VM の状態も表示し、セッションがなくても VM が稼働している状態を観測可能にする。
 - `ato stop [--id|--name] [--all] [--force]`
+  - OCI セッション停止後に active OCI session が 0 件になり、running Podman machine が 1 件だけで、かつ非 Ato 管理の running container が存在しない場合、Podman machine VM も停止する。
+  - `--all` は active process / import preview / OCI container-network session に加えて、残存 active OCI session、複数 running machine、非 Ato container がない場合の Podman machine VM 停止も含む。
 - `ato logs [--id|--name] [--follow] [--tail]`
 
 ### 3.3 Auth Commands
