@@ -812,6 +812,12 @@ fn open_app_window_with_capsule_input(
     // to the registry slot and evict the entry. Without this the
     // registry would grow monotonically as AppWindows come and go.
     let gpui_window_id = app_handle.window_id().as_u64();
+    tracing::info!(
+        app_window_id = gpui_window_id,
+        route = %route.label(),
+        has_capsule_shell = capsule_shell_slot.borrow().is_some(),
+        "open_app_window_with_capsule_input: AppWindow created"
+    );
     if let Some(shell) = capsule_shell_slot.borrow().clone() {
         let _ = shell.update(cx, |shell, _cx| shell.set_content_window_id(gpui_window_id));
         // Register this real `AppCapsuleShell` as a Focus-mode guest
@@ -829,7 +835,12 @@ fn open_app_window_with_capsule_input(
             other => other.label(),
         };
         cx.global_mut::<crate::window::focus_guest_panes::FocusGuestPaneRegistry>()
-            .register(gpui_window_id, route.clone(), handle_str, shell.downgrade());
+            .register(gpui_window_id, route.clone(), handle_str.clone(), shell.downgrade());
+        tracing::info!(
+            app_window_id = gpui_window_id,
+            handle = %handle_str,
+            "open_app_window_with_capsule_input: FocusGuestPaneRegistry registered"
+        );
     }
     if let Some(entry) = cx
         .global_mut::<crate::state::AppWindowRegistry>()
