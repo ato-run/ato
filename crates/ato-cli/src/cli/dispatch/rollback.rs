@@ -169,6 +169,7 @@ mod tests {
     /// in the log (log predecessor), not "last non-current".
     ///
     /// Scenario: log=[rev1, rev2, rev3], current=rev3 → auto rollback → rev2.
+    #[serial_test::serial]
     #[test]
     #[serial]
     fn rollback_auto_picks_log_predecessor() {
@@ -225,6 +226,7 @@ mod tests {
     }
 
     /// `rollback <ipk> <unknown_rev>` must return an error.
+    #[serial_test::serial]
     #[test]
     #[serial]
     fn rollback_explicit_unknown_rev_fails() {
@@ -247,6 +249,7 @@ mod tests {
     }
 
     /// `rollback <ipk> <known_rev>` sets `current_revision` to that rev.
+    #[serial_test::serial]
     #[test]
     #[serial]
     fn rollback_explicit_known_rev_succeeds() {

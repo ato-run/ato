@@ -1788,14 +1788,33 @@ pub(crate) fn is_semver(s: &str) -> bool {
 }
 
 pub(crate) fn is_valid_mount_path(path: &str) -> bool {
-    let path = Path::new(path);
-    path.is_absolute()
-        && path.components().all(|component| {
-            !matches!(
-                component,
-                Component::ParentDir | Component::CurDir | Component::Prefix(_)
-            )
-        })
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.contains('\\')
+        && rest
+            .split('/')
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_mount_path;
+
+    #[test]
+    fn mount_paths_are_unix_container_paths() {
+        assert!(is_valid_mount_path("/app/backend/data"));
+        assert!(is_valid_mount_path("/var/lib/postgresql/data"));
+
+        assert!(!is_valid_mount_path(""));
+        assert!(!is_valid_mount_path("/"));
+        assert!(!is_valid_mount_path("relative/path"));
+        assert!(!is_valid_mount_path("C:\\data"));
+        assert!(!is_valid_mount_path("/app\\data"));
+        assert!(!is_valid_mount_path("/app/../data"));
+        assert!(!is_valid_mount_path("/app//data"));
+    }
 }
 
 pub(crate) fn is_valid_platform_key(s: &str) -> bool {
