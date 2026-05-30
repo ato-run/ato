@@ -204,6 +204,9 @@ impl AppCapsuleShell {
                 async move {
                     loop {
                         be.timer(Duration::from_millis(100)).await;
+                        if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                            continue;
+                        }
 
                         // Drain progress steps before checking the result so
                         // the boot wizard advances as the orchestrator works.
@@ -377,6 +380,9 @@ impl AppCapsuleShell {
                 async move {
                     loop {
                         be.timer(Duration::from_millis(100)).await;
+                        if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                            continue;
+                        }
 
                         let steps: Vec<u8> = {
                             let mut v = Vec::new();
@@ -512,6 +518,9 @@ impl AppCapsuleShell {
                 async move {
                     loop {
                         be.timer(Duration::from_millis(100)).await;
+                        if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                            continue;
+                        }
 
                         let steps: Vec<u8> = {
                             let mut v = Vec::new();
@@ -717,6 +726,7 @@ impl AppCapsuleShell {
                 let win_size = window.bounds().size;
                 let w = f32::from(win_size.width) as u32;
                 let h = f32::from(win_size.height) as u32;
+                let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
                 match WebViewBuilder::new()
                     .with_url(&effective_url)
                     .with_bounds(Rect {
