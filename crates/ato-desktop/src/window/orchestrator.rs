@@ -814,6 +814,22 @@ fn open_app_window_with_capsule_input(
     let gpui_window_id = app_handle.window_id().as_u64();
     if let Some(shell) = capsule_shell_slot.borrow().clone() {
         let _ = shell.update(cx, |shell, _cx| shell.set_content_window_id(gpui_window_id));
+        // Register this real `AppCapsuleShell` as a Focus-mode guest
+        // automation pane (#370) so MCP `browser_tabs` lists it and
+        // `browser_snapshot` / `browser_take_screenshot` can target its
+        // private WebView. Only capsule-backed routes reach here with a
+        // populated `capsule_shell_slot` — Store / Dock / Settings /
+        // ExternalUrl / placeholder windows never set the slot, so they
+        // are never registered.
+        let handle_str = match &route {
+            GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
+                handle.clone()
+            }
+            GuestRoute::LocalManifest(local) => local.source_handle.clone(),
+            other => other.label(),
+        };
+        cx.global_mut::<crate::window::focus_guest_panes::FocusGuestPaneRegistry>()
+            .register(gpui_window_id, route.clone(), handle_str, shell.downgrade());
     }
     if let Some(entry) = cx
         .global_mut::<crate::state::AppWindowRegistry>()

@@ -29,10 +29,12 @@ use gpui::{
     WeakEntity,
 };
 use wry::dpi::{LogicalPosition, LogicalSize};
-use wry::{Rect, WebView, WebViewBuilder};
+use wry::{PageLoadEvent, Rect, WebView, WebViewBuilder};
 
 use capsule_wire::handle::CapsuleDisplayStrategy;
 
+use crate::automation::command::PendingAutomationRequest;
+use crate::automation::AutomationHost;
 use crate::orchestrator::{DesktopLaunchInput, GuestLaunchSession, LaunchError};
 use crate::state::session::{
     CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession, SessionClient, SessionClientId,
@@ -82,6 +84,12 @@ pub struct AppCapsuleShell {
     boot_state: CapsuleBootState,
     webview: Option<WebView>,
     content_window_id: Option<u64>,
+    /// The URL actually loaded into `webview` once it is created. This is
+    /// the *effective* URL — for `WebUrl` sessions it is the ato-netd stable
+    /// ingress URL (`http://127.0.0.1:<port>/…`), which differs from the
+    /// upstream `session_current_url`. Reported to MCP `browser_tabs` so the
+    /// pane's URL matches what is really on screen (#370 review follow-up).
+    automation_url: Option<String>,
     /// Result delivered from the background launch thread.
     pending_result: Option<Result<GuestLaunchSession, LaunchError>>,
     /// Cached window size, used for WebView bounds and resize detection.
@@ -312,6 +320,7 @@ impl AppCapsuleShell {
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
+            automation_url: None,
             pending_result: None,
             window_size: win_size,
             abort_flag,
@@ -434,6 +443,7 @@ impl AppCapsuleShell {
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
+            automation_url: None,
             pending_result: None,
             window_size: win_size,
             abort_flag,
@@ -611,6 +621,7 @@ impl AppCapsuleShell {
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
+            automation_url: None,
             pending_result: None,
             window_size: win_size,
             abort_flag,
@@ -633,6 +644,7 @@ impl AppCapsuleShell {
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
+            automation_url: None,
             pending_result: Some(Ok(session)),
             window_size: win_size,
             abort_flag: Arc::new(AtomicBool::new(false)),
@@ -652,6 +664,56 @@ impl AppCapsuleShell {
     #[allow(dead_code)]
     pub fn abort(&self) {
         self.abort_flag.store(true, Ordering::Release);
+    }
+
+    /// True once the guest WebView has been created (boot succeeded). Used
+    /// by the Focus automation dispatcher to decide whether a registered
+    /// guest pane can yet service browser commands (#370).
+    pub fn has_webview(&self) -> bool {
+        self.webview.is_some()
+    }
+
+    /// Session id of the running guest, if boot has completed.
+    pub fn current_session_id(&self) -> Option<String> {
+        match &self.boot_state {
+            CapsuleBootState::Ready { session } => Some(session.session_id.clone()),
+            _ => None,
+        }
+    }
+
+    /// Best-effort current URL for automation / pane listing. Returns the
+    /// URL actually loaded into the WebView once it exists (the effective
+    /// ingress URL), so `browser_tabs` matches what's on screen. Falls back
+    /// to the upstream `session_current_url` / `capsule://<handle>` form
+    /// while still booting or on failure.
+    pub fn current_url_for_automation(&self) -> String {
+        if let Some(url) = &self.automation_url {
+            return url.clone();
+        }
+        match &self.boot_state {
+            CapsuleBootState::Ready { session } => session_current_url(session),
+            _ => format!("capsule://{}", self.handle),
+        }
+    }
+
+    /// Dispatch an MCP browser automation command to this shell's private
+    /// guest WebView (#370). Mirrors the dock pane's
+    /// `webview::dispatch_automation_command` path so guest capsules behave
+    /// identically to the dock under MCP browser tools.
+    pub fn dispatch_automation_request(
+        &mut self,
+        req: PendingAutomationRequest,
+        pane_id: usize,
+        automation: &AutomationHost,
+    ) {
+        match self.webview.as_ref() {
+            Some(webview) => {
+                crate::webview::dispatch_automation_command(req, webview, pane_id, automation);
+            }
+            None => {
+                req.send(Err("guest capsule WebView is not ready".into()));
+            }
+        }
     }
 
     /// Process a result that arrived from the background thread.
@@ -727,14 +789,31 @@ impl AppCapsuleShell {
                 let w = f32::from(win_size.width) as u32;
                 let h = f32::from(win_size.height) as u32;
                 let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
-                match WebViewBuilder::new()
+                let mut builder = WebViewBuilder::new()
                     .with_url(&effective_url)
                     .with_bounds(Rect {
                         position: LogicalPosition::new(0i32, 0i32).into(),
                         size: LogicalSize::new(w, h).into(),
-                    })
-                    .build_as_child(window)
+                    });
+                // Mark this guest pane loaded/unloaded for the Focus automation
+                // dispatcher (#370), mirroring the dock WebView's handler. MCP
+                // JS commands (snapshot/click/evaluate) are gated on
+                // `is_page_loaded`, so without this they'd time out against
+                // guest capsule panes.
+                let automation_pane = self
+                    .content_window_id
+                    .map(crate::window::focus_guest_panes::focus_guest_pane_id);
+                if let (Some(pane_id), Some(automation)) =
+                    (automation_pane, cx.try_global::<AutomationHost>().cloned())
                 {
+                    // Start unloaded; the Finished event flips it to loaded.
+                    automation.mark_page_unloaded(pane_id);
+                    builder = builder.with_on_page_load_handler(move |event, _url| match event {
+                        PageLoadEvent::Started => automation.mark_page_unloaded(pane_id),
+                        PageLoadEvent::Finished => automation.mark_page_loaded(pane_id),
+                    });
+                }
+                match builder.build_as_child(window) {
                     Ok(webview) => {
                         tracing::info!(
                             handle = %self.handle,
@@ -743,6 +822,7 @@ impl AppCapsuleShell {
                             "AppCapsuleShell: WebView created for running session"
                         );
                         self.webview = Some(webview);
+                        self.automation_url = Some(effective_url.clone());
                         self.window_size = win_size;
                         self.boot_state = CapsuleBootState::Ready {
                             session: Box::new(session),
@@ -1014,6 +1094,12 @@ fn close_boot_window(cx: &mut App) {
         .try_global::<BootWindowSlot>()
         .and_then(|s| s.boot_window);
     if let Some(handle) = slot {
+        // Diagnostic for #370: confirm the window being removed here is the
+        // boot wizard, not the AppWindow that hosts the guest WebView.
+        tracing::info!(
+            window_id = handle.window_id().as_u64(),
+            "close_boot_window removing boot window"
+        );
         let _ = handle.update(cx, |_, window, _| window.remove_window());
         // Clear both fields — once the launch result arrives, AbortBoot
         // is no longer applicable (boot window is gone).
