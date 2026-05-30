@@ -853,9 +853,15 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            if let Err(err) = crate::window::dock::open_dock_window(cx) {
-                tracing::error!(error = %err, "OpenIdentityMenu: open_dock_window failed");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    if let Err(err) = crate::window::dock::open_dock_window(cx) {
+                        tracing::error!(error = %err, "OpenIdentityMenu: open_dock_window failed");
+                    }
+                },
+            );
         });
 
         // Settings cog routing in Focus mode — Stages C+D:
@@ -868,10 +874,16 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
-                tracing::error!(error = %err, "ShowSettings: open_settings_window failed");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
+                        tracing::error!(error = %err, "ShowSettings: open_settings_window failed");
+                    }
+                },
+            );
         });
 
         // Focus-mode handler for the Control Bar URL pill's
@@ -1057,10 +1069,16 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::open_card_switcher_window(cx) {
-                tracing::error!(error = %err, "failed to open card switcher window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::open_card_switcher_window(cx) {
+                        tracing::error!(error = %err, "failed to open card switcher window");
+                    }
+                },
+            );
         });
 
         // #174 — cycle through open app windows in MRU order via
@@ -1080,10 +1098,16 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::store::open_store_window(cx) {
-                tracing::error!(error = %err, "failed to open store window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::store::open_store_window(cx) {
+                        tracing::error!(error = %err, "failed to open store window");
+                    }
+                },
+            );
         });
 
         // Toggle Dock visibility. If the dock window exists, close it.
@@ -1097,9 +1121,23 @@ pub fn run(skip_onboarding: bool) {
             }
             let slot = cx.global::<crate::window::dock::DockWindowSlot>();
             if let Some(handle) = slot.0 {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                crate::system_capsule::ipc::defer_after_dispatch_for(
+                    cx,
+                    std::time::Duration::from_millis(50),
+                    move |cx| {
+                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    },
+                );
             } else {
-                let _ = crate::window::dock::open_dock_window(cx);
+                crate::system_capsule::ipc::defer_after_dispatch_for(
+                    cx,
+                    std::time::Duration::from_millis(50),
+                    |cx| {
+                        if let Err(err) = crate::window::dock::open_dock_window(cx) {
+                            tracing::error!(error = %err, "ToggleDock: open_dock_window failed");
+                        }
+                    },
+                );
             }
         });
 
@@ -1111,10 +1149,16 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::dock::open_dock_window(cx) {
-                tracing::error!(error = %err, "failed to open dock window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::dock::open_dock_window(cx) {
+                        tracing::error!(error = %err, "failed to open dock window");
+                    }
+                },
+            );
         });
 
         // Toggle the Control Bar info popup. Dispatched from the info icon
@@ -1137,10 +1181,16 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::capsule_panel::open_capsule_panel_window(cx) {
-                tracing::error!(error = %err, "failed to open capsule panel window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::capsule_panel::open_capsule_panel_window(cx) {
+                        tracing::error!(error = %err, "failed to open capsule panel window");
+                    }
+                },
+            );
         });
 
         // Spawn a fresh StartWindow. Unlike the Launcher / Store
@@ -1151,15 +1201,27 @@ pub fn run(skip_onboarding: bool) {
         // action is still registered so MCP / keybind paths reach
         // the same target.
         cx.on_action(|_: &OpenStartWindow, cx: &mut App| {
-            if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                tracing::error!(error = %err, "failed to open start window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    if let Err(err) = crate::window::start_window::open_start_window(cx) {
+                        tracing::error!(error = %err, "failed to open start window");
+                    }
+                },
+            );
         });
 
         cx.on_action(|_: &OpenGithubRunWindow, cx: &mut App| {
-            if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
-                tracing::error!(error = %err, "failed to open github run window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
+                        tracing::error!(error = %err, "failed to open github run window");
+                    }
+                },
+            );
         });
 
         // The two startup modes are mutually exclusive — there is no
