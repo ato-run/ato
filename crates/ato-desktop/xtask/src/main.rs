@@ -242,9 +242,43 @@ fn bundle_windows_app(target: &str, helper_source: &HelperSource) -> Result<Path
     fs::copy(&helpers.nacelle, bin_dir.join("nacelle.exe"))
         .with_context(|| format!("failed to copy {} to staging", helpers.nacelle.display()))?;
     copy_bundled_assets(&paths.desktop_root.join("assets"), &assets_dir)?;
+    assert_windows_staging_layout(&staging)?;
 
     println!("Staged Windows install tree at {}", staging.display());
     Ok(staging)
+}
+
+fn assert_windows_staging_layout(staging: &Path) -> Result<()> {
+    let required_files = [
+        staging.join("ato-desktop.exe"),
+        staging.join("bin").join("ato.exe"),
+        staging.join("bin").join("nacelle.exe"),
+    ];
+    for path in required_files {
+        if !path.is_file() {
+            bail!(
+                "Windows staging is missing required file {}",
+                path.display()
+            );
+        }
+    }
+
+    let assets = staging.join("assets");
+    if !assets.is_dir() {
+        bail!(
+            "Windows staging is missing required assets directory {}",
+            assets.display()
+        );
+    }
+    let mut entries = fs::read_dir(&assets)
+        .with_context(|| format!("failed to read assets directory {}", assets.display()))?;
+    if entries.next().is_none() {
+        bail!(
+            "Windows staging assets directory is empty: {}",
+            assets.display()
+        );
+    }
+    Ok(())
 }
 
 fn bundle_linux_app(target: &str, helper_source: &HelperSource) -> Result<PathBuf> {
@@ -361,7 +395,33 @@ fn package_msi(staging: &Path, target: &str) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let dist_dir = staging.parent().context("staging path has no parent")?;
     let obj_path = dist_dir.join("ato.wixobj");
+    let assets_wxs_path = dist_dir.join("ato-assets.wxs");
+    let assets_obj_path = dist_dir.join("ato-assets.wixobj");
     let msi_path = dist_dir.join(format!("Ato-Desktop-{version}-{target}.msi"));
+    assert_windows_staging_layout(staging)?;
+
+    let assets_dir = staging.join("assets");
+    let status = Command::new("heat")
+        .arg("dir")
+        .arg(&assets_dir)
+        .args([
+            "-cg",
+            "AssetsFiles",
+            "-dr",
+            "AssetsFolder",
+            "-srd",
+            "-sreg",
+            "-gg",
+            "-var",
+            "var.StagingAssetsDir",
+        ])
+        .arg("-out")
+        .arg(&assets_wxs_path)
+        .status()
+        .context("failed to invoke `heat` — install WiX Toolset 3.x and ensure it is on PATH")?;
+    if !status.success() {
+        bail!("heat failed for {} ({})", assets_dir.display(), status);
+    }
 
     // candle = compile .wxs → .wixobj
     let status = Command::new("candle")
@@ -379,12 +439,33 @@ fn package_msi(staging: &Path, target: &str) -> Result<()> {
     if !status.success() {
         bail!("candle failed for {} ({})", wxs.display(), status);
     }
+    let status = Command::new("candle")
+        .args(["-arch", arch])
+        .arg(format!(
+            "-dStagingAssetsDir={}",
+            assets_dir
+                .to_str()
+                .context("assets staging path is not UTF-8")?
+        ))
+        .arg("-out")
+        .arg(&assets_obj_path)
+        .arg(&assets_wxs_path)
+        .status()
+        .context("failed to invoke `candle` for harvested assets")?;
+    if !status.success() {
+        bail!(
+            "candle failed for harvested assets {} ({})",
+            assets_wxs_path.display(),
+            status
+        );
+    }
 
     let status = Command::new("light")
         .args(["-ext", "WixUIExtension", "-ext", "WixUtilExtension"])
         .arg("-out")
         .arg(&msi_path)
         .arg(&obj_path)
+        .arg(&assets_obj_path)
         .status()
         .context("failed to invoke `light` — install WiX Toolset 3.x")?;
     if !status.success() {
@@ -1585,10 +1666,11 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        cargo_dist_triple, consume_release_helper, copy_bundled_assets, find_file_named,
-        find_release_archive, helper_archive_ext, helper_exe_name, render_info_plist,
-        resolve_helper_source, sha256_hex, verify_release_checksum, HelperSource, MacTarget,
-        WorkspacePaths, HELPER_ARTIFACT_DIR_ENV, HELPER_SOURCE_ENV,
+        assert_windows_staging_layout, cargo_dist_triple, consume_release_helper,
+        copy_bundled_assets, find_file_named, find_release_archive, helper_archive_ext,
+        helper_exe_name, render_info_plist, resolve_helper_source, sha256_hex,
+        verify_release_checksum, HelperSource, MacTarget, WorkspacePaths, HELPER_ARTIFACT_DIR_ENV,
+        HELPER_SOURCE_ENV,
     };
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -1634,6 +1716,52 @@ mod tests {
             plist.contains("<string>AppIcon</string>"),
             "Info.plist CFBundleIconFile value must be AppIcon"
         );
+    }
+
+    #[test]
+    fn windows_staging_assertion_requires_helper_and_assets() {
+        let root = test_root("windows-staging-ok");
+        let staging = root.join("Ato");
+        fs::create_dir_all(staging.join("bin")).unwrap();
+        fs::create_dir_all(staging.join("assets")).unwrap();
+        fs::write(staging.join("ato-desktop.exe"), "").unwrap();
+        fs::write(staging.join("bin").join("ato.exe"), "").unwrap();
+        fs::write(staging.join("bin").join("nacelle.exe"), "").unwrap();
+        fs::write(staging.join("assets").join("AppIcon.ico"), "").unwrap();
+
+        assert_windows_staging_layout(&staging).unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn windows_staging_assertion_rejects_missing_helper() {
+        let root = test_root("windows-staging-missing-helper");
+        let staging = root.join("Ato");
+        fs::create_dir_all(staging.join("assets")).unwrap();
+        fs::write(staging.join("ato-desktop.exe"), "").unwrap();
+        fs::write(staging.join("assets").join("AppIcon.ico"), "").unwrap();
+
+        let error = assert_windows_staging_layout(&staging).unwrap_err();
+        assert!(error.to_string().contains("bin"));
+        assert!(error.to_string().contains("ato.exe"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!(
+                "{name}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+        if root.exists() {
+            fs::remove_dir_all(&root).ok();
+        }
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 
     #[test]

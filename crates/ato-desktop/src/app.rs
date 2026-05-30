@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
+use crate::bundle_paths::DesktopBundlePaths;
 use crate::config::ControlBarMode;
 use crate::ui::DesktopShell;
 use gpui::AsyncApp;
@@ -360,7 +361,14 @@ impl AssetSource for LocalAssetSource {
 }
 
 pub fn run(skip_onboarding: bool) {
-    let assets_dir = resolve_assets_dir().expect("failed to resolve ato-desktop assets directory");
+    let assets_dir = match resolve_assets_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to resolve ato-desktop assets directory");
+            eprintln!("Ato Desktop startup error:\n{error}");
+            return;
+        }
+    };
     match crate::system_capsule::materializer::bootstrap_from_assets(&assets_dir) {
         Ok(report) => {
             tracing::info!(
@@ -1562,41 +1570,9 @@ fn install_app_menus(cx: &mut App) {
 }
 
 fn resolve_assets_dir() -> anyhow::Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("ATO_DESKTOP_ASSETS_DIR") {
-        let path = PathBuf::from(dir);
-        if path.is_dir() {
-            return Ok(path);
-        }
-    }
-
-    // current_dir/current_exe failures must not crash launch — when the
-    // shell's cwd inode is stale (bundle replaced under an open shell),
-    // getcwd(2) returns ENOENT. Fall through to the next strategy instead.
-    if let Ok(cwd) = std::env::current_dir() {
-        let cwd_assets = cwd.join("assets");
-        if cwd_assets.is_dir() {
-            return Ok(cwd_assets);
-        }
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
-            if let Some(contents) = macos_dir.parent() {
-                let bundled = contents.join("Resources").join("assets");
-                if bundled.is_dir() {
-                    return Ok(bundled);
-                }
-            }
-            let sibling = macos_dir.join("assets");
-            if sibling.is_dir() {
-                return Ok(sibling);
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "ato-desktop assets directory was not found; set ATO_DESKTOP_ASSETS_DIR or run from the app root"
-    ))
+    DesktopBundlePaths::from_env()
+        .resolve_assets_dir()
+        .map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]
