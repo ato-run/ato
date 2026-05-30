@@ -190,7 +190,12 @@ fn request_snapshot(cx: &mut App, handle: AnyWindowHandle, tx: mpsc::Sender<Opti
     crate::window::macos::request_wkwebview_snapshot(cx, handle, tx);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn request_snapshot(cx: &mut App, handle: AnyWindowHandle, tx: mpsc::Sender<Option<String>>) {
+    crate::window::windows::request_win_window_snapshot(cx, handle, tx);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn request_snapshot(_cx: &mut App, _handle: AnyWindowHandle, tx: mpsc::Sender<Option<String>>) {
     let _ = tx.send(None);
 }
@@ -254,13 +259,6 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
             }
         })
         .collect();
-    if let Err(error) = cx
-        .global_mut::<SessionRegistry>()
-        .refresh_oci_sessions_from_cli()
-    {
-        tracing::warn!(?error, "switcher: failed to refresh CLI OCI sessions");
-    }
-
     let cards_json = serde_json::to_string(&cards).unwrap_or_else(|_| "[]".to_string());
     let windows_script = format!("window.__ATO_WINDOWS = {};", cards_json);
     let sessions_json = serde_json::to_string(&cx.global::<SessionRegistry>().view_entries())
@@ -297,6 +295,7 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
             .into(),
         };
         let queue_for_ipc = queue.clone();
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_html(SWITCHER_HTML)
             .with_initialization_script(init_script.as_str())
@@ -349,10 +348,14 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
                 be.timer(Duration::from_millis(300)).await;
                 for (window_id, window_handle) in window_id_to_handle {
                     let (tx, rx) = mpsc::channel();
+                    crate::webview_init_guard::wait_until_idle(&be).await;
                     aa.update(|cx| request_snapshot(cx, window_handle, tx));
                     let deadline = Instant::now() + Duration::from_millis(1500);
                     loop {
                         be.timer(Duration::from_millis(50)).await;
+                        if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                            continue;
+                        }
                         match rx.try_recv() {
                             Ok(Some(data_url)) => {
                                 aa.update(|cx| {
@@ -389,6 +392,62 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
             }
         })
         .detach();
+
+    // Asynchronously refresh OCI sessions from the CLI so the session rows
+    // reflect the actual container state.  We do this *after* the window opens
+    // to avoid blocking the UI: the Card Switcher renders immediately with
+    // whatever the registry already knows, then updates once `ato ps` returns.
+    {
+        let async_app2 = cx.to_async();
+        let switcher_handle2 = *handle;
+        async_app
+            .foreground_executor()
+            .spawn({
+                let be = async_app2.background_executor().clone();
+                let aa = async_app2.clone();
+                async move {
+                    use std::time::Duration;
+                    be.timer(Duration::from_millis(200)).await;
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::orchestrator::list_oci_sessions());
+                    });
+                    loop {
+                        be.timer(Duration::from_millis(100)).await;
+                        if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                            continue;
+                        }
+                        match rx.try_recv() {
+                            Ok(Ok(snapshots)) => {
+                                aa.update(|cx| {
+                                    cx.global_mut::<SessionRegistry>()
+                                        .sync_oci_sessions(snapshots);
+                                    let still_open = cx
+                                        .global::<CardSwitcherWindowSlot>()
+                                        .0
+                                        .map(|h| h == switcher_handle2)
+                                        .unwrap_or(false);
+                                    if still_open {
+                                        refresh_session_snapshot(cx);
+                                    }
+                                });
+                                break;
+                            }
+                            Ok(Err(error)) => {
+                                tracing::warn!(
+                                    ?error,
+                                    "switcher: async OCI session refresh failed"
+                                );
+                                break;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                        }
+                    }
+                }
+            })
+            .detach();
+    }
 
     tracing::info!("switcher: open complete");
     Ok(())
