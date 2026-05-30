@@ -31,6 +31,10 @@
 //!
 //! So calling this collector before the launch loop's provisioning
 //! phase is safe and observably side-effect-free.
+//!
+//! The exception is [`preflight_oci_provider_readiness`], which is used by
+//! the actual OCI launch path and may call `ensure_ready()`. On macOS/Windows
+//! that can auto-start a single stopped Podman machine before launch.
 
 #![allow(clippy::result_large_err)]
 
@@ -132,7 +136,13 @@ where
     S: OciProviderSelector,
 {
     let provider = selector.select_provider();
-    evaluate_oci_provider_readiness(provider.probe().await, mode, requirements)
+    // Auto-start a stopped machine (macOS/Windows) or verify binary is present (Linux).
+    // Any ensure_ready failure is treated the same as a not-ready probe result so that
+    // BestEffort callers still get OciProviderReadinessOutcome::NotReady rather than Err.
+    match provider.ensure_ready().await {
+        Err(err) => oci_provider_readiness_failure(mode, err),
+        Ok(()) => evaluate_oci_provider_readiness(provider.probe().await, mode, requirements),
+    }
 }
 
 fn evaluate_oci_provider_readiness(
@@ -916,9 +926,19 @@ egress_allow = ["smtp.gmail.com"]
                 .chain(args.iter().copied())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let mut outputs = self.outputs.lock().unwrap();
-            match outputs.remove(&key) {
-                Some(result) => result,
+            // Mocked outputs are reusable: `preflight_oci_provider_readiness`
+            // calls `ensure_ready()` (which on Linux issues a `probe()`
+            // internally) followed by another `provider.probe().await`, so
+            // the same command can be observed twice in a single readiness
+            // check. Treating each registered output as consume-once would
+            // make the second probe collapse to NotFound → `Missing` and
+            // hide the actual production behavior under a fake-runner
+            // limitation. Cloning here keeps the assertions honest while
+            // still surfacing genuinely unmocked commands.
+            let outputs = self.outputs.lock().unwrap();
+            match outputs.get(&key) {
+                Some(Ok(output)) => Ok(output.clone()),
+                Some(Err(err)) => Err(std::io::Error::new(err.kind(), err.to_string())),
                 None => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("missing fake command: {key}"),
@@ -1001,8 +1021,18 @@ egress_allow = ["smtp.gmail.com"]
         }
     }
 
+    /// Regression cover for the macOS auto-start failure path. Prior to
+    /// #328 (`fix(oci): ensure Podman machine is running before OCI session
+    /// start`), `ensure_ready` on macOS returned `NotReady{ MachineNotRunning }`
+    /// the moment `machine list` reported the single machine stopped. #328
+    /// changed that: a single stopped machine is auto-started. The relevant
+    /// failure surface for `Required` readiness is therefore no longer
+    /// "machine not running" but "auto-start failed", and the typed error
+    /// shape is `MachineStartFailed` (`oci_machine_start_failed`), not the
+    /// older `NotReady`. This test pins the new contract so a future change
+    /// to the auto-start path does not silently swallow start failures.
     #[tokio::test]
-    async fn oci_provider_readiness_required_fails_when_podman_machine_not_running() {
+    async fn oci_provider_readiness_required_surfaces_machine_start_failure() {
         let selector = selector(
             FakeRunner::default()
                 .with_output(
@@ -1016,6 +1046,14 @@ egress_allow = ["smtp.gmail.com"]
                         r#"[{"Name":"podman-machine-default","MachineId":"volatile","Running":false}]"#,
                         "",
                     ),
+                )
+                .with_output(
+                    &["podman", "machine", "start", "podman-machine-default"],
+                    output(
+                        1,
+                        "",
+                        "Error: cannot start machine: provider is unavailable\n",
+                    ),
                 ),
             PodmanProbePlatform::Macos,
         );
@@ -1026,20 +1064,21 @@ egress_allow = ["smtp.gmail.com"]
             OciProviderReadinessRequirements::default(),
         )
         .await
-        .expect_err("required readiness must fail");
+        .expect_err("required readiness must surface auto-start failures");
 
-        assert_eq!(error.code(), "oci_provider_not_ready");
+        assert_eq!(error.code(), "oci_machine_start_failed");
         match error {
-            OciProviderError::NotReady {
-                inventory: Some(inventory),
-                ..
+            OciProviderError::MachineStartFailed {
+                machine_name,
+                reason,
             } => {
-                assert_eq!(
-                    inventory.machine,
-                    OciProviderMachineStatus::MachineNotRunning
+                assert_eq!(machine_name, "podman-machine-default");
+                assert!(
+                    reason.contains("provider is unavailable"),
+                    "reason must propagate the start-command stderr: {reason:?}"
                 );
             }
-            other => panic!("expected not-ready inventory, got {other:?}"),
+            other => panic!("expected MachineStartFailed, got {other:?}"),
         }
     }
 

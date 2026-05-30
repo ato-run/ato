@@ -662,6 +662,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     #[serial]
     fn purge_plan_preserves_config_and_keys_by_default() {

@@ -719,10 +719,32 @@ pub(super) fn start_runtime_session(
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "prepare_session_execution");
     let PreparedSessionExecution {
-        prepared,
+        mut prepared,
         dep_contracts,
     } = prepare_session_execution(plan, raw_manifest)?;
     timer.finish_ok();
+
+    #[cfg(unix)]
+    {
+        match crate::common::netd::ensure_egress_proxy() {
+            Ok(egress_port) => {
+                let proxy = crate::common::proxy::proxy_env_for_http_connect(egress_port, &[]);
+                prepared
+                    .launch_ctx
+                    .extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
+                prepared.launch_ctx.set_egress_proxy_port(egress_port);
+                tracing::debug!(
+                    egress_port,
+                    "ato-netd egress proxy injected into session launch context"
+                );
+            }
+            Err(crate::common::netd::EgressProxyError::NotSupported) => {}
+            Err(err) => {
+                return Err(anyhow::Error::from(err)
+                    .context("failed to start ato-netd egress proxy for session"));
+            }
+        }
+    }
 
     let session_web_port = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
         if plan.execution_port().is_some() || runtime_overrides::override_port(None).is_some() {
@@ -1122,6 +1144,26 @@ pub(super) fn start_orchestration_session_in_process(
         .map_err(|err| err.context("failed to set up dependency contracts for session start"))?;
     timer.finish_ok();
 
+    #[cfg(unix)]
+    {
+        match crate::common::netd::ensure_egress_proxy() {
+            Ok(egress_port) => {
+                let proxy = crate::common::proxy::proxy_env_for_http_connect(egress_port, &[]);
+                launch_ctx.extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
+                launch_ctx.set_egress_proxy_port(egress_port);
+                tracing::debug!(
+                    egress_port,
+                    "ato-netd egress proxy injected into orchestration session launch context"
+                );
+            }
+            Err(crate::common::netd::EgressProxyError::NotSupported) => {}
+            Err(err) => {
+                return Err(anyhow::Error::from(err)
+                    .context("failed to start ato-netd egress proxy for orchestration session"));
+            }
+        }
+    }
+
     // Step 2: [services] orchestration in detach mode. The detach API runs
     // ServicePhaseCoordinator (the same one foreground `ato run` uses) and
     // returns control after readiness instead of entering monitor_until_exit.
@@ -1146,17 +1188,14 @@ pub(super) fn start_orchestration_session_in_process(
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "orchestration_start_until_ready");
     let oci_provider = DefaultOciProviderSelector.select_provider();
-    // Readiness preflight: surface "podman binary missing", "podman machine
-    // stopped", or "unsupported platform" as a typed error *before* we start
-    // creating networks, pulling images, or running `podman create`. Without
-    // this gate, those conditions only become visible as partial-setup
-    // failures deep inside `execute_until_ready_and_detach`, which is exactly
-    // the "hang from a half-built session" regression #289 is trying to avoid.
+    // Ensure the OCI provider is ready before touching networks or containers.
+    // On macOS/Windows this auto-starts a stopped Podman machine.  Without
+    // this gate, a stopped machine only surfaces as partial-setup failures deep
+    // inside `execute_until_ready_and_detach` (regression #289 / #328).
     runtime_handle
-        .block_on(async { oci_provider.probe().await?.require_ready().map(|_| ()) })
+        .block_on(async { oci_provider.ensure_ready().await })
         .map_err(|err| {
-            anyhow::Error::from(err)
-                .context("OCI provider readiness probe failed before session start")
+            anyhow::Error::from(err).context("OCI provider not ready before session start")
         })?;
     let detached = runtime_handle
         .block_on(
@@ -2866,6 +2905,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
     if stopped && session_path.exists() {
         fs::remove_file(&session_path)
             .with_context(|| format!("failed to remove session file {}", session_path.display()))?;
+        crate::common::netd::try_shutdown_if_last_session();
     }
 
     if json {
@@ -5162,6 +5202,7 @@ mod tests {
                 aliases: vec![name.to_string()],
                 publish,
                 allow_from: vec![],
+                egress_proxy: true,
             },
             run_once: false,
             runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
@@ -5252,6 +5293,7 @@ mod tests {
                 aliases: vec!["frontend".to_string()],
                 publish: false,
                 allow_from: vec![],
+                egress_proxy: true,
             },
             run_once: false,
             runtime: ResolvedServiceRuntime::Managed(ResolvedTargetRuntime {

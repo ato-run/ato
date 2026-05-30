@@ -684,6 +684,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .try_global::<crate::automation::AutomationHost>()
             .cloned();
 
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(
                 DOCK_SCHEME.to_string(),
@@ -758,12 +759,25 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     // stay alive, so the next dock click only needs to call
     // makeKeyAndOrderFront + activate_window without running
     // `fetch_identity`, creating a new WebView, or loading the page.
-    let close_handle = *handle;
     handle.update(cx, |_, window, app_cx| {
         window.on_window_should_close(app_cx, move |window, _app| {
-            tracing::info!("dock: close intercepted, hiding instead of destroying");
-            crate::window::macos::hide_window_in_handler(window);
-            false
+            #[cfg(target_os = "macos")]
+            {
+                tracing::info!("dock: close intercepted, hiding instead of destroying");
+                crate::window::macos::hide_window_in_handler(window);
+                false
+            }
+            #[cfg(target_os = "windows")]
+            {
+                tracing::info!("dock: close intercepted, hiding instead of destroying");
+                crate::window::windows::hide_window_in_handler(window);
+                false
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                let _ = window;
+                true
+            }
         });
     });
 
@@ -846,6 +860,9 @@ fn spawn_dock_event_loop(cx: &mut App, queue: DockEventQueue, host: AnyWindowHan
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
+            if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                continue;
+            }
             let drained = match queue.lock() {
                 Ok(mut events) => std::mem::take(&mut *events),
                 Err(_) => continue,

@@ -369,6 +369,7 @@ fn open_wizard(
         };
         let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let queue_for_ipc = queue.clone();
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
                 let response =
@@ -598,6 +599,7 @@ pub fn open_consent_window_for_route_with_client(
             })
             .await;
 
+        crate::webview_init_guard::wait_until_idle(&be).await;
         let _ = aa.update(|cx| {
             // Guard: only hydrate if this is still the active consent wizard.
             let current_id = cx
@@ -806,6 +808,7 @@ fn open_consent_wizard_inner(
             .into(),
         };
         let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
                 let response =
@@ -941,6 +944,7 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .into(),
         };
         let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
                 let response =
@@ -1029,6 +1033,15 @@ pub fn start_boot_launch(
                 let _ = progress_tx.send(step);
             })),
         );
+        if let Ok(ref session) = result {
+            if session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl {
+                super::app_capsule_shell::wait_for_session_upstream_ready(
+                    session,
+                    &abort_for_thread,
+                    Duration::from_secs(60),
+                );
+            }
+        }
         if abort_for_thread.load(Ordering::Acquire) {
             if let Ok(ref session) = result {
                 let _ = crate::orchestrator::stop_guest_session(&session.session_id);
@@ -1046,6 +1059,9 @@ pub fn start_boot_launch(
         .spawn(async move {
             loop {
                 be.timer(Duration::from_millis(100)).await;
+                if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                    continue;
+                }
 
                 let mut steps = Vec::new();
                 while let Ok(step) = progress_rx.try_recv() {
@@ -1339,6 +1355,7 @@ fn open_boot_wizard_inner(
             .into(),
         };
         let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
                 let response =
