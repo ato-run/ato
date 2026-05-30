@@ -68,7 +68,89 @@ pub fn take_screenshot(webview: &wry::WebView, tx: Sender<Result<Value, String>>
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn read_capture_stream_bytes(
+    stream: &windows::Win32::System::Com::IStream,
+) -> Result<Vec<u8>, String> {
+    use std::slice;
+    use windows::Win32::System::Com::StructuredStorage::GetHGlobalFromStream;
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    let hglobal = unsafe { GetHGlobalFromStream(stream) }
+        .map_err(|err| format!("GetHGlobalFromStream failed: {err}"))?;
+    let size = unsafe { GlobalSize(hglobal) };
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let ptr = unsafe { GlobalLock(hglobal) };
+    if ptr.is_null() {
+        return Err(format!(
+            "GlobalLock failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let bytes = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), size).to_vec() };
+    let _ = unsafe { GlobalUnlock(hglobal) };
+    Ok(bytes)
+}
+
+#[cfg(target_os = "windows")]
+pub fn take_screenshot(webview: &wry::WebView, tx: Sender<Result<Value, String>>) {
+    use base64::Engine as _;
+    use webview2_com::{CapturePreviewCompletedHandler, Microsoft::Web::WebView2::Win32::*};
+    use windows::Win32::{
+        Foundation::HGLOBAL, System::Com::StructuredStorage::CreateStreamOnHGlobal,
+    };
+    use wry::WebViewExtWindows;
+
+    let stream = match unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) } {
+        Ok(stream) => stream,
+        Err(err) => {
+            let _ = tx.send(Err(format!("CreateStreamOnHGlobal failed: {err}")));
+            return;
+        }
+    };
+
+    let callback_tx = tx.clone();
+    let stream_for_handler = stream.clone();
+    let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+        match result {
+            Ok(()) => match read_capture_stream_bytes(&stream_for_handler) {
+                Ok(bytes) if bytes.is_empty() => {
+                    let _ = callback_tx.send(Err("CapturePreview returned an empty PNG".into()));
+                }
+                Ok(bytes) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    let _ = callback_tx.send(Ok(serde_json::json!({
+                        "data": b64,
+                        "mimeType": "image/png"
+                    })));
+                }
+                Err(err) => {
+                    let _ = callback_tx.send(Err(err));
+                }
+            },
+            Err(err) => {
+                let _ = callback_tx.send(Err(format!("CapturePreview failed: {err}")));
+            }
+        }
+        Ok(())
+    }));
+
+    if let Err(err) = unsafe {
+        webview.webview().CapturePreview(
+            COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+            &stream,
+            &handler,
+        )
+    } {
+        let _ = tx.send(Err(format!("failed to start CapturePreview: {err}")));
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn take_screenshot(_webview: &wry::WebView, tx: Sender<Result<Value, String>>) {
     let _ = tx.send(Err(
         "screenshot is not yet supported on this platform".into()

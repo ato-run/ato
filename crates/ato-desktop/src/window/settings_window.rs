@@ -158,6 +158,7 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
             )
             .into(),
         };
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_html(SETTINGS_HTML)
             .with_initialization_script(&init_script)
