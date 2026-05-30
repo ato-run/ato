@@ -1194,7 +1194,7 @@ fn open_info_popup(
         is_movable: false,
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(popup_bounds)),
-        window_decorations: Some(WindowDecorations::Client),
+        window_decorations: None,
         window_background: popup_background_appearance(),
         ..Default::default()
     };
@@ -1331,7 +1331,7 @@ fn open_control_bar_inner(
         is_movable: true,
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_decorations: Some(WindowDecorations::Client),
+        window_decorations: None,
         window_background: popup_background_appearance(),
         ..Default::default()
     };
