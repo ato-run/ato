@@ -190,7 +190,12 @@ fn request_snapshot(cx: &mut App, handle: AnyWindowHandle, tx: mpsc::Sender<Opti
     crate::window::macos::request_wkwebview_snapshot(cx, handle, tx);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn request_snapshot(cx: &mut App, handle: AnyWindowHandle, tx: mpsc::Sender<Option<String>>) {
+    crate::window::windows::request_win_window_snapshot(cx, handle, tx);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn request_snapshot(_cx: &mut App, _handle: AnyWindowHandle, tx: mpsc::Sender<Option<String>>) {
     let _ = tx.send(None);
 }
