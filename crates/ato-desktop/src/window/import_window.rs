@@ -206,6 +206,7 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
             )
             .into(),
         };
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_html(IMPORT_HTML)
             .with_initialization_script(&composed)

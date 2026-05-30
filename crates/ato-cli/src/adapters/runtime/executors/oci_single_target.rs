@@ -99,6 +99,14 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     // Env: merge OCI target env with launch context env.
     let mut env = plan.targets_oci_env();
     env.extend(launch_ctx.merged_env());
+    // Override proxy env for containers: 127.0.0.1 is unreachable from inside a
+    // container; use host.containers.internal instead.
+    if let Some(port) = launch_ctx.egress_proxy_port() {
+        let container_proxy = crate::common::proxy::proxy_env_for_oci_container(port, &[]);
+        for (k, v) in crate::common::proxy::proxy_env_to_pairs(&container_proxy) {
+            env.insert(k, v);
+        }
+    }
 
     // Cmd: prefer targets_oci_cmd, fall back to entrypoint/run command.
     let mut cmd = plan.targets_oci_cmd();
@@ -159,6 +167,11 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
             network: None,
             aliases: Vec::new(),
             platform: None,
+            extra_hosts: if launch_ctx.egress_proxy_port().is_some() {
+                vec![crate::common::proxy::OCI_HOST_GATEWAY_ENTRY.to_string()]
+            } else {
+                vec![]
+            },
         })
         .await
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))

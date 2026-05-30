@@ -653,3 +653,43 @@ async fn deregister_keeps_port_in_allocator() {
 
     shutdown_daemon(client, child).await;
 }
+
+/// Test 10: when the upstream is not listening (ConnectionRefused), the ingress
+/// proxy returns 503 Service Unavailable with an HTML auto-refresh page instead
+/// of a bare "HTTP proxy error" body.  This lets the browser keep retrying
+/// automatically while a slow service (Docker container, JVM startup) boots.
+#[serial]
+#[tokio::test]
+async fn upstream_not_ready_returns_service_starting_page() {
+    // Bind a port and immediately drop the listener — nothing will accept on it.
+    let (listener, deaf_addr) = free_listener().await;
+    drop(listener);
+
+    let ato_home = TempDir::new().unwrap();
+    let (child, socket_path) = spawn_daemon(&ato_home);
+    let mut client = wait_for_daemon(&socket_path, 3000).await;
+
+    let IngressInfo { port } = client
+        .register_ingress("not-ready", &format!("http://{deaf_addr}"))
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(150)).await;
+    let resp = http_get(&format!("http://127.0.0.1:{port}/")).await;
+
+    assert_eq!(
+        resp.status, 503,
+        "upstream not ready must yield 503, not 502"
+    );
+    let body = String::from_utf8_lossy(&resp.body);
+    assert!(
+        body.contains("Service is starting"),
+        "body must contain user-friendly 'Service is starting' message; got: {body:.200}"
+    );
+    assert!(
+        body.contains("http-equiv=\"refresh\""),
+        "body must contain meta auto-refresh; got: {body:.200}"
+    );
+
+    shutdown_daemon(client, child).await;
+}

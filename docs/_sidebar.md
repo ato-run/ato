@@ -3,9 +3,11 @@
 **Topics**
 
 - [Run](run.md)
+- [Recipes](recipe.md)
 - [Capsule](capsule.md)
 - [Sandbox](sandbox.md)
 - [Execution Identity](execution-identity.md)
+- [Desktop](desktop.md)
 
 **Reference**
 

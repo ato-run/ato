@@ -11,7 +11,7 @@
 
 [package]
 name = "ato-desktop"
-version = "0.5.2"
+version = "0.5.5"
 edition = "2021"
 authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."
@@ -103,6 +103,28 @@ wry = { version = "0.55.0", features = ["protocol", "devtools"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38.2"
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Xps",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Security",
+] }
+raw-window-handle = "0.6"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6.4"
@@ -115,6 +137,9 @@ objc2-web-kit = "0.3.2"
 # `gpui::Window::window_handle()` to descend to NSWindow and wire
 # `addChildWindow:ordered:` for the Focus View Control Bar (#171).
 raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
 
 [dev-dependencies]
 tempfile = "3"
