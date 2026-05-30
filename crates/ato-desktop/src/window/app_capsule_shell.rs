@@ -84,6 +84,12 @@ pub struct AppCapsuleShell {
     boot_state: CapsuleBootState,
     webview: Option<WebView>,
     content_window_id: Option<u64>,
+    /// The URL actually loaded into `webview` once it is created. This is
+    /// the *effective* URL — for `WebUrl` sessions it is the ato-netd stable
+    /// ingress URL (`http://127.0.0.1:<port>/…`), which differs from the
+    /// upstream `session_current_url`. Reported to MCP `browser_tabs` so the
+    /// pane's URL matches what is really on screen (#370 review follow-up).
+    automation_url: Option<String>,
     /// Result delivered from the background launch thread.
     pending_result: Option<Result<GuestLaunchSession, LaunchError>>,
     /// Cached window size, used for WebView bounds and resize detection.
@@ -314,6 +320,7 @@ impl AppCapsuleShell {
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
+            automation_url: None,
             pending_result: None,
             window_size: win_size,
             abort_flag,
@@ -436,6 +443,7 @@ impl AppCapsuleShell {
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
+            automation_url: None,
             pending_result: None,
             window_size: win_size,
             abort_flag,
@@ -613,6 +621,7 @@ impl AppCapsuleShell {
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
+            automation_url: None,
             pending_result: None,
             window_size: win_size,
             abort_flag,
@@ -635,6 +644,7 @@ impl AppCapsuleShell {
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
+            automation_url: None,
             pending_result: Some(Ok(session)),
             window_size: win_size,
             abort_flag: Arc::new(AtomicBool::new(false)),
@@ -671,9 +681,15 @@ impl AppCapsuleShell {
         }
     }
 
-    /// Best-effort current URL for automation / pane listing. Falls back to
-    /// the `capsule://<handle>` form while still booting or on failure.
+    /// Best-effort current URL for automation / pane listing. Returns the
+    /// URL actually loaded into the WebView once it exists (the effective
+    /// ingress URL), so `browser_tabs` matches what's on screen. Falls back
+    /// to the upstream `session_current_url` / `capsule://<handle>` form
+    /// while still booting or on failure.
     pub fn current_url_for_automation(&self) -> String {
+        if let Some(url) = &self.automation_url {
+            return url.clone();
+        }
         match &self.boot_state {
             CapsuleBootState::Ready { session } => session_current_url(session),
             _ => format!("capsule://{}", self.handle),
@@ -806,6 +822,7 @@ impl AppCapsuleShell {
                             "AppCapsuleShell: WebView created for running session"
                         );
                         self.webview = Some(webview);
+                        self.automation_url = Some(effective_url.clone());
                         self.window_size = win_size;
                         self.boot_state = CapsuleBootState::Ready {
                             session: Box::new(session),
