@@ -34,43 +34,110 @@ ato run https://ato.run/s/demo # open a shared recipe
 
 ## Install
 
-macOS / Linux:
+### macOS / Linux
+
+Default install:
 
 ```bash
 curl -fsSL https://ato.run/install.sh | sh
 ```
 
-Windows PowerShell:
+On a graphical macOS/Linux session, this installs Ato Desktop. The Desktop
+bundle includes the private helper binaries it needs: `ato`, `nacelle`, and
+`ato-netd`. It does not separately install the standalone CLI archive.
+
+To also make `ato` available in your terminal:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh -s -- --with-cli
+```
+
+This exposes the bundled `ato` helper on PATH. It does not download a second
+copy of `ato-cli` or expose `nacelle` / `ato-netd` as user commands.
+
+For headless environments, SSH sessions, CI, or CLI-only usage:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh -s -- --cli-only
+```
+
+CLI-only installs `ato` plus a private `nacelle` sidecar. It does not install
+Ato Desktop.
+
+To install a specific version:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5 --with-cli
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5 --cli-only
+```
+
+### Windows PowerShell
+
+Default install:
 
 ```powershell
 irm https://ato.run/install.ps1 | iex
 ```
 
-Homebrew:
+On normal Windows desktop sessions, this installs the Ato Desktop MSI. The
+Desktop bundle includes private `ato.exe`, `nacelle.exe`, and `ato-netd.exe`
+helpers.
+
+To ensure `ato` is available from PowerShell:
+
+```powershell
+irm https://ato.run/install.ps1 | iex -WithCli
+```
+
+For CI, server/headless environments, or CLI-only usage:
+
+```powershell
+irm https://ato.run/install.ps1 | iex -CliOnly
+```
+
+CLI-only installs `ato.exe` plus a private `nacelle.exe` sidecar. It does not
+install Ato Desktop.
+
+### Homebrew
 
 ```bash
 brew install ato-run/ato/ato-cli
 ```
 
-From source:
+Homebrew installs the CLI, not Ato Desktop.
+
+### From source
 
 ```bash
 cargo build -p ato-cli --release
 ```
 
-Check that it works:
+### Verify installation
+
+If you installed Ato Desktop only, launch **Ato Desktop** from your
+applications menu.
+
+If you used `--with-cli`, `-WithCli`, `--cli-only`, `-CliOnly`, or Homebrew,
+verify the terminal command:
 
 ```bash
 ato --help
 ```
 
-To uninstall an `install.sh` deployment:
+### Uninstall
+
+If `ato` is available on PATH:
 
 ```bash
 ato uninstall
 ato uninstall --purge
 ato uninstall --purge --include-config --include-keys --yes
 ```
+
+If you installed Desktop only and did not expose the CLI, remove Ato Desktop
+through the normal OS app removal flow, or re-run the installer with CLI
+exposure before using `ato uninstall`.
 
 ## Quick Start
 

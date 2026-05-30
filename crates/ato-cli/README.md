@@ -17,37 +17,65 @@ Point `ato` at a Python script, a Node app, a Rust binary, or a GitHub repo — 
 
 ## Install
 
-macOS / Linux:
+### macOS / Linux
+
+Default install:
 
 ```bash
 curl -fsSL https://ato.run/install.sh | sh
 ```
 
-Windows PowerShell:
+On a graphical macOS/Linux session, this installs Ato Desktop. The Desktop
+bundle includes the private helper binaries it needs: `ato`, `nacelle`, and
+`ato-netd`. It does not separately install the standalone CLI archive.
+
+To also make `ato` available in your terminal:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh -s -- --with-cli
+```
+
+For headless environments, SSH sessions, CI, or CLI-only usage:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh -s -- --cli-only
+```
+
+### Windows PowerShell
+
+Default install:
 
 ```powershell
 irm https://ato.run/install.ps1 | iex
 ```
 
-This installs the `ato` CLI. On Windows, the PowerShell installer downloads the ZIP asset into a user-scoped directory and removes Mark-of-the-Web with `Unblock-File`; unsigned MSI distribution is deferred until Windows code signing is in place.
+On normal Windows desktop sessions, this installs the Ato Desktop MSI. The
+Desktop bundle includes private `ato.exe`, `nacelle.exe`, and `ato-netd.exe`
+helpers.
 
-Other channels:
+To ensure `ato` is available from PowerShell:
+
+```powershell
+irm https://ato.run/install.ps1 | iex -WithCli
+```
+
+For CI, server/headless environments, or CLI-only usage:
+
+```powershell
+irm https://ato.run/install.ps1 | iex -CliOnly
+```
+
+### Other channels
 
 ```bash
 # Homebrew — CLI only
-brew install ato-run/ato/ato
-
-# Homebrew — Desktop + CLI bundled
-brew install --cask ato-run/ato/ato
+brew install ato-run/ato/ato-cli
 
 # Build from source (Rust toolchain required)
 cargo install --locked --git https://github.com/ato-run/ato-cli ato-cli
-cargo install --locked --git https://github.com/ato-run/ato-desktop ato-desktop
 ```
 
 Prebuilt binaries are available on the [Releases page](https://github.com/ato-run/ato-cli/releases/latest).
-
-> **macOS note (v0.5):** The Desktop `.app` is **ad-hoc signed**, not yet Apple-notarized. Homebrew Cask installs run cleanly. Direct downloads will trigger a one-time "developer cannot be verified" prompt — right-click the app and choose **Open** the first time, or run `xattr -dr com.apple.quarantine "/Applications/Ato Desktop.app"`. Apple Developer ID signing is targeted for v0.6+.
 
 ## Quick start
 
