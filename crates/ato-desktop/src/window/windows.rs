@@ -1,9 +1,8 @@
 //! Windows-only window management primitives.
 //!
 //! Provides the same conceptual surface as `window/macos.rs` using Win32
-//! APIs. All functions are no-ops (log + return) on hardware that does not
-//! support the requested feature (e.g. `round_window_corners` silently
-//! succeeds on Windows 10 where DWM rounded corners are not available).
+//! APIs. All functions are no-ops (log + return) when the backing `HWND`
+//! cannot be resolved or a Win32 call fails.
 //!
 //! The path from `gpui::Window` to an `HWND` goes through the
 //! `raw_window_handle` trait that GPUI implements on `Window`: the Win32
@@ -18,7 +17,6 @@ use std::io::Cursor;
 use std::sync::mpsc::Sender;
 use tracing::warn;
 use windows_sys::Win32::Foundation::{GetLastError, SetLastError, HWND, RECT};
-use windows_sys::Win32::Graphics::Dwm::{DwmEnableBlurBehindWindow, DWM_BLURBEHIND, DWM_BB_ENABLE};
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
     GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -93,7 +91,9 @@ fn hwnd_for(cx: &mut App, handle: AnyWindowHandle) -> Option<HWND> {
 ///
 /// Uses `DwmSetWindowAttribute` with `DWMWA_WINDOW_CORNER_PREFERENCE = 33`
 /// and value `DWMWCP_ROUND = 2`. Silently ignores failures on Windows 10
-/// where this attribute is not supported.
+/// where this attribute is not supported. The `_radius` argument is accepted
+/// for parity with the macOS helper but DWM only offers a fixed system radius
+/// (there is no per-window radius on Windows), so it is unused.
 pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, _radius: f64) {
     use std::ffi::c_void;
     use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
@@ -113,28 +113,6 @@ pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, _radius: f64)
             &corner_pref as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as u32,
         );
-    }
-}
-
-/// Apply DWM blur-behind to the entire window surface.
-///
-/// This is useful for transparent popup overlays (for example the Control Bar)
-/// where composition alpha can otherwise appear as an opaque black backing on
-/// some Windows setups.
-pub fn enable_blur_behind(cx: &mut App, handle: AnyWindowHandle) {
-    let Some(hwnd) = hwnd_for(cx, handle) else {
-        return;
-    };
-
-    let blur = DWM_BLURBEHIND {
-        dwFlags: DWM_BB_ENABLE,
-        fEnable: 1,
-        hRgnBlur: std::ptr::null_mut(),
-        fTransitionOnMaximized: 0,
-    };
-
-    unsafe {
-        let _ = DwmEnableBlurBehindWindow(hwnd, &blur);
     }
 }
 
