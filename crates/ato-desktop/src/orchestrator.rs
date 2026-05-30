@@ -218,6 +218,12 @@ pub struct CapsuleLaunchSession {
     /// signal fires. `None` only on launch paths that pre-date Phase 0
     /// instrumentation.
     pub click_origin: Option<ClickOrigin>,
+    /// Install profile key for this session, `ipk_<32hex>`, written by
+    /// the CLI into the session record when launching via `ato launch
+    /// <ipk>`. `None` for transient / preview / LocalManifest runs.
+    /// Used by the WebView store classifier to assign `CapsuleProfile`
+    /// instead of `CapsuleEphemeral` for installed trusted capsules.
+    pub install_profile_key: Option<String>,
 }
 
 impl CapsuleLaunchSession {
@@ -1103,17 +1109,48 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
     if pattern.is_empty() || pattern.len() < 4 {
         return Vec::new();
     }
-    let output = match Command::new("pgrep").arg("-f").arg(pattern).output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !output.status.success() {
-        return Vec::new();
+
+    #[cfg(unix)]
+    {
+        let output = match Command::new("pgrep").arg("-f").arg(pattern).output() {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
+
+    #[cfg(windows)]
+    {
+        let escaped = pattern.replace('\'', "''");
+        let script = format!(
+            "Get-Process | Where-Object {{ $_.ProcessName -match '{escaped}' -or ($_.Path -ne $null -and $_.Path -match '{escaped}') }} | Select-Object -ExpandProperty Id"
+        );
+        let output = match Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
 }
 
 #[cfg(unix)]
@@ -1131,7 +1168,27 @@ fn kill_pids(pids: &[u32]) -> usize {
     killed
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn kill_pids(pids: &[u32]) -> usize {
+    let mut killed = 0usize;
+    let current = std::process::id();
+    for &pid in pids {
+        if pid == current {
+            continue;
+        }
+        let ok = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if ok {
+            killed += 1;
+        }
+    }
+    killed
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_pids(_pids: &[u32]) -> usize {
     0
 }
@@ -1173,56 +1230,100 @@ pub(crate) fn cleanup_host_resources() -> CleanupReport {
 }
 
 fn find_port_pids(port: u16) -> Vec<u32> {
-    let output = match Command::new("lsof")
-        .arg("-ti")
-        .arg(format!(":{port}"))
-        .output()
+    #[cfg(unix)]
     {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !output.status.success() {
-        return Vec::new();
+        let output = match Command::new("lsof")
+            .arg("-ti")
+            .arg(format!(":{port}"))
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
+
+    #[cfg(windows)]
+    {
+        let output = match Command::new("netstat").args(["-ano"]).output() {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        let port_str = format!(":{port} ");
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains(&port_str)
+                    && (line.contains("LISTENING") || line.contains("ESTABLISHED"))
+            })
+            .filter_map(|line| line.split_whitespace().last()?.trim().parse::<u32>().ok())
+            .collect::<std::collections::HashSet<u32>>()
+            .into_iter()
+            .collect();
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
 }
 
 fn count_owned_shm() -> usize {
-    let output = match Command::new("ipcs").arg("-m").output() {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let current_user = std::env::var("USER").unwrap_or_default();
-    text.lines()
-        .filter(|line| line.contains(&current_user))
-        .count()
+    #[cfg(unix)]
+    {
+        let output = match Command::new("ipcs").arg("-m").output() {
+            Ok(o) => o,
+            Err(_) => return 0,
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let current_user = std::env::var("USER").unwrap_or_default();
+        return text
+            .lines()
+            .filter(|line| line.contains(&current_user))
+            .count();
+    }
+
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 fn free_owned_shm() -> usize {
-    let output = match Command::new("ipcs").arg("-m").output() {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let current_user = std::env::var("USER").unwrap_or_default();
-    let mut freed = 0usize;
-    for line in text.lines() {
-        if !line.contains(&current_user) {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(id_str) = parts.get(1) {
-            if let Ok(id) = id_str.parse::<u32>() {
-                let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
-                freed += 1;
+    #[cfg(unix)]
+    {
+        let output = match Command::new("ipcs").arg("-m").output() {
+            Ok(o) => o,
+            Err(_) => return 0,
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let current_user = std::env::var("USER").unwrap_or_default();
+        let mut freed = 0usize;
+        for line in text.lines() {
+            if !line.contains(&current_user) {
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
+                    freed += 1;
+                }
             }
         }
+        return freed;
     }
-    freed
+
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
@@ -2046,6 +2147,7 @@ fn build_launch_session(
         execution_id: started.execution_id,
         execution_receipt_schema_version: started.execution_receipt_schema_version,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -2113,6 +2215,7 @@ fn build_launch_session_from_started(started: SessionStartInfo) -> Result<Capsul
         execution_id: started.execution_id,
         execution_receipt_schema_version: started.execution_receipt_schema_version,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -2383,6 +2486,7 @@ fn build_launch_session_from_stored(
         execution_id: None,
         execution_receipt_schema_version: None,
         click_origin: None,
+        install_profile_key: stored.install_profile_key.clone(),
     })
 }
 
@@ -2785,6 +2889,7 @@ fn start_web_service_from_workspace(
         execution_id: None,
         execution_receipt_schema_version: None,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -2997,6 +3102,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
                 execution_id: None,
                 execution_receipt_schema_version: None,
                 click_origin: None,
+                install_profile_key: None,
             })
         }
         capsule_core::share::ShareExecutionResult::Completed { exit_code } => {

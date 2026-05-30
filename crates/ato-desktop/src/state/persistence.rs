@@ -355,6 +355,7 @@ fn build_restored_surface(
                     healthcheck_url: None,
                     invoke_url: None,
                     served_by: None,
+                    install_profile_key: None,
                     auth_flow: false,
                 }),
                 vec![route],
