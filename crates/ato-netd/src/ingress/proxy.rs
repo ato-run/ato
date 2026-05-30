@@ -219,10 +219,24 @@ async fn proxy_http(
     let upstream_url = upstream.read().await.clone();
     let scheme = upstream_url.scheme().to_string();
 
-    // Rewrite URI to point at upstream.
-    let new_uri = rewrite_uri(&upstream_url, req.uri())
+    // Rewrite URI: extract path+query from the rewritten absolute URI, then
+    // use origin-form (path+query only) for the upstream request.
+    // hyper serialises an absolute-URI (scheme+authority+path) as
+    // `GET http://host/path HTTP/1.1`, which is the HTTP proxy request-target
+    // format.  ASGI servers such as uvicorn/FastAPI treat the full URL as the
+    // route path and return 404.  A direct reverse-proxy connection must use
+    // origin-form: `GET /path HTTP/1.1`.
+    let rewritten = rewrite_uri(&upstream_url, req.uri())
         .map_err(|e| anyhow::anyhow!("URI rewrite failed: {e}"))?;
-    *req.uri_mut() = new_uri;
+    let pq = rewritten
+        .path_and_query()
+        .cloned()
+        .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
+    let origin_uri = Uri::builder()
+        .path_and_query(pq)
+        .build()
+        .map_err(|e| anyhow::anyhow!("origin-form URI: {e}"))?;
+    *req.uri_mut() = origin_uri;
 
     // Rewrite Host header.
     let upstream_host = match upstream_url.port() {
@@ -346,10 +360,19 @@ async fn proxy_websocket(
     // Extract the client-side upgrade future BEFORE consuming the request.
     let client_upgrade = hyper::upgrade::on(&mut req);
 
-    // Rewrite URI to point at upstream.
-    let new_uri = rewrite_uri(&upstream_url, req.uri())
+    // Rewrite to origin-form URI for the upstream WebSocket upgrade request
+    // (same reason as proxy_http: direct connections use origin-form).
+    let rewritten = rewrite_uri(&upstream_url, req.uri())
         .map_err(|e| anyhow::anyhow!("URI rewrite failed: {e}"))?;
-    *req.uri_mut() = new_uri;
+    let pq = rewritten
+        .path_and_query()
+        .cloned()
+        .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
+    let origin_uri = Uri::builder()
+        .path_and_query(pq)
+        .build()
+        .map_err(|e| anyhow::anyhow!("origin-form URI: {e}"))?;
+    *req.uri_mut() = origin_uri;
 
     let upstream_host = match upstream_url.port() {
         Some(p) => format!("{}:{}", upstream_url.host_str().unwrap_or("127.0.0.1"), p),

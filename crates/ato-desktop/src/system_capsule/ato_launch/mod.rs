@@ -290,6 +290,7 @@ pub fn dispatch(
                     .spawn(async move { fetch_github_candidates(&repo_clone) })
                     .await;
 
+                crate::webview_init_guard::wait_until_idle(&be).await;
                 let _ = async_app.update(|cx| {
                     if let Some(shell) = shell_weak.upgrade() {
                         shell.read(cx).inject_github_candidates(&result);
@@ -320,6 +321,7 @@ pub fn dispatch(
                     .spawn(async move { infer_capsule_toml(&repo_clone) })
                     .await;
 
+                crate::webview_init_guard::wait_until_idle(&be).await;
                 let _ = async_app.update(|cx| {
                     if let Some(shell) = shell_weak.upgrade() {
                         shell.read(cx).inject_cli_inference_result(&result);
@@ -363,6 +365,7 @@ pub fn dispatch(
                         crate::github_manifest_draft::prepare_github_manifest_draft(request)
                     })
                     .await;
+                crate::webview_init_guard::wait_until_idle(&be).await;
                 let _ = async_app.update(|cx| match result {
                     Ok(route) => {
                         let _ = host.update(cx, |_, window, _| window.remove_window());
