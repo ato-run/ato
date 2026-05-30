@@ -1194,7 +1194,7 @@ fn open_info_popup(
         is_movable: false,
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(popup_bounds)),
-        window_decorations: None,
+        window_decorations: Some(WindowDecorations::Client),
         window_background: popup_background_appearance(),
         ..Default::default()
     };
@@ -1206,10 +1206,6 @@ fn open_info_popup(
         });
         cx.new(|cx| gpui_component::Root::new(shell, window, cx).bg(transparent_black()))
     })?;
-    #[cfg(target_os = "windows")]
-    {
-        super::windows::enable_blur_behind(cx, *handle);
-    }
 
     cx.set_global(InfoPopupWindowSlot(Some(*handle)));
     Ok(*handle)
@@ -1219,7 +1215,35 @@ pub(crate) fn dismiss_info_popup(cx: &mut App) {
     let _ = close_info_popup_if_live(cx);
 }
 
+#[cfg(target_os = "windows")]
 fn popup_background_appearance() -> WindowBackgroundAppearance {
+    // With GPUI DirectComposition disabled on Windows (so child WebView2
+    // surfaces composite), a fully transparent popup window presents as
+    // opaque black. Blurred keeps the floating pill readable while preserving
+    // transparent rounded corners.
+    WindowBackgroundAppearance::Blurred
+}
+
+#[cfg(not(target_os = "windows"))]
+fn popup_background_appearance() -> WindowBackgroundAppearance {
+    WindowBackgroundAppearance::Transparent
+}
+
+/// Background appearance for the Control Bar window.
+///
+/// On macOS the window is transparent so the rounded "pill" floats over the
+/// desktop. On Windows DirectComposition is disabled (so child WebView2
+/// surfaces composite), which means a transparent surface paints black and a
+/// blurred one shows acrylic frost in the corners between the rounded content
+/// and the DWM-rounded window. An opaque window avoids both — the bar reads as
+/// a clean rounded rectangle (corners rounded via DWM).
+#[cfg(target_os = "windows")]
+fn control_bar_background_appearance() -> WindowBackgroundAppearance {
+    WindowBackgroundAppearance::Opaque
+}
+
+#[cfg(not(target_os = "windows"))]
+fn control_bar_background_appearance() -> WindowBackgroundAppearance {
     WindowBackgroundAppearance::Transparent
 }
 
@@ -1331,8 +1355,8 @@ fn open_control_bar_inner(
         is_movable: true,
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_decorations: None,
-        window_background: popup_background_appearance(),
+        window_decorations: Some(WindowDecorations::Client),
+        window_background: control_bar_background_appearance(),
         ..Default::default()
     };
     let shell_slot: Rc<RefCell<Option<Entity<ControlBarShellPlaceholder>>>> =
@@ -1367,13 +1391,18 @@ fn open_control_bar_inner(
     }
     #[cfg(target_os = "windows")]
     {
+        // DirectComposition is disabled on Windows (so child WebView2 surfaces
+        // composite), which means a GPUI window cannot present a
+        // per-pixel-alpha transparent surface. Rather than a full pill (which
+        // would require region-clipping that leaves visible blur/black around
+        // the bar), the window is opaque and we simply round its corners via
+        // DWM. The pill shape stays macOS-only.
         let initial_h = if cx.global::<ControlBarController>().should_render_expanded() {
             BAR_HEIGHT
         } else {
             COMPACT_HEIGHT
         };
         super::windows::round_window_corners(cx, *handle, (initial_h / 2.0) as f64);
-        super::windows::enable_blur_behind(cx, *handle);
         if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
             if let Err(err) = super::windows::attach_as_child(cx, entry.handle, *handle) {
                 tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
