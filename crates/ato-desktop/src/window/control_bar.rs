@@ -1195,7 +1195,7 @@ fn open_info_popup(
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(popup_bounds)),
         window_decorations: Some(WindowDecorations::Client),
-        window_background: WindowBackgroundAppearance::Transparent,
+        window_background: popup_background_appearance(),
         ..Default::default()
     };
 
@@ -1213,6 +1213,19 @@ fn open_info_popup(
 
 pub(crate) fn dismiss_info_popup(cx: &mut App) {
     let _ = close_info_popup_if_live(cx);
+}
+
+#[cfg(target_os = "windows")]
+fn popup_background_appearance() -> WindowBackgroundAppearance {
+    // With GPUI direct composition disabled on Windows, fully transparent popup
+    // windows can present as black. Blurred keeps the floating surface readable
+    // while preserving transparent rounded corners.
+    WindowBackgroundAppearance::Blurred
+}
+
+#[cfg(not(target_os = "windows"))]
+fn popup_background_appearance() -> WindowBackgroundAppearance {
+    WindowBackgroundAppearance::Transparent
 }
 
 fn close_info_popup_if_live(cx: &mut App) -> bool {
@@ -1324,7 +1337,7 @@ fn open_control_bar_inner(
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_decorations: Some(WindowDecorations::Client),
-        window_background: WindowBackgroundAppearance::Transparent,
+        window_background: popup_background_appearance(),
         ..Default::default()
     };
     let shell_slot: Rc<RefCell<Option<Entity<ControlBarShellPlaceholder>>>> =
