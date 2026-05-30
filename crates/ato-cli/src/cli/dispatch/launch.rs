@@ -103,12 +103,19 @@ pub(crate) fn execute_launch_command(
     // the pinned current_revision is executed even after a rollback.
     let revision_output_dir = store.revision_output_dir(&rev_id);
 
+    // `pinned_revision_output_dir` must be the `.capsule` file, not the output directory.
+    // `normalize_run_target_after_install` only handles the `.capsule` extension check
+    // for a file path; a bare directory falls through to source inference and fails with
+    // ATO_ERR_AMBIGUOUS_ENTRYPOINT because no `capsule.toml` is present at that path.
+    let pinned_capsule_path = find_capsule_in_revision_output(&revision_output_dir)
+        .unwrap_or_else(|| revision_output_dir.clone());
+
     // Set the thread-local lifecycle context via a scoped guard so it is
     // always cleared when this function returns (or panics).
     let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx.clone());
 
     execute_run_command(
-        revision_output_dir.clone(),
+        pinned_capsule_path.clone(),
         /* target */ None,
         /* args */ profile_args,
         /* watch */ false,
@@ -117,7 +124,10 @@ pub(crate) fn execute_launch_command(
         /* registry */ None,
         /* enforcement */ EnforcementMode::Strict,
         /* sandbox_mode */ false,
-        /* dangerously_skip_permissions */ false,
+        // Installed capsules are pre-consented artifacts; bypass the sandbox
+        // opt-in / execution-plan consent gate that applies to `ato run`.
+        /* dangerously_skip_permissions */
+        true,
         /* compatibility_fallback */ None,
         /* provider_toolchain */ ProviderToolchain::Auto,
         /* explicit_commit */ None,
@@ -138,9 +148,36 @@ pub(crate) fn execute_launch_command(
         /* cache_strategy_arg */ crate::cli::shared::CacheStrategyArg::Auto,
         /* plan_only */ false,
         Some(lifecycle_ctx),
-        /* pinned_revision_output_dir */ Some(revision_output_dir),
+        /* pinned_revision_output_dir */ Some(pinned_capsule_path),
         reporter,
     )
+}
+
+/// Find the single `.capsule` file inside a revision output directory.
+///
+/// `ato launch` stores revision artifacts as `output/{name}.capsule` — a directory
+/// containing exactly one capsule file. `normalize_run_target_after_install` routes
+/// a path to `prepare_capsule_target` only when the path itself ends in `.capsule`;
+/// passing the parent directory falls through to source inference and fails with
+/// `ATO_ERR_AMBIGUOUS_ENTRYPOINT`. This helper extracts the file path so the run
+/// pipeline sees a proper capsule target.
+///
+/// Returns `None` if the directory cannot be read or contains no `.capsule` file
+/// (caller falls back to the directory and lets the pipeline surface the error).
+fn find_capsule_in_revision_output(output_dir: &std::path::Path) -> Option<PathBuf> {
+    let entry = std::fs::read_dir(output_dir).ok()?.find_map(|entry| {
+        let path = entry.ok()?.path();
+        if path
+            .extension()
+            .map(|ext| ext.eq_ignore_ascii_case("capsule"))
+            .unwrap_or(false)
+        {
+            Some(path)
+        } else {
+            None
+        }
+    });
+    entry
 }
 
 /// Scan all installed apps and profiles to find the one matching `profile_key`.
@@ -398,6 +435,50 @@ mod tests {
         assert!(
             warning.unwrap().contains("env_refs"),
             "warning must mention env_refs"
+        );
+    }
+
+    /// `find_capsule_in_revision_output` returns the `.capsule` file path.
+    #[test]
+    fn find_capsule_in_output_dir_finds_capsule_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let capsule_path = dir.path().join("my-app-1.0.0.capsule");
+        std::fs::write(&capsule_path, b"fake capsule content").unwrap();
+
+        let found = find_capsule_in_revision_output(dir.path());
+        assert_eq!(found, Some(capsule_path), "should return the .capsule file");
+    }
+
+    /// `find_capsule_in_revision_output` returns None for an empty directory.
+    #[test]
+    fn find_capsule_in_output_dir_returns_none_for_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = find_capsule_in_revision_output(dir.path());
+        assert!(found.is_none(), "empty directory should return None");
+    }
+
+    /// `find_capsule_in_revision_output` ignores non-capsule files.
+    #[test]
+    fn find_capsule_in_output_dir_ignores_non_capsule_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("artifact_manifest.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"notes").unwrap();
+
+        let found = find_capsule_in_revision_output(dir.path());
+        assert!(
+            found.is_none(),
+            "directory with only non-capsule files should return None"
+        );
+    }
+
+    /// `find_capsule_in_revision_output` returns None for a non-existent directory.
+    #[test]
+    fn find_capsule_in_output_dir_returns_none_for_missing_dir() {
+        let found =
+            find_capsule_in_revision_output(std::path::Path::new("/nonexistent/path/output"));
+        assert!(
+            found.is_none(),
+            "missing directory should return None (not panic)"
         );
     }
 }
