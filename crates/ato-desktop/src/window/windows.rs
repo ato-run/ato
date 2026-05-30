@@ -14,12 +14,19 @@
 use gpui::{AnyWindowHandle, App, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::Value;
+use std::io::Cursor;
 use std::sync::mpsc::Sender;
 use tracing::warn;
-use windows_sys::Win32::Foundation::{GetLastError, SetLastError, HWND};
+use windows_sys::Win32::Foundation::{GetLastError, SetLastError, HWND, RECT};
+use windows_sys::Win32::Graphics::Gdi::{
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+    GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    HBITMAP, HGDIOBJ, RGBQUAD, SRCCOPY,
+};
+use windows_sys::Win32::Storage::Xps::PrintWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_HWNDPARENT,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    GetWindowRect, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    GWLP_HWNDPARENT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
 };
 
 // ── HWND helpers ──────────────────────────────────────────────────────────────
@@ -183,14 +190,147 @@ pub fn request_win_window_snapshot(
     handle: AnyWindowHandle,
     tx: Sender<Option<String>>,
 ) {
-    // On Windows the screenshot is taken from the WebView2 handle, which is
-    // owned by the AppCapsuleShell, not retrieved here via HWND. This function
-    // sends `None` because the caller-side fallback already tries the
-    // automation MCP screenshot path. A full HWND-based BitBlt implementation
-    // can be added here when needed.
-    let _ = cx;
-    let _ = handle;
-    let _ = tx.send(None);
+    let Some(hwnd) = hwnd_for(cx, handle) else {
+        let _ = tx.send(None);
+        return;
+    };
+    let hwnd_value = hwnd as isize;
+    std::thread::spawn(move || {
+        let data_url = capture_hwnd_png_data_url(hwnd_value as HWND)
+            .map_err(|error| {
+                tracing::debug!(?error, "windows snapshot capture failed");
+                error
+            })
+            .ok();
+        let _ = tx.send(data_url);
+    });
+}
+
+fn last_error_context(operation: &str) -> String {
+    format!("{operation} failed: Win32 error {}", unsafe {
+        GetLastError()
+    })
+}
+
+fn capture_hwnd_png_data_url(hwnd: HWND) -> Result<String, String> {
+    unsafe {
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(hwnd, &mut rect) == 0 {
+            return Err(last_error_context("GetWindowRect"));
+        }
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return Err(format!("window has invalid capture size {width}x{height}"));
+        }
+
+        let window_dc = GetWindowDC(hwnd);
+        if window_dc.is_null() {
+            return Err(last_error_context("GetWindowDC"));
+        }
+
+        let result = (|| {
+            let memory_dc = CreateCompatibleDC(window_dc);
+            if memory_dc.is_null() {
+                return Err(last_error_context("CreateCompatibleDC"));
+            }
+
+            let result = (|| {
+                let bitmap = CreateCompatibleBitmap(window_dc, width, height);
+                if bitmap.is_null() {
+                    return Err(last_error_context("CreateCompatibleBitmap"));
+                }
+                let result = capture_bitmap_to_png_data_url(
+                    hwnd, window_dc, memory_dc, bitmap, width, height,
+                );
+                let _ = DeleteObject(bitmap as HGDIOBJ);
+                result
+            })();
+
+            let _ = DeleteDC(memory_dc);
+            result
+        })();
+
+        let _ = ReleaseDC(hwnd, window_dc);
+        result
+    }
+}
+
+unsafe fn capture_bitmap_to_png_data_url(
+    hwnd: HWND,
+    window_dc: windows_sys::Win32::Graphics::Gdi::HDC,
+    memory_dc: windows_sys::Win32::Graphics::Gdi::HDC,
+    bitmap: HBITMAP,
+    width: i32,
+    height: i32,
+) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let previous = SelectObject(memory_dc, bitmap as HGDIOBJ);
+    if previous.is_null() {
+        return Err(last_error_context("SelectObject"));
+    }
+
+    let rendered = PrintWindow(hwnd, memory_dc, 2);
+    if rendered == 0 && BitBlt(memory_dc, 0, 0, width, height, window_dc, 0, 0, SRCCOPY) == 0 {
+        let _ = SelectObject(memory_dc, previous);
+        return Err(last_error_context("PrintWindow/BitBlt"));
+    }
+
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            biSizeImage: 0,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        bmiColors: [RGBQUAD {
+            rgbBlue: 0,
+            rgbGreen: 0,
+            rgbRed: 0,
+            rgbReserved: 0,
+        }; 1],
+    };
+    let mut bgra = vec![0u8; (width as usize) * (height as usize) * 4];
+    let rows = GetDIBits(
+        memory_dc,
+        bitmap,
+        0,
+        height as u32,
+        bgra.as_mut_ptr().cast(),
+        &mut info,
+        DIB_RGB_COLORS,
+    );
+    let _ = SelectObject(memory_dc, previous);
+    if rows == 0 {
+        return Err(last_error_context("GetDIBits"));
+    }
+
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        pixel[3] = 255;
+    }
+
+    let image = image::RgbaImage::from_raw(width as u32, height as u32, bgra)
+        .ok_or_else(|| "failed to construct RGBA image".to_string())?;
+    let mut png = Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|error| format!("PNG encode failed: {error}"))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+    Ok(format!("data:image/png;base64,{encoded}"))
 }
 
 /// Take a screenshot from a `wry::WebView` handle directly.
