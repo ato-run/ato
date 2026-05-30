@@ -1206,6 +1206,10 @@ fn open_info_popup(
         });
         cx.new(|cx| gpui_component::Root::new(shell, window, cx).bg(transparent_black()))
     })?;
+    #[cfg(target_os = "windows")]
+    {
+        super::windows::enable_blur_behind(cx, *handle);
+    }
 
     cx.set_global(InfoPopupWindowSlot(Some(*handle)));
     Ok(*handle)
@@ -1215,15 +1219,6 @@ pub(crate) fn dismiss_info_popup(cx: &mut App) {
     let _ = close_info_popup_if_live(cx);
 }
 
-#[cfg(target_os = "windows")]
-fn popup_background_appearance() -> WindowBackgroundAppearance {
-    // With GPUI direct composition disabled on Windows, fully transparent popup
-    // windows can present as black. Blurred keeps the floating surface readable
-    // while preserving transparent rounded corners.
-    WindowBackgroundAppearance::Blurred
-}
-
-#[cfg(not(target_os = "windows"))]
 fn popup_background_appearance() -> WindowBackgroundAppearance {
     WindowBackgroundAppearance::Transparent
 }
@@ -1378,6 +1373,7 @@ fn open_control_bar_inner(
             COMPACT_HEIGHT
         };
         super::windows::round_window_corners(cx, *handle, (initial_h / 2.0) as f64);
+        super::windows::enable_blur_behind(cx, *handle);
         if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
             if let Err(err) = super::windows::attach_as_child(cx, entry.handle, *handle) {
                 tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
