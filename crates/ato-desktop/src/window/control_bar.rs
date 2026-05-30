@@ -590,6 +590,30 @@ impl Render for ControlBarShellPlaceholder {
     }
 }
 
+/// Apply the platform-appropriate surface shape to a Control Bar pill.
+///
+/// macOS: the host window is transparent and rounded to a full pill, so the
+/// inner surface is `rounded_full()` with a hairline border that defines the
+/// floating pill against the desktop.
+///
+/// Windows: the host window is opaque with DWM-rounded corners (the full pill
+/// shape is macOS-only — see `open_control_bar_inner`). Keep the inner surface
+/// square and clip overflow so neither the opaque window background nor a
+/// border halo can show in the gap between a rounded inner pill and the
+/// DWM-rounded window edge — the very "blur/black around the bar" this is
+/// meant to avoid.
+#[cfg(target_os = "windows")]
+fn bar_surface_shape(d: gpui::Div, _border_alpha: f32) -> gpui::Div {
+    d.overflow_hidden()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bar_surface_shape(d: gpui::Div, border_alpha: f32) -> gpui::Div {
+    d.rounded_full()
+        .border_1()
+        .border_color(hsla(0.0, 0.0, 0.0, border_alpha))
+}
+
 fn bar_pill(
     omnibar: Entity<InputState>,
     is_capsule: bool,
@@ -597,21 +621,21 @@ fn bar_pill(
     window_count: usize,
     locale: LocaleCode,
 ) -> impl IntoElement {
-    div()
-        .size_full()
-        .px(px(6.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .bg(rgb(0xffffff))
-        .rounded_full()
-        .border_1()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.04))
-        .child(left_action_group(locale))
-        .child(pill_separator())
-        .child(url_pill(omnibar, is_capsule, is_starred))
-        .child(pill_separator())
-        .child(right_action_group(window_count, locale))
+    bar_surface_shape(
+        div()
+            .size_full()
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .bg(rgb(0xffffff)),
+        0.04,
+    )
+    .child(left_action_group(locale))
+    .child(pill_separator())
+    .child(url_pill(omnibar, is_capsule, is_starred))
+    .child(pill_separator())
+    .child(right_action_group(window_count, locale))
 }
 
 /// Left group: [Settings]
@@ -658,13 +682,13 @@ fn pill_separator() -> impl IntoElement {
 }
 
 fn compact_pill() -> impl IntoElement {
-    div()
-        .w(px(COMPACT_BAR_WIDTH))
-        .h(px(COMPACT_HEIGHT))
-        .rounded_full()
-        .bg(hsla(0.0, 0.0, 1.0, 0.90))
-        .border_1()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.08))
+    bar_surface_shape(
+        div()
+            .w(px(COMPACT_BAR_WIDTH))
+            .h(px(COMPACT_HEIGHT))
+            .bg(hsla(0.0, 0.0, 1.0, 0.90)),
+        0.08,
+    )
 }
 
 fn my_dock_button() -> impl IntoElement {
