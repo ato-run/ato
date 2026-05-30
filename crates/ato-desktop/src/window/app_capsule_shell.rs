@@ -791,6 +791,7 @@ impl AppCapsuleShell {
                 let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
                 let mut builder = WebViewBuilder::new()
                     .with_url(&effective_url)
+                    .with_incognito(true)
                     .with_bounds(Rect {
                         position: LogicalPosition::new(0i32, 0i32).into(),
                         size: LogicalSize::new(w, h).into(),
