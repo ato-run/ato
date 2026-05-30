@@ -3141,6 +3141,7 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
                 healthcheck_url: pane.healthcheck_url,
                 invoke_url: pane.invoke_url,
                 served_by: pane.served_by,
+                install_profile_key: pane.install_profile_key,
             })
     });
     let Some(active) = active else {

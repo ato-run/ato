@@ -3,7 +3,8 @@
 ## Overview
 
 `ato run` is the front door for resolving source inputs with a recipe and
-launching the resulting execution.
+launching the resulting execution. Its command-level contract is an ephemeral
+local production rehearsal, not durable app registration.
 
 It accepts a local directory, GitHub repository, Store reference, share URL,
 local share artifact, or canonical capsule handle. The CLI surface defaults
@@ -74,6 +75,7 @@ References:
 
 - [`Repository README`](https://github.com/ato-run/ato/blob/main/README.md)
 - [`rfcs/accepted/ATO_CLI_SPEC.md`](rfcs/accepted/ATO_CLI_SPEC.md)
+- [`rfcs/draft/run-install-semantics.md`](rfcs/draft/run-install-semantics.md)
 
 ## Design Notes
 
