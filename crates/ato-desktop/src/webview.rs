@@ -423,6 +423,9 @@ impl WebViewManager {
             fe.spawn(async move {
                 loop {
                     be.timer(Duration::from_millis(50)).await;
+                    if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                        continue;
+                    }
                     let queued = pending.lock().map(|q| !q.is_empty()).unwrap_or(false);
                     if has_pending.swap(false, Ordering::Relaxed) || queued {
                         notify_window(async_app_poll.clone(), window_handle);
@@ -500,12 +503,15 @@ impl WebViewManager {
             return;
         }
         self.prewarmed = true;
+        #[cfg(target_os = "windows")]
+        crate::window::windows::prepare_window_for_webview(window);
 
         use wry::dpi::{LogicalPosition, LogicalSize};
         // Position off-screen and 1×1 so the prewarm view is invisible
         // even briefly. Errors here are silently ignored — prewarm is
         // best-effort optimisation. Use the shared web_context so the
         // prewarm and the real tabs share one on-disk data store.
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let result = WebViewBuilder::new_with_web_context(&mut self.web_context)
             .with_url("about:blank")
             .with_visible(false)
@@ -2684,6 +2690,9 @@ impl WebViewManager {
             None => surface_base_extras.clone(),
         };
         crate::surface_timing::emit_stage("webview_create_start", "ok", 0, None, &extras_at_start);
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
+        #[cfg(target_os = "windows")]
+        crate::window::windows::prepare_window_for_webview(window);
         let webview = builder
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child webview for {url}"))?;
@@ -3869,6 +3878,7 @@ fn notify_window(async_app: AsyncApp, window_handle: AnyWindowHandle) {
     let fe = async_app.foreground_executor().clone();
     fe.spawn(async move {
         bg.timer(std::time::Duration::from_millis(16)).await;
+        crate::webview_init_guard::wait_until_idle(&bg).await;
         let mut async_app = async_app;
         let _ = async_app.update_window(window_handle, |_, window, _| {
             window.refresh();

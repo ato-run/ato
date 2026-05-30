@@ -65,7 +65,7 @@ impl JsonRpcResponse {
 pub enum AutomationCommand {
     /// Returns the Playwright-compatible a11y snapshot of the page.
     Snapshot,
-    /// Takes a PNG screenshot of the WebView. macOS only.
+    /// Takes a PNG screenshot of the WebView (macOS and Windows).
     Screenshot,
     /// Clicks element by stable ref.
     Click { ref_id: String },

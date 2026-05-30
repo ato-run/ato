@@ -271,6 +271,12 @@ fn spawn_drain_loop_inner(
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
+            // Defer while a Wry `build_as_child` is pumping the Win32 message
+            // loop on the main thread (Windows): resuming and calling `update`
+            // here would re-borrow the GPUI `App` and panic.
+            if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                continue;
+            }
             let drained: Vec<(SystemCapsuleId, SystemCommand, Option<u64>)> = match queue.lock() {
                 Ok(mut q) => std::mem::take(&mut *q),
                 Err(_) => continue,
@@ -335,6 +341,35 @@ fn spawn_drain_loop_inner(
         }
     })
     .detach();
+}
+
+/// Run follow-up UI work after the current system-capsule IPC dispatch has
+/// unwound. Wry/WebView2 can pump the native message loop during
+/// `build_as_child`; starting another WebView from the same GPUI update that
+/// is handling an IPC callback can re-enter GPUI while its App borrow is still
+/// active on Windows.
+pub fn defer_after_dispatch<F>(cx: &mut App, action: F)
+where
+    F: FnOnce(&mut App) + 'static,
+{
+    defer_after_dispatch_for(cx, Duration::from_millis(0), action);
+}
+
+pub fn defer_after_dispatch_for<F>(cx: &mut App, delay: Duration, action: F)
+where
+    F: FnOnce(&mut App) + 'static,
+{
+    let async_app = cx.to_async();
+    let bg_exec = async_app.background_executor().clone();
+    let update_app = async_app.clone();
+    async_app
+        .foreground_executor()
+        .spawn(async move {
+            bg_exec.timer(delay).await;
+            crate::webview_init_guard::wait_until_idle(&bg_exec).await;
+            let _ = update_app.update(action);
+        })
+        .detach();
 }
 
 #[cfg(test)]

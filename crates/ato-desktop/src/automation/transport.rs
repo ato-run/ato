@@ -17,6 +17,13 @@ pub type NotifyFn = Arc<dyn Fn() + Send + Sync + 'static>;
 pub type ActivePaneSnapshot = Arc<Mutex<Option<usize>>>;
 
 /// Returns the socket path for this process.
+#[cfg(windows)]
+pub fn socket_path() -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\ato-desktop-{}", std::process::id()))
+}
+
+/// Returns the socket path for this process.
+#[cfg(not(windows))]
 pub fn socket_path() -> PathBuf {
     let run_dir = dirs_runtime();
     run_dir.join(format!("ato-desktop-{}.sock", std::process::id()))
@@ -47,6 +54,26 @@ pub(crate) fn pid_is_alive(pid: u32) -> bool {
     }
     let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     errno != libc::ESRCH
+}
+
+#[cfg(windows)]
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    if pid == 0 {
+        return false;
+    }
+    if pid == std::process::id() {
+        return true;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle == std::ptr::null_mut() {
+        return false;
+    }
+    unsafe { CloseHandle(handle) };
+    true
 }
 
 /// Extract `<pid>` from `ato-desktop-<pid>.sock`. Returns `None` for any other shape.
@@ -147,6 +174,9 @@ pub fn start_socket_listener(
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
+                        let _ = stream.set_read_timeout(Some(AUTOMATION_CONNECTION_IO_TIMEOUT));
+                        let _ = stream.set_write_timeout(Some(AUTOMATION_CONNECTION_IO_TIMEOUT));
+
                         let pending = Arc::clone(&pending);
                         let notify = Arc::clone(&notify);
                         let active_pane = Arc::clone(&active_pane);
@@ -394,63 +424,144 @@ mod tests {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub fn start_socket_listener(
-    _pending: PendingQueue,
-    _notify: NotifyFn,
-    _active_pane: ActivePaneSnapshot,
-) -> std::io::Result<PathBuf> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "automation socket transport is not yet supported on this platform",
-    ))
-}
-
-#[cfg(unix)]
-fn handle_connection(
-    stream: std::os::unix::net::UnixStream,
     pending: PendingQueue,
     notify: NotifyFn,
     active_pane: ActivePaneSnapshot,
-) {
-    let _ = stream.set_read_timeout(Some(AUTOMATION_CONNECTION_IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(AUTOMATION_CONNECTION_IO_TIMEOUT));
+) -> std::io::Result<PathBuf> {
+    use std::fs;
+    use std::os::windows::io::FromRawHandle;
 
-    let mut writer = stream.try_clone().ok();
-    let reader = BufReader::new(stream);
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                debug!("automation connection read error: {e}");
-                break;
+    let path = socket_path();
+    let run_dir = dirs_runtime();
+    fs::create_dir_all(&run_dir)?;
+
+    let discovery = serde_json::json!({
+        "pid": std::process::id(),
+        "socket": path.to_string_lossy().as_ref(),
+    });
+    if let Ok(json) = serde_json::to_string(&discovery) {
+        let _ = fs::write(current_instance_file(), json);
+    }
+
+    let pipe_name_wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let path_clone = path.clone();
+    std::thread::Builder::new()
+        .name("ato-desktop-automation-listener".into())
+        .spawn(move || {
+            loop {
+                // Use the process default security descriptor for the named pipe.
+                // On Windows this inherits the creator's default DACL, which is
+                // sufficient here to keep automation scoped to the current user.
+                let handle = unsafe {
+                    CreateNamedPipeW(
+                        pipe_name_wide.as_ptr(),
+                        PIPE_ACCESS_DUPLEX,
+                        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                        255,
+                        65_536,
+                        65_536,
+                        0,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if handle == INVALID_HANDLE_VALUE {
+                    error!(
+                        "CreateNamedPipeW failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    break;
+                }
+
+                let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) } != 0
+                    || std::io::Error::last_os_error().raw_os_error()
+                        == Some(ERROR_PIPE_CONNECTED as i32);
+                if !connected {
+                    error!(
+                        "ConnectNamedPipe failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    unsafe { CloseHandle(handle) };
+                    continue;
+                }
+
+                let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
+                let pending = Arc::clone(&pending);
+                let notify = Arc::clone(&notify);
+                let active_pane = Arc::clone(&active_pane);
+                std::thread::spawn(move || {
+                    handle_connection(file, pending, notify, active_pane);
+                });
+            }
+            debug!("automation socket listener exiting");
+        })?;
+
+    Ok(path_clone)
+}
+
+fn handle_connection<S>(
+    mut stream: S,
+    pending: PendingQueue,
+    notify: NotifyFn,
+    active_pane: ActivePaneSnapshot,
+) where
+    S: std::io::Read + Write,
+{
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = {
+            let mut reader = BufReader::new(&mut stream);
+            match reader.read_line(&mut line) {
+                Ok(n) => n,
+                Err(e) => {
+                    debug!("automation connection read error: {e}");
+                    break;
+                }
             }
         };
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        let line = line.trim_end_matches(&['\r', '\n'][..]);
         if line.is_empty() {
             continue;
         }
 
-        let (id, response_json) = match dispatch_request(&line, &pending, &notify, &active_pane) {
+        let (id, response_json) = match dispatch_request(line, &pending, &notify, &active_pane) {
             Ok((rx, response_timeout)) => {
                 // Block waiting for GPUI to process the request.
                 match rx.recv_timeout(response_timeout) {
                     Ok(Ok(value)) => {
-                        let id = extract_id(&line);
+                        let id = extract_id(line);
                         (
                             id.clone(),
                             serde_json::to_string(&JsonRpcResponse::ok(id, value)).unwrap(),
                         )
                     }
                     Ok(Err(msg)) => {
-                        let id = extract_id(&line);
+                        let id = extract_id(line);
                         (
                             id.clone(),
                             serde_json::to_string(&JsonRpcResponse::err(id, -32000, msg)).unwrap(),
                         )
                     }
                     Err(_) => {
-                        let id = extract_id(&line);
+                        let id = extract_id(line);
                         (
                             id.clone(),
                             serde_json::to_string(&JsonRpcResponse::err(
@@ -464,18 +575,16 @@ fn handle_connection(
                 }
             }
             Err(resp) => {
-                let id = extract_id(&line);
+                let id = extract_id(line);
                 (id, resp)
             }
         };
 
         let _ = id; // already embedded in response_json
 
-        if let Some(ref mut w) = writer {
-            let _ = w.write_all(response_json.as_bytes());
-            let _ = w.write_all(b"\n");
-            let _ = w.flush();
-        }
+        let _ = stream.write_all(response_json.as_bytes());
+        let _ = stream.write_all(b"\n");
+        let _ = stream.flush();
         // One request per connection — close after responding.
         break;
     }
