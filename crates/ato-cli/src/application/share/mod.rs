@@ -730,6 +730,7 @@ fn materialize_generic_target(
         true,
         crate::ProviderToolchain::Auto,
         None,
+        None,
         false,
         None,
         false,
