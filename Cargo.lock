@@ -463,6 +463,7 @@ dependencies = [
  "wasmtime-wasi",
  "wat",
  "which 6.0.3",
+ "windows-sys 0.59.0",
  "xz2",
  "zeroize",
  "zip",
