@@ -1033,162 +1033,163 @@ branch = "main"
         use super::super::*;
         use super::COMMUNITY_URL_MUTEX;
 
-    /// Starts a minimal inline HTTP server that serves exactly one response
-    /// and returns its base URL.  Uses only tokio primitives — no extra deps.
-    async fn mock_http(status: u16, body: impl Into<String> + Send + 'static) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
+        /// Starts a minimal inline HTTP server that serves exactly one response
+        /// and returns its base URL.  Uses only tokio primitives — no extra deps.
+        async fn mock_http(status: u16, body: impl Into<String> + Send + 'static) -> String {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::TcpListener;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let body = body.into();
-        tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buf = vec![0u8; 4096];
-                let _ = stream.read(&mut buf).await;
-                let reason = match status {
-                    200 => "OK",
-                    404 => "Not Found",
-                    500 => "Internal Server Error",
-                    _ => "Unknown",
-                };
-                let resp = format!(
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let body = body.into();
+            tokio::spawn(async move {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let reason = match status {
+                        200 => "OK",
+                        404 => "Not Found",
+                        500 => "Internal Server Error",
+                        _ => "Unknown",
+                    };
+                    let resp = format!(
                     "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                let _ = stream.write_all(resp.as_bytes()).await;
-            }
-        });
-        format!("http://127.0.0.1:{port}")
-    }
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            });
+            format!("http://127.0.0.1:{port}")
+        }
 
-    #[tokio::test]
-    async fn fetch_candidates_parses_multiple_candidates() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
-        let body = r#"{"candidates":[
+        #[tokio::test]
+        async fn fetch_candidates_parses_multiple_candidates() {
+            let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+            let body = r#"{"candidates":[
             {"id":"c1","title":"Recipe One","source":"github.com/a/b","trust":"community","stars":10,"platforms":["macOS"],"lastVerifiedAt":null,"permissionsSummary":["network"],"capsuleTomlUrl":"http://x/c1","revision":null},
             {"id":"c2","title":"Recipe Two","source":"github.com/a/b","trust":"owner","stars":5,"platforms":[],"lastVerifiedAt":null,"permissionsSummary":[],"capsuleTomlUrl":"http://x/c2","revision":null}
         ]}"#;
-        let base = mock_http(200, body).await;
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
-        let result = fetch_community_capsule_tomls("github.com/a/b").await;
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
-        let candidates = result.expect("fetch should succeed");
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].id, "c1");
-        assert_eq!(candidates[1].id, "c2");
-        assert_eq!(candidates[0].permissions_summary, vec!["network"]);
-    }
+            let base = mock_http(200, body).await;
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+            let result = fetch_community_capsule_tomls("github.com/a/b").await;
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+            let candidates = result.expect("fetch should succeed");
+            assert_eq!(candidates.len(), 2);
+            assert_eq!(candidates[0].id, "c1");
+            assert_eq!(candidates[1].id, "c2");
+            assert_eq!(candidates[0].permissions_summary, vec!["network"]);
+        }
 
-    #[tokio::test]
-    async fn fetch_candidates_404_returns_empty_vec() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
-        let base = mock_http(404, r#"{"error":"not found"}"#).await;
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
-        let result = fetch_community_capsule_tomls("github.com/unknown/repo").await;
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
-        let candidates = result.expect("404 must return empty vec, not error");
-        assert!(candidates.is_empty());
-    }
+        #[tokio::test]
+        async fn fetch_candidates_404_returns_empty_vec() {
+            let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+            let base = mock_http(404, r#"{"error":"not found"}"#).await;
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+            let result = fetch_community_capsule_tomls("github.com/unknown/repo").await;
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+            let candidates = result.expect("404 must return empty vec, not error");
+            assert!(candidates.is_empty());
+        }
 
-    #[tokio::test]
-    async fn fetch_candidates_empty_array_returns_empty_vec() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
-        let base = mock_http(200, r#"{"candidates":[]}"#).await;
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
-        let result = fetch_community_capsule_tomls("github.com/a/b").await;
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
-        let candidates = result.expect("empty candidates list is ok");
-        assert!(candidates.is_empty());
-    }
+        #[tokio::test]
+        async fn fetch_candidates_empty_array_returns_empty_vec() {
+            let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+            let base = mock_http(200, r#"{"candidates":[]}"#).await;
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+            let result = fetch_community_capsule_tomls("github.com/a/b").await;
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+            let candidates = result.expect("empty candidates list is ok");
+            assert!(candidates.is_empty());
+        }
 
-    #[tokio::test]
-    async fn fetch_candidates_500_returns_error() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
-        let base = mock_http(500, r#"{"error":"internal"}"#).await;
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
-        let result = fetch_community_capsule_tomls("github.com/a/b").await;
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
-        assert!(result.is_err(), "non-2xx (excluding 404) must return error");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("Failed to fetch community capsule.tomls") || msg.contains("status=500"),
-            "unexpected error message: {msg}"
-        );
-    }
+        #[tokio::test]
+        async fn fetch_candidates_500_returns_error() {
+            let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+            let base = mock_http(500, r#"{"error":"internal"}"#).await;
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+            let result = fetch_community_capsule_tomls("github.com/a/b").await;
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+            assert!(result.is_err(), "non-2xx (excluding 404) must return error");
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("Failed to fetch community capsule.tomls")
+                    || msg.contains("status=500"),
+                "unexpected error message: {msg}"
+            );
+        }
 
-    #[tokio::test]
-    async fn fetch_candidates_invalid_json_returns_error() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
-        let base = mock_http(200, r#"not valid json at all"#).await;
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
-        let result = fetch_community_capsule_tomls("github.com/a/b").await;
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
-        assert!(result.is_err(), "invalid JSON must return error");
-    }
+        #[tokio::test]
+        async fn fetch_candidates_invalid_json_returns_error() {
+            let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+            let base = mock_http(200, r#"not valid json at all"#).await;
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+            let result = fetch_community_capsule_tomls("github.com/a/b").await;
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+            assert!(result.is_err(), "invalid JSON must return error");
+        }
 
-    #[tokio::test]
-    async fn fetch_capsule_toml_by_id_returns_content() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
-        let toml_body = "[source]\nrepository = \"github.com/a/b\"\n";
-        let base = mock_http(200, toml_body).await;
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
-        let result = fetch_capsule_toml_by_id("some-id").await;
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
-        let content = result.expect("fetch by id should succeed");
-        assert!(content.contains("[source]"));
-        assert!(content.contains("github.com/a/b"));
-    }
+        #[tokio::test]
+        async fn fetch_capsule_toml_by_id_returns_content() {
+            let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+            let toml_body = "[source]\nrepository = \"github.com/a/b\"\n";
+            let base = mock_http(200, toml_body).await;
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+            let result = fetch_capsule_toml_by_id("some-id").await;
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+            let content = result.expect("fetch by id should succeed");
+            assert!(content.contains("[source]"));
+            assert!(content.contains("github.com/a/b"));
+        }
 
-    #[tokio::test]
-    async fn fetch_capsule_toml_by_id_non_2xx_returns_error() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
-        let base = mock_http(404, r#"not found"#).await;
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
-        let result = fetch_capsule_toml_by_id("missing-id").await;
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
-        assert!(
-            result.is_err(),
-            "non-2xx from capsule-tomls/<id> must error"
-        );
-    }
+        #[tokio::test]
+        async fn fetch_capsule_toml_by_id_non_2xx_returns_error() {
+            let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+            let base = mock_http(404, r#"not found"#).await;
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+            let result = fetch_capsule_toml_by_id("missing-id").await;
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+            assert!(
+                result.is_err(),
+                "non-2xx from capsule-tomls/<id> must error"
+            );
+        }
 
-    #[tokio::test]
-    async fn fetch_toml_from_url_returns_content() {
-        // fetch_toml_from_url uses a direct URL, not the community API base URL,
-        // so no ATO_COMMUNITY_API_URL override needed.
-        let toml_body = "[source]\nrepository = \"github.com/a/b\"\n";
-        let base = mock_http(200, toml_body).await;
-        let url = format!("{}/capsule.toml", base);
-        let result = fetch_toml_from_url(&url).await;
-        let content = result.expect("fetch_toml_from_url should succeed");
-        assert!(content.contains("[source]"));
-    }
+        #[tokio::test]
+        async fn fetch_toml_from_url_returns_content() {
+            // fetch_toml_from_url uses a direct URL, not the community API base URL,
+            // so no ATO_COMMUNITY_API_URL override needed.
+            let toml_body = "[source]\nrepository = \"github.com/a/b\"\n";
+            let base = mock_http(200, toml_body).await;
+            let url = format!("{}/capsule.toml", base);
+            let result = fetch_toml_from_url(&url).await;
+            let content = result.expect("fetch_toml_from_url should succeed");
+            assert!(content.contains("[source]"));
+        }
 
-    #[tokio::test]
-    async fn fetch_toml_from_url_non_2xx_returns_error() {
-        let base = mock_http(403, r#"forbidden"#).await;
-        let url = format!("{}/capsule.toml", base);
-        let result = fetch_toml_from_url(&url).await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("Failed to fetch capsule.toml from URL") || msg.contains("status=403"),
-            "unexpected message: {msg}"
-        );
-    }
+        #[tokio::test]
+        async fn fetch_toml_from_url_non_2xx_returns_error() {
+            let base = mock_http(403, r#"forbidden"#).await;
+            let url = format!("{}/capsule.toml", base);
+            let result = fetch_toml_from_url(&url).await;
+            assert!(result.is_err());
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("Failed to fetch capsule.toml from URL") || msg.contains("status=403"),
+                "unexpected message: {msg}"
+            );
+        }
 
-    #[tokio::test]
-    async fn community_api_url_env_override_is_respected() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
-        // Verify that ATO_COMMUNITY_API_URL override actually routes requests
-        // to the specified server.  If the override is ignored the request would
-        // go to https://api.ato.run and fail / timeout in CI.
-        let base = mock_http(200, r#"{"candidates":[]}"#).await;
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
-        let resolved = resolve_community_api_base_url();
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
-        assert_eq!(resolved, base);
-    }
+        #[tokio::test]
+        async fn community_api_url_env_override_is_respected() {
+            let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+            // Verify that ATO_COMMUNITY_API_URL override actually routes requests
+            // to the specified server.  If the override is ignored the request would
+            // go to https://api.ato.run and fail / timeout in CI.
+            let base = mock_http(200, r#"{"candidates":[]}"#).await;
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+            let resolved = resolve_community_api_base_url();
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+            assert_eq!(resolved, base);
+        }
     } // end mod async_tests
 } // end mod tests
