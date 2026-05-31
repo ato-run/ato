@@ -75,6 +75,62 @@ static SAMPLE_RECIPE_CATALOG: &[SampleRecipeBinding] = &[
         github: Some(("langgenius", "dify")),
         manifest_content: include_str!("../../../../samples/recipes/dify/capsule.toml"),
     },
+    SampleRecipeBinding {
+        slug: "pocketbase",
+        display_name: "PocketBase",
+        aliases: &["pocketbase", "pocket-base"],
+        github: Some(("pocketbase", "pocketbase")),
+        manifest_content: include_str!("../../../../samples/recipes/pocketbase/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "homepage",
+        display_name: "Homepage",
+        aliases: &["homepage", "gethomepage"],
+        github: Some(("gethomepage", "homepage")),
+        manifest_content: include_str!("../../../../samples/recipes/homepage/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "node-red",
+        display_name: "Node-RED",
+        aliases: &["node-red", "nodered"],
+        github: Some(("node-red", "node-red")),
+        manifest_content: include_str!("../../../../samples/recipes/node-red/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "fresh-rss",
+        display_name: "FreshRSS",
+        aliases: &["fresh-rss", "freshrss"],
+        github: Some(("FreshRSS", "FreshRSS")),
+        manifest_content: include_str!("../../../../samples/recipes/freshrss/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "filebrowser",
+        display_name: "File Browser",
+        aliases: &["filebrowser", "file-browser"],
+        github: Some(("filebrowser", "filebrowser")),
+        manifest_content: include_str!("../../../../samples/recipes/filebrowser/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "mailpit",
+        display_name: "Mailpit",
+        aliases: &["mailpit"],
+        github: Some(("axllent", "mailpit")),
+        manifest_content: include_str!("../../../../samples/recipes/mailpit/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "pgweb",
+        display_name: "pgweb",
+        aliases: &["pgweb"],
+        github: Some(("sosedoff", "pgweb")),
+        manifest_content: include_str!("../../../../samples/recipes/pgweb/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "adminer",
+        display_name: "Adminer",
+        aliases: &["adminer"],
+        github: Some(("vrana", "adminer")),
+        manifest_content: include_str!("../../../../samples/recipes/adminer/capsule.toml"),
+    },
 ];
 
 fn materialize_recipe(binding: &SampleRecipeBinding) -> Result<PathBuf> {

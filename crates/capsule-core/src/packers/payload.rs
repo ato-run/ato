@@ -266,7 +266,9 @@ mod tests {
         normalize_relative_utf8_path, reconstruct_from_chunks,
     };
     use crate::types::CapsuleManifest;
+    #[cfg(unix)]
     use std::ffi::OsString;
+    #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
     use std::path::Path;
 

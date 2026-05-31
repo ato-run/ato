@@ -112,6 +112,9 @@ pub fn spawn_drain_loop<F>(
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
+            if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                continue;
+            }
             let drained: Vec<BridgeAction> = match queue.lock() {
                 Ok(mut q) => std::mem::take(&mut *q),
                 Err(_) => continue,
