@@ -12,7 +12,11 @@ use crate::cli::{ConsentInternalCommands, InternalCommands};
 pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> {
     match command {
         InternalCommands::Consent { command } => execute_consent_command(command),
-        InternalCommands::Preflight { target, json } => execute_preflight_command(target, json),
+        InternalCommands::Preflight {
+            target,
+            community_toml_id,
+            json,
+        } => execute_preflight_command(target, community_toml_id, json),
         InternalCommands::ImportPreviewSweep { force, json } => {
             execute_import_preview_sweep_command(force, json)
         }
@@ -36,8 +40,36 @@ pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> 
 /// `requirements` array). Non-zero exits are reserved for genuine
 /// failures (manifest missing, derivation failed, consent store
 /// unreadable). This matches `ato inspect requirements`'s convention.
-fn execute_preflight_command(target: String, json: bool) -> Result<()> {
-    let result = collect_aggregate_requirements(&target, ExecutionProfile::Dev)
+fn execute_preflight_command(
+    target: String,
+    community_toml_id: Option<String>,
+    json: bool,
+) -> Result<()> {
+    // If --community-toml-id is given, fetch and validate the community TOML,
+    // write it to a temp file, and run preflight against that path so the
+    // consent UI reflects the selected recipe's targets / secrets / policy.
+    let _temp_dir_guard;
+    let effective_target = if let Some(ref ctoml_id) = community_toml_id {
+        let toml_content =
+            crate::community::fetch_and_validate_community_toml(ctoml_id, &target)
+                .map_err(|err| anyhow!("preflight: community TOML fetch/validate failed: {err}"))?;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("ato-preflight-community-")
+            .tempdir()
+            .map_err(|err| anyhow!("preflight: failed to create temp dir: {err}"))?;
+        let toml_path = tmp.path().join("capsule.toml");
+        std::fs::write(&toml_path, &toml_content)
+            .map_err(|err| anyhow!("preflight: failed to write temp TOML: {err}"))?;
+        let path_str = toml_path.display().to_string();
+        _temp_dir_guard = Some(tmp);
+        path_str
+    } else {
+        _temp_dir_guard = None;
+        target.clone()
+    };
+
+    let result = collect_aggregate_requirements(&effective_target, ExecutionProfile::Dev)
         .map_err(|err| anyhow!("preflight collection failed: {err}"))?;
 
     if json {
