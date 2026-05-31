@@ -28,4 +28,37 @@ Examples:
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
     },
+
+    Receipt {
+        #[command(subcommand)]
+        command: ReceiptCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ReceiptCommands {
+    #[command(
+        about = "Upload a verification receipt to an existing community capsule.toml",
+        after_help = "\
+Examples:
+  ato community receipt upload ctoml_abc123 --receipt ./receipt.json
+  ato community receipt upload ctoml_abc123 --receipt ./receipt.json --dry-run
+  ato community receipt upload ctoml_abc123 --receipt ./receipt.json -y"
+    )]
+    Upload {
+        /// ID of the community capsule.toml to attach the receipt to
+        capsule_toml_id: String,
+
+        /// Path to the receipt file (JSON)
+        #[arg(long)]
+        receipt: PathBuf,
+
+        /// Validate and print request summary without sending
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
+        /// Skip interactive confirmation (required in non-TTY environments)
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+    },
 }
