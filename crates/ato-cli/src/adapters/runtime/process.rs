@@ -1076,7 +1076,7 @@ fn stop_import_preview_session_record(
     }
 
     if ato_run_owned {
-        match terminate_process(session.ato_run_pid, force) {
+        match terminate_import_preview_root(session.ato_run_pid, force) {
             Ok(true) => {
                 let _ = wait_for_process_exit(session.ato_run_pid, 10);
                 stopped = true;
@@ -1134,6 +1134,18 @@ fn import_preview_stop_outcome(
             ImportPreviewStopStatus::AlreadyGone
         },
         error: None,
+    }
+}
+
+fn terminate_import_preview_root(pid: i32, force: bool) -> Result<bool> {
+    #[cfg(windows)]
+    {
+        return terminate_windows_process_tree(pid, force);
+    }
+
+    #[cfg(not(windows))]
+    {
+        terminate_process(pid, force)
     }
 }
 
@@ -1664,6 +1676,35 @@ fn terminate_process(pid: i32, force: bool) -> Result<bool> {
         let _ = force;
         Err(anyhow::anyhow!(
             "Process termination is not supported on this platform"
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn terminate_windows_process_tree(pid: i32, force: bool) -> Result<bool> {
+    if pid <= 0 {
+        return Ok(false);
+    }
+
+    let mut command = Command::new("taskkill");
+    command.arg("/PID").arg(pid.to_string()).arg("/T");
+    if force {
+        command.arg("/F");
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("Failed to execute taskkill /T for PID {}", pid))?;
+
+    if status.success() {
+        return Ok(true);
+    }
+
+    if !is_process_alive(pid) {
+        Ok(false)
+    } else {
+        Err(anyhow::anyhow!(
+            "Failed to terminate process tree rooted at {}",
+            pid
         ))
     }
 }

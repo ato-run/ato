@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
+use crate::bundle_paths::DesktopBundlePaths;
 use crate::config::ControlBarMode;
 use crate::ui::DesktopShell;
 use gpui::AsyncApp;
@@ -156,6 +157,64 @@ fn looks_like_github_repo_input(input: &str) -> bool {
         "http://www.github.com/",
     ];
     PREFIXES.iter().any(|p| lower.starts_with(p))
+}
+
+/// Classify a closing GPUI window so the `on_window_closed` log makes it
+/// clear whether the boot wizard, an AppWindow, or chrome was closed.
+/// This is diagnostic-only (#370 lifecycle investigation).
+fn classify_closed_window_kind(cx: &App, window_id: u64) -> &'static str {
+    // Check if the window id belongs to the boot wizard slot.
+    let boot_matches = cx
+        .try_global::<crate::window::launch_window::BootWindowSlot>()
+        .and_then(|s| s.boot_window)
+        .map(|h| h.window_id().as_u64() == window_id)
+        .unwrap_or(false);
+    if boot_matches {
+        return "boot-wizard";
+    }
+
+    // Check if registered as an AppWindow in the registry.
+    if cx
+        .global::<crate::state::AppWindowRegistry>()
+        .find_by_gpui_window_id(window_id)
+        .is_some()
+    {
+        return "app-window";
+    }
+
+    // Check singleton chrome windows.
+    if let Some(c) = cx.try_global::<crate::window::ControlBarController>() {
+        if c.handle.map(|h| h.window_id().as_u64() == window_id).unwrap_or(false) {
+            return "control-bar";
+        }
+    }
+    if cx
+        .global::<crate::window::card_switcher::CardSwitcherWindowSlot>()
+        .0
+        .map(|h| h.window_id().as_u64() == window_id)
+        .unwrap_or(false)
+    {
+        return "card-switcher";
+    }
+    if cx
+        .global::<crate::window::settings_window::SettingsWindowSlot>()
+        .0
+        .map(|h| h.window_id().as_u64() == window_id)
+        .unwrap_or(false)
+    {
+        return "settings";
+    }
+
+    // Check content windows (dock, store, onboarding, start, etc.)
+    if cx
+        .global::<crate::window::content_windows::OpenContentWindows>()
+        .get(window_id)
+        .is_some()
+    {
+        return "content-window";
+    }
+
+    "unknown"
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
@@ -323,6 +382,7 @@ impl OpenUrlBridge {
                 // to the GPUI event loop so the original borrow drops
                 // before refresh() runs.
                 bg.timer(std::time::Duration::from_millis(16)).await;
+                crate::webview_init_guard::wait_until_idle(&bg).await;
                 refresh_app.refresh();
                 refresh_scheduled.store(false, Ordering::Release);
             })
@@ -359,7 +419,14 @@ impl AssetSource for LocalAssetSource {
 }
 
 pub fn run(skip_onboarding: bool) {
-    let assets_dir = resolve_assets_dir().expect("failed to resolve ato-desktop assets directory");
+    let assets_dir = match resolve_assets_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to resolve ato-desktop assets directory");
+            eprintln!("Ato Desktop startup error:\n{error}");
+            return;
+        }
+    };
     match crate::system_capsule::materializer::bootstrap_from_assets(&assets_dir) {
         Ok(report) => {
             tracing::info!(
@@ -398,6 +465,7 @@ pub fn run(skip_onboarding: bool) {
         cx.set_global(crate::window::content_windows::OpenContentWindows::default());
         cx.set_global(crate::state::session::SessionRegistry::default());
         cx.set_global(crate::window::launch_window::PendingLaunches::default());
+        cx.set_global(crate::window::focus_guest_panes::FocusGuestPaneRegistry::default());
         cx.set_global(crate::state::capsule_state::CapsuleStateStore::default());
         cx.set_global(
             crate::system_capsule::window_registry::SystemCapsuleWindowRegistry::default(),
@@ -550,6 +618,14 @@ pub fn run(skip_onboarding: bool) {
             // Card Switcher / MRU stay accurate. The registry uses
             // the GPUI WindowId u64 it stamped at open time.
             let closed_id = window_id.as_u64();
+            // Classify the closed window so the log makes it clear
+            // whether the boot wizard, an AppWindow, or chrome closed.
+            let closed_kind = classify_closed_window_kind(cx, closed_id);
+            tracing::info!(
+                closed_id,
+                %closed_kind,
+                "on_window_closed observed window close"
+            );
             let removed_id = cx
                 .global_mut::<crate::state::AppWindowRegistry>()
                 .find_by_gpui_window_id(closed_id);
@@ -574,6 +650,24 @@ pub fn run(skip_onboarding: bool) {
                 tracing::info!(
                     gpui_window_id = closed_id,
                     "content window evicted from registry on close"
+                );
+            }
+
+            // Evict the Focus guest capsule automation pane (#370) so a
+            // stale pane is never reported by `browser_tabs` after its
+            // window closes, and fail any in-flight MCP browser requests
+            // still queued against it so callers don't hang.
+            if let Some(entry) = cx
+                .global_mut::<crate::window::focus_guest_panes::FocusGuestPaneRegistry>()
+                .unregister_window(closed_id)
+            {
+                if let Some(host) = cx.try_global::<crate::automation::AutomationHost>() {
+                    host.fail_requests_for_pane(entry.pane_id);
+                }
+                tracing::info!(
+                    gpui_window_id = closed_id,
+                    pane_id = entry.pane_id,
+                    "focus guest capsule pane unregistered on close"
                 );
             }
             if let Some(handle) = cx.global::<crate::window::ControlBarController>().handle {
@@ -852,9 +946,15 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            if let Err(err) = crate::window::dock::open_dock_window(cx) {
-                tracing::error!(error = %err, "OpenIdentityMenu: open_dock_window failed");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    if let Err(err) = crate::window::dock::open_dock_window(cx) {
+                        tracing::error!(error = %err, "OpenIdentityMenu: open_dock_window failed");
+                    }
+                },
+            );
         });
 
         // Settings cog routing in Focus mode — Stages C+D:
@@ -867,10 +967,16 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
-                tracing::error!(error = %err, "ShowSettings: open_settings_window failed");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
+                        tracing::error!(error = %err, "ShowSettings: open_settings_window failed");
+                    }
+                },
+            );
         });
 
         // Focus-mode handler for the Control Bar URL pill's
@@ -1056,10 +1162,16 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::open_card_switcher_window(cx) {
-                tracing::error!(error = %err, "failed to open card switcher window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::open_card_switcher_window(cx) {
+                        tracing::error!(error = %err, "failed to open card switcher window");
+                    }
+                },
+            );
         });
 
         // #174 — cycle through open app windows in MRU order via
@@ -1079,10 +1191,16 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::store::open_store_window(cx) {
-                tracing::error!(error = %err, "failed to open store window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::store::open_store_window(cx) {
+                        tracing::error!(error = %err, "failed to open store window");
+                    }
+                },
+            );
         });
 
         // Toggle Dock visibility. If the dock window exists, close it.
@@ -1096,9 +1214,23 @@ pub fn run(skip_onboarding: bool) {
             }
             let slot = cx.global::<crate::window::dock::DockWindowSlot>();
             if let Some(handle) = slot.0 {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                crate::system_capsule::ipc::defer_after_dispatch_for(
+                    cx,
+                    std::time::Duration::from_millis(50),
+                    move |cx| {
+                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    },
+                );
             } else {
-                let _ = crate::window::dock::open_dock_window(cx);
+                crate::system_capsule::ipc::defer_after_dispatch_for(
+                    cx,
+                    std::time::Duration::from_millis(50),
+                    |cx| {
+                        if let Err(err) = crate::window::dock::open_dock_window(cx) {
+                            tracing::error!(error = %err, "ToggleDock: open_dock_window failed");
+                        }
+                    },
+                );
             }
         });
 
@@ -1110,10 +1242,16 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::dock::open_dock_window(cx) {
-                tracing::error!(error = %err, "failed to open dock window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::dock::open_dock_window(cx) {
+                        tracing::error!(error = %err, "failed to open dock window");
+                    }
+                },
+            );
         });
 
         // Toggle the Control Bar info popup. Dispatched from the info icon
@@ -1136,10 +1274,16 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            crate::window::control_bar::dismiss_info_popup(cx);
-            if let Err(err) = crate::window::capsule_panel::open_capsule_panel_window(cx) {
-                tracing::error!(error = %err, "failed to open capsule panel window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    crate::window::control_bar::dismiss_info_popup(cx);
+                    if let Err(err) = crate::window::capsule_panel::open_capsule_panel_window(cx) {
+                        tracing::error!(error = %err, "failed to open capsule panel window");
+                    }
+                },
+            );
         });
 
         // Spawn a fresh StartWindow. Unlike the Launcher / Store
@@ -1150,15 +1294,27 @@ pub fn run(skip_onboarding: bool) {
         // action is still registered so MCP / keybind paths reach
         // the same target.
         cx.on_action(|_: &OpenStartWindow, cx: &mut App| {
-            if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                tracing::error!(error = %err, "failed to open start window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    if let Err(err) = crate::window::start_window::open_start_window(cx) {
+                        tracing::error!(error = %err, "failed to open start window");
+                    }
+                },
+            );
         });
 
         cx.on_action(|_: &OpenGithubRunWindow, cx: &mut App| {
-            if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
-                tracing::error!(error = %err, "failed to open github run window");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch_for(
+                cx,
+                std::time::Duration::from_millis(50),
+                |cx| {
+                    if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
+                        tracing::error!(error = %err, "failed to open github run window");
+                    }
+                },
+            );
         });
 
         // The two startup modes are mutually exclusive — there is no
@@ -1207,10 +1363,12 @@ pub fn run(skip_onboarding: bool) {
                 .spawn(async move {
                     // One frame is enough for the macOS RunLoop to complete
                     // its first pass and for WKWebView to initialize normally.
+                    let bg_exec = async_cx.background_executor();
                     async_cx
                         .background_executor()
                         .timer(std::time::Duration::from_millis(32))
                         .await;
+                    crate::webview_init_guard::wait_until_idle(bg_exec).await;
                     let _ = async_cx.update(|cx| {
                         if show_onboarding {
                             match crate::window::onboarding_window::open_onboarding_window(cx) {
@@ -1497,41 +1655,9 @@ fn install_app_menus(cx: &mut App) {
 }
 
 fn resolve_assets_dir() -> anyhow::Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("ATO_DESKTOP_ASSETS_DIR") {
-        let path = PathBuf::from(dir);
-        if path.is_dir() {
-            return Ok(path);
-        }
-    }
-
-    // current_dir/current_exe failures must not crash launch — when the
-    // shell's cwd inode is stale (bundle replaced under an open shell),
-    // getcwd(2) returns ENOENT. Fall through to the next strategy instead.
-    if let Ok(cwd) = std::env::current_dir() {
-        let cwd_assets = cwd.join("assets");
-        if cwd_assets.is_dir() {
-            return Ok(cwd_assets);
-        }
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
-            if let Some(contents) = macos_dir.parent() {
-                let bundled = contents.join("Resources").join("assets");
-                if bundled.is_dir() {
-                    return Ok(bundled);
-                }
-            }
-            let sibling = macos_dir.join("assets");
-            if sibling.is_dir() {
-                return Ok(sibling);
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "ato-desktop assets directory was not found; set ATO_DESKTOP_ASSETS_DIR or run from the app root"
-    ))
+    DesktopBundlePaths::from_env()
+        .resolve_assets_dir()
+        .map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]
