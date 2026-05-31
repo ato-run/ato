@@ -365,6 +365,7 @@ pub fn start_session(
     target_label: Option<&str>,
     from_materialized_record: Option<&str>,
     run_config_hash: Option<&str>,
+    community_toml_id: Option<&str>,
     json: bool,
 ) -> Result<()> {
     // Reserve stdout for the SessionStartEnvelope when the caller
@@ -435,7 +436,48 @@ pub fn start_session(
         }
     }
 
-    let mut runner = if let Some(record_path) = from_materialized_record {
+    // When a community capsule.toml ID is provided, fetch and validate the recipe,
+    // write it to a temp dir, and launch from the downloaded manifest.
+    // We hold the `_community_toml_dir` guard alive for the duration of the session
+    // start so the temp file isn't deleted before the runner can read it.
+    let _community_toml_dir: Option<tempfile::TempDir>;
+    let community_toml_manifest_path: Option<PathBuf>;
+    if let Some(cid) = community_toml_id {
+        let toml_content = crate::community::fetch_and_validate_community_toml(cid, handle)
+            .with_context(|| {
+                format!(
+                    "failed to fetch/validate community capsule.toml '{}' for '{}'",
+                    cid, handle
+                )
+            })?;
+        let dir = tempfile::Builder::new()
+            .prefix("ato-community-toml-")
+            .tempdir()
+            .with_context(|| "failed to create temp dir for community capsule.toml")?;
+        let toml_path = dir.path().join("capsule.toml");
+        fs::write(&toml_path, &toml_content).with_context(|| {
+            format!(
+                "failed to write community capsule.toml to {}",
+                toml_path.display()
+            )
+        })?;
+        tracing::debug!(ctoml_id = %cid, path = %toml_path.display(), "community capsule.toml written to temp dir");
+        community_toml_manifest_path = Some(toml_path);
+        _community_toml_dir = Some(dir);
+    } else {
+        community_toml_manifest_path = None;
+        _community_toml_dir = None;
+    }
+
+    let mut runner = if let Some(manifest_path) = community_toml_manifest_path {
+        super::session_runner::SessionStartPhaseRunner::from_toml_path(
+            handle,
+            manifest_path,
+            target_label,
+            run_config_hash.map(str::to_string),
+            json,
+        )
+    } else if let Some(record_path) = from_materialized_record {
         let path = PathBuf::from(record_path);
         let record = ato_session_core::read_materialized_launch_record(&path)?;
         if record.handle != handle && record.normalized_handle != handle {

@@ -451,6 +451,7 @@ mod tests {
         let route = GuestRoute::CapsuleHandle {
             handle: "capsule://org/demo@1.0.0".to_string(),
             label: "demo".to_string(),
+            community_toml_id: None,
         };
         assert_eq!(
             logical_key_for_route(&route),
@@ -519,6 +520,7 @@ mod tests {
         let handle_route = GuestRoute::CapsuleHandle {
             handle: handle.to_string(),
             label: "demo".to_string(),
+            community_toml_id: None,
         };
         let session_route = GuestRoute::Capsule {
             session: handle.to_string(),

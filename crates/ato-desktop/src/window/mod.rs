@@ -32,8 +32,6 @@ pub mod webview_paste;
 // `ato-settings` system capsule.
 #[cfg(target_os = "macos")]
 pub mod macos;
-#[cfg(target_os = "windows")]
-pub mod windows;
 pub mod onboarding_window;
 pub mod orchestrator;
 pub mod settings_window;
@@ -41,6 +39,8 @@ pub mod start_window;
 pub mod store;
 pub mod web_bridge;
 pub mod web_link_view;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 // Make the pure-data `AppWindowRegistry` from `state` accessible
 // across windows via `cx.global::<AppWindowRegistry>()`. The impl
