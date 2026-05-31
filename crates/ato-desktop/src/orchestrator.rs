@@ -672,11 +672,10 @@ fn collect_preflight_envelope_for_input(
             collect_preflight_envelope(&local.manifest_path.display().to_string())
         }
         DesktopLaunchInput::CommunityToml(ct) => {
-            // Community TOML launches preflight against the source handle
-            // (before the recipe is materialized). This is best-effort —
-            // failures fall through to the lazy aggregation path.
-            let normalized = normalize_preflight_handle(&ct.source_handle);
-            collect_preflight_envelope(&normalized)
+            // Materialize the community TOML to a temp file so preflight
+            // inspects the actual selected recipe (correct targets / secrets /
+            // policy) instead of the local sample or cached manifest.
+            collect_preflight_envelope_for_community_toml(&ct.source_handle, &ct.ctoml_id)
         }
     }
 }
@@ -718,6 +717,70 @@ fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope
 
         bail!(
             "ato internal preflight failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    serde_json::from_str(trimmed)
+        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))
+}
+
+/// Preflight a community TOML candidate by passing `--community-toml-id` to
+/// `ato internal preflight`.
+///
+/// The CLI fetches and validates the community TOML, writes it to a temp path,
+/// and runs preflight against that manifest. This ensures the consent UI shows
+/// the requirements for the **selected** recipe (correct targets / secrets /
+/// policy) rather than the cached or inferred manifest for the source handle.
+fn collect_preflight_envelope_for_community_toml(
+    source_handle: &str,
+    ctoml_id: &str,
+) -> Result<PreflightAggregateEnvelope> {
+    let ato_bin = resolve_ato_binary()?;
+    debug!(
+        bin = %ato_bin.display(),
+        source_handle,
+        ctoml_id,
+        "calling ato internal preflight with --community-toml-id"
+    );
+    let normalized = normalize_preflight_handle(source_handle);
+    let output = Command::new(&ato_bin)
+        .no_console_window()
+        .args([
+            "internal",
+            "preflight",
+            &normalized,
+            "--community-toml-id",
+            ctoml_id,
+            "--json",
+        ])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke '{}' internal preflight --community-toml-id",
+                ato_bin.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // Older CLI builds may not support --community-toml-id; fall back to
+        // handle-based preflight so the consent wizard can still proceed.
+        if stderr.contains("unexpected argument") && stderr.contains("community-toml-id") {
+            debug!(
+                source_handle,
+                ctoml_id,
+                "CLI does not support --community-toml-id in preflight; falling back to handle"
+            );
+            return collect_preflight_envelope(&normalized);
+        }
+
+        bail!(
+            "ato internal preflight --community-toml-id failed (exit {}): stderr={stderr} stdout={stdout}",
             output.status
         );
     }

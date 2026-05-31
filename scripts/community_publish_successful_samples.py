@@ -97,6 +97,13 @@ def publish_sample(sample: dict, dry_run: bool, force: bool) -> dict | None:
         print(f"  error: toml_path not found: {toml_path}", file=sys.stderr)
         return {"slug": slug, "status": "error", "reason": "toml_not_found"}
 
+    # Dry-run: offline only — no network access.
+    if dry_run:
+        print(f"  [dry-run] would run: {ATO_BIN} community submit github.com/{source} -T {toml_rel} -y")
+        print(f"  [dry-run] toml digest: {toml_digest(toml_path)}")
+        return None
+
+    # Live run: check for existing candidates before submitting.
     if not force:
         existing_id = already_published(source, toml_path)
         if existing_id:
@@ -107,11 +114,6 @@ def publish_sample(sample: dict, dry_run: bool, force: bool) -> dict | None:
                 "status": "already_published",
                 "ctoml_id": existing_id,
             }
-
-    if dry_run:
-        print(f"  [dry-run] would run: {ATO_BIN} community submit github.com/{source} -T {toml_rel} -y")
-        print(f"  [dry-run] toml digest: {toml_digest(toml_path)}")
-        return None
 
     # github.com/<source> is the input format the CLI expects
     cmd = [
