@@ -345,7 +345,11 @@ fn handle_capsule_url(cx: &mut gpui::App, url: String) {
         target_handle = %handle,
         "WebLinkView capsule:// link → spawning AppWindow"
     );
-    let route = crate::state::GuestRoute::CapsuleHandle { handle, label };
+    let route = crate::state::GuestRoute::CapsuleHandle {
+        handle,
+        label,
+        community_toml_id: None,
+    };
     if let Err(err) = crate::window::open_app_window(cx, route) {
         tracing::error!(error = %err, "WebLinkView capsule nav: open_app_window failed");
     }
