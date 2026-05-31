@@ -258,7 +258,7 @@ pub(crate) enum SourceValidationOutcome {
     },
 }
 
-fn extract_toml_source(toml_content: &str) -> Option<String> {
+pub(crate) fn extract_toml_source(toml_content: &str) -> Option<String> {
     let parsed: TomlValue = toml::from_str(toml_content).ok()?;
     parsed
         .get("source")
