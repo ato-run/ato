@@ -122,6 +122,16 @@ pub(super) fn build_app_router(ui_enabled: bool) -> Router<AppState> {
         "/v1/local/processes/:id/logs",
         get(handle_get_process_logs).delete(handle_clear_process_logs),
     );
+    app = app.route("/v1/runtime/providers", get(handle_runtime_providers));
+    app = app.route("/v1/runtime/sessions", get(handle_runtime_sessions));
+    app = app.route(
+        "/v1/runtime/install-profiles",
+        get(handle_runtime_install_profiles),
+    );
+    app = app.route(
+        "/v1/runtime/sessions/:id/logs",
+        get(handle_runtime_session_logs),
+    );
 
     #[cfg(feature = "webui")]
     if ui_enabled {
