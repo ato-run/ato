@@ -999,7 +999,17 @@ pub(crate) async fn resolve_run_target_or_install(
                             None => None,
                         }
                     }
-                    Ok(_) => None,
+                    Ok(_) => {
+                        // API returned zero candidates for this source.
+                        // In a TTY give the user a choice; non-TTY/JSON silently infers.
+                        if is_tty
+                            && !json_mode
+                            && !crate::community::prompt_no_candidates_flow(&repository)?
+                        {
+                            anyhow::bail!("Run cancelled.");
+                        }
+                        None
+                    }
                     Err(err) => {
                         debug!(
                             %err,

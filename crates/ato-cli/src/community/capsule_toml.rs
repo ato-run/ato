@@ -426,6 +426,40 @@ pub(crate) fn format_candidate_for_display(
     lines.join("\n")
 }
 
+/// Called when the community API returns zero candidates for `source`.
+/// In a TTY, offers the user a choice: continue with inference or cancel.
+/// In non-TTY / JSON environments, proceeds to inference silently.
+/// Returns `true` to continue with inference, `false` to cancel.
+pub(crate) fn prompt_no_candidates_flow(source: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Ok(true);
+    }
+
+    eprintln!("\nNo community recipes found for {}.", source);
+    eprintln!();
+    eprintln!("1. Infer new capsule.toml from project structure");
+    eprintln!("2. Cancel");
+    eprintln!("   (To use an existing capsule.toml, re-run with -T ./path/to/capsule.toml)");
+    eprintln!();
+
+    loop {
+        eprint!("Enter choice (1-2): ");
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read selection")?;
+
+        match input.trim() {
+            "1" => return Ok(true),
+            "2" => return Ok(false),
+            _ => eprintln!("Invalid choice, try again."),
+        }
+    }
+}
+
 pub(crate) fn prompt_community_candidate_selection(
     source: &str,
     candidates: &[CommunityCapsuleTomlCandidate],
@@ -476,6 +510,11 @@ pub(crate) fn prompt_community_candidate_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialises access to ATO_COMMUNITY_API_URL across all tests in this
+    // module (sync and async) so they don't race against each other.
+    pub(super) static COMMUNITY_URL_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn trust_level_deserializes_community() {
@@ -705,6 +744,7 @@ mod tests {
 
     #[test]
     fn resolve_community_api_base_url_defaults() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
         let url = resolve_community_api_base_url();
         assert_eq!(url, "https://api.ato.run");
     }
@@ -921,4 +961,234 @@ mod tests {
         sort_candidates(&mut candidates);
         assert_eq!(candidates[0].id, "none");
     }
-}
+
+    // ── additional -T / source-identity regression coverage ─────────────────
+
+    #[test]
+    fn extract_toml_source_returns_none_for_empty_toml() {
+        assert_eq!(extract_toml_source(""), None);
+    }
+
+    #[test]
+    fn extract_toml_source_returns_none_when_no_repository_key() {
+        let toml = r#"name = "foo"
+[source]
+branch = "main"
+"#;
+        assert_eq!(extract_toml_source(toml), None);
+    }
+
+    #[test]
+    fn validate_local_t_source_match_ok() {
+        let toml = "[source]\nrepository = \"github.com/o/r\"\n";
+        assert_eq!(
+            validate_capsule_toml_source_matches_run_target(toml, "github.com/o/r"),
+            SourceValidationOutcome::Match
+        );
+    }
+
+    #[test]
+    fn validate_local_t_source_mismatch_is_mismatch() {
+        let toml = "[source]\nrepository = \"github.com/o/r\"\n";
+        assert!(matches!(
+            validate_capsule_toml_source_matches_run_target(toml, "github.com/other/repo"),
+            SourceValidationOutcome::Mismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_remote_t_missing_source_is_missing() {
+        let toml = "name = \"foo\"\n";
+        assert_eq!(
+            validate_capsule_toml_source_matches_run_target(toml, "github.com/o/r"),
+            SourceValidationOutcome::MissingSource
+        );
+    }
+
+    #[test]
+    fn validate_candidate_source_mismatch_error_message_contains_both_sources() {
+        let err = validate_candidate_source_matches_run_target("github.com/a/b", "github.com/c/d")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("github.com/a/b"),
+            "expected old source in error"
+        );
+        assert!(
+            err.contains("github.com/c/d"),
+            "expected run target in error"
+        );
+    }
+
+    #[test]
+    fn no_candidates_flow_returns_true_in_non_tty() {
+        // In a non-TTY test environment stdin/stderr are not terminals,
+        // so prompt_no_candidates_flow must return Ok(true) without prompting.
+        let result = prompt_no_candidates_flow("github.com/a/b").expect("should not fail");
+        assert!(result, "non-TTY must proceed to inference");
+    }
+
+    // ── async / mock-HTTP tests ──────────────────────────────────────────────
+    mod async_tests {
+        use super::super::*;
+        use super::COMMUNITY_URL_MUTEX;
+
+    /// Starts a minimal inline HTTP server that serves exactly one response
+    /// and returns its base URL.  Uses only tokio primitives — no extra deps.
+    async fn mock_http(status: u16, body: impl Into<String> + Send + 'static) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = body.into();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    500 => "Internal Server Error",
+                    _ => "Unknown",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn fetch_candidates_parses_multiple_candidates() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        let body = r#"{"candidates":[
+            {"id":"c1","title":"Recipe One","source":"github.com/a/b","trust":"community","stars":10,"platforms":["macOS"],"lastVerifiedAt":null,"permissionsSummary":["network"],"capsuleTomlUrl":"http://x/c1","revision":null},
+            {"id":"c2","title":"Recipe Two","source":"github.com/a/b","trust":"owner","stars":5,"platforms":[],"lastVerifiedAt":null,"permissionsSummary":[],"capsuleTomlUrl":"http://x/c2","revision":null}
+        ]}"#;
+        let base = mock_http(200, body).await;
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let result = fetch_community_capsule_tomls("github.com/a/b").await;
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        let candidates = result.expect("fetch should succeed");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].id, "c1");
+        assert_eq!(candidates[1].id, "c2");
+        assert_eq!(candidates[0].permissions_summary, vec!["network"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_candidates_404_returns_empty_vec() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        let base = mock_http(404, r#"{"error":"not found"}"#).await;
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let result = fetch_community_capsule_tomls("github.com/unknown/repo").await;
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        let candidates = result.expect("404 must return empty vec, not error");
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_candidates_empty_array_returns_empty_vec() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        let base = mock_http(200, r#"{"candidates":[]}"#).await;
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let result = fetch_community_capsule_tomls("github.com/a/b").await;
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        let candidates = result.expect("empty candidates list is ok");
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_candidates_500_returns_error() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        let base = mock_http(500, r#"{"error":"internal"}"#).await;
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let result = fetch_community_capsule_tomls("github.com/a/b").await;
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        assert!(result.is_err(), "non-2xx (excluding 404) must return error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Failed to fetch community capsule.tomls") || msg.contains("status=500"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_candidates_invalid_json_returns_error() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        let base = mock_http(200, r#"not valid json at all"#).await;
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let result = fetch_community_capsule_tomls("github.com/a/b").await;
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        assert!(result.is_err(), "invalid JSON must return error");
+    }
+
+    #[tokio::test]
+    async fn fetch_capsule_toml_by_id_returns_content() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        let toml_body = "[source]\nrepository = \"github.com/a/b\"\n";
+        let base = mock_http(200, toml_body).await;
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let result = fetch_capsule_toml_by_id("some-id").await;
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        let content = result.expect("fetch by id should succeed");
+        assert!(content.contains("[source]"));
+        assert!(content.contains("github.com/a/b"));
+    }
+
+    #[tokio::test]
+    async fn fetch_capsule_toml_by_id_non_2xx_returns_error() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        let base = mock_http(404, r#"not found"#).await;
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let result = fetch_capsule_toml_by_id("missing-id").await;
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        assert!(
+            result.is_err(),
+            "non-2xx from capsule-tomls/<id> must error"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_toml_from_url_returns_content() {
+        // fetch_toml_from_url uses a direct URL, not the community API base URL,
+        // so no ATO_COMMUNITY_API_URL override needed.
+        let toml_body = "[source]\nrepository = \"github.com/a/b\"\n";
+        let base = mock_http(200, toml_body).await;
+        let url = format!("{}/capsule.toml", base);
+        let result = fetch_toml_from_url(&url).await;
+        let content = result.expect("fetch_toml_from_url should succeed");
+        assert!(content.contains("[source]"));
+    }
+
+    #[tokio::test]
+    async fn fetch_toml_from_url_non_2xx_returns_error() {
+        let base = mock_http(403, r#"forbidden"#).await;
+        let url = format!("{}/capsule.toml", base);
+        let result = fetch_toml_from_url(&url).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Failed to fetch capsule.toml from URL") || msg.contains("status=403"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn community_api_url_env_override_is_respected() {
+        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        // Verify that ATO_COMMUNITY_API_URL override actually routes requests
+        // to the specified server.  If the override is ignored the request would
+        // go to https://api.ato.run and fail / timeout in CI.
+        let base = mock_http(200, r#"{"candidates":[]}"#).await;
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let resolved = resolve_community_api_base_url();
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        assert_eq!(resolved, base);
+    }
+    } // end mod async_tests
+} // end mod tests
