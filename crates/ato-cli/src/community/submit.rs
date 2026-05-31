@@ -212,17 +212,21 @@ pub(crate) async fn execute_submit(
         return Ok(());
     };
 
-    submit_prepared_with_response(&payload).await?;
+    let result = submit_prepared_with_response(&payload).await?;
 
-    if !json_mode {
+    if json_mode {
+        let output = serde_json::json!({
+            "id": result.id,
+            "url": result.url,
+            "status": result.status,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
         eprintln!();
         eprintln!("Submitted community capsule.toml:");
-        eprintln!("  id: {}", payload.id.as_deref().unwrap_or("?"));
-        eprintln!("  url: {}", payload.url.as_deref().unwrap_or("(unknown)"));
-        eprintln!(
-            "  status: {}",
-            payload.status.as_deref().unwrap_or("pending")
-        );
+        eprintln!("  id: {}", result.id);
+        eprintln!("  url: {}", result.url);
+        eprintln!("  status: {}", result.status);
     }
 
     Ok(())
@@ -230,9 +234,6 @@ pub(crate) async fn execute_submit(
 
 pub(crate) struct PreparedSubmission {
     pub(crate) payload: SubmissionPayload,
-    pub(crate) id: Option<String>,
-    pub(crate) url: Option<String>,
-    pub(crate) status: Option<String>,
 }
 
 pub(crate) enum SubmitDryRun {
@@ -366,12 +367,7 @@ pub(crate) fn prepare_submission(
         return Ok(None);
     }
 
-    Ok(Some(PreparedSubmission {
-        payload,
-        id: None,
-        url: None,
-        status: None,
-    }))
+    Ok(Some(PreparedSubmission { payload }))
 }
 
 pub(crate) async fn submit_prepared_with_response(

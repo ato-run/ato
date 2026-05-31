@@ -914,7 +914,7 @@ pub(crate) async fn resolve_run_target_or_install(
                     Ok(candidates) if !candidates.is_empty() => {
                         let mut candidates = candidates;
                         crate::community::sort_candidates(&mut candidates);
-                        let selected = if is_tty {
+                        let selected = if is_tty && !json_mode {
                             match crate::community::prompt_community_candidate_selection(
                                 &repository,
                                 &candidates,
