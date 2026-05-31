@@ -97,8 +97,34 @@ fn scan_value_for_secrets(value: &serde_json::Value, path: &str, warnings: &mut 
                 scan_value_for_secrets(child, &child_path, warnings);
             }
         }
+        serde_json::Value::String(s) => {
+            if contains_private_key_marker(s) {
+                warnings.push(format!(
+                    "Value at '{}' looks like a private key or base64-encoded secret",
+                    path
+                ));
+            }
+        }
         _ => {}
     }
+}
+
+fn contains_private_key_marker(value: &str) -> bool {
+    if value.starts_with("-----BEGIN") {
+        return true;
+    }
+    if value.starts_with("ssh-") {
+        return true;
+    }
+    if value.len() > 40
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=')
+        && value.len() % 4 == 0
+    {
+        return true;
+    }
+    false
 }
 
 fn is_placeholder_value(value: &str) -> bool {
@@ -117,6 +143,23 @@ fn is_placeholder_value(value: &str) -> bool {
         || v == "X"
 }
 
+fn validate_capsule_toml_id(id: &str) -> Result<()> {
+    if !id.starts_with("ctoml_") {
+        bail!(
+            "Invalid capsule_toml_id: '{}'. Expected format: ctoml_<id>",
+            id
+        );
+    }
+    let rest = &id[6..];
+    if rest.is_empty() || !rest.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        bail!(
+            "Invalid capsule_toml_id: '{}'. Expected format: ctoml_<id> with alphanumeric + underscore",
+            id
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn execute_receipt_upload(
     capsule_toml_id: &str,
     receipt_path: &Path,
@@ -127,6 +170,9 @@ pub(crate) async fn execute_receipt_upload(
     if !receipt_path.exists() {
         bail!("Receipt file not found: {}", receipt_path.display());
     }
+
+    validate_capsule_toml_id(capsule_toml_id)
+        .with_context(|| format!("Invalid capsule_toml_id: {capsule_toml_id}"))?;
 
     let metadata = std::fs::metadata(receipt_path).with_context(|| {
         format!(
@@ -439,5 +485,52 @@ mod tests {
     #[test]
     fn max_receipt_size_is_one_mb() {
         assert_eq!(MAX_RECEIPT_SIZE_BYTES, 1_048_576);
+    }
+
+    #[test]
+    fn private_key_marker_detected_in_arbitrary_string() {
+        let receipt = serde_json::json!({
+            "config": "-----BEGIN RSA PRIVATE KEY-----\nabc123\n-----END RSA PRIVATE KEY-----"
+        });
+        let warnings = scan_receipt_for_secrets(&receipt);
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("private key"));
+    }
+
+    #[test]
+    fn private_key_marker_detected_in_nested_string() {
+        let receipt = serde_json::json!({
+            "execution": {
+                "env": {
+                    "SOME_KEY": "ssh-rsa AAAAB3..."
+                }
+            }
+        });
+        let warnings = scan_receipt_for_secrets(&receipt);
+        assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn validate_capsule_toml_id_accepts_valid() {
+        assert!(validate_capsule_toml_id("ctoml_abc123").is_ok());
+        assert!(validate_capsule_toml_id("ctoml_abc123_xyz").is_ok());
+    }
+
+    #[test]
+    fn validate_capsule_toml_id_rejects_missing_prefix() {
+        let err = validate_capsule_toml_id("abc123").unwrap_err();
+        assert!(err.to_string().contains("ctoml_"));
+    }
+
+    #[test]
+    fn validate_capsule_toml_id_rejects_empty_suffix() {
+        let err = validate_capsule_toml_id("ctoml_").unwrap_err();
+        assert!(err.to_string().contains("Invalid"));
+    }
+
+    #[test]
+    fn validate_capsule_toml_id_rejects_special_chars() {
+        let err = validate_capsule_toml_id("ctoml_abc/123").unwrap_err();
+        assert!(err.to_string().contains("Invalid"));
     }
 }
