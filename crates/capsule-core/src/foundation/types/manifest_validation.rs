@@ -1815,6 +1815,28 @@ mod tests {
         assert!(!is_valid_mount_path("/app/../data"));
         assert!(!is_valid_mount_path("/app//data"));
     }
+
+    #[test]
+    fn recipe_state_binding_paths_accepted_on_windows() {
+        assert!(is_valid_mount_path("/var/opt/memos"));
+        assert!(is_valid_mount_path("/app/data"));
+        assert!(is_valid_mount_path("/pb_data"));
+        assert!(is_valid_mount_path("/app/config"));
+        assert!(is_valid_mount_path("/app/public/icons"));
+        assert!(is_valid_mount_path("/var/lib/postgresql/data"));
+        assert!(is_valid_mount_path("/home/node/.n8n"));
+        assert!(is_valid_mount_path("/shiori"));
+        assert!(is_valid_mount_path("/database"));
+        assert!(is_valid_mount_path("/srv"));
+        assert!(is_valid_mount_path("/app/backend/data"));
+    }
+
+    #[test]
+    fn relative_container_target_data_is_rejected() {
+        assert!(!is_valid_mount_path("data"));
+        assert!(!is_valid_mount_path("relative/path"));
+        assert!(!is_valid_mount_path("./data"));
+    }
 }
 
 pub(crate) fn is_valid_platform_key(s: &str) -> bool {
