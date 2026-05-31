@@ -1470,6 +1470,7 @@ where
             export_request: request.export_request.clone(),
             provider_workspace: None,
             transient_workspace_root: None,
+            community_submit_context: None,
         }
     } else {
         crate::install::support::resolve_run_target_or_install(
