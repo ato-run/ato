@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 
 use crate::orchestrator::resolve_ato_binary;
+use crate::proc_util::CommandNoWindowExt;
 use crate::source_import_session::ImportOutput;
 
 /// Run `ato import <repo> --emit-json` and parse the JSON output.
@@ -13,6 +14,7 @@ use crate::source_import_session::ImportOutput;
 pub(crate) fn infer(repo: &str) -> Result<ImportOutput> {
     let ato = resolve_ato_binary()?;
     let output = Command::new(&ato)
+        .no_console_window()
         .arg("import")
         .arg(repo)
         .arg("--emit-json")
@@ -49,7 +51,8 @@ pub(crate) fn run_with_recipe(
 ) -> Result<ImportOutput> {
     let ato = resolve_ato_binary()?;
     let mut cmd = Command::new(&ato);
-    cmd.arg("import")
+    cmd.no_console_window()
+        .arg("import")
         .arg(repo)
         .arg("--recipe")
         .arg(recipe_path)
@@ -82,6 +85,7 @@ pub(crate) fn run_with_recipe(
 pub(crate) fn stop_import_preview_session(run_session_id: &str) -> Result<()> {
     let ato = resolve_ato_binary()?;
     let output = Command::new(&ato)
+        .no_console_window()
         .arg("stop")
         .arg(run_session_id)
         .arg("--force")
@@ -105,6 +109,7 @@ pub(crate) fn stop_import_preview_session(run_session_id: &str) -> Result<()> {
 pub(crate) fn sweep_stale_import_preview_sessions() -> Result<()> {
     let ato = resolve_ato_binary()?;
     let output = Command::new(&ato)
+        .no_console_window()
         .arg("internal")
         .arg("import-preview-sweep")
         .arg("--json")

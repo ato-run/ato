@@ -33,6 +33,8 @@
 
   "start.title": "New Window",
   "start.subtitle": "Open a capsule, local app, or GitHub repo",
+  "start.quit": "Quit",
+  "start.quit.tooltip": "Quit Ato Desktop",
   "start.search.placeholder": "Capsule name, URL, GitHub repo, local path, or command",
   "start.tile.github.label": "Run from GitHub",
   "start.tile.github.desc": "Install and launch a repo URL",
