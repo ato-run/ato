@@ -89,3 +89,26 @@ pub fn open_configured_startup_surface(
 pub fn is_multi_window_enabled() -> bool {
     crate::config::load_config().desktop.focus_view_enabled
 }
+
+/// Window caption shown in the OS taskbar / window list. GPUI creates its
+/// windows with an empty title unless `TitlebarOptions::title` is set (it
+/// is `None` in `TitleBar::title_bar_options()`), so on Windows the taskbar
+/// thumbnail shows no app name. Every taskbar-visible window sets this via
+/// `window.set_window_title` at construction time.
+pub const WINDOW_TITLE: &str = "Ato Desktop";
+
+/// Process-wide shutdown latch. Set once when an explicit quit begins (the
+/// Start capsule's quit button, or an abnormal-exit path) so that
+/// `on_window_closed` does not try to reopen the Start landing surface
+/// while GPUI is already tearing the windows down.
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark the process as shutting down. Idempotent.
+pub fn begin_shutdown() {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// True once [`begin_shutdown`] has been called.
+pub fn is_shutting_down() -> bool {
+    SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst)
+}

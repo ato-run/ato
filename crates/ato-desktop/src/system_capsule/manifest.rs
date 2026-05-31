@@ -155,6 +155,7 @@ const TABLE: &[SystemCapsuleDescriptor] = &[
             Capability::WindowsClose,
             Capability::WebviewCreate,
             Capability::LaunchSystemCapsule,
+            Capability::AppQuit,
         ],
     },
     SystemCapsuleDescriptor {

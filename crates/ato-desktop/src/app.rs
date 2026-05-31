@@ -802,13 +802,29 @@ pub fn run(skip_onboarding: bool) {
                 }
             }
 
-            // In Focus mode the Control Bar is a process-lifetime
-            // singleton with its own lifecycle, decoupled from any
-            // AppWindow. Closing the last AppWindow therefore should
-            // NOT auto-open a Launcher — the bar is already there as
-            // the user's landing surface. We quit only when every
-            // remaining window (including the Control Bar) is gone.
-            if cx.windows().is_empty() && !crate::window::is_multi_window_enabled() {
+            // Window-lifecycle endgame.
+            //
+            // Legacy single-window mode: quit when the last window closes.
+            //
+            // Focus View: the Control Bar is a process-lifetime singleton, so
+            // `cx.windows()` is effectively never empty while the bar is up —
+            // and the bar is a WS_EX_TOOLWINDOW that never appears in the
+            // Windows taskbar. A user who closes every content window from the
+            // taskbar would otherwise be left with an invisible, unclosable
+            // bar and a process that never exits. Instead, when the last
+            // *content* window closes we bring back the Start capsule as the
+            // landing surface (its quit button is the explicit exit). If the
+            // Start page cannot be opened and only the Control Bar remains,
+            // that is an unrecoverable state — quit as abnormal.
+            if crate::window::is_multi_window_enabled() {
+                if !crate::window::is_shutting_down()
+                    && cx
+                        .global::<crate::window::content_windows::OpenContentWindows>()
+                        .is_empty()
+                {
+                    reopen_start_or_quit(cx);
+                }
+            } else if cx.windows().is_empty() {
                 cx.quit();
             }
         })
@@ -1429,6 +1445,7 @@ pub fn run(skip_onboarding: bool) {
                 {
                     let open_url_bridge = open_url_bridge.clone();
                     move |window, cx| {
+                        window.set_window_title(crate::window::WINDOW_TITLE);
                         let shell =
                             cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
                         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
@@ -1439,6 +1456,43 @@ pub fn run(skip_onboarding: bool) {
         }
 
         cx.activate(true);
+    });
+}
+
+/// Focus View: after the last content window closes, bring the Start
+/// capsule back as the landing surface. If it cannot be opened and only the
+/// Control Bar is left, the shell has nothing usable to show — treat that as
+/// abnormal and quit. Deferred a tick so we never open a Wry WebView while
+/// GPUI is still unwinding the `on_window_closed` callback (synchronous
+/// `build_as_child` re-entrancy panics on Windows).
+fn reopen_start_or_quit(cx: &mut App) {
+    crate::system_capsule::ipc::defer_after_dispatch(cx, |cx| {
+        if crate::window::is_shutting_down() {
+            return;
+        }
+        // A content window may have opened in the meantime (e.g. the user
+        // launched something from the Control Bar) — nothing to do then.
+        if !cx
+            .global::<crate::window::content_windows::OpenContentWindows>()
+            .is_empty()
+        {
+            return;
+        }
+        match crate::window::start_window::open_start_window(cx) {
+            Ok(()) => {
+                tracing::info!(
+                    "last content window closed — reopened Start capsule as landing surface"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to reopen Start capsule after last window closed; only the Control Bar remains — quitting as abnormal"
+                );
+                crate::window::begin_shutdown();
+                cx.quit();
+            }
+        }
     });
 }
 

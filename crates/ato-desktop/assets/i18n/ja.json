@@ -33,6 +33,8 @@
 
   "start.title": "新しいウィンドウ",
   "start.subtitle": "カプセル、ローカルアプリ、GitHub repo を開く",
+  "start.quit": "終了",
+  "start.quit.tooltip": "Ato Desktop を終了",
   "start.search.placeholder": "カプセル名、URL、GitHub repo、ローカルパス、またはコマンド",
   "start.tile.github.label": "GitHubから実行",
   "start.tile.github.desc": "Repo URLをインストールして起動",
