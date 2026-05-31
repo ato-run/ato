@@ -39,7 +39,7 @@ impl gpui::Global for AuthLoginWindowSlot {}
 
 /// Lightweight GPUI view keeping the Wry WebView alive.
 pub struct AuthLoginWebView {
-    _webview: WebView,
+    _webview: Option<WebView>,
     window_size: Size<Pixels>,
 }
 
@@ -60,14 +60,16 @@ impl AuthLoginWebView {
         if current == self.window_size {
             return;
         }
-        let _ = self._webview.set_bounds(Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(current.width) as u32,
-                f32::from(current.height) as u32,
-            )
-            .into(),
-        });
+        if let Some(webview) = self._webview.as_ref() {
+            let _ = webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, 0i32).into(),
+                size: LogicalSize::new(
+                    f32::from(current.width) as u32,
+                    f32::from(current.height) as u32,
+                )
+                .into(),
+            });
+        }
         self.window_size = current;
     }
 }
@@ -182,9 +184,8 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
         let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_url(&login_url)
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for AuthLoginWindow");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Login window", webview, window);
 
         let view = cx.new(|_cx| AuthLoginWebView {
             _webview: webview,
