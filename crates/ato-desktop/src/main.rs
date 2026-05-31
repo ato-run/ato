@@ -16,6 +16,7 @@ mod localization;
 mod logging;
 mod netd;
 mod orchestrator;
+mod proc_util;
 mod retention;
 mod secret_bridge;
 mod settings;
