@@ -57,6 +57,62 @@ impl Drop for HomeGuard {
     }
 }
 
+struct AtoHomeGuard {
+    previous: Option<std::ffi::OsString>,
+    root: std::path::PathBuf,
+}
+
+impl AtoHomeGuard {
+    fn set(name: &str) -> Self {
+        let previous = std::env::var_os("ATO_HOME");
+        let root = std::env::current_dir()
+            .expect("cwd")
+            .join(".tmp")
+            .join("registry-serve-tests")
+            .join(format!(
+                "{}-{}-{}",
+                name,
+                std::process::id(),
+                chrono::Utc::now()
+                    .timestamp_nanos_opt()
+                    .expect("timestamp nanos")
+            ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create ATO_HOME test root");
+        std::env::set_var("ATO_HOME", &root);
+        Self { previous, root }
+    }
+}
+
+impl Drop for AtoHomeGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("ATO_HOME", previous);
+        } else {
+            std::env::remove_var("ATO_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn bearer_headers(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let value = format!("Bearer {token}")
+        .parse::<HeaderValue>()
+        .expect("auth header");
+    headers.insert(header::AUTHORIZATION, value);
+    headers
+}
+
+fn registry_test_state(auth_token: Option<&str>) -> AppState {
+    AppState {
+        listen_url: "http://127.0.0.1:8787".to_string(),
+        data_dir: std::env::current_dir().expect("cwd").join(".tmp"),
+        auth_token: auth_token.map(str::to_string),
+        lock: Arc::new(Mutex::new(())),
+    }
+}
+
 fn build_capsule_bytes(manifest: &str) -> Vec<u8> {
     build_capsule_bytes_with_files(manifest, &[("README.md", b"dummy".as_slice())])
 }
@@ -770,12 +826,7 @@ fn read_process_log_lines_applies_tail_limit() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_providers_returns_desktop_provider() {
-    let state = AppState {
-        listen_url: "http://127.0.0.1:8787".to_string(),
-        data_dir: std::env::current_dir().expect("cwd").join(".tmp"),
-        auth_token: None,
-        lock: Arc::new(Mutex::new(())),
-    };
+    let state = registry_test_state(None);
     let response = handle_runtime_providers(State(state), HeaderMap::new())
         .await
         .into_response();
@@ -790,9 +841,170 @@ async fn runtime_providers_returns_desktop_provider() {
     assert_eq!(json[0]["capabilities"]["supports_launch"], false);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn sensitive_runtime_read_apis_require_auth_when_token_configured() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _ato_home = AtoHomeGuard::set("runtime-read-auth");
+    let state = registry_test_state(Some("secret"));
+
+    let response = handle_runtime_sessions(State(state.clone()), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = handle_runtime_install_profiles(State(state.clone()), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = handle_runtime_session_logs(
+        State(state.clone()),
+        HeaderMap::new(),
+        AxumPath("runtime-session-1".to_string()),
+        Query(ProcessLogsQuery { tail: Some(10) }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let headers = bearer_headers("secret");
+    let response = handle_runtime_sessions(State(state.clone()), headers.clone())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = handle_runtime_install_profiles(State(state.clone()), headers.clone())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = handle_runtime_session_logs(
+        State(state),
+        headers,
+        AxumPath("runtime-session-1".to_string()),
+        Query(ProcessLogsQuery { tail: Some(10) }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn install_profiles_read_ato_home_instances_root() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _ato_home = AtoHomeGuard::set("install-profiles");
+
+    let root = install_profile_store_root();
+    let store = capsule_core::foundation::install_lifecycle::InstallInstanceStore::new(&root)
+        .expect("install store");
+    let app_id = capsule_core::foundation::install_lifecycle::InstalledAppId::new(
+        "app_runtime_profile_test",
+    );
+    let profile_id = capsule_core::foundation::install_lifecycle::ProfileId::new("default");
+    let revision_id =
+        capsule_core::foundation::install_lifecycle::InstallRevisionId::new("rev_runtime_test");
+    store
+        .write_app_record(&capsule_core::foundation::install_lifecycle::AppRecord {
+            installed_app_id: app_id.clone(),
+            publisher: "koh0920".to_string(),
+            slug: "runtime-demo".to_string(),
+            capsule_handle: "koh0920/runtime-demo".to_string(),
+            version: "0.1.0".to_string(),
+            installed_at: "2026-05-31T00:00:00Z".to_string(),
+            updated_at: "2026-05-31T00:00:00Z".to_string(),
+        })
+        .expect("write app");
+    store
+        .write_profile(
+            &app_id,
+            &capsule_core::foundation::install_lifecycle::LaunchProfile {
+                profile_id: profile_id.clone(),
+                port_policy: "fixed:8123".to_string(),
+                isolation: "strict".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("write profile");
+    store
+        .scaffold_revision(&revision_id)
+        .expect("scaffold revision");
+    store
+        .set_current_revision(&app_id, &profile_id, &revision_id)
+        .expect("set current revision");
+
+    let response = handle_runtime_install_profiles(
+        State(registry_test_state(Some("secret"))),
+        bearer_headers("secret"),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json[0]["installed_app_id"], "app_runtime_profile_test");
+    assert_eq!(json[0]["publisher"], "koh0920");
+    assert_eq!(json[0]["slug"], "runtime-demo");
+    assert_eq!(json[0]["capsule_handle"], "koh0920/runtime-demo");
+    assert_eq!(json[0]["profile_id"], "default");
+    assert_eq!(json[0]["current_revision_id"], "rev_runtime_test");
+    assert_eq!(json[0]["port_policy"], "fixed:8123");
+    assert_eq!(json[0]["isolation"], "strict");
+}
+
 #[test]
-fn runtime_session_summary_maps_process_to_desktop_placement() {
-    let summary = runtime_session_summary(ProcessInfo {
+fn runtime_session_summary_keeps_legacy_process_origin_unknown() {
+    let summary = runtime_session_summary(runtime_process_fixture(), None);
+
+    assert_eq!(summary.session.session_id, "runtime-session-1");
+    assert_eq!(summary.session.status, "ready");
+    assert_eq!(summary.session.user_visible_url, None);
+    assert_eq!(
+        summary.local_runtime_url.as_deref(),
+        Some("http://127.0.0.1:8123")
+    );
+    assert_eq!(
+        summary.session.requested_by_client.as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(
+        summary.session.runtime_owner.as_deref(),
+        Some("local_runtime")
+    );
+    assert_eq!(
+        summary.session.placement.placement_provider,
+        capsule_wire::placement::PlacementProviderKind::Desktop
+    );
+}
+
+#[test]
+fn runtime_session_summary_uses_stored_session_origin_and_user_url() {
+    let stored = stored_runtime_session_record();
+    let summary = runtime_session_summary(runtime_process_fixture(), Some(&stored));
+
+    assert_eq!(summary.session.session_id, "runtime-session-1");
+    assert_eq!(
+        summary.session.user_visible_url.as_deref(),
+        Some("https://desktop.example/session/runtime-session-1")
+    );
+    assert_eq!(
+        summary.local_runtime_url.as_deref(),
+        Some("http://127.0.0.1:8123")
+    );
+    assert_eq!(
+        summary.session.requested_by_client.as_deref(),
+        Some("desktop_fe")
+    );
+    assert_eq!(summary.session.runtime_owner.as_deref(), Some("desktop_be"));
+    assert_eq!(
+        summary.session.placement.placement_provider_id.as_str(),
+        "desktop:stored"
+    );
+}
+
+fn runtime_process_fixture() -> ProcessInfo {
+    ProcessInfo {
         id: "runtime-session-1".to_string(),
         name: "demo".to_string(),
         pid: std::process::id() as i32,
@@ -813,18 +1025,52 @@ fn runtime_session_summary_maps_process_to_desktop_placement() {
         last_event: None,
         last_error: None,
         exit_code: None,
-    });
+    }
+}
 
-    assert_eq!(summary.session_id, "runtime-session-1");
-    assert_eq!(summary.status, "ready");
-    assert_eq!(
-        summary.user_visible_url.as_deref(),
-        Some("http://127.0.0.1:8123")
-    );
-    assert_eq!(
-        summary.placement.placement_provider,
-        capsule_wire::placement::PlacementProviderKind::Desktop
-    );
+fn stored_runtime_session_record() -> ato_session_core::StoredSessionInfo {
+    serde_json::from_value(serde_json::json!({
+        "session_id": "runtime-session-1",
+        "handle": "publisher/slug",
+        "normalized_handle": "publisher/slug",
+        "canonical_handle": null,
+        "trust_state": "trusted",
+        "source": "registry",
+        "restricted": false,
+        "snapshot": null,
+        "runtime": {
+            "target_label": "main",
+            "runtime": "node",
+            "driver": null,
+            "language": null,
+            "port": null
+        },
+        "display_strategy": "web_url",
+        "pid": 1234,
+        "log_path": ".tmp/runtime-session-1.log",
+        "manifest_path": "capsule.toml",
+        "target_label": "main",
+        "notes": [],
+        "guest": null,
+        "web": null,
+        "terminal": null,
+        "service": null,
+        "placement_provider": "desktop",
+        "placement_provider_id": "desktop:stored",
+        "placement_id": "plc_stored_desktop",
+        "placement_fingerprint": "sha256:abc",
+        "placement_facets": {
+            "provider_kind": "desktop",
+            "isolation_class": "local",
+            "storage_class": "local",
+            "network_class": "loopback",
+            "runner_version": "0.7.0-dev"
+        },
+        "user_visible_url": "https://desktop.example/session/runtime-session-1",
+        "requested_by_client": "desktop_fe",
+        "runtime_owner": "desktop_be"
+    }))
+    .expect("stored session record")
 }
 
 #[tokio::test(flavor = "current_thread")]
