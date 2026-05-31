@@ -77,7 +77,12 @@ pub fn install_panic_hook() {
         let report_path = write_crash_report(&report);
 
         #[cfg(target_os = "windows")]
-        show_dialog("Ato Desktop crashed", &location, &message, report_path.as_ref());
+        show_dialog(
+            "Ato Desktop crashed",
+            &location,
+            &message,
+            report_path.as_ref(),
+        );
 
         // Reset before delegating so a future (non-aborting) panic is still
         // captured if the process somehow survives this one.
