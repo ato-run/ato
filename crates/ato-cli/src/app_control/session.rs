@@ -1951,6 +1951,7 @@ pub(super) fn resolve_session_launch_plan(
                 true,
                 ProviderToolchain::Auto,
                 None,
+                None,
                 false,
                 None,
                 false,
