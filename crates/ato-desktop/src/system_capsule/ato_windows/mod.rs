@@ -107,11 +107,14 @@ pub fn dispatch(
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
         WindowsCommand::OpenStart => {
-            if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                tracing::error!(error = %err, "ato_windows: open_start_window failed");
-            }
-            cx.set_global(CardSwitcherWindowSlot(None));
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                cx.set_global(CardSwitcherWindowSlot(None));
+                cx.set_global(crate::window::card_switcher::CardSwitcherEntitySlot(None));
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+                if let Err(err) = crate::window::start_window::open_start_window(cx) {
+                    tracing::error!(error = %err, "ato_windows: open_start_window failed");
+                }
+            });
         }
         WindowsCommand::CloseWindow { window_id } => {
             // Look up the target handle. If the window was already closed

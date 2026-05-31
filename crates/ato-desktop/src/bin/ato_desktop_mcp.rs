@@ -106,35 +106,52 @@ fn discover_socket() -> PathBuf {
             }
         }
     }
-    // Fallback: enumerate `ato-desktop-<pid>.sock` and pick the first whose
-    // pid is alive. This rules out orphan sockets left behind by crashed
-    // instances (#68).
-    let mut legacy_socket = None;
-    if let Ok(entries) = std::fs::read_dir(&run_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !(name.starts_with("ato-desktop-") && name.ends_with(".sock")) {
-                continue;
-            }
-            let stem = name
-                .strip_prefix("ato-desktop-")
-                .and_then(|s| s.strip_suffix(".sock"));
-            let pid = stem.and_then(|s| s.parse::<u32>().ok());
-            match pid {
-                Some(pid) if pid_is_alive(pid) => return entry.path(),
-                Some(_) => {}
-                None => {
-                    legacy_socket.get_or_insert_with(|| entry.path());
+
+    #[cfg(unix)]
+    {
+        // Fallback: enumerate `ato-desktop-<pid>.sock` and pick the first whose
+        // pid is alive. This rules out orphan sockets left behind by crashed
+        // instances (#68).
+        let mut legacy_socket = None;
+        if let Ok(entries) = std::fs::read_dir(&run_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !(name.starts_with("ato-desktop-") && name.ends_with(".sock")) {
+                    continue;
+                }
+                let stem = name
+                    .strip_prefix("ato-desktop-")
+                    .and_then(|s| s.strip_suffix(".sock"));
+                let pid = stem.and_then(|s| s.parse::<u32>().ok());
+                match pid {
+                    Some(pid) if pid_is_alive(pid) => return entry.path(),
+                    Some(_) => {}
+                    None => {
+                        legacy_socket.get_or_insert_with(|| entry.path());
+                    }
                 }
             }
         }
+        if let Some(path) = legacy_socket {
+            return path;
+        }
+        return run_dir.join("ato-desktop.sock");
     }
-    if let Some(path) = legacy_socket {
-        return path;
+
+    #[cfg(windows)]
+    {
+        // Named pipes have no filesystem representation that can be enumerated.
+        // Without a valid discovery JSON we cannot determine which
+        // `\\.\pipe\ato-desktop-<pid>` to connect to. Return a sentinel that
+        // does not exist, producing a clear "not running" error at connect time.
+        PathBuf::from(r"\\.\pipe\ato-desktop-not-running")
     }
-    // Last resort default.
-    run_dir.join("ato-desktop.sock")
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        run_dir.join("ato-desktop.sock")
+    }
 }
 
 /// Best-effort liveness check used when picking which discovered socket to
@@ -155,7 +172,24 @@ fn pid_is_alive(pid: u32) -> bool {
     errno != libc::ESRCH
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output();
+    match output {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.contains(&pid.to_string())
+        }
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn pid_is_alive(_pid: u32) -> bool {
     true
 }
@@ -665,48 +699,113 @@ fn handle_host_take_screenshot(
         Err(e) => return mcp_error(id, &format!("failed to allocate screenshot path: {e}")),
     };
 
-    let mut cmd = std::process::Command::new("screencapture");
-    // `-t png` → PNG output. `-x` suppresses the system shutter sound
-    // so AODD loops do not click on every capture.
-    cmd.args(["-t", "png", "-x"]);
-    if let Some(region) = args.get("region").and_then(|v| v.as_str()) {
-        if !is_valid_region(region) {
-            return mcp_error(
-                id,
-                &format!("invalid region '{region}': expected 'x,y,w,h' integers"),
-            );
-        }
-        cmd.arg("-R").arg(region);
-    }
-    cmd.arg(&path);
-
-    match cmd.output() {
-        Ok(out) if out.status.success() => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::json!({
-                        "ok": true,
-                        "path": path.display().to_string(),
-                    }).to_string()
-                }],
-                "isError": false
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("screencapture");
+        cmd.args(["-t", "png", "-x"]);
+        if let Some(region) = args.get("region").and_then(|v| v.as_str()) {
+            if !is_valid_region(region) {
+                return mcp_error(
+                    id,
+                    &format!("invalid region '{region}': expected 'x,y,w,h' integers"),
+                );
             }
-        }),
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            mcp_error(
-                id,
-                &format!(
-                    "screencapture exited with status {}: {}",
-                    out.status, stderr
-                ),
-            )
+            cmd.arg("-R").arg(region);
         }
-        Err(e) => mcp_error(id, &format!("failed to spawn screencapture: {e}")),
+        cmd.arg(&path);
+        match cmd.output() {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                return mcp_error(
+                    id,
+                    &format!(
+                        "screencapture exited with status {}: {}",
+                        out.status, stderr
+                    ),
+                );
+            }
+            Err(e) => return mcp_error(id, &format!("failed to spawn screencapture: {e}")),
+        }
     }
+
+    #[cfg(windows)]
+    {
+        let region = args.get("region").and_then(|v| v.as_str());
+        let (x, y, w, h) = if let Some(region) = region {
+            if !is_valid_region(region) {
+                return mcp_error(
+                    id,
+                    &format!("invalid region '{region}': expected 'x,y,w,h' integers"),
+                );
+            }
+            let parts: Vec<i64> = region
+                .split(',')
+                .map(|part| part.trim().parse::<i64>().unwrap())
+                .collect();
+            (parts[0], parts[1], parts[2], parts[3])
+        } else {
+            (0, 0, -1, -1)
+        };
+
+        let ps_path = escape_ps_single_quoted(&path.display().to_string());
+        let script = if w < 0 {
+            format!(
+                r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
+$s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;
+$bmp=New-Object System.Drawing.Bitmap($s.Width,$s.Height);
+$g=[System.Drawing.Graphics]::FromImage($bmp);
+$g.CopyFromScreen($s.Left,$s.Top,0,0,$s.Size);
+$bmp.Save('{ps_path}',[System.Drawing.Imaging.ImageFormat]::Png);
+$g.Dispose();$bmp.Dispose()"#
+            )
+        } else {
+            format!(
+                r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
+$bmp=New-Object System.Drawing.Bitmap({w},{h});
+$g=[System.Drawing.Graphics]::FromImage($bmp);
+$g.CopyFromScreen({x},{y},0,0,(New-Object System.Drawing.Size({w},{h})));
+$bmp.Save('{ps_path}',[System.Drawing.Imaging.ImageFormat]::Png);
+$g.Dispose();$bmp.Dispose()"#
+            )
+        };
+
+        match std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                return mcp_error(
+                    id,
+                    &format!("PowerShell screenshot failed ({}): {}", out.status, stderr),
+                );
+            }
+            Err(e) => return mcp_error(id, &format!("failed to spawn powershell: {e}")),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        return mcp_error(id, "host_take_screenshot is not supported on this platform");
+    }
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": serde_json::json!({
+                    "ok": true,
+                    "path": path.display().to_string(),
+                })
+                .to_string()
+            }],
+            "isError": false
+        }
+    })
 }
 
 fn aodd_screenshot_path() -> std::io::Result<PathBuf> {
@@ -738,38 +837,74 @@ fn handle_host_activate_app(id: serde_json::Value, args: &serde_json::Value) -> 
     if !is_safe_applescript_literal(process_name) {
         return mcp_error(id, "process_name contains forbidden characters");
     }
-    let script = format!(
-        "tell application \"System Events\" to set frontmost of (first process whose name is \"{}\") to true",
-        process_name
-    );
-    match std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
+
+    #[cfg(target_os = "macos")]
     {
-        Ok(out) if out.status.success() => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::json!({"ok": true, "process_name": process_name}).to_string()
-                }],
-                "isError": false
+        let script = format!(
+            "tell application \"System Events\" to set frontmost of (first process whose name is \"{}\") to true",
+            process_name
+        );
+        match std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                return mcp_error(
+                    id,
+                    &format!(
+                        "osascript failed to activate {process_name} (status {}): {}",
+                        out.status, stderr
+                    ),
+                );
             }
-        }),
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            mcp_error(
-                id,
-                &format!(
-                    "osascript failed to activate {process_name} (status {}): {}",
-                    out.status, stderr
-                ),
-            )
+            Err(e) => return mcp_error(id, &format!("failed to spawn osascript: {e}")),
         }
-        Err(e) => mcp_error(id, &format!("failed to spawn osascript: {e}")),
     }
+
+    #[cfg(windows)]
+    {
+        let ps_process_name = escape_ps_single_quoted(process_name);
+        let script = format!(
+            "(New-Object -ComObject WScript.Shell).AppActivate((Get-Process | Where-Object {{ $_.ProcessName -eq '{ps_process_name}' }} | Select-Object -First 1 -ExpandProperty Id))",
+        );
+        match std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                return mcp_error(
+                    id,
+                    &format!(
+                        "failed to activate {process_name} ({}): {}",
+                        out.status, stderr
+                    ),
+                );
+            }
+            Err(e) => return mcp_error(id, &format!("failed to spawn powershell: {e}")),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        return mcp_error(id, "host_activate_app is not supported on this platform");
+    }
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": serde_json::json!({"ok": true, "process_name": process_name}).to_string()
+            }],
+            "isError": false
+        }
+    })
 }
 
 /// `host_press_key` — synthesise a keystroke to the foreground app.
@@ -789,44 +924,107 @@ fn handle_host_press_key(id: serde_json::Value, args: &serde_json::Value) -> ser
         })
         .unwrap_or_default();
 
-    let modifier_clause = match build_modifier_clause(&modifiers) {
-        Ok(s) => s,
-        Err(e) => return mcp_error(id, &e),
-    };
-
-    let script = match build_keystroke_script(key, &modifier_clause) {
-        Ok(s) => s,
-        Err(e) => return mcp_error(id, &e),
-    };
-
-    match std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
+    #[cfg(target_os = "macos")]
     {
-        Ok(out) if out.status.success() => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::json!({"ok": true, "key": key, "modifiers": modifiers}).to_string()
-                }],
-                "isError": false
+        let modifier_clause = match build_modifier_clause(&modifiers) {
+            Ok(s) => s,
+            Err(e) => return mcp_error(id, &e),
+        };
+
+        let script = match build_keystroke_script(key, &modifier_clause) {
+            Ok(s) => s,
+            Err(e) => return mcp_error(id, &e),
+        };
+
+        match std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                return mcp_error(
+                    id,
+                    &format!(
+                        "osascript keystroke failed (status {}): {}",
+                        out.status, stderr
+                    ),
+                );
             }
-        }),
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            mcp_error(
-                id,
-                &format!(
-                    "osascript keystroke failed (status {}): {}",
-                    out.status, stderr
-                ),
-            )
+            Err(e) => return mcp_error(id, &format!("failed to spawn osascript: {e}")),
         }
-        Err(e) => mcp_error(id, &format!("failed to spawn osascript: {e}")),
     }
+
+    #[cfg(windows)]
+    {
+        let sendkeys_key = match key {
+            "Escape" | "escape" | "Esc" | "esc" => "{ESC}".to_string(),
+            "Return" | "return" | "Enter" | "enter" => "{ENTER}".to_string(),
+            "Tab" | "tab" => "{TAB}".to_string(),
+            "Space" | "space" => " ".to_string(),
+            "Backspace" | "backspace" | "Delete" | "delete" => "{BACKSPACE}".to_string(),
+            "Up" | "up" | "ArrowUp" => "{UP}".to_string(),
+            "Down" | "down" | "ArrowDown" => "{DOWN}".to_string(),
+            "Left" | "left" | "ArrowLeft" => "{LEFT}".to_string(),
+            "Right" | "right" | "ArrowRight" => "{RIGHT}".to_string(),
+            k if k.len() == 1 => {
+                let escaped = match k {
+                    "+" | "^" | "%" | "~" | "(" | ")" | "{" | "}" | "[" | "]" => {
+                        format!("{{{k}}}")
+                    }
+                    _ => k.to_string(),
+                };
+                escaped
+            }
+            other => return mcp_error(id, &format!("unsupported key for Windows: {other}")),
+        };
+
+        let mut prefix = String::new();
+        for modifier in &modifiers {
+            match modifier.to_lowercase().as_str() {
+                "shift" => prefix.push('+'),
+                "control" | "ctrl" => prefix.push('^'),
+                "alt" | "option" => prefix.push('%'),
+                "command" | "cmd" => {}
+                other => return mcp_error(id, &format!("unknown modifier: {other}")),
+            }
+        }
+
+        let send_sequence = format!("{prefix}{sendkeys_key}");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')",
+            send_sequence.replace('\'', "''")
+        );
+        match std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                return mcp_error(id, &format!("SendKeys failed ({}): {}", out.status, stderr));
+            }
+            Err(e) => return mcp_error(id, &format!("failed to spawn powershell: {e}")),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        return mcp_error(id, "host_press_key is not supported on this platform");
+    }
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": serde_json::json!({"ok": true, "key": key, "modifiers": modifiers}).to_string()
+            }],
+            "isError": false
+        }
+    })
 }
 
 fn build_modifier_clause(modifiers: &[String]) -> Result<String, String> {
@@ -906,21 +1104,51 @@ fn handle_cleanup_host_resources(
 }
 
 fn find_pids(pattern: &str) -> Vec<u32> {
-    let output = match std::process::Command::new("pgrep")
-        .arg("-f")
-        .arg(pattern)
-        .output()
+    #[cfg(unix)]
     {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !output.status.success() {
-        return Vec::new();
+        let output = match std::process::Command::new("pgrep")
+            .arg("-f")
+            .arg(pattern)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
+
+    #[cfg(windows)]
+    {
+        let escaped = pattern.replace('\'', "''");
+        let script = format!(
+            "Get-Process | Where-Object {{ $_.ProcessName -match '{escaped}' -or ($_.Path -ne $null -and $_.Path -match '{escaped}') }} | Select-Object -ExpandProperty Id"
+        );
+        let output = match std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
 }
 
 #[cfg(unix)]
@@ -937,63 +1165,129 @@ fn kill_pids_mcp(pids: &[u32]) -> usize {
     killed
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn kill_pids_mcp(pids: &[u32]) -> usize {
+    let current = std::process::id();
+    let mut killed = 0usize;
+    for &pid in pids {
+        if pid == current {
+            continue;
+        }
+        let ok = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if ok {
+            killed += 1;
+        }
+    }
+    killed
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_pids_mcp(_pids: &[u32]) -> usize {
     0
 }
 
 fn find_port_pids_mcp(port: u16) -> Vec<u32> {
-    let output = match std::process::Command::new("lsof")
-        .arg("-ti")
-        .arg(format!(":{port}"))
-        .output()
+    #[cfg(unix)]
     {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !output.status.success() {
-        return Vec::new();
+        let output = match std::process::Command::new("lsof")
+            .arg("-ti")
+            .arg(format!(":{port}"))
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
+
+    #[cfg(windows)]
+    {
+        let output = match std::process::Command::new("netstat")
+            .args(["-ano"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        let port_str = format!(":{port} ");
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains(&port_str)
+                    && (line.contains("LISTENING") || line.contains("ESTABLISHED"))
+            })
+            .filter_map(|line| line.split_whitespace().last()?.trim().parse::<u32>().ok())
+            .collect::<std::collections::HashSet<u32>>()
+            .into_iter()
+            .collect();
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
 }
 
 fn count_shm_mcp() -> usize {
-    let output = match std::process::Command::new("ipcs").arg("-m").output() {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let user = std::env::var("USER").unwrap_or_default();
-    text.lines().filter(|line| line.contains(&user)).count()
+    #[cfg(unix)]
+    {
+        let output = match std::process::Command::new("ipcs").arg("-m").output() {
+            Ok(o) => o,
+            Err(_) => return 0,
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let user = std::env::var("USER").unwrap_or_default();
+        return text.lines().filter(|line| line.contains(&user)).count();
+    }
+
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 fn free_shm_mcp() -> usize {
-    let output = match std::process::Command::new("ipcs").arg("-m").output() {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let user = std::env::var("USER").unwrap_or_default();
-    let mut freed = 0usize;
-    for line in text.lines() {
-        if !line.contains(&user) {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(id_str) = parts.get(1) {
-            if let Ok(id) = id_str.parse::<u32>() {
-                let _ = std::process::Command::new("ipcrm")
-                    .arg("-m")
-                    .arg(id.to_string())
-                    .output();
-                freed += 1;
+    #[cfg(unix)]
+    {
+        let output = match std::process::Command::new("ipcs").arg("-m").output() {
+            Ok(o) => o,
+            Err(_) => return 0,
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let user = std::env::var("USER").unwrap_or_default();
+        let mut freed = 0usize;
+        for line in text.lines() {
+            if !line.contains(&user) {
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    let _ = std::process::Command::new("ipcrm")
+                        .arg("-m")
+                        .arg(id.to_string())
+                        .output();
+                    freed += 1;
+                }
             }
         }
+        return freed;
     }
-    freed
+
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 /// Map either a single character or a named key to the AppleScript
@@ -1039,6 +1333,12 @@ fn build_keystroke_script(key: &str, modifier_clause: &str) -> Result<String, St
 /// the AppleScript string literal we embed into.
 fn is_safe_applescript_literal(s: &str) -> bool {
     !s.chars().any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
+}
+
+/// Escapes a string for safe embedding inside a PowerShell single-quoted literal.
+/// In PS single-quoted strings, only `'` is special and must be doubled as `''`.
+fn escape_ps_single_quoted(s: &str) -> String {
+    s.replace('\'', "''")
 }
 
 fn automation_client_response_timeout(
@@ -1332,7 +1632,101 @@ fn send_automation_command(
         .unwrap_or(serde_json::Value::Null))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn send_automation_command(
+    socket_path: &Path,
+    method: &str,
+    params: serde_json::Value,
+    response_timeout: std::time::Duration,
+) -> Result<serde_json::Value, String> {
+    use std::io::{BufRead as _, Write};
+    use std::time::Instant;
+
+    let deadline = Instant::now() + response_timeout;
+    let mut file = loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(socket_path)
+        {
+            Ok(file) => break file,
+            Err(error) if error.raw_os_error() == Some(231) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "named pipe {} is busy (all instances occupied)",
+                        socket_path.display()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "no ato-desktop instance is running (no pipe at {})",
+                    socket_path.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot connect to ato-desktop pipe {}: {error}",
+                    socket_path.display()
+                ));
+            }
+        }
+    };
+
+    let rpc = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params
+    });
+    let mut line = serde_json::to_string(&rpc).unwrap();
+    line.push('\n');
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("send failed: {e}"))?;
+
+    // `std::fs::File` (named pipe) has no `set_read_timeout`. Bound the
+    // receive with a helper thread + channel timeout instead.
+    let timeout_remaining = deadline.saturating_duration_since(Instant::now());
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    std::thread::spawn(move || {
+        let mut response_line = String::new();
+        let result = std::io::BufReader::new(file)
+            .read_line(&mut response_line)
+            .map(|_| response_line)
+            .map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    let response_line = match rx.recv_timeout(timeout_remaining) {
+        Ok(Ok(line)) => line,
+        Ok(Err(e)) => return Err(format!("receive failed: {e}")),
+        Err(_) => {
+            return Err(format!(
+                "timed out waiting for ato-desktop response ({}ms)",
+                response_timeout.as_millis()
+            ))
+        }
+    };
+
+    let response: serde_json::Value =
+        serde_json::from_str(&response_line).map_err(|e| format!("invalid JSON response: {e}"))?;
+
+    if let Some(error) = response.get("error") {
+        let msg = error
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("automation error");
+        return Err(msg.to_string());
+    }
+
+    Ok(response
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn send_automation_command(
     _socket_path: &Path,
     _method: &str,
@@ -1346,7 +1740,7 @@ fn send_automation_command(
 
 static TOOLS: &str = r#"[
   {"name":"browser_snapshot","description":"Returns an accessibility tree snapshot of the active WebView page.","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer","description":"Target pane ID (0 = active pane)"}},"required":[]}},
-  {"name":"browser_take_screenshot","description":"Takes a PNG screenshot of the active WebView (macOS only).","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer"}},"required":[]}},
+  {"name":"browser_take_screenshot","description":"Takes a PNG screenshot of the active WebView (macOS via WKWebView snapshotting; Windows via WebView2 CapturePreview).","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer"}},"required":[]}},
   {"name":"browser_click","description":"Clicks an element by its stable ref from browser_snapshot.","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"pane_id":{"type":"integer"}},"required":["ref"]}},
   {"name":"browser_fill","description":"Sets the value of an input by ref (clears first).","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"value":{"type":"string"},"pane_id":{"type":"integer"}},"required":["ref","value"]}},
   {"name":"browser_type","description":"Types text character-by-character into an element.","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"text":{"type":"string"},"pane_id":{"type":"integer"}},"required":["ref","text"]}},
@@ -1371,9 +1765,9 @@ static TOOLS: &str = r#"[
   {"name":"stop_active_session","description":"Stop the active pane's underlying capsule session, mirroring the `Cmd+Shift+W` keybind and the omnibar 'stop session' suggestion. Routes through `WebViewManager::stop_active_session` — the same method `DesktopShell::on_stop_active_session` dispatches — so providers (postgres, etc.) and consumers (uvicorn / vite / ...) shut down via `ato app session stop` exactly as a UI-initiated stop would. Returns `{ok:true, stopped, had_active_session, session_id, handle}`; `stopped:false` with `had_active_session:false` means there was nothing to stop (idempotent), `stopped:false` with `had_active_session:true` means the underlying `stop_guest_session` returned a non-success outcome and the caller should inspect ports/processes (refs #92 AC-step 6).","inputSchema":{"type":"object","properties":{},"required":[]}},
   {"name":"restart_active_session","description":"Stop and restart the active Focus-mode capsule session with the same route and launch configs. Restricted to CapsuleHandle/CapsuleUrl routes. The root Focus View window stays open. Returns `{ok:true, restarted, had_active_session, session_id, handle}`; `restarted:false` with `had_active_session:false` means nothing was running (idempotent). If stop fails, reopen is skipped and an error is returned.","inputSchema":{"type":"object","properties":{},"required":[]}},
   {"name":"auth_status","description":"Returns the current ato-desktop sign-in state for AODD agents. Does NOT expose the session token.","inputSchema":{"type":"object","properties":{},"required":[]}},
-  {"name":"host_take_screenshot","description":"Captures the full macOS display as PNG (via `screencapture -t png -x`) and writes it to a hermetic temp file under `${ATO_HOME:-~/.ato}/aodd/`. Returns `{ok:true, path:'<abs>'}`. This is the AODD-visual-inspection primitive for ato-desktop's GPUI host surfaces (Control Bar, AppWindow, Launcher, Card Switcher); those surfaces are NOT reachable via the `browser_*` tools because those target WKWebView page content only. macOS only. Requires Screen Recording permission for the terminal running the MCP — the first invocation will trigger a system permission prompt.","inputSchema":{"type":"object","properties":{"region":{"type":"string","description":"Optional region in 'x,y,w,h' format. When omitted captures the whole main display."}},"required":[]}},
-  {"name":"host_activate_app","description":"Brings an application to the foreground via osascript + System Events. Required before host_press_key so keystrokes route to ato-desktop, not whatever else has focus. Returns `{ok:true}` on success. Requires Accessibility permission for the terminal running the MCP — the first invocation triggers a system prompt.","inputSchema":{"type":"object","properties":{"process_name":{"type":"string","description":"Process name as shown in Activity Monitor (default: 'ato-desktop')."}},"required":[]}},
-  {"name":"host_press_key","description":"Sends a keyboard event to the currently focused application via osascript + System Events keystroke. Pair with host_activate_app first. `key` accepts a single character (e.g. 'n', '1') or a named key ('Escape', 'Return', 'Tab', 'Space'). `modifiers` is an array drawn from ['command','shift','option','control']. Returns `{ok:true}` on success.","inputSchema":{"type":"object","properties":{"key":{"type":"string","description":"Single character or named key."},"modifiers":{"type":"array","items":{"type":"string"},"description":"Modifier keys to hold."}},"required":["key"]}},
-  {"name":"cleanup_host_resources","description":"Preview and clean up stale provider processes (postgres, bun) and System V shared memory segments owned by the current user. Uses TERM only — no SIGKILL. Set dry_run=true to only preview without killing.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"If true, only preview without killing (default: false)"}},"required":[]}},
+  {"name":"host_take_screenshot","description":"Captures the full display as PNG on macOS (via `screencapture`) and Windows (via PowerShell + .NET Graphics), writing it under `${ATO_HOME:-~/.ato}/aodd/`. Returns `{ok:true, path:'<abs>'}`. This is the AODD visual-inspection primitive for ato-desktop's GPUI host surfaces, which are not reachable via the `browser_*` tools because those target embedded WebView content only.","inputSchema":{"type":"object","properties":{"region":{"type":"string","description":"Optional region in 'x,y,w,h' format. When omitted captures the whole main display."}},"required":[]}},
+  {"name":"host_activate_app","description":"Brings an application to the foreground on macOS (via osascript + System Events) and Windows (via PowerShell AppActivate). Required before `host_press_key` so keystrokes route to ato-desktop, not whatever else has focus. Returns `{ok:true}` on success.","inputSchema":{"type":"object","properties":{"process_name":{"type":"string","description":"Process name as shown in Activity Monitor or Task Manager (default: 'ato-desktop')."}},"required":[]}},
+  {"name":"host_press_key","description":"Sends a keyboard event to the currently focused application on macOS (osascript/System Events) and Windows (PowerShell SendKeys). Pair with `host_activate_app` first. `key` accepts a single character (e.g. 'n', '1') or a named key ('Escape', 'Return', 'Tab', 'Space'). `modifiers` is an array drawn from ['command','shift','option','control'] (Windows ignores command). Returns `{ok:true}` on success.","inputSchema":{"type":"object","properties":{"key":{"type":"string","description":"Single character or named key."},"modifiers":{"type":"array","items":{"type":"string"},"description":"Modifier keys to hold."}},"required":["key"]}},
+  {"name":"cleanup_host_resources","description":"Preview and clean up stale provider processes (postgres, bun) owned by the current user. On Unix also removes System V shared memory segments; on Unix sends SIGTERM (no SIGKILL), on Windows uses `taskkill /F` (force-kill, no graceful shutdown). Set dry_run=true to only preview without killing.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"If true, only preview without killing (default: false)"}},"required":[]}},
   {"name":"host_dispatch_action","description":"Queues a host-level GPUI action by name onto the ato-desktop automation socket. Valid actions: 'NavigateToUrl' (requires `url` parameter), 'ForceApprovePending', 'FocusControlBarInput', 'OpenStartWindow', 'OpenStoreWindow', 'OpenCardSwitcher', 'CompleteOnboarding', 'SkipOnboarding', 'ShowSettings', and others. The desktop drains the queue on its next render pass and invokes the matching handler in-process. Returns `{ok:true, queued_action:'<name>'}`.","inputSchema":{"type":"object","properties":{"action":{"type":"string","description":"Action name to dispatch."},"url":{"type":"string","description":"URL parameter required for NavigateToUrl action (e.g. 'capsule://github.com/Koh0920/hello-capsule')."}},"required":["action"]}}
 ]"#;

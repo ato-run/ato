@@ -1,8 +1,10 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 const APP_NAME: &str = "Ato Desktop";
 const APP_IDENTIFIER: &str = "run.ato.desktop";
@@ -28,6 +30,8 @@ fn main() -> Result<()> {
             let mut do_zip = false;
             let mut do_msi = false;
             let mut do_appimage = false;
+            let mut helper_source_arg: Option<String> = None;
+            let mut helper_artifact_dir_arg: Option<String> = None;
             let mut i = 0;
             while i < forwarded.len() {
                 let arg = &forwarded[i];
@@ -45,9 +49,34 @@ fn main() -> Result<()> {
                     "--zip" => do_zip = true,
                     "--msi" => do_msi = true,
                     "--appimage" => do_appimage = true,
+                    "--helper-source" => {
+                        helper_source_arg = Some(
+                            forwarded
+                                .get(i)
+                                .context("--helper-source requires a value: local or release")?
+                                .clone(),
+                        );
+                        i += 1;
+                    }
+                    "--helper-artifact-dir" => {
+                        helper_artifact_dir_arg = Some(
+                            forwarded
+                                .get(i)
+                                .context("--helper-artifact-dir requires a directory path")?
+                                .clone(),
+                        );
+                        i += 1;
+                    }
                     other => bail!("unsupported xtask argument: {}", other),
                 }
             }
+            // Resolve where the bundled `ato` / `nacelle` helpers come from.
+            // `local` (default) builds them from source; `release` consumes
+            // prebuilt cargo-dist artifacts so Desktop packaging never
+            // rebuilds the CLI/sidecar (issue #366). Made explicit on purpose
+            // — a release build must never silently fall back to rebuilding.
+            let helper_source =
+                resolve_helper_source(helper_source_arg, helper_artifact_dir_arg)?;
             // Dispatch by target family. Each platform has its own
             // staging layout — keeping them in distinct functions
             // makes the per-platform invariants (Helpers/ato vs
@@ -59,7 +88,7 @@ fn main() -> Result<()> {
             // zip path is now the canonical install.sh delivery.
             match target.as_str() {
                 "darwin-arm64" | "darwin-x86_64" => {
-                    let bundle = bundle_macos_app(&target)?;
+                    let bundle = bundle_macos_app(&target, &helper_source)?;
                     if sign {
                         codesign_bundle(&bundle)?;
                     }
@@ -72,7 +101,7 @@ fn main() -> Result<()> {
                     Ok(())
                 }
                 "windows-x86_64" => {
-                    let staging = bundle_windows_app(&target)?;
+                    let staging = bundle_windows_app(&target, &helper_source)?;
                     if do_msi {
                         package_msi(&staging, &target)?;
                     }
@@ -82,7 +111,7 @@ fn main() -> Result<()> {
                     Ok(())
                 }
                 "linux-x86_64" | "linux-arm64" => {
-                    let staging = bundle_linux_app(&target)?;
+                    let staging = bundle_linux_app(&target, &helper_source)?;
                     if do_appimage {
                         package_appimage(&staging, &target)?;
                     }
@@ -145,13 +174,23 @@ fn print_help() {
     println!(
         "ato-desktop xtask\n\n\
          Commands:\n  \
-           bundle [--target TARGET] [--sign] [--notarize] [--zip] [--msi] [--appimage]\n  \
+           bundle [--target TARGET] [--sign] [--notarize] [--zip] [--msi] [--appimage]\n         \
+                  [--helper-source local|release] [--helper-artifact-dir DIR]\n  \
            notarize <bundle>     Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
            zip      <path>       Wrap a .app bundle (macOS) or staging dir (Windows) in a .zip\n  \
            msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
            appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
          Targets:\n  \
             darwin-arm64 (default), darwin-x86_64, windows-x86_64, linux-x86_64, linux-arm64\n\n\
+         Helper source (bundled private `ato` + `nacelle`):\n  \
+            - local   (default) build ato + nacelle from the workspace\n  \
+            - release           consume prebuilt cargo-dist artifacts from\n                     \
+                      --helper-artifact-dir / ATO_HELPER_ARTIFACT_DIR (no rebuild).\n            \
+                Env equivalents: ATO_DESKTOP_HELPER_SOURCE, ATO_HELPER_ARTIFACT_DIR.\n  \
+            Bundled `ato`/`nacelle` are PRIVATE Desktop-internal helpers — bundling\n  \
+            does NOT expose `ato` on the user's shell PATH (a separate CLI-expose step\n  \
+            does that), and `nacelle` is never placed on PATH. ato-netd is always built\n  \
+            locally (it is not a released cargo-dist artifact).\n\n\
          macOS code-signing modes (resolved at runtime):\n  \
             - if MAC_DEVELOPER_ID_NAME is set: real Developer ID (hardened runtime + entitlements)\n  \
             - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n\n\
@@ -164,7 +203,7 @@ fn print_help() {
 ///   - macOS:   `dist/<target>/Ato Desktop.app/Contents/...`
 ///   - Windows: `dist/<target>/Ato/{ato-desktop.exe, bin/ato.exe, assets/}`
 ///   - Linux:   `dist/<target>/AppDir/usr/{bin/{ato-desktop,ato,ato-netd},share/applications/...}`
-fn bundle_windows_app(target: &str) -> Result<PathBuf> {
+fn bundle_windows_app(target: &str, helper_source: &HelperSource) -> Result<PathBuf> {
     let rust_target = match target {
         "windows-x86_64" => "x86_64-pc-windows-msvc",
         other => bail!("unsupported windows target: {}", other),
@@ -176,13 +215,9 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
         rust_target,
         &paths.target_root,
     )?;
-    run_cargo_build(&paths.ato_manifest, "ato", rust_target, &paths.target_root)?;
-    run_cargo_build(
-        &paths.nacelle_manifest,
-        "nacelle",
-        rust_target,
-        &paths.target_root,
-    )?;
+    // ato + nacelle come from `helper_source` (built locally or consumed
+    // from released cargo-dist artifacts). ato-desktop is always built here.
+    let helpers = stage_helper_binaries(helper_source, target, rust_target, &paths)?;
 
     let staging = paths.desktop_root.join("dist").join(target).join("Ato");
     if staging.exists() {
@@ -196,25 +231,57 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
 
     let profile_dir = format!("{rust_target}/release");
     let desktop_exe = paths.target_root.join(&profile_dir).join("ato-desktop.exe");
-    let helper_exe = paths.target_root.join(&profile_dir).join("ato.exe");
-    let nacelle_exe = paths.target_root.join(&profile_dir).join("nacelle.exe");
     fs::copy(&desktop_exe, staging.join("ato-desktop.exe")).with_context(|| {
         format!(
             "failed to copy {} to staging — was the cross-build successful?",
             desktop_exe.display()
         )
     })?;
-    fs::copy(&helper_exe, bin_dir.join("ato.exe"))
-        .with_context(|| format!("failed to copy {} to staging", helper_exe.display()))?;
-    fs::copy(&nacelle_exe, bin_dir.join("nacelle.exe"))
-        .with_context(|| format!("failed to copy {} to staging", nacelle_exe.display()))?;
+    fs::copy(&helpers.ato, bin_dir.join("ato.exe"))
+        .with_context(|| format!("failed to copy {} to staging", helpers.ato.display()))?;
+    fs::copy(&helpers.nacelle, bin_dir.join("nacelle.exe"))
+        .with_context(|| format!("failed to copy {} to staging", helpers.nacelle.display()))?;
     copy_bundled_assets(&paths.desktop_root.join("assets"), &assets_dir)?;
+    assert_windows_staging_layout(&staging)?;
 
     println!("Staged Windows install tree at {}", staging.display());
     Ok(staging)
 }
 
-fn bundle_linux_app(target: &str) -> Result<PathBuf> {
+fn assert_windows_staging_layout(staging: &Path) -> Result<()> {
+    let required_files = [
+        staging.join("ato-desktop.exe"),
+        staging.join("bin").join("ato.exe"),
+        staging.join("bin").join("nacelle.exe"),
+    ];
+    for path in required_files {
+        if !path.is_file() {
+            bail!(
+                "Windows staging is missing required file {}",
+                path.display()
+            );
+        }
+    }
+
+    let assets = staging.join("assets");
+    if !assets.is_dir() {
+        bail!(
+            "Windows staging is missing required assets directory {}",
+            assets.display()
+        );
+    }
+    let mut entries = fs::read_dir(&assets)
+        .with_context(|| format!("failed to read assets directory {}", assets.display()))?;
+    if entries.next().is_none() {
+        bail!(
+            "Windows staging assets directory is empty: {}",
+            assets.display()
+        );
+    }
+    Ok(())
+}
+
+fn bundle_linux_app(target: &str, helper_source: &HelperSource) -> Result<PathBuf> {
     let rust_target = match target {
         "linux-x86_64" => "x86_64-unknown-linux-gnu",
         "linux-arm64" => "aarch64-unknown-linux-gnu",
@@ -227,13 +294,11 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
         rust_target,
         &paths.target_root,
     )?;
-    run_cargo_build(&paths.ato_manifest, "ato", rust_target, &paths.target_root)?;
-    run_cargo_build(
-        &paths.nacelle_manifest,
-        "nacelle",
-        rust_target,
-        &paths.target_root,
-    )?;
+    // ato + nacelle come from `helper_source`. ato-desktop and ato-netd are
+    // always built locally — ato-netd is not a released cargo-dist artifact
+    // (dist-workspace.toml ships only ato-cli + nacelle), so it has no
+    // release source to consume (issue #366).
+    let helpers = stage_helper_binaries(helper_source, target, rust_target, &paths)?;
     run_cargo_build(
         &paths.netd_manifest,
         "ato-netd",
@@ -259,21 +324,14 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
     fs::create_dir_all(&assets_dir)?;
 
     let profile_dir = format!("{rust_target}/release");
-    fs::copy(
-        paths.target_root.join(&profile_dir).join("ato-desktop"),
-        bin_dir.join("ato-desktop"),
+    copy_executable(
+        &paths.target_root.join(&profile_dir).join("ato-desktop"),
+        &bin_dir.join("ato-desktop"),
     )
     .context("failed to stage ato-desktop binary")?;
-    fs::copy(
-        paths.target_root.join(&profile_dir).join("ato"),
-        bin_dir.join("ato"),
-    )
-    .context("failed to stage ato helper binary")?;
-    fs::copy(
-        paths.target_root.join(&profile_dir).join("nacelle"),
-        bin_dir.join("nacelle"),
-    )
-    .context("failed to stage nacelle binary")?;
+    copy_executable(&helpers.ato, &bin_dir.join("ato")).context("failed to stage ato helper binary")?;
+    copy_executable(&helpers.nacelle, &bin_dir.join("nacelle"))
+        .context("failed to stage nacelle binary")?;
     copy_executable(
         &paths.target_root.join(&profile_dir).join("ato-netd"),
         &bin_dir.join("ato-netd"),
@@ -337,7 +395,33 @@ fn package_msi(staging: &Path, target: &str) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let dist_dir = staging.parent().context("staging path has no parent")?;
     let obj_path = dist_dir.join("ato.wixobj");
+    let assets_wxs_path = dist_dir.join("ato-assets.wxs");
+    let assets_obj_path = dist_dir.join("ato-assets.wixobj");
     let msi_path = dist_dir.join(format!("Ato-Desktop-{version}-{target}.msi"));
+    assert_windows_staging_layout(staging)?;
+
+    let assets_dir = staging.join("assets");
+    let status = Command::new("heat")
+        .arg("dir")
+        .arg(&assets_dir)
+        .args([
+            "-cg",
+            "AssetsFiles",
+            "-dr",
+            "AssetsFolder",
+            "-srd",
+            "-sreg",
+            "-gg",
+            "-var",
+            "var.StagingAssetsDir",
+        ])
+        .arg("-out")
+        .arg(&assets_wxs_path)
+        .status()
+        .context("failed to invoke `heat` — install WiX Toolset 3.x and ensure it is on PATH")?;
+    if !status.success() {
+        bail!("heat failed for {} ({})", assets_dir.display(), status);
+    }
 
     // candle = compile .wxs → .wixobj
     let status = Command::new("candle")
@@ -355,12 +439,33 @@ fn package_msi(staging: &Path, target: &str) -> Result<()> {
     if !status.success() {
         bail!("candle failed for {} ({})", wxs.display(), status);
     }
+    let status = Command::new("candle")
+        .args(["-arch", arch])
+        .arg(format!(
+            "-dStagingAssetsDir={}",
+            assets_dir
+                .to_str()
+                .context("assets staging path is not UTF-8")?
+        ))
+        .arg("-out")
+        .arg(&assets_obj_path)
+        .arg(&assets_wxs_path)
+        .status()
+        .context("failed to invoke `candle` for harvested assets")?;
+    if !status.success() {
+        bail!(
+            "candle failed for harvested assets {} ({})",
+            assets_wxs_path.display(),
+            status
+        );
+    }
 
     let status = Command::new("light")
         .args(["-ext", "WixUIExtension", "-ext", "WixUtilExtension"])
         .arg("-out")
         .arg(&msi_path)
         .arg(&obj_path)
+        .arg(&assets_obj_path)
         .status()
         .context("failed to invoke `light` — install WiX Toolset 3.x")?;
     if !status.success() {
@@ -793,7 +898,7 @@ fn package_windows_zip(staging: &Path, target: &str) -> Result<()> {
     Ok(())
 }
 
-fn bundle_macos_app(target: &str) -> Result<PathBuf> {
+fn bundle_macos_app(target: &str, helper_source: &HelperSource) -> Result<PathBuf> {
     let spec = MacTarget::parse(target)?;
     let paths = WorkspacePaths::discover()?;
 
@@ -803,18 +908,11 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
         &spec.rust_target,
         &paths.target_root,
     )?;
-    run_cargo_build(
-        &paths.ato_manifest,
-        "ato",
-        &spec.rust_target,
-        &paths.target_root,
-    )?;
-    run_cargo_build(
-        &paths.nacelle_manifest,
-        "nacelle",
-        &spec.rust_target,
-        &paths.target_root,
-    )?;
+    // ato + nacelle come from `helper_source`. ato-desktop and ato-netd are
+    // always built locally — ato-netd is not a released cargo-dist artifact
+    // (dist-workspace.toml ships only ato-cli + nacelle), so it has no
+    // release source to consume (issue #366).
+    let helpers = stage_helper_binaries(helper_source, target, &spec.rust_target, &paths)?;
     run_cargo_build(
         &paths.netd_manifest,
         "ato-netd",
@@ -847,8 +945,8 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     let profile_dir = PathBuf::from(&spec.profile_dir);
 
     let desktop_binary = paths.target_root.join(&profile_dir).join("ato-desktop");
-    let helper_binary = paths.target_root.join(&profile_dir).join("ato");
-    let nacelle_binary = paths.target_root.join(&profile_dir).join("nacelle");
+    let helper_binary = helpers.ato.clone();
+    let nacelle_binary = helpers.nacelle.clone();
     let netd_binary = paths.target_root.join(&profile_dir).join("ato-netd");
 
     let app_binary_path = macos_dir.join("ato-desktop");
@@ -902,6 +1000,335 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     Ok(bundle_root)
 }
 
+/// Where the bundled `ato` / `nacelle` helper binaries come from.
+///
+/// This distinction is deliberately explicit (issue #366): a release build
+/// must consume prebuilt artifacts and must never silently fall back to
+/// rebuilding the CLI/sidecar from source.
+///
+/// - `Local`   — build `ato` + `nacelle` from the workspace (dev default).
+/// - `Release` — consume the prebuilt cargo-dist archives that the main
+///   release pipeline (`release.yml`) already published, from a local
+///   directory the caller pre-populated (no network access here — the
+///   workflow downloads the artifacts; xtask only stages them).
+#[derive(Debug, Clone)]
+enum HelperSource {
+    Local,
+    Release { artifact_dir: PathBuf },
+}
+
+/// Resolved source paths for the two consumed helpers. ato-desktop and
+/// ato-netd are out of band — they are always built locally.
+struct StagedHelpers {
+    ato: PathBuf,
+    nacelle: PathBuf,
+}
+
+const HELPER_SOURCE_ENV: &str = "ATO_DESKTOP_HELPER_SOURCE";
+const HELPER_ARTIFACT_DIR_ENV: &str = "ATO_HELPER_ARTIFACT_DIR";
+
+/// Resolve the helper source from CLI flags, falling back to env vars, then
+/// to `local`. Precedence: `--helper-source` > `ATO_DESKTOP_HELPER_SOURCE`
+/// > default `local`; likewise `--helper-artifact-dir` >
+/// `ATO_HELPER_ARTIFACT_DIR`.
+fn resolve_helper_source(
+    cli_source: Option<String>,
+    cli_artifact_dir: Option<String>,
+) -> Result<HelperSource> {
+    let source = cli_source
+        .or_else(|| std::env::var(HELPER_SOURCE_ENV).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local".to_string());
+
+    match source.as_str() {
+        "local" => Ok(HelperSource::Local),
+        "release" => {
+            let artifact_dir = cli_artifact_dir
+                .or_else(|| std::env::var(HELPER_ARTIFACT_DIR_ENV).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .with_context(|| {
+                    format!(
+                        "--helper-source=release requires the prebuilt artifacts directory: \
+                         pass --helper-artifact-dir <dir> or set {HELPER_ARTIFACT_DIR_ENV}"
+                    )
+                })?;
+            if !artifact_dir.is_dir() {
+                bail!(
+                    "helper artifact directory does not exist: {} \
+                     (download the released ato-cli/nacelle archives there first)",
+                    artifact_dir.display()
+                );
+            }
+            Ok(HelperSource::Release { artifact_dir })
+        }
+        other => bail!(
+            "unsupported --helper-source '{other}': expected 'local' or 'release'"
+        ),
+    }
+}
+
+/// Produce the `ato` and `nacelle` helper binaries for `target`, either by
+/// building them locally or by consuming prebuilt release artifacts.
+fn stage_helper_binaries(
+    source: &HelperSource,
+    target: &str,
+    rust_target: &str,
+    paths: &WorkspacePaths,
+) -> Result<StagedHelpers> {
+    match source {
+        HelperSource::Local => {
+            run_cargo_build(&paths.ato_manifest, "ato", rust_target, &paths.target_root)?;
+            run_cargo_build(
+                &paths.nacelle_manifest,
+                "nacelle",
+                rust_target,
+                &paths.target_root,
+            )?;
+            let profile_dir = format!("{rust_target}/release");
+            Ok(StagedHelpers {
+                ato: paths
+                    .target_root
+                    .join(&profile_dir)
+                    .join(helper_exe_name("ato", target)),
+                nacelle: paths
+                    .target_root
+                    .join(&profile_dir)
+                    .join(helper_exe_name("nacelle", target)),
+            })
+        }
+        HelperSource::Release { artifact_dir } => {
+            println!(
+                "helper-source=release: consuming prebuilt ato/nacelle from {} \
+                 (no rebuild)",
+                artifact_dir.display()
+            );
+            let unpack_root = paths.desktop_root.join("dist").join(target).join(".helpers");
+            if unpack_root.exists() {
+                fs::remove_dir_all(&unpack_root).with_context(|| {
+                    format!("failed to clean helper unpack dir {}", unpack_root.display())
+                })?;
+            }
+            fs::create_dir_all(&unpack_root)?;
+            let ato = consume_release_helper(
+                &["ato-cli", "ato"],
+                "ato",
+                target,
+                artifact_dir,
+                &unpack_root,
+            )?;
+            let nacelle = consume_release_helper(
+                &["nacelle"],
+                "nacelle",
+                target,
+                artifact_dir,
+                &unpack_root,
+            )?;
+            Ok(StagedHelpers { ato, nacelle })
+        }
+    }
+}
+
+/// cargo-dist Rust target-triple for a desktop bundle target.
+fn cargo_dist_triple(target: &str) -> Result<&'static str> {
+    Ok(match target {
+        "darwin-arm64" => "aarch64-apple-darwin",
+        "darwin-x86_64" => "x86_64-apple-darwin",
+        "windows-x86_64" => "x86_64-pc-windows-msvc",
+        "linux-x86_64" => "x86_64-unknown-linux-gnu",
+        "linux-arm64" => "aarch64-unknown-linux-gnu",
+        other => bail!("no cargo-dist triple for target {other}"),
+    })
+}
+
+/// Archive extension cargo-dist uses for a target: `.zip` on Windows,
+/// `.tar.xz` everywhere else.
+fn helper_archive_ext(target: &str) -> &'static str {
+    if target.starts_with("windows-") {
+        "zip"
+    } else {
+        "tar.xz"
+    }
+}
+
+/// Platform-correct on-disk executable name for a helper stem: `ato.exe` on
+/// Windows targets, `ato` otherwise. Keyed off the *target* (not the build
+/// host) so cross-target reasoning stays correct.
+fn helper_exe_name(stem: &str, target: &str) -> String {
+    if target.starts_with("windows-") {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Locate, verify, unpack, and normalize a single released helper archive.
+///
+/// `pkg_candidates` is the set of cargo-dist app names the binary might ship
+/// under (e.g. the `ato` binary lives in the `ato-cli` package archive).
+/// Returns the path to the extracted, correctly-named executable.
+fn consume_release_helper(
+    pkg_candidates: &[&str],
+    bin_stem: &str,
+    target: &str,
+    artifact_dir: &Path,
+    unpack_root: &Path,
+) -> Result<PathBuf> {
+    let triple = cargo_dist_triple(target)?;
+    let ext = helper_archive_ext(target);
+    let archive = find_release_archive(pkg_candidates, triple, ext, artifact_dir)
+        .with_context(|| {
+            format!(
+                "no released {bin_stem} artifact for {target} ({triple}) found in {}. \
+                 Expected an archive like {}-{triple}.{ext} (download it from the \
+                 GitHub release before bundling with --helper-source=release).",
+                artifact_dir.display(),
+                pkg_candidates.first().copied().unwrap_or(bin_stem),
+            )
+        })?;
+
+    verify_release_checksum(&archive)?;
+
+    let dest = unpack_root.join(bin_stem);
+    fs::create_dir_all(&dest)?;
+    extract_archive(&archive, &dest)?;
+
+    let exe_name = helper_exe_name(bin_stem, target);
+    let binary = find_file_named(&dest, &exe_name).with_context(|| {
+        format!(
+            "extracted {} but found no '{exe_name}' inside it",
+            archive.display()
+        )
+    })?;
+    println!(
+        "  staged {bin_stem} from {} -> {}",
+        archive.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+        binary.display()
+    );
+    Ok(binary)
+}
+
+/// First archive in `artifact_dir` matching `{candidate}-…{triple}.{ext}`.
+fn find_release_archive(
+    pkg_candidates: &[&str],
+    triple: &str,
+    ext: &str,
+    artifact_dir: &Path,
+) -> Result<PathBuf> {
+    let suffix = format!("{triple}.{ext}");
+    for candidate in pkg_candidates {
+        let prefix = format!("{candidate}-");
+        for entry in fs::read_dir(artifact_dir)
+            .with_context(|| format!("failed to read {}", artifact_dir.display()))?
+        {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix) && name.ends_with(&suffix) {
+                return Ok(entry.path());
+            }
+        }
+    }
+    bail!("no matching archive")
+}
+
+/// Verify `<archive>.sha256` if present. cargo-dist writes one checksum file
+/// per artifact; verification is best-effort ("if available" per #366) so a
+/// missing checksum warns rather than fails.
+fn verify_release_checksum(archive: &Path) -> Result<()> {
+    let mut sha_path = archive.as_os_str().to_owned();
+    sha_path.push(".sha256");
+    let sha_path = PathBuf::from(sha_path);
+    if !sha_path.is_file() {
+        println!(
+            "  WARNING: no checksum file at {} — skipping verification",
+            sha_path.display()
+        );
+        return Ok(());
+    }
+    let expected = fs::read_to_string(&sha_path)
+        .with_context(|| format!("failed to read {}", sha_path.display()))?;
+    let expected = expected
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if expected.len() != 64 {
+        bail!(
+            "checksum file {} did not contain a 64-char sha256 hex digest",
+            sha_path.display()
+        );
+    }
+    let actual = sha256_hex(archive)?;
+    if actual != expected {
+        bail!(
+            "checksum mismatch for {}: expected {expected}, got {actual}",
+            archive.display()
+        );
+    }
+    println!("  verified sha256 of {}", archive.display());
+    Ok(())
+}
+
+/// Streaming sha256 of a file, lowercase hex.
+fn sha256_hex(path: &Path) -> Result<String> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Extract a `.tar.xz` or `.zip` archive into `dest` using the system `tar`.
+/// bsdtar (macOS/Windows) and GNU tar (Linux) both auto-detect xz via `-xf`;
+/// bsdtar also reads `.zip`, which covers the Windows artifacts.
+fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
+    let status = Command::new("tar")
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .with_context(|| format!("failed to invoke tar to extract {}", archive.display()))?;
+    if !status.success() {
+        bail!("tar failed to extract {} ({status})", archive.display());
+    }
+    Ok(())
+}
+
+/// Depth-first search for a file with exactly `name` under `root`.
+fn find_file_named(root: &Path, name: &str) -> Result<PathBuf> {
+    for entry in
+        fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Ok(found) = find_file_named(&path, name) {
+                return Ok(found);
+            }
+        } else if entry.file_name().to_string_lossy() == name {
+            return Ok(path);
+        }
+    }
+    bail!("'{name}' not found under {}", root.display())
+}
+
 fn run_cargo_build(
     manifest_path: &Path,
     bin: &str,
@@ -934,6 +1361,14 @@ fn run_cargo_build(
             target_dir_str,
         ])
         .env_remove("CARGO_TARGET_DIR")
+        // xtask now authoritatively provisions the bundled helpers (see
+        // `stage_helper_binaries`), so ato-desktop's build.rs must NOT also
+        // spawn a nested `cargo build -p ato-cli -p nacelle`. Without this,
+        // the ato-desktop build and the nested helper build contend for the
+        // same `--target-dir` cargo lock and deadlock (both target
+        // `<root>/target`). CI already sets this; doing it here makes
+        // `cargo xtask bundle <target>` work out of the box locally too.
+        .env("ATO_DESKTOP_SKIP_HELPER_BUILD", "1")
         .status()
         .with_context(|| format!("failed to run cargo build for {}", manifest_path.display()))?;
 
@@ -1228,7 +1663,15 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{copy_bundled_assets, render_info_plist, MacTarget, WorkspacePaths};
+    use std::process::Command;
+
+    use super::{
+        assert_windows_staging_layout, cargo_dist_triple, consume_release_helper,
+        copy_bundled_assets, find_file_named, find_release_archive, helper_archive_ext,
+        helper_exe_name, render_info_plist, resolve_helper_source, sha256_hex,
+        verify_release_checksum, HelperSource, MacTarget, WorkspacePaths, HELPER_ARTIFACT_DIR_ENV,
+        HELPER_SOURCE_ENV,
+    };
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1273,6 +1716,52 @@ mod tests {
             plist.contains("<string>AppIcon</string>"),
             "Info.plist CFBundleIconFile value must be AppIcon"
         );
+    }
+
+    #[test]
+    fn windows_staging_assertion_requires_helper_and_assets() {
+        let root = test_root("windows-staging-ok");
+        let staging = root.join("Ato");
+        fs::create_dir_all(staging.join("bin")).unwrap();
+        fs::create_dir_all(staging.join("assets")).unwrap();
+        fs::write(staging.join("ato-desktop.exe"), "").unwrap();
+        fs::write(staging.join("bin").join("ato.exe"), "").unwrap();
+        fs::write(staging.join("bin").join("nacelle.exe"), "").unwrap();
+        fs::write(staging.join("assets").join("AppIcon.ico"), "").unwrap();
+
+        assert_windows_staging_layout(&staging).unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn windows_staging_assertion_rejects_missing_helper() {
+        let root = test_root("windows-staging-missing-helper");
+        let staging = root.join("Ato");
+        fs::create_dir_all(staging.join("assets")).unwrap();
+        fs::write(staging.join("ato-desktop.exe"), "").unwrap();
+        fs::write(staging.join("assets").join("AppIcon.ico"), "").unwrap();
+
+        let error = assert_windows_staging_layout(&staging).unwrap_err();
+        assert!(error.to_string().contains("bin"));
+        assert!(error.to_string().contains("ato.exe"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!(
+                "{name}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+        if root.exists() {
+            fs::remove_dir_all(&root).ok();
+        }
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 
     #[test]
@@ -1350,5 +1839,265 @@ mod tests {
             "expected ato-netd manifest path, got {}",
             paths.netd_manifest.display()
         );
+    }
+
+    // ---- release helper consumption (issue #366) ----
+
+    #[test]
+    fn cargo_dist_triple_maps_every_bundle_target() {
+        assert_eq!(
+            cargo_dist_triple("darwin-arm64").unwrap(),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            cargo_dist_triple("darwin-x86_64").unwrap(),
+            "x86_64-apple-darwin"
+        );
+        assert_eq!(
+            cargo_dist_triple("windows-x86_64").unwrap(),
+            "x86_64-pc-windows-msvc"
+        );
+        assert_eq!(
+            cargo_dist_triple("linux-x86_64").unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            cargo_dist_triple("linux-arm64").unwrap(),
+            "aarch64-unknown-linux-gnu"
+        );
+        assert!(cargo_dist_triple("plan9-riscv").is_err());
+    }
+
+    #[test]
+    fn helper_exe_name_appends_exe_only_on_windows_targets() {
+        assert_eq!(helper_exe_name("ato", "windows-x86_64"), "ato.exe");
+        assert_eq!(helper_exe_name("nacelle", "windows-x86_64"), "nacelle.exe");
+        assert_eq!(helper_exe_name("ato", "darwin-arm64"), "ato");
+        assert_eq!(helper_exe_name("nacelle", "linux-x86_64"), "nacelle");
+    }
+
+    #[test]
+    fn helper_archive_ext_is_zip_on_windows_else_tar_xz() {
+        assert_eq!(helper_archive_ext("windows-x86_64"), "zip");
+        assert_eq!(helper_archive_ext("darwin-arm64"), "tar.xz");
+        assert_eq!(helper_archive_ext("linux-x86_64"), "tar.xz");
+    }
+
+    #[test]
+    fn resolve_helper_source_defaults_and_explicit_local() {
+        assert!(matches!(
+            resolve_helper_source(Some("local".to_string()), None).unwrap(),
+            HelperSource::Local
+        ));
+    }
+
+    #[test]
+    fn resolve_helper_source_release_requires_artifact_dir() {
+        // Ensure the env fallback is not set so the missing-dir path is hit.
+        std::env::remove_var(HELPER_ARTIFACT_DIR_ENV);
+        std::env::remove_var(HELPER_SOURCE_ENV);
+        let err = resolve_helper_source(Some("release".to_string()), None)
+            .expect_err("release without an artifact dir must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(HELPER_ARTIFACT_DIR_ENV) || msg.contains("--helper-artifact-dir"),
+            "error should name how to supply the dir, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_helper_source_release_rejects_missing_dir() {
+        let missing = temp_dir("ato-helper-missing").join("nope");
+        let err = resolve_helper_source(
+            Some("release".to_string()),
+            Some(missing.to_string_lossy().to_string()),
+        )
+        .expect_err("nonexistent artifact dir must error");
+        assert!(format!("{err:#}").contains("does not exist"));
+    }
+
+    #[test]
+    fn resolve_helper_source_rejects_unknown_value() {
+        let err = resolve_helper_source(Some("download".to_string()), None)
+            .expect_err("unknown helper source must error");
+        assert!(format!("{err:#}").contains("local"));
+    }
+
+    #[test]
+    fn resolve_helper_source_release_accepts_explicit_dir() {
+        let dir = temp_dir("ato-helper-dir");
+        let source = resolve_helper_source(
+            Some("release".to_string()),
+            Some(dir.to_string_lossy().to_string()),
+        )
+        .expect("release with a real dir should resolve");
+        match source {
+            HelperSource::Release { artifact_dir } => assert_eq!(artifact_dir, dir),
+            HelperSource::Local => panic!("expected Release"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        let dir = temp_dir("ato-sha");
+        let file = dir.join("abc.txt");
+        fs::write(&file, b"abc").unwrap();
+        assert_eq!(
+            sha256_hex(&file).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn verify_checksum_accepts_match_rejects_mismatch_warns_on_missing() {
+        let dir = temp_dir("ato-verify");
+        let archive = dir.join("ato-cli-aarch64-apple-darwin.tar.xz");
+        fs::write(&archive, b"fake archive bytes").unwrap();
+        let digest = sha256_hex(&archive).unwrap();
+
+        // Missing checksum: best-effort, returns Ok.
+        verify_release_checksum(&archive).expect("missing checksum should not fail");
+
+        // Matching checksum (cargo-dist format: `<hex>  <filename>`).
+        let sha_path = dir.join("ato-cli-aarch64-apple-darwin.tar.xz.sha256");
+        fs::write(
+            &sha_path,
+            format!("{digest}  ato-cli-aarch64-apple-darwin.tar.xz\n"),
+        )
+        .unwrap();
+        verify_release_checksum(&archive).expect("matching checksum should pass");
+
+        // Mismatch.
+        fs::write(&sha_path, format!("{}  x\n", "0".repeat(64))).unwrap();
+        assert!(verify_release_checksum(&archive).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn find_release_archive_matches_package_and_triple() {
+        let dir = temp_dir("ato-find-archive");
+        fs::write(dir.join("nacelle-aarch64-apple-darwin.tar.xz"), b"n").unwrap();
+        fs::write(dir.join("ato-cli-aarch64-apple-darwin.tar.xz"), b"a").unwrap();
+        fs::write(dir.join("ato-cli-x86_64-pc-windows-msvc.zip"), b"w").unwrap();
+
+        let ato = find_release_archive(
+            &["ato-cli", "ato"],
+            "aarch64-apple-darwin",
+            "tar.xz",
+            &dir,
+        )
+        .expect("should find the ato-cli archive");
+        assert_eq!(
+            ato.file_name().unwrap().to_string_lossy(),
+            "ato-cli-aarch64-apple-darwin.tar.xz"
+        );
+
+        let win = find_release_archive(
+            &["ato-cli", "ato"],
+            "x86_64-pc-windows-msvc",
+            "zip",
+            &dir,
+        )
+        .expect("should find the windows zip");
+        assert_eq!(
+            win.file_name().unwrap().to_string_lossy(),
+            "ato-cli-x86_64-pc-windows-msvc.zip"
+        );
+
+        assert!(
+            find_release_archive(&["nacelle"], "x86_64-unknown-linux-gnu", "tar.xz", &dir)
+                .is_err(),
+            "no linux nacelle archive present"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn consume_release_helper_errors_actionably_when_artifact_missing() {
+        let artifact_dir = temp_dir("ato-empty-artifacts");
+        let unpack = temp_dir("ato-unpack");
+        let err = consume_release_helper(
+            &["ato-cli", "ato"],
+            "ato",
+            "darwin-arm64",
+            &artifact_dir,
+            &unpack,
+        )
+        .expect_err("missing artifact must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("aarch64-apple-darwin"), "msg: {msg}");
+        assert!(msg.contains("--helper-source=release"), "msg: {msg}");
+        let _ = fs::remove_dir_all(artifact_dir);
+        let _ = fs::remove_dir_all(unpack);
+    }
+
+    #[test]
+    fn find_file_named_searches_recursively() {
+        let dir = temp_dir("ato-find-file");
+        fs::create_dir_all(dir.join("a/b/c")).unwrap();
+        fs::write(dir.join("a/b/c/nacelle"), b"bin").unwrap();
+        let found = find_file_named(&dir, "nacelle").expect("should find nested file");
+        assert!(found.ends_with("a/b/c/nacelle"));
+        assert!(find_file_named(&dir, "missing").is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// End-to-end consumption: a cargo-dist-style `.tar.xz` containing the
+    /// `ato` binary is verified, unpacked, and normalized — with no cargo
+    /// build invoked. Proves the release path stages from artifacts alone.
+    #[test]
+    fn consume_release_helper_round_trips_from_targz_artifact() {
+        let work = temp_dir("ato-roundtrip");
+        let artifact_dir = work.join("artifacts");
+        let payload = work.join("payload");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        // cargo-dist nests binaries under a per-archive subdir; mirror that
+        // so the recursive `find_file_named` is exercised.
+        fs::create_dir_all(payload.join("ato-cli-aarch64-apple-darwin")).unwrap();
+        fs::write(
+            payload.join("ato-cli-aarch64-apple-darwin/ato"),
+            b"#!/bin/sh\necho ato\n",
+        )
+        .unwrap();
+
+        let archive = artifact_dir.join("ato-cli-aarch64-apple-darwin.tar.xz");
+        let created = Command::new("tar")
+            .arg("-cJf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&payload)
+            .arg("ato-cli-aarch64-apple-darwin")
+            .status();
+        // bsdtar/GNU tar with xz is expected on dev + CI hosts; if it is
+        // genuinely unavailable the rest of the assertion cannot run.
+        let created = created.expect("tar should be invokable");
+        assert!(created.success(), "tar -cJf failed to build the fixture archive");
+
+        let digest = sha256_hex(&archive).unwrap();
+        fs::write(
+            artifact_dir.join("ato-cli-aarch64-apple-darwin.tar.xz.sha256"),
+            format!("{digest}  ato-cli-aarch64-apple-darwin.tar.xz\n"),
+        )
+        .unwrap();
+
+        let unpack = work.join("unpack");
+        fs::create_dir_all(&unpack).unwrap();
+        let staged = consume_release_helper(
+            &["ato-cli", "ato"],
+            "ato",
+            "darwin-arm64",
+            &artifact_dir,
+            &unpack,
+        )
+        .expect("release helper should be consumed");
+        assert_eq!(staged.file_name().unwrap().to_string_lossy(), "ato");
+        assert_eq!(
+            fs::read(&staged).unwrap(),
+            b"#!/bin/sh\necho ato\n",
+            "extracted binary contents must match the artifact"
+        );
+        let _ = fs::remove_dir_all(work);
     }
 }
