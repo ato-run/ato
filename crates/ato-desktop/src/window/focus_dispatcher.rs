@@ -412,6 +412,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 let route = crate::state::GuestRoute::CapsuleHandle {
                                                     handle: handle.clone(),
                                                     label: repo.clone(),
+                                                    community_toml_id: None,
                                                 };
                                                 // Close the GitHub Run window if still open.
                                                 if let Some(shell_weak) = cx
@@ -988,10 +989,7 @@ pub(crate) struct GuestPaneMeta {
 /// Build the `browser_tabs` pane array: every live guest capsule pane,
 /// followed by the dock pane when it is open. Kept pure (no GPUI globals) so
 /// the JSON shape is unit-testable (#370).
-pub(crate) fn build_pane_list(
-    guests: &[GuestPaneMeta],
-    dock_open: bool,
-) -> Vec<serde_json::Value> {
+pub(crate) fn build_pane_list(guests: &[GuestPaneMeta], dock_open: bool) -> Vec<serde_json::Value> {
     let mut panes: Vec<serde_json::Value> = guests
         .iter()
         .map(|g| {
