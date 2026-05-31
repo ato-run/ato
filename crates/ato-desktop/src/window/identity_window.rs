@@ -129,7 +129,7 @@ fn fetch_whoami_identity() -> Value {
 }
 
 pub struct IdentityWindowShell {
-    _webview: WebView,
+    _webview: Option<WebView>,
     window_size: Size<Pixels>,
     paste: WebViewPasteSupport,
 }
@@ -138,7 +138,7 @@ impl_focusable_via_paste!(IdentityWindowShell, paste);
 
 impl WebViewPasteShell for IdentityWindowShell {
     fn active_paste_target(&self) -> Option<&WebView> {
-        Some(&self._webview)
+        self._webview.as_ref()
     }
 }
 
@@ -159,14 +159,16 @@ impl IdentityWindowShell {
         if current == self.window_size {
             return;
         }
-        let _ = self._webview.set_bounds(Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(current.width) as u32,
-                f32::from(current.height) as u32,
-            )
-            .into(),
-        });
+        if let Some(webview) = self._webview.as_ref() {
+            let _ = webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, 0i32).into(),
+                size: LogicalSize::new(
+                    f32::from(current.width) as u32,
+                    f32::from(current.height) as u32,
+                )
+                .into(),
+            });
+        }
         self.window_size = current;
     }
 }
@@ -210,9 +212,8 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
                 queue_for_ipc,
             ))
             .with_initialization_script(init_script.clone())
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the Identity WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Identity window", webview, window);
         let shell = cx.new(|cx| IdentityWindowShell {
             _webview: webview,
             window_size: win_size,

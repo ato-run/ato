@@ -60,7 +60,7 @@ pub struct ImportApiCreds(pub Option<ApiCreds>);
 impl gpui::Global for ImportApiCreds {}
 
 pub struct ImportWindowShell {
-    _webview: WebView,
+    _webview: Option<WebView>,
     window_size: Size<Pixels>,
     paste: WebViewPasteSupport,
 }
@@ -69,7 +69,7 @@ impl_focusable_via_paste!(ImportWindowShell, paste);
 
 impl WebViewPasteShell for ImportWindowShell {
     fn active_paste_target(&self) -> Option<&WebView> {
-        Some(&self._webview)
+        self._webview.as_ref()
     }
 }
 
@@ -90,14 +90,16 @@ impl ImportWindowShell {
         if current == self.window_size {
             return;
         }
-        let _ = self._webview.set_bounds(Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(current.width) as u32,
-                f32::from(current.height) as u32,
-            )
-            .into(),
-        });
+        if let Some(webview) = self._webview.as_ref() {
+            let _ = webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, 0i32).into(),
+                size: LogicalSize::new(
+                    f32::from(current.width) as u32,
+                    f32::from(current.height) as u32,
+                )
+                .into(),
+            });
+        }
         self.window_size = current;
     }
 
@@ -109,8 +111,10 @@ impl ImportWindowShell {
             "typeof window.__atoImportSnapshot==='function'&&window.__atoImportSnapshot({})",
             snapshot_json
         );
-        if let Err(error) = self._webview.evaluate_script(&script) {
-            tracing::warn!(?error, "ato-import: evaluate_script(push_snapshot) failed");
+        if let Some(webview) = self._webview.as_ref() {
+            if let Err(error) = webview.evaluate_script(&script) {
+                tracing::warn!(?error, "ato-import: evaluate_script(push_snapshot) failed");
+            }
         }
     }
 }
@@ -214,9 +218,8 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
                 SystemCapsuleId::AtoImport,
                 queue_for_closure,
             ))
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the Import window");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Import window", webview, window);
         let shell = cx.new(|cx| ImportWindowShell {
             _webview: webview,
             window_size: win_size,

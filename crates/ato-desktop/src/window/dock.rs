@@ -139,7 +139,7 @@ impl DockRuntimeState {
 /// alive for the lifetime of its window and evaluate host events into
 /// the page.
 pub struct DockWebView {
-    pub(crate) webview: WebView,
+    pub(crate) webview: Option<WebView>,
     window_size: Size<Pixels>,
     identity_state: Arc<Mutex<Value>>,
     runtime_state: Arc<Mutex<DockRuntimeState>>,
@@ -150,7 +150,7 @@ impl_focusable_via_paste!(DockWebView, paste);
 
 impl WebViewPasteShell for DockWebView {
     fn active_paste_target(&self) -> Option<&WebView> {
-        Some(&self.webview)
+        self.webview.as_ref()
     }
 }
 
@@ -158,8 +158,10 @@ impl DockWebView {
     fn emit_event(&mut self, event: &Value) {
         let payload = serde_json::to_string(event).unwrap_or_else(|_| "null".to_string());
         let script = format!("window.__ATO_DOCK_EVENT__ && window.__ATO_DOCK_EVENT__({payload});");
-        if let Err(error) = self.webview.evaluate_script(&script) {
-            tracing::warn!(?error, "dock: evaluate_script event dispatch failed");
+        if let Some(webview) = self.webview.as_ref() {
+            if let Err(error) = webview.evaluate_script(&script) {
+                tracing::warn!(?error, "dock: evaluate_script event dispatch failed");
+            }
         }
     }
 
@@ -168,14 +170,16 @@ impl DockWebView {
         if current == self.window_size {
             return;
         }
-        let _ = self.webview.set_bounds(Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(current.width) as u32,
-                f32::from(current.height) as u32,
-            )
-            .into(),
-        });
+        if let Some(webview) = self.webview.as_ref() {
+            let _ = webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, 0i32).into(),
+                size: LogicalSize::new(
+                    f32::from(current.width) as u32,
+                    f32::from(current.height) as u32,
+                )
+                .into(),
+            });
+        }
         self.window_size = current;
     }
 }
@@ -735,9 +739,8 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                 SystemCapsuleId::AtoDock,
                 bridge_queue.clone(),
             ))
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the Dock WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Dock window", webview, window);
         let view = cx.new(|cx| DockWebView {
             webview,
             window_size: win_size,
@@ -822,8 +825,10 @@ pub fn notify_login_success(cx: &mut App) {
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0);
             let reload_url = format!("{DOCK_SCHEME}://localhost/?t={ts}");
-            if let Err(error) = view.webview.load_url(&reload_url) {
-                tracing::warn!(?error, "dock: load_url after login failed");
+            if let Some(webview) = view.webview.as_ref() {
+                if let Err(error) = webview.load_url(&reload_url) {
+                    tracing::warn!(?error, "dock: load_url after login failed");
+                }
             }
         });
 
