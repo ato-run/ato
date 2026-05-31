@@ -277,6 +277,7 @@ mod tests {
         let handle = GuestRoute::CapsuleHandle {
             handle: "capsule://org/demo@1.0.0".to_string(),
             label: "demo".to_string(),
+            community_toml_id: None,
         };
         assert_eq!(logical_capsule_key_for_stable_origin(&external), None);
         assert_eq!(logical_capsule_key_for_stable_origin(&capsule_url), None);

@@ -433,13 +433,16 @@ fn render_omnibar_suggestion(
                 OmnibarSuggestionAction::ShowSettings => {
                     window.dispatch_action(Box::new(ShowSettings), cx);
                 }
-                OmnibarSuggestionAction::LaunchCapsule { handle } => {
-                    window.dispatch_action(
-                        Box::new(NavigateToUrl {
-                            url: handle.clone(),
-                        }),
-                        cx,
-                    );
+                OmnibarSuggestionAction::LaunchCapsule {
+                    handle,
+                    community_toml_id,
+                } => {
+                    let url = if let Some(ref cid) = community_toml_id {
+                        format!("{}?ctoml={}", handle, cid)
+                    } else {
+                        handle.clone()
+                    };
+                    window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
                 }
                 OmnibarSuggestionAction::StopActiveSession => {
                     window.dispatch_action(Box::new(StopActiveSession), cx);
