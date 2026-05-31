@@ -43,6 +43,7 @@ use crate::automation::AutomationHost;
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::config::SecretEntry;
 use crate::logging::TARGET_FAVICON;
+use crate::proc_util::CommandNoWindowExt;
 use crate::orchestrator::{
     resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session, spawn_terminal,
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
@@ -1136,7 +1137,11 @@ impl WebViewManager {
                 AuthStatus => {
                     let status = match crate::orchestrator::resolve_ato_binary() {
                         Ok(ato_bin) => {
-                            match Command::new(&ato_bin).arg("desktop-auth-handoff").output() {
+                            match Command::new(&ato_bin)
+                                .no_console_window()
+                                .arg("desktop-auth-handoff")
+                                .output()
+                            {
                                 Ok(output) if output.status.success() => {
                                     auth_status_from_handoff_stdout(&output.stdout)
                                 }
@@ -3534,6 +3539,7 @@ fn load_desktop_auth_handoff() -> Result<DesktopAuthHandoff> {
     let ato_bin = crate::orchestrator::resolve_ato_binary()
         .context("failed to locate ato binary for desktop auth handoff")?;
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .arg("desktop-auth-handoff")
         .output()
         .context("failed to run `ato desktop-auth-handoff`")?;
