@@ -14,6 +14,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use crate::proc_util::CommandNoWindowExt;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -57,6 +58,7 @@ pub(crate) fn discover() -> Option<ApiCreds> {
         }
     };
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .arg("desktop-auth-handoff")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

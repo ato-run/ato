@@ -35,6 +35,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::orchestrator::resolve_ato_binary;
+use crate::proc_util::CommandNoWindowExt;
 use crate::source_import_session::normalize_github_import_input;
 use crate::state::GuestRoute;
 use crate::system_capsule::ato_dock::DockSourceKind;
@@ -543,6 +544,7 @@ fn fetch_identity() -> Value {
         }
     };
     let output = match Command::new(&bin)
+        .no_console_window()
         .arg("whoami")
         .stdin(Stdio::null())
         .output()
@@ -945,6 +947,7 @@ fn save_manifest_blocking(
     // Regenerate lockfile so a subsequent preview does not hit E207.
     let ato_bin = resolve_ato_binary()?;
     let lock_output = Command::new(&ato_bin)
+        .no_console_window()
         .arg("lock")
         .current_dir(&working_directory)
         .stdin(Stdio::null())
@@ -967,6 +970,7 @@ fn run_publish_command(runtime: &Arc<Mutex<DockRuntimeState>>, args: &[&str]) ->
         .context("Prepare a source before running publish")?;
     let ato_bin = resolve_ato_binary()?;
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .args(args)
         .current_dir(&working_directory)
         .stdin(Stdio::null())
@@ -1041,6 +1045,7 @@ fn start_preview_blocking(runtime: &Arc<Mutex<DockRuntimeState>>, request_id: &s
         .context("Prepare a source before starting preview")?;
     let ato_bin = resolve_ato_binary()?;
     let mut child = Command::new(&ato_bin)
+        .no_console_window()
         .arg("run")
         .arg(&working_directory)
         .current_dir(&working_directory)
@@ -1223,6 +1228,7 @@ fn clone_public_github_repo(session_id: &str, raw_url: &str) -> Result<PathBuf> 
 
     let git_bin = resolve_git_binary();
     let output = Command::new(&git_bin)
+        .no_console_window()
         // Bypass any credential helper — we only clone public repos.
         .arg("-c")
         .arg("credential.helper=")
@@ -1355,6 +1361,7 @@ fn infer_manifest_or_template(
 fn infer_manifest_toml(working_directory: &Path) -> Result<InferredManifestResponse> {
     let ato_bin = resolve_ato_binary()?;
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .arg("project")
         .arg("infer-manifest")
         .arg(working_directory)
