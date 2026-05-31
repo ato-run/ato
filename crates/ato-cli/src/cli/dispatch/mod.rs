@@ -633,6 +633,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dry_run,
             no_tui,
             json,
+            toml,
+            source,
+            yes,
         } => execute_publish_command(
             publish::PublishCommandArgs {
                 registry,
@@ -650,6 +653,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 fix,
                 no_tui,
                 json,
+                toml,
+                source,
+                yes,
             },
             ci,
             dry_run,
