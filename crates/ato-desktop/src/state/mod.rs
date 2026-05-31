@@ -24,8 +24,8 @@ use url::{form_urlencoded, Url};
 
 use crate::bridge::ShellEvent;
 use crate::config::SecretEntry;
-use crate::proc_util::CommandNoWindowExt;
 use crate::orchestrator::{register_pending_cli_command, CliLaunchSpec};
+use crate::proc_util::CommandNoWindowExt;
 use crate::ui::share::web_favicon_origin;
 
 pub type WorkspaceId = usize;
@@ -266,6 +266,10 @@ pub enum GuestRoute {
     CapsuleHandle {
         handle: String,
         label: String,
+        /// Community capsule.toml ID. Threaded from the omnibar suggestion
+        /// through to the CLI so the launch can resolve from the pre-selected
+        /// community recipe without re-running discovery.
+        community_toml_id: Option<String>,
     },
     CapsuleUrl {
         handle: String,
@@ -728,6 +732,10 @@ pub enum OmnibarSuggestionAction {
     ShowSettings,
     LaunchCapsule {
         handle: String,
+        /// Community capsule.toml ID to use for this launch. `None` for
+        /// local registry results; `Some(id)` for community candidates so the
+        /// CLI can skip re-discovery and use the pre-selected recipe directly.
+        community_toml_id: Option<String>,
     },
     /// RFC: SURFACE_CLOSE_SEMANTICS §6.2 — explicit Stop UI for the
     /// active pane's underlying capsule session.
@@ -745,6 +753,9 @@ pub struct CapsuleSearchResult {
     pub handle: String,
     pub display_name: String,
     pub description: Option<String>,
+    /// Community capsule.toml ID (e.g. `ctoml_xxx`). Set when the result
+    /// originated from the community API; `None` for local registry results.
+    pub ctoml_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1384,14 +1395,17 @@ impl AppState {
         let local_tauri = GuestRoute::CapsuleHandle {
             handle: demo_local_capsule("ato-desktop-real-tauri"),
             label: demo_local_capsule("ato-desktop-real-tauri"),
+            community_toml_id: None,
         };
         let local_electron = GuestRoute::CapsuleHandle {
             handle: demo_local_capsule("ato-desktop-real-electron"),
             label: demo_local_capsule("ato-desktop-real-electron"),
+            community_toml_id: None,
         };
         let local_wails = GuestRoute::CapsuleHandle {
             handle: demo_local_capsule("ato-desktop-real-wails"),
             label: demo_local_capsule("ato-desktop-real-wails"),
+            community_toml_id: None,
         };
         let welcome = GuestRoute::Capsule {
             session: "welcome".to_string(),
@@ -1900,6 +1914,7 @@ impl AppState {
                     .unwrap_or_else(|| result.handle.clone()),
                 action: OmnibarSuggestionAction::LaunchCapsule {
                     handle: result.handle.clone(),
+                    community_toml_id: result.ctoml_id.clone(),
                 },
             });
         }
@@ -2214,6 +2229,7 @@ impl AppState {
                     GuestRoute::CapsuleHandle {
                         handle: normalized.clone(),
                         label: format!("share:{share_id}"),
+                        community_toml_id: None,
                     },
                     vec![
                         CapabilityGrant::ReadFile,
@@ -2237,6 +2253,7 @@ impl AppState {
                             GuestRoute::CapsuleHandle {
                                 handle: label.clone(),
                                 label,
+                                community_toml_id: None,
                             },
                             vec![
                                 CapabilityGrant::ReadFile,

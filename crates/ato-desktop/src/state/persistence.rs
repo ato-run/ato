@@ -80,7 +80,11 @@ impl PersistedRoute {
             GuestRoute::ExternalUrl(url) => Some(Self::ExternalUrl {
                 url: url.as_str().to_string(),
             }),
-            GuestRoute::CapsuleHandle { handle, label } => Some(Self::CapsuleHandle {
+            GuestRoute::CapsuleHandle {
+                handle,
+                label,
+                ..
+            } => Some(Self::CapsuleHandle {
                 handle: handle.clone(),
                 label: label.clone(),
             }),
@@ -111,7 +115,11 @@ impl PersistedRoute {
             Self::ExternalUrl { url } => Url::parse(&url).ok().map(GuestRoute::ExternalUrl),
             Self::HostPanelSettings { .. } => None,
             Self::CapsuleHandle { handle, label } => {
-                Some(GuestRoute::CapsuleHandle { handle, label })
+                Some(GuestRoute::CapsuleHandle {
+                    handle,
+                    label,
+                    community_toml_id: None,
+                })
             }
             Self::CapsuleUrl { handle, label, url } => Url::parse(&url)
                 .ok()

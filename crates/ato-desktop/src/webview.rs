@@ -43,12 +43,30 @@ use crate::automation::AutomationHost;
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::config::SecretEntry;
 use crate::logging::TARGET_FAVICON;
-use crate::proc_util::CommandNoWindowExt;
 use crate::orchestrator::{
-    resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session, spawn_terminal,
-    stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
+    resolve_and_start_guest, resolve_and_start_guest_with_input, spawn_cli_session,
+    spawn_log_tail_session, spawn_terminal, stop_guest_session, take_pending_cli_command,
+    take_pending_share_terminal, CommunityTomlInput, DesktopLaunchInput, GuestLaunchSession,
     LaunchError, SpawnKind, SpawnSpec,
 };
+
+/// Local helpers to construct `DesktopLaunchInput` from `ensure_pending_local_launch`
+/// without needing a `mod` inside an `impl` block.
+mod resolve_and_start_guest_with_input_fn {
+    use super::{CommunityTomlInput, DesktopLaunchInput};
+
+    pub(super) fn make_handle_input(handle: &str) -> DesktopLaunchInput {
+        DesktopLaunchInput::from_handle(handle)
+    }
+
+    pub(super) fn make_community_input(handle: &str, ctoml_id: &str) -> DesktopLaunchInput {
+        DesktopLaunchInput::CommunityToml(CommunityTomlInput {
+            source_handle: handle.to_string(),
+            ctoml_id: ctoml_id.to_string(),
+        })
+    }
+}
+use crate::proc_util::CommandNoWindowExt;
 use crate::state::{
     session::SessionRegistry, ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry,
     AuthSessionStatus, BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId,
@@ -711,8 +729,18 @@ impl WebViewManager {
                 self.automation.mark_page_loaded(active.pane_id);
             } else {
                 match &active.route {
-                    GuestRoute::CapsuleHandle { handle, .. } => {
-                        self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
+                    GuestRoute::CapsuleHandle {
+                        handle,
+                        community_toml_id,
+                        ..
+                    } => {
+                        self.ensure_pending_local_launch(
+                            active.pane_id,
+                            &route_key,
+                            handle,
+                            community_toml_id.as_deref(),
+                            state,
+                        );
                     }
                     _ => match self.build_webview(
                         window,
@@ -1925,6 +1953,7 @@ impl WebViewManager {
         pane_id: usize,
         route_key: &str,
         handle: &str,
+        community_toml_id: Option<&str>,
         state: &mut AppState,
     ) {
         let key = pending_launch_key(pane_id, route_key);
@@ -1985,6 +2014,12 @@ impl WebViewManager {
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
         let handle = handle.to_string();
+        // Build the typed launch input now so the background thread has all context.
+        let launch_input = if let Some(cid) = community_toml_id {
+            resolve_and_start_guest_with_input_fn::make_community_input(&handle, cid)
+        } else {
+            resolve_and_start_guest_with_input_fn::make_handle_input(&handle)
+        };
         let background_executor = self.async_app.background_executor().clone();
         let foreground_executor = self.async_app.foreground_executor().clone();
         let async_app = self.async_app.clone();
@@ -2020,7 +2055,7 @@ impl WebViewManager {
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
                 handle: handle.clone(),
-                session: resolve_and_start_guest(&handle, &secrets, &plain_configs, None)
+                session: resolve_and_start_guest_with_input(&launch_input, &secrets, &plain_configs, None)
                     .inspect_err(|err| {
                         // #117 — interactive-resolution errors
                         // (preflight aggregate, missing config,
@@ -2102,7 +2137,7 @@ impl WebViewManager {
             route: pane.route.clone(),
             trust_state: pane.trust_state.clone(),
             install_profile_key: pane.install_profile_key.clone(),
-            publisher_identity: None,  // not yet plumbed; will be added when store record carries publisher
+            publisher_identity: None, // not yet plumbed; will be added when store record carries publisher
             source_identity: pane.canonical_handle.clone(),
             snapshot_label: pane.snapshot_label.clone(),
         };
@@ -5486,6 +5521,7 @@ mod tests {
         let handle_route = GuestRoute::CapsuleHandle {
             handle: handle.into(),
             label: "Blinko".into(),
+            community_toml_id: None,
         };
         let url_route = GuestRoute::CapsuleUrl {
             handle: handle.into(),
@@ -5559,6 +5595,7 @@ mod tests {
         let handle_route = GuestRoute::CapsuleHandle {
             handle: handle.into(),
             label: "app".into(),
+            community_toml_id: None,
         };
         let ephemeral_key = webview_retention_key_for_route(&handle_route);
         assert_ne!(
@@ -5856,6 +5893,7 @@ mod tests {
         let route = GuestRoute::CapsuleHandle {
             handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
             label: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+            community_toml_id: None,
         };
         let route_key = route.to_string();
         let next = active_web_pane(route.clone(), 7);
@@ -5874,6 +5912,7 @@ mod tests {
         let handle_route = GuestRoute::CapsuleHandle {
             handle: "capsule://org/demo@1.0.0".to_string(),
             label: "demo".to_string(),
+            community_toml_id: None,
         };
         let url_route = GuestRoute::CapsuleUrl {
             handle: "capsule://org/demo@1.0.0".to_string(),
@@ -5909,6 +5948,7 @@ mod tests {
         let capsule_handle_route = GuestRoute::CapsuleHandle {
             handle: "capsule://org/demo@1.0.0".to_string(),
             label: "demo".to_string(),
+            community_toml_id: None,
         };
         let capsule_session_route = GuestRoute::Capsule {
             session: "session-1".to_string(),
@@ -5973,6 +6013,7 @@ mod tests {
         let route = GuestRoute::CapsuleHandle {
             handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
             label: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+            community_toml_id: None,
         };
         assert!(!should_force_mounted_after_reuse(
             WebViewReuseAction::Navigate,
@@ -6560,6 +6601,7 @@ mod tests {
             GuestRoute::CapsuleHandle {
                 handle: "capsule://org/demo@1.0.0".into(),
                 label: "demo".into(),
+                community_toml_id: None,
             },
             GuestRoute::CapsuleUrl {
                 handle: "capsule://org/demo@1.0.0".into(),
@@ -6601,6 +6643,7 @@ mod tests {
         GuestRoute::CapsuleHandle {
             handle: "capsule://ato.run/org/app".to_string(),
             label: "app".to_string(),
+            community_toml_id: None,
         }
     }
 
