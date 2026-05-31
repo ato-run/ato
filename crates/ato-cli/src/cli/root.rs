@@ -19,6 +19,7 @@ use super::shared::{
 };
 use super::source::SourceCommands;
 use super::state::StateCommands;
+use super::workspace::WorkspaceCommands;
 
 #[derive(Parser)]
 #[command(name = "ato")]
@@ -28,9 +29,9 @@ use super::state::StateCommands;
 Usage: {usage}
 
 Primary Commands:
-  run      Rehearse a capsule in an ephemeral local session
-  decap    Set up a workspace locally
-  encap    Share your current workspace
+  run                 Run a local project, source repo, or published recipe
+  workspace share     Share a local workspace
+  workspace setup     Set up a shared workspace locally
 
 Management:
   ps       List running capsules
@@ -295,7 +296,16 @@ pub(crate) enum Commands {
 
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Share your current workspace"
+        about = "Share or set up a workspace"
+    )]
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
+    },
+
+    #[command(
+        hide = true,
+        about = "Share your current workspace (deprecated: use `ato workspace share`)"
     )]
     Encap {
         /// Local workspace path to capture (default: current directory)
@@ -344,8 +354,8 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
-        about = "Materialize a shared workspace descriptor into a target directory"
+        hide = true,
+        about = "Materialize a shared workspace descriptor into a target directory (deprecated: use `ato workspace setup`)"
     )]
     Decap {
         /// Share URL, share.spec.json, or share.lock.json

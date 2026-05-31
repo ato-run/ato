@@ -16,6 +16,7 @@ pub(crate) struct EncapCommandArgs {
     pub(crate) allow_dirty: bool,
     pub(crate) yes: bool,
     pub(crate) save_config: bool,
+    pub(crate) dev: bool,
     pub(crate) reporter: Arc<CliReporter>,
 }
 
@@ -25,6 +26,7 @@ pub(crate) struct DecapCommandArgs {
     pub(crate) plan: bool,
     pub(crate) tool_runtime: ShareToolRuntime,
     pub(crate) strict: bool,
+    pub(crate) dev: bool,
     pub(crate) reporter: Arc<CliReporter>,
 }
 
@@ -40,6 +42,7 @@ pub(crate) fn execute_encap_command(args: EncapCommandArgs) -> Result<()> {
             allow_dirty: args.allow_dirty,
             yes: args.yes,
             save_config: args.save_config,
+            dev: args.dev,
         },
         args.reporter,
     )
@@ -53,6 +56,7 @@ pub(crate) fn execute_decap_command(args: DecapCommandArgs) -> Result<()> {
             plan: args.plan,
             tool_runtime: args.tool_runtime,
             strict: args.strict,
+            dev: args.dev,
         },
         args.reporter,
     )
