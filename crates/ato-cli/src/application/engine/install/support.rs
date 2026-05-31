@@ -932,13 +932,13 @@ pub(crate) async fn resolve_run_target_or_install(
                                 AtoError::EntrypointInvalid {
                                     message: format!(
                                         "TOML_SELECTION_REQUIRED: multiple community \
-                                                 capsule.toml candidates exist for '{}'. \
-                                                 Use -T/--use-existing-toml, or run interactively.",
+                                         capsule.toml candidates exist for '{}'. \
+                                         Use -T/--use-existing-toml, or run interactively.",
                                         repository
                                     ),
                                     hint: Some(
                                         "Re-run in a TTY or use -T/--use-existing-toml to \
-                                                 select a specific capsule.toml."
+                                         select a specific capsule.toml."
                                             .to_string(),
                                     ),
                                     field: None,
@@ -948,25 +948,50 @@ pub(crate) async fn resolve_run_target_or_install(
 
                         match selected {
                             Some(idx) => {
-                                let toml_content =
-                                    crate::community::fetch_capsule_toml_by_id(&candidates[idx].id)
-                                        .await
-                                        .with_context(|| {
-                                            format!(
-                                                "Failed to fetch community capsule.toml '{}'",
-                                                candidates[idx].id
-                                            )
-                                        })?;
-                                crate::community::validate_capsule_toml_source_matches_run_target(
-                                    &toml_content,
+                                let candidate = &candidates[idx];
+                                crate::community::validate_candidate_source_matches_run_target(
+                                    &candidate.source,
                                     &repository,
                                 )
                                 .with_context(|| {
                                     format!(
-                                        "Community capsule.toml '{}' source mismatch",
-                                        candidates[idx].id
+                                        "Community candidate '{}' source mismatch with run target",
+                                        candidate.id
                                     )
                                 })?;
+                                let toml_content =
+                                    crate::community::fetch_capsule_toml_by_id(&candidate.id)
+                                        .await
+                                        .with_context(|| {
+                                            format!(
+                                                "Failed to fetch community capsule.toml '{}'",
+                                                candidate.id
+                                            )
+                                        })?;
+                                let validation =
+                                    crate::community::validate_capsule_toml_source_with_provenance(
+                                        &toml_content,
+                                        &repository,
+                                        &candidate.source,
+                                    );
+                                match validation {
+                                    crate::community::SourceValidationOutcome::Match => {}
+                                    crate::community::SourceValidationOutcome::MissingSource => {
+                                        unreachable!("validate_capsule_toml_source_with_provenance never returns MissingSource")
+                                    }
+                                    crate::community::SourceValidationOutcome::Mismatch {
+                                        toml_source,
+                                        expected_source: _,
+                                    } => {
+                                        anyhow::bail!(
+                                            "Community capsule.toml '{}' source mismatch: \
+                                             TOML declares '{}', expected '{}'.",
+                                            candidate.id,
+                                            toml_source,
+                                            repository
+                                        );
+                                    }
+                                }
                                 Some(toml_content)
                             }
                             None => None,
@@ -986,33 +1011,81 @@ pub(crate) async fn resolve_run_target_or_install(
             let resolved_existing_toml = if let Some(toml_input) = use_existing_toml.as_deref() {
                 if toml_input.starts_with("http://") || toml_input.starts_with("https://") {
                     let content = crate::community::fetch_toml_from_url(toml_input).await?;
-                    crate::community::validate_capsule_toml_source_matches_run_target(
-                        &content,
-                        &repository,
-                    )
-                    .with_context(|| {
-                        format!("Remote capsule.toml from {toml_input} source mismatch")
-                    })?;
+                    let validation =
+                        crate::community::validate_capsule_toml_source_matches_run_target(
+                            &content,
+                            &repository,
+                        );
+                    match validation {
+                        crate::community::SourceValidationOutcome::Match => {}
+                        crate::community::SourceValidationOutcome::MissingSource => {
+                            anyhow::bail!(
+                                "Remote capsule.toml from {toml_input} does not contain \
+                                 source.repository or metadata.repository. A remote TOML \
+                                 must declare its source identity."
+                            );
+                        }
+                        crate::community::SourceValidationOutcome::Mismatch {
+                            toml_source,
+                            expected_source: _,
+                        } => {
+                            anyhow::bail!(
+                                "Remote capsule.toml from {toml_input} source mismatch: \
+                                 TOML declares '{toml_source}', expected '{repository}'."
+                            );
+                        }
+                    }
                     Some(content)
                 } else {
                     let expanded = crate::local_input::expand_local_path(toml_input);
                     let content = std::fs::read_to_string(&expanded).with_context(|| {
                         format!("Failed to read TOML file: {}", expanded.display())
                     })?;
-                    let is_explicit_mismatch =
+                    let validation =
                         crate::community::validate_capsule_toml_source_matches_run_target(
                             &content,
                             &repository,
-                        )
-                        .is_err();
-                    if is_explicit_mismatch {
-                        anyhow::bail!(
-                            "Source identity mismatch: the capsule.toml at '{}' \
-                             does not match the run target '{}'. \
-                             The TOML must reference the same repository.",
-                            expanded.display(),
-                            repository
                         );
+                    match validation {
+                        crate::community::SourceValidationOutcome::Match => {}
+                        crate::community::SourceValidationOutcome::Mismatch {
+                            toml_source,
+                            expected_source: _,
+                        } => {
+                            anyhow::bail!(
+                                "Source identity mismatch: the capsule.toml at '{}' \
+                                 declares '{toml_source}', but run target is '{repository}'.",
+                                expanded.display(),
+                            );
+                        }
+                        crate::community::SourceValidationOutcome::MissingSource => {
+                            if is_tty {
+                                if !progressive_ui::confirm_with_fallback(
+                                    &format!(
+                                        "WARNING: The capsule.toml at '{}' does not declare \
+                                         a source.repository. Continue anyway? [y/N] ",
+                                        expanded.display()
+                                    ),
+                                    false,
+                                    progressive_ui::can_use_progressive_ui(json_mode),
+                                )? {
+                                    anyhow::bail!("Aborted due to missing source identity.")
+                                }
+                            } else if yes {
+                                futures::executor::block_on(reporter.warn(format!(
+                                    "WARNING: capsule.toml at '{}' has no source.repository; \
+                                     continuing because --yes is set.",
+                                    expanded.display()
+                                )))?;
+                            } else {
+                                anyhow::bail!(
+                                    "capsule.toml at '{}' does not declare a source.repository. \
+                                     Re-run with -y/--yes to continue anyway, or add \
+                                     [source.repository] to the TOML.",
+                                    expanded.display()
+                                );
+                            }
+                        }
                     }
                     Some(content)
                 }
@@ -1020,8 +1093,6 @@ pub(crate) async fn resolve_run_target_or_install(
                 None
             };
 
-            let is_community_toml = selected_community_toml.is_some();
-            let is_explicit_toml = resolved_existing_toml.is_some();
             let effective_toml = selected_community_toml.or(resolved_existing_toml);
 
             let resolved_commit = match explicit_commit.clone() {
@@ -1086,22 +1157,6 @@ pub(crate) async fn resolve_run_target_or_install(
                 explicit_commit.clone(),
             )
             .await?;
-
-            let needs_community_prompt = !is_explicit_toml
-                && !is_community_toml
-                && crate::community::should_prompt_community_sharing()
-                && !json_mode;
-
-            if needs_community_prompt {
-                let _ = futures::executor::block_on(
-                    reporter.notify(
-                        "Run succeeded! Do you want to share this capsule.toml recipe \
-                     to the Ato community? Community submission is not implemented \
-                     yet. Run will continue without submitting."
-                            .to_string(),
-                    ),
-                );
-            }
 
             let desktop_open_path = launchable_desktop_open_path(&install_result);
             return Ok(ResolvedRunTarget {
