@@ -517,7 +517,7 @@ pub fn open_consent_window_for_route_with_client(
     requested_client: crate::state::session::SessionClientKind,
 ) -> Result<()> {
     let (display_name, display_handle) = match &route {
-        GuestRoute::CapsuleHandle { handle, label } => {
+        GuestRoute::CapsuleHandle { handle, label, .. } => {
             let pretty_name = label
                 .split(['/', '@', '-', '_'])
                 .filter(|s| !s.is_empty())
@@ -892,7 +892,7 @@ pub fn scroll_active_consent_config_panel_to_bottom(cx: &mut App) -> Result<()> 
 pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyWindowHandle> {
     let init_script = route.map(|r| {
         let (name, handle) = match r {
-            GuestRoute::CapsuleHandle { handle, label } => {
+            GuestRoute::CapsuleHandle { handle, label, .. } => {
                 let pretty = label
                     .split(['/', '@', '-', '_'])
                     .filter(|s| !s.is_empty())
@@ -1397,10 +1397,7 @@ fn close_boot_window_handle(
         "close_boot_window_handle: removing boot wizard window"
     );
     let _ = boot_handle.update(cx, |_, window, _| window.remove_window());
-    tracing::info!(
-        boot_window_id,
-        "ato_launch: boot wizard closed"
-    );
+    tracing::info!(boot_window_id, "ato_launch: boot wizard closed");
 }
 
 fn stop_session_async(session_id: String) {
@@ -1417,7 +1414,7 @@ fn stop_session_async(session_id: String) {
 
 fn record_start_history(route: &GuestRoute) {
     let item = match route {
-        GuestRoute::CapsuleHandle { handle, label }
+        GuestRoute::CapsuleHandle { handle, label, .. }
         | GuestRoute::CapsuleUrl { handle, label, .. } => Some((handle.as_str(), label.as_str())),
         GuestRoute::LocalManifest(local) => {
             Some((local.source_handle.as_str(), local.label.as_str()))
