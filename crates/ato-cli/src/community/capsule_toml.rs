@@ -93,12 +93,20 @@ pub(crate) fn resolve_community_api_base_url() -> String {
         .unwrap_or_else(|| DEFAULT_COMMUNITY_API_URL.to_string())
 }
 
-fn community_api_client() -> Result<reqwest::Client> {
+fn community_discovery_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .with_context(|| "Failed to build community discovery client")
+}
+
+fn community_fetch_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
-        .with_context(|| "Failed to build community API client")
+        .with_context(|| "Failed to build community fetch client")
 }
 
 pub(crate) fn platform_display_name() -> &'static str {
@@ -159,7 +167,7 @@ pub(crate) fn sort_candidates(candidates: &mut [CommunityCapsuleTomlCandidate]) 
 pub(crate) async fn fetch_community_capsule_tomls(
     source: &str,
 ) -> Result<Vec<CommunityCapsuleTomlCandidate>> {
-    let client = community_api_client()?;
+    let client = community_discovery_client()?;
     let endpoint = format!(
         "{}/v1/capsule-tomls?source={}",
         resolve_community_api_base_url(),
@@ -192,7 +200,7 @@ pub(crate) async fn fetch_community_capsule_tomls(
 }
 
 pub(crate) async fn fetch_capsule_toml_by_id(id: &str) -> Result<String> {
-    let client = community_api_client()?;
+    let client = community_fetch_client()?;
     let endpoint = format!("{}/v1/capsule-tomls/{id}", resolve_community_api_base_url());
     debug!(%endpoint, "fetching capsule.toml by id");
     let response = client
@@ -217,7 +225,7 @@ pub(crate) async fn fetch_capsule_toml_by_id(id: &str) -> Result<String> {
 }
 
 pub(crate) async fn fetch_toml_from_url(url: &str) -> Result<String> {
-    let client = community_api_client()?;
+    let client = community_fetch_client()?;
     debug!(%url, "fetching capsule.toml from URL");
     let response = client
         .get(url)
@@ -240,39 +248,86 @@ pub(crate) async fn fetch_toml_from_url(url: &str) -> Result<String> {
         .with_context(|| "Failed to read capsule.toml from URL response body")
 }
 
-pub(crate) fn validate_capsule_toml_source_matches_run_target(
-    toml_content: &str,
-    normalized_source: &str,
-) -> Result<()> {
-    let parsed: TomlValue = toml::from_str(toml_content)
-        .with_context(|| "Failed to parse capsule.toml for source validation")?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourceValidationOutcome {
+    Match,
+    MissingSource,
+    Mismatch {
+        toml_source: String,
+        expected_source: String,
+    },
+}
 
-    let toml_source = parsed
+fn extract_toml_source(toml_content: &str) -> Option<String> {
+    let parsed: TomlValue = toml::from_str(toml_content).ok()?;
+    parsed
         .get("source")
         .and_then(|s| s.get("repository"))
-        .and_then(|v| v.as_str())
+        .and_then(|v| v.as_str().map(str::to_string))
         .or_else(|| {
             parsed
                 .get("metadata")
                 .and_then(|m| m.get("repository"))
-                .and_then(|v| v.as_str())
-        });
+                .and_then(|v| v.as_str().map(str::to_string))
+        })
+}
 
-    match toml_source {
-        Some(src) if src == normalized_source => Ok(()),
-        Some(src) => bail!(
-            "Source identity mismatch: capsule.toml declares source '{}', but run target is '{}'. \
-             The TOML must reference the same repository.",
-            src,
-            normalized_source
-        ),
+pub(crate) fn validate_capsule_toml_source_matches_run_target(
+    toml_content: &str,
+    normalized_source: &str,
+) -> SourceValidationOutcome {
+    match extract_toml_source(toml_content) {
+        Some(src) if src == normalized_source => SourceValidationOutcome::Match,
+        Some(src) => SourceValidationOutcome::Mismatch {
+            toml_source: src,
+            expected_source: normalized_source.to_string(),
+        },
+        None => SourceValidationOutcome::MissingSource,
+    }
+}
+
+pub(crate) fn validate_capsule_toml_source_with_provenance(
+    toml_content: &str,
+    normalized_source: &str,
+    provenance_source: &str,
+) -> SourceValidationOutcome {
+    if provenance_source != normalized_source {
+        return SourceValidationOutcome::Mismatch {
+            toml_source: provenance_source.to_string(),
+            expected_source: normalized_source.to_string(),
+        };
+    }
+
+    match extract_toml_source(toml_content) {
+        Some(toml_src) if toml_src == normalized_source => SourceValidationOutcome::Match,
+        Some(toml_src) => SourceValidationOutcome::Mismatch {
+            toml_source: toml_src,
+            expected_source: normalized_source.to_string(),
+        },
         None => {
             debug!(
                 %normalized_source,
-                "capsule.toml has no source.repository or metadata.repository; skipping source identity validation"
+                %provenance_source,
+                "capsule.toml has no source.repository; using community candidate.source as provenance"
             );
-            Ok(())
+            SourceValidationOutcome::Match
         }
+    }
+}
+
+pub(crate) fn validate_candidate_source_matches_run_target(
+    candidate_source: &str,
+    normalized_source: &str,
+) -> Result<()> {
+    if candidate_source == normalized_source {
+        Ok(())
+    } else {
+        bail!(
+            "Community candidate source mismatch: candidate declares source '{}', \
+             but run target is '{}'.",
+            candidate_source,
+            normalized_source
+        )
     }
 }
 
@@ -336,14 +391,10 @@ pub(crate) fn prompt_community_candidate_selection(
         "{}. Infer new capsule.toml (skip community recipes)",
         candidates.len() + 1
     );
-    eprintln!(
-        "{}. Use local/remote capsule.toml (-T)",
-        candidates.len() + 2
-    );
     eprintln!();
 
     loop {
-        eprint!("Enter choice (1-{}): ", candidates.len() + 2);
+        eprint!("Enter choice (1-{}): ", candidates.len() + 1);
         use std::io::Write;
         let _ = std::io::stderr().flush();
 
@@ -353,7 +404,7 @@ pub(crate) fn prompt_community_candidate_selection(
             .context("Failed to read selection")?;
 
         let choice: usize = match input.trim().parse() {
-            Ok(n) if n >= 1 && n <= candidates.len() + 2 => n,
+            Ok(n) if n >= 1 && n <= candidates.len() + 1 => n,
             _ => {
                 eprintln!("Invalid choice, try again.");
                 continue;
@@ -362,14 +413,6 @@ pub(crate) fn prompt_community_candidate_selection(
 
         return Ok(choice);
     }
-}
-
-pub(crate) fn is_tty_available() -> bool {
-    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
-pub(crate) fn should_prompt_community_sharing() -> bool {
-    is_tty_available()
 }
 
 #[cfg(test)]
@@ -514,8 +557,10 @@ mod tests {
             [source]
             repository = "github.com/owner/repo"
         "#;
-        validate_capsule_toml_source_matches_run_target(toml, "github.com/owner/repo")
-            .expect("should match");
+        assert_eq!(
+            validate_capsule_toml_source_matches_run_target(toml, "github.com/owner/repo"),
+            SourceValidationOutcome::Match
+        );
     }
 
     #[test]
@@ -526,12 +571,13 @@ mod tests {
             [source]
             repository = "github.com/other/repo"
         "#;
-        let result = validate_capsule_toml_source_matches_run_target(toml, "github.com/owner/repo");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Source identity mismatch"));
+        assert_eq!(
+            validate_capsule_toml_source_matches_run_target(toml, "github.com/owner/repo"),
+            SourceValidationOutcome::Mismatch {
+                toml_source: "github.com/other/repo".into(),
+                expected_source: "github.com/owner/repo".into(),
+            }
+        );
     }
 
     #[test]
@@ -542,8 +588,100 @@ mod tests {
             [metadata]
             repository = "github.com/owner/repo"
         "#;
-        validate_capsule_toml_source_matches_run_target(toml, "github.com/owner/repo")
-            .expect("should match via metadata");
+        assert_eq!(
+            validate_capsule_toml_source_matches_run_target(toml, "github.com/owner/repo"),
+            SourceValidationOutcome::Match
+        );
+    }
+
+    #[test]
+    fn source_identity_missing_source_returns_missing() {
+        let toml = r#"
+            name = "test"
+            version = "1.0.0"
+        "#;
+        assert_eq!(
+            validate_capsule_toml_source_matches_run_target(toml, "github.com/owner/repo"),
+            SourceValidationOutcome::MissingSource
+        );
+    }
+
+    #[test]
+    fn validate_with_provenance_uses_provenance_when_toml_missing() {
+        let toml = r#"
+            name = "test"
+            version = "1.0.0"
+        "#;
+        assert_eq!(
+            validate_capsule_toml_source_with_provenance(
+                toml,
+                "github.com/owner/repo",
+                "github.com/owner/repo"
+            ),
+            SourceValidationOutcome::Match
+        );
+    }
+
+    #[test]
+    fn validate_with_provenance_rejects_provenance_mismatch() {
+        let toml = r#"
+            name = "test"
+            version = "1.0.0"
+        "#;
+        assert_eq!(
+            validate_capsule_toml_source_with_provenance(
+                toml,
+                "github.com/owner/repo",
+                "github.com/wrong/repo"
+            ),
+            SourceValidationOutcome::Mismatch {
+                toml_source: "github.com/wrong/repo".into(),
+                expected_source: "github.com/owner/repo".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_with_provenance_toml_source_overrides_provenance_on_mismatch() {
+        let toml = r#"
+            name = "test"
+            version = "1.0.0"
+            [source]
+            repository = "github.com/different/repo"
+        "#;
+        assert_eq!(
+            validate_capsule_toml_source_with_provenance(
+                toml,
+                "github.com/owner/repo",
+                "github.com/owner/repo"
+            ),
+            SourceValidationOutcome::Mismatch {
+                toml_source: "github.com/different/repo".into(),
+                expected_source: "github.com/owner/repo".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn candidate_source_matches_run_target() {
+        assert!(validate_candidate_source_matches_run_target(
+            "github.com/owner/repo",
+            "github.com/owner/repo"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn candidate_source_mismatch_run_target_fails() {
+        let result = validate_candidate_source_matches_run_target(
+            "github.com/wrong/repo",
+            "github.com/owner/repo",
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Community candidate source mismatch"));
     }
 
     #[test]
