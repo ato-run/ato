@@ -184,7 +184,10 @@ fn classify_closed_window_kind(cx: &App, window_id: u64) -> &'static str {
 
     // Check singleton chrome windows.
     if let Some(c) = cx.try_global::<crate::window::ControlBarController>() {
-        if c.handle.map(|h| h.window_id().as_u64() == window_id).unwrap_or(false) {
+        if c.handle
+            .map(|h| h.window_id().as_u64() == window_id)
+            .unwrap_or(false)
+        {
             return "control-bar";
         }
     }
@@ -802,13 +805,29 @@ pub fn run(skip_onboarding: bool) {
                 }
             }
 
-            // In Focus mode the Control Bar is a process-lifetime
-            // singleton with its own lifecycle, decoupled from any
-            // AppWindow. Closing the last AppWindow therefore should
-            // NOT auto-open a Launcher — the bar is already there as
-            // the user's landing surface. We quit only when every
-            // remaining window (including the Control Bar) is gone.
-            if cx.windows().is_empty() && !crate::window::is_multi_window_enabled() {
+            // Window-lifecycle endgame.
+            //
+            // Legacy single-window mode: quit when the last window closes.
+            //
+            // Focus View: the Control Bar is a process-lifetime singleton, so
+            // `cx.windows()` is effectively never empty while the bar is up —
+            // and the bar is a WS_EX_TOOLWINDOW that never appears in the
+            // Windows taskbar. A user who closes every content window from the
+            // taskbar would otherwise be left with an invisible, unclosable
+            // bar and a process that never exits. Instead, when the last
+            // *content* window closes we bring back the Start capsule as the
+            // landing surface (its quit button is the explicit exit). If the
+            // Start page cannot be opened and only the Control Bar remains,
+            // that is an unrecoverable state — quit as abnormal.
+            if crate::window::is_multi_window_enabled() {
+                if !crate::window::is_shutting_down()
+                    && cx
+                        .global::<crate::window::content_windows::OpenContentWindows>()
+                        .is_empty()
+                {
+                    reopen_start_or_quit(cx);
+                }
+            } else if cx.windows().is_empty() {
                 cx.quit();
             }
         })
@@ -923,6 +942,7 @@ pub fn run(skip_onboarding: bool) {
             let route = crate::state::GuestRoute::CapsuleHandle {
                 handle: "github.com/Koh0920/WasedaP2P".to_string(),
                 label: "WasedaP2P".to_string(),
+                community_toml_id: None,
             };
             tracing::info!("calling open_consent_window_for_route");
             match crate::window::launch_window::open_consent_window_for_route(cx, route) {
@@ -1028,7 +1048,20 @@ pub fn run(skip_onboarding: bool) {
             }
 
             if let Some(rest) = raw.strip_prefix("capsule://") {
-                let handle = rest.trim_end_matches('/').to_string();
+                // Extract optional ?ctoml=<id> query parameter.
+                let (rest_path, community_toml_id) = if let Some(q_pos) = rest.find('?') {
+                    let path = &rest[..q_pos];
+                    let query = &rest[q_pos + 1..];
+                    let cid = query
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("ctoml="))
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string);
+                    (path, cid)
+                } else {
+                    (rest, None)
+                };
+                let handle = rest_path.trim_end_matches('/').to_string();
                 if handle.is_empty() {
                     tracing::warn!("capsule:// with empty handle — ignored");
                     return;
@@ -1048,8 +1081,11 @@ pub fn run(skip_onboarding: bool) {
                         // Go through the consent wizard — E103/E302 modals
                         // will appear in the Desktop shell before the capsule
                         // is launched and opened in the OS browser.
-                        let route =
-                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        let route = crate::state::GuestRoute::CapsuleHandle {
+                            handle,
+                            label,
+                            community_toml_id,
+                        };
                         if let Err(err) =
                             crate::window::launch_window::open_consent_window_for_route_with_client(
                                 cx,
@@ -1068,8 +1104,11 @@ pub fn run(skip_onboarding: bool) {
                             "capsule_open_mode=webviewer: not yet implemented, falling back to window"
                         );
                         // fall through to window behaviour
-                        let route =
-                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        let route = crate::state::GuestRoute::CapsuleHandle {
+                            handle,
+                            label,
+                            community_toml_id,
+                        };
                         if let Err(err) =
                             crate::window::launch_window::open_consent_window_for_route(
                                 cx, route,
@@ -1082,8 +1121,11 @@ pub fn run(skip_onboarding: bool) {
                         }
                     }
                     crate::config::CapsuleOpenMode::Window => {
-                        let route =
-                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        let route = crate::state::GuestRoute::CapsuleHandle {
+                            handle,
+                            label,
+                            community_toml_id,
+                        };
                         // Gate every capsule launch on a pre-flight consent
                         // wizard. On Approve the broker spawns the real
                         // AppWindow + boot wizard; on Cancel nothing happens.
@@ -1429,6 +1471,7 @@ pub fn run(skip_onboarding: bool) {
                 {
                     let open_url_bridge = open_url_bridge.clone();
                     move |window, cx| {
+                        window.set_window_title(crate::window::WINDOW_TITLE);
                         let shell =
                             cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
                         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
@@ -1439,6 +1482,43 @@ pub fn run(skip_onboarding: bool) {
         }
 
         cx.activate(true);
+    });
+}
+
+/// Focus View: after the last content window closes, bring the Start
+/// capsule back as the landing surface. If it cannot be opened and only the
+/// Control Bar is left, the shell has nothing usable to show — treat that as
+/// abnormal and quit. Deferred a tick so we never open a Wry WebView while
+/// GPUI is still unwinding the `on_window_closed` callback (synchronous
+/// `build_as_child` re-entrancy panics on Windows).
+fn reopen_start_or_quit(cx: &mut App) {
+    crate::system_capsule::ipc::defer_after_dispatch(cx, |cx| {
+        if crate::window::is_shutting_down() {
+            return;
+        }
+        // A content window may have opened in the meantime (e.g. the user
+        // launched something from the Control Bar) — nothing to do then.
+        if !cx
+            .global::<crate::window::content_windows::OpenContentWindows>()
+            .is_empty()
+        {
+            return;
+        }
+        match crate::window::start_window::open_start_window(cx) {
+            Ok(()) => {
+                tracing::info!(
+                    "last content window closed — reopened Start capsule as landing surface"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to reopen Start capsule after last window closed; only the Control Bar remains — quitting as abnormal"
+                );
+                crate::window::begin_shutdown();
+                cx.quit();
+            }
+        }
     });
 }
 

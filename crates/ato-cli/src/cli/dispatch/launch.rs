@@ -130,6 +130,7 @@ pub(crate) fn execute_launch_command(
         true,
         /* compatibility_fallback */ None,
         /* provider_toolchain */ ProviderToolchain::Auto,
+        /* use_existing_toml */ None,
         /* explicit_commit */ None,
         /* assume_yes */ args.yes,
         /* verbose */ args.verbose,

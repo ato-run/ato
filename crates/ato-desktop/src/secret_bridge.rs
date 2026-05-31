@@ -2,6 +2,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+use crate::proc_util::CommandNoWindowExt;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -96,6 +97,7 @@ impl CliSecretBridge {
         })?;
 
         let mut child = Command::new(&ato)
+            .no_console_window()
             .args(["secrets", "bridge", "--json"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

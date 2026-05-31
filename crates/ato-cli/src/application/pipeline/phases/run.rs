@@ -218,6 +218,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) allow_unsafe: bool,
     pub(crate) compatibility_fallback: Option<String>,
     pub(crate) provider_toolchain_requested: ProviderToolchain,
+    pub(crate) use_existing_toml: Option<String>,
     pub(crate) explicit_commit: Option<String>,
     pub(crate) assume_yes: bool,
     pub(crate) verbose: bool,
@@ -1469,12 +1470,14 @@ where
             export_request: request.export_request.clone(),
             provider_workspace: None,
             transient_workspace_root: None,
+            community_submit_context: None,
         }
     } else {
         crate::install::support::resolve_run_target_or_install(
             request.target.clone(),
             request.assume_yes,
             request.provider_toolchain_requested,
+            request.use_existing_toml.clone(),
             request.explicit_commit.clone(),
             request.keep_failed_artifacts,
             request.auto_fix_mode,
@@ -4830,6 +4833,7 @@ url = "http://127.0.0.1:8787/health"
             allow_unsafe: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            use_existing_toml: None,
             explicit_commit: None,
             assume_yes: true,
             verbose: false,
