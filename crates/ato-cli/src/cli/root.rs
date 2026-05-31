@@ -60,11 +60,11 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Rehearse a capsule in an ephemeral local session",
+        about = "Run a local project, source repo, or published recipe",
         trailing_var_arg = true
     )]
     Run {
-        /// Local path (./, ../, ~/, /...), share URL (https://ato.run/s/...), provider target (pypi:<package>, pypi:<package>[extra], npm:<package>, npm:@scope/package), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
+        /// Local path (./, ../, ~/, /...), share URL (https://ato.run/s/...), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
