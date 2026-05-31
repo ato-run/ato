@@ -94,7 +94,7 @@ pub(crate) enum GitMode {
     /// Pin the current local commit (must be pushed to remote)
     #[default]
     SameCommit,
-    /// Fetch the remote branch HEAD at encap time and pin that rev
+    /// Fetch the remote branch HEAD when sharing and pin that rev
     LatestAtEncap,
 }
 
