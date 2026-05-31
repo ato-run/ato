@@ -97,12 +97,17 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                 .and_then(|s| s.0.clone());
                             if let Some(entity) = entity_opt {
                                 let dock = entity.read(cx);
-                                match dock.webview.load_url(&url) {
-                                    Ok(()) => {
-                                        req.send(Ok(serde_json::json!({ "ok": true })));
-                                    }
-                                    Err(e) => {
-                                        req.send(Err(e.to_string()));
+                                match dock.webview.as_ref() {
+                                    Some(webview) => match webview.load_url(&url) {
+                                        Ok(()) => {
+                                            req.send(Ok(serde_json::json!({ "ok": true })));
+                                        }
+                                        Err(e) => {
+                                            req.send(Err(e.to_string()));
+                                        }
+                                    },
+                                    None => {
+                                        req.send(Err("dock webview unavailable".into()));
                                     }
                                 }
                             } else {
@@ -139,12 +144,16 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                             .and_then(|s| s.0.clone());
                         if let Some(entity) = entity_opt {
                             let dock = entity.read(cx);
-                            dispatch_automation_command(
-                                req,
-                                &dock.webview,
-                                DOCK_AUTOMATION_PANE_ID,
-                                &host_clone,
-                            );
+                            if let Some(webview) = dock.webview.as_ref() {
+                                dispatch_automation_command(
+                                    req,
+                                    webview,
+                                    DOCK_AUTOMATION_PANE_ID,
+                                    &host_clone,
+                                );
+                            } else {
+                                req.send(Err("dock webview unavailable".into()));
+                            }
                         } else {
                             req.send(Err("dock is not open".into()));
                         }
