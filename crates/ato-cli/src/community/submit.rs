@@ -170,6 +170,12 @@ fn is_placeholder_value(value: &str) -> bool {
         || v == "X"
 }
 
+pub(crate) struct SubmitResult {
+    pub(crate) id: String,
+    pub(crate) url: String,
+    pub(crate) status: String,
+}
+
 pub(crate) async fn execute_submit(
     source: &str,
     toml_path: &Path,
@@ -188,10 +194,99 @@ pub(crate) async fn execute_submit(
     let toml_content = std::fs::read_to_string(toml_path)
         .with_context(|| format!("Failed to read capsule.toml: {}", toml_path.display()))?;
 
-    validate_toml_shape(&toml_content)
+    let dry_run_mode = if dry_run {
+        Some(SubmitDryRun::PrintToConsole { json_mode })
+    } else {
+        None
+    };
+
+    let payload = prepare_submission(
+        &normalized_source,
+        &toml_path,
+        &toml_content,
+        yes,
+        dry_run_mode.as_ref(),
+    )?;
+
+    let Some(payload) = payload else {
+        return Ok(());
+    };
+
+    if !dry_run {
+        let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+        if is_tty && !yes {
+            eprintln!();
+            eprintln!("Submit capsule.toml to Ato community?");
+            eprintln!();
+            eprintln!("  source: {}", normalized_source);
+            eprintln!("  toml: {}", toml_path.display());
+            eprintln!("  trust: community");
+            eprintln!("  visibility: public");
+            eprintln!();
+            eprintln!("This will publish the capsule.toml as public execution metadata.");
+            eprint!("Continue? [y/N] ");
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("Failed to read confirmation")?;
+            if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+                if json_mode {
+                    let output = serde_json::json!({"status": "aborted"});
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    eprintln!("Submission aborted.");
+                }
+                return Ok(());
+            }
+        } else if !is_tty && !yes {
+            bail!(
+                "Non-interactive submission requires -y/--yes. \
+                 Re-run with -y/--yes to confirm."
+            );
+        }
+    }
+
+    let result = submit_prepared_with_response(&payload).await?;
+
+    if json_mode {
+        let output = serde_json::json!({
+            "id": result.id,
+            "url": result.url,
+            "status": result.status,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        eprintln!();
+        eprintln!("Submitted community capsule.toml:");
+        eprintln!("  id: {}", result.id);
+        eprintln!("  url: {}", result.url);
+        eprintln!("  status: {}", result.status);
+    }
+
+    Ok(())
+}
+
+pub(crate) struct PreparedSubmission {
+    pub(crate) payload: SubmissionPayload,
+}
+
+pub(crate) enum SubmitDryRun {
+    PrintToConsole { json_mode: bool },
+}
+
+pub(crate) fn prepare_submission(
+    normalized_source: &str,
+    toml_path: &Path,
+    toml_content: &str,
+    yes: bool,
+    dry_run: Option<&SubmitDryRun>,
+) -> Result<Option<PreparedSubmission>> {
+    validate_toml_shape(toml_content)
         .with_context(|| format!("Invalid capsule.toml: {}", toml_path.display()))?;
 
-    let secret_warnings = scan_for_secrets(&toml_content)?;
+    let secret_warnings = scan_for_secrets(toml_content)?;
     if !secret_warnings.is_empty() {
         for w in &secret_warnings {
             eprintln!("WARNING: {}", w);
@@ -216,9 +311,9 @@ pub(crate) async fn execute_submit(
         }
     }
 
-    let declared_source = extract_toml_source(&toml_content);
+    let declared_source = extract_toml_source(toml_content);
     let source_validation =
-        validate_capsule_toml_source_matches_run_target(&toml_content, &normalized_source);
+        validate_capsule_toml_source_matches_run_target(toml_content, normalized_source);
 
     match source_validation {
         SourceValidationOutcome::Match => {}
@@ -266,59 +361,22 @@ pub(crate) async fn execute_submit(
         }
     }
 
-    let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-
-    if !dry_run {
-        if is_tty && !yes {
-            eprintln!();
-            eprintln!("Submit capsule.toml to Ato community?");
-            eprintln!();
-            eprintln!("  source: {}", normalized_source);
-            eprintln!("  toml: {}", toml_path.display());
-            eprintln!("  trust: community");
-            eprintln!("  visibility: public");
-            eprintln!();
-            eprintln!("This will publish the capsule.toml as public execution metadata.");
-            eprint!("Continue? [y/N] ");
-            use std::io::Write;
-            let _ = std::io::stderr().flush();
-            let mut input = String::new();
-            std::io::stdin()
-                .read_line(&mut input)
-                .context("Failed to read confirmation")?;
-            if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-                if json_mode {
-                    let output = serde_json::json!({"status": "aborted"});
-                    println!("{}", serde_json::to_string_pretty(&output)?);
-                } else {
-                    eprintln!("Submission aborted.");
-                }
-                return Ok(());
-            }
-        } else if !is_tty && !yes {
-            bail!(
-                "Non-interactive submission requires -y/--yes. \
-                 Re-run with -y/--yes to confirm."
-            );
-        }
-    }
-
     let payload = SubmissionPayload {
-        source: normalized_source.clone(),
-        capsule_toml: toml_content,
+        source: normalized_source.to_string(),
+        capsule_toml: toml_content.to_string(),
         metadata: SubmissionMetadata {
             client: "ato-cli".to_string(),
             platform: detect_platform(),
             trust_requested: "community".to_string(),
             source_identity: SourceIdentity {
                 declared: declared_source,
-                provenance: normalized_source,
+                provenance: normalized_source.to_string(),
             },
         },
     };
 
-    if dry_run {
-        if json_mode {
+    if let Some(SubmitDryRun::PrintToConsole { json_mode }) = dry_run {
+        if *json_mode {
             let output = serde_json::json!({
                 "status": "dry_run",
                 "payload_summary": {
@@ -342,9 +400,15 @@ pub(crate) async fn execute_submit(
             eprintln!();
             eprintln!("No network call was made.");
         }
-        return Ok(());
+        return Ok(None);
     }
 
+    Ok(Some(PreparedSubmission { payload }))
+}
+
+pub(crate) async fn submit_prepared_with_response(
+    submission: &PreparedSubmission,
+) -> Result<SubmitResult> {
     let client = submission_client()?;
     let endpoint = format!("{}/v1/capsule-tomls", resolve_community_api_base_url());
     debug!(%endpoint, "submitting community capsule.toml");
@@ -352,7 +416,7 @@ pub(crate) async fn execute_submit(
         .post(&endpoint)
         .header(reqwest::header::USER_AGENT, "ato-cli")
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&payload)
+        .json(&submission.payload)
         .send()
         .await
         .with_context(|| "Failed to submit community capsule.toml")?;
@@ -368,22 +432,11 @@ pub(crate) async fn execute_submit(
         .await
         .with_context(|| "Failed to parse submission response")?;
 
-    if json_mode {
-        let output = serde_json::json!({
-            "id": result.id,
-            "url": result.url,
-            "status": result.status,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        eprintln!();
-        eprintln!("Submitted community capsule.toml:");
-        eprintln!("  id: {}", result.id);
-        eprintln!("  url: {}", result.url);
-        eprintln!("  status: {}", result.status);
-    }
-
-    Ok(())
+    Ok(SubmitResult {
+        id: result.id,
+        url: result.url,
+        status: result.status,
+    })
 }
 
 #[cfg(test)]
