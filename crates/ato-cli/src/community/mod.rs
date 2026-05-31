@@ -135,6 +135,37 @@ pub(crate) fn fetch_and_validate_community_toml(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Mutex;
+
+    static COMMUNITY_API_URL_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn mock_http_sequence(responses: Vec<(u16, &'static str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock community API");
+        let port = listener.local_addr().expect("mock addr").port();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    500 => "Internal Server Error",
+                    _ => "Unknown",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
 
     /// Source identity mismatch must fail closed.
     #[test]
@@ -238,5 +269,62 @@ repository = "github.com/owner/repo"
             result.is_none(),
             "ctoml_wrong must not be found in candidates for owner/repo"
         );
+    }
+
+    #[test]
+    fn fetch_and_validate_rejects_ctoml_id_from_another_source() {
+        let _guard = COMMUNITY_API_URL_MUTEX.lock().expect("community api mutex");
+        let base = mock_http_sequence(vec![(
+            200,
+            r#"{"candidates":[
+                {"id":"ctoml_other","title":"Other","source":"owner/repo","trust":"community","stars":0,"platforms":[],"lastVerifiedAt":null,"permissionsSummary":[],"capsuleTomlUrl":"http://x/ctoml_other","revision":null}
+            ]}"#,
+        )]);
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let err = fetch_and_validate_community_toml("ctoml_requested", "github.com/owner/repo")
+            .expect_err("ctoml id must be registered under expected source");
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        assert!(err.to_string().contains("not registered under source"));
+    }
+
+    #[test]
+    fn fetch_and_validate_rejects_toml_source_mismatch() {
+        let _guard = COMMUNITY_API_URL_MUTEX.lock().expect("community api mutex");
+        let base = mock_http_sequence(vec![
+            (
+                200,
+                r#"{"candidates":[
+                    {"id":"ctoml_ok","title":"Recipe","source":"owner/repo","trust":"community","stars":0,"platforms":[],"lastVerifiedAt":null,"permissionsSummary":[],"capsuleTomlUrl":"http://x/ctoml_ok","revision":null}
+                ]}"#,
+            ),
+            (200, "[source]\nrepository = \"other/repo\"\n"),
+        ]);
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let err = fetch_and_validate_community_toml("ctoml_ok", "github.com/owner/repo")
+            .expect_err("TOML source mismatch must fail closed");
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        assert!(err.to_string().contains("source mismatch"));
+    }
+
+    #[test]
+    fn fetch_and_validate_allows_missing_toml_source_when_registry_matches() {
+        let _guard = COMMUNITY_API_URL_MUTEX.lock().expect("community api mutex");
+        let base = mock_http_sequence(vec![
+            (
+                200,
+                r#"{"candidates":[
+                    {"id":"ctoml_ok","title":"Recipe","source":"owner/repo","trust":"community","stars":0,"platforms":[],"lastVerifiedAt":null,"permissionsSummary":[],"capsuleTomlUrl":"http://x/ctoml_ok","revision":null}
+                ]}"#,
+            ),
+            (
+                200,
+                "schema_version = \"0.3\"\nname = \"recipe\"\ntype = \"app\"\n",
+            ),
+        ]);
+        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        let content = fetch_and_validate_community_toml("ctoml_ok", "github.com/owner/repo")
+            .expect("registry provenance should anchor missing TOML source");
+        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        assert!(content.contains("schema_version"));
     }
 }
