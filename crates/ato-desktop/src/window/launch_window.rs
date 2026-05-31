@@ -203,7 +203,7 @@ pub struct ActiveGithubRunShell(pub Option<WeakEntity<LaunchWindowShell>>);
 impl gpui::Global for ActiveGithubRunShell {}
 
 pub struct LaunchWindowShell {
-    _webview: WebView,
+    _webview: Option<WebView>,
     window_size: Size<Pixels>,
     paste: WebViewPasteSupport,
 }
@@ -212,7 +212,7 @@ impl_focusable_via_paste!(LaunchWindowShell, paste);
 
 impl WebViewPasteShell for LaunchWindowShell {
     fn active_paste_target(&self) -> Option<&WebView> {
-        Some(&self._webview)
+        self._webview.as_ref()
     }
 }
 
@@ -231,19 +231,30 @@ impl Render for LaunchWindowShell {
 }
 
 impl LaunchWindowShell {
+    /// Evaluate `script` in the wizard WebView if it was created. A no-op when
+    /// the WebView failed to build (graceful degrade — see
+    /// `crate::window::build_child_webview`).
+    fn eval(&self, script: &str) {
+        if let Some(webview) = self._webview.as_ref() {
+            let _ = webview.evaluate_script(script);
+        }
+    }
+
     fn sync_webview_bounds(&mut self, window: &mut Window) {
         let current = window.bounds().size;
         if current == self.window_size {
             return;
         }
-        let _ = self._webview.set_bounds(Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(current.width) as u32,
-                f32::from(current.height) as u32,
-            )
-            .into(),
-        });
+        if let Some(webview) = self._webview.as_ref() {
+            let _ = webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, 0i32).into(),
+                size: LogicalSize::new(
+                    f32::from(current.width) as u32,
+                    f32::from(current.height) as u32,
+                )
+                .into(),
+            });
+        }
         self.window_size = current;
     }
 
@@ -257,7 +268,7 @@ impl LaunchWindowShell {
             "typeof window.__atoStep==='function'&&window.__atoStep({})",
             step
         );
-        let _ = self._webview.evaluate_script(&script);
+        self.eval(&script);
     }
 
     /// Push a textual launch event line into the boot wizard detail/log view.
@@ -267,7 +278,7 @@ impl LaunchWindowShell {
             "typeof window.__atoDetail==='function'&&window.__atoDetail({})",
             detail_json
         );
-        let _ = self._webview.evaluate_script(&script);
+        self.eval(&script);
     }
 
     /// Show a terminal failure in the boot wizard without opening an
@@ -280,7 +291,7 @@ impl LaunchWindowShell {
             "typeof window.__atoFail==='function'&&window.__atoFail({})",
             error_json
         );
-        let _ = self._webview.evaluate_script(&script);
+        self.eval(&script);
     }
 
     /// Inject the full consent preview into the wizard WebView.
@@ -292,17 +303,15 @@ impl LaunchWindowShell {
             "typeof window.__ato_hydrate_preview==='function'&&window.__ato_hydrate_preview({})",
             preview_json
         );
-        let _ = self._webview.evaluate_script(&script);
+        self.eval(&script);
     }
 
     pub fn open_config_panel(&self) {
-        let _ = self
-            ._webview
-            .evaluate_script("typeof openConfigPanel==='function'&&openConfigPanel()");
+        self.eval("typeof openConfigPanel==='function'&&openConfigPanel()");
     }
 
     pub fn scroll_config_panel_to_bottom(&self) {
-        let _ = self._webview.evaluate_script(
+        self.eval(
             "const el=document.getElementById('panel-config-body'); if (el) { el.scrollTop = el.scrollHeight; }",
         );
     }
@@ -316,7 +325,7 @@ impl LaunchWindowShell {
             "typeof window.__ato_github_candidates_result==='function'&&window.__ato_github_candidates_result({})",
             json
         );
-        let _ = self._webview.evaluate_script(&script);
+        self.eval(&script);
     }
 
     pub fn inject_cli_inference_result(&self, result: &serde_json::Value) {
@@ -325,7 +334,7 @@ impl LaunchWindowShell {
             "typeof window.__ato_cli_inference_result==='function'&&window.__ato_cli_inference_result({})",
             json
         );
-        let _ = self._webview.evaluate_script(&script);
+        self.eval(&script);
     }
 
     pub fn inject_github_proceed_result(&self, result: &serde_json::Value) {
@@ -334,7 +343,7 @@ impl LaunchWindowShell {
             "typeof window.__ato_github_proceed_result==='function'&&window.__ato_github_proceed_result({})",
             json
         );
-        let _ = self._webview.evaluate_script(&script);
+        self.eval(&script);
     }
 }
 
@@ -382,9 +391,8 @@ fn open_wizard(
                 SystemCapsuleId::AtoLaunch,
                 queue_for_ipc,
             ))
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the Launch wizard WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Launch wizard", webview, window);
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
             window_size: win_size,
@@ -821,9 +829,8 @@ fn open_consent_wizard_inner(
                 SystemCapsuleId::AtoLaunch,
                 queue_for_closure,
             ))
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the consent WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Consent wizard", webview, window);
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
             window_size: win_size,
@@ -962,9 +969,8 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
                 SystemCapsuleId::AtoLaunch,
                 queue_for_closure,
             ))
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the github_run WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("GitHub Run wizard", webview, window);
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
             window_size: win_size,
@@ -1476,9 +1482,8 @@ fn open_boot_wizard_inner(
                 SystemCapsuleId::AtoLaunch,
                 queue_for_closure,
             ))
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the boot WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Boot wizard", webview, window);
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
             window_size: win_size,

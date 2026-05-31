@@ -1988,7 +1988,7 @@ impl Render for DesktopShell {
         if let Some(entity) = dock_entity {
             let dock_ref = entity.read(cx);
             self.webviews
-                .dispatch_dock_automation_requests(&mut self.state, Some(&dock_ref.webview));
+                .dispatch_dock_automation_requests(&mut self.state, dock_ref.webview.as_ref());
         } else {
             self.webviews
                 .dispatch_dock_automation_requests(&mut self.state, None);

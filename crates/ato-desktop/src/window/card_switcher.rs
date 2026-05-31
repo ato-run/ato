@@ -53,7 +53,7 @@ impl gpui::Global for CardSwitcherEntitySlot {}
 /// is still loading (browsers typically show transparent before the
 /// document layouts).
 pub struct CardSwitcherShell {
-    _webview: WebView,
+    _webview: Option<WebView>,
     window_size: Size<Pixels>,
     paste: WebViewPasteSupport,
 }
@@ -62,7 +62,7 @@ impl_focusable_via_paste!(CardSwitcherShell, paste);
 
 impl WebViewPasteShell for CardSwitcherShell {
     fn active_paste_target(&self) -> Option<&WebView> {
-        Some(&self._webview)
+        self._webview.as_ref()
     }
 }
 
@@ -86,8 +86,10 @@ impl CardSwitcherShell {
         let script = format!(
             "window.__ATO_SWITCHER_SCREENSHOT__ && window.__ATO_SWITCHER_SCREENSHOT__({window_id}, '{escaped}');"
         );
-        if let Err(e) = self._webview.evaluate_script(&script) {
-            tracing::debug!(window_id, ?e, "switcher: screenshot push failed");
+        if let Some(webview) = self._webview.as_ref() {
+            if let Err(e) = webview.evaluate_script(&script) {
+                tracing::debug!(window_id, ?e, "switcher: screenshot push failed");
+            }
         }
     }
 
@@ -95,8 +97,10 @@ impl CardSwitcherShell {
         let script = format!(
             "window.__ATO_SESSIONS_REFRESH__ && window.__ATO_SESSIONS_REFRESH__({sessions_json});"
         );
-        if let Err(error) = self._webview.evaluate_script(&script) {
-            tracing::debug!(?error, "switcher: session snapshot push failed");
+        if let Some(webview) = self._webview.as_ref() {
+            if let Err(error) = webview.evaluate_script(&script) {
+                tracing::debug!(?error, "switcher: session snapshot push failed");
+            }
         }
     }
 
@@ -105,14 +109,16 @@ impl CardSwitcherShell {
         if current == self.window_size {
             return;
         }
-        let _ = self._webview.set_bounds(Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(current.width) as u32,
-                f32::from(current.height) as u32,
-            )
-            .into(),
-        });
+        if let Some(webview) = self._webview.as_ref() {
+            let _ = webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, 0i32).into(),
+                size: LogicalSize::new(
+                    f32::from(current.width) as u32,
+                    f32::from(current.height) as u32,
+                )
+                .into(),
+            });
+        }
         self.window_size = current;
     }
 }
@@ -303,9 +309,8 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
                 SystemCapsuleId::AtoWindows,
                 queue_for_ipc,
             ))
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the Card Switcher WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Card Switcher window", webview, window);
         let shell = cx.new(|cx| CardSwitcherShell {
             _webview: webview,
             window_size: win_size,
