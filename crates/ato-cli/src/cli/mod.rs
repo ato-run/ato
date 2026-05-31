@@ -3,6 +3,7 @@ pub(crate) mod attest;
 mod binding;
 pub(crate) mod cache;
 pub(crate) mod commands;
+pub(crate) mod community;
 mod config;
 pub(crate) mod dispatch;
 mod import_cmd;
@@ -21,6 +22,7 @@ mod session;
 pub(crate) mod shared;
 mod source;
 mod state;
+mod workspace;
 
 #[allow(unused_imports)]
 pub(crate) use app::{AppCommands, ModelTierArg, PrivacyModeArg, RepairActionArg, SessionCommands};
@@ -61,3 +63,5 @@ pub(crate) use shared::{
 pub(crate) use source::SourceCommands;
 #[allow(unused_imports)]
 pub(crate) use state::StateCommands;
+#[allow(unused_imports)]
+pub(crate) use workspace::WorkspaceCommands;

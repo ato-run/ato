@@ -25,8 +25,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::Storage::Xps::PrintWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, GWL_EXSTYLE, GWLP_HWNDPARENT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOW, WS_EX_NOREDIRECTIONBITMAP,
+    ShowWindow, GWLP_HWNDPARENT, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, WS_EX_NOREDIRECTIONBITMAP,
 };
 
 // ── HWND helpers ──────────────────────────────────────────────────────────────
@@ -175,6 +175,29 @@ pub fn show_win_window(cx: &mut App, handle: AnyWindowHandle) {
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
         }
+    }
+}
+
+/// Pin the window to the always-on-top band so the floating Control Bar
+/// stays above normal app windows (and other apps). GPUI's Windows backend
+/// creates `WindowKind::PopUp` windows as `WS_EX_TOOLWINDOW` but does not
+/// mark them topmost, so we set `HWND_TOPMOST` explicitly via `SetWindowPos`.
+/// `SWP_NOMOVE | SWP_NOSIZE` keep the current rect; `SWP_NOACTIVATE` avoids
+/// stealing focus.
+pub fn set_window_topmost(cx: &mut App, handle: AnyWindowHandle) {
+    let Some(hwnd) = hwnd_for(cx, handle) else {
+        return;
+    };
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 

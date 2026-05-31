@@ -1,0 +1,83 @@
+# Community Publish Manifest — AODD-success samples only
+#
+# Each [[samples]] entry must have at least one AODD success receipt before
+# publish_status is set to "publish".  Do not add entries here speculatively.
+#
+# publish_status values:
+#   pending   — not yet submitted to registry
+#   published — submitted; fill in ctoml_id / ctoml_url after submission
+#   skip      — intentionally excluded (no AODD success or known issues)
+
+[[samples]]
+slug = "memos"
+source = "usememos/memos"
+toml_path = "samples/recipes/memos/capsule.toml"
+verified_platforms = ["darwin-arm64"]
+receipt_paths = ["docs/aodd/dev-head-test-set-a-receipt.md"]
+notes = "macOS Desktop AODD ✅ — CLI session ready 13 s, readiness 200 :5230"
+publish_status = "pending"
+
+[[samples]]
+slug = "uptime-kuma"
+source = "louislam/uptime-kuma"
+toml_path = "samples/recipes/uptime-kuma/capsule.toml"
+verified_platforms = ["darwin-arm64"]
+receipt_paths = ["docs/aodd/dev-head-test-set-a-receipt.md"]
+notes = "macOS Desktop AODD ✅ — CLI session ready 25 s, readiness 302 :3001"
+publish_status = "pending"
+
+[[samples]]
+slug = "n8n"
+source = "n8n-io/n8n"
+toml_path = "samples/recipes/n8n/capsule.toml"
+verified_platforms = ["darwin-arm64"]
+receipt_paths = ["docs/aodd/dev-head-test-set-a-receipt.md"]
+notes = "macOS Desktop AODD ✅ — CLI session ready 26 s, readiness 200 :5678/healthz"
+publish_status = "pending"
+
+[[samples]]
+slug = "blinko"
+source = "blinkospace/blinko"
+toml_path = "samples/recipes/blinko/capsule.toml"
+verified_platforms = ["darwin-arm64"]
+receipt_paths = ["docs/aodd/dev-head-test-set-a-receipt.md"]
+notes = "macOS Desktop AODD ✅ — 2-service (db+main), ready 43 s, readiness 200 :1111"
+publish_status = "pending"
+
+[[samples]]
+slug = "excalidraw"
+source = "excalidraw/excalidraw"
+toml_path = "samples/recipes/excalidraw/capsule.toml"
+verified_platforms = ["darwin-arm64"]
+receipt_paths = ["docs/aodd/dev-head-test-set-a-receipt.md"]
+notes = "macOS Desktop AODD ✅ — CLI session ready 19 s, readiness 200 :8080"
+publish_status = "pending"
+
+[[samples]]
+slug = "pgweb"
+source = "sosedoff/pgweb"
+toml_path = "samples/recipes/pgweb/capsule.toml"
+verified_platforms = ["windows-x86_64"]
+receipt_paths = ["docs/aodd/receipts/desktop-recipe-launch-20260530/pgweb/receipt.md"]
+notes = "Windows Desktop AODD ✅ — complete end-to-end, WebView pane reached"
+publish_status = "pending"
+
+# ── Explicitly excluded ────────────────────────────────────────────────────
+
+[[samples]]
+slug = "affine"
+source = "toeverything/AFFiNE"
+toml_path = "samples/recipes/affine/capsule.toml"
+verified_platforms = []
+receipt_paths = []
+notes = "Latest AODD result is TIMEOUT / incomplete — do not publish yet"
+publish_status = "skip"
+
+[[samples]]
+slug = "dify"
+source = "langgenius/dify"
+toml_path = "samples/recipes/dify/capsule.toml"
+verified_platforms = []
+receipt_paths = []
+notes = "QEMU port-forward failure on macOS arm64; latest AODD incomplete — do not publish yet"
+publish_status = "skip"

@@ -49,6 +49,12 @@ pub(crate) enum InternalCommands {
         /// `github.com/owner/repo`. Unlike `ato run`, this plumbing
         /// path never fetches or installs.
         target: String,
+        /// Fetch the specified community capsule.toml by ID, validate its
+        /// source identity against `target`, and run preflight against the
+        /// fetched manifest. When set, the offline manifest cache is
+        /// bypassed and the community TOML is used instead.
+        #[arg(long = "community-toml-id")]
+        community_toml_id: Option<String>,
         /// Emit machine-readable JSON output on stdout. Without it
         /// the command emits a brief human-readable summary (still
         /// including every identity field a TTY user could copy-

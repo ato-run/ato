@@ -40,6 +40,9 @@ use crate::application::pipeline::phases::run::{
 use crate::application::session_graph_populate::{
     EDGE_KIND_PROVIDES, NODE_KIND_PROVIDER, NODE_KIND_SERVICE,
 };
+use crate::application::state_bindings::{
+    require_explicit_persistent_state_bindings, resolve_attach_state_source_overrides,
+};
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
     prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
@@ -53,7 +56,7 @@ use crate::runtime::{overrides as runtime_overrides, port_manager::PortManager};
 use crate::ProviderToolchain;
 
 use super::guest_contract::GuestContract;
-use super::resolve::resolve_local_plan;
+use super::resolve::resolve_local_plan_with_state_overrides;
 
 /// Thread-local install lifecycle context set by `ato launch` before calling
 /// `execute_run_command`. Using thread-local (rather than process-global OnceLock)
@@ -352,6 +355,41 @@ pub(crate) struct ExecutionReceiptSessionMetadata {
     pub(crate) reproducibility_class: Option<String>,
 }
 
+fn fetch_community_toml_to_cache(
+    community_toml_id: &str,
+    expected_handle: &str,
+) -> Result<PathBuf> {
+    validate_community_toml_id_for_session_start(community_toml_id)?;
+    let content =
+        crate::community::fetch_and_validate_community_toml(community_toml_id, expected_handle)
+            .with_context(|| {
+                format!(
+                    "failed to fetch/validate community capsule.toml '{}' for '{}'",
+                    community_toml_id, expected_handle
+                )
+            })?;
+    let cache_dir = capsule_core::common::paths::ato_cache_dir().join("community-tomls");
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("failed to create {}", cache_dir.display()))?;
+    let path = cache_dir.join(format!("{community_toml_id}.toml"));
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn validate_community_toml_id_for_session_start(id: &str) -> Result<()> {
+    let rest = id
+        .strip_prefix("ctoml_")
+        .ok_or_else(|| anyhow::anyhow!("--community-toml-id must start with 'ctoml_'"))?;
+    if rest.is_empty()
+        || !rest
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        anyhow::bail!("--community-toml-id contains invalid characters; expected ctoml_<ascii-id>");
+    }
+    Ok(())
+}
+
 // On-disk session record schema lives in `ato-session-core` (see top-of-
 // file `pub(crate) use`). Keep this comment as a back-pointer because
 // `git blame` for this file should still surface the design rationale:
@@ -363,6 +401,8 @@ pub(crate) struct ExecutionReceiptSessionMetadata {
 pub fn start_session(
     handle: &str,
     target_label: Option<&str>,
+    community_toml_id: Option<&str>,
+    attach_state: &[String],
     from_materialized_record: Option<&str>,
     run_config_hash: Option<&str>,
     json: bool,
@@ -435,7 +475,20 @@ pub fn start_session(
         }
     }
 
-    let mut runner = if let Some(record_path) = from_materialized_record {
+    let mut runner = if let Some(cid) = community_toml_id {
+        if from_materialized_record.is_some() {
+            anyhow::bail!("--community-toml-id cannot be used with --from-materialized-record");
+        }
+        let manifest_path = fetch_community_toml_to_cache(cid, handle)?;
+        super::session_runner::SessionStartPhaseRunner::from_toml_path(
+            handle,
+            manifest_path,
+            target_label,
+            attach_state.to_vec(),
+            run_config_hash.map(str::to_string),
+            json,
+        )
+    } else if let Some(record_path) = from_materialized_record {
         let path = PathBuf::from(record_path);
         let record = ato_session_core::read_materialized_launch_record(&path)?;
         if record.handle != handle && record.normalized_handle != handle {
@@ -449,12 +502,14 @@ pub fn start_session(
         super::session_runner::SessionStartPhaseRunner::from_materialized_record(
             record,
             run_config_hash.map(str::to_string),
+            attach_state.to_vec(),
             json,
         )
     } else {
         super::session_runner::SessionStartPhaseRunner::new(
             handle,
             target_label,
+            attach_state.to_vec(),
             run_config_hash.map(str::to_string),
             json,
         )
@@ -1873,13 +1928,15 @@ pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInf
 pub(super) fn resolve_session_launch_plan(
     handle: &str,
     target_label: Option<&str>,
+    community_toml_path: Option<&Path>,
+    attach_state: &[String],
 ) -> Result<(
     PathBuf,
     capsule_core::router::ManifestData,
     capsule_core::launch_spec::LaunchSpec,
     Vec<String>,
 )> {
-    if !super::resolve::input_is_existing_local_path(handle) {
+    if community_toml_path.is_none() && !super::resolve::input_is_existing_local_path(handle) {
         if let Some(resolved) = super::sample_recipes::resolve_sample_recipe_for_input(handle)? {
             let manifest_path = resolved.manifest_path;
             let mut notes = vec![format!(
@@ -1890,6 +1947,7 @@ pub(super) fn resolve_session_launch_plan(
                 &manifest_path,
                 target_label,
                 Some(resolved.slug.as_str()),
+                attach_state,
             )?;
             notes.extend(plan_notes);
             let launch = derive_launch_spec(&plan).with_context(|| {
@@ -1910,30 +1968,46 @@ pub(super) fn resolve_session_launch_plan(
             ..
         } = canonical
         {
-            if let Some(resolved) =
-                super::sample_recipes::resolve_sample_recipe_for_github(owner, repo)?
-            {
-                let manifest_path = resolved.manifest_path;
-                let mut notes = vec![format!(
-                    "Resolved via bundled sample recipe '{}' for github.com/{}/{}.",
-                    resolved.slug, owner, repo
-                )];
-                let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
-                    &manifest_path,
-                    target_label,
-                    Some(resolved.slug.as_str()),
-                )?;
-                notes.extend(plan_notes);
-                let launch = derive_launch_spec(&plan).with_context(|| {
-                    format!(
-                        "failed to derive launch spec for sample recipe '{}' at {}",
-                        resolved.slug,
-                        manifest_path.display()
-                    )
-                })?;
-                return Ok((manifest_path, plan, launch, notes));
+            if community_toml_path.is_none() {
+                if let Some(resolved) =
+                    super::sample_recipes::resolve_sample_recipe_for_github(owner, repo)?
+                {
+                    let manifest_path = resolved.manifest_path;
+                    let mut notes = vec![format!(
+                        "Resolved via bundled sample recipe '{}' for github.com/{}/{}.",
+                        resolved.slug, owner, repo
+                    )];
+                    let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
+                        &manifest_path,
+                        target_label,
+                        Some(resolved.slug.as_str()),
+                        attach_state,
+                    )?;
+                    notes.extend(plan_notes);
+                    let launch = derive_launch_spec(&plan).with_context(|| {
+                        format!(
+                            "failed to derive launch spec for sample recipe '{}' at {}",
+                            resolved.slug,
+                            manifest_path.display()
+                        )
+                    })?;
+                    return Ok((manifest_path, plan, launch, notes));
+                }
             }
         }
+    }
+
+    if let Some(manifest_path) = community_toml_path {
+        let manifest_path = manifest_path.to_path_buf();
+        let (plan, _guest, notes) =
+            resolve_local_plan_for_session_start(&manifest_path, target_label, None, attach_state)?;
+        let launch = derive_launch_spec(&plan).with_context(|| {
+            format!(
+                "failed to derive launch spec for {}",
+                manifest_path.display()
+            )
+        })?;
+        return Ok((manifest_path, plan, launch, notes));
     }
 
     let resolved_path = match normalize_capsule_handle(handle) {
@@ -1950,6 +2024,7 @@ pub(super) fn resolve_session_launch_plan(
                 PathBuf::from(cli_ref),
                 true,
                 ProviderToolchain::Auto,
+                community_toml_path.map(|path| path.to_string_lossy().to_string()),
                 None,
                 false,
                 None,
@@ -1972,7 +2047,8 @@ pub(super) fn resolve_session_launch_plan(
         resolved_path.clone()
     };
 
-    let (plan, _guest, notes) = resolve_local_plan(&manifest_path, target_label)?;
+    let (plan, _guest, notes) =
+        resolve_local_plan_for_session_start(&manifest_path, target_label, None, attach_state)?;
     let launch = derive_launch_spec(&plan).with_context(|| {
         format!(
             "failed to derive launch spec for {}",
@@ -1986,20 +2062,45 @@ pub(super) fn resolve_local_plan_for_session_start(
     manifest_path: &Path,
     target_label: Option<&str>,
     sample_recipe_slug: Option<&str>,
+    attach_state: &[String],
 ) -> Result<(
     capsule_core::router::ManifestData,
     Option<GuestContract>,
     Vec<String>,
 )> {
-    let (mut plan, guest, mut notes) = resolve_local_plan(manifest_path, target_label)?;
-    if let Some(slug) = sample_recipe_slug {
+    let raw = fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = capsule_core::types::CapsuleManifest::from_toml(&raw)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let state_source_overrides = if !attach_state.is_empty() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        resolve_attach_state_source_overrides(&manifest, attach_state, &cwd)?
+    } else if let Some(slug) = sample_recipe_slug {
         let bindings = auto_state_bindings_for_sample_recipe_manifest(manifest_path, slug)?;
         if !bindings.is_empty() {
-            plan.state_source_overrides = bindings;
-            notes.push(format!(
-                "Auto-bound persistent sample recipe state under ~/.ato/state/sample-recipes/{slug}."
-            ));
+            bindings
+        } else {
+            require_explicit_persistent_state_bindings(&manifest)?;
+            std::collections::HashMap::new()
         }
+    } else {
+        require_explicit_persistent_state_bindings(&manifest)?;
+        std::collections::HashMap::new()
+    };
+
+    let (plan, guest, mut notes) = resolve_local_plan_with_state_overrides(
+        manifest_path,
+        target_label,
+        state_source_overrides,
+    )?;
+    if sample_recipe_slug.is_some()
+        && !plan.state_source_overrides.is_empty()
+        && attach_state.is_empty()
+    {
+        let slug = sample_recipe_slug.unwrap();
+        notes.push(format!(
+            "Auto-bound persistent sample recipe state under ~/.ato/state/sample-recipes/{slug}."
+        ));
     }
     Ok((plan, guest, notes))
 }
@@ -4118,6 +4219,7 @@ mod tests {
             &resolved.manifest_path,
             None,
             Some(resolved.slug.as_str()),
+            &[],
         )
         .expect("resolve session plan");
 
@@ -4142,6 +4244,81 @@ mod tests {
             .mounts
             .iter()
             .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos"));
+    }
+
+    #[test]
+    #[serial]
+    fn session_start_applies_attach_state_to_explicit_persistent_state() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
+        let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("memos")
+            .expect("resolve sample recipe")
+            .expect("memos recipe");
+        let state_dir = temp.path().join("memos-data");
+        let attach_state = vec![format!("data:{}", state_dir.display())];
+        let (plan, _guest, _notes) = resolve_local_plan_for_session_start(
+            &resolved.manifest_path,
+            None,
+            None,
+            &attach_state,
+        )
+        .expect("resolve session plan with attached state");
+
+        let state_path = plan
+            .state_source_overrides
+            .get("data")
+            .expect("data state override");
+        assert_eq!(
+            state_path,
+            &state_dir
+                .canonicalize()
+                .expect("state dir created")
+                .display()
+                .to_string()
+        );
+        let services = plan.resolve_services().expect("resolve services");
+        let main = services.service("main").expect("main service");
+        assert!(main
+            .runtime
+            .runtime()
+            .mounts
+            .iter()
+            .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos"));
+    }
+
+    #[test]
+    #[serial]
+    fn session_start_reports_early_error_for_missing_attach_state() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
+        let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("memos")
+            .expect("resolve sample recipe")
+            .expect("memos recipe");
+        let err = resolve_local_plan_for_session_start(&resolved.manifest_path, None, None, &[])
+            .expect_err("missing attach-state should fail");
+        assert!(err.to_string().contains("state 'data' requires"));
+        assert!(err
+            .to_string()
+            .contains("--attach-state data:/path/to/data"));
+    }
+
+    #[test]
+    fn session_start_allows_no_persistent_state_without_attach_state() {
+        let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("pgweb")
+            .expect("resolve sample recipe")
+            .expect("pgweb recipe");
+        let (plan, _guest, _notes) =
+            resolve_local_plan_for_session_start(&resolved.manifest_path, None, None, &[])
+                .expect("pgweb should not require attach-state");
+        assert!(plan.state_source_overrides.is_empty());
     }
 
     #[cfg(unix)]

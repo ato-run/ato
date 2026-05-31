@@ -43,7 +43,7 @@ use crate::executors::target_runner;
 use crate::reporters::CliReporter;
 
 use super::guest_contract::parse_guest_contract;
-use super::resolve::{build_resolution, HandleResolution};
+use super::resolve::HandleResolution;
 use super::session::{
     redirect_stdout_to_stderr, resolve_local_plan_for_session_start, resolve_session_launch_plan,
     restore_stdout, start_guest_session, start_orchestration_session_in_process,
@@ -107,6 +107,11 @@ fn try_remote_build_output_projection(
 enum SessionStartSource {
     Handle,
     MaterializedRecord(MaterializedLaunchRecord),
+    /// Start from an explicit capsule.toml file (e.g. fetched from the community API).
+    /// The manifest_path field on the runner already holds the file path;
+    /// run_install resolves the plan directly from it instead of going through
+    /// network resolution.
+    TomlPath,
 }
 
 pub(super) struct SessionStartPhaseRunner {
@@ -115,6 +120,7 @@ pub(super) struct SessionStartPhaseRunner {
     json: bool,
     start_source: SessionStartSource,
     expected_run_config_hash: Option<String>,
+    attach_state: Vec<String>,
 
     // Set by Install phase
     resolution: Option<HandleResolution>,
@@ -184,6 +190,7 @@ impl SessionStartPhaseRunner {
     pub(super) fn new(
         handle: &str,
         target_label: Option<&str>,
+        attach_state: Vec<String>,
         expected_run_config_hash: Option<String>,
         json: bool,
     ) -> Self {
@@ -193,6 +200,7 @@ impl SessionStartPhaseRunner {
             json,
             start_source: SessionStartSource::Handle,
             expected_run_config_hash,
+            attach_state,
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -216,6 +224,7 @@ impl SessionStartPhaseRunner {
     pub(super) fn from_materialized_record(
         record: MaterializedLaunchRecord,
         expected_run_config_hash: Option<String>,
+        attach_state: Vec<String>,
         json: bool,
     ) -> Self {
         Self {
@@ -224,6 +233,7 @@ impl SessionStartPhaseRunner {
             json,
             start_source: SessionStartSource::MaterializedRecord(record),
             expected_run_config_hash,
+            attach_state,
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -242,6 +252,30 @@ impl SessionStartPhaseRunner {
             session_info: None,
             receipt_graph_id_sink: None,
         }
+    }
+
+    /// Construct a runner that starts a session from an explicit capsule.toml
+    /// file (e.g. one fetched from the community API). Unlike `new`, the
+    /// install phase skips network resolution and resolves the plan directly
+    /// from `manifest_path`.
+    pub(super) fn from_toml_path(
+        handle: &str,
+        manifest_path: PathBuf,
+        target_label: Option<&str>,
+        attach_state: Vec<String>,
+        expected_run_config_hash: Option<String>,
+        json: bool,
+    ) -> Self {
+        let mut runner = Self::new(
+            handle,
+            target_label,
+            attach_state,
+            expected_run_config_hash,
+            json,
+        );
+        runner.manifest_path = Some(manifest_path);
+        runner.start_source = SessionStartSource::TomlPath;
+        runner
     }
 
     /// `true` when the consumer manifest declares a top-level `[services]`
@@ -309,8 +343,11 @@ impl SessionStartPhaseRunner {
             );
         }
         let manifest_path_str = manifest_path.to_string_lossy().to_string();
-        let mut resolution =
-            build_resolution(&manifest_path_str, Some(record.target_label.as_str()), None)?;
+        let mut resolution = super::resolve::build_resolution(
+            &manifest_path_str,
+            Some(record.target_label.as_str()),
+            None,
+        )?;
         resolution.input = record.handle.clone();
         resolution.normalized_handle = record.normalized_handle.clone();
         resolution.canonical_handle = record.canonical_handle.clone();
@@ -330,6 +367,7 @@ impl SessionStartPhaseRunner {
             &manifest_path,
             Some(record.target_label.as_str()),
             sample_recipe_slug,
+            &self.attach_state,
         )?;
         let expected_app_root = PathBuf::from(&record.app_root)
             .canonicalize()
@@ -404,25 +442,105 @@ impl SessionStartPhaseRunner {
         Ok(())
     }
 
+    /// Install phase for community-TOML-path launches. The manifest file has
+    /// already been fetched and written to `self.manifest_path` by the caller;
+    /// we resolve the plan directly from it without network resolution.
+    fn install_from_toml_path(&mut self) -> Result<()> {
+        let manifest_path = self
+            .manifest_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("TomlPath start source requires manifest_path"))?;
+
+        let manifest_path_str = manifest_path.to_string_lossy().to_string();
+        let resolution = super::resolve::build_resolution(
+            &manifest_path_str,
+            self.target_label.as_deref(),
+            None,
+        )?;
+        let (plan, _guest, notes) = resolve_local_plan_for_session_start(
+            &manifest_path,
+            self.target_label.as_deref(),
+            None,
+            &self.attach_state,
+        )?;
+
+        // Run preflight so missing secrets surface via the usual E103 path.
+        let is_orchestration = self.target_label.is_none() && plan.is_orchestration_mode();
+        if is_orchestration {
+            let orchestration = plan
+                .resolve_services()
+                .context("failed to resolve [services] orchestration plan")?;
+            let manifest_preflight: toml::Value = toml::from_str(
+                &std::fs::read_to_string(&manifest_path)
+                    .with_context(|| format!("failed to read {}", manifest_path.display()))?,
+            )
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+            crate::application::pipeline::phases::run::preflight_orchestration_session_environment(
+                &plan,
+                &manifest_preflight,
+                &orchestration,
+                &self.launch_ctx,
+                &crate::application::dependency_credentials::ProcessHostEnv,
+                "launching the session",
+            )?;
+        } else {
+            target_runner::preflight_required_environment_variables(&plan, &self.launch_ctx)?;
+        }
+
+        let launch = capsule_core::launch_spec::derive_launch_spec(&plan).with_context(|| {
+            format!(
+                "failed to derive launch spec for community manifest {}",
+                manifest_path.display()
+            )
+        })?;
+        let raw_manifest = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let manifest_value: toml::Value = toml::from_str(&raw_manifest)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+
+        self.resolution = Some(resolution);
+        self.plan = Some(plan);
+        self.launch = Some(launch);
+        self.raw_manifest = Some(raw_manifest);
+        self.manifest_value = Some(manifest_value);
+        self.notes = notes;
+        Ok(())
+    }
+
     async fn run_install(&mut self) -> Result<()> {
         if let SessionStartSource::MaterializedRecord(record) = self.start_source.clone() {
             return self.install_from_materialized_record(&record);
         }
 
-        if let Some(hit) = crate::application::warm_launch::try_registry_live_reuse_fast_path(
-            &self.handle,
-            self.target_label.as_deref(),
-        )? {
-            self.install_reused = true;
-            self.pre_projection_spec = Some(hit.pre_projection_spec);
-            self._launch_lock = hit.launch_lock;
-            self.session_info = Some(super::session::session_info_from_stored(*hit.record));
-            return Ok(());
+        if matches!(self.start_source, SessionStartSource::TomlPath) {
+            return self.install_from_toml_path();
         }
 
-        let resolution = build_resolution(&self.handle, self.target_label.as_deref(), None)?;
-        let (manifest_path, mut plan, mut launch, mut notes) =
-            resolve_session_launch_plan(&self.handle, self.target_label.as_deref())?;
+        if matches!(self.start_source, SessionStartSource::Handle) && self.attach_state.is_empty() {
+            if let Some(hit) = crate::application::warm_launch::try_registry_live_reuse_fast_path(
+                &self.handle,
+                self.target_label.as_deref(),
+            )? {
+                self.install_reused = true;
+                self.pre_projection_spec = Some(hit.pre_projection_spec);
+                self._launch_lock = hit.launch_lock;
+                self.session_info = Some(super::session::session_info_from_stored(*hit.record));
+                return Ok(());
+            }
+        }
+
+        let resolution = super::resolve::build_resolution_for_session_start(
+            &self.handle,
+            self.target_label.as_deref(),
+            None,
+            true,
+        )?;
+        let (manifest_path, mut plan, mut launch, mut notes) = resolve_session_launch_plan(
+            &self.handle,
+            self.target_label.as_deref(),
+            None,
+            &self.attach_state,
+        )?;
         let is_orchestration = self.target_label.is_none() && plan.is_orchestration_mode();
 
         // Env preflight runs BEFORE the live-session reuse check so we never
@@ -1345,7 +1463,8 @@ mod tests {
     /// from the runner side.
     #[test]
     fn assigning_receipt_graph_id_sink_shares_arc_with_input_sink() {
-        let mut runner = SessionStartPhaseRunner::new("publisher/slug", None, None, false);
+        let mut runner =
+            SessionStartPhaseRunner::new("publisher/slug", None, Vec::new(), None, false);
         assert!(
             runner.receipt_graph_id_sink.is_none(),
             "fixture sanity: a freshly built runner has no sink"

@@ -35,6 +35,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::orchestrator::resolve_ato_binary;
+use crate::proc_util::CommandNoWindowExt;
 use crate::source_import_session::normalize_github_import_input;
 use crate::state::GuestRoute;
 use crate::system_capsule::ato_dock::DockSourceKind;
@@ -139,7 +140,7 @@ impl DockRuntimeState {
 /// alive for the lifetime of its window and evaluate host events into
 /// the page.
 pub struct DockWebView {
-    pub(crate) webview: WebView,
+    pub(crate) webview: Option<WebView>,
     window_size: Size<Pixels>,
     identity_state: Arc<Mutex<Value>>,
     runtime_state: Arc<Mutex<DockRuntimeState>>,
@@ -150,7 +151,7 @@ impl_focusable_via_paste!(DockWebView, paste);
 
 impl WebViewPasteShell for DockWebView {
     fn active_paste_target(&self) -> Option<&WebView> {
-        Some(&self.webview)
+        self.webview.as_ref()
     }
 }
 
@@ -158,8 +159,10 @@ impl DockWebView {
     fn emit_event(&mut self, event: &Value) {
         let payload = serde_json::to_string(event).unwrap_or_else(|_| "null".to_string());
         let script = format!("window.__ATO_DOCK_EVENT__ && window.__ATO_DOCK_EVENT__({payload});");
-        if let Err(error) = self.webview.evaluate_script(&script) {
-            tracing::warn!(?error, "dock: evaluate_script event dispatch failed");
+        if let Some(webview) = self.webview.as_ref() {
+            if let Err(error) = webview.evaluate_script(&script) {
+                tracing::warn!(?error, "dock: evaluate_script event dispatch failed");
+            }
         }
     }
 
@@ -168,14 +171,16 @@ impl DockWebView {
         if current == self.window_size {
             return;
         }
-        let _ = self.webview.set_bounds(Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(current.width) as u32,
-                f32::from(current.height) as u32,
-            )
-            .into(),
-        });
+        if let Some(webview) = self.webview.as_ref() {
+            let _ = webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, 0i32).into(),
+                size: LogicalSize::new(
+                    f32::from(current.width) as u32,
+                    f32::from(current.height) as u32,
+                )
+                .into(),
+            });
+        }
         self.window_size = current;
     }
 }
@@ -543,6 +548,7 @@ fn fetch_identity() -> Value {
         }
     };
     let output = match Command::new(&bin)
+        .no_console_window()
         .arg("whoami")
         .stdin(Stdio::null())
         .output()
@@ -667,6 +673,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let entity_capture2 = entity_capture.clone();
 
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
@@ -735,9 +742,8 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                 SystemCapsuleId::AtoDock,
                 bridge_queue.clone(),
             ))
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the Dock WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Dock window", webview, window);
         let view = cx.new(|cx| DockWebView {
             webview,
             window_size: win_size,
@@ -822,8 +828,10 @@ pub fn notify_login_success(cx: &mut App) {
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0);
             let reload_url = format!("{DOCK_SCHEME}://localhost/?t={ts}");
-            if let Err(error) = view.webview.load_url(&reload_url) {
-                tracing::warn!(?error, "dock: load_url after login failed");
+            if let Some(webview) = view.webview.as_ref() {
+                if let Err(error) = webview.load_url(&reload_url) {
+                    tracing::warn!(?error, "dock: load_url after login failed");
+                }
             }
         });
 
@@ -944,6 +952,7 @@ fn save_manifest_blocking(
     // Regenerate lockfile so a subsequent preview does not hit E207.
     let ato_bin = resolve_ato_binary()?;
     let lock_output = Command::new(&ato_bin)
+        .no_console_window()
         .arg("lock")
         .current_dir(&working_directory)
         .stdin(Stdio::null())
@@ -966,6 +975,7 @@ fn run_publish_command(runtime: &Arc<Mutex<DockRuntimeState>>, args: &[&str]) ->
         .context("Prepare a source before running publish")?;
     let ato_bin = resolve_ato_binary()?;
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .args(args)
         .current_dir(&working_directory)
         .stdin(Stdio::null())
@@ -1040,6 +1050,7 @@ fn start_preview_blocking(runtime: &Arc<Mutex<DockRuntimeState>>, request_id: &s
         .context("Prepare a source before starting preview")?;
     let ato_bin = resolve_ato_binary()?;
     let mut child = Command::new(&ato_bin)
+        .no_console_window()
         .arg("run")
         .arg(&working_directory)
         .current_dir(&working_directory)
@@ -1222,6 +1233,7 @@ fn clone_public_github_repo(session_id: &str, raw_url: &str) -> Result<PathBuf> 
 
     let git_bin = resolve_git_binary();
     let output = Command::new(&git_bin)
+        .no_console_window()
         // Bypass any credential helper — we only clone public repos.
         .arg("-c")
         .arg("credential.helper=")
@@ -1354,6 +1366,7 @@ fn infer_manifest_or_template(
 fn infer_manifest_toml(working_directory: &Path) -> Result<InferredManifestResponse> {
     let ato_bin = resolve_ato_binary()?;
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .arg("project")
         .arg("infer-manifest")
         .arg(working_directory)

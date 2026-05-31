@@ -32,8 +32,6 @@ pub mod webview_paste;
 // `ato-settings` system capsule.
 #[cfg(target_os = "macos")]
 pub mod macos;
-#[cfg(target_os = "windows")]
-pub mod windows;
 pub mod onboarding_window;
 pub mod orchestrator;
 pub mod settings_window;
@@ -41,6 +39,8 @@ pub mod start_window;
 pub mod store;
 pub mod web_bridge;
 pub mod web_link_view;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 // Make the pure-data `AppWindowRegistry` from `state` accessible
 // across windows via `cx.global::<AppWindowRegistry>()`. The impl
@@ -59,6 +59,38 @@ pub use control_bar::{
     toggle_control_bar, ControlBarController, ControlBarShellPlaceholder,
 };
 pub use orchestrator::{open_app_window, AppWindowShell};
+
+/// Build a Wry child WebView, degrading gracefully on failure instead of
+/// aborting the process.
+///
+/// Every system window builds its content WebView with
+/// `WebViewBuilder::build_as_child` inside GPUI's non-unwinding `open_window`
+/// callback. A `.expect()` there turns a recoverable WebView2/WKWebView error
+/// (e.g. E_ACCESSDENIED creating the WebView2 user-data folder when installed
+/// under `C:\Program Files`) into a hard process abort. Instead, route the
+/// build through this helper: on failure it reports the error (logged + crash
+/// report file + a copyable dialog on Windows) and returns `None`, so the
+/// window renders empty but the process — and every other open window —
+/// survives. Callers hold the result as `Option<WebView>`.
+///
+/// `context` is a short human label for the surface (e.g. "Start window") used
+/// in the reported error.
+pub(crate) fn build_child_webview(
+    context: &str,
+    builder: wry::WebViewBuilder<'_>,
+    window: &gpui::Window,
+) -> Option<wry::WebView> {
+    match builder.build_as_child(window) {
+        Ok(webview) => Some(webview),
+        Err(err) => {
+            crate::crash::report_nonfatal(
+                &format!("{context} could not be created"),
+                &format!("The embedded WebView failed to start:\n{err}"),
+            );
+            None
+        }
+    }
+}
 
 pub fn open_configured_startup_surface(
     cx: &mut gpui::App,
@@ -88,4 +120,27 @@ pub fn open_configured_startup_surface(
 /// config key to opt out of Focus View.
 pub fn is_multi_window_enabled() -> bool {
     crate::config::load_config().desktop.focus_view_enabled
+}
+
+/// Window caption shown in the OS taskbar / window list. GPUI creates its
+/// windows with an empty title unless `TitlebarOptions::title` is set (it
+/// is `None` in `TitleBar::title_bar_options()`), so on Windows the taskbar
+/// thumbnail shows no app name. Every taskbar-visible window sets this via
+/// `window.set_window_title` at construction time.
+pub const WINDOW_TITLE: &str = "Ato Desktop";
+
+/// Process-wide shutdown latch. Set once when an explicit quit begins (the
+/// Start capsule's quit button, or an abnormal-exit path) so that
+/// `on_window_closed` does not try to reopen the Start landing surface
+/// while GPUI is already tearing the windows down.
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark the process as shutting down. Idempotent.
+pub fn begin_shutdown() {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// True once [`begin_shutdown`] has been called.
+pub fn is_shutting_down() -> bool {
+    SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst)
 }
