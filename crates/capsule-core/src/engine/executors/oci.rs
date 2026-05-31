@@ -218,10 +218,12 @@ fn resolve_docker_host() -> Option<String> {
 }
 
 fn detect_engine() -> Result<OciEngine> {
-    Ok(match crate::engine::oci_engine_select::select_oci_engine()? {
-        crate::engine::oci_engine_select::OciEngineKind::Docker => OciEngine::Docker,
-        crate::engine::oci_engine_select::OciEngineKind::Podman => OciEngine::Podman,
-    })
+    Ok(
+        match crate::engine::oci_engine_select::select_oci_engine()? {
+            crate::engine::oci_engine_select::OciEngineKind::Docker => OciEngine::Docker,
+            crate::engine::oci_engine_select::OciEngineKind::Podman => OciEngine::Podman,
+        },
+    )
 }
 
 fn engine_binary(engine: &OciEngine) -> &'static str {
