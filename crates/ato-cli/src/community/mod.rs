@@ -1,4 +1,5 @@
 mod capsule_toml;
+pub(crate) mod submit;
 
 pub(crate) use capsule_toml::{
     fetch_capsule_toml_by_id, fetch_community_capsule_tomls, fetch_toml_from_url,

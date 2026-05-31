@@ -681,5 +681,19 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::DesktopAuthHandoff => auth::desktop_auth_handoff(),
 
         Commands::Whoami => auth::status(),
+
+        Commands::Community { command } => match command {
+            crate::cli::community::CommunityCommands::Submit {
+                source,
+                toml_path,
+                dry_run,
+                yes,
+            } => {
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(crate::community::submit::execute_submit(
+                    &source, &toml_path, dry_run, yes, json,
+                ))
+            }
+        },
     }
 }
