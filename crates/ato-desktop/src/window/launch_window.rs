@@ -369,6 +369,7 @@ fn open_wizard(
         };
         let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let queue_for_ipc = queue.clone();
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
                 let response =
@@ -598,6 +599,7 @@ pub fn open_consent_window_for_route_with_client(
             })
             .await;
 
+        crate::webview_init_guard::wait_until_idle(&be).await;
         let _ = aa.update(|cx| {
             // Guard: only hydrate if this is still the active consent wizard.
             let current_id = cx
@@ -806,6 +808,7 @@ fn open_consent_wizard_inner(
             .into(),
         };
         let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
                 let response =
@@ -902,6 +905,11 @@ pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyW
         )
     });
     let (handle, shell) = open_boot_wizard_inner(cx, init_script)?;
+    tracing::info!(
+        boot_window_id = handle.window_id().as_u64(),
+        route = ?route.map(|r| r.label()),
+        "open_boot_window: boot wizard opened"
+    );
     cx.set_global(PendingBootShell(Some(shell.downgrade())));
     Ok(handle)
 }
@@ -941,6 +949,7 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .into(),
         };
         let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
                 let response =
@@ -992,6 +1001,11 @@ pub fn start_boot_launch(
         .try_global::<PendingBootShell>()
         .and_then(|g| g.0.clone());
     cx.set_global(PendingBootShell(None));
+    tracing::info!(
+        boot_window_id = boot_handle.window_id().as_u64(),
+        route = %route.label(),
+        "start_boot_launch: BootWindowSlot set"
+    );
     cx.set_global(BootWindowSlot {
         boot_window: Some(boot_handle),
         abort_flag: Some(Arc::clone(&abort_flag)),
@@ -1030,9 +1044,7 @@ pub fn start_boot_launch(
             })),
         );
         if let Ok(ref session) = result {
-            if session.display_strategy
-                == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl
-            {
+            if session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl {
                 super::app_capsule_shell::wait_for_session_upstream_ready(
                     session,
                     &abort_for_thread,
@@ -1057,6 +1069,9 @@ pub fn start_boot_launch(
         .spawn(async move {
             loop {
                 be.timer(Duration::from_millis(100)).await;
+                if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                    continue;
+                }
 
                 let mut steps = Vec::new();
                 while let Ok(step) = progress_rx.try_recv() {
@@ -1093,7 +1108,7 @@ pub fn start_boot_launch(
                                 if let Ok(session) = result {
                                     stop_session_async(session.session_id);
                                 }
-                                close_boot_window_handle(cx, boot_handle);
+                                close_boot_window_handle(cx, boot_handle, None);
                                 return;
                             }
 
@@ -1163,7 +1178,7 @@ pub fn start_boot_launch(
                                             last_seen_at: SystemTime::now(),
                                         };
                                         registry.attach_client(client);
-                                        close_boot_window_handle(cx, boot_handle);
+                                        close_boot_window_handle(cx, boot_handle, None);
                                         record_start_history(&route_for_open);
                                     } else {
                                         match crate::window::orchestrator::open_ready_capsule_window(
@@ -1173,10 +1188,62 @@ pub fn start_boot_launch(
                                             launch_configs_for_result.clone(),
                                         ) {
                                             Ok(app_handle) => {
-                                                close_boot_window_handle(cx, boot_handle);
-                                                let _ = app_handle.update(cx, |_, window, _| {
-                                                    window.activate_window()
-                                                });
+                                                let app_window_id =
+                                                    app_handle.window_id().as_u64();
+                                                tracing::info!(
+                                                    session_id = %session_id,
+                                                    app_window_id,
+                                                    boot_window_id = boot_handle.window_id().as_u64(),
+                                                    "launch success: AppWindow opened, activating before boot close"
+                                                );
+                                                // Activate the AppWindow BEFORE closing the
+                                                // boot wizard.  This prevents macOS from
+                                                // wrongly treating the freshly-opened window
+                                                // as a child of the soon-to-close wizard.
+                                                let activated = app_handle
+                                                    .update(cx, |_, window, _| {
+                                                        window.activate_window();
+                                                        true
+                                                    })
+                                                    .unwrap_or(false);
+                                                tracing::info!(
+                                                    app_window_id,
+                                                    activated,
+                                                    "AppWindow activation result"
+                                                );
+
+                                                close_boot_window_handle(
+                                                    cx,
+                                                    boot_handle,
+                                                    Some(app_window_id),
+                                                );
+
+                                                // Verify AppWindow still exists after boot close.
+                                                let content_exists = cx
+                                                    .global::<crate::window::content_windows::OpenContentWindows>()
+                                                    .get(app_window_id)
+                                                    .is_some();
+                                                let guest_pane_exists = cx
+                                                    .global::<crate::window::focus_guest_panes::FocusGuestPaneRegistry>()
+                                                    .pane_id_for_window(app_window_id)
+                                                    .is_some();
+                                                let still_open = app_handle
+                                                    .update(cx, |_, _window, _| true)
+                                                    .unwrap_or(false);
+                                                tracing::info!(
+                                                    app_window_id,
+                                                    content_exists,
+                                                    guest_pane_exists,
+                                                    still_open,
+                                                    "AppWindow post-boot-close verification"
+                                                );
+                                                if !still_open {
+                                                    tracing::error!(
+                                                        app_window_id,
+                                                        "AppWindow disappeared after boot wizard close"
+                                                    );
+                                                }
+
                                                 record_start_history(&route_for_open);
                                             }
                                             Err(err) => {
@@ -1275,10 +1342,56 @@ fn show_boot_failure(
     }
 }
 
-fn close_boot_window_handle(cx: &mut App, boot_handle: AnyWindowHandle) {
+fn close_boot_window_handle(
+    cx: &mut App,
+    boot_handle: AnyWindowHandle,
+    app_window_id: Option<u64>,
+) {
+    let boot_window_id = boot_handle.window_id().as_u64();
+
+    // Guard: refuse to close the boot window if its GPUI id matches the
+    // AppWindow id.  This can happen when the allocator reuses the same
+    // slot or when a caller accidentally passes the wrong handle.
+    if Some(boot_window_id) == app_window_id {
+        tracing::error!(
+            boot_window_id,
+            app_window_id,
+            "close_boot_window_handle: refusing to close — boot id equals app id"
+        );
+        cx.set_global(BootWindowSlot::default());
+        return;
+    }
+
+    // Only clear BootWindowSlot if it still points to this exact boot
+    // window.  A concurrent launch may have already replaced the slot
+    // with a different handle; clearing in that case would orphan the
+    // newer launch's slot.
+    let slot_boot = cx
+        .try_global::<BootWindowSlot>()
+        .and_then(|s| s.boot_window);
+    let slot_matches = slot_boot
+        .map(|h| h.window_id().as_u64() == boot_window_id)
+        .unwrap_or(false);
+    if slot_matches {
+        cx.set_global(BootWindowSlot::default());
+    } else {
+        tracing::info!(
+            boot_window_id,
+            ?slot_boot,
+            "close_boot_window_handle: BootWindowSlot already owned by a different window — not clearing"
+        );
+    }
+
+    tracing::info!(
+        boot_window_id,
+        ?app_window_id,
+        "close_boot_window_handle: removing boot wizard window"
+    );
     let _ = boot_handle.update(cx, |_, window, _| window.remove_window());
-    cx.set_global(BootWindowSlot::default());
-    tracing::info!("ato_launch: boot wizard closed");
+    tracing::info!(
+        boot_window_id,
+        "ato_launch: boot wizard closed"
+    );
 }
 
 fn stop_session_async(session_id: String) {
@@ -1350,6 +1463,7 @@ fn open_boot_wizard_inner(
             .into(),
         };
         let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
                 let response =

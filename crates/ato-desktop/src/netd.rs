@@ -5,7 +5,7 @@
 //!
 //! # Control-plane contract
 //! Desktop only talks to `ato-netd` through [`ato_net::control::SyncClient`].
-//! The wire protocol (newline-delimited JSON over a Unix domain socket) is an
+//! The wire protocol (newline-delimited JSON over a local control transport) is an
 //! implementation detail of `ato-net` / `ato-netd` and must not be re-implemented
 //! here.
 //!
@@ -18,17 +18,13 @@
 //!   5. `PATH` lookup
 //!
 //! # Platform note
-//! `ato-netd` is Unix-only in slices A-C. On non-Unix hosts
-//! [`register_stable_ingress`] returns [`IngressError::NotSupported`] and
-//! callers fall back to the direct `local_url`.
+//! `ato-netd` now uses a Unix domain socket on Unix and a named pipe on
+//! Windows. Other platforms still surface [`IngressError::NotSupported`].
 
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::thread;
-#[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(unix)]
 use ato_net::control::SyncClient;
 
 use crate::state::GuestRoute;
@@ -62,7 +58,7 @@ pub(crate) enum IngressError {
     #[error("ato-netd control error: {0}")]
     Control(#[from] ato_net::control::Error),
 
-    /// Platform does not support ato-netd (non-Unix in slices A-C).
+    /// Platform does not support ato-netd in the current build.
     #[error("ato-netd ingress is not supported on this platform in the current release")]
     NotSupported,
 }
@@ -138,7 +134,6 @@ pub(crate) fn normalize_upstream_url(url: &str) -> std::borrow::Cow<'_, str> {
 /// - [`IngressError::PersistedPortTaken`] — the stable port is held by
 ///   another process. The caller **must not** silently rebind.
 /// - Other variants for binary-not-found, spawn failures, and timeouts.
-#[cfg(unix)]
 pub(crate) fn register_stable_ingress(key: &str, upstream_url: &str) -> Result<u16, IngressError> {
     let normalized = normalize_upstream_url(upstream_url);
     tracing::info!(
@@ -156,26 +151,100 @@ pub(crate) fn register_stable_ingress(key: &str, upstream_url: &str) -> Result<u
     }
 }
 
+/// Deregister a stable ingress route. Best-effort: logs a warning on failure
+/// but never panics. Safe to call if the daemon is already stopped.
+pub(crate) fn deregister_stable_ingress(key: &str) {
+    match SyncClient::connect_default() {
+        Ok(mut client) => match client.deregister_ingress(key) {
+            Ok(()) => tracing::debug!(key = %key, "deregistered ato-netd ingress route"),
+            Err(err) => tracing::warn!(
+                key = %key,
+                error = %err,
+                "failed to deregister ato-netd ingress route (best-effort)"
+            ),
+        },
+        Err(ato_net::control::Error::NotRunning { .. }) => {
+            // Daemon already stopped — nothing to deregister.
+        }
+        Err(err) => tracing::warn!(
+            key = %key,
+            error = %err,
+            "failed to connect to ato-netd for deregistration (best-effort)"
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeral ingress (transient capsule sessions)
+// ---------------------------------------------------------------------------
+
+/// Tracks how an ingress route was registered so the correct deregister call
+/// can be issued when the session stops.
+#[derive(Debug, Clone)]
+pub(crate) struct IngressRegistration {
+    pub key: String,
+    pub kind: IngressRegistrationKind,
+}
+
+/// Whether the ingress route is stable (persisted) or ephemeral (in-memory).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IngressRegistrationKind {
+    /// Stable ingress: port is persisted in `stable_origin_ports.json`.
+    Stable,
+    /// Ephemeral ingress: port is in-memory only, session-unique.
+    Ephemeral,
+}
+
+/// Register an ephemeral ingress route with `ato-netd` and return the
+/// allocated port. If `ato-netd` is not running, it will be spawned.
+///
+/// The assigned port is **not** persisted to `stable_origin_ports.json`.
+/// A new port is guaranteed to differ from all currently-active ephemeral
+/// ports and all stable ports. Within the same daemon lifetime, a released
+/// port will not be immediately reassigned.
+#[cfg(unix)]
+pub(crate) fn register_ephemeral_ingress(
+    key: &str,
+    upstream_url: &str,
+) -> Result<u16, IngressError> {
+    let normalized = normalize_upstream_url(upstream_url);
+    tracing::info!(
+        key = %key,
+        upstream_url = %normalized,
+        "registering ato-netd ephemeral ingress"
+    );
+    let mut client = ensure_netd_connected()?;
+    match client.register_ephemeral_ingress(key, &normalized) {
+        Ok(info) => Ok(info.port),
+        Err(ato_net::control::Error::DaemonError { code, message }) => {
+            Err(map_daemon_error(key, &code, &message))
+        }
+        Err(other) => Err(IngressError::Control(other)),
+    }
+}
+
 #[cfg(not(unix))]
-pub(crate) fn register_stable_ingress(
+pub(crate) fn register_ephemeral_ingress(
     _key: &str,
     _upstream_url: &str,
 ) -> Result<u16, IngressError> {
     Err(IngressError::NotSupported)
 }
 
-/// Deregister a stable ingress route. Best-effort: logs a warning on failure
-/// but never panics. Safe to call if the daemon is already stopped.
-pub(crate) fn deregister_stable_ingress(key: &str) {
+/// Deregister an ephemeral ingress route. Best-effort: logs a warning on
+/// failure but never panics. Safe to call if the daemon is already stopped.
+pub(crate) fn deregister_ephemeral_ingress(key: &str) {
     #[cfg(unix)]
     {
         match SyncClient::connect_default() {
-            Ok(mut client) => match client.deregister_ingress(key) {
-                Ok(()) => tracing::debug!(key = %key, "deregistered ato-netd ingress route"),
+            Ok(mut client) => match client.deregister_ephemeral_ingress(key) {
+                Ok(()) => {
+                    tracing::debug!(key = %key, "deregistered ato-netd ephemeral ingress route")
+                }
                 Err(err) => tracing::warn!(
                     key = %key,
                     error = %err,
-                    "failed to deregister ato-netd ingress route (best-effort)"
+                    "failed to deregister ato-netd ephemeral ingress route (best-effort)"
                 ),
             },
             Err(ato_net::control::Error::NotRunning { .. }) => {
@@ -184,7 +253,7 @@ pub(crate) fn deregister_stable_ingress(key: &str) {
             Err(err) => tracing::warn!(
                 key = %key,
                 error = %err,
-                "failed to connect to ato-netd for deregistration (best-effort)"
+                "failed to connect to ato-netd for ephemeral deregistration (best-effort)"
             ),
         }
     }
@@ -196,7 +265,6 @@ pub(crate) fn deregister_stable_ingress(key: &str) {
 // Internal: connect or spawn + retry
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 fn ensure_netd_connected() -> Result<SyncClient, IngressError> {
     // Fast path: daemon already running.
     match SyncClient::connect_default() {
@@ -226,7 +294,7 @@ fn ensure_netd_connected() -> Result<SyncClient, IngressError> {
         .spawn()
         .map_err(IngressError::SpawnFailed)?;
 
-    // Retry until the socket appears (up to ~2 s total).
+    // Retry until the control endpoint appears (up to ~2 s total).
     const RETRIES: u32 = 20;
     for i in 0..RETRIES {
         let delay_ms = 50 + 25 * i;
@@ -247,7 +315,6 @@ fn ensure_netd_connected() -> Result<SyncClient, IngressError> {
 // Internal: binary resolution
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 pub(crate) fn resolve_netd_binary() -> Result<PathBuf, IngressError> {
     // 1. Explicit env override.
     if let Some(path) = std::env::var_os(NETD_BIN_ENV) {
@@ -255,8 +322,6 @@ pub(crate) fn resolve_netd_binary() -> Result<PathBuf, IngressError> {
         if path.is_file() {
             return Ok(path);
         }
-        // Override set but missing — surface as BinaryNotFound so caller
-        // can show a clear message rather than silently falling through.
         return Err(IngressError::BinaryNotFound);
     }
 
@@ -266,26 +331,33 @@ pub(crate) fn resolve_netd_binary() -> Result<PathBuf, IngressError> {
             return Ok(path);
         }
 
-        // 3. Linux/AppImage sibling helper: `{exe_dir}/ato-netd`.
+        // 3. Platform sibling helper: `{exe_dir}/ato-netd(.exe)`.
         if let Some(path) = sibling_netd_binary(&exe) {
             return Ok(path);
         }
     }
 
-    // 4. Monorepo dev build: `{ATO_DESKTOP_DEV_HELPER_TARGET}/{profile}/ato-netd`.
+    // 4. Monorepo dev build: `{ATO_DESKTOP_DEV_HELPER_TARGET}/{profile}/ato-netd(.exe)`.
     if let Some(path) = dev_workspace_netd_binary() {
         return Ok(path);
     }
 
     // 5. PATH lookup.
-    if let Some(path) = which_in_path("ato-netd") {
+    if let Some(path) = which_in_path(netd_binary_name()) {
         return Ok(path);
     }
 
     Err(IngressError::BinaryNotFound)
 }
 
-#[cfg(unix)]
+fn netd_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "ato-netd.exe"
+    } else {
+        "ato-netd"
+    }
+}
+
 fn dev_workspace_netd_binary() -> Option<PathBuf> {
     let target_root = option_env!("ATO_DESKTOP_DEV_HELPER_TARGET")?;
     let profile = if cfg!(debug_assertions) {
@@ -293,29 +365,40 @@ fn dev_workspace_netd_binary() -> Option<PathBuf> {
     } else {
         "release"
     };
-    let candidate = PathBuf::from(target_root).join(profile).join("ato-netd");
+    let candidate = PathBuf::from(target_root)
+        .join(profile)
+        .join(netd_binary_name());
     candidate.is_file().then_some(candidate)
 }
 
-#[cfg(unix)]
 fn bundled_macos_netd_binary(exe: &Path) -> Option<PathBuf> {
     let macos_dir = exe.parent()?;
     let contents_dir = macos_dir.parent()?;
-    let candidate = contents_dir.join("Helpers").join("ato-netd");
+    let candidate = contents_dir.join("Helpers").join(netd_binary_name());
     candidate.is_file().then_some(candidate)
 }
 
-#[cfg(unix)]
 fn sibling_netd_binary(exe: &Path) -> Option<PathBuf> {
     let exe_dir = exe.parent()?;
-    let candidate = exe_dir.join("ato-netd");
+    let candidate = exe_dir.join(netd_binary_name());
     candidate.is_file().then_some(candidate)
 }
 
 fn which_in_path(binary: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let binary_names = {
+        let mut names = vec![binary.to_string()];
+        if Path::new(binary).extension().is_none() {
+            names.push(format!("{binary}.exe"));
+        }
+        names
+    };
+    #[cfg(not(windows))]
+    let binary_names = vec![binary.to_string()];
+
     std::env::split_paths(&path_var)
-        .map(|entry| entry.join(binary))
+        .flat_map(|entry| binary_names.iter().map(move |name| entry.join(name)))
         .find(|candidate| candidate.is_file())
 }
 
@@ -323,7 +406,6 @@ fn which_in_path(binary: &str) -> Option<PathBuf> {
 // Internal: error classification
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 fn map_daemon_error(key: &str, code: &str, message: &str) -> IngressError {
     if code == "ingress_register_failed" && message.contains("already claimed") {
         // Extract port from: "port allocator error: port N is already claimed by..."
@@ -548,5 +630,32 @@ mod tests {
 
         let resolved = sibling_netd_binary(&exe).expect("sibling should resolve");
         assert_eq!(resolved, netd);
+    }
+
+    #[test]
+    fn ingress_registration_kind_ephemeral_and_stable_are_distinct() {
+        let stable = IngressRegistration {
+            key: "handle:test".to_string(),
+            kind: IngressRegistrationKind::Stable,
+        };
+        let ephemeral = IngressRegistration {
+            key: "ephemeral:session-1".to_string(),
+            kind: IngressRegistrationKind::Ephemeral,
+        };
+        assert_ne!(stable.kind, ephemeral.kind);
+        assert_eq!(stable.kind, IngressRegistrationKind::Stable);
+        assert_eq!(ephemeral.kind, IngressRegistrationKind::Ephemeral);
+    }
+
+    #[test]
+    fn ephemeral_key_format_uses_session_prefix() {
+        // The ephemeral key format must use "ephemeral:" prefix so it never
+        // collides with stable "handle:" or "session:" keys.
+        let session_id = "abc-123-def";
+        let ephemeral_key = format!("ephemeral:{session_id}");
+        assert!(ephemeral_key.starts_with("ephemeral:"));
+        // Must not look like a stable key
+        assert!(!ephemeral_key.starts_with("handle:"));
+        assert!(!ephemeral_key.starts_with("session:"));
     }
 }

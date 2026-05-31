@@ -16,3 +16,7 @@ dist = false
 
 [dependencies]
 anyhow = "1.0"
+# Pure-Rust sha256 so the `--helper-source release` path can verify the
+# checksum of consumed cargo-dist artifacts deterministically, without
+# shelling out to three different platform tools (shasum/sha256sum/certutil).
+sha2 = "0.10"

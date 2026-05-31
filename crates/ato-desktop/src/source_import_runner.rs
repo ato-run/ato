@@ -112,7 +112,12 @@ pub(crate) fn sweep_stale_import_preview_sessions() -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .with_context(|| format!("failed to spawn {} internal import-preview-sweep", ato.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to spawn {} internal import-preview-sweep",
+                ato.display()
+            )
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
