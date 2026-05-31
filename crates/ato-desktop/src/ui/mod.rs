@@ -233,6 +233,7 @@ pub(crate) fn open_external_url(url: &str) -> std::io::Result<()> {
     } else {
         std::process::Command::new("xdg-open")
     };
+    crate::proc_util::CommandNoWindowExt::no_console_window(&mut command);
     let status = command.arg(url).status()?;
     if !status.success() {
         return Err(std::io::Error::other(format!(
@@ -1042,7 +1043,11 @@ impl DesktopShell {
         // session token. We watch the child from a thread and forward
         // the exit status back to the render loop via cli_login_rx;
         // poll_cli_login() then drives complete_ato_login on success.
-        match std::process::Command::new(&ato_bin).arg("login").spawn() {
+        match {
+            let mut cmd = std::process::Command::new(&ato_bin);
+            crate::proc_util::CommandNoWindowExt::no_console_window(&mut cmd);
+            cmd.arg("login").spawn()
+        } {
             Ok(mut child) => {
                 self.state.push_activity(
                     crate::state::ActivityTone::Info,

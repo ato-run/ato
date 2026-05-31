@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::proc_util::CommandNoWindowExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -140,6 +142,7 @@ pub(crate) fn prepare_github_manifest_draft(request: GithubDraftRequest) -> Resu
 
 fn resolve_git_ref(clone_url: &str, requested_ref: &str) -> Result<String> {
     let output = Command::new("git")
+        .no_console_window()
         .args(["ls-remote", clone_url, requested_ref])
         .output()
         .with_context(|| format!("failed to resolve GitHub ref {requested_ref}"))?;
@@ -231,6 +234,7 @@ fn materialize_source_cache(
 
 fn run_git(cmd: &mut Command, label: &str) -> Result<()> {
     let output = cmd
+        .no_console_window()
         .output()
         .with_context(|| format!("failed to run {label}"))?;
     if output.status.success() {
