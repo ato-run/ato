@@ -105,15 +105,18 @@ run = "main.py"
 `runtime_tools` は実行ランタイムとは異なる追加 toolchain を `ato run` のビルド・実行フェーズに取り込む。
 `build` は `ato run` の build フェーズで実行される lifecycle コマンドを指定する。
 
-**ライフサイクル順序**:
+**ライフサイクル順序**（`ato run` の build フェーズ内）:
 
 ```
-1. primary runtime を解決（uv venv、Python インストール等）
-2. runtime_tools で宣言された toolchain を解決・プロビジョニング
-3. primary runtime の依存関係をインストール（uv pip install 等）
-4. target-level build コマンドを実行（例: npm run build）
-5. target の run コマンドを起動
+1. primary runtime を解決・準備する
+2. primary runtime の依存関係を materialize する（uv pip install 等）
+3. runtime_tools で宣言された lifecycle toolchains を build 実行前に materialize する
+4. target-level build コマンドを実行する
+5. target run コマンドを起動する
 ```
+
+重要: **`runtime_tools` は build コマンドよりも前に PATH へ追加される**。
+uv pip install と runtime_tools materialization の厳密な順序は実装依存であり、ここでは規定しない。
 
 **典型的なユースケース: Python バックエンド + Node フロントエンドビルド**
 
@@ -136,12 +139,9 @@ run = "python -m uvicorn app.main:app --host 127.0.0.1"
 port = 8000
 ```
 
-`ato run .` を実行すると:
-1. Python 3.11 を uv でプロビジョニング
-2. Node 20 を管理対象 toolchain からプロビジョニング（`~/.ato/toolchains/node-20/`）
-3. `uv pip install -r requirements.txt`
-4. `npm install && npm run build` → `dist/` 生成
-5. uvicorn 起動、`dist/` を静的ファイルとして配信
+`ato run .` を実行すると、Python 3.11 と Node 20 が自動的にプロビジョニングされ、
+`npm install && npm run build` が build フェーズで実行されて `dist/` が生成される。
+その後 uvicorn が起動し、生成された `dist/` を静的ファイルとして配信する。
 
 Django + Vite、Flask + esbuild、Rails + Vite など、バックエンドランタイムとフロントエンドビルドツールチェーンが異なるあらゆる構成で同様に機能する。
 
