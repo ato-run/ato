@@ -100,6 +100,56 @@ run = "main.py"
 - 許可 driver は `deno` / `node` / `python` / `native`
 - `driver = "deno" | "node" | "python"` になる場合、`runtime_version` は必須
 
+#### `runtime_tools` と target-level `build`（source target）
+
+`runtime_tools` は実行ランタイムとは異なる追加 toolchain を `ato run` のビルド・実行フェーズに取り込む。
+`build` は `ato run` の build フェーズで実行される lifecycle コマンドを指定する。
+
+**ライフサイクル順序**（`ato run` の build フェーズ内）:
+
+```
+1. primary runtime を解決・準備する
+2. primary runtime の依存関係を materialize する（uv pip install 等）
+3. runtime_tools で宣言された lifecycle toolchains を build 実行前に materialize する
+4. target-level build コマンドを実行する
+5. target run コマンドを起動する
+```
+
+重要: **`runtime_tools` は build コマンドよりも前に PATH へ追加される**。
+uv pip install と runtime_tools materialization の厳密な順序は実装依存であり、ここでは規定しない。
+
+**典型的なユースケース: Python バックエンド + Node フロントエンドビルド**
+
+FastAPI + Vite/React など、Python で実行するが Node でフロントエンドをビルドする構成:
+
+```toml
+schema_version = "0.3"
+name = "fullstack-app"
+version = "0.1.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+runtime_tools = { node = "20" }
+build = "npm install && npm run build"
+run = "python -m uvicorn app.main:app --host 127.0.0.1"
+port = 8000
+```
+
+`ato run .` を実行すると、Python 3.11 と Node 20 が自動的にプロビジョニングされ、
+`npm install && npm run build` が build フェーズで実行されて `dist/` が生成される。
+その後 uvicorn が起動し、生成された `dist/` を静的ファイルとして配信する。
+
+Django + Vite、Flask + esbuild、Rails + Vite など、バックエンドランタイムとフロントエンドビルドツールチェーンが異なるあらゆる構成で同様に機能する。
+
+**注意点**:
+- `runtime_tools` でバージョンを固定しない場合、キャッシュ済みバージョンが使われることがある
+- `build` コマンドは source inference（ロックファイルなし）でも compat manifest bridge 経由で解決される（#192 修正済み）
+- `default_target` が `main` で lock target label が `default` の場合、内部で自動エイリアスが作成されるため `compat_str` は正しく解決される
+
 ### 4.2 `runtime = "web"`
 
 - `driver` は必須
