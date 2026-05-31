@@ -1090,4 +1090,10 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: IpcCommands,
     },
+
+    #[command(about = "Interact with the Ato community capsule.toml registry")]
+    Community {
+        #[command(subcommand)]
+        command: super::community::CommunityCommands,
+    },
 }
