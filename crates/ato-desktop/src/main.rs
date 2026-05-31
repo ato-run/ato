@@ -7,6 +7,7 @@ mod bundle_paths;
 mod cli_envelope;
 mod cli_install;
 mod config;
+mod crash;
 mod egress_policy;
 mod egress_proxy;
 mod github_manifest_draft;
@@ -49,6 +50,11 @@ fn main() {
 
     let _log_guard = logging::init_tracing();
 
+    // Capture panics to the log file + a crash report + (on Windows) a
+    // copyable dialog. Without this, a panic inside GPUI's non-unwinding
+    // `open_window` callback aborts the GUI process with no visible message.
+    crash::install_panic_hook();
+
     // On Windows, GPUI renders into a DirectComposition swapchain
     // (WS_EX_NOREDIRECTIONBITMAP). Child Wry/WebView2 HWNDs are not part of
     // that visual tree, so they are occluded and every WebView-backed window
@@ -65,6 +71,39 @@ fn main() {
         unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
         tracing::info!(
             "Windows: defaulting GPUI_DISABLE_DIRECT_COMPOSITION=1 so WebView2 children composite"
+        );
+    }
+
+    // WebView2 places its user-data folder next to the executable by default
+    // (`<exe>.WebView2`). When ato-desktop is installed to C:\Program Files\Ato\
+    // (the MSI default), that location is read-only for a normal user, so
+    // WebView2 environment creation fails with E_ACCESSDENIED (0x80070005).
+    // Wry's `build_as_child` then returns an error that every window builder
+    // `.expect()`s — and because that runs inside GPUI's non-unwinding
+    // `open_window` callback, the panic aborts the whole GUI process via the
+    // Windows fail-fast path (exit code 0xc0000409) the instant the first
+    // WebView-backed window (the Start surface) is opened. The GUI subsystem
+    // build has no console and no panic hook, so the user only sees a silent
+    // crash. (This never reproduces under `cargo run`, which runs from a
+    // writable target/ directory.)
+    //
+    // Point WebView2 at a per-user writable folder under ~/.ato so the
+    // Program Files install works. An explicit override is honored.
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
+        let data_folder =
+            capsule_core::common::paths::ato_path_or_workspace_tmp("desktop/webview2");
+        // Best-effort: WebView2 will create the folder itself, but creating it
+        // up front surfaces any permission problem in the log rather than as a
+        // later WebView2 failure.
+        let _ = std::fs::create_dir_all(&data_folder);
+        // SAFETY: set on the main thread before any window / WebView2
+        // environment is created (Wry reads this when it builds the first
+        // WebView). No other thread reads this variable yet.
+        unsafe { std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &data_folder) };
+        tracing::info!(
+            ?data_folder,
+            "Windows: set WEBVIEW2_USER_DATA_FOLDER to a writable per-user folder"
         );
     }
 
