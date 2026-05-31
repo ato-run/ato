@@ -845,20 +845,82 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                         SessionCommands::Start {
                             handle,
                             target,
+                            community_toml_id,
+                            attach_state,
                             from_materialized_record,
                             run_config_hash,
-                            community_toml_id: _,
                             json,
                         },
                 },
         } => {
             assert_eq!(handle, "./samples/desky-mock-tauri");
             assert_eq!(target.as_deref(), Some("desktop"));
+            assert!(community_toml_id.is_none());
+            assert!(attach_state.is_empty());
             assert!(from_materialized_record.is_none());
             assert!(run_config_hash.is_none());
             assert!(json);
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let session_start_with_state = Cli::try_parse_from([
+        "ato",
+        "app",
+        "session",
+        "start",
+        "github.com/usememos/memos",
+        "--community-toml-id",
+        "ctoml_abc123",
+        "--attach-state",
+        "data:/tmp/memos-data",
+        "--attach-state",
+        "db-data:/tmp/db",
+        "--json",
+    ])
+    .expect("parse app session start with attach-state");
+    match session_start_with_state.command {
+        Commands::App {
+            command:
+                AppCommands::Session {
+                    command:
+                        SessionCommands::Start {
+                            handle,
+                            community_toml_id,
+                            attach_state,
+                            json,
+                            ..
+                        },
+                },
+        } => {
+            assert_eq!(handle, "github.com/usememos/memos");
+            assert_eq!(community_toml_id.as_deref(), Some("ctoml_abc123"));
+            assert_eq!(
+                attach_state,
+                vec![
+                    "data:/tmp/memos-data".to_string(),
+                    "db-data:/tmp/db".to_string()
+                ]
+            );
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    for value in ["data", ":path", "data:"] {
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "app",
+                "session",
+                "start",
+                "github.com/usememos/memos",
+                "--attach-state",
+                value,
+            ])
+            .is_err(),
+            "invalid --attach-state value should be rejected: {value}"
+        );
     }
 
     let session_stop = Cli::try_parse_from([
