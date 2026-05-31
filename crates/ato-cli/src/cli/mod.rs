@@ -3,6 +3,7 @@ pub(crate) mod attest;
 mod binding;
 pub(crate) mod cache;
 pub(crate) mod commands;
+pub(crate) mod community;
 mod config;
 pub(crate) mod dispatch;
 mod import_cmd;
