@@ -1,0 +1,11 @@
+{$OPENLIST_PUBLIC_DOMAIN} {
+	request_body {
+		max_size 10GB
+	}
+
+	reverse_proxy openlist:5244 {
+		header_up Host {host}
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
