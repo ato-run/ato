@@ -346,11 +346,11 @@ fn expand_tilde(path: &str) -> PathBuf {
 fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
     vec![
         FeaturedApp {
-            handle: "capsule://github.com/usememos/memos".to_string(),
-            label: "Memos".to_string(),
-            description: tr(locale, "start.featured.memos_desc"),
-            icon: "📝".to_string(),
-            icon_bg: "linear-gradient(135deg,#f59e0b,#f97316)".to_string(),
+            handle: "affine".to_string(),
+            label: "AFFiNE".to_string(),
+            description: tr(locale, "start.featured.affine_desc"),
+            icon: "△".to_string(),
+            icon_bg: "linear-gradient(135deg,#fb7185,#e11d48)".to_string(),
             tags: vec![
                 tr(locale, "start.featured.tag.local_run"),
                 tr(locale, "start.featured.tag.offline"),
@@ -360,11 +360,11 @@ fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
             installed: false,
         },
         FeaturedApp {
-            handle: "capsule://github.com/louislam/uptime-kuma".to_string(),
-            label: "Uptime Kuma".to_string(),
-            description: tr(locale, "start.featured.uptime_kuma_desc"),
-            icon: "🟢".to_string(),
-            icon_bg: "linear-gradient(135deg,#10b981,#059669)".to_string(),
+            handle: "open-webui".to_string(),
+            label: "Open WebUI".to_string(),
+            description: tr(locale, "start.featured.open_webui_desc"),
+            icon: "OI".to_string(),
+            icon_bg: "linear-gradient(135deg,#0f172a,#334155)".to_string(),
             tags: vec![
                 tr(locale, "start.featured.tag.local_run"),
                 tr(locale, "start.featured.tag.privacy"),
@@ -411,21 +411,25 @@ pub fn dispatch(
                 if let Ok(normalized) =
                     crate::source_import_session::normalize_github_import_input(&handle)
                 {
-                    if let Err(err) = crate::window::import_window::open_with_url(
-                        cx,
-                        normalized.source_url_normalized.clone(),
-                    ) {
-                        tracing::error!(error = %err, "ato_start: open_query GitHub import failed");
-                    }
-                    let _ = host.update(cx, |_, window, _| window.remove_window());
+                    let source_url = normalized.source_url_normalized.clone();
+                    crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                        let _ = host.update(cx, |_, window, _| window.remove_window());
+                        if let Err(err) =
+                            crate::window::import_window::open_with_url(cx, source_url)
+                        {
+                            tracing::error!(error = %err, "ato_start: open_query GitHub import failed");
+                        }
+                    });
                     return Ok(());
                 }
                 let route = GuestRoute::CapsuleHandle {
                     handle: handle.clone(),
                     label: handle.clone(),
                 };
-                open_capsule_from_start(cx, route, &handle);
-                let _ = host.update(cx, |_, window, _| window.remove_window());
+                crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                    let _ = host.update(cx, |_, window, _| window.remove_window());
+                    open_capsule_from_start(cx, route, &handle);
+                });
             }
             QueryIntent::ExternalUrl(url_str) => match url::Url::parse(&url_str) {
                 Ok(url) => {
@@ -434,20 +438,24 @@ pub fn dispatch(
                     if let Ok(normalized) =
                         crate::source_import_session::normalize_github_import_input(&url_str)
                     {
-                        if let Err(err) = crate::window::import_window::open_with_url(
-                            cx,
-                            normalized.source_url_normalized.clone(),
-                        ) {
-                            tracing::error!(error = %err, "ato_start: open_query GitHub URL failed");
-                        }
-                        let _ = host.update(cx, |_, window, _| window.remove_window());
+                        let source_url = normalized.source_url_normalized.clone();
+                        crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                            let _ = host.update(cx, |_, window, _| window.remove_window());
+                            if let Err(err) =
+                                crate::window::import_window::open_with_url(cx, source_url)
+                            {
+                                tracing::error!(error = %err, "ato_start: open_query GitHub URL failed");
+                            }
+                        });
                         return Ok(());
                     }
                     let route = GuestRoute::ExternalUrl(url);
-                    if let Err(err) = crate::window::open_app_window(cx, route) {
-                        tracing::error!(error = %err, "ato_start: open_query ExternalUrl failed");
-                    }
-                    let _ = host.update(cx, |_, window, _| window.remove_window());
+                    crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                        let _ = host.update(cx, |_, window, _| window.remove_window());
+                        if let Err(err) = crate::window::open_app_window(cx, route) {
+                            tracing::error!(error = %err, "ato_start: open_query ExternalUrl failed");
+                        }
+                    });
                 }
                 Err(err) => {
                     tracing::warn!(url = %url_str, error = %err, "ato_start: open_query URL parse failed");
@@ -463,12 +471,14 @@ pub fn dispatch(
                     handle: path,
                     label,
                 };
-                if let Err(err) =
-                    crate::window::launch_window::open_consent_window_for_route(cx, route)
-                {
-                    tracing::error!(error = %err, "ato_start: open_query LocalPath failed");
-                }
-                let _ = host.update(cx, |_, window, _| window.remove_window());
+                crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                    let _ = host.update(cx, |_, window, _| window.remove_window());
+                    if let Err(err) =
+                        crate::window::launch_window::open_consent_window_for_route(cx, route)
+                    {
+                        tracing::error!(error = %err, "ato_start: open_query LocalPath failed");
+                    }
+                });
             }
             QueryIntent::Invalid(_msg) => {
                 // Validation error: no action, no fallback.
@@ -483,21 +493,28 @@ pub fn dispatch(
                 handle: handle.clone(),
                 label: handle.clone(),
             };
-            open_capsule_from_start(cx, route, &handle);
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+                open_capsule_from_start(cx, route, &handle);
+            });
         }
 
         AtoStartCommand::OpenStore => {
-            if let Err(err) = crate::window::store::open_store_window(cx) {
-                tracing::error!(error = %err, "ato_start: open_store failed");
-            }
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+                if let Err(err) = crate::window::store::open_store_window(cx) {
+                    tracing::error!(error = %err, "ato_start: open_store failed");
+                }
+            });
         }
 
         AtoStartCommand::OpenSettings => {
-            if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
-                tracing::error!(error = %err, "ato_start: open_settings failed");
-            }
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+                if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
+                    tracing::error!(error = %err, "ato_start: open_settings failed");
+                }
+            });
         }
 
         AtoStartCommand::OpenLocalPath { path } => {
@@ -510,22 +527,29 @@ pub fn dispatch(
                 handle: path,
                 label,
             };
-            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
-            {
-                tracing::error!(error = %err, "ato_start: open_local_path failed");
-            }
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+                if let Err(err) =
+                    crate::window::launch_window::open_consent_window_for_route(cx, route)
+                {
+                    tracing::error!(error = %err, "ato_start: open_local_path failed");
+                }
+            });
         }
 
         AtoStartCommand::OpenGithubRun => {
-            if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
-                tracing::error!(error = %err, "ato_start: open_github_run failed");
-            }
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+                if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
+                    tracing::error!(error = %err, "ato_start: open_github_run failed");
+                }
+            });
         }
 
         AtoStartCommand::Close => {
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+            });
         }
     }
     Ok(())

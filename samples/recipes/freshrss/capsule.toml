@@ -1,0 +1,29 @@
+schema_version = "0.3"
+name = "fresh-rss"
+version = "1.24.0"
+type = "app"
+description = "A free, self-hostable RSS aggregator"
+homepage = "https://github.com/FreshRSS/FreshRSS"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "freshrss/freshrss:latest"
+port = 80
+env = { CRON_MIN = "*/20" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "RSS feed data and configuration"
+attach = "explicit"
+schema_id = "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "80", initial_delay_seconds = 10, timeout_seconds = 60 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/www/FreshRSS/data"

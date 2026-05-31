@@ -1,6 +1,7 @@
 mod app;
 mod automation;
 mod bridge;
+mod bundle_paths;
 mod cli_envelope;
 mod cli_install;
 mod config;
@@ -26,6 +27,7 @@ mod terminal;
 mod ui;
 mod userland;
 mod webview;
+mod webview_init_guard;
 mod window;
 
 fn main() {
@@ -35,6 +37,25 @@ fn main() {
     }
 
     let _log_guard = logging::init_tracing();
+
+    // On Windows, GPUI renders into a DirectComposition swapchain
+    // (WS_EX_NOREDIRECTIONBITMAP). Child Wry/WebView2 HWNDs are not part of
+    // that visual tree, so they are occluded and every WebView-backed window
+    // paints black/blank (this includes the Start window, which hosts its own
+    // child WebView via build_as_child). Disabling DirectComposition makes the
+    // WebView2 child windows composite normally while DWM accent transparency
+    // (used for the control-bar pill) keeps working. We default it on but
+    // honour an explicit override so power users can still opt back into
+    // DirectComposition.
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("GPUI_DISABLE_DIRECT_COMPOSITION").is_none() {
+        // SAFETY: set on the main thread before the GPUI platform is created
+        // (which reads this env var). No other thread reads this variable.
+        unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
+        tracing::info!(
+            "Windows: defaulting GPUI_DISABLE_DIRECT_COMPOSITION=1 so WebView2 children composite"
+        );
+    }
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

@@ -40,7 +40,7 @@ on:
     inputs:
       tag:
         description: "Override release tag (e.g. ato-desktop-v0.5.0)"
-        required: false
+        required: true
 
 permissions:
   contents: write  # gh release upload needs write on contents

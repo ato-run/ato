@@ -20,6 +20,7 @@ use capsule_wire::handle::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
+use crate::bundle_paths::DesktopBundlePaths;
 use crate::config::SecretEntry;
 use crate::state::session::{OciImportKind, OciSessionSnapshot, OciSessionStatus};
 use crate::state::{LocalManifestRoute, ManifestSource};
@@ -181,8 +182,6 @@ impl DesktopLaunchInput {
     }
 }
 
-const ATO_BIN_ENV: &str = "ATO_DESKTOP_ATO_BIN";
-
 #[derive(Clone, Debug)]
 pub struct CapsuleLaunchSession {
     pub handle: String,
@@ -219,6 +218,12 @@ pub struct CapsuleLaunchSession {
     /// signal fires. `None` only on launch paths that pre-date Phase 0
     /// instrumentation.
     pub click_origin: Option<ClickOrigin>,
+    /// Install profile key for this session, `ipk_<32hex>`, written by
+    /// the CLI into the session record when launching via `ato launch
+    /// <ipk>`. `None` for transient / preview / LocalManifest runs.
+    /// Used by the WebView store classifier to assign `CapsuleProfile`
+    /// instead of `CapsuleEphemeral` for installed trusted capsules.
+    pub install_profile_key: Option<String>,
 }
 
 impl CapsuleLaunchSession {
@@ -1104,17 +1109,48 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
     if pattern.is_empty() || pattern.len() < 4 {
         return Vec::new();
     }
-    let output = match Command::new("pgrep").arg("-f").arg(pattern).output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !output.status.success() {
-        return Vec::new();
+
+    #[cfg(unix)]
+    {
+        let output = match Command::new("pgrep").arg("-f").arg(pattern).output() {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
+
+    #[cfg(windows)]
+    {
+        let escaped = pattern.replace('\'', "''");
+        let script = format!(
+            "Get-Process | Where-Object {{ $_.ProcessName -match '{escaped}' -or ($_.Path -ne $null -and $_.Path -match '{escaped}') }} | Select-Object -ExpandProperty Id"
+        );
+        let output = match Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
 }
 
 #[cfg(unix)]
@@ -1132,7 +1168,27 @@ fn kill_pids(pids: &[u32]) -> usize {
     killed
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn kill_pids(pids: &[u32]) -> usize {
+    let mut killed = 0usize;
+    let current = std::process::id();
+    for &pid in pids {
+        if pid == current {
+            continue;
+        }
+        let ok = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if ok {
+            killed += 1;
+        }
+    }
+    killed
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_pids(_pids: &[u32]) -> usize {
     0
 }
@@ -1174,56 +1230,100 @@ pub(crate) fn cleanup_host_resources() -> CleanupReport {
 }
 
 fn find_port_pids(port: u16) -> Vec<u32> {
-    let output = match Command::new("lsof")
-        .arg("-ti")
-        .arg(format!(":{port}"))
-        .output()
+    #[cfg(unix)]
     {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !output.status.success() {
-        return Vec::new();
+        let output = match Command::new("lsof")
+            .arg("-ti")
+            .arg(format!(":{port}"))
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
+
+    #[cfg(windows)]
+    {
+        let output = match Command::new("netstat").args(["-ano"]).output() {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        let port_str = format!(":{port} ");
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| {
+                line.contains(&port_str)
+                    && (line.contains("LISTENING") || line.contains("ESTABLISHED"))
+            })
+            .filter_map(|line| line.split_whitespace().last()?.trim().parse::<u32>().ok())
+            .collect::<std::collections::HashSet<u32>>()
+            .into_iter()
+            .collect();
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
 }
 
 fn count_owned_shm() -> usize {
-    let output = match Command::new("ipcs").arg("-m").output() {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let current_user = std::env::var("USER").unwrap_or_default();
-    text.lines()
-        .filter(|line| line.contains(&current_user))
-        .count()
+    #[cfg(unix)]
+    {
+        let output = match Command::new("ipcs").arg("-m").output() {
+            Ok(o) => o,
+            Err(_) => return 0,
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let current_user = std::env::var("USER").unwrap_or_default();
+        return text
+            .lines()
+            .filter(|line| line.contains(&current_user))
+            .count();
+    }
+
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 fn free_owned_shm() -> usize {
-    let output = match Command::new("ipcs").arg("-m").output() {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let current_user = std::env::var("USER").unwrap_or_default();
-    let mut freed = 0usize;
-    for line in text.lines() {
-        if !line.contains(&current_user) {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(id_str) = parts.get(1) {
-            if let Ok(id) = id_str.parse::<u32>() {
-                let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
-                freed += 1;
+    #[cfg(unix)]
+    {
+        let output = match Command::new("ipcs").arg("-m").output() {
+            Ok(o) => o,
+            Err(_) => return 0,
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let current_user = std::env::var("USER").unwrap_or_default();
+        let mut freed = 0usize;
+        for line in text.lines() {
+            if !line.contains(&current_user) {
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
+                    freed += 1;
+                }
             }
         }
+        return freed;
     }
-    freed
+
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
@@ -1820,68 +1920,62 @@ fn spawn_background_receipt_refresh(handle: &str) {
 }
 
 pub fn resolve_ato_binary() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os(ATO_BIN_ENV) {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
-        }
-        bail!(
-            "{} points to a missing ato helper binary: {}",
-            ATO_BIN_ENV,
-            path.display()
-        );
-    }
-
-    if let Some(path) = bundled_ato_binary()? {
-        return Ok(path);
-    }
-
     // Monorepo dev workflow: prefer the root-workspace `target/{profile}/ato`
     // produced by ato-desktop's build.rs (see `rebuild_helpers`). This wins
-    // over `sibling_ato_binary` because a stale sibling could have been left
-    // by a prior bundle step, and over PATH because a globally-installed
-    // `ato` is almost always older than the working tree.
-    if let Some(path) = dev_workspace_binary("ato") {
-        return Ok(path);
-    }
-
-    if let Some(path) = sibling_ato_binary()? {
-        return Ok(path);
-    }
-
-    if let Some(path) = which_in_path("ato") {
-        return Ok(path);
-    }
-
-    bail!(
-        "ato helper binary was not found. Bundle Helpers/ato, set {}, or install 'ato' on PATH.",
-        ATO_BIN_ENV
-    )
+    // over PATH because a globally-installed `ato` is almost always older
+    // than the working tree. Packaged helpers still win when present.
+    let dev_helper = dev_workspace_binary("ato");
+    DesktopBundlePaths::from_env()
+        .resolve_ato_helper_with_extra(dev_helper)
+        .map_err(anyhow::Error::new)
 }
 
 /// Resolve the `nacelle` sandbox helper binary.
 ///
 /// Precedence mirrors `resolve_ato_binary`:
 ///   1. `NACELLE_PATH` env var (explicit override).
-///   2. Monorepo dev target (`<root>/target/{profile}/nacelle`), kept fresh by
+///   2. Bundle-relative helper next to `ato-desktop` / inside `bin/`.
+///   3. Monorepo dev target (`<root>/target/{profile}/nacelle`), kept fresh by
 ///      this crate's build.rs.
-///   3. PATH lookup (globally installed `nacelle`).
+///   4. PATH lookup (globally installed `nacelle`).
 ///
 /// Returning `None` means no helper was found anywhere; callers should
 /// surface a clear error rather than silently spawning a missing binary.
 pub fn resolve_nacelle_binary() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("NACELLE_PATH") {
-        let path = PathBuf::from(path);
+    resolve_nacelle_binary_with_paths(
+        &DesktopBundlePaths::from_env(),
+        std::env::var_os("NACELLE_PATH").map(PathBuf::from),
+        dev_workspace_binary("nacelle"),
+    )
+}
+
+fn resolve_nacelle_binary_with_paths(
+    bundle_paths: &DesktopBundlePaths,
+    override_path: Option<PathBuf>,
+    dev_workspace_path: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = override_path {
         if path.is_file() {
             return Some(path);
         }
     }
 
-    if let Some(path) = dev_workspace_binary("nacelle") {
-        return Some(path);
+    for candidate in bundle_paths.bundle_binary_candidates("nacelle") {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
     }
 
-    which_in_path("nacelle")
+    if let Some(path) = dev_workspace_path {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    bundle_paths
+        .path_candidates("nacelle")
+        .into_iter()
+        .find(|candidate| candidate.is_file())
 }
 
 /// `target/{profile}/<name>` inside the root workspace that ships ato-cli
@@ -1903,64 +1997,6 @@ fn dev_workspace_binary(name: &str) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-fn bundled_ato_binary() -> Result<Option<PathBuf>> {
-    let exe = std::env::current_exe().context("failed to resolve ato-desktop executable path")?;
-    let Some(macos_dir) = exe.parent() else {
-        return Ok(None);
-    };
-
-    let bundled = macos_dir
-        .parent()
-        .map(|contents| contents.join("Helpers").join("ato"));
-    if let Some(path) = bundled {
-        if path.is_file() {
-            return Ok(Some(path));
-        }
-    }
-
-    Ok(None)
-}
-
-fn sibling_ato_binary() -> Result<Option<PathBuf>> {
-    let exe = std::env::current_exe().context("failed to resolve ato-desktop executable path")?;
-    let Some(parent) = exe.parent() else {
-        return Ok(None);
-    };
-
-    let bin_name = if cfg!(windows) { "ato.exe" } else { "ato" };
-    let candidate = parent.join(bin_name);
-
-    if candidate.is_file() {
-        // In monorepo dev builds, ato-desktop lives at crates/ato-desktop/target/{profile}/
-        // while ato-cli is built into the root workspace's target/{profile}/.
-        // If a fresher peer exists 4 ancestors up (repo root), prefer it so that
-        // rebuilding ato-cli is immediately picked up without re-bundling.
-        let profile = parent
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("debug");
-        if let Some(repo_root) = parent.ancestors().nth(4) {
-            let peer = repo_root.join("target").join(profile).join(bin_name);
-            if peer.is_file() && peer != candidate {
-                let sibling_mtime = candidate.metadata().and_then(|m| m.modified()).ok();
-                let peer_mtime = peer.metadata().and_then(|m| m.modified()).ok();
-                if let (Some(sm), Some(pm)) = (sibling_mtime, peer_mtime) {
-                    if pm > sm {
-                        tracing::debug!(
-                            sibling = %candidate.display(),
-                            peer = %peer.display(),
-                            "using fresher root-workspace ato binary"
-                        );
-                        return Ok(Some(peer));
-                    }
-                }
-            }
-        }
-        return Ok(Some(candidate));
-    }
-    Ok(None)
-}
-
 fn which_in_path(binary: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     which_in_path_entries(binary, std::env::split_paths(&path_var))
@@ -1970,9 +2006,14 @@ fn which_in_path_entries(
     binary: &str,
     entries: impl IntoIterator<Item = PathBuf>,
 ) -> Option<PathBuf> {
+    let binary = if cfg!(windows) && !binary.to_ascii_lowercase().ends_with(".exe") {
+        format!("{binary}.exe")
+    } else {
+        binary.to_string()
+    };
     entries
         .into_iter()
-        .map(|entry| entry.join(binary))
+        .map(|entry| entry.join(&binary))
         .find(|candidate| candidate.is_file())
 }
 
@@ -2106,6 +2147,7 @@ fn build_launch_session(
         execution_id: started.execution_id,
         execution_receipt_schema_version: started.execution_receipt_schema_version,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -2173,6 +2215,7 @@ fn build_launch_session_from_started(started: SessionStartInfo) -> Result<Capsul
         execution_id: started.execution_id,
         execution_receipt_schema_version: started.execution_receipt_schema_version,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -2443,6 +2486,7 @@ fn build_launch_session_from_stored(
         execution_id: None,
         execution_receipt_schema_version: None,
         click_origin: None,
+        install_profile_key: stored.install_profile_key.clone(),
     })
 }
 
@@ -2845,6 +2889,7 @@ fn start_web_service_from_workspace(
         execution_id: None,
         execution_receipt_schema_version: None,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -3057,6 +3102,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
                 execution_id: None,
                 execution_receipt_schema_version: None,
                 click_origin: None,
+                install_profile_key: None,
             })
         }
         capsule_core::share::ShareExecutionResult::Completed { exit_code } => {
@@ -5242,6 +5288,7 @@ mod fast_path_tests {
     use ato_session_core::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use ato_session_core::write_session_record_atomic;
     use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+    use serial_test::serial;
     use tempfile::TempDir;
 
     const TEST_HANDLE: &str = "capsule://ato.run/koh0920/byok-ai-chat";
@@ -5466,6 +5513,7 @@ mod fast_path_tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_ato_binary_prefers_ato_desktop_ato_bin() {
         let tmp = tempfile::NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
@@ -5476,11 +5524,61 @@ mod fast_path_tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_ato_binary_errors_on_missing_env_path() {
         std::env::set_var("ATO_DESKTOP_ATO_BIN", "/nonexistent/ato/helper/binary");
         let err = resolve_ato_binary().unwrap_err();
-        assert!(format!("{err:#}").contains("missing ato helper"));
+        assert!(format!("{err:#}").contains("points to a missing file"));
         std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+    }
+
+    #[test]
+    fn resolve_nacelle_binary_prefers_bundle_relative_install_layout() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let install = dir.path().join("Ato");
+        let bin = install.join("bin");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        std::fs::write(install.join("ato-desktop.exe"), "").expect("desktop exe");
+        let nacelle = bin.join("nacelle.exe");
+        std::fs::write(&nacelle, "").expect("nacelle exe");
+
+        let bundle_paths = DesktopBundlePaths::for_test(
+            crate::bundle_paths::DesktopPlatform::Windows,
+            install.join("ato-desktop.exe"),
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+        );
+
+        let resolved = resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
+        assert_eq!(resolved, nacelle);
+    }
+
+    #[test]
+    fn resolve_nacelle_binary_falls_back_to_path_entries() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let install = dir.path().join("Ato");
+        let path_dir = dir.path().join("path");
+        std::fs::create_dir_all(&install).expect("create install");
+        std::fs::create_dir_all(&path_dir).expect("create path dir");
+        std::fs::write(install.join("ato-desktop.exe"), "").expect("desktop exe");
+        let nacelle = path_dir.join("nacelle.exe");
+        std::fs::write(&nacelle, "").expect("nacelle exe");
+
+        let bundle_paths = DesktopBundlePaths::for_test(
+            crate::bundle_paths::DesktopPlatform::Windows,
+            install.join("ato-desktop.exe"),
+            None,
+            None,
+            None,
+            vec![path_dir.clone()],
+            None,
+        );
+
+        let resolved = resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
+        assert_eq!(resolved, nacelle);
     }
 
     #[test]
@@ -5710,9 +5808,7 @@ mod launch_error_display_tests {
         ));
         assert!(is_tracing_noise_line("  DEBUG ato_cli: some message"));
         assert!(is_tracing_noise_line("TRACE ato_cli: fine grained"));
-        assert!(is_tracing_noise_line(
-            "INFO ato_cli: informational only"
-        ));
+        assert!(is_tracing_noise_line("INFO ato_cli: informational only"));
     }
 
     #[test]

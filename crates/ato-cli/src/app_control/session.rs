@@ -385,6 +385,16 @@ pub fn start_session(
     // unaffected — it never sets this flag.
     crate::adapters::runtime::executors::orchestrator::redirect_service_stdout_to_stderr_for_envelope_mode(json);
 
+    // Envelope mode means a parent (ato-desktop) is capturing our stdout via a
+    // pipe and waiting for EOF. Detach our stdio from every child the launch is
+    // about to spawn so a long-lived one (the OCI `logs --follow` streamer, the
+    // parent-death watcher) cannot pin the pipe open past our own exit and hang
+    // the parent's `Command::output()` (#377). Windows-only; see the helper.
+    #[cfg(windows)]
+    if json {
+        clear_std_handle_inheritance();
+    }
+
     // Drive the same Hourglass pipeline `ato run` uses, with a
     // `SessionStartPhaseRunner` that swaps Execute for session-specific
     // spawn + ProcessManager registration. Install resolves the handle,
@@ -1195,8 +1205,7 @@ pub(super) fn start_orchestration_session_in_process(
     runtime_handle
         .block_on(async { oci_provider.ensure_ready().await })
         .map_err(|err| {
-            anyhow::Error::from(err)
-                .context("OCI provider not ready before session start")
+            anyhow::Error::from(err).context("OCI provider not ready before session start")
         })?;
     let detached = runtime_handle
         .block_on(
@@ -2991,6 +3000,60 @@ fn maybe_spawn_parent_death_watcher(session_id: &str) -> Result<()> {
 
     let _child = command.spawn().context("failed to spawn watcher process")?;
     Ok(())
+}
+
+/// Strip `HANDLE_FLAG_INHERIT` from this process's standard output and error
+/// handles so that subsequently spawned children do not inherit them.
+///
+/// On Windows, `std`/`tokio` spawn children with `bInheritHandles = TRUE`, and
+/// the stdio handles handed to *this* process are inheritable. When
+/// `ato app session start` is itself launched with piped stdout/stderr — which
+/// is exactly how ato-desktop launches it, via `Command::output()` — any
+/// long-lived child that inherits copies of those pipe write-ends holds them
+/// open for its own lifetime. The desktop's `output()` then never observes EOF
+/// and blocks forever, even though session start has already exited with the
+/// envelope written (#377). The worst offender is the `<engine> logs --follow`
+/// streamer the OCI orchestrator spawns to mirror container output: it runs
+/// until the container stops, long outliving session start. The parent-death
+/// watcher is a second such child.
+///
+/// Clearing the inherit flag once, before orchestration spawns anything, stops
+/// every child from capturing our stdio. The session-start envelope is still
+/// printed afterwards through this process's own handles, which is unaffected;
+/// service output is mirrored to our stderr at the Rust layer, not by child
+/// inheritance, so nothing downstream needs to inherit these handles. POSIX is
+/// immune because `std` marks the `output()` pipe fds `CLOEXEC`.
+#[cfg(windows)]
+fn clear_std_handle_inheritance() {
+    use windows_sys::Win32::Foundation::{
+        GetLastError, SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+
+    for std_id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: both are plain Win32 calls operating only on this process's
+        // own standard handles; we skip null/invalid handles.
+        unsafe {
+            let handle = GetStdHandle(std_id);
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                // No usable handle for this stream (e.g. detached). Nothing to
+                // detach from children — not an error.
+                continue;
+            }
+            if SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0 {
+                // The clear failed on a real handle, so a long-lived child may
+                // still inherit and pin this stream's pipe, re-introducing the
+                // desktop `output()` hang (#377). Surface it instead of silently
+                // proceeding — the launch may appear to stall downstream.
+                tracing::warn!(
+                    std_id,
+                    last_error = GetLastError(),
+                    "failed to clear HANDLE_FLAG_INHERIT on a standard handle; a \
+                     long-lived child could pin the parent's stdout/stderr pipe (#377)"
+                );
+            }
+        }
+    }
 }
 
 fn desktop_parent_process_matches(parent_pid: u32, expected_start_time: Option<u64>) -> bool {
