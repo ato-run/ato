@@ -27,6 +27,36 @@ Open `http://127.0.0.1:5244/` and sign in with:
 
 The default Ato target only exposes OpenList over loopback HTTP. It does not bind ports 80 or 443.
 
+## Ato Runtime Smoke (Required Before Merge)
+
+Do not treat `--plan-only` as sufficient validation for this recipe. Run a real capsule launch, verify HTTP 200, then verify state persistence across restart.
+
+```bash
+cd samples/recipes/openlist-google-drive-crypt
+
+export ATO_HOME="$PWD/.tmp/ato-home-openlist"
+export OPENLIST_STATE_DIR="$PWD/.tmp/openlist-state"
+export OPENLIST_ADMIN_PASSWORD='dummy-password'
+
+mkdir -p "$ATO_HOME" "$OPENLIST_STATE_DIR"
+
+cargo run -p ato-cli -- run ./capsule.toml --yes --state data="$OPENLIST_STATE_DIR"
+curl -I -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5244/
+
+# stop + restart with same ATO_HOME/state binding
+cargo run -p ato-cli -- stop --all --force
+cargo run -p ato-cli -- run ./capsule.toml --yes --state data="$OPENLIST_STATE_DIR"
+curl -I -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5244/
+```
+
+Expected result:
+
+- Both curl checks return `200`.
+- OpenList initializes successfully on first run (no DB/config write failure).
+- Admin/session/storage settings remain after stop and restart when reusing the same `--state data=...` directory.
+
+OpenList v4.1.0+ runs as UID/GID `1001` by default. If startup fails with a permission error under `/opt/openlist/data`, treat this as a merge blocker for the Ato-capsule path. In that case, use the Compose profile for now and document in PR validation that Ato runtime verification is blocked pending UID/GID-compatible persistent state handling.
+
 ## Manual Google Drive + Crypt Setup
 
 Google Drive and Crypt are intentionally configured after launch because OAuth consent and storage policy choices are user-specific.
@@ -77,9 +107,9 @@ For non-standard public ports, pass the full `domain:port` value in `Host` and `
 ## Verification Checklist
 
 - OpenList starts from the Ato capsule.
-- `http://127.0.0.1:${OPENLIST_PORT:-5244}/` returns HTTP 200 and shows the login UI.
+- `http://127.0.0.1:5244/` returns HTTP 200 and shows the login UI.
 - Missing `OPENLIST_ADMIN_PASSWORD` blocks launch before the container starts.
-- `/opt/openlist/data` is backed by persistent Ato state and survives restart.
+- `/opt/openlist/data` is backed by persistent Ato state, is writable by OpenList, and survives restart.
 - A test Google Drive driver points to an `encrypted_storage` folder.
 - A Crypt mount such as `/secure` can upload and preview a PDF or image.
 - The corresponding Google Drive files under `encrypted_storage` are not readable as plaintext.
