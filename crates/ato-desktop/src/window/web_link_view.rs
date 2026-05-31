@@ -57,7 +57,7 @@ type CapsuleNavQueue = Arc<Mutex<Vec<String>>>;
 
 struct Tab {
     id: usize,
-    webview: WebView,
+    webview: Option<WebView>,
     url: SharedString,
     title: SharedString,
     url_input: Entity<InputState>,
@@ -76,7 +76,7 @@ impl_focusable_via_paste!(WebLinkViewShell, paste);
 
 impl WebViewPasteShell for WebLinkViewShell {
     fn active_paste_target(&self) -> Option<&WebView> {
-        self.active_tab().map(|t| &t.webview)
+        self.active_tab().and_then(|t| t.webview.as_ref())
     }
 }
 
@@ -143,18 +143,18 @@ impl WebLinkViewShell {
     }
 
     fn navigate_back(&self) {
-        if let Some(t) = self.active_tab() {
-            let _ = t.webview.evaluate_script("history.back();");
+        if let Some(webview) = self.active_tab().and_then(|t| t.webview.as_ref()) {
+            let _ = webview.evaluate_script("history.back();");
         }
     }
     fn navigate_forward(&self) {
-        if let Some(t) = self.active_tab() {
-            let _ = t.webview.evaluate_script("history.forward();");
+        if let Some(webview) = self.active_tab().and_then(|t| t.webview.as_ref()) {
+            let _ = webview.evaluate_script("history.forward();");
         }
     }
     fn reload(&self) {
-        if let Some(t) = self.active_tab() {
-            let _ = t.webview.evaluate_script("location.reload();");
+        if let Some(webview) = self.active_tab().and_then(|t| t.webview.as_ref()) {
+            let _ = webview.evaluate_script("location.reload();");
         }
     }
 
@@ -170,7 +170,9 @@ impl WebLinkViewShell {
             .map(|t| t.url_input.clone());
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
-            let _ = tab.webview.load_url(&normalized);
+            if let Some(webview) = tab.webview.as_ref() {
+                let _ = webview.load_url(&normalized);
+            }
             tab.url = SharedString::from(normalized.clone());
             tab.title = SharedString::from(short_title_for_url(&normalized));
         }
@@ -185,7 +187,9 @@ impl WebLinkViewShell {
 
     fn sync_visibility(&self) {
         for tab in &self.tabs {
-            let _ = tab.webview.set_visible(tab.id == self.active_tab_id);
+            if let Some(webview) = tab.webview.as_ref() {
+                let _ = webview.set_visible(tab.id == self.active_tab_id);
+            }
         }
     }
 
@@ -198,10 +202,12 @@ impl WebLinkViewShell {
         let w = f32::from(current.width) as u32;
         let h = (f32::from(current.height) as u32).saturating_sub(top as u32);
         for tab in &self.tabs {
-            let _ = tab.webview.set_bounds(Rect {
-                position: LogicalPosition::new(0i32, top).into(),
-                size: LogicalSize::new(w, h).into(),
-            });
+            if let Some(webview) = tab.webview.as_ref() {
+                let _ = webview.set_bounds(Rect {
+                    position: LogicalPosition::new(0i32, top).into(),
+                    size: LogicalSize::new(w, h).into(),
+                });
+            }
         }
         self.window_size = current;
     }
@@ -241,9 +247,8 @@ fn build_tab(
             } else {
                 true
             }
-        })
-        .build_as_child(window)
-        .expect("WebLinkView tab WebView build_as_child must succeed");
+        });
+    let webview = crate::window::build_child_webview("Web link tab", webview, window);
 
     let url_input = cx.new(|cx| {
         InputState::new(window, cx)
@@ -266,7 +271,9 @@ fn build_tab(
             // an earlier synchronous reclaim for better responsiveness.
             InputEvent::Focus => {
                 if let Some(tab) = this.active_tab() {
-                    let _ = tab.webview.focus_parent();
+                    if let Some(webview) = tab.webview.as_ref() {
+                        let _ = webview.focus_parent();
+                    }
                 }
                 cx.notify();
             }
@@ -586,7 +593,9 @@ fn url_pill(url_input: Entity<InputState>, entity: Entity<WebLinkViewShell>) -> 
         .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
             entity.update(cx, |this, _cx| {
                 if let Some(tab) = this.active_tab() {
-                    let _ = tab.webview.focus_parent();
+                    if let Some(webview) = tab.webview.as_ref() {
+                        let _ = webview.focus_parent();
+                    }
                 }
             });
         })
