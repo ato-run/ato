@@ -43,7 +43,7 @@ use crate::executors::target_runner;
 use crate::reporters::CliReporter;
 
 use super::guest_contract::parse_guest_contract;
-use super::resolve::{build_resolution, HandleResolution};
+use super::resolve::HandleResolution;
 use super::session::{
     redirect_stdout_to_stderr, resolve_local_plan_for_session_start, resolve_session_launch_plan,
     restore_stdout, start_guest_session, start_orchestration_session_in_process,
@@ -120,6 +120,7 @@ pub(super) struct SessionStartPhaseRunner {
     json: bool,
     start_source: SessionStartSource,
     expected_run_config_hash: Option<String>,
+    attach_state: Vec<String>,
 
     // Set by Install phase
     resolution: Option<HandleResolution>,
@@ -189,6 +190,7 @@ impl SessionStartPhaseRunner {
     pub(super) fn new(
         handle: &str,
         target_label: Option<&str>,
+        attach_state: Vec<String>,
         expected_run_config_hash: Option<String>,
         json: bool,
     ) -> Self {
@@ -198,6 +200,7 @@ impl SessionStartPhaseRunner {
             json,
             start_source: SessionStartSource::Handle,
             expected_run_config_hash,
+            attach_state,
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -221,6 +224,7 @@ impl SessionStartPhaseRunner {
     pub(super) fn from_materialized_record(
         record: MaterializedLaunchRecord,
         expected_run_config_hash: Option<String>,
+        attach_state: Vec<String>,
         json: bool,
     ) -> Self {
         Self {
@@ -229,6 +233,7 @@ impl SessionStartPhaseRunner {
             json,
             start_source: SessionStartSource::MaterializedRecord(record),
             expected_run_config_hash,
+            attach_state,
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -257,10 +262,17 @@ impl SessionStartPhaseRunner {
         handle: &str,
         manifest_path: PathBuf,
         target_label: Option<&str>,
+        attach_state: Vec<String>,
         expected_run_config_hash: Option<String>,
         json: bool,
     ) -> Self {
-        let mut runner = Self::new(handle, target_label, expected_run_config_hash, json);
+        let mut runner = Self::new(
+            handle,
+            target_label,
+            attach_state,
+            expected_run_config_hash,
+            json,
+        );
         runner.manifest_path = Some(manifest_path);
         runner.start_source = SessionStartSource::TomlPath;
         runner
@@ -331,8 +343,11 @@ impl SessionStartPhaseRunner {
             );
         }
         let manifest_path_str = manifest_path.to_string_lossy().to_string();
-        let mut resolution =
-            build_resolution(&manifest_path_str, Some(record.target_label.as_str()), None)?;
+        let mut resolution = super::resolve::build_resolution(
+            &manifest_path_str,
+            Some(record.target_label.as_str()),
+            None,
+        )?;
         resolution.input = record.handle.clone();
         resolution.normalized_handle = record.normalized_handle.clone();
         resolution.canonical_handle = record.canonical_handle.clone();
@@ -352,6 +367,7 @@ impl SessionStartPhaseRunner {
             &manifest_path,
             Some(record.target_label.as_str()),
             sample_recipe_slug,
+            &self.attach_state,
         )?;
         let expected_app_root = PathBuf::from(&record.app_root)
             .canonicalize()
@@ -436,11 +452,16 @@ impl SessionStartPhaseRunner {
             .ok_or_else(|| anyhow::anyhow!("TomlPath start source requires manifest_path"))?;
 
         let manifest_path_str = manifest_path.to_string_lossy().to_string();
-        let resolution = build_resolution(&manifest_path_str, self.target_label.as_deref(), None)?;
+        let resolution = super::resolve::build_resolution(
+            &manifest_path_str,
+            self.target_label.as_deref(),
+            None,
+        )?;
         let (plan, _guest, notes) = resolve_local_plan_for_session_start(
             &manifest_path,
             self.target_label.as_deref(),
             None,
+            &self.attach_state,
         )?;
 
         // Run preflight so missing secrets surface via the usual E103 path.
@@ -495,20 +516,31 @@ impl SessionStartPhaseRunner {
             return self.install_from_toml_path();
         }
 
-        if let Some(hit) = crate::application::warm_launch::try_registry_live_reuse_fast_path(
-            &self.handle,
-            self.target_label.as_deref(),
-        )? {
-            self.install_reused = true;
-            self.pre_projection_spec = Some(hit.pre_projection_spec);
-            self._launch_lock = hit.launch_lock;
-            self.session_info = Some(super::session::session_info_from_stored(*hit.record));
-            return Ok(());
+        if matches!(self.start_source, SessionStartSource::Handle) && self.attach_state.is_empty() {
+            if let Some(hit) = crate::application::warm_launch::try_registry_live_reuse_fast_path(
+                &self.handle,
+                self.target_label.as_deref(),
+            )? {
+                self.install_reused = true;
+                self.pre_projection_spec = Some(hit.pre_projection_spec);
+                self._launch_lock = hit.launch_lock;
+                self.session_info = Some(super::session::session_info_from_stored(*hit.record));
+                return Ok(());
+            }
         }
 
-        let resolution = build_resolution(&self.handle, self.target_label.as_deref(), None)?;
-        let (manifest_path, mut plan, mut launch, mut notes) =
-            resolve_session_launch_plan(&self.handle, self.target_label.as_deref())?;
+        let resolution = super::resolve::build_resolution_for_session_start(
+            &self.handle,
+            self.target_label.as_deref(),
+            None,
+            true,
+        )?;
+        let (manifest_path, mut plan, mut launch, mut notes) = resolve_session_launch_plan(
+            &self.handle,
+            self.target_label.as_deref(),
+            None,
+            &self.attach_state,
+        )?;
         let is_orchestration = self.target_label.is_none() && plan.is_orchestration_mode();
 
         // Env preflight runs BEFORE the live-session reuse check so we never
@@ -1431,7 +1463,8 @@ mod tests {
     /// from the runner side.
     #[test]
     fn assigning_receipt_graph_id_sink_shares_arc_with_input_sink() {
-        let mut runner = SessionStartPhaseRunner::new("publisher/slug", None, None, false);
+        let mut runner =
+            SessionStartPhaseRunner::new("publisher/slug", None, Vec::new(), None, false);
         assert!(
             runner.receipt_graph_id_sink.is_none(),
             "fixture sanity: a freshly built runner has no sink"
