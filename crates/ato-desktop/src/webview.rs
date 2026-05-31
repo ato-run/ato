@@ -1791,6 +1791,7 @@ impl WebViewManager {
                     target,
                     fields,
                     original_secrets,
+                    community_toml_id,
                 }) => {
                     // Recoverable: the capsule is missing user-supplied
                     // config. Pin the request on AppState so the next
@@ -1817,6 +1818,7 @@ impl WebViewManager {
                         target,
                         fields,
                         original_secrets,
+                        community_toml_id,
                     });
                 }
                 Err(LaunchError::MissingConsent {
@@ -1828,6 +1830,7 @@ impl WebViewManager {
                     provisioning_policy_hash,
                     summary,
                     original_secrets,
+                    community_toml_id,
                 }) => {
                     // Retry-once policy: if the user already approved
                     // once for this (handle, target_label) this session
@@ -1879,6 +1882,7 @@ impl WebViewManager {
                             provisioning_policy_hash,
                             summary,
                             original_secrets,
+                            community_toml_id,
                         });
                     }
                 }
@@ -1886,6 +1890,7 @@ impl WebViewManager {
                     handle,
                     requirements,
                     original_secrets,
+                    community_toml_id,
                 }) => {
                     // #117 — eager preflight returned the full set of
                     // pending requirements before any provisioning ran.
@@ -1910,6 +1915,7 @@ impl WebViewManager {
                                     target,
                                     fields: schema,
                                     original_secrets: original_secrets.clone(),
+                                    community_toml_id: community_toml_id.clone(),
                                 });
                             }
                             InteractiveResolutionKind::ConsentRequired {
@@ -1929,6 +1935,7 @@ impl WebViewManager {
                                     provisioning_policy_hash,
                                     summary,
                                     original_secrets: original_secrets.clone(),
+                                    community_toml_id: community_toml_id.clone(),
                                 });
                             }
                         }
@@ -6124,6 +6131,7 @@ mod tests {
                 target: None,
                 fields: Vec::new(),
                 original_secrets: Vec::new(),
+                community_toml_id: None,
             }
         }
 
@@ -6238,6 +6246,7 @@ mod tests {
                     fields: vec![secret_field("SECRET_KEY")],
                 }],
                 consents: Vec::new(),
+                community_toml_id: None,
             });
 
             apply_capsule_secrets(
@@ -6272,6 +6281,7 @@ mod tests {
                     },
                 ],
                 consents: vec![consent_item("web")],
+                community_toml_id: None,
             });
 
             apply_capsule_secrets(
@@ -6316,6 +6326,7 @@ mod tests {
                 provisioning_policy_hash: "blake3:bbb".to_string(),
                 summary: "Capsule: publisher/app@1.0.0".to_string(),
                 original_secrets: Vec::new(),
+                community_toml_id: None,
             }
         }
 
@@ -6396,6 +6407,7 @@ mod tests {
                 original_secrets: Vec::new(),
                 secrets: Vec::new(),
                 consents: vec![consent_item("app"), consent_item("web")],
+                community_toml_id: None,
             });
 
             let handled =
@@ -6425,6 +6437,7 @@ mod tests {
                     fields: Vec::new(),
                 }],
                 consents: vec![consent_item("app")],
+                community_toml_id: None,
             });
 
             apply_pending_resolution_consents(&mut state, handle, |_| Ok(())).expect("approve");
@@ -6451,6 +6464,7 @@ mod tests {
                 target: target.map(str::to_string),
                 fields: Vec::new(),
                 original_secrets: Vec::new(),
+                community_toml_id: None,
             }
         }
 
@@ -6464,6 +6478,7 @@ mod tests {
                 provisioning_policy_hash: "blake3:prov".to_string(),
                 summary: "Consent summary".to_string(),
                 original_secrets: Vec::new(),
+                community_toml_id: None,
             }
         }
 
@@ -6512,6 +6527,7 @@ mod tests {
                         summary: "Consent web".to_string(),
                     },
                 ],
+                community_toml_id: None,
             });
 
             let message = pending_prelaunch_requirement_message(&state, handle)
