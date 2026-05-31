@@ -151,6 +151,147 @@ fn search_local_registry(query: &str) -> Vec<crate::state::CapsuleSearchResult> 
         .collect()
 }
 
+// ─── Community capsule-toml lookup ──────────────────────────────────────────
+
+const COMMUNITY_API_ENV: &str = "ATO_COMMUNITY_API_URL";
+const COMMUNITY_API_DEFAULT: &str = "https://api.ato.run";
+
+/// Attempt to normalise `query` into `(api_source, launcher_handle)`.
+///
+/// Accepted input shapes:
+///   `github.com/owner/repo`              → `("owner/repo", "github.com/owner/repo")`
+///   `https://github.com/owner/repo`      → same
+///   `capsule://github.com/owner/repo`    → same
+///
+/// Returns `None` for anything that is not a GitHub source locator.
+pub(crate) fn normalize_github_source(query: &str) -> Option<(String, String)> {
+    let trimmed = query.trim();
+
+    // Strip known prefixes
+    let rest = if let Some(r) = trimmed.strip_prefix("capsule://github.com/") {
+        r
+    } else if let Some(r) = trimmed.strip_prefix("https://github.com/") {
+        r
+    } else if let Some(r) = trimmed.strip_prefix("http://github.com/") {
+        r
+    } else if let Some(r) = trimmed.strip_prefix("github.com/") {
+        r
+    } else {
+        return None;
+    };
+
+    // rest must be "owner/repo" (exactly one slash, non-empty on both sides)
+    let rest = rest.trim_end_matches('/');
+    let mut parts = rest.splitn(2, '/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some((
+        format!("{owner}/{repo}"),
+        format!("github.com/{owner}/{repo}"),
+    ))
+}
+
+/// Parse a raw JSON string from `GET /v1/capsule-tomls?source=...` into a
+/// list of `CapsuleSearchResult`s.  Separated from the HTTP call so unit
+/// tests can drive it without a live server.
+pub(crate) fn parse_community_candidates(
+    json: &str,
+    launcher_handle: &str,
+) -> Vec<crate::state::CapsuleSearchResult> {
+    let body: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let candidates = match body.get("candidates").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    candidates
+        .iter()
+        .take(5)
+        .filter_map(|c| {
+            let title = c
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Community Recipe");
+            let trust = c
+                .get("trust")
+                .and_then(|v| v.as_str())
+                .unwrap_or("community");
+            let receipts = c
+                .get("successfulReceipts")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let ctoml_id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+            let description = if receipts > 0 {
+                format!("{trust} · {receipts} verified receipt(s) · {ctoml_id}")
+            } else {
+                format!("{trust} · {ctoml_id}")
+            };
+
+            Some(crate::state::CapsuleSearchResult {
+                handle: launcher_handle.to_string(),
+                display_name: format!("{title} · Community"),
+                description: Some(description),
+            })
+        })
+        .collect()
+}
+
+/// Query the community registry for candidates matching a GitHub source.
+/// Runs synchronously — call from a background thread.
+fn search_community_capsule_tomls(query: &str) -> Vec<crate::state::CapsuleSearchResult> {
+    let (api_source, launcher_handle) = match normalize_github_source(query) {
+        Some(pair) => pair,
+        None => return Vec::new(),
+    };
+
+    let base =
+        std::env::var(COMMUNITY_API_ENV).unwrap_or_else(|_| COMMUNITY_API_DEFAULT.to_string());
+    let base = base.trim_end_matches('/').to_string();
+
+    let encoded: String = api_source
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{:02X}", b),
+        })
+        .collect();
+
+    let url = format!("{base}/v1/capsule-tomls?source={encoded}");
+
+    let response = match ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .get(&url)
+        .set("User-Agent", "ato-desktop")
+        .call()
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    if response.status() == 404 {
+        return Vec::new();
+    }
+
+    let body_str = match response.into_string() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    parse_community_candidates(&body_str, &launcher_handle)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
 /// Hit GitHub's `releases/latest` and compare its tag to the local
 /// `CARGO_PKG_VERSION`. Returns the resulting [`UpdateCheck`] state
 /// to be assigned to AppState by the render-loop poller. Runs
@@ -436,6 +577,13 @@ impl DesktopShell {
     }
 
     /// Trigger an async capsule search if the omnibar text changed and is non-empty.
+    ///
+    /// For source-shaped inputs (`github.com/<owner>/<repo>` and URL variants):
+    ///   - skips the local text-search (not useful for exact source locators)
+    ///   - fires a community API lookup instead
+    ///
+    /// For all other non-URL inputs:
+    ///   - fires the local registry search as before
     fn maybe_trigger_capsule_search(&mut self, query: &str) {
         let trimmed = query.trim();
         if trimmed == self.state.capsule_search_query {
@@ -449,7 +597,20 @@ impl DesktopShell {
             return;
         }
 
-        // Skip if it looks like a URL
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.capsule_search_rx = Some(rx);
+        let query_str = trimmed.to_string();
+
+        // Source-shaped input: community API lookup (skip local text search)
+        if normalize_github_source(trimmed).is_some() {
+            std::thread::spawn(move || {
+                let community = search_community_capsule_tomls(&query_str);
+                let _ = tx.send(community);
+            });
+            return;
+        }
+
+        // Plain URL (but not a github source locator): skip all searches
         if trimmed.starts_with("http://")
             || trimmed.starts_with("https://")
             || trimmed.contains("://")
@@ -459,13 +620,10 @@ impl DesktopShell {
             return;
         }
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.capsule_search_rx = Some(rx);
-
-        let query_str = trimmed.to_string();
+        // Free-text query: local registry lookup
         std::thread::spawn(move || {
-            let results = search_local_registry(&query_str);
-            let _ = tx.send(results);
+            let local = search_local_registry(&query_str);
+            let _ = tx.send(local);
         });
     }
 
@@ -4721,5 +4879,137 @@ mod tests {
             .unwrap_or_else(|| panic!("expected to resolve favicon for {url}"));
         assert_eq!(image.format, ImageFormat::Png);
         assert!(image.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    // ── Community source normalization ──────────────────────────────────────
+
+    use super::{normalize_github_source, parse_community_candidates};
+
+    #[test]
+    fn normalize_plain_github_source() {
+        let (api, handle) = normalize_github_source("github.com/usememos/memos").unwrap();
+        assert_eq!(api, "usememos/memos");
+        assert_eq!(handle, "github.com/usememos/memos");
+    }
+
+    #[test]
+    fn normalize_https_github_url() {
+        let (api, handle) =
+            normalize_github_source("https://github.com/excalidraw/excalidraw").unwrap();
+        assert_eq!(api, "excalidraw/excalidraw");
+        assert_eq!(handle, "github.com/excalidraw/excalidraw");
+    }
+
+    #[test]
+    fn normalize_capsule_scheme() {
+        let (api, handle) = normalize_github_source("capsule://github.com/n8n-io/n8n").unwrap();
+        assert_eq!(api, "n8n-io/n8n");
+        assert_eq!(handle, "github.com/n8n-io/n8n");
+    }
+
+    #[test]
+    fn normalize_trailing_slash_stripped() {
+        let (api, _) = normalize_github_source("github.com/louislam/uptime-kuma/").unwrap();
+        assert_eq!(api, "louislam/uptime-kuma");
+    }
+
+    #[test]
+    fn normalize_non_source_returns_none() {
+        assert!(normalize_github_source("memos").is_none());
+        assert!(normalize_github_source("n8n").is_none());
+        assert!(normalize_github_source("https://example.com/foo").is_none());
+        assert!(normalize_github_source("github.com/owner").is_none()); // missing repo
+    }
+
+    #[test]
+    fn normalize_deep_path_returns_none() {
+        // More than one slash after owner/repo — not a valid source locator
+        assert!(normalize_github_source("github.com/owner/repo/tree/main").is_none());
+    }
+
+    // ── Community API response parsing ──────────────────────────────────────
+
+    #[test]
+    fn parse_candidates_maps_to_search_results() {
+        let json = r#"{
+            "candidates": [{
+                "id": "ctoml_abc123",
+                "title": "memos",
+                "source": "usememos/memos",
+                "trust": "community",
+                "stars": 0,
+                "platforms": [],
+                "lastVerifiedAt": null,
+                "permissionsSummary": [],
+                "capsuleTomlUrl": "https://api.ato.run/v1/capsule-tomls/ctoml_abc123",
+                "revision": null,
+                "successfulReceipts": 5,
+                "failedReceipts": 0,
+                "currentPlatformVerified": null,
+                "sourceRef": null,
+                "sourceRefAgeDays": null,
+                "riskScore": null
+            }]
+        }"#;
+        let results = parse_community_candidates(json, "github.com/usememos/memos");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].handle, "github.com/usememos/memos");
+        assert!(results[0].display_name.contains("memos"));
+        assert!(results[0].display_name.contains("Community"));
+        let desc = results[0].description.as_deref().unwrap_or("");
+        assert!(
+            desc.contains("5"),
+            "description should mention receipt count"
+        );
+        assert!(desc.contains("ctoml_abc123"));
+    }
+
+    #[test]
+    fn parse_candidates_empty_array_returns_empty() {
+        let results = parse_community_candidates(r#"{"candidates":[]}"#, "github.com/a/b");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn parse_candidates_404_like_json_returns_empty() {
+        let results = parse_community_candidates(r#"{"error":"not_found"}"#, "github.com/a/b");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn parse_candidates_malformed_json_returns_empty() {
+        let results = parse_community_candidates("not valid json at all", "github.com/a/b");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn parse_candidates_zero_receipts_omits_count() {
+        let json = r#"{
+            "candidates": [{
+                "id": "ctoml_xyz",
+                "title": "pgweb",
+                "source": "sosedoff/pgweb",
+                "trust": "community",
+                "stars": 0,
+                "platforms": [],
+                "lastVerifiedAt": null,
+                "permissionsSummary": [],
+                "capsuleTomlUrl": "https://api.ato.run/v1/capsule-tomls/ctoml_xyz",
+                "revision": null,
+                "successfulReceipts": 0,
+                "failedReceipts": 0,
+                "currentPlatformVerified": null,
+                "sourceRef": null,
+                "sourceRefAgeDays": null,
+                "riskScore": null
+            }]
+        }"#;
+        let results = parse_community_candidates(json, "github.com/sosedoff/pgweb");
+        assert_eq!(results.len(), 1);
+        let desc = results[0].description.as_deref().unwrap_or("");
+        assert!(
+            !desc.contains("receipt"),
+            "no receipt mention when count is 0"
+        );
     }
 }
