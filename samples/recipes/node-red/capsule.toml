@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "node-red"
+version = "4.0.0"
+type = "app"
+description = "Low-code programming for event-driven applications"
+homepage = "https://github.com/node-red/node-red"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "nodered/node-red:latest"
+port = 1880
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "flows, settings, and node data"
+attach = "explicit"
+schema_id = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "1880", initial_delay_seconds = 5, timeout_seconds = 60 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
