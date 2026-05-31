@@ -987,7 +987,7 @@ fn resolve_source_lock(repo: &CandidateRepo, git_mode: GitMode) -> Result<Resolv
                 eprintln!(
                     "⚠️  Warning: commit {} in {} was not found on the remote.\n\
                      Recipients may fail to check out this revision.\n\
-                     Push to the remote first, or use --git-mode latest-at-encap.",
+                     Push to the remote first, or use --git-mode latest-at-share.",
                     &rev[..rev.len().min(12)],
                     repo.rel_path,
                 );
@@ -2829,7 +2829,7 @@ fn materialize_source(
         format!(
             "Commit {} is not reachable from {}. \
              The sender may not have pushed this commit. \
-             Ask the sender to push, or re-share using `ato encap --git-mode latest-at-encap`.",
+             Ask the sender to push, or re-share using `ato workspace share --git-mode latest-at-share`.",
             &locked.rev, &source.url
         )
     })?;
