@@ -890,6 +890,10 @@ pub struct PendingConfigRequest {
     /// call. Cloned at request-construction time so a concurrent
     /// secret-store mutation can't corrupt the retry.
     pub original_secrets: Vec<SecretEntry>,
+    /// Community capsule.toml ID if the original launch was driven by
+    /// a specific registry candidate. The retry path uses this to
+    /// reconstruct `DesktopLaunchInput::CommunityToml`.
+    pub community_toml_id: Option<String>,
 }
 
 /// Mirrors `PendingConfigRequest` for the E302
@@ -921,6 +925,10 @@ pub struct PendingConsentRequest {
     /// Snapshot of secrets passed to the original `start_capsule`
     /// call so the post-Approve retry uses the same input.
     pub original_secrets: Vec<SecretEntry>,
+    /// Community capsule.toml ID if the original launch was driven by
+    /// a specific registry candidate. Carried through so the
+    /// post-Approve retry uses the same `--community-toml-id`.
+    pub community_toml_id: Option<String>,
 }
 
 /// One missing-env requirement, scoped to a specific orchestration
@@ -975,6 +983,13 @@ pub struct PendingResolutionRequest {
     /// request level (not per-item) so the retry path is identical
     /// regardless of whether secrets, consents, or both were missing.
     pub original_secrets: Vec<SecretEntry>,
+    /// Community capsule.toml ID if the original launch was driven by
+    /// a specific registry candidate. Present when the launch input
+    /// was `DesktopLaunchInput::CommunityToml`. Ensures that after the
+    /// resolution modal is dismissed, the retry can verify the
+    /// `community_toml_id` is still being respected even if the route
+    /// were somehow reconstructed without it.
+    pub community_toml_id: Option<String>,
     /// Missing secret schemas across all targets. Order is
     /// arrival-order (first-merged-first); the modal renders sections
     /// in this order. A target only appears once in this list — a
@@ -1735,12 +1750,19 @@ impl AppState {
             .get_or_insert_with(|| PendingResolutionRequest {
                 handle: request.handle.clone(),
                 original_secrets: request.original_secrets.clone(),
+                community_toml_id: request.community_toml_id.clone(),
                 ..PendingResolutionRequest::default()
             });
         // Latest secrets snapshot wins — the orchestrator's drain path
         // re-emits the snapshot on every retry attempt, so the most
         // recent value is the one we should use to retry the launch.
         pending.original_secrets = request.original_secrets;
+        // Preserve the community_toml_id once set — it must not be
+        // overwritten by a subsequent merge that has None (e.g. a
+        // legacy retry path that doesn't carry it).
+        if request.community_toml_id.is_some() {
+            pending.community_toml_id = request.community_toml_id;
+        }
         pending.merge_secrets(PendingSecretsItem {
             target: request.target,
             fields: request.fields,
@@ -1756,9 +1778,13 @@ impl AppState {
             .get_or_insert_with(|| PendingResolutionRequest {
                 handle: request.handle.clone(),
                 original_secrets: request.original_secrets.clone(),
+                community_toml_id: request.community_toml_id.clone(),
                 ..PendingResolutionRequest::default()
             });
         pending.original_secrets = request.original_secrets;
+        if request.community_toml_id.is_some() {
+            pending.community_toml_id = request.community_toml_id;
+        }
         pending.merge_consent(PendingConsentItem {
             scoped_id: request.scoped_id,
             version: request.version,
@@ -5476,5 +5502,98 @@ mod tests {
             }
             other => panic!("expected AtoRunRepl, got {other:?}"),
         }
+    }
+
+    // ── community_toml_id threading through pending resolution ─────────────
+
+    fn config_request_with_ctoml(handle: &str, ctoml_id: Option<&str>) -> PendingConfigRequest {
+        PendingConfigRequest {
+            handle: handle.to_string(),
+            target: None,
+            fields: Vec::new(),
+            original_secrets: Vec::new(),
+            community_toml_id: ctoml_id.map(str::to_string),
+        }
+    }
+
+    fn consent_request_with_ctoml(handle: &str, ctoml_id: Option<&str>) -> PendingConsentRequest {
+        PendingConsentRequest {
+            handle: handle.to_string(),
+            scoped_id: "pub/app".to_string(),
+            version: "1.0.0".to_string(),
+            target_label: "app".to_string(),
+            policy_segment_hash: "blake3:aaa".to_string(),
+            provisioning_policy_hash: "blake3:bbb".to_string(),
+            summary: "test".to_string(),
+            original_secrets: Vec::new(),
+            community_toml_id: ctoml_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn community_toml_id_preserved_through_config_merge() {
+        let mut state = AppState::demo();
+        state.merge_config_into_resolution(config_request_with_ctoml(
+            "github.com/sosedoff/pgweb",
+            Some("ctoml_abc123"),
+        ));
+        let pending = state.pending_resolution.as_ref().expect("should be set");
+        assert_eq!(
+            pending.community_toml_id.as_deref(),
+            Some("ctoml_abc123"),
+            "community_toml_id must survive merge_config_into_resolution"
+        );
+        assert_eq!(pending.handle, "github.com/sosedoff/pgweb");
+    }
+
+    #[test]
+    fn community_toml_id_preserved_through_consent_merge() {
+        let mut state = AppState::demo();
+        state.merge_consent_into_resolution(consent_request_with_ctoml(
+            "github.com/usememos/memos",
+            Some("ctoml_xyz789"),
+        ));
+        let pending = state.pending_resolution.as_ref().expect("should be set");
+        assert_eq!(
+            pending.community_toml_id.as_deref(),
+            Some("ctoml_xyz789"),
+            "community_toml_id must survive merge_consent_into_resolution"
+        );
+    }
+
+    #[test]
+    fn community_toml_id_not_overwritten_by_none_on_subsequent_merge() {
+        let mut state = AppState::demo();
+        // First merge carries community_toml_id
+        state.merge_config_into_resolution(config_request_with_ctoml(
+            "github.com/sosedoff/pgweb",
+            Some("ctoml_abc123"),
+        ));
+        // Second merge (e.g. from a legacy path without community_toml_id)
+        // must NOT clear the existing community_toml_id.
+        state.merge_config_into_resolution(config_request_with_ctoml(
+            "github.com/sosedoff/pgweb",
+            None,
+        ));
+        let pending = state.pending_resolution.as_ref().expect("should be set");
+        assert_eq!(
+            pending.community_toml_id.as_deref(),
+            Some("ctoml_abc123"),
+            "a None merge must not overwrite an existing community_toml_id"
+        );
+    }
+
+    #[test]
+    fn community_toml_id_absent_for_regular_launch() {
+        let mut state = AppState::demo();
+        state.merge_config_into_resolution(config_request_with_ctoml(
+            "github.com/usememos/memos",
+            None,
+        ));
+        let pending = state.pending_resolution.as_ref().expect("should be set");
+        assert_eq!(
+            pending.community_toml_id, None,
+            "regular (non-community) launch must not set community_toml_id"
+        );
     }
 }
