@@ -110,7 +110,7 @@ fn scan_value_for_secrets(value: &serde_json::Value, path: &str, warnings: &mut 
 }
 
 fn contains_private_key_marker(value: &str) -> bool {
-    if value.starts_with("-----BEGIN") {
+    if value.contains("-----BEGIN") && value.contains("PRIVATE KEY") {
         return true;
     }
     if value.starts_with("ssh-") {
@@ -151,9 +151,13 @@ fn validate_capsule_toml_id(id: &str) -> Result<()> {
         );
     }
     let rest = &id[6..];
-    if rest.is_empty() || !rest.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    if rest.is_empty()
+        || !rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         bail!(
-            "Invalid capsule_toml_id: '{}'. Expected format: ctoml_<id> with alphanumeric + underscore",
+            "Invalid capsule_toml_id: '{}'. Expected format: ctoml_<id> with alphanumeric, underscore, or hyphen",
             id
         );
     }
@@ -532,5 +536,21 @@ mod tests {
     fn validate_capsule_toml_id_rejects_special_chars() {
         let err = validate_capsule_toml_id("ctoml_abc/123").unwrap_err();
         assert!(err.to_string().contains("Invalid"));
+    }
+
+    #[test]
+    fn validate_capsule_toml_id_accepts_hyphens() {
+        assert!(validate_capsule_toml_id("ctoml_abc-123").is_ok());
+        assert!(validate_capsule_toml_id("ctoml_xxx-yyy-zzz").is_ok());
+    }
+
+    #[test]
+    fn private_key_marker_detected_in_embedded_error() {
+        let receipt = serde_json::json!({
+            "log": "error: -----BEGIN RSA PRIVATE KEY-----\nMIIEog...\n-----END RSA PRIVATE KEY-----"
+        });
+        let warnings = scan_receipt_for_secrets(&receipt);
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("private key"));
     }
 }
