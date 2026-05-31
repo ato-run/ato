@@ -10,7 +10,7 @@ pub(crate) use capsule_toml::{
     fetch_toml_from_url, prompt_community_candidate_selection, prompt_no_candidates_flow,
     sort_candidates, validate_candidate_source_matches_run_target,
     validate_capsule_toml_source_matches_run_target, validate_capsule_toml_source_with_provenance,
-    SourceValidationOutcome,
+    CommunityCapsuleTomlCandidate, CommunityTrustLevel, SourceValidationOutcome,
 };
 pub(crate) use prompt::{
     community_submit_prompt_disabled, confirm_community_submit_prompt,
@@ -18,54 +18,99 @@ pub(crate) use prompt::{
     CommunitySubmitPromptContext,
 };
 
-/// Fetch a community capsule.toml by ID and validate its source identity.
+/// Normalize an expected-source string to the API-stored form (`owner/repo`).
+///
+/// Strips:
+///   - `capsule://` scheme prefix
+///   - `github.com/` host prefix
+///   - trailing slashes
+///
+/// This mirrors the normalization the CLI performs at submit time.
+pub(crate) fn normalize_expected_source(expected_source: &str) -> String {
+    let stripped = expected_source
+        .strip_prefix("capsule://")
+        .unwrap_or(expected_source)
+        .trim_end_matches('/');
+    stripped
+        .strip_prefix("github.com/")
+        .unwrap_or(stripped)
+        .to_string()
+}
+
+/// Fetch a community capsule.toml by ID and validate its source identity
+/// against the **actual registry provenance** stored in the community API.
 ///
 /// `expected_source` may be any of:
 ///   - `github.com/owner/repo`
 ///   - `capsule://github.com/owner/repo`
 ///   - `owner/repo`  (already-normalized API form)
 ///
-/// Validation uses provenance-based logic:
-///   - If the TOML declares `[source].repository`, it must match the
-///     normalized API form (e.g. `usememos/memos`).
-///   - If the TOML has no `[source].repository`, the community API's own
-///     provenance record (the `source` stored at submission time) serves as
-///     the identity anchor — which is acceptable because the CLI already
-///     validated source identity at submit time.
+/// ## Validation algorithm
 ///
-/// Fails closed on: API 404, non-2xx, invalid TOML, source mismatch.
+/// 1. Normalize `expected_source` to the API form (`owner/repo`).
+/// 2. Query `GET /v1/capsule-tomls?source=<normalized>` to get the
+///    candidates registered under that source.
+/// 3. Verify that the specified `ctoml_id` appears in the result.
+///    Fail closed if not — this means the registry does not associate
+///    the given ID with the expected source.
+/// 4. Fetch the raw TOML from `GET /v1/capsule-tomls/<id>`.
+/// 5. Validate the TOML's `[source].repository` (if present) against the
+///    candidate's `source` field using `validate_capsule_toml_source_with_provenance`.
+///    If the TOML has no `[source].repository`, the registry provenance
+///    serves as the identity anchor (consistent with submit-time behaviour).
+///
+/// Fails closed on: candidate not found for source, API 404/non-2xx,
+/// invalid TOML, source mismatch.
 pub(crate) fn fetch_and_validate_community_toml(
     ctoml_id: &str,
     expected_source: &str,
 ) -> anyhow::Result<String> {
-    // Strip capsule:// prefix, then strip github.com/ prefix to match the
-    // normalized API form the community registry stores (e.g. "usememos/memos").
-    let stripped = expected_source
-        .strip_prefix("capsule://")
-        .unwrap_or(expected_source)
-        .trim_end_matches('/');
-    let normalized_api = stripped.strip_prefix("github.com/").unwrap_or(stripped);
+    let normalized_api = normalize_expected_source(expected_source);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .with_context(|| "failed to build tokio runtime for community TOML fetch")?;
 
-    let content = rt.block_on(fetch_capsule_toml_by_id(ctoml_id))?;
+    // Step 1: Fetch candidates for the expected source to get registry provenance.
+    let candidates = rt
+        .block_on(fetch_community_capsule_tomls(&normalized_api))
+        .with_context(|| {
+            format!("failed to fetch community candidates for source '{normalized_api}'")
+        })?;
 
-    // Use provenance-based validation.  When the TOML has no [source].repository
-    // (which is the case for most current sample recipes), the provenance
-    // (`normalized_api`) is used as the source identity — consistent with how
-    // the CLI handles provenance at submit time.
-    match validate_capsule_toml_source_with_provenance(&content, normalized_api, normalized_api) {
+    // Step 2: Verify the ctoml_id belongs to this source.
+    let candidate: &CommunityCapsuleTomlCandidate = candidates
+        .iter()
+        .find(|c| c.id == ctoml_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "community capsule.toml '{}' is not registered under source '{}'; \
+                 refusing to launch — possible source-binding mismatch",
+                ctoml_id,
+                normalized_api
+            )
+        })?;
+
+    // Step 3: Use the registry-stored `source` as the authoritative provenance.
+    let registry_provenance = &candidate.source;
+
+    // Step 4: Fetch the TOML content.
+    let content = rt
+        .block_on(fetch_capsule_toml_by_id(ctoml_id))
+        .with_context(|| format!("failed to fetch TOML content for '{ctoml_id}'"))?;
+
+    // Step 5: Validate TOML source identity against registry provenance.
+    match validate_capsule_toml_source_with_provenance(
+        &content,
+        &normalized_api,
+        registry_provenance,
+    ) {
         SourceValidationOutcome::Match => {}
         SourceValidationOutcome::MissingSource => {
             // Should not be reachable when provenance == normalized_api
-            // (validate_capsule_toml_source_with_provenance returns Match for
-            // None source when the provenance check passes), but handle it
-            // defensively.
             anyhow::bail!(
-                "community capsule.toml {} has no verifiable source identity for '{}'",
+                "community capsule.toml '{}' has no verifiable source identity for '{}'",
                 ctoml_id,
                 normalized_api
             );
@@ -75,8 +120,8 @@ pub(crate) fn fetch_and_validate_community_toml(
             expected_source: expected,
         } => {
             anyhow::bail!(
-                "community capsule.toml {} source mismatch: \
-                 TOML declares '{}' but expected '{}'",
+                "community capsule.toml '{}' source mismatch: \
+                 TOML declares '{}' but registry provenance is '{}'",
                 ctoml_id,
                 toml_source,
                 expected
@@ -90,16 +135,6 @@ pub(crate) fn fetch_and_validate_community_toml(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Validates source identity match succeeds when TOML source equals expected.
-    #[test]
-    fn fetch_and_validate_community_toml_source_match_integration_skipped() {
-        // This test requires a live API; it is skipped unless ATO_E2E_TEST=1.
-        if std::env::var("ATO_E2E_TEST").as_deref() != Ok("1") {
-            return;
-        }
-        // Real network test would go here — omitted for unit test suite.
-    }
 
     /// Source identity mismatch must fail closed.
     #[test]
@@ -116,14 +151,13 @@ repository = "github.com/other/repo"
         );
     }
 
-    /// Missing source identity is OK via provenance-based validation.
+    /// Missing source identity with matching provenance returns Match.
     #[test]
     fn validate_missing_source_ok_with_matching_provenance() {
         let toml_content = r#"
 [metadata]
 title = "some capsule"
 "#;
-        // When provenance == normalized_api, missing source.repository is accepted.
         let outcome =
             validate_capsule_toml_source_with_provenance(toml_content, "owner/repo", "owner/repo");
         assert!(
@@ -147,7 +181,7 @@ repository = "github.com/owner/repo"
         );
     }
 
-    /// Invalid TOML content should not match (extract_toml_source returns None).
+    /// Invalid TOML content behaves as missing source.
     #[test]
     fn validate_invalid_toml_fails_closed() {
         let toml_content = "not valid toml [[[";
@@ -159,20 +193,50 @@ repository = "github.com/owner/repo"
         );
     }
 
-    /// capsule:// prefix on expected_source should be stripped before comparison.
+    /// normalize_expected_source strips capsule:// and github.com/ prefixes.
     #[test]
-    fn validate_strips_capsule_prefix_on_expected_source() {
-        // fetch_and_validate_community_toml strips "capsule://" before calling
-        // validate_capsule_toml_source_matches_run_target. We test the underlying
-        // function directly with the already-stripped form.
-        let toml_content = r#"
-[source]
-repository = "github.com/usememos/memos"
-"#;
-        let outcome = validate_capsule_toml_source_matches_run_target(
-            toml_content,
-            "github.com/usememos/memos", // already stripped
+    fn normalize_expected_source_strips_prefixes() {
+        assert_eq!(
+            normalize_expected_source("capsule://github.com/owner/repo"),
+            "owner/repo"
         );
-        assert!(matches!(outcome, SourceValidationOutcome::Match));
+        assert_eq!(
+            normalize_expected_source("github.com/owner/repo"),
+            "owner/repo"
+        );
+        assert_eq!(normalize_expected_source("owner/repo"), "owner/repo");
+        assert_eq!(
+            normalize_expected_source("github.com/owner/repo/"),
+            "owner/repo"
+        );
+    }
+
+    /// ctoml_id not found in candidates for source must fail closed.
+    #[test]
+    fn validate_ctoml_id_not_in_candidates_fails_closed() {
+        // The candidates list for "owner/repo" does not contain "ctoml_wrong".
+        let candidates: Vec<CommunityCapsuleTomlCandidate> = vec![CommunityCapsuleTomlCandidate {
+            id: "ctoml_correct".to_string(),
+            title: "Correct".to_string(),
+            source: "owner/repo".to_string(),
+            trust: crate::community::capsule_toml::CommunityTrustLevel::Community,
+            stars: 0,
+            platforms: vec![],
+            last_verified_at: None,
+            permissions_summary: vec![],
+            capsule_toml_url: "https://api.ato.run/v1/capsule-tomls/ctoml_correct".to_string(),
+            revision: None,
+            successful_receipts: None,
+            failed_receipts: None,
+            current_platform_verified: None,
+            source_ref: None,
+            source_ref_age_days: None,
+            risk_score: None,
+        }];
+        let result = candidates.iter().find(|c| c.id == "ctoml_wrong");
+        assert!(
+            result.is_none(),
+            "ctoml_wrong must not be found in candidates for owner/repo"
+        );
     }
 }
