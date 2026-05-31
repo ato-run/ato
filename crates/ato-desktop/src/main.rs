@@ -40,7 +40,9 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
-        let _ = unsafe { SetCurrentProcessExplicitAppUserModelID(windows::core::w!("run.ato.desktop")) };
+        let _ = unsafe {
+            SetCurrentProcessExplicitAppUserModelID(windows::core::w!("run.ato.desktop"))
+        };
     }
 
     if std::env::args().any(|a| a == "--version" || a == "-V") {
