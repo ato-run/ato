@@ -332,7 +332,7 @@ fn report_next_step(args: &RunLikeCommandArgs, raw_target: &str) -> Result<()> {
         Some("Share it next: ato workspace share".to_string())
     } else if looks_like_remote_try_target(raw_target) {
         Some(format!(
-            "Set it up locally next: ato decap {} --into ./{}",
+            "Set it up locally next: ato workspace setup {} --into ./{}",
             raw_target,
             suggested_into_dir(raw_target)
         ))
@@ -528,6 +528,8 @@ fn provider_shorthand_kind(target: &str) -> Option<&'static str> {
     let lower = target.to_ascii_lowercase();
     if lower.starts_with("pypi:") {
         Some("pypi")
+    } else if lower.starts_with("pip:") {
+        Some("pip")
     } else if lower.starts_with("npm:") {
         Some("npm")
     } else {
@@ -765,6 +767,14 @@ mod tests {
         assert_eq!(
             super::provider_shorthand_kind("npm:@scope/package"),
             Some("npm")
+        );
+    }
+
+    #[test]
+    fn provider_shorthand_kind_detects_pip() {
+        assert_eq!(
+            super::provider_shorthand_kind("pip:markitdown"),
+            Some("pip")
         );
     }
 
