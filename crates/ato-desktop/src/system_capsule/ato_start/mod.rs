@@ -431,6 +431,7 @@ pub fn dispatch(
                 let route = GuestRoute::CapsuleHandle {
                     handle: handle.clone(),
                     label: handle.clone(),
+                    community_toml_id: None,
                 };
                 crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
                     let _ = host.update(cx, |_, window, _| window.remove_window());
@@ -476,6 +477,7 @@ pub fn dispatch(
                 let route = GuestRoute::CapsuleHandle {
                     handle: path,
                     label,
+                    community_toml_id: None,
                 };
                 crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
                     let _ = host.update(cx, |_, window, _| window.remove_window());
@@ -498,6 +500,7 @@ pub fn dispatch(
             let route = GuestRoute::CapsuleHandle {
                 handle: handle.clone(),
                 label: handle.clone(),
+                community_toml_id: None,
             };
             crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
                 let _ = host.update(cx, |_, window, _| window.remove_window());
@@ -532,6 +535,7 @@ pub fn dispatch(
             let route = GuestRoute::CapsuleHandle {
                 handle: path,
                 label,
+                community_toml_id: None,
             };
             crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
                 let _ = host.update(cx, |_, window, _| window.remove_window());
