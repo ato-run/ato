@@ -1362,6 +1362,7 @@ pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
         .unwrap_or_else(|_| GuestRoute::CapsuleHandle {
             handle: "wasedap2p".to_string(),
             label: "WasedaP2P".to_string(),
+            community_toml_id: None,
         });
     open_control_bar_inner(cx, bounds, initial_route)
 }

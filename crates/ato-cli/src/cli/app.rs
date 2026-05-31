@@ -74,6 +74,11 @@ pub(crate) enum SessionCommands {
         from_materialized_record: Option<String>,
         #[arg(long = "run-config-hash")]
         run_config_hash: Option<String>,
+        /// Use a specific community capsule.toml recipe by ID (e.g. `ctoml_xxx`).
+        /// The CLI fetches the recipe, validates its source matches the handle, and
+        /// uses it as the launch manifest instead of running discovery.
+        #[arg(long = "community-toml-id")]
+        community_toml_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
