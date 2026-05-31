@@ -116,8 +116,8 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
     // the app. The WebView occludes any GPUI overlay on Windows, so the
     // affordance has to live inside the page; it is added via the init
     // script rather than the Astro source so no rebuild is required.
-    let quit_label = serde_json::to_string(&tr(locale, "start.quit"))
-        .unwrap_or_else(|_| "\"Quit\"".to_string());
+    let quit_label =
+        serde_json::to_string(&tr(locale, "start.quit")).unwrap_or_else(|_| "\"Quit\"".to_string());
     let quit_tooltip = serde_json::to_string(&tr(locale, "start.quit.tooltip"))
         .unwrap_or_else(|_| "\"Quit\"".to_string());
     let quit_button_script = format!(
