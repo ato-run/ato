@@ -739,6 +739,13 @@ fn open_app_window_with_capsule_input(
     > = Rc::new(RefCell::new(None));
     let capsule_shell_slot_for_window = capsule_shell_slot.clone();
     let open_result = cx.open_window(options, move |window, cx| {
+        // Give the OS window a caption so the Windows taskbar thumbnail
+        // shows the capsule name instead of an empty/exe-derived label.
+        window.set_window_title(&format!(
+            "{} — {}",
+            route_for_view.label(),
+            crate::window::WINDOW_TITLE
+        ));
         // Branch on route kind:
         //   - ExternalUrl → WebLinkView (Wry WebView + browser chrome).
         //   - CapsuleHandle → AppCapsuleShell (real session orchestration,

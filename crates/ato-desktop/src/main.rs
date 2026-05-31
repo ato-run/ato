@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod automation;
 mod bridge;
@@ -31,6 +33,14 @@ mod webview_init_guard;
 mod window;
 
 fn main() {
+    // Must be called before any windows are created so Windows groups
+    // taskbar entries correctly and shows "Ato Desktop" instead of the exe name.
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        let _ = unsafe { SetCurrentProcessExplicitAppUserModelID(windows::core::w!("run.ato.desktop")) };
+    }
+
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("ato-desktop {}", env!("CARGO_PKG_VERSION"));
         return;
