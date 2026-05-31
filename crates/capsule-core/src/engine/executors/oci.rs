@@ -218,13 +218,10 @@ fn resolve_docker_host() -> Option<String> {
 }
 
 fn detect_engine() -> Result<OciEngine> {
-    if which::which("docker").is_ok() {
-        return Ok(OciEngine::Docker);
-    }
-    if which::which("podman").is_ok() {
-        return Ok(OciEngine::Podman);
-    }
-    Err(CapsuleError::NotFound("OCI engine (docker/podman)".into()))
+    Ok(match crate::engine::oci_engine_select::select_oci_engine()? {
+        crate::engine::oci_engine_select::OciEngineKind::Docker => OciEngine::Docker,
+        crate::engine::oci_engine_select::OciEngineKind::Podman => OciEngine::Podman,
+    })
 }
 
 fn engine_binary(engine: &OciEngine) -> &'static str {
