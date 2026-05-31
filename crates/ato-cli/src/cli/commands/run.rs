@@ -790,6 +790,7 @@ struct ConsumerRunPhaseRunner<'a> {
     /// `build_prelaunch_receipt_document_with_graph` so the partial
     /// receipt boundary observes the same ids on the failure path.
     receipt_graph_id_sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
+    community_submit_context: Option<crate::community::CommunitySubmitPromptContext>,
 }
 
 impl ConsumerRunPhaseRunner<'_> {
@@ -850,6 +851,8 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 self.agent_local_root = install.resolved_target.agent_local_root;
                 self.transient_workspace_root =
                     install.resolved_target.transient_workspace_root.clone();
+                self.community_submit_context =
+                    install.resolved_target.community_submit_context.clone();
                 self.provider_backed_target = install.resolved_target.provider_workspace.is_some();
                 self.should_stop_after_install = matches!(
                     install.manifest_outcome,
@@ -1076,6 +1079,30 @@ fn report_dependency_projection(
     Ok(())
 }
 
+async fn try_post_success_community_submit_prompt(
+    args: &RunArgs,
+    runner: &ConsumerRunPhaseRunner<'_>,
+) -> Result<()> {
+    let Some(context) = runner.community_submit_context.as_ref() else {
+        return Ok(());
+    };
+
+    if !crate::community::should_prompt_for_community_submit(
+        context,
+        args.reporter.is_json(),
+        args.background,
+        args.plan_only,
+    ) {
+        return Ok(());
+    }
+
+    if !crate::community::confirm_community_submit_prompt(context)? {
+        return Ok(());
+    }
+
+    crate::community::try_community_submit_after_run(context).await
+}
+
 async fn execute_normal_mode(
     args: RunArgs,
     receipt_graph_id_sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
@@ -1100,14 +1127,22 @@ async fn execute_normal_mode(
         should_stop_after_install: false,
         phase_annotations: std::collections::HashMap::new(),
         receipt_graph_id_sink,
+        community_submit_context: None,
     };
 
     let result = pipeline.run(&mut runner).await;
     if result.is_ok() {
+        let maybe_prompt_error = try_post_success_community_submit_prompt(&args, &runner).await;
         if !args.background {
             if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {
                 let _ = fs::remove_dir_all(transient_workspace_root);
             }
+        }
+        if let Err(err) = maybe_prompt_error {
+            tracing::warn!(
+                error = %err,
+                "community submit prompt failed, preserving original run success"
+            );
         }
     } else if args.keep_failed_artifacts {
         if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {
@@ -1489,6 +1524,7 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
         export_request: args.export_request.clone(),
         provider_workspace: None,
         transient_workspace_root: None,
+        community_submit_context: None,
     };
     let normalized =
         futures::executor::block_on(normalize_run_target_after_install(&args, &resolved, None))?;
@@ -2037,6 +2073,7 @@ run = "node server.js""#,
             export_request: None,
             provider_workspace: None,
             transient_workspace_root: None,
+            community_submit_context: None,
         };
 
         let normalized = normalize_run_target_after_install(&args, &resolved, None)
@@ -2151,6 +2188,7 @@ run = "main.py""#,
                 resolution_metadata_path: resolution_metadata_path.clone(),
             }),
             transient_workspace_root: Some(workspace_root.clone()),
+            community_submit_context: None,
         };
 
         let normalized = normalize_run_target_after_install(&args, &resolved, None)
@@ -2248,6 +2286,7 @@ run = "main.py""#,
             export_request: None,
             provider_workspace: None,
             transient_workspace_root: None,
+            community_submit_context: None,
         };
 
         let normalized = normalize_run_target_after_install(&args, &resolved, None)

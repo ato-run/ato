@@ -671,6 +671,7 @@ mod tests {
             export_request: None,
             provider_workspace: None,
             transient_workspace_root: None,
+            community_submit_context: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
@@ -716,6 +717,7 @@ mod tests {
             export_request: None,
             provider_workspace: None,
             transient_workspace_root: None,
+            community_submit_context: None,
         };
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
 
