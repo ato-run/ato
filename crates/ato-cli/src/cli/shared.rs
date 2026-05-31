@@ -94,15 +94,16 @@ pub(crate) enum GitMode {
     /// Pin the current local commit (must be pushed to remote)
     #[default]
     SameCommit,
-    /// Fetch the remote branch HEAD at encap time and pin that rev
-    LatestAtEncap,
+    /// Fetch the remote branch HEAD when sharing and pin that rev
+    #[value(alias = "latest-at-encap")]
+    LatestAtShare,
 }
 
 impl GitMode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             GitMode::SameCommit => "same-commit",
-            GitMode::LatestAtEncap => "latest-at-encap",
+            GitMode::LatestAtShare => "latest-at-encap",
         }
     }
 }

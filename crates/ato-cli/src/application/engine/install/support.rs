@@ -782,6 +782,7 @@ pub(crate) struct ResolvedRunTarget {
     pub(crate) export_request: Option<ResolvedCliExportRequest>,
     pub(crate) provider_workspace: Option<install::provider_target::ProviderRunWorkspace>,
     pub(crate) transient_workspace_root: Option<PathBuf>,
+    pub(crate) community_submit_context: Option<crate::community::CommunitySubmitPromptContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -809,6 +810,7 @@ pub(crate) async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
     provider_toolchain: ProviderToolchain,
+    use_existing_toml: Option<String>,
     explicit_commit: Option<String>,
     keep_failed_artifacts: bool,
     auto_fix_mode: Option<GitHubAutoFixMode>,
@@ -859,6 +861,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 export_request: None,
                 provider_workspace: None,
                 transient_workspace_root: None,
+                community_submit_context: None,
             });
         }
         install::provider_target::ParsedRunTarget::GitHubRepository(repository) => {
@@ -903,6 +906,210 @@ pub(crate) async fn resolve_run_target_or_install(
                 );
             }
 
+            let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+            let selected_community_toml: Option<String> = if use_existing_toml.is_some() {
+                None
+            } else {
+                match crate::community::fetch_community_capsule_tomls(&repository).await {
+                    Ok(candidates) if !candidates.is_empty() => {
+                        let mut candidates = candidates;
+                        crate::community::sort_candidates(&mut candidates);
+                        let selected = if is_tty && !json_mode {
+                            match crate::community::prompt_community_candidate_selection(
+                                &repository,
+                                &candidates,
+                            ) {
+                                Ok(n) if n <= candidates.len() => Some(n - 1),
+                                Ok(_) => None,
+                                Err(_) => None,
+                            }
+                        } else if candidates.len() == 1 && yes {
+                            futures::executor::block_on(reporter.notify(format!(
+                                "Using community capsule.toml: {}",
+                                candidates[0].title
+                            )))?;
+                            Some(0)
+                        } else {
+                            return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                                AtoError::EntrypointInvalid {
+                                    message: format!(
+                                        "TOML_SELECTION_REQUIRED: multiple community \
+                                         capsule.toml candidates exist for '{}'. \
+                                         Use -T/--use-existing-toml, or run interactively.",
+                                        repository
+                                    ),
+                                    hint: Some(
+                                        "Re-run in a TTY or use -T/--use-existing-toml to \
+                                         select a specific capsule.toml."
+                                            .to_string(),
+                                    ),
+                                    field: None,
+                                },
+                            )));
+                        };
+
+                        match selected {
+                            Some(idx) => {
+                                let candidate = &candidates[idx];
+                                crate::community::validate_candidate_source_matches_run_target(
+                                    &candidate.source,
+                                    &repository,
+                                )
+                                .with_context(|| {
+                                    format!(
+                                        "Community candidate '{}' source mismatch with run target",
+                                        candidate.id
+                                    )
+                                })?;
+                                let toml_content =
+                                    crate::community::fetch_capsule_toml_by_id(&candidate.id)
+                                        .await
+                                        .with_context(|| {
+                                            format!(
+                                                "Failed to fetch community capsule.toml '{}'",
+                                                candidate.id
+                                            )
+                                        })?;
+                                let validation =
+                                    crate::community::validate_capsule_toml_source_with_provenance(
+                                        &toml_content,
+                                        &repository,
+                                        &candidate.source,
+                                    );
+                                match validation {
+                                    crate::community::SourceValidationOutcome::Match => {}
+                                    crate::community::SourceValidationOutcome::MissingSource => {
+                                        unreachable!("validate_capsule_toml_source_with_provenance never returns MissingSource")
+                                    }
+                                    crate::community::SourceValidationOutcome::Mismatch {
+                                        toml_source,
+                                        expected_source: _,
+                                    } => {
+                                        anyhow::bail!(
+                                            "Community capsule.toml '{}' source mismatch: \
+                                             TOML declares '{}', expected '{}'.",
+                                            candidate.id,
+                                            toml_source,
+                                            repository
+                                        );
+                                    }
+                                }
+                                Some(toml_content)
+                            }
+                            None => None,
+                        }
+                    }
+                    Ok(_) => {
+                        // API returned zero candidates for this source.
+                        // In a TTY give the user a choice; non-TTY/JSON silently infers.
+                        if is_tty
+                            && !json_mode
+                            && !crate::community::prompt_no_candidates_flow(&repository)?
+                        {
+                            anyhow::bail!("Run cancelled.");
+                        }
+                        None
+                    }
+                    Err(err) => {
+                        debug!(
+                            %err,
+                            "community capsule.toml lookup failed; falling back to inference"
+                        );
+                        None
+                    }
+                }
+            };
+
+            let community_selected = selected_community_toml.is_some();
+
+            let (resolved_existing_toml, local_t_path) =
+                if let Some(toml_input) = use_existing_toml.as_deref() {
+                    if toml_input.starts_with("http://") || toml_input.starts_with("https://") {
+                        let content = crate::community::fetch_toml_from_url(toml_input).await?;
+                        let validation =
+                            crate::community::validate_capsule_toml_source_matches_run_target(
+                                &content,
+                                &repository,
+                            );
+                        match validation {
+                            crate::community::SourceValidationOutcome::Match => {}
+                            crate::community::SourceValidationOutcome::MissingSource => {
+                                anyhow::bail!(
+                                    "Remote capsule.toml from {toml_input} does not contain \
+                                 source.repository or metadata.repository. A remote TOML \
+                                 must declare its source identity."
+                                );
+                            }
+                            crate::community::SourceValidationOutcome::Mismatch {
+                                toml_source,
+                                expected_source: _,
+                            } => {
+                                anyhow::bail!(
+                                    "Remote capsule.toml from {toml_input} source mismatch: \
+                                 TOML declares '{toml_source}', expected '{repository}'."
+                                );
+                            }
+                        }
+                        (Some(content), None)
+                    } else {
+                        let expanded = crate::local_input::expand_local_path(toml_input);
+                        let content = std::fs::read_to_string(&expanded).with_context(|| {
+                            format!("Failed to read TOML file: {}", expanded.display())
+                        })?;
+                        let validation =
+                            crate::community::validate_capsule_toml_source_matches_run_target(
+                                &content,
+                                &repository,
+                            );
+                        match validation {
+                            crate::community::SourceValidationOutcome::Match => {}
+                            crate::community::SourceValidationOutcome::Mismatch {
+                                toml_source,
+                                expected_source: _,
+                            } => {
+                                anyhow::bail!(
+                                    "Source identity mismatch: the capsule.toml at '{}' \
+                                 declares '{toml_source}', but run target is '{repository}'.",
+                                    expanded.display(),
+                                );
+                            }
+                            crate::community::SourceValidationOutcome::MissingSource => {
+                                if is_tty {
+                                    if !progressive_ui::confirm_with_fallback(
+                                        &format!(
+                                            "WARNING: The capsule.toml at '{}' does not declare \
+                                         a source.repository. Continue anyway? [y/N] ",
+                                            expanded.display()
+                                        ),
+                                        false,
+                                        progressive_ui::can_use_progressive_ui(json_mode),
+                                    )? {
+                                        anyhow::bail!("Aborted due to missing source identity.")
+                                    }
+                                } else if yes {
+                                    futures::executor::block_on(reporter.warn(format!(
+                                        "WARNING: capsule.toml at '{}' has no source.repository; \
+                                     continuing because --yes is set.",
+                                        expanded.display()
+                                    )))?;
+                                } else {
+                                    anyhow::bail!(
+                                    "capsule.toml at '{}' does not declare a source.repository. \
+                                     Re-run with -y/--yes to continue anyway, or add \
+                                     [source.repository] to the TOML.",
+                                    expanded.display()
+                                );
+                                }
+                            }
+                        }
+                        (Some(content), Some(expanded))
+                    }
+                } else {
+                    (None, None)
+                };
+
+            let effective_toml = selected_community_toml.or(resolved_existing_toml);
+
             let resolved_commit = match explicit_commit.clone() {
                 Some(commit) => commit,
                 None => install::fetch_github_install_draft(&repository)
@@ -920,8 +1127,25 @@ pub(crate) async fn resolve_run_target_or_install(
                     .await?;
             let checkout_root = checkout.checkout_dir.clone();
             maybe_copy_env_example(&checkout_root, json_mode);
-            if checkout_root.join("capsule.toml").exists() {
+
+            if let Some(toml_content) = effective_toml {
+                let toml_path = checkout_root.join("capsule.toml");
+                std::fs::write(&toml_path, toml_content).with_context(|| {
+                    format!("Failed to write capsule.toml to {}", toml_path.display())
+                })?;
                 let preserved_root = relocate_github_run_checkout(&checkout_root)?;
+                let preserved_toml_path = preserved_root.join("capsule.toml");
+                let context = if community_selected {
+                    None
+                } else if let Some(original_local_path) = local_t_path {
+                    Some(crate::community::CommunitySubmitPromptContext {
+                        source: repository.clone(),
+                        capsule_toml_path: preserved_toml_path,
+                        origin: crate::community::CommunitySubmitOrigin::LocalOverride,
+                    })
+                } else {
+                    None
+                };
                 return Ok(ResolvedRunTarget {
                     path: preserved_root.clone(),
                     agent_local_root: Some(preserved_root.clone()),
@@ -929,6 +1153,27 @@ pub(crate) async fn resolve_run_target_or_install(
                     export_request: None,
                     provider_workspace: None,
                     transient_workspace_root: Some(preserved_root),
+                    community_submit_context: context,
+                });
+            }
+
+            if checkout_root.join("capsule.toml").exists() {
+                let preserved_root = relocate_github_run_checkout(&checkout_root)?;
+                let toml_path = preserved_root.join("capsule.toml");
+                return Ok(ResolvedRunTarget {
+                    path: preserved_root.clone(),
+                    agent_local_root: Some(preserved_root.clone()),
+                    desktop_open_path: None,
+                    export_request: None,
+                    provider_workspace: None,
+                    transient_workspace_root: Some(preserved_root),
+                    community_submit_context: Some(
+                        crate::community::CommunitySubmitPromptContext {
+                            source: repository.clone(),
+                            capsule_toml_path: toml_path,
+                            origin: crate::community::CommunitySubmitOrigin::ExistingRepoToml,
+                        },
+                    ),
                 });
             }
 
@@ -948,7 +1193,18 @@ pub(crate) async fn resolve_run_target_or_install(
                 explicit_commit.clone(),
             )
             .await?;
+
             let desktop_open_path = launchable_desktop_open_path(&install_result);
+            let inferred_toml_path = install_result.path.join("capsule.toml");
+            let context = if community_selected || local_t_path.is_some() {
+                None
+            } else {
+                Some(crate::community::CommunitySubmitPromptContext {
+                    source: repository.clone(),
+                    capsule_toml_path: inferred_toml_path,
+                    origin: crate::community::CommunitySubmitOrigin::Inferred,
+                })
+            };
             return Ok(ResolvedRunTarget {
                 path: install_result.path,
                 agent_local_root: None,
@@ -956,6 +1212,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 export_request: None,
                 provider_workspace: None,
                 transient_workspace_root: None,
+                community_submit_context: context,
             });
         }
         install::provider_target::ParsedRunTarget::Provider(provider_target) => {
@@ -972,6 +1229,7 @@ pub(crate) async fn resolve_run_target_or_install(
                 export_request: None,
                 transient_workspace_root: Some(workspace.workspace_root.clone()),
                 provider_workspace: Some(workspace),
+                community_submit_context: None,
             });
         }
         install::provider_target::ParsedRunTarget::RegistryReference => {
@@ -1078,6 +1336,7 @@ pub(crate) async fn resolve_run_target_or_install(
                             )?,
                             provider_workspace: None,
                             transient_workspace_root: None,
+                            community_submit_context: None,
                         });
                     }
                 }
@@ -1104,6 +1363,7 @@ pub(crate) async fn resolve_run_target_or_install(
                         )?,
                         provider_workspace: None,
                         transient_workspace_root: None,
+                        community_submit_context: None,
                     });
                 }
                 return Err(error);
@@ -1125,6 +1385,7 @@ pub(crate) async fn resolve_run_target_or_install(
             )?,
             provider_workspace: None,
             transient_workspace_root: None,
+            community_submit_context: None,
         });
     }
 
@@ -1198,6 +1459,7 @@ pub(crate) async fn resolve_run_target_or_install(
         export_request: resolve_cli_export_request(export_invocation, &scoped_ref, &install_path)?,
         provider_workspace: None,
         transient_workspace_root: None,
+        community_submit_context: None,
     })
 }
 
@@ -2325,6 +2587,7 @@ pub(crate) fn execute_run_command(
     dangerously_skip_permissions: bool,
     compatibility_fallback: Option<String>,
     provider_toolchain: ProviderToolchain,
+    use_existing_toml: Option<String>,
     explicit_commit: Option<String>,
     assume_yes: bool,
     verbose: bool,
@@ -2362,6 +2625,7 @@ pub(crate) fn execute_run_command(
         dangerously_skip_permissions,
         compatibility_fallback,
         provider_toolchain_requested: provider_toolchain,
+        use_existing_toml,
         explicit_commit,
         assume_yes,
         verbose,
@@ -2374,13 +2638,6 @@ pub(crate) fn execute_run_command(
         write_grants: write,
         read_write_grants: read_write,
         caller_cwd: std::env::current_dir().or_else(|_| {
-            // Stale cwd (shell sat in a directory whose inode was replaced —
-            // e.g. the .app bundle was reinstalled under an open fish shell)
-            // returns ENOENT from getcwd(2). For remote-handle runs the
-            // caller_cwd is only used as a fallback for relative path
-            // resolution, so degrading to $HOME keeps `ato run koh0920/...`
-            // working from a stale shell. Local-path runs already failed
-            // earlier in dispatch when their relative path couldn't resolve.
             dirs::home_dir().ok_or_else(|| {
                 anyhow::anyhow!("failed to resolve current working directory and $HOME is unset")
             })
@@ -2751,6 +3008,7 @@ mod tests {
             PathBuf::from("github.com/octocat/nope"),
             true,
             ProviderToolchain::Auto,
+            None,
             Some("deadbeef".to_string()),
             false,
             None,
@@ -2827,6 +3085,7 @@ mod tests {
             PathBuf::from("@team/tool"),
             true,
             ProviderToolchain::Auto,
+            None,
             None,
             false,
             None,
@@ -3035,6 +3294,7 @@ target = "app"
             internal_path.clone(),
             true,
             ProviderToolchain::Auto,
+            None,
             None,
             false,
             None,

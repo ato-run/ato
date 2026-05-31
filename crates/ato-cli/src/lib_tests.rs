@@ -133,6 +133,7 @@ fn resolve_run_target_rejects_noncanonical_github_url_input() {
             true,
             ProviderToolchain::Auto,
             None,
+            None,
             false,
             None,
             false,
@@ -158,6 +159,7 @@ fn resolve_run_target_rejects_via_for_local_paths() {
             PathBuf::from("."),
             true,
             ProviderToolchain::Uv,
+            None,
             None,
             false,
             None,
@@ -402,6 +404,171 @@ fn decap_command_requires_into_and_parses_plan() {
     assert!(error.is_err(), "missing --into must fail");
     let rendered = error.err().expect("parse error").to_string();
     assert!(rendered.contains("--into"));
+}
+
+#[test]
+fn workspace_share_command_parses_default_flags() {
+    let cli = Cli::try_parse_from(["ato", "workspace", "share", "."]).expect("parse");
+    match cli.command {
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Share {
+                path,
+                internal,
+                private,
+                local,
+                print_plan,
+                dev,
+                ..
+            } => {
+                assert_eq!(path, PathBuf::from("."));
+                assert!(!internal);
+                assert!(!private);
+                assert!(!local);
+                assert!(!print_plan);
+                assert!(!dev);
+            }
+            _ => panic!("unexpected workspace subcommand"),
+        },
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn workspace_share_command_parses_dev_flag() {
+    let cli = Cli::try_parse_from(["ato", "workspace", "share", ".", "--dev"]).expect("parse");
+    match cli.command {
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Share { dev, .. } => {
+                assert!(dev);
+            }
+            _ => panic!("unexpected workspace subcommand"),
+        },
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn workspace_share_command_parses_dev_and_print_plan() {
+    let cli = Cli::try_parse_from(["ato", "workspace", "share", ".", "--dev", "--print-plan"])
+        .expect("parse");
+    match cli.command {
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Share {
+                dev, print_plan, ..
+            } => {
+                assert!(dev);
+                assert!(print_plan);
+            }
+            _ => panic!("unexpected workspace subcommand"),
+        },
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn workspace_share_command_parses_visibility_flags() {
+    let cli = Cli::try_parse_from(["ato", "workspace", "share", "--internal"]).expect("parse");
+    match cli.command {
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Share { internal, .. } => {
+                assert!(internal);
+            }
+            _ => panic!("unexpected workspace subcommand"),
+        },
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn workspace_share_command_mutual_exclusion_fails() {
+    assert!(Cli::try_parse_from(["ato", "workspace", "share", "--internal", "--private"]).is_err());
+    assert!(Cli::try_parse_from(["ato", "workspace", "share", "--internal", "--local"]).is_err());
+    assert!(Cli::try_parse_from(["ato", "workspace", "share", "--private", "--local"]).is_err());
+}
+
+#[test]
+fn workspace_setup_command_parses_into_and_plan() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "workspace",
+        "setup",
+        "https://ato.run/s/demo",
+        "--into",
+        "./demo",
+        "--plan",
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Setup {
+                input,
+                into,
+                plan,
+                dev,
+                ..
+            } => {
+                assert_eq!(input, "https://ato.run/s/demo");
+                assert_eq!(into, PathBuf::from("./demo"));
+                assert!(plan);
+                assert!(!dev);
+            }
+            _ => panic!("unexpected workspace subcommand"),
+        },
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let error = Cli::try_parse_from(["ato", "workspace", "setup", "https://ato.run/s/demo"]);
+    assert!(error.is_err(), "missing --into must fail");
+    let rendered = error.err().expect("parse error").to_string();
+    assert!(rendered.contains("--into"));
+}
+
+#[test]
+fn workspace_setup_command_parses_dev_flag() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "workspace",
+        "setup",
+        "https://ato.run/s/demo",
+        "--into",
+        "./demo",
+        "--dev",
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Setup { dev, .. } => {
+                assert!(dev);
+            }
+            _ => panic!("unexpected workspace subcommand"),
+        },
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn workspace_setup_command_parses_dev_and_plan() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "workspace",
+        "setup",
+        "https://ato.run/s/demo",
+        "--into",
+        "./demo",
+        "--dev",
+        "--plan",
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Setup { dev, plan, .. } => {
+                assert!(dev);
+                assert!(plan);
+            }
+            _ => panic!("unexpected workspace subcommand"),
+        },
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
 }
 
 #[test]
@@ -678,6 +845,8 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                         SessionCommands::Start {
                             handle,
                             target,
+                            community_toml_id,
+                            attach_state,
                             from_materialized_record,
                             run_config_hash,
                             json,
@@ -686,11 +855,72 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         } => {
             assert_eq!(handle, "./samples/desky-mock-tauri");
             assert_eq!(target.as_deref(), Some("desktop"));
+            assert!(community_toml_id.is_none());
+            assert!(attach_state.is_empty());
             assert!(from_materialized_record.is_none());
             assert!(run_config_hash.is_none());
             assert!(json);
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let session_start_with_state = Cli::try_parse_from([
+        "ato",
+        "app",
+        "session",
+        "start",
+        "github.com/usememos/memos",
+        "--community-toml-id",
+        "ctoml_abc123",
+        "--attach-state",
+        "data:/tmp/memos-data",
+        "--attach-state",
+        "db-data:/tmp/db",
+        "--json",
+    ])
+    .expect("parse app session start with attach-state");
+    match session_start_with_state.command {
+        Commands::App {
+            command:
+                AppCommands::Session {
+                    command:
+                        SessionCommands::Start {
+                            handle,
+                            community_toml_id,
+                            attach_state,
+                            json,
+                            ..
+                        },
+                },
+        } => {
+            assert_eq!(handle, "github.com/usememos/memos");
+            assert_eq!(community_toml_id.as_deref(), Some("ctoml_abc123"));
+            assert_eq!(
+                attach_state,
+                vec![
+                    "data:/tmp/memos-data".to_string(),
+                    "db-data:/tmp/db".to_string()
+                ]
+            );
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    for value in ["data", ":path", "data:"] {
+        assert!(
+            Cli::try_parse_from([
+                "ato",
+                "app",
+                "session",
+                "start",
+                "github.com/usememos/memos",
+                "--attach-state",
+                value,
+            ])
+            .is_err(),
+            "invalid --attach-state value should be rejected: {value}"
+        );
     }
 
     let session_stop = Cli::try_parse_from([
@@ -1185,6 +1415,9 @@ fn test_publish_args() -> publish_command_dispatch::PublishCommandArgs {
         fix: false,
         no_tui: false,
         json: true,
+        toml: None,
+        source: None,
+        yes: false,
     }
 }
 

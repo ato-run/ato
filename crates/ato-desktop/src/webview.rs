@@ -44,10 +44,29 @@ use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, Shell
 use crate::config::SecretEntry;
 use crate::logging::TARGET_FAVICON;
 use crate::orchestrator::{
-    resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session, spawn_terminal,
-    stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
+    resolve_and_start_guest, resolve_and_start_guest_with_input, spawn_cli_session,
+    spawn_log_tail_session, spawn_terminal, stop_guest_session, take_pending_cli_command,
+    take_pending_share_terminal, CommunityTomlInput, DesktopLaunchInput, GuestLaunchSession,
     LaunchError, SpawnKind, SpawnSpec,
 };
+
+/// Local helpers to construct `DesktopLaunchInput` from `ensure_pending_local_launch`
+/// without needing a `mod` inside an `impl` block.
+mod resolve_and_start_guest_with_input_fn {
+    use super::{CommunityTomlInput, DesktopLaunchInput};
+
+    pub(super) fn make_handle_input(handle: &str) -> DesktopLaunchInput {
+        DesktopLaunchInput::from_handle(handle)
+    }
+
+    pub(super) fn make_community_input(handle: &str, ctoml_id: &str) -> DesktopLaunchInput {
+        DesktopLaunchInput::CommunityToml(CommunityTomlInput {
+            source_handle: handle.to_string(),
+            ctoml_id: ctoml_id.to_string(),
+        })
+    }
+}
+use crate::proc_util::CommandNoWindowExt;
 use crate::state::{
     session::SessionRegistry, ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry,
     AuthSessionStatus, BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId,
@@ -710,8 +729,18 @@ impl WebViewManager {
                 self.automation.mark_page_loaded(active.pane_id);
             } else {
                 match &active.route {
-                    GuestRoute::CapsuleHandle { handle, .. } => {
-                        self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
+                    GuestRoute::CapsuleHandle {
+                        handle,
+                        community_toml_id,
+                        ..
+                    } => {
+                        self.ensure_pending_local_launch(
+                            active.pane_id,
+                            &route_key,
+                            handle,
+                            community_toml_id.as_deref(),
+                            state,
+                        );
                     }
                     _ => match self.build_webview(
                         window,
@@ -1136,7 +1165,11 @@ impl WebViewManager {
                 AuthStatus => {
                     let status = match crate::orchestrator::resolve_ato_binary() {
                         Ok(ato_bin) => {
-                            match Command::new(&ato_bin).arg("desktop-auth-handoff").output() {
+                            match Command::new(&ato_bin)
+                                .no_console_window()
+                                .arg("desktop-auth-handoff")
+                                .output()
+                            {
                                 Ok(output) if output.status.success() => {
                                     auth_status_from_handoff_stdout(&output.stdout)
                                 }
@@ -1758,6 +1791,7 @@ impl WebViewManager {
                     target,
                     fields,
                     original_secrets,
+                    community_toml_id,
                 }) => {
                     // Recoverable: the capsule is missing user-supplied
                     // config. Pin the request on AppState so the next
@@ -1784,6 +1818,7 @@ impl WebViewManager {
                         target,
                         fields,
                         original_secrets,
+                        community_toml_id,
                     });
                 }
                 Err(LaunchError::MissingConsent {
@@ -1795,6 +1830,7 @@ impl WebViewManager {
                     provisioning_policy_hash,
                     summary,
                     original_secrets,
+                    community_toml_id,
                 }) => {
                     // Retry-once policy: if the user already approved
                     // once for this (handle, target_label) this session
@@ -1846,6 +1882,7 @@ impl WebViewManager {
                             provisioning_policy_hash,
                             summary,
                             original_secrets,
+                            community_toml_id,
                         });
                     }
                 }
@@ -1853,6 +1890,7 @@ impl WebViewManager {
                     handle,
                     requirements,
                     original_secrets,
+                    community_toml_id,
                 }) => {
                     // #117 — eager preflight returned the full set of
                     // pending requirements before any provisioning ran.
@@ -1877,6 +1915,7 @@ impl WebViewManager {
                                     target,
                                     fields: schema,
                                     original_secrets: original_secrets.clone(),
+                                    community_toml_id: community_toml_id.clone(),
                                 });
                             }
                             InteractiveResolutionKind::ConsentRequired {
@@ -1896,6 +1935,7 @@ impl WebViewManager {
                                     provisioning_policy_hash,
                                     summary,
                                     original_secrets: original_secrets.clone(),
+                                    community_toml_id: community_toml_id.clone(),
                                 });
                             }
                         }
@@ -1920,6 +1960,7 @@ impl WebViewManager {
         pane_id: usize,
         route_key: &str,
         handle: &str,
+        community_toml_id: Option<&str>,
         state: &mut AppState,
     ) {
         let key = pending_launch_key(pane_id, route_key);
@@ -1980,6 +2021,12 @@ impl WebViewManager {
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
         let handle = handle.to_string();
+        // Build the typed launch input now so the background thread has all context.
+        let launch_input = if let Some(cid) = community_toml_id {
+            resolve_and_start_guest_with_input_fn::make_community_input(&handle, cid)
+        } else {
+            resolve_and_start_guest_with_input_fn::make_handle_input(&handle)
+        };
         let background_executor = self.async_app.background_executor().clone();
         let foreground_executor = self.async_app.foreground_executor().clone();
         let async_app = self.async_app.clone();
@@ -2015,37 +2062,42 @@ impl WebViewManager {
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
                 handle: handle.clone(),
-                session: resolve_and_start_guest(&handle, &secrets, &plain_configs, None)
-                    .inspect_err(|err| {
-                        // #117 — interactive-resolution errors
-                        // (preflight aggregate, missing config,
-                        // missing consent) are expected states, not
-                        // failures. Log them at info so the user-side
-                        // log stream stays readable while the modal
-                        // is open; reserve `error!` for genuinely
-                        // unexpected breakage. The orchestrator
-                        // upstream already logs at warn when it
-                        // recognises these cases, so info here keeps
-                        // both sides at-or-below-warn.
-                        match err {
-                            LaunchError::MissingConfig { .. }
-                            | LaunchError::MissingConsent { .. }
-                            | LaunchError::PreflightAggregate { .. } => {
-                                info!(
-                                    handle = %handle,
-                                    error = %err,
-                                    "guest session launch awaiting user input"
-                                );
-                            }
-                            LaunchError::Other(_) => {
-                                error!(
-                                    handle = %handle,
-                                    error = %err,
-                                    "guest session launch failed"
-                                );
-                            }
+                session: resolve_and_start_guest_with_input(
+                    &launch_input,
+                    &secrets,
+                    &plain_configs,
+                    None,
+                )
+                .inspect_err(|err| {
+                    // #117 — interactive-resolution errors
+                    // (preflight aggregate, missing config,
+                    // missing consent) are expected states, not
+                    // failures. Log them at info so the user-side
+                    // log stream stays readable while the modal
+                    // is open; reserve `error!` for genuinely
+                    // unexpected breakage. The orchestrator
+                    // upstream already logs at warn when it
+                    // recognises these cases, so info here keeps
+                    // both sides at-or-below-warn.
+                    match err {
+                        LaunchError::MissingConfig { .. }
+                        | LaunchError::MissingConsent { .. }
+                        | LaunchError::PreflightAggregate { .. } => {
+                            info!(
+                                handle = %handle,
+                                error = %err,
+                                "guest session launch awaiting user input"
+                            );
                         }
-                    }),
+                        LaunchError::Other(_) => {
+                            error!(
+                                handle = %handle,
+                                error = %err,
+                                "guest session launch failed"
+                            );
+                        }
+                    }
+                }),
             };
             if result.session.is_ok() {
                 info!(handle = %handle, route_key = %result.route_key, "guest session launched");
@@ -2097,7 +2149,7 @@ impl WebViewManager {
             route: pane.route.clone(),
             trust_state: pane.trust_state.clone(),
             install_profile_key: pane.install_profile_key.clone(),
-            publisher_identity: None,  // not yet plumbed; will be added when store record carries publisher
+            publisher_identity: None, // not yet plumbed; will be added when store record carries publisher
             source_identity: pane.canonical_handle.clone(),
             snapshot_label: pane.snapshot_label.clone(),
         };
@@ -3534,6 +3586,7 @@ fn load_desktop_auth_handoff() -> Result<DesktopAuthHandoff> {
     let ato_bin = crate::orchestrator::resolve_ato_binary()
         .context("failed to locate ato binary for desktop auth handoff")?;
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .arg("desktop-auth-handoff")
         .output()
         .context("failed to run `ato desktop-auth-handoff`")?;
@@ -5480,6 +5533,7 @@ mod tests {
         let handle_route = GuestRoute::CapsuleHandle {
             handle: handle.into(),
             label: "Blinko".into(),
+            community_toml_id: None,
         };
         let url_route = GuestRoute::CapsuleUrl {
             handle: handle.into(),
@@ -5553,6 +5607,7 @@ mod tests {
         let handle_route = GuestRoute::CapsuleHandle {
             handle: handle.into(),
             label: "app".into(),
+            community_toml_id: None,
         };
         let ephemeral_key = webview_retention_key_for_route(&handle_route);
         assert_ne!(
@@ -5850,6 +5905,7 @@ mod tests {
         let route = GuestRoute::CapsuleHandle {
             handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
             label: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+            community_toml_id: None,
         };
         let route_key = route.to_string();
         let next = active_web_pane(route.clone(), 7);
@@ -5868,6 +5924,7 @@ mod tests {
         let handle_route = GuestRoute::CapsuleHandle {
             handle: "capsule://org/demo@1.0.0".to_string(),
             label: "demo".to_string(),
+            community_toml_id: None,
         };
         let url_route = GuestRoute::CapsuleUrl {
             handle: "capsule://org/demo@1.0.0".to_string(),
@@ -5903,6 +5960,7 @@ mod tests {
         let capsule_handle_route = GuestRoute::CapsuleHandle {
             handle: "capsule://org/demo@1.0.0".to_string(),
             label: "demo".to_string(),
+            community_toml_id: None,
         };
         let capsule_session_route = GuestRoute::Capsule {
             session: "session-1".to_string(),
@@ -5967,6 +6025,7 @@ mod tests {
         let route = GuestRoute::CapsuleHandle {
             handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
             label: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+            community_toml_id: None,
         };
         assert!(!should_force_mounted_after_reuse(
             WebViewReuseAction::Navigate,
@@ -6072,6 +6131,7 @@ mod tests {
                 target: None,
                 fields: Vec::new(),
                 original_secrets: Vec::new(),
+                community_toml_id: None,
             }
         }
 
@@ -6186,6 +6246,7 @@ mod tests {
                     fields: vec![secret_field("SECRET_KEY")],
                 }],
                 consents: Vec::new(),
+                community_toml_id: None,
             });
 
             apply_capsule_secrets(
@@ -6220,6 +6281,7 @@ mod tests {
                     },
                 ],
                 consents: vec![consent_item("web")],
+                community_toml_id: None,
             });
 
             apply_capsule_secrets(
@@ -6264,6 +6326,7 @@ mod tests {
                 provisioning_policy_hash: "blake3:bbb".to_string(),
                 summary: "Capsule: publisher/app@1.0.0".to_string(),
                 original_secrets: Vec::new(),
+                community_toml_id: None,
             }
         }
 
@@ -6344,6 +6407,7 @@ mod tests {
                 original_secrets: Vec::new(),
                 secrets: Vec::new(),
                 consents: vec![consent_item("app"), consent_item("web")],
+                community_toml_id: None,
             });
 
             let handled =
@@ -6373,6 +6437,7 @@ mod tests {
                     fields: Vec::new(),
                 }],
                 consents: vec![consent_item("app")],
+                community_toml_id: None,
             });
 
             apply_pending_resolution_consents(&mut state, handle, |_| Ok(())).expect("approve");
@@ -6399,6 +6464,7 @@ mod tests {
                 target: target.map(str::to_string),
                 fields: Vec::new(),
                 original_secrets: Vec::new(),
+                community_toml_id: None,
             }
         }
 
@@ -6412,6 +6478,7 @@ mod tests {
                 provisioning_policy_hash: "blake3:prov".to_string(),
                 summary: "Consent summary".to_string(),
                 original_secrets: Vec::new(),
+                community_toml_id: None,
             }
         }
 
@@ -6460,6 +6527,7 @@ mod tests {
                         summary: "Consent web".to_string(),
                     },
                 ],
+                community_toml_id: None,
             });
 
             let message = pending_prelaunch_requirement_message(&state, handle)
@@ -6554,6 +6622,7 @@ mod tests {
             GuestRoute::CapsuleHandle {
                 handle: "capsule://org/demo@1.0.0".into(),
                 label: "demo".into(),
+                community_toml_id: None,
             },
             GuestRoute::CapsuleUrl {
                 handle: "capsule://org/demo@1.0.0".into(),
@@ -6595,6 +6664,7 @@ mod tests {
         GuestRoute::CapsuleHandle {
             handle: "capsule://ato.run/org/app".to_string(),
             label: "app".to_string(),
+            community_toml_id: None,
         }
     }
 

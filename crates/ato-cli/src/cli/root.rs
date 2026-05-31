@@ -19,6 +19,7 @@ use super::shared::{
 };
 use super::source::SourceCommands;
 use super::state::StateCommands;
+use super::workspace::WorkspaceCommands;
 
 #[derive(Parser)]
 #[command(name = "ato")]
@@ -28,9 +29,9 @@ use super::state::StateCommands;
 Usage: {usage}
 
 Primary Commands:
-  run      Rehearse a capsule in an ephemeral local session
-  decap    Set up a workspace locally
-  encap    Share your current workspace
+  run                 Run a local project, source repo, or published recipe
+  workspace share     Share a local workspace
+  workspace setup     Set up a shared workspace locally
 
 Management:
   ps       List running capsules
@@ -59,11 +60,11 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Rehearse a capsule in an ephemeral local session",
+        about = "Run a local project, source repo, or published recipe",
         trailing_var_arg = true
     )]
     Run {
-        /// Local path (./, ../, ~/, /...), share URL (https://ato.run/s/...), provider target (pypi:<package>, pypi:<package>[extra], npm:<package>, npm:@scope/package), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
+        /// Local path (./, ../, ~/, /...), share URL (https://ato.run/s/...), store scoped ID (publisher/slug), or GitHub repo (github.com/owner/repo). Default: current directory
         #[arg(default_value = ".")]
         path: PathBuf,
 
@@ -139,6 +140,12 @@ pub(crate) enum Commands {
         /// Select the provider-backed materialization toolchain
         #[arg(long = "via", value_enum, default_value_t = ProviderToolchain::Auto)]
         via: ProviderToolchain,
+
+        /// Use an existing capsule.toml from a local file path or community URL
+        /// instead of auto-generating one. Accepts a local path or an https:// URL.
+        /// Skips community candidate discovery when provided.
+        #[arg(short = 'T', long = "use-existing-toml", value_name = "PATH_OR_URL")]
+        use_existing_toml: Option<String>,
 
         /// Pin a GitHub run to an explicit commit SHA and skip mutable-ref resolution
         #[arg(long = "commit", value_name = "SHA")]
@@ -289,7 +296,16 @@ pub(crate) enum Commands {
 
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Share your current workspace"
+        about = "Share or set up a workspace"
+    )]
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
+    },
+
+    #[command(
+        hide = true,
+        about = "Share your current workspace (deprecated: use `ato workspace share`)"
     )]
     Encap {
         /// Local workspace path to capture (default: current directory)
@@ -338,8 +354,8 @@ pub(crate) enum Commands {
     },
 
     #[command(
-        next_help_heading = "Primary Commands",
-        about = "Materialize a shared workspace descriptor into a target directory"
+        hide = true,
+        about = "Materialize a shared workspace descriptor into a target directory (deprecated: use `ato workspace setup`)"
     )]
     Decap {
         /// Share URL, share.spec.json, or share.lock.json
@@ -985,6 +1001,35 @@ pub(crate) enum Commands {
         no_tui: bool,
         #[arg(long)]
         json: bool,
+        /// Publish a capsule.toml as a community capsule record
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = [
+                "registry",
+                "artifact",
+                "scoped_id",
+                "ci",
+                "prepare",
+                "build",
+                "deploy",
+                "finalize_local",
+                "legacy_full_publish",
+                "force_large_payload",
+                "paid_large_payload",
+                "allow_existing",
+                "allow_external_finalize",
+                "fix",
+                "no_tui"
+            ]
+        )]
+        toml: Option<PathBuf>,
+        /// Source locator for the capsule.toml (e.g. github.com/owner/repo)
+        #[arg(long, value_name = "SOURCE", requires = "toml")]
+        source: Option<String>,
+        /// Skip interactive confirmation when using --toml
+        #[arg(short = 'y', long = "yes", requires = "toml", default_value_t = false)]
+        yes: bool,
     },
 
     #[command(hide = true)]
@@ -1073,5 +1118,11 @@ pub(crate) enum Commands {
     Ipc {
         #[command(subcommand)]
         command: IpcCommands,
+    },
+
+    #[command(about = "Interact with the Ato community capsule.toml registry")]
+    Community {
+        #[command(subcommand)]
+        command: super::community::CommunityCommands,
     },
 }
