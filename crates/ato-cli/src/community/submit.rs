@@ -212,6 +212,42 @@ pub(crate) async fn execute_submit(
         return Ok(());
     };
 
+    if !dry_run {
+        let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+        if is_tty && !yes {
+            eprintln!();
+            eprintln!("Submit capsule.toml to Ato community?");
+            eprintln!();
+            eprintln!("  source: {}", normalized_source);
+            eprintln!("  toml: {}", toml_path.display());
+            eprintln!("  trust: community");
+            eprintln!("  visibility: public");
+            eprintln!();
+            eprintln!("This will publish the capsule.toml as public execution metadata.");
+            eprint!("Continue? [y/N] ");
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("Failed to read confirmation")?;
+            if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+                if json_mode {
+                    let output = serde_json::json!({"status": "aborted"});
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    eprintln!("Submission aborted.");
+                }
+                return Ok(());
+            }
+        } else if !is_tty && !yes {
+            bail!(
+                "Non-interactive submission requires -y/--yes. \
+                 Re-run with -y/--yes to confirm."
+            );
+        }
+    }
+
     let result = submit_prepared_with_response(&payload).await?;
 
     if json_mode {
