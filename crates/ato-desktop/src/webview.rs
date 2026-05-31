@@ -2055,37 +2055,42 @@ impl WebViewManager {
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
                 handle: handle.clone(),
-                session: resolve_and_start_guest_with_input(&launch_input, &secrets, &plain_configs, None)
-                    .inspect_err(|err| {
-                        // #117 — interactive-resolution errors
-                        // (preflight aggregate, missing config,
-                        // missing consent) are expected states, not
-                        // failures. Log them at info so the user-side
-                        // log stream stays readable while the modal
-                        // is open; reserve `error!` for genuinely
-                        // unexpected breakage. The orchestrator
-                        // upstream already logs at warn when it
-                        // recognises these cases, so info here keeps
-                        // both sides at-or-below-warn.
-                        match err {
-                            LaunchError::MissingConfig { .. }
-                            | LaunchError::MissingConsent { .. }
-                            | LaunchError::PreflightAggregate { .. } => {
-                                info!(
-                                    handle = %handle,
-                                    error = %err,
-                                    "guest session launch awaiting user input"
-                                );
-                            }
-                            LaunchError::Other(_) => {
-                                error!(
-                                    handle = %handle,
-                                    error = %err,
-                                    "guest session launch failed"
-                                );
-                            }
+                session: resolve_and_start_guest_with_input(
+                    &launch_input,
+                    &secrets,
+                    &plain_configs,
+                    None,
+                )
+                .inspect_err(|err| {
+                    // #117 — interactive-resolution errors
+                    // (preflight aggregate, missing config,
+                    // missing consent) are expected states, not
+                    // failures. Log them at info so the user-side
+                    // log stream stays readable while the modal
+                    // is open; reserve `error!` for genuinely
+                    // unexpected breakage. The orchestrator
+                    // upstream already logs at warn when it
+                    // recognises these cases, so info here keeps
+                    // both sides at-or-below-warn.
+                    match err {
+                        LaunchError::MissingConfig { .. }
+                        | LaunchError::MissingConsent { .. }
+                        | LaunchError::PreflightAggregate { .. } => {
+                            info!(
+                                handle = %handle,
+                                error = %err,
+                                "guest session launch awaiting user input"
+                            );
                         }
-                    }),
+                        LaunchError::Other(_) => {
+                            error!(
+                                handle = %handle,
+                                error = %err,
+                                "guest session launch failed"
+                            );
+                        }
+                    }
+                }),
             };
             if result.session.is_ok() {
                 info!(handle = %handle, route_key = %result.route_key, "guest session launched");
