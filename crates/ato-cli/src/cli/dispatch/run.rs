@@ -95,6 +95,14 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
         eprintln!("{warning}");
     }
 
+    if let Some(kind) = provider_shorthand_kind(raw_target.as_ref()) {
+        eprintln!(
+            "warning: direct package-provider run targets are deprecated. \
+             `ato run {kind}:...` will be removed from `ato run`; \
+             use a capsule.toml-backed recipe instead."
+        );
+    }
+
     // --oci-compose: import docker-compose.yml and run via PodmanProvider.
     // This early-return path bypasses the normal capsule resolution pipeline.
     if args.oci_compose {
@@ -321,7 +329,7 @@ fn report_next_step(args: &RunLikeCommandArgs, raw_target: &str) -> Result<()> {
     let message = if crate::local_input::should_treat_input_as_local(raw_target, &expanded_local)
         && expanded_local.is_dir()
     {
-        Some("Share it next: ato encap".to_string())
+        Some("Share it next: ato workspace share".to_string())
     } else if looks_like_remote_try_target(raw_target) {
         Some(format!(
             "Set it up locally next: ato decap {} --into ./{}",
@@ -514,6 +522,17 @@ fn ato_log_requests_verbose() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn provider_shorthand_kind(target: &str) -> Option<&'static str> {
+    let lower = target.to_ascii_lowercase();
+    if lower.starts_with("pypi:") {
+        Some("pypi")
+    } else if lower.starts_with("npm:") {
+        Some("npm")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -726,5 +745,56 @@ mod tests {
         assert!(resolve_run_verbose(true));
 
         std::env::remove_var("ATO_LOG");
+    }
+
+    #[test]
+    fn provider_shorthand_kind_detects_pypi() {
+        assert_eq!(
+            super::provider_shorthand_kind("pypi:markitdown"),
+            Some("pypi")
+        );
+    }
+
+    #[test]
+    fn provider_shorthand_kind_detects_npm() {
+        assert_eq!(super::provider_shorthand_kind("npm:vite"), Some("npm"));
+    }
+
+    #[test]
+    fn provider_shorthand_kind_detects_npm_scoped() {
+        assert_eq!(
+            super::provider_shorthand_kind("npm:@scope/package"),
+            Some("npm")
+        );
+    }
+
+    #[test]
+    fn provider_shorthand_kind_ignores_github_repo() {
+        assert_eq!(
+            super::provider_shorthand_kind("github.com/usememos/memos"),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_shorthand_kind_ignores_local_path() {
+        assert_eq!(super::provider_shorthand_kind("."), None);
+    }
+
+    #[test]
+    fn provider_shorthand_kind_ignores_share_url() {
+        assert_eq!(
+            super::provider_shorthand_kind("https://ato.run/s/demo"),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_shorthand_kind_case_insensitive() {
+        assert_eq!(super::provider_shorthand_kind("NPM:tsx"), Some("npm"));
+        assert_eq!(
+            super::provider_shorthand_kind("PyPI:requests"),
+            Some("pypi")
+        );
     }
 }
