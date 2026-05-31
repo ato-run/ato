@@ -9,6 +9,6 @@ runtime = "source"
 driver = "python"
 runtime_version = "3.11"
 runtime_tools = { node = "20" }
-build = "npm run build"
+build = "npm install --no-audit --fund=false && npm run build"
 run = "python app/server.py"
 port = 19876
