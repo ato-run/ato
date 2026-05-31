@@ -1873,13 +1873,23 @@ fn test_run_help_shows_yes_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("github.com/owner/repo"))
-        .stdout(predicate::str::contains("pypi:<package>"))
-        .stdout(predicate::str::contains("npm:<package>"))
+        .stdout(predicate::str::contains("pypi:").not())
+        .stdout(predicate::str::contains("npm:").not())
         .stdout(predicate::str::contains("--via <VIA>"))
         .stdout(predicate::str::contains("--skill <SKILL>").not())
         .stdout(predicate::str::contains("--yes"))
         .stdout(predicate::str::contains("--registry"))
         .stdout(predicate::str::contains("default: https://api.ato.run"));
+}
+
+#[test]
+fn test_run_provider_shorthand_emits_deprecation_warning() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "pypi:markitdown", "--plan-only"])
+        .assert()
+        .stderr(predicate::str::contains(
+            "direct package-provider run targets are deprecated",
+        ));
 }
 
 #[test]
