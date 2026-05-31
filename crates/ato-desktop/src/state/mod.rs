@@ -24,6 +24,7 @@ use url::{form_urlencoded, Url};
 
 use crate::bridge::ShellEvent;
 use crate::config::SecretEntry;
+use crate::proc_util::CommandNoWindowExt;
 use crate::orchestrator::{register_pending_cli_command, CliLaunchSpec};
 use crate::ui::share::web_favicon_origin;
 
@@ -4044,7 +4045,11 @@ impl AppState {
                 return;
             }
         };
-        match Command::new(&ato_bin).arg("logout").output() {
+        match Command::new(&ato_bin)
+            .no_console_window()
+            .arg("logout")
+            .output()
+        {
             Ok(output) if output.status.success() => {}
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -4186,6 +4191,7 @@ fn verify_cli_ato_session() -> Result<VerifiedAtoSession, String> {
         format!("Could not locate ato binary for sign-in verification: {error}")
     })?;
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .arg("desktop-auth-handoff")
         .output()
         .map_err(|error| {
