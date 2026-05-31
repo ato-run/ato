@@ -120,6 +120,7 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .into(),
         };
         let store_url = format!("{}://localhost/", STORE_SCHEME);
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(STORE_SCHEME.to_string(), |_id, req, responder| {
                 let path = req.uri().path();

@@ -179,6 +179,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
             .into(),
         };
 
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_url(&login_url)
             .with_bounds(webview_rect)
@@ -207,6 +208,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
         let completion = be
             .spawn(async move { watch_login_completion(reader, child) })
             .await;
+        crate::webview_init_guard::wait_until_idle(&be).await;
         let _ = aa.update(|cx| {
             on_login_completion(cx, completion);
         });

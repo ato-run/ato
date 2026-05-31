@@ -224,6 +224,7 @@ fn build_tab(
     };
     let url_str = url.as_str().to_string();
     let queue_for_nav = queue.clone();
+    let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
     let webview = WebViewBuilder::new()
         .with_url(&url_str)
         .with_bounds(webview_rect)
@@ -298,6 +299,9 @@ fn spawn_capsule_nav_drain(cx: &mut Context<WebLinkViewShell>, queue: CapsuleNav
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
+            if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                continue;
+            }
             let drained: Vec<String> = match queue.lock() {
                 Ok(mut q) => std::mem::take(&mut *q),
                 Err(_) => continue,

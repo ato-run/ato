@@ -47,9 +47,7 @@ fn embed_windows_icon(manifest_dir: &PathBuf) {
     );
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir
-            .join("assets/windows/ato-desktop.rc")
-            .display()
+        manifest_dir.join("assets/windows/ato-desktop.rc").display()
     );
     embed_resource::compile("assets/windows/ato-desktop.rc", embed_resource::NONE);
 }

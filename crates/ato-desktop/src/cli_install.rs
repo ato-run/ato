@@ -16,8 +16,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path;
+
+use crate::bundle_paths::DesktopBundlePaths;
 
 /// Outcome of [`try_install`] — surfaced to the UI as a toast.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,38 +67,9 @@ pub fn record_first_launch_prompt_shown() -> Result<()> {
 /// not contain the expected helper layout — exposing a typed error
 /// here keeps `app.rs` from string-matching on filesystem messages.
 pub fn locate_bundled_helper(current_exe: &Path) -> Result<PathBuf> {
-    // The helper layout depends on the platform's bundle conventions:
-    //   macOS:   <exe>=.../Contents/MacOS/ato-desktop
-    //            helper=.../Contents/Helpers/ato
-    //   linux:   <exe>=.../usr/bin/ato-desktop
-    //            helper=.../usr/bin/ato
-    //   windows: <exe>=.../ato-desktop.exe
-    //            helper=.../bin/ato.exe
-    let exe_dir = current_exe
-        .parent()
-        .ok_or_else(|| anyhow!("current executable has no parent directory"))?;
-
-    #[cfg(target_os = "macos")]
-    let candidate = exe_dir
-        .parent()
-        .ok_or_else(|| anyhow!("expected MacOS/.. for macOS bundle"))?
-        .join("Helpers")
-        .join("ato");
-
-    #[cfg(target_os = "windows")]
-    let candidate = exe_dir.join("bin").join("ato.exe");
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let candidate = exe_dir.join("ato");
-
-    if candidate.exists() {
-        Ok(candidate)
-    } else {
-        bail!(
-            "bundled ato helper not found at {} — is this a packaged build?",
-            candidate.display()
-        )
-    }
+    DesktopBundlePaths::for_current_exe(current_exe.to_path_buf())
+        .locate_bundled_ato_helper()
+        .map_err(anyhow::Error::new)
 }
 
 /// Try to install the helper into a stable PATH location. Picks the

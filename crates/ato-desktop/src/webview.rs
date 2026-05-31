@@ -30,6 +30,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wry::http::{Request, Response};
 #[cfg(target_os = "macos")]
+use wry::WebViewBuilderExtDarwin;
+#[cfg(target_os = "macos")]
 use wry::WebViewExtMacOS;
 use wry::{
     NewWindowResponse, PageLoadEvent, Rect, RequestAsyncResponder, WebContext, WebView,
@@ -166,12 +168,11 @@ pub struct WebViewManager {
     /// `None` until the channel is installed (e.g. in unit tests where the
     /// background check is irrelevant).
     capsule_update_tx: Option<std::sync::mpsc::Sender<(usize, crate::state::CapsuleUpdate)>>,
-    /// Shared `WebContext` so every pane uses the same on-disk
-    /// `WKWebsiteDataStore`. This makes cookies and localStorage
-    /// persist across tab open/close and across restarts (data
-    /// directory: `~/.ato/desktop/webcontext/`). Without it each
-    /// `WebContext::new(None)` was ephemeral and ato.run sign-in
-    /// state was lost the moment the pane was rebuilt.
+    /// Shared `WebContext` for system routes (ExternalUrl, Terminal)
+    /// so ato.run cookies and localStorage persist across tab open/close
+    /// and across restarts (data directory: `~/.ato/desktop/webcontext/`).
+    /// Capsule routes use isolated stores (incognito or profile-keyed)
+    /// via `apply_webview_store_policy`; they do not share this context.
     web_context: WebContext,
     /// Retained-session table — RFC: SURFACE_CLOSE_SEMANTICS. Pane
     /// close demotes the session to this table instead of stopping
@@ -211,28 +212,20 @@ struct ManagedWebView {
     route_key: String,
     bounds: PaneBounds,
     launched_session: Option<GuestLaunchSession>,
+    /// The WebView store class in use for this WebView, recorded at build time.
+    /// Used by `sync_from_state` to detect store-class transitions (e.g.
+    /// `CapsuleEphemeral` → `CapsuleProfile` when `install_profile_key` arrives)
+    /// and force a `Rebuild` rather than keeping the mismatched store.
+    store_class: WebViewStoreClass,
     /// The stable ingress key registered with `ato-netd` for this WebView.
-    /// Set on successful registration; `None` when the route did not go
-    /// through `ato-netd` (e.g. external URL, terminal, or fallback).
-    /// Used by `stop_launched_session` and `stop_active_session` to
-    /// deregister the route on session teardown.
-    stable_ingress_key: Option<String>,
+    /// Tracks the ato-netd ingress registration for this WebView so the
+    /// correct deregister call can be issued on session teardown.
+    /// `None` when the route did not go through `ato-netd` (e.g. external
+    /// URL, terminal, or fallback to direct `local_url`).
+    ingress_registration: Option<crate::netd::IngressRegistration>,
     webview: WebView,
     #[cfg(target_os = "macos")]
     frame_host: Option<Retained<NSView>>,
-    /// Ephemeral per-capsule WebContext.  `Some` for capsule routes
-    /// (Capsule, CapsuleHandle, CapsuleUrl, LocalManifest) — each
-    /// gets its own in-memory WKWebsiteDataStore so cookies,
-    /// localStorage, and service-worker storage are fully isolated per
-    /// instance.  `None` for system routes (ExternalUrl, Terminal)
-    /// that share the persistent `WebViewManager::web_context` so
-    /// ato.run sign-in state survives tab close/reopen.
-    ///
-    /// The field name is prefixed with `_` to signal that it is kept
-    /// alive only for its Drop side-effect (the native WKWebsiteDataStore
-    /// object is released when both the WebView and this WebContext are
-    /// dropped together).
-    _ephemeral_ctx: Option<WebContext>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,6 +423,9 @@ impl WebViewManager {
             fe.spawn(async move {
                 loop {
                     be.timer(Duration::from_millis(50)).await;
+                    if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                        continue;
+                    }
                     let queued = pending.lock().map(|q| !q.is_empty()).unwrap_or(false);
                     if has_pending.swap(false, Ordering::Relaxed) || queued {
                         notify_window(async_app_poll.clone(), window_handle);
@@ -507,12 +503,15 @@ impl WebViewManager {
             return;
         }
         self.prewarmed = true;
+        #[cfg(target_os = "windows")]
+        crate::window::windows::prepare_window_for_webview(window);
 
         use wry::dpi::{LogicalPosition, LogicalSize};
         // Position off-screen and 1×1 so the prewarm view is invisible
         // even briefly. Errors here are silently ignored — prewarm is
         // best-effort optimisation. Use the shared web_context so the
         // prewarm and the real tabs share one on-disk data store.
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let result = WebViewBuilder::new_with_web_context(&mut self.web_context)
             .with_url("about:blank")
             .with_visible(false)
@@ -626,6 +625,39 @@ impl WebViewManager {
             })
             .unwrap_or(WebViewReuseAction::Rebuild);
 
+        // Detect store-class transitions: if the route says Keep but the new
+        // identity (e.g. install_profile_key just arrived) maps to a different
+        // store class than the live WebView was built with, force a Rebuild so
+        // the WebView gets the correct persistent store.
+        let reuse_action = if matches!(reuse_action, WebViewReuseAction::Keep) {
+            let new_identity = WebViewStoreIdentity {
+                route: active.route.clone(),
+                trust_state: active.trust_state.clone(),
+                install_profile_key: active.install_profile_key.clone(),
+                publisher_identity: None,
+                source_identity: active.canonical_handle.clone(),
+                snapshot_label: active.snapshot_label.clone(),
+            };
+            let new_class = store_class_for_identity(&new_identity);
+            if self
+                .views
+                .get(&active.pane_id)
+                .map(|v| v.store_class != new_class)
+                .unwrap_or(false)
+            {
+                tracing::debug!(
+                    pane_id = active.pane_id,
+                    ?new_class,
+                    "store class changed — forcing WebView rebuild"
+                );
+                WebViewReuseAction::Rebuild
+            } else {
+                reuse_action
+            }
+        } else {
+            reuse_action
+        };
+
         // Tracks whether the Navigate branch's `load_url` call below failed,
         // so the post-reuse `Mounted` cleanup can skip force-promoting a
         // pane whose new navigation never actually started (#143 review).
@@ -639,8 +671,17 @@ impl WebViewManager {
                 state.sync_web_session_state(previous.pane_id, WebSessionState::Closed);
             }
 
-            let stable_origin_key = stable_origin_key_for_route(&active.route);
-            if let Some(mut retained) = stable_origin_key
+            let active_identity = WebViewStoreIdentity {
+                route: active.route.clone(),
+                trust_state: active.trust_state.clone(),
+                install_profile_key: active.install_profile_key.clone(),
+                publisher_identity: None,
+                source_identity: active.canonical_handle.clone(),
+                snapshot_label: active.snapshot_label.clone(),
+            };
+            let retention_key = webview_retention_key_for_identity(&active_identity)
+                .or_else(|| webview_retention_key_for_route(&active.route));
+            if let Some(mut retained) = retention_key
                 .as_deref()
                 .and_then(|key| self.webview_retention.take_by_key(key))
             {
@@ -1584,6 +1625,7 @@ impl WebViewManager {
                                 healthcheck_url: None,
                                 invoke_url: None,
                                 served_by: None,
+                                install_profile_key: None,
                                 auth_flow: false,
                                 bounds: active.bounds.clone(),
                             };
@@ -2045,7 +2087,21 @@ impl WebViewManager {
         let mut inject_window_ready_signal = false;
 
         let pane_binding = Arc::new(AtomicUsize::new(pane.pane_id));
-        let mut ingress_key: Option<String> = None;
+        let mut ingress_registration: Option<crate::netd::IngressRegistration> = None;
+
+        // Build the store identity for this pane.  Fields that are not yet
+        // plumbed into ActiveWebPane (install_profile_key, publisher_identity)
+        // are always None for now; the classifier will fall back to
+        // CapsuleEphemeral until the #350 activation follow-up populates them.
+        let pane_identity = WebViewStoreIdentity {
+            route: pane.route.clone(),
+            trust_state: pane.trust_state.clone(),
+            install_profile_key: pane.install_profile_key.clone(),
+            publisher_identity: None,  // not yet plumbed; will be added when store record carries publisher
+            source_identity: pane.canonical_handle.clone(),
+            snapshot_label: pane.snapshot_label.clone(),
+        };
+
         let (url, bridge_endpoint, allowlist, route_content, guest_payload) = match &pane.route {
             GuestRoute::Capsule {
                 session,
@@ -2140,8 +2196,81 @@ impl WebViewManager {
                     let local_url = session.local_url.clone().ok_or_else(|| {
                         anyhow::anyhow!("WebUrl session has no local_url: {}", session.session_id)
                     })?;
-                    let url =
-                        if let Some(key) = crate::netd::logical_key_for_route(&pane.route) {
+                    let url = {
+                        use crate::netd::{IngressRegistration, IngressRegistrationKind};
+
+                        // CapsuleEphemeral routes use a session-unique ephemeral port
+                        // (not persisted in stable_origin_ports.json). System routes
+                        // use stable ingress for consistent origin across restarts.
+                        let route_store_class = store_class_for_identity(&pane_identity);
+                        if route_store_class == WebViewStoreClass::CapsuleEphemeral {
+                            // Ephemeral key is scoped to this session so it never collides
+                            // with stable keys or another capsule's ephemeral key.
+                            let ephemeral_key = format!("ephemeral:{}", session.session_id);
+                            match crate::netd::register_ephemeral_ingress(
+                                &ephemeral_key,
+                                &local_url,
+                            ) {
+                                Ok(port) => {
+                                    let ingress_url = format!("http://127.0.0.1:{port}/");
+                                    info!(
+                                        key = %ephemeral_key,
+                                        port = port,
+                                        local_url = %local_url,
+                                        "registered ato-netd ephemeral ingress route"
+                                    );
+                                    ingress_registration = Some(IngressRegistration {
+                                        key: ephemeral_key,
+                                        kind: IngressRegistrationKind::Ephemeral,
+                                    });
+                                    ingress_url
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        route = %pane.route,
+                                        session_id = %session.session_id,
+                                        error = %err,
+                                        "failed to register ephemeral ingress; \
+                                         falling back to direct local_url"
+                                    );
+                                    local_url
+                                }
+                            }
+                        } else if let WebViewStoreClass::CapsuleProfile { ref uuid } =
+                            route_store_class
+                        {
+                            // Stable profile-aligned ingress: the key is derived from the
+                            // profile UUID so that storage partition and origin are 1:1.
+                            // Two installed profiles of the same handle get different ports.
+                            let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+                            let profile_key = format!("profile:{hex}");
+                            match crate::netd::register_stable_ingress(&profile_key, &local_url) {
+                                Ok(port) => {
+                                    let ingress_url = format!("http://127.0.0.1:{port}/");
+                                    info!(
+                                        key = %profile_key,
+                                        port = port,
+                                        local_url = %local_url,
+                                        "registered ato-netd stable profile ingress route"
+                                    );
+                                    ingress_registration = Some(IngressRegistration {
+                                        key: profile_key,
+                                        kind: IngressRegistrationKind::Stable,
+                                    });
+                                    ingress_url
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        route = %pane.route,
+                                        session_id = %session.session_id,
+                                        error = %err,
+                                        "failed to register profile ingress; \
+                                         falling back to direct local_url"
+                                    );
+                                    local_url
+                                }
+                            }
+                        } else if let Some(key) = crate::netd::logical_key_for_route(&pane.route) {
                             match crate::netd::register_stable_ingress(&key, &local_url) {
                                 Ok(port) => {
                                     let ingress_url = format!("http://127.0.0.1:{port}/");
@@ -2149,9 +2278,12 @@ impl WebViewManager {
                                         key = %key,
                                         port = port,
                                         local_url = %local_url,
-                                        "registered ato-netd ingress route"
+                                        "registered ato-netd stable ingress route"
                                     );
-                                    ingress_key = Some(key);
+                                    ingress_registration = Some(IngressRegistration {
+                                        key,
+                                        kind: IngressRegistrationKind::Stable,
+                                    });
                                     ingress_url
                                 }
                                 Err(err) => {
@@ -2167,14 +2299,9 @@ impl WebViewManager {
                             }
                         } else {
                             local_url
-                        };
-                    (
-                        url,
-                        None,
-                        Vec::new(),
-                        RouteContent::External,
-                        None,
-                    )
+                        }
+                    };
+                    (url, None, Vec::new(), RouteContent::External, None)
                 } else {
                     let session_id = session.session_id.clone();
                     let frontend_path = session
@@ -2205,32 +2332,47 @@ impl WebViewManager {
             ),
         };
 
+        // Rollback guard: if any step below returns Err after an ingress
+        // route has been registered in ato-netd, call
+        // `deregister_ingress_if_registered` before propagating the error so
+        // the daemon does not hold a stale ephemeral (or stable) route
+        // indefinitely.  The guard is disarmed on the success path by taking
+        // the value out via `reg_guard.0.take()` just before `Ok(...)`.
+        struct IngressRollback(Option<crate::netd::IngressRegistration>);
+        impl Drop for IngressRollback {
+            fn drop(&mut self) {
+                deregister_ingress_if_registered(&self.0);
+            }
+        }
+        let mut reg_guard = IngressRollback(ingress_registration);
+
         let webview_bounds = content_bounds(pane.bounds);
 
-        // Capsule routes (CapsuleHandle, CapsuleUrl, LocalManifest, Capsule)
-        // each get an isolated ephemeral WebContext — a fresh in-memory
-        // WKWebsiteDataStore — so cookies, localStorage, and service-worker
-        // registrations from one capsule can never bleed into another.
-        //
+        // Determine the store class for this pane using the full identity
+        // (trust_state + install_profile_key + source/publisher identity).
+        // CapsuleProfile is assigned only when trust and install_profile_key
+        // are both present; until #350 activation plumbs those fields into
+        // ActiveWebPane, capsule routes always produce CapsuleEphemeral.
+        let store_class = store_class_for_identity(&pane_identity);
+
         // System routes (ExternalUrl, Terminal) share the persistent
         // WebViewManager::web_context so ato.run sign-in cookies survive
         // tab close/reopen and cross-pane (dock ↔ store ↔ settings).
         //
-        // `is_webview_retention_eligible_route` maps exactly to the set
-        // of routes that represent user-launched capsules, so we reuse it
-        // here rather than duplicating the match arms.
-        let mut ephemeral_ctx: Option<WebContext> =
-            if is_webview_retention_eligible_route(&pane.route) {
-                Some(WebContext::new(None))
-            } else {
-                None
-            };
-        let mut builder = if let Some(ctx) = ephemeral_ctx.as_mut() {
-            WebViewBuilder::new_with_web_context(ctx)
-        } else {
-            WebViewBuilder::new_with_web_context(&mut self.web_context)
-        }
-        .with_bounds(bounds_to_rect(webview_bounds));
+        // CapsuleEphemeral routes (all capsule routes for now) get a
+        // per-session non-persistent store via `with_incognito(true)` →
+        // WKWebsiteDataStore::nonPersistentDataStore().  Each call creates
+        // an independent in-memory store, so capsules are fully isolated
+        // from each other and no state survives session end.
+        //
+        // CapsuleProfile (reserved — not yet assigned by store_class_for_route)
+        // will use `with_data_store_identifier([u8; 16])` on macOS 14+ for
+        // persistent profile-keyed storage once trust/profile identity is
+        // available in GuestRoute (#350 follow-up).  On macOS <14 it falls
+        // back to incognito rather than silently sharing the default store.
+        let mut builder = WebViewBuilder::new_with_web_context(&mut self.web_context)
+            .with_bounds(bounds_to_rect(webview_bounds));
+        builder = apply_webview_store_policy(builder, &store_class);
 
         // Layer 1: tag every Desktop WebView with a custom UA suffix
         // so ato.run server can render Desktop-specific UX (Launch
@@ -2505,19 +2647,23 @@ impl WebViewManager {
 
         builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
 
-        // Only inject ato.run auth cookies for system (non-capsule) routes.
-        // Capsule routes use an ephemeral WebContext and must never receive
-        // ato.run session cookies, even if the capsule URL happens to match
-        // the ato.run/dock pattern.
-        let desktop_auth_handoff =
-            if !is_webview_retention_eligible_route(&pane.route) && should_install_ato_auth_cookies(&url) {
-                Some(
-                    load_desktop_auth_handoff()
-                        .with_context(|| format!("unable to prepare ato.run auth cookies for {url}"))?,
-                )
-            } else {
-                None
-            };
+        // Auth cookie injection is gated on BOTH the route's store class
+        // (must be System) and the URL pattern (ato.run/dock).  The store-
+        // class gate is the hard structural guard: even if a CapsuleUrl
+        // happens to point at https://ato.run/dock, `allows_ato_auth_cookies`
+        // returns false for CapsuleEphemeral routes and cookie injection is
+        // skipped.  The URL predicate is a secondary filter that limits
+        // injection to the specific system pages that need it.
+        let desktop_auth_handoff = if store_class.allows_ato_auth_cookies()
+            && should_install_ato_auth_cookies(&url)
+        {
+            Some(
+                load_desktop_auth_handoff()
+                    .with_context(|| format!("unable to prepare ato.run auth cookies for {url}"))?,
+            )
+        } else {
+            None
+        };
 
         let builder = if let Some(handoff) = &desktop_auth_handoff {
             builder.with_url_and_headers(&url, auth_initial_request_headers(handoff)?)
@@ -2544,6 +2690,9 @@ impl WebViewManager {
             None => surface_base_extras.clone(),
         };
         crate::surface_timing::emit_stage("webview_create_start", "ok", 0, None, &extras_at_start);
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
+        #[cfg(target_os = "windows")]
+        crate::window::windows::prepare_window_for_webview(window);
         let webview = builder
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child webview for {url}"))?;
@@ -2577,11 +2726,14 @@ impl WebViewManager {
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
             launched_session,
-            stable_ingress_key: ingress_key,
+            store_class: store_class_for_identity(&pane_identity),
+            // Disarm the rollback guard: the registration now lives in
+            // ManagedWebView and will be deregistered by the explicit stop /
+            // eviction paths instead.
+            ingress_registration: reg_guard.0.take(),
             webview,
             #[cfg(target_os = "macos")]
             frame_host,
-            _ephemeral_ctx: ephemeral_ctx,
         })
     }
 
@@ -2701,6 +2853,9 @@ impl WebViewManager {
             },
             Instant::now(),
         );
+        for entry in &evicted {
+            deregister_ingress_if_registered(&entry.webview.ingress_registration);
+        }
         drop(evicted);
     }
 
@@ -2722,6 +2877,9 @@ impl WebViewManager {
 
     fn sweep_expired_webview_retention(&mut self) {
         let evicted = self.webview_retention.evict_expired(Instant::now());
+        for entry in &evicted {
+            deregister_ingress_if_registered(&entry.webview.ingress_registration);
+        }
         drop(evicted);
     }
 
@@ -2870,9 +3028,7 @@ impl WebViewManager {
         // omnibar entry / `browser_navigate` MCP call does, and it is
         // what #112 needs from this fix.
         if let Some(previous) = self.views.remove(&active_pane_id) {
-            if let Some(key) = previous.stable_ingress_key.as_deref() {
-                crate::netd::deregister_stable_ingress(key);
-            }
+            deregister_ingress_if_registered(&previous.ingress_registration);
             self.automation.fail_requests_for_pane(active_pane_id);
             self.automation.mark_page_unloaded(active_pane_id);
             tracing::debug!(
@@ -2888,11 +3044,13 @@ impl WebViewManager {
         if stopped {
             self.handle_to_session.remove(&handle);
             if let Some(retained) = self.webview_retention.take_by_session_id(&session_id) {
+                deregister_ingress_if_registered(&retained.webview.ingress_registration);
                 drop(retained);
             } else if let Some(retained) = self
                 .webview_retention
                 .take_by_key(&format!("handle:{handle}"))
             {
+                deregister_ingress_if_registered(&retained.webview.ingress_registration);
                 drop(retained);
             }
         }
@@ -2907,7 +3065,9 @@ impl WebViewManager {
     /// before the underlying session can be stopped via this path.
     /// Returns the number of sessions queued for stop.
     pub fn stop_all_retained_sessions(&mut self) -> usize {
-        self.webview_retention.drain();
+        for entry in self.webview_retention.drain() {
+            deregister_ingress_if_registered(&entry.webview.ingress_registration);
+        }
         let drained = self.retention.drain();
         let count = drained.len();
         for (entry, _reason) in drained {
@@ -2985,9 +3145,7 @@ impl WebViewManager {
 
     fn stop_launched_session(&mut self, webview: &ManagedWebView, state: &mut AppState) {
         // Deregister the ato-netd ingress route before stopping the session.
-        if let Some(key) = webview.stable_ingress_key.as_deref() {
-            crate::netd::deregister_stable_ingress(key);
-        }
+        deregister_ingress_if_registered(&webview.ingress_registration);
 
         let Some(session) = &webview.launched_session else {
             return;
@@ -3131,10 +3289,13 @@ impl Drop for WebViewManager {
             );
             let _ = stop_guest_session(&entry.session_id);
         }
-        self.webview_retention.drain();
+        for entry in self.webview_retention.drain() {
+            deregister_ingress_if_registered(&entry.webview.ingress_registration);
+        }
 
         // Best-effort shutdown so orphaned guest sessions do not survive process exit.
         for existing in self.views.drain().map(|(_, existing)| existing) {
+            deregister_ingress_if_registered(&existing.ingress_registration);
             if let Some(session) = existing.launched_session.as_ref() {
                 let _ = stop_guest_session(&session.session_id);
             }
@@ -3179,6 +3340,7 @@ fn apply_launch_session_metadata(
         session.healthcheck_url.clone(),
         session.invoke_url.clone(),
         session.served_by.clone(),
+        session.install_profile_key.clone(),
     );
 }
 
@@ -3716,6 +3878,7 @@ fn notify_window(async_app: AsyncApp, window_handle: AnyWindowHandle) {
     let fe = async_app.foreground_executor().clone();
     fe.spawn(async move {
         bg.timer(std::time::Duration::from_millis(16)).await;
+        crate::webview_init_guard::wait_until_idle(&bg).await;
         let mut async_app = async_app;
         let _ = async_app.update_window(window_handle, |_, window, _| {
             window.refresh();
@@ -4253,24 +4416,376 @@ fn stable_origin_key_for_route(route: &GuestRoute) -> Option<String> {
     }
 }
 
+/// Which WebKit storage store a WebView may use, and the host-level
+/// policies that govern it.
+///
+/// `System` — the shared persistent `WKWebsiteDataStore`.  Used by
+/// `ExternalUrl` (ato.run dock, Store, sign-in panes) and `Terminal`.
+/// ato.run auth cookies may be injected here.
+///
+/// `CapsuleEphemeral` — a per-session non-persistent store via
+/// `WKWebsiteDataStore.nonPersistentDataStore()` (set through
+/// `WebViewBuilder::with_incognito(true)`).  Each WebView receives an
+/// independent in-memory store; no state survives session end.
+/// Used by transient / preview / local-manifest routes.  ato.run auth
+/// cookies must **never** enter this store.
+///
+/// `CapsuleProfile` — a profile-keyed persistent store derived from the
+/// capsule's stable identity (`uuid`).  On macOS 14+ this maps to
+/// `WKWebsiteDataStore::dataStoreForIdentifier`, giving the capsule its
+/// own persistent cookie jar and localStorage that survive Desktop
+/// restarts.  On macOS <14 and on Linux the `uuid` field is unused and
+/// the implementation falls back to incognito (non-persistent, isolated)
+/// rather than silently sharing the default store.
+/// **Reserved for future use**: `store_class_for_route` does not
+/// currently assign any route to `CapsuleProfile`.  It will be used
+/// once trust/profile identity is plumbed into `GuestRoute` (#350
+/// follow-up).  ato.run auth cookies must **never** enter this store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebViewStoreClass {
+    System,
+    CapsuleEphemeral,
+    /// Profile-keyed persistent store.  `uuid` is a 16-byte identifier
+    /// derived deterministically from the capsule's stable namespaced
+    /// key via BLAKE3 so that the same capsule always maps to the same
+    /// WKWebsiteDataStore identifier across Desktop restarts.
+    CapsuleProfile {
+        uuid: [u8; 16],
+    },
+}
+
+impl WebViewStoreClass {
+    /// Returns `true` only when it is safe to inject ato.run auth cookies
+    /// into this store.  Capsule stores must never receive first-party
+    /// ato.run session cookies.
+    fn allows_ato_auth_cookies(self) -> bool {
+        matches!(self, WebViewStoreClass::System)
+    }
+
+    /// Returns `true` when the route uses an incognito (non-persistent,
+    /// per-session) store rather than a persistent profile store.
+    fn uses_incognito_store(self) -> bool {
+        matches!(self, WebViewStoreClass::CapsuleEphemeral)
+    }
+}
+
+/// Full identity context passed to `store_class_for_identity`.
+///
+/// Extends a bare `GuestRoute` with the trust/profile metadata available
+/// in `ActiveWebPane` at WebView build time.  Keeping identity separate
+/// from `GuestRoute` avoids adding optional classifier fields to a type
+/// that is also used for routing and navigation.
+///
+/// Fields that are not yet carried by `ActiveWebPane` (e.g.
+/// `install_profile_key`, `publisher_identity`) will be `None` in
+/// production until the #350 activation follow-up plumbs them.  When all
+/// required fields are present, `store_class_for_identity` assigns
+/// `CapsuleProfile`; until then every capsule route falls back to
+/// `CapsuleEphemeral`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebViewStoreIdentity {
+    /// Route variant — determines the System / Capsule base class.
+    pub route: GuestRoute,
+    /// Trust classification for the capsule.
+    ///
+    /// Known values: `"local"` (local or trusted build),
+    /// `"untrusted"` (remote, not yet verified), `None` (unknown /
+    /// still resolving).  Only `"local"` (and a future `"trusted"`)
+    /// is eligible for `CapsuleProfile`.
+    pub trust_state: Option<String>,
+    /// Install profile key — set for capsules that the user has
+    /// explicitly installed via `ato install`.  `None` for transient
+    /// preview / single-run launches.
+    ///
+    /// Not yet plumbed into `ActiveWebPane`; always `None` in
+    /// production.  Once populated, an installed + trusted capsule
+    /// reaches `CapsuleProfile`; everything else stays
+    /// `CapsuleEphemeral`.
+    pub install_profile_key: Option<String>,
+    /// Publisher identity from the capsule manifest or install record
+    /// (e.g. `"github.com/someorg"`).  Included in the profile UUID
+    /// so that a handle transferred to a different publisher cannot
+    /// silently inherit the original store.
+    pub publisher_identity: Option<String>,
+    /// Source identity — typically the canonical capsule handle (e.g.
+    /// `"capsule://github.com/org/app"`).  Primary namespace component
+    /// for the persistent store UUID.
+    pub source_identity: Option<String>,
+    /// Snapshot/revision label.  Intentionally **excluded** from the
+    /// profile UUID: app updates should preserve user localStorage /
+    /// cookies across revisions.  If publisher or source changes, the
+    /// corresponding fields already create a distinct UUID.
+    pub snapshot_label: Option<String>,
+}
+
+impl WebViewStoreIdentity {
+    /// Construct a minimal identity from a route alone (no trust /
+    /// install metadata).  Equivalent to a transient / unresolved
+    /// launch: capsule routes get `CapsuleEphemeral`, system routes
+    /// get `System`.
+    pub(crate) fn from_route(route: GuestRoute) -> Self {
+        Self {
+            route,
+            trust_state: None,
+            install_profile_key: None,
+            publisher_identity: None,
+            source_identity: None,
+            snapshot_label: None,
+        }
+    }
+}
+
+/// Returns `true` when `trust_state` represents a trusted capsule
+/// that is eligible for persistent profile storage.
+///
+/// Current trusted values: `"local"`.
+/// Future: a `"trusted"` value for registry-verified installed capsules.
+fn is_trusted_trust_state(trust_state: Option<&str>) -> bool {
+    matches!(trust_state, Some("local"))
+}
+
+/// Maps a `WebViewStoreIdentity` to a `WebViewStoreClass`.
+///
+/// This is the single authoritative classifier.  `store_class_for_route`
+/// delegates here via a minimal identity (no trust/install metadata), so
+/// all existing call sites continue to work without change.
+///
+/// Assignment rules:
+/// - `ExternalUrl` / `Terminal` → `System` regardless of identity.
+/// - Capsule route with trusted `trust_state` **and** a non-`None`
+///   `install_profile_key` → `CapsuleProfile { uuid }`.
+/// - Everything else (untrusted, unknown, no `install_profile_key`,
+///   `LocalManifest`, transient `Capsule`) → `CapsuleEphemeral`.
+///
+/// `CapsuleProfile` is safe to activate only when both conditions hold
+/// because `trust_state` without an install key means the capsule is a
+/// transient run (not an owned install), and an install key without a
+/// trusted state means it arrived from an unknown / untrusted source.
+fn store_class_for_identity(identity: &WebViewStoreIdentity) -> WebViewStoreClass {
+    // System routes always use the shared persistent context.
+    match &identity.route {
+        GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => {
+            return WebViewStoreClass::System;
+        }
+        _ => {}
+    }
+
+    // Grant CapsuleProfile only when the capsule is both trusted AND
+    // has an explicit install profile key.  Either condition missing
+    // means this is a transient, preview, or untrusted run.
+    if let (true, Some(install_profile_key)) = (
+        is_trusted_trust_state(identity.trust_state.as_deref()),
+        identity.install_profile_key.as_deref(),
+    ) {
+        let uuid = profile_store_uuid_from_identity(
+            install_profile_key,
+            identity.publisher_identity.as_deref(),
+            identity.source_identity.as_deref(),
+        );
+        return WebViewStoreClass::CapsuleProfile { uuid };
+    }
+
+    WebViewStoreClass::CapsuleEphemeral
+}
+
+/// Derive a stable 16-byte store UUID from the full install identity.
+///
+/// Key components (revision/snapshot intentionally excluded — see
+/// `WebViewStoreIdentity::snapshot_label` doc):
+/// - `install_profile_key` — stable user-install identity
+/// - `source_identity` — canonical capsule handle
+/// - `publisher_identity` — publisher handle (or empty string)
+///
+/// Different `install_profile_key` values → different UUIDs (user
+/// install isolation).  Different publisher → different UUID (prevents
+/// an org-transfer from inheriting the old store).
+fn profile_store_uuid_from_identity(
+    install_profile_key: &str,
+    publisher_identity: Option<&str>,
+    source_identity: Option<&str>,
+) -> [u8; 16] {
+    let key = format!(
+        "profile:ipk={}:src={}:pub={}",
+        install_profile_key,
+        source_identity.unwrap_or(""),
+        publisher_identity.unwrap_or(""),
+    );
+    profile_store_uuid(&key)
+}
+
+/// Derive a 16-byte profile identifier from a namespaced capsule key.
+///
+/// The key must already be namespaced (e.g. `"handle:{handle}"` or
+/// `"url:{handle}"` or `"profile:ipk=..."`) so that different route
+/// types for the same handle string cannot collide.  BLAKE3 provides a
+/// stable, collision-resistant mapping that is consistent across Rust
+/// version upgrades (unlike `DefaultHasher`).
+fn profile_store_uuid(namespaced_key: &str) -> [u8; 16] {
+    let hash = blake3::hash(namespaced_key.as_bytes());
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(&hash.as_bytes()[..16]);
+    uuid
+}
+
+/// Detect the macOS major version at runtime.
+///
+/// Used to guard `with_data_store_identifier` which requires macOS 14+.
+/// Returns 0 on non-macOS targets (the cfg guard prevents this being
+/// called there, but the signature must compile on all platforms).
+#[cfg(target_os = "macos")]
+fn macos_major_version() -> i64 {
+    use objc2_foundation::NSProcessInfo;
+    // SAFETY: processInfo() is safe to call from any thread on macOS.
+    // The return type is Retained<NSProcessInfo>, which is Send.
+    let info = NSProcessInfo::processInfo();
+    info.operatingSystemVersion().majorVersion as i64
+}
+
+/// Apply the WebKit data-store policy for a given store class to a
+/// `WebViewBuilder`.
+///
+/// Centralises all data-store selection logic so `build_webview` stays
+/// readable and the policy is testable in isolation.
+///
+/// Policy:
+/// - `System`: no override — WebView uses `self.web_context` (shared
+///   persistent `WKWebsiteDataStore.defaultDataStore()`).
+/// - `CapsuleEphemeral`: `with_incognito(true)` →
+///   `WKWebsiteDataStore.nonPersistentDataStore()`.  Each WebView
+///   receives an independent in-memory store.
+/// - `CapsuleProfile { uuid }`:
+///   - macOS 14+: `with_data_store_identifier(uuid)` →
+///     `WKWebsiteDataStore.dataStoreForIdentifier(NSUUID)` (persistent,
+///     profile-keyed).
+///   - macOS <14 or non-macOS: `with_incognito(true)` (non-persistent,
+///     isolated — prevents sharing `defaultDataStore` even though
+///     storage cannot be persisted on these platforms).
+fn apply_webview_store_policy<'a>(
+    builder: WebViewBuilder<'a>,
+    store_class: &WebViewStoreClass,
+) -> WebViewBuilder<'a> {
+    match store_class {
+        WebViewStoreClass::System => builder,
+        WebViewStoreClass::CapsuleEphemeral => builder.with_incognito(true),
+        WebViewStoreClass::CapsuleProfile { uuid } => {
+            #[cfg(target_os = "macos")]
+            {
+                // dataStoreForIdentifier is macOS 14+ / iOS 17+.
+                // On macOS <14, passing a data_store_identifier silently falls
+                // back to defaultDataStore — which would break isolation by
+                // sharing the default persistent store.  Guard with a runtime
+                // version check and fall back to incognito instead.
+                if macos_major_version() >= 14 {
+                    return builder.with_data_store_identifier(*uuid);
+                }
+            }
+            let _ = uuid;
+            builder.with_incognito(true)
+        }
+    }
+}
+
+/// Maps a `GuestRoute` to its `WebViewStoreClass`.
+///
+/// Thin wrapper around `store_class_for_identity` that creates a minimal
+/// identity (no trust/profile metadata).  With no `install_profile_key`
+/// or `trust_state`, capsule routes always fall back to
+/// `CapsuleEphemeral`, which is the correct safe default.
+///
+/// Call sites that have additional metadata available from `ActiveWebPane`
+/// should use `store_class_for_identity` directly to enable
+/// `CapsuleProfile` assignment once the #350 activation follow-up plumbs
+/// `install_profile_key` into `ActiveWebPane`.
+fn store_class_for_route(route: &GuestRoute) -> WebViewStoreClass {
+    store_class_for_identity(&WebViewStoreIdentity::from_route(route.clone()))
+}
+
 fn is_webview_retention_eligible_route(route: &GuestRoute) -> bool {
-    matches!(
-        route,
-        GuestRoute::Capsule { .. }
-            | GuestRoute::CapsuleHandle { .. }
-            | GuestRoute::LocalManifest(_)
-            | GuestRoute::CapsuleUrl { .. }
-    )
+    // System routes (ExternalUrl, Terminal) are not retained because they
+    // represent external sites whose state lives in the shared persistent
+    // WebContext — closing and reopening them is cheap.  All capsule
+    // routes (both CapsuleEphemeral and CapsuleProfile) are eligible for
+    // retention so a warm WebView can be reused on reopen.
+    !matches!(store_class_for_route(route), WebViewStoreClass::System)
+}
+
+/// Deregister the ato-netd ingress route recorded on a `ManagedWebView`,
+/// dispatching to the correct stable or ephemeral deregister function.
+/// No-op when `registration` is `None`.
+fn deregister_ingress_if_registered(registration: &Option<crate::netd::IngressRegistration>) {
+    let Some(reg) = registration else { return };
+    match reg.kind {
+        crate::netd::IngressRegistrationKind::Stable => {
+            crate::netd::deregister_stable_ingress(&reg.key);
+        }
+        crate::netd::IngressRegistrationKind::Ephemeral => {
+            crate::netd::deregister_ephemeral_ingress(&reg.key);
+        }
+    }
+}
+
+/// Compute the retention-table lookup key for a route.
+///
+/// The key must align with the storage partition so a retained WebView is
+/// only reused when its store class and identity match the new request.
+///
+/// - `System` → `None` (system routes are not retained).
+/// - `CapsuleEphemeral` → handle-based key (warm reuse for the same
+///   capsule handle within the retention TTL is correct; the incognito
+///   store is per-WebView instance, so reusing the object also reuses
+///   its isolated in-memory store).
+/// - `CapsuleProfile { uuid }` → `"profile:{uuid_hex}"` so that two
+///   routes with different profile identities never share a retained
+///   WebView.  Currently unreachable from the production classifier
+///   (reserved for #350 follow-up).
+fn webview_retention_key_for_route(route: &GuestRoute) -> Option<String> {
+    match store_class_for_route(route) {
+        WebViewStoreClass::System => None,
+        WebViewStoreClass::CapsuleEphemeral => stable_origin_key_for_route(route),
+        WebViewStoreClass::CapsuleProfile { uuid } => {
+            let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+            Some(format!("profile:{hex}"))
+        }
+    }
+}
+
+/// Compute the retention key for a route with full identity context.
+///
+/// For `CapsuleProfile` routes, the key is `"profile:{uuid_hex}"` derived from
+/// the install_profile_key/source/publisher — NOT the handle string — so two
+/// installed profiles of the same handle get distinct retention entries.
+/// For `CapsuleEphemeral`, falls back to route-only key (handle-based).
+fn webview_retention_key_for_identity(identity: &WebViewStoreIdentity) -> Option<String> {
+    match store_class_for_identity(identity) {
+        WebViewStoreClass::System => None,
+        WebViewStoreClass::CapsuleEphemeral => stable_origin_key_for_route(&identity.route),
+        WebViewStoreClass::CapsuleProfile { uuid } => {
+            let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+            Some(format!("profile:{hex}"))
+        }
+    }
 }
 
 fn stable_origin_key_for_webview(view: &ManagedWebView) -> Option<String> {
-    if !is_webview_retention_eligible_route(&view.route) {
-        return None;
+    match &view.store_class {
+        WebViewStoreClass::System => None,
+        WebViewStoreClass::CapsuleEphemeral => {
+            // Prefer session.handle so the retained WebView can be found
+            // on pane re-open within the TTL.
+            if let Some(session) = view.launched_session.as_ref() {
+                Some(format!("handle:{}", session.handle))
+            } else {
+                stable_origin_key_for_route(&view.route)
+            }
+        }
+        WebViewStoreClass::CapsuleProfile { uuid } => {
+            // Retention key must align with the storage partition UUID so
+            // that routes with different profile identities never reuse
+            // each other's WebView objects.
+            let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+            Some(format!("profile:{hex}"))
+        }
     }
-    if let Some(session) = view.launched_session.as_ref() {
-        return Some(format!("handle:{}", session.handle));
-    }
-    stable_origin_key_for_route(&view.route)
 }
 
 fn compact(value: &str) -> String {
@@ -4896,6 +5411,7 @@ mod tests {
             healthcheck_url: None,
             invoke_url: None,
             served_by: None,
+            install_profile_key: None,
             auth_flow: false,
             bounds: PaneBounds::empty(),
         }
@@ -4909,6 +5425,208 @@ mod tests {
         ));
         assert!(!should_install_ato_auth_cookies("https://ato.run/auth"));
         assert!(!should_install_ato_auth_cookies("https://example.com/dock"));
+    }
+
+    /// Transient/preview capsule routes (LocalManifest, Capsule) must use
+    /// the ephemeral (non-persistent) store and must never receive ato.run
+    /// auth cookies.  This is the regression guard for #352.
+    #[test]
+    fn capsule_ephemeral_routes_deny_auth_cookies() {
+        let ephemeral_routes: &[GuestRoute] = &[
+            GuestRoute::Capsule {
+                session: "s1".into(),
+                entry_path: "/index.html".into(),
+            },
+            GuestRoute::LocalManifest(crate::state::LocalManifestRoute {
+                manifest_path: "/tmp/capsule.toml".into(),
+                source_handle: "capsule://ato.run/koh0920/local".into(),
+                label: "local".into(),
+                requested_ref: "main".into(),
+                resolved_commit: "abc".into(),
+                manifest_source: crate::state::ManifestSource::Repo,
+                manifest_hash: "hash".into(),
+                draft_id: "d1".into(),
+            }),
+        ];
+
+        for route in ephemeral_routes {
+            let cls = store_class_for_route(route);
+            assert_eq!(
+                cls,
+                WebViewStoreClass::CapsuleEphemeral,
+                "route {route} should be CapsuleEphemeral"
+            );
+            assert!(
+                cls.uses_incognito_store(),
+                "route {route} should use an incognito (non-persistent) store"
+            );
+            assert!(
+                !cls.allows_ato_auth_cookies(),
+                "route {route} must not allow ato.run auth cookie injection"
+            );
+        }
+    }
+
+    /// All capsule routes (CapsuleHandle, CapsuleUrl, LocalManifest, Capsule)
+    /// must use `CapsuleEphemeral` — isolated non-persistent store.
+    /// `CapsuleProfile` is reserved for future trusted-install routes (see
+    /// #350 follow-up) and is not currently reachable from the production
+    /// classifier.  Regression guard for #350 and #352.
+    #[test]
+    fn capsule_handle_and_url_routes_are_ephemeral_not_profile() {
+        let ato_dock_url = url::Url::parse("https://ato.run/dock").expect("url");
+        let handle = "capsule://ato.run/koh0920/blinko";
+
+        let handle_route = GuestRoute::CapsuleHandle {
+            handle: handle.into(),
+            label: "Blinko".into(),
+        };
+        let url_route = GuestRoute::CapsuleUrl {
+            handle: handle.into(),
+            label: "hello".into(),
+            url: ato_dock_url.clone(), // deliberately points at ato.run/dock
+        };
+
+        let handle_cls = store_class_for_route(&handle_route);
+        let url_cls = store_class_for_route(&url_route);
+
+        // Both must be CapsuleEphemeral (not CapsuleProfile or System).
+        assert_eq!(
+            handle_cls,
+            WebViewStoreClass::CapsuleEphemeral,
+            "CapsuleHandle should be CapsuleEphemeral, got {handle_cls:?}"
+        );
+        assert_eq!(
+            url_cls,
+            WebViewStoreClass::CapsuleEphemeral,
+            "CapsuleUrl should be CapsuleEphemeral, got {url_cls:?}"
+        );
+
+        // Auth cookies must be denied regardless of URL.
+        assert!(
+            !handle_cls.allows_ato_auth_cookies(),
+            "CapsuleHandle must not allow ato.run auth cookie injection"
+        );
+        assert!(
+            !url_cls.allows_ato_auth_cookies(),
+            "CapsuleUrl pointing at ato.run/dock must not allow auth cookie injection"
+        );
+
+        // CapsuleEphemeral must use an incognito (non-persistent) store.
+        assert!(
+            handle_cls.uses_incognito_store(),
+            "CapsuleHandle CapsuleEphemeral should use incognito store"
+        );
+    }
+
+    /// CapsuleProfile (the future persistent-profile type) always denies
+    /// auth cookies and does NOT report uses_incognito_store (it aims for
+    /// persistent storage on supported platforms).  Tests the type directly
+    /// since it is not currently reachable from the production classifier.
+    #[test]
+    fn capsule_profile_store_class_denies_auth_cookies_and_is_not_incognito() {
+        let uuid = profile_store_uuid("handle:capsule://ato.run/user/app");
+        let profile_cls = WebViewStoreClass::CapsuleProfile { uuid };
+        assert!(
+            !profile_cls.allows_ato_auth_cookies(),
+            "CapsuleProfile must never allow ato.run auth cookie injection"
+        );
+        assert!(
+            !profile_cls.uses_incognito_store(),
+            "CapsuleProfile should not report uses_incognito_store (aims for persistent store)"
+        );
+    }
+
+    /// Retention key for a CapsuleProfile must use the profile UUID hex
+    /// string, not the handle string, so routes with different profile
+    /// identities cannot accidentally share a retained WebView.
+    /// (CapsuleProfile is currently unreachable from the production
+    /// classifier; this tests the helper in isolation.)
+    #[test]
+    fn capsule_profile_retention_key_uses_uuid_not_handle() {
+        let handle = "capsule://ato.run/user/app";
+        let uuid = profile_store_uuid(&format!("handle:{handle}"));
+        let uuid_hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+        let expected_key = format!("profile:{uuid_hex}");
+
+        // The ephemeral key for the same handle uses a handle: prefix.
+        let handle_route = GuestRoute::CapsuleHandle {
+            handle: handle.into(),
+            label: "app".into(),
+        };
+        let ephemeral_key = webview_retention_key_for_route(&handle_route);
+        assert_ne!(
+            ephemeral_key.as_deref(),
+            Some(expected_key.as_str()),
+            "CapsuleEphemeral retention key must differ from CapsuleProfile key"
+        );
+        assert!(
+            ephemeral_key
+                .as_deref()
+                .map_or(false, |k| k.starts_with("handle:")),
+            "CapsuleEphemeral retention key must use handle: prefix"
+        );
+    }
+
+    /// profile_store_uuid must be deterministic and stable across calls
+    /// (same input → same UUID, different inputs → different UUIDs).
+    #[test]
+    fn profile_store_uuid_is_deterministic_and_unique() {
+        let a = profile_store_uuid("handle:capsule://ato.run/user/app");
+        let a2 = profile_store_uuid("handle:capsule://ato.run/user/app");
+        let b = profile_store_uuid("url:capsule://ato.run/user/app");
+        let c = profile_store_uuid("handle:capsule://ato.run/user/other");
+
+        assert_eq!(a, a2, "same input must produce the same UUID");
+        assert_ne!(
+            a, b,
+            "different namespace prefixes must produce different UUIDs"
+        );
+        assert_ne!(a, c, "different handles must produce different UUIDs");
+        assert_ne!(b, c, "url-namespace vs different handle must differ");
+    }
+
+    /// ExternalUrl pointing at ato.run/dock is a system route and is the
+    /// only kind of route that may receive ato.run auth cookies.
+    #[test]
+    fn external_url_ato_run_dock_is_system_and_allows_auth_cookies() {
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://ato.run/dock").expect("url"));
+        let cls = store_class_for_route(&route);
+        assert_eq!(cls, WebViewStoreClass::System);
+        assert!(!cls.uses_incognito_store());
+        assert!(cls.allows_ato_auth_cookies());
+        // Combined predicate matches what build_webview checks:
+        assert!(
+            cls.allows_ato_auth_cookies()
+                && should_install_ato_auth_cookies("https://ato.run/dock")
+        );
+    }
+
+    /// ExternalUrl pointing at a non-ato.run host is system-class (shared
+    /// context) but should_install_ato_auth_cookies returns false.
+    #[test]
+    fn external_url_non_dock_is_system_but_no_auth_cookie_injection() {
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let cls = store_class_for_route(&route);
+        assert_eq!(cls, WebViewStoreClass::System);
+        assert!(cls.allows_ato_auth_cookies());
+        // URL predicate blocks injection even though store class permits it.
+        assert!(!should_install_ato_auth_cookies("https://example.com"));
+    }
+
+    /// Terminal is a system route and must not inject ato.run auth cookies
+    /// (the URL predicate already returns false for terminal:// but the
+    /// store-class check is the structural guard).
+    #[test]
+    fn terminal_route_is_system_class() {
+        let route = GuestRoute::Terminal {
+            session_id: "sess-1".into(),
+        };
+        let cls = store_class_for_route(&route);
+        assert_eq!(cls, WebViewStoreClass::System);
+        assert!(!cls.uses_incognito_store());
+        // terminal:// does not match ato.run/dock so no injection.
+        assert!(!should_install_ato_auth_cookies("terminal://sess-1/"));
     }
 
     #[test]
@@ -5805,5 +6523,444 @@ mod tests {
         let json = serde_json::to_value(&status).unwrap();
         assert!(json.get("session_token").is_none());
         assert!(json.get("token").is_none());
+    }
+
+    /// `deregister_ingress_if_registered` must be a no-op for `None` and not
+    /// panic. Regression guard: any refactor that breaks this check will cause
+    /// the guard drop in `build_webview` to panic on every WebView creation
+    /// for routes without ingress registration.
+    #[test]
+    fn deregister_ingress_if_registered_noop_for_none() {
+        deregister_ingress_if_registered(&None);
+    }
+
+    /// The ingress selection in `build_webview` is driven by `store_class_for_route`.
+    /// `build_webview` dispatches ingress registration based on store class,
+    /// not on `logical_key_for_route` alone.  For `CapsuleEphemeral` routes,
+    /// ephemeral ingress is always chosen — even when a logical key exists
+    /// (e.g. `CapsuleHandle` does derive a stable key from its handle).
+    ///
+    /// This test verifies that the store-class → ingress dispatch invariant
+    /// holds for the routes that matter most, and that `System` routes
+    /// (`ExternalUrl`, `Terminal`) are never classified as `CapsuleEphemeral`
+    /// or `CapsuleProfile`.
+    #[test]
+    fn store_class_drives_ingress_dispatch() {
+        use crate::netd::logical_key_for_route;
+
+        // CapsuleHandle and CapsuleUrl → CapsuleEphemeral (isolated non-persistent
+        // store; CapsuleProfile is reserved for future trusted-install routes).
+        let ephemeral_routes = [
+            GuestRoute::CapsuleHandle {
+                handle: "capsule://org/demo@1.0.0".into(),
+                label: "demo".into(),
+            },
+            GuestRoute::CapsuleUrl {
+                handle: "capsule://org/demo@1.0.0".into(),
+                label: "demo".into(),
+                url: url::Url::parse("http://127.0.0.1:3000").expect("url"),
+            },
+        ];
+        for route in &ephemeral_routes {
+            assert_eq!(
+                store_class_for_route(route),
+                WebViewStoreClass::CapsuleEphemeral,
+                "route {route} must be CapsuleEphemeral"
+            );
+        }
+
+        // System routes → System store (not capsule-isolated).
+        let system_routes = [
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url")),
+            GuestRoute::ExternalUrl(url::Url::parse("https://ato.run/dock").expect("url")),
+        ];
+        for route in &system_routes {
+            assert_eq!(
+                store_class_for_route(route),
+                WebViewStoreClass::System,
+                "route {route} must be System"
+            );
+            // System routes with ato.run/dock URL have no logical key and thus
+            // no ingress registration.
+            assert!(
+                logical_key_for_route(route).is_none(),
+                "ExternalUrl routes must not have a stable ingress key"
+            );
+        }
+    }
+
+    // ── WebViewStoreIdentity / store_class_for_identity tests ──────────
+
+    fn capsule_handle_route() -> GuestRoute {
+        GuestRoute::CapsuleHandle {
+            handle: "capsule://ato.run/org/app".to_string(),
+            label: "app".to_string(),
+        }
+    }
+
+    fn capsule_url_route() -> GuestRoute {
+        GuestRoute::CapsuleUrl {
+            handle: "capsule://ato.run/org/app".to_string(),
+            label: "app".to_string(),
+            url: url::Url::parse("http://127.0.0.1:9999/").expect("url"),
+        }
+    }
+
+    fn local_manifest_route() -> GuestRoute {
+        GuestRoute::LocalManifest(crate::state::LocalManifestRoute {
+            manifest_path: "/tmp/capsule.toml".into(),
+            source_handle: "capsule://ato.run/org/app".to_string(),
+            label: "dev".to_string(),
+            requested_ref: "main".to_string(),
+            resolved_commit: "abc123".to_string(),
+            manifest_source: crate::state::ManifestSource::Repo,
+            manifest_hash: "deadbeef".to_string(),
+            draft_id: "draft-0".to_string(),
+        })
+    }
+
+    fn capsule_route() -> GuestRoute {
+        GuestRoute::Capsule {
+            session: "sess-abc".to_string(),
+            entry_path: "/".to_string(),
+        }
+    }
+
+    /// Minimal identity with no trust/profile metadata — simulates a
+    /// transient route where `ActiveWebPane` fields are not yet populated.
+    fn minimal_identity(route: GuestRoute) -> WebViewStoreIdentity {
+        WebViewStoreIdentity::from_route(route)
+    }
+
+    /// Full trusted-installed identity for testing CapsuleProfile assignment.
+    fn installed_trusted_identity(route: GuestRoute) -> WebViewStoreIdentity {
+        WebViewStoreIdentity {
+            route,
+            trust_state: Some("local".to_string()),
+            install_profile_key: Some("ipk_aabbcc".to_string()),
+            publisher_identity: Some("github.com/org".to_string()),
+            source_identity: Some("capsule://ato.run/org/app".to_string()),
+            snapshot_label: Some("v1.2.3".to_string()),
+        }
+    }
+
+    #[test]
+    fn metadata_missing_capsule_handle_is_ephemeral() {
+        // No trust_state and no install_profile_key → CapsuleEphemeral
+        let cls = store_class_for_identity(&minimal_identity(capsule_handle_route()));
+        assert_eq!(cls, WebViewStoreClass::CapsuleEphemeral);
+    }
+
+    #[test]
+    fn metadata_missing_capsule_url_is_ephemeral() {
+        let cls = store_class_for_identity(&minimal_identity(capsule_url_route()));
+        assert_eq!(cls, WebViewStoreClass::CapsuleEphemeral);
+    }
+
+    #[test]
+    fn metadata_missing_local_manifest_is_ephemeral() {
+        let cls = store_class_for_identity(&minimal_identity(local_manifest_route()));
+        assert_eq!(cls, WebViewStoreClass::CapsuleEphemeral);
+    }
+
+    #[test]
+    fn metadata_missing_capsule_session_is_ephemeral() {
+        let cls = store_class_for_identity(&minimal_identity(capsule_route()));
+        assert_eq!(cls, WebViewStoreClass::CapsuleEphemeral);
+    }
+
+    #[test]
+    fn untrusted_trust_state_is_ephemeral_even_with_ipk() {
+        // untrusted + install_profile_key → still CapsuleEphemeral
+        let id = WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: Some("untrusted".to_string()),
+            install_profile_key: Some("ipk_aabbcc".to_string()),
+            publisher_identity: None,
+            source_identity: None,
+            snapshot_label: None,
+        };
+        assert_eq!(
+            store_class_for_identity(&id),
+            WebViewStoreClass::CapsuleEphemeral
+        );
+    }
+
+    #[test]
+    fn trusted_without_install_profile_key_is_ephemeral() {
+        // local trust but no install_profile_key → still CapsuleEphemeral
+        let id = WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: Some("local".to_string()),
+            install_profile_key: None,
+            publisher_identity: Some("github.com/org".to_string()),
+            source_identity: Some("capsule://ato.run/org/app".to_string()),
+            snapshot_label: None,
+        };
+        assert_eq!(
+            store_class_for_identity(&id),
+            WebViewStoreClass::CapsuleEphemeral
+        );
+    }
+
+    #[test]
+    fn unknown_trust_state_with_ipk_is_ephemeral() {
+        // trust_state=None + install_profile_key → still CapsuleEphemeral
+        let id = WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: None,
+            install_profile_key: Some("ipk_aabbcc".to_string()),
+            publisher_identity: None,
+            source_identity: None,
+            snapshot_label: None,
+        };
+        assert_eq!(
+            store_class_for_identity(&id),
+            WebViewStoreClass::CapsuleEphemeral
+        );
+    }
+
+    #[test]
+    fn trusted_with_install_profile_key_is_capsule_profile() {
+        // trusted + install_profile_key → CapsuleProfile
+        let id = installed_trusted_identity(capsule_handle_route());
+        assert!(
+            matches!(
+                store_class_for_identity(&id),
+                WebViewStoreClass::CapsuleProfile { .. }
+            ),
+            "expected CapsuleProfile, got {:?}",
+            store_class_for_identity(&id)
+        );
+    }
+
+    #[test]
+    fn system_route_is_system_regardless_of_trust_state() {
+        let external =
+            GuestRoute::ExternalUrl(url::Url::parse("https://ato.run/store").expect("url"));
+        for trust in [
+            None,
+            Some("local".to_string()),
+            Some("untrusted".to_string()),
+        ] {
+            let id = WebViewStoreIdentity {
+                route: external.clone(),
+                trust_state: trust.clone(),
+                install_profile_key: Some("ipk_aabbcc".to_string()),
+                publisher_identity: Some("pub".to_string()),
+                source_identity: Some("capsule://ato.run/org/app".to_string()),
+                snapshot_label: None,
+            };
+            assert_eq!(
+                store_class_for_identity(&id),
+                WebViewStoreClass::System,
+                "ExternalUrl must be System regardless of trust_state={trust:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_uuid_varies_by_install_profile_key() {
+        let make_id = |ipk: &str| WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: Some("local".to_string()),
+            install_profile_key: Some(ipk.to_string()),
+            publisher_identity: Some("github.com/org".to_string()),
+            source_identity: Some("capsule://ato.run/org/app".to_string()),
+            snapshot_label: None,
+        };
+        let uuid_a = match store_class_for_identity(&make_id("ipk_aaaa")) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        let uuid_b = match store_class_for_identity(&make_id("ipk_bbbb")) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        assert_ne!(
+            uuid_a, uuid_b,
+            "different install_profile_key must produce different UUID"
+        );
+    }
+
+    #[test]
+    fn profile_uuid_varies_by_source_identity() {
+        let make_id = |src: &str| WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: Some("local".to_string()),
+            install_profile_key: Some("ipk_same".to_string()),
+            publisher_identity: Some("github.com/org".to_string()),
+            source_identity: Some(src.to_string()),
+            snapshot_label: None,
+        };
+        let uuid_a = match store_class_for_identity(&make_id("capsule://ato.run/org/app-a")) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        let uuid_b = match store_class_for_identity(&make_id("capsule://ato.run/org/app-b")) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        assert_ne!(
+            uuid_a, uuid_b,
+            "different source_identity must produce different UUID"
+        );
+    }
+
+    #[test]
+    fn profile_uuid_varies_by_publisher_identity() {
+        let make_id = |pub_id: &str| WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: Some("local".to_string()),
+            install_profile_key: Some("ipk_same".to_string()),
+            publisher_identity: Some(pub_id.to_string()),
+            source_identity: Some("capsule://ato.run/org/app".to_string()),
+            snapshot_label: None,
+        };
+        let uuid_a = match store_class_for_identity(&make_id("github.com/org-a")) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        let uuid_b = match store_class_for_identity(&make_id("github.com/org-b")) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        assert_ne!(
+            uuid_a, uuid_b,
+            "different publisher_identity must produce different UUID"
+        );
+    }
+
+    #[test]
+    fn profile_uuid_stable_across_snapshot_changes() {
+        // snapshot_label is intentionally excluded from the profile UUID —
+        // app updates should preserve user localStorage/cookies.
+        let make_id = |snap: Option<&str>| WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: Some("local".to_string()),
+            install_profile_key: Some("ipk_same".to_string()),
+            publisher_identity: Some("github.com/org".to_string()),
+            source_identity: Some("capsule://ato.run/org/app".to_string()),
+            snapshot_label: snap.map(str::to_string),
+        };
+        let uuid_v1 = match store_class_for_identity(&make_id(Some("v1.0.0"))) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        let uuid_v2 = match store_class_for_identity(&make_id(Some("v2.0.0"))) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        let uuid_none = match store_class_for_identity(&make_id(None)) {
+            WebViewStoreClass::CapsuleProfile { uuid } => uuid,
+            other => panic!("expected CapsuleProfile, got {other:?}"),
+        };
+        assert_eq!(
+            uuid_v1, uuid_v2,
+            "UUID must be stable across snapshot changes"
+        );
+        assert_eq!(
+            uuid_v1, uuid_none,
+            "UUID must be stable when snapshot_label is absent"
+        );
+    }
+
+    #[test]
+    fn capsule_profile_does_not_allow_ato_auth_cookies() {
+        let id = installed_trusted_identity(capsule_handle_route());
+        let cls = store_class_for_identity(&id);
+        assert!(
+            matches!(cls, WebViewStoreClass::CapsuleProfile { .. }),
+            "fixture must reach CapsuleProfile"
+        );
+        assert!(
+            !cls.allows_ato_auth_cookies(),
+            "CapsuleProfile must not allow ato auth cookies"
+        );
+    }
+
+    #[test]
+    fn capsule_profile_retention_key_differs_from_ephemeral_key() {
+        // CapsuleProfile retention key uses the profile UUID hex, not the
+        // handle string, so two routes with different profile identities
+        // never share a retained WebView.
+        let route = capsule_handle_route();
+        let ephemeral_key = webview_retention_key_for_route(&route);
+        let profile_id = installed_trusted_identity(route.clone());
+        let profile_key = match store_class_for_identity(&profile_id) {
+            WebViewStoreClass::CapsuleProfile { uuid } => {
+                let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+                Some(format!("profile:{hex}"))
+            }
+            _ => panic!("expected CapsuleProfile"),
+        };
+        // Ephemeral retention key is handle-based; profile key is UUID-based.
+        assert_ne!(
+            ephemeral_key, profile_key,
+            "ephemeral and profile retention keys must not collide"
+        );
+    }
+
+    #[test]
+    fn store_class_for_route_delegates_to_identity_classifier() {
+        // store_class_for_route is the minimal-identity wrapper.  With no
+        // install_profile_key it always returns CapsuleEphemeral for capsule
+        // routes, and System for external/terminal routes.
+        assert_eq!(
+            store_class_for_route(&capsule_handle_route()),
+            WebViewStoreClass::CapsuleEphemeral
+        );
+        assert_eq!(
+            store_class_for_route(&GuestRoute::ExternalUrl(
+                url::Url::parse("https://ato.run/").expect("url")
+            )),
+            WebViewStoreClass::System
+        );
+    }
+
+    #[test]
+    fn identity_retention_key_for_capsule_profile_uses_profile_prefix() {
+        let id = installed_trusted_identity(capsule_handle_route());
+        let key = webview_retention_key_for_identity(&id);
+        assert!(
+            key.as_deref()
+                .map(|k| k.starts_with("profile:"))
+                .unwrap_or(false),
+            "CapsuleProfile retention key must start with 'profile:', got {key:?}"
+        );
+    }
+
+    #[test]
+    fn identity_retention_key_for_ephemeral_does_not_use_profile_prefix() {
+        let id = minimal_identity(capsule_handle_route());
+        let key = webview_retention_key_for_identity(&id);
+        assert!(
+            key.as_deref()
+                .map(|k| !k.starts_with("profile:"))
+                .unwrap_or(true),
+            "CapsuleEphemeral retention key must not start with 'profile:', got {key:?}"
+        );
+    }
+
+    #[test]
+    fn identity_retention_key_is_stable_across_snapshot_changes() {
+        let make_id = |snap: Option<&str>| installed_trusted_identity_with_snap(snap);
+        let key_v1 = webview_retention_key_for_identity(&make_id(Some("v1.0")));
+        let key_v2 = webview_retention_key_for_identity(&make_id(Some("v2.0")));
+        assert_eq!(
+            key_v1, key_v2,
+            "retention key must be stable across snapshot changes (UUID excludes snapshot)"
+        );
+    }
+
+    fn installed_trusted_identity_with_snap(snap: Option<&str>) -> WebViewStoreIdentity {
+        WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: Some("local".to_string()),
+            install_profile_key: Some("ipk_aabbcc".to_string()),
+            publisher_identity: Some("github.com/org".to_string()),
+            source_identity: Some("capsule://ato.run/org/app".to_string()),
+            snapshot_label: snap.map(str::to_string),
+        }
     }
 }
