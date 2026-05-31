@@ -80,6 +80,7 @@ pub fn dispatch(
             let route = GuestRoute::CapsuleHandle {
                 handle: handle.clone(),
                 label,
+                community_toml_id: None,
             };
             tracing::info!(handle = %handle, "ato_store: opening/installing/running capsule from catalog");
             if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)

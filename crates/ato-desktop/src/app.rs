@@ -184,7 +184,10 @@ fn classify_closed_window_kind(cx: &App, window_id: u64) -> &'static str {
 
     // Check singleton chrome windows.
     if let Some(c) = cx.try_global::<crate::window::ControlBarController>() {
-        if c.handle.map(|h| h.window_id().as_u64() == window_id).unwrap_or(false) {
+        if c.handle
+            .map(|h| h.window_id().as_u64() == window_id)
+            .unwrap_or(false)
+        {
             return "control-bar";
         }
     }
@@ -939,6 +942,7 @@ pub fn run(skip_onboarding: bool) {
             let route = crate::state::GuestRoute::CapsuleHandle {
                 handle: "github.com/Koh0920/WasedaP2P".to_string(),
                 label: "WasedaP2P".to_string(),
+                community_toml_id: None,
             };
             tracing::info!("calling open_consent_window_for_route");
             match crate::window::launch_window::open_consent_window_for_route(cx, route) {
@@ -1044,7 +1048,20 @@ pub fn run(skip_onboarding: bool) {
             }
 
             if let Some(rest) = raw.strip_prefix("capsule://") {
-                let handle = rest.trim_end_matches('/').to_string();
+                // Extract optional ?ctoml=<id> query parameter.
+                let (rest_path, community_toml_id) = if let Some(q_pos) = rest.find('?') {
+                    let path = &rest[..q_pos];
+                    let query = &rest[q_pos + 1..];
+                    let cid = query
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("ctoml="))
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string);
+                    (path, cid)
+                } else {
+                    (rest, None)
+                };
+                let handle = rest_path.trim_end_matches('/').to_string();
                 if handle.is_empty() {
                     tracing::warn!("capsule:// with empty handle — ignored");
                     return;
@@ -1064,8 +1081,11 @@ pub fn run(skip_onboarding: bool) {
                         // Go through the consent wizard — E103/E302 modals
                         // will appear in the Desktop shell before the capsule
                         // is launched and opened in the OS browser.
-                        let route =
-                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        let route = crate::state::GuestRoute::CapsuleHandle {
+                            handle,
+                            label,
+                            community_toml_id,
+                        };
                         if let Err(err) =
                             crate::window::launch_window::open_consent_window_for_route_with_client(
                                 cx,
@@ -1084,8 +1104,11 @@ pub fn run(skip_onboarding: bool) {
                             "capsule_open_mode=webviewer: not yet implemented, falling back to window"
                         );
                         // fall through to window behaviour
-                        let route =
-                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        let route = crate::state::GuestRoute::CapsuleHandle {
+                            handle,
+                            label,
+                            community_toml_id,
+                        };
                         if let Err(err) =
                             crate::window::launch_window::open_consent_window_for_route(
                                 cx, route,
@@ -1098,8 +1121,11 @@ pub fn run(skip_onboarding: bool) {
                         }
                     }
                     crate::config::CapsuleOpenMode::Window => {
-                        let route =
-                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        let route = crate::state::GuestRoute::CapsuleHandle {
+                            handle,
+                            label,
+                            community_toml_id,
+                        };
                         // Gate every capsule launch on a pre-flight consent
                         // wizard. On Approve the broker spawns the real
                         // AppWindow + boot wizard; on Cancel nothing happens.
