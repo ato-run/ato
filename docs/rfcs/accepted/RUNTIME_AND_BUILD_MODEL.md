@@ -43,15 +43,18 @@ related: []
 
 `[targets.<label>].build` フィールドで宣言された shell コマンドは、`ato run` の **build フェーズ**（primary runtime のプロビジョニング完了後、`run` コマンド起動前）に実行される。これは ato-cli 自身が直接実行する。
 
-**ライフサイクル順序**（`ato run` 時）:
+**ライフサイクル順序**（`ato run` の build フェーズ内）:
 
 ```
-1. primary runtime を解決・プロビジョニング（例: uv venv --python 3.11）
-2. runtime_tools で宣言された追加 toolchain を解決・プロビジョニング（例: Node 20）
-3. 依存関係をインストール（例: uv pip install -r requirements.txt）
-4. [targets.<label>].build コマンドを実行（例: npm install && npm run build）
-5. [targets.<label>].run コマンドを起動
+1. primary runtime を解決・準備する
+2. primary runtime の依存関係を materialize する
+3. runtime_tools で宣言された lifecycle toolchains を build 実行前に materialize する
+4. [targets.<label>].build コマンドを実行する
+5. [targets.<label>].run コマンドを起動する
 ```
+
+重要: **`runtime_tools` は build コマンドよりも前に PATH へ追加される**。
+uv pip install と runtime_tools materialization の厳密な順序は実装依存であり、ここでは規定しない。
 
 **混在 toolchain の典型例（Python + Node）**:
 
