@@ -140,6 +140,9 @@ pub(crate) struct PublishCommandArgs {
     pub(crate) fix: bool,
     pub(crate) no_tui: bool,
     pub(crate) json: bool,
+    pub(crate) toml: Option<PathBuf>,
+    pub(crate) source: Option<String>,
+    pub(crate) yes: bool,
 }
 
 pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as PublishPhaseBoundary;
@@ -914,7 +917,17 @@ pub(crate) fn execute_publish_command(
     json: bool,
     reporter: Reporter,
 ) -> Result<()> {
-    if ci {
+    if let Some(ref toml_path) = args.toml {
+        let source = args
+            .source
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--source is required when --toml is used"))?;
+        eprintln!("Publishing capsule.toml as community capsule record...");
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(crate::community::submit::execute_submit(
+            source, toml_path, dry_run, args.yes, json,
+        ))
+    } else if ci {
         execute_publish_ci_command(json, force_large_payload, paid_large_payload, reporter)
     } else if dry_run {
         execute_publish_dry_run_command(args, reporter)
@@ -1407,6 +1420,9 @@ mod tests {
             fix: false,
             no_tui: true,
             json: true,
+            toml: None,
+            source: None,
+            yes: false,
         })
         .expect("authoritative publish source should resolve without manifest write")
         .expect("source authoritative input");
