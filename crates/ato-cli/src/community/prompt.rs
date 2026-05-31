@@ -98,6 +98,13 @@ pub(crate) async fn try_community_submit_after_run(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTEX.lock().unwrap()
+    }
 
     fn make_context() -> CommunitySubmitPromptContext {
         CommunitySubmitPromptContext {
@@ -109,6 +116,7 @@ mod tests {
 
     #[test]
     fn disable_env_var_true_returns_true() {
+        let _lock = env_lock();
         std::env::set_var(ENV_DISABLE_PROMPT, "1");
         assert!(community_submit_prompt_disabled());
         std::env::remove_var(ENV_DISABLE_PROMPT);
@@ -116,6 +124,7 @@ mod tests {
 
     #[test]
     fn disable_env_var_true_string_returns_true() {
+        let _lock = env_lock();
         std::env::set_var(ENV_DISABLE_PROMPT, "true");
         assert!(community_submit_prompt_disabled());
         std::env::remove_var(ENV_DISABLE_PROMPT);
@@ -123,12 +132,14 @@ mod tests {
 
     #[test]
     fn disable_env_var_absent_returns_false() {
+        let _lock = env_lock();
         std::env::remove_var(ENV_DISABLE_PROMPT);
         assert!(!community_submit_prompt_disabled());
     }
 
     #[test]
     fn prompt_suppressed_when_disabled_env_set() {
+        let _lock = env_lock();
         std::env::set_var(ENV_DISABLE_PROMPT, "1");
         let ctx = make_context();
         assert!(!should_prompt_for_community_submit(
@@ -139,6 +150,7 @@ mod tests {
 
     #[test]
     fn prompt_suppressed_in_json_mode() {
+        let _lock = env_lock();
         std::env::remove_var(ENV_DISABLE_PROMPT);
         let ctx = make_context();
         assert!(!should_prompt_for_community_submit(
