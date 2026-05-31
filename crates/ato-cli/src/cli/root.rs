@@ -991,6 +991,19 @@ pub(crate) enum Commands {
         no_tui: bool,
         #[arg(long)]
         json: bool,
+        /// Publish a capsule.toml as a community capsule record
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = ["artifact", "ci", "prepare", "build", "deploy", "finalize_local"]
+        )]
+        toml: Option<PathBuf>,
+        /// Source locator for the capsule.toml (e.g. github.com/owner/repo)
+        #[arg(long, value_name = "SOURCE", requires = "toml")]
+        source: Option<String>,
+        /// Skip interactive confirmation when using --toml
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
     },
 
     #[command(hide = true)]
