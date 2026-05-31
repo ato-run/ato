@@ -1187,6 +1187,9 @@ fn test_publish_args() -> publish_command_dispatch::PublishCommandArgs {
         fix: false,
         no_tui: false,
         json: true,
+        toml: None,
+        source: None,
+        yes: false,
     }
 }
 
