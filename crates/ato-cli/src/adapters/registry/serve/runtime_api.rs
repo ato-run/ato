@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use super::*;
 
+use ato_session_core::{read_session_records, session_root, StoredSessionInfo};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
     derive_install_profile_key, InstallInstanceStore,
@@ -33,6 +36,14 @@ struct RuntimeInstallProfileResponse {
     port_policy: String,
     concurrency_policy: String,
     isolation: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct RuntimeSessionResponse {
+    #[serde(flatten)]
+    pub(super) session: PlacedSessionSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) local_runtime_url: Option<String>,
 }
 
 pub(super) async fn handle_runtime_providers(
@@ -93,9 +104,13 @@ pub(super) async fn handle_runtime_sessions(
     };
     processes.sort_by_key(|process| std::cmp::Reverse(process.start_time));
 
+    let stored_by_id = stored_sessions_by_id();
     let rows = processes
         .into_iter()
-        .map(runtime_session_summary)
+        .map(|process| {
+            let stored = stored_by_id.get(&process.id);
+            runtime_session_summary(process, stored)
+        })
         .collect::<Vec<_>>();
     (StatusCode::OK, Json(rows)).into_response()
 }
@@ -108,7 +123,7 @@ pub(super) async fn handle_runtime_install_profiles(
         return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
     }
 
-    let instances_root = ato_path_or_workspace_tmp("instances");
+    let instances_root = install_profile_store_root();
     let store = match InstallInstanceStore::new(&instances_root) {
         Ok(store) => store,
         Err(err) => {
@@ -204,19 +219,87 @@ pub(super) async fn handle_runtime_session_logs(
         .into_response()
 }
 
-pub(super) fn runtime_session_summary(process: ProcessInfo) -> PlacedSessionSummary {
-    PlacedSessionSummary {
-        session_id: process.id,
-        status: process_status_label(process.status).to_string(),
-        placement: local_desktop_placement_identity(),
-        execution_id: None,
-        user_visible_url: process
-            .requested_port
-            .map(|port| format!("http://127.0.0.1:{port}")),
-        requested_by_client: Some("web_console".to_string()),
-        runtime_owner: Some("desktop_be".to_string()),
-        install_profile_key: None,
-        launch_profile_id: process.target_label,
+pub(super) fn runtime_session_summary(
+    process: ProcessInfo,
+    stored: Option<&StoredSessionInfo>,
+) -> RuntimeSessionResponse {
+    let local_runtime_url = process
+        .requested_port
+        .map(|port| format!("http://127.0.0.1:{port}"));
+    RuntimeSessionResponse {
+        session: PlacedSessionSummary {
+            session_id: process.id,
+            status: process_status_label(process.status).to_string(),
+            placement: placement_identity_for(stored),
+            execution_id: stored.and_then(|record| record.execution_id.clone()),
+            user_visible_url: stored.and_then(|record| record.user_visible_url.clone()),
+            requested_by_client: stored
+                .and_then(|record| record.requested_by_client.clone())
+                .or_else(|| Some("unknown".to_string())),
+            runtime_owner: stored
+                .and_then(|record| record.runtime_owner.clone())
+                .or_else(|| Some("local_runtime".to_string())),
+            install_profile_key: stored.and_then(|record| record.install_profile_key.clone()),
+            launch_profile_id: stored
+                .and_then(|record| record.install_profile_id.clone())
+                .or(process.target_label),
+        },
+        local_runtime_url,
+    }
+}
+
+pub(super) fn install_profile_store_root() -> PathBuf {
+    // `ato launch` and the install lifecycle store use the canonical ATO_HOME
+    // root. The Runtime Control read API intentionally mirrors that source of
+    // truth instead of the local registry's package data_dir.
+    ato_path_or_workspace_tmp("instances")
+}
+
+fn stored_sessions_by_id() -> BTreeMap<String, StoredSessionInfo> {
+    let Ok(root) = session_root() else {
+        return BTreeMap::new();
+    };
+    let Ok(records) = read_session_records(&root) else {
+        return BTreeMap::new();
+    };
+    records
+        .into_iter()
+        .map(|record| (record.session_id.clone(), record))
+        .collect()
+}
+
+fn placement_identity_for(stored: Option<&StoredSessionInfo>) -> PlacementIdentity {
+    let Some(record) = stored else {
+        return local_desktop_placement_identity();
+    };
+    let placement_provider = record
+        .placement_provider
+        .as_deref()
+        .and_then(placement_provider_kind_from_str)
+        .unwrap_or(PlacementProviderKind::Desktop);
+    PlacementIdentity {
+        placement_provider,
+        placement_provider_id: PlacementProviderId::new(
+            record
+                .placement_provider_id
+                .clone()
+                .unwrap_or_else(|| LOCAL_DESKTOP_PROVIDER_ID.to_string()),
+        ),
+        placement_id: record
+            .placement_id
+            .clone()
+            .unwrap_or_else(|| LOCAL_DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: record.placement_fingerprint.clone(),
+        placement_facets: record.placement_facets.clone(),
+    }
+}
+
+fn placement_provider_kind_from_str(value: &str) -> Option<PlacementProviderKind> {
+    match value {
+        "desktop" => Some(PlacementProviderKind::Desktop),
+        "managed" => Some(PlacementProviderKind::Managed),
+        "external" => Some(PlacementProviderKind::External),
+        _ => None,
     }
 }
 
