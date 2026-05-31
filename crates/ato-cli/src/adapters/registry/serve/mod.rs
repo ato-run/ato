@@ -50,6 +50,7 @@ mod local_service;
 mod metadata_api;
 mod registry_storage;
 mod routes;
+mod runtime_api;
 mod runtime_support;
 #[cfg(feature = "webui")]
 mod ui;
@@ -62,6 +63,7 @@ use local_service::*;
 use metadata_api::*;
 use registry_storage::*;
 use routes::*;
+use runtime_api::*;
 use runtime_support::*;
 #[cfg(feature = "webui")]
 use ui::*;
