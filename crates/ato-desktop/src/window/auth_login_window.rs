@@ -27,6 +27,7 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::orchestrator::resolve_ato_binary;
+use crate::proc_util::CommandNoWindowExt;
 
 // ── Global slot ───────────────────────────────────────────────────────────────
 
@@ -109,6 +110,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
 
     // ── Launch the CLI subprocess ─────────────────────────────────────────────
     let mut child: Child = Command::new(&ato_bin)
+        .no_console_window()
         .arg("login")
         .arg("--desktop-webview")
         .stdout(Stdio::piped())
@@ -169,6 +171,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
     };
 
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),

@@ -33,6 +33,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::orchestrator::resolve_ato_binary;
+use crate::proc_util::CommandNoWindowExt;
 use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
@@ -71,6 +72,7 @@ fn fetch_whoami_identity() -> Value {
     };
 
     let output = match Command::new(&bin)
+        .no_console_window()
         .arg("whoami")
         .stdin(std::process::Stdio::null())
         // 2-second cap so a flaky network call from whoami (it may
@@ -192,6 +194,7 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
 
     let queue = system_ipc::new_queue();
     let handle = cx.open_window(options, |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),

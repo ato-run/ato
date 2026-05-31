@@ -357,9 +357,11 @@ fn push_secrets_error(cx: &mut App, request_id: Option<&str>, message: &str) {
 /// On macOS/Windows this checks the Podman machine state.
 /// On Linux, `podman machine` is not needed — native Podman is reported as ready.
 fn collect_podman_diagnostics() -> serde_json::Value {
+    use crate::proc_util::CommandNoWindowExt;
     use std::process::Command;
 
     let binary_found = Command::new("podman")
+        .no_console_window()
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -384,6 +386,7 @@ fn collect_podman_diagnostics() -> serde_json::Value {
 
     // macOS / Windows — inspect the machine list.
     let list_result = Command::new("podman")
+        .no_console_window()
         .args(["machine", "list", "--format", "json"])
         .output();
 

@@ -110,6 +110,7 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let init_script = compose_init_script(locale, Some(""));
 
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
