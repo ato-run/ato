@@ -15,6 +15,7 @@ pub(crate) mod app_control;
 pub(crate) mod application;
 pub(crate) mod cli;
 pub(crate) mod common;
+pub(crate) mod community;
 pub(crate) mod logging;
 pub(crate) mod utils;
 
