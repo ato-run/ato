@@ -75,6 +75,20 @@ static SAMPLE_RECIPE_CATALOG: &[SampleRecipeBinding] = &[
         github: Some(("langgenius", "dify")),
         manifest_content: include_str!("../../../../samples/recipes/dify/capsule.toml"),
     },
+    SampleRecipeBinding {
+        slug: "pgweb",
+        display_name: "pgweb",
+        aliases: &["pgweb"],
+        github: Some(("sosedoff", "pgweb")),
+        manifest_content: include_str!("../../../../samples/recipes/pgweb/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "adminer",
+        display_name: "Adminer",
+        aliases: &["adminer"],
+        github: Some(("vrana", "adminer")),
+        manifest_content: include_str!("../../../../samples/recipes/adminer/capsule.toml"),
+    },
 ];
 
 fn materialize_recipe(binding: &SampleRecipeBinding) -> Result<PathBuf> {
