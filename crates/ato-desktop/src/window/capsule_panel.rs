@@ -137,6 +137,7 @@ pub fn open_capsule_panel_window(cx: &mut App) -> Result<()> {
     };
 
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let shell = cx.new(|_cx| CapsulePanelWindow {
             model: model.clone(),
         });
@@ -223,6 +224,7 @@ fn open_capsule_settings_window_with_model(
     options: WindowOptions,
 ) -> Result<()> {
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let shell = cx.new(|_cx| CapsuleSettingsWindow {
             model: model.clone(),
             scroll_handle: ScrollHandle::default(),

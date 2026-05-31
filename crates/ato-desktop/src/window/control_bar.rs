@@ -1362,6 +1362,7 @@ pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
         .unwrap_or_else(|_| GuestRoute::CapsuleHandle {
             handle: "wasedap2p".to_string(),
             label: "WasedaP2P".to_string(),
+            community_toml_id: None,
         });
     open_control_bar_inner(cx, bounds, initial_route)
 }
@@ -1432,6 +1433,9 @@ fn open_control_bar_inner(
                 tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
             }
         }
+        // Pin the bar to the always-on-top band so it stays visible in front
+        // of the content windows it controls.
+        super::windows::set_window_topmost(cx, *handle);
     }
     Ok(*handle)
 }

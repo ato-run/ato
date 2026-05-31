@@ -212,7 +212,7 @@ pub fn dispatch(
                         // next time the start page opens, this capsule
                         // appears in the "recent capsules" row.
                         let history_item = match &route {
-                            GuestRoute::CapsuleHandle { handle, label }
+                            GuestRoute::CapsuleHandle { handle, label, .. }
                             | GuestRoute::CapsuleUrl { handle, label, .. } => {
                                 Some((handle.as_str(), label.as_str()))
                             }

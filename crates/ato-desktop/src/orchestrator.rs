@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+
+use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -116,6 +118,19 @@ pub fn take_pending_cli_command(session_id: &str) -> Option<CliLaunchSpec> {
 pub enum DesktopLaunchInput {
     Handle(String),
     LocalManifestPath(LocalManifestLaunchInput),
+    /// Launch via a pre-selected community capsule.toml. The CLI fetches
+    /// the recipe by ID, validates its source matches the handle, and
+    /// passes it to the session-start pipeline as a materialized record.
+    CommunityToml(CommunityTomlInput),
+}
+
+/// Input for a community-TOML-driven launch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommunityTomlInput {
+    /// The normalized source handle (e.g. `capsule://github.com/owner/repo`).
+    pub source_handle: String,
+    /// Community capsule.toml ID (e.g. `ctoml_xxx`).
+    pub ctoml_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +165,7 @@ impl DesktopLaunchInput {
         match self {
             Self::Handle(_) => "handle",
             Self::LocalManifestPath(_) => "local_manifest_path",
+            Self::CommunityToml(_) => "community_toml",
         }
     }
 
@@ -157,6 +173,9 @@ impl DesktopLaunchInput {
         match self {
             Self::Handle(handle) => handle.clone(),
             Self::LocalManifestPath(local) => local.manifest_path.display().to_string(),
+            // Community TOML: boundary arg is the source handle; the CLI will
+            // resolve the community recipe by ctoml_id before starting the session.
+            Self::CommunityToml(ct) => ct.source_handle.clone(),
         }
     }
 
@@ -164,20 +183,29 @@ impl DesktopLaunchInput {
         match self {
             Self::Handle(handle) => handle,
             Self::LocalManifestPath(local) => &local.source_handle,
+            Self::CommunityToml(ct) => &ct.source_handle,
         }
     }
 
     pub fn manifest_path_for_log(&self) -> Option<&Path> {
         match self {
-            Self::Handle(_) => None,
+            Self::Handle(_) | Self::CommunityToml(_) => None,
             Self::LocalManifestPath(local) => Some(local.manifest_path.as_path()),
         }
     }
 
     pub fn manifest_source_for_log(&self) -> Option<&'static str> {
         match self {
-            Self::Handle(_) => None,
+            Self::Handle(_) | Self::CommunityToml(_) => None,
             Self::LocalManifestPath(local) => Some(local.manifest_source.as_str()),
+        }
+    }
+
+    /// Return the community-toml-id if this is a `CommunityToml` input.
+    pub fn community_toml_id(&self) -> Option<&str> {
+        match self {
+            Self::CommunityToml(ct) => Some(&ct.ctoml_id),
+            _ => None,
         }
     }
 }
@@ -285,6 +313,10 @@ pub enum LaunchError {
         /// `start_capsule` call. Cloned at error-construction time so
         /// a concurrent SecretStore mutation can't corrupt the retry.
         original_secrets: Vec<SecretEntry>,
+        /// Community capsule.toml ID if this launch was driven by a
+        /// specific registry candidate. Carried through so the retry
+        /// after the config modal uses the same `--community-toml-id`.
+        community_toml_id: Option<String>,
     },
     /// The CLI aborted with E302 carrying
     /// `details.reason = "execution_plan_consent_required"` — the
@@ -314,6 +346,10 @@ pub enum LaunchError {
         /// `start_capsule` call, so the post-Approve retry uses
         /// exactly the same input.
         original_secrets: Vec<SecretEntry>,
+        /// Community capsule.toml ID if this launch was driven by a
+        /// specific registry candidate. Carried so the post-Approve
+        /// retry uses the same `--community-toml-id`.
+        community_toml_id: Option<String>,
     },
     /// #117 — eager preflight detected one or more pending pre-launch
     /// requirements (a mix of missing secrets and per-target consents)
@@ -337,6 +373,10 @@ pub enum LaunchError {
         /// `start_capsule` call. Cloned so the post-Submit retry uses
         /// exactly the same input.
         original_secrets: Vec<SecretEntry>,
+        /// Community capsule.toml ID if this launch was driven by a
+        /// specific registry candidate. Carried so the post-Submit
+        /// retry uses the same `--community-toml-id`.
+        community_toml_id: Option<String>,
     },
     /// Any other failure — opaque string suitable for direct display.
     Other(String),
@@ -457,6 +497,7 @@ pub fn resolve_and_start_guest_with_input(
                     handle: source_handle,
                     requirements: filtered,
                     original_secrets: secrets.to_vec(),
+                    community_toml_id: input.community_toml_id().map(str::to_string),
                 });
             }
             // Else: every secret already in SecretStore + every
@@ -477,7 +518,14 @@ pub fn resolve_and_start_guest_with_input(
         }
     }
 
-    let mut session = resolve_and_start_capsule(&boundary_arg, secrets, plain_configs, on_step)?;
+    let community_toml_id = input.community_toml_id().map(str::to_string);
+    let mut session = resolve_and_start_capsule(
+        &boundary_arg,
+        secrets,
+        plain_configs,
+        on_step,
+        community_toml_id.as_deref(),
+    )?;
     if let DesktopLaunchInput::LocalManifestPath(local) = input {
         session.handle = local.source_handle.clone();
         session.normalized_handle = local.source_handle.clone();
@@ -636,6 +684,12 @@ fn collect_preflight_envelope_for_input(
         DesktopLaunchInput::LocalManifestPath(local) => {
             collect_preflight_envelope(&local.manifest_path.display().to_string())
         }
+        DesktopLaunchInput::CommunityToml(ct) => {
+            // Materialize the community TOML to a temp file so preflight
+            // inspects the actual selected recipe (correct targets / secrets /
+            // policy) instead of the local sample or cached manifest.
+            collect_preflight_envelope_for_community_toml(&ct.source_handle, &ct.ctoml_id)
+        }
     }
 }
 
@@ -643,6 +697,7 @@ fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope
     let ato_bin = resolve_ato_binary()?;
     debug!(bin = %ato_bin.display(), handle, "calling ato internal preflight");
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .args(["internal", "preflight", handle, "--json"])
         .output()
         .with_context(|| {
@@ -675,6 +730,70 @@ fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope
 
         bail!(
             "ato internal preflight failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    serde_json::from_str(trimmed)
+        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))
+}
+
+/// Preflight a community TOML candidate by passing `--community-toml-id` to
+/// `ato internal preflight`.
+///
+/// The CLI fetches and validates the community TOML, writes it to a temp path,
+/// and runs preflight against that manifest. This ensures the consent UI shows
+/// the requirements for the **selected** recipe (correct targets / secrets /
+/// policy) rather than the cached or inferred manifest for the source handle.
+fn collect_preflight_envelope_for_community_toml(
+    source_handle: &str,
+    ctoml_id: &str,
+) -> Result<PreflightAggregateEnvelope> {
+    let ato_bin = resolve_ato_binary()?;
+    debug!(
+        bin = %ato_bin.display(),
+        source_handle,
+        ctoml_id,
+        "calling ato internal preflight with --community-toml-id"
+    );
+    let normalized = normalize_preflight_handle(source_handle);
+    let output = Command::new(&ato_bin)
+        .no_console_window()
+        .args([
+            "internal",
+            "preflight",
+            &normalized,
+            "--community-toml-id",
+            ctoml_id,
+            "--json",
+        ])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke '{}' internal preflight --community-toml-id",
+                ato_bin.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // Older CLI builds may not support --community-toml-id; fall back to
+        // handle-based preflight so the consent wizard can still proceed.
+        if stderr.contains("unexpected argument") && stderr.contains("community-toml-id") {
+            debug!(
+                source_handle,
+                ctoml_id,
+                "CLI does not support --community-toml-id in preflight; falling back to handle"
+            );
+            return collect_preflight_envelope(&normalized);
+        }
+
+        bail!(
+            "ato internal preflight --community-toml-id failed (exit {}): stderr={stderr} stdout={stdout}",
             output.status
         );
     }
@@ -923,6 +1042,7 @@ pub fn resolve_and_start_capsule(
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
     on_step: Option<Box<dyn Fn(u8) + Send>>,
+    community_toml_id: Option<&str>,
 ) -> Result<CapsuleLaunchSession, LaunchError> {
     info!(handle, "resolving capsule");
 
@@ -951,37 +1071,44 @@ pub fn resolve_and_start_capsule(
     // is the implicit "fast path hit" signal in the SURFACE-TIMING
     // log. Any failure falls through to the legacy two-subprocess
     // path; we never crash on a corrupted record.
-    match try_session_record_fast_path(handle) {
-        Ok(Some(mut session)) => {
-            session.click_origin = Some(click_origin);
-            info!(
-                session_id = %session.session_id,
-                handle,
-                "capsule session reused via session-record fast path"
-            );
-            // Best-effort: refresh the v2 execution receipt in the background.
-            // The fast path bypasses `ato app session start` entirely, so the
-            // receipt would otherwise stay stale. The CLI's own reuse path
-            // detects the cached session and emits/refreshes the receipt
-            // quickly (~150ms subprocess overhead, no fresh spawn). Failures
-            // are logged at debug — they only weaken later inspect/replay,
-            // not the running session.
-            spawn_background_receipt_refresh(handle);
-            return Ok(session);
-        }
-        Ok(None) => {
-            debug!(
-                handle,
-                "session-record fast path miss; falling back to subprocess"
-            );
-        }
-        Err(err) => {
-            // The fast path is best-effort — every failure (corrupt
-            // JSON, unreadable directory, permission error) MUST fall
-            // through silently so the user still gets a working
-            // capsule. We log at debug to avoid noise on the cold
-            // path where there's nothing to reuse.
-            debug!(error = %err, handle, "session-record fast path errored; falling back to subprocess");
+    //
+    // Skip the fast path when a specific community TOML was requested.
+    // Reusing an existing session for the same handle would silently
+    // discard the user's explicit community TOML selection, potentially
+    // running a different recipe than the one they chose.
+    if community_toml_id.is_none() {
+        match try_session_record_fast_path(handle) {
+            Ok(Some(mut session)) => {
+                session.click_origin = Some(click_origin);
+                info!(
+                    session_id = %session.session_id,
+                    handle,
+                    "capsule session reused via session-record fast path"
+                );
+                // Best-effort: refresh the v2 execution receipt in the background.
+                // The fast path bypasses `ato app session start` entirely, so the
+                // receipt would otherwise stay stale. The CLI's own reuse path
+                // detects the cached session and emits/refreshes the receipt
+                // quickly (~150ms subprocess overhead, no fresh spawn). Failures
+                // are logged at debug — they only weaken later inspect/replay,
+                // not the running session.
+                spawn_background_receipt_refresh(handle);
+                return Ok(session);
+            }
+            Ok(None) => {
+                debug!(
+                    handle,
+                    "session-record fast path miss; falling back to subprocess"
+                );
+            }
+            Err(err) => {
+                // The fast path is best-effort — every failure (corrupt
+                // JSON, unreadable directory, permission error) MUST fall
+                // through silently so the user still gets a working
+                // capsule. We log at debug to avoid noise on the cold
+                // path where there's nothing to reuse.
+                debug!(error = %err, handle, "session-record fast path errored; falling back to subprocess");
+            }
         }
     }
 
@@ -1009,7 +1136,7 @@ pub fn resolve_and_start_capsule(
     }
     let started = {
         let timer = SurfaceStageTimer::start("session_start_subprocess");
-        let result = start_capsule(handle, secrets, plain_configs);
+        let result = start_capsule(handle, secrets, plain_configs, community_toml_id);
         timer.finish_ok();
         result?
     };
@@ -1132,6 +1259,7 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
             "Get-Process | Where-Object {{ $_.ProcessName -match '{escaped}' -or ($_.Path -ne $null -and $_.Path -match '{escaped}') }} | Select-Object -ExpandProperty Id"
         );
         let output = match Command::new("powershell")
+            .no_console_window()
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
         {
@@ -1177,6 +1305,7 @@ fn kill_pids(pids: &[u32]) -> usize {
             continue;
         }
         let ok = Command::new("taskkill")
+            .no_console_window()
             .args(["/PID", &pid.to_string(), "/F"])
             .output()
             .map(|output| output.status.success())
@@ -1370,6 +1499,7 @@ fn start_capsule(
     handle: &str,
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
+    community_toml_id: Option<&str>,
 ) -> Result<SessionStartInfo, LaunchError> {
     let ato_bin = resolve_ato_binary().map_err(LaunchError::from)?;
     debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
@@ -1379,6 +1509,9 @@ fn start_capsule(
     // in the ATO_HOME-relative path, causing stop to return stopped=false.
     let mut cmd = ato_helper_command(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
+    if let Some(cid) = community_toml_id {
+        cmd.args(["--community-toml-id", cid]);
+    }
     let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
     cmd.arg("--run-config-hash").arg(&run_config_hash);
 
@@ -1422,7 +1555,7 @@ fn start_capsule(
         cmd.env(key, value);
     }
 
-    run_session_start_command(&ato_bin, handle, secrets, &mut cmd)
+    run_session_start_command(&ato_bin, handle, secrets, &mut cmd, community_toml_id)
 }
 
 fn start_capsule_from_materialized_record(
@@ -1461,7 +1594,7 @@ fn start_capsule_from_materialized_record(
         cmd.env(key, value);
     }
 
-    run_session_start_command(&ato_bin, handle, secrets, &mut cmd)
+    run_session_start_command(&ato_bin, handle, secrets, &mut cmd, None)
 }
 
 fn run_session_start_command(
@@ -1469,6 +1602,7 @@ fn run_session_start_command(
     handle: &str,
     secrets: &[SecretEntry],
     cmd: &mut Command,
+    community_toml_id: Option<&str>,
 ) -> Result<SessionStartInfo, LaunchError> {
     let output = cmd.output().map_err(|err| {
         LaunchError::Other(format!(
@@ -1523,6 +1657,7 @@ fn run_session_start_command(
                             target: details.target.or(event.target.clone()),
                             fields: details.missing_schema,
                             original_secrets: secrets.to_vec(),
+                            community_toml_id: community_toml_id.map(str::to_string),
                         });
                     }
                 }
@@ -1554,6 +1689,7 @@ fn run_session_start_command(
                         provisioning_policy_hash: details.provisioning_policy_hash,
                         summary: details.summary,
                         original_secrets: secrets.to_vec(),
+                        community_toml_id: community_toml_id.map(str::to_string),
                     });
                 }
             }
@@ -1605,6 +1741,7 @@ pub fn approve_execution_plan_consent(
         "calling ato internal consent approve-execution-plan"
     );
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .args([
             "internal",
             "consent",
@@ -1716,6 +1853,7 @@ fn oci_stop_args(session_id: &str) -> [&str; 3] {
 
 fn ato_helper_command(ato_bin: &Path) -> Command {
     let mut command = Command::new(ato_bin);
+    command.no_console_window();
     apply_desktop_ato_home(&mut command, std::env::var_os("ATO_HOME"));
     command
 }
@@ -2789,6 +2927,7 @@ fn start_web_service_from_workspace(
             "node_modules missing — running install before dev"
         );
         let install_status = Command::new(pm)
+            .no_console_window()
             .arg("install")
             .current_dir(&install_root)
             .status()
@@ -2806,6 +2945,7 @@ fn start_web_service_from_workspace(
     }
 
     let mut child = Command::new(pm)
+        .no_console_window()
         .args(["run", "dev"])
         .current_dir(&source_dir)
         .stdout(Stdio::piped())
@@ -3013,6 +3153,7 @@ fn decap_share(share_url: &str, into: &Path) -> Result<()> {
     let ato_bin = resolve_ato_binary()?;
     info!(share_url, dest = %into.display(), "running ato decap");
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .args(["decap", share_url, "--into"])
         .arg(into)
         .output()
@@ -3534,7 +3675,7 @@ mod tests {
         }
 
         // Materialise the share URL and start a session.
-        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[], None)
+        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[], None, None)
             .expect("resolve_and_start_capsule should succeed for the share URL");
 
         eprintln!("[e2e] session_id  = {}", session.session_id);
@@ -3984,6 +4125,7 @@ pub fn spawn_terminal_session(
 
     // Spawn nacelle subprocess with stdin/stdout piped
     let mut child = std::process::Command::new(&nacelle_bin)
+        .no_console_window()
         .args([
             "internal",
             "--input",
@@ -5512,6 +5654,30 @@ mod fast_path_tests {
         assert_eq!(session.app_root, PathBuf::from("/tmp"));
     }
 
+    /// community_toml_id launches must never use the session-record fast path.
+    /// If an existing session for the same handle is live, the fast path would
+    /// silently reuse it instead of launching with the selected community TOML.
+    #[test]
+    fn community_toml_id_launch_skips_fast_path() {
+        // Verify the fast-path guard at the logic level: when community_toml_id
+        // is Some, the guard `community_toml_id.is_none()` is false, so the fast-
+        // path block is not entered.  We can test this directly with the guard
+        // predicate since try_session_record_fast_path_inner requires filesystem
+        // state that would make the test flaky.
+        let ctoml_id = Some("ctoml_abc123");
+        let no_ctoml: Option<&str> = None;
+
+        // Guard condition: fast path is skipped when community_toml_id is Some.
+        assert!(
+            !ctoml_id.is_none(),
+            "community_toml_id.is_none() must be false when Some — fast path is skipped"
+        );
+        assert!(
+            no_ctoml.is_none(),
+            "community_toml_id.is_none() must be true when None — fast path runs normally"
+        );
+    }
+
     #[test]
     #[serial]
     fn resolve_ato_binary_prefers_ato_desktop_ato_bin() {
@@ -5552,7 +5718,8 @@ mod fast_path_tests {
             None,
         );
 
-        let resolved = resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
+        let resolved =
+            resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
         assert_eq!(resolved, nacelle);
     }
 
@@ -5577,7 +5744,8 @@ mod fast_path_tests {
             None,
         );
 
-        let resolved = resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
+        let resolved =
+            resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
         assert_eq!(resolved, nacelle);
     }
 

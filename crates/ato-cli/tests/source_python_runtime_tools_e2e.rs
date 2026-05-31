@@ -110,9 +110,7 @@ struct HttpResponse {
 /// Issue a bare-bones HTTP/1.0 GET and return status + body.
 fn http_get(addr: &str, path: &str) -> Option<HttpResponse> {
     let mut stream = TcpStream::connect(addr).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let req = format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
     let mut buf = Vec::new();
@@ -286,23 +284,23 @@ fn source_python_runtime_tools_build_and_serve() {
     );
 
     // (4) GET / → HTTP 200 + body contains fixture marker (confirms built frontend served).
-    let root_resp =
-        root_resp.expect("HTTP GET / should succeed (server was ready on TCP)");
+    let root_resp = root_resp.expect("HTTP GET / should succeed (server was ready on TCP)");
     assert_eq!(
         root_resp.status, 200,
         "GET / expected HTTP 200, got {}\nstderr:\n{stderr_final}",
         root_resp.status
     );
     assert!(
-        root_resp.body.contains("source-python-runtime-tools-fixture")
+        root_resp
+            .body
+            .contains("source-python-runtime-tools-fixture")
             || root_resp.body.contains("/assets/bundle.js"),
         "GET / body does not contain built-frontend marker\nbody:\n{}",
         root_resp.body
     );
 
     // (5) GET /assets/bundle.js → HTTP 200 (static asset served from dist/).
-    let asset_resp =
-        asset_resp.expect("HTTP GET /assets/bundle.js should succeed");
+    let asset_resp = asset_resp.expect("HTTP GET /assets/bundle.js should succeed");
     assert_eq!(
         asset_resp.status, 200,
         "GET /assets/bundle.js expected HTTP 200, got {}",
