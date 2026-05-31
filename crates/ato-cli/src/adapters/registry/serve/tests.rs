@@ -763,6 +763,65 @@ fn read_process_log_lines_applies_tail_limit() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_providers_returns_desktop_provider() {
+    let state = AppState {
+        listen_url: "http://127.0.0.1:8787".to_string(),
+        data_dir: std::env::current_dir().expect("cwd").join(".tmp"),
+        auth_token: None,
+        lock: Arc::new(Mutex::new(())),
+    };
+    let response = handle_runtime_providers(State(state), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json[0]["id"], "desktop:local");
+    assert_eq!(json[0]["kind"], "desktop");
+    assert_eq!(json[0]["capabilities"]["supports_logs"], true);
+    assert_eq!(json[0]["capabilities"]["supports_launch"], false);
+}
+
+#[test]
+fn runtime_session_summary_maps_process_to_desktop_placement() {
+    let summary = runtime_session_summary(ProcessInfo {
+        id: "runtime-session-1".to_string(),
+        name: "demo".to_string(),
+        pid: std::process::id() as i32,
+        workload_pid: None,
+        status: ProcessStatus::Ready,
+        runtime: "source".to_string(),
+        start_time: std::time::SystemTime::now(),
+        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            std::process::id(),
+        ),
+        workload_os_start_time_unix_ms: None,
+        manifest_path: None,
+        scoped_id: None,
+        target_label: Some("main".to_string()),
+        requested_port: Some(8123),
+        log_path: None,
+        ready_at: Some(std::time::SystemTime::now()),
+        last_event: None,
+        last_error: None,
+        exit_code: None,
+    });
+
+    assert_eq!(summary.session_id, "runtime-session-1");
+    assert_eq!(summary.status, "ready");
+    assert_eq!(
+        summary.user_visible_url.as_deref(),
+        Some("http://127.0.0.1:8123")
+    );
+    assert_eq!(
+        summary.placement.placement_provider,
+        capsule_wire::placement::PlacementProviderKind::Desktop
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn manifest_yank_requires_auth() {
     let tmp = tempfile::tempdir().expect("tempdir");
     initialize_storage(tmp.path()).expect("init");

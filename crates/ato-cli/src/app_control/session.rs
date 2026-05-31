@@ -26,6 +26,7 @@ use capsule_core::handle::{
 };
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule_wire::placement::{PlacementFacets, PlacementProviderKind};
 use serde::Serialize;
 
 use crate::adapters::runtime::oci_provider::{
@@ -157,6 +158,28 @@ const SESSION_ACTION_STOP: &str = "session_stop";
 const SESSION_RUNTIME: &str = "ato-desktop-session";
 const DESKTOP_PARENT_PID_ENV: &str = "ATO_DESKTOP_PARENT_PID";
 const DESKTOP_PARENT_START_TIME_ENV: &str = "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS";
+const DESKTOP_PLACEMENT_PROVIDER: &str = "desktop";
+const DESKTOP_PLACEMENT_PROVIDER_ID: &str = "desktop:local";
+const DESKTOP_PLACEMENT_ID: &str = "plc_local_desktop";
+const DESKTOP_RUNTIME_OWNER: &str = "desktop_be";
+
+fn desktop_placement_facets() -> PlacementFacets {
+    PlacementFacets {
+        provider_kind: PlacementProviderKind::Desktop,
+        isolation_class: "local".to_string(),
+        storage_class: "local".to_string(),
+        network_class: "loopback".to_string(),
+        runner_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    }
+}
+
+fn session_requested_by_client() -> String {
+    if std::env::var_os(DESKTOP_PARENT_PID_ENV).is_some() {
+        "desktop_fe".to_string()
+    } else {
+        "cli".to_string()
+    }
+}
 
 /// Build a reporter for orchestration-session helpers. In envelope
 /// mode (set by `start_session(json=true)` on the orchestrator's
@@ -694,6 +717,14 @@ pub(super) fn start_guest_session(
         install_profile_key: None,
         install_revision_id: None,
         capsule_instance_key: None,
+        placement_provider: Some(DESKTOP_PLACEMENT_PROVIDER.to_string()),
+        placement_provider_id: Some(DESKTOP_PLACEMENT_PROVIDER_ID.to_string()),
+        placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: None,
+        placement_facets: Some(desktop_placement_facets()),
+        user_visible_url: None,
+        requested_by_client: Some(session_requested_by_client()),
+        runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
@@ -1014,6 +1045,14 @@ pub(super) fn start_runtime_session(
         install_profile_key: None,
         install_revision_id: None,
         capsule_instance_key: None,
+        placement_provider: Some(DESKTOP_PLACEMENT_PROVIDER.to_string()),
+        placement_provider_id: Some(DESKTOP_PLACEMENT_PROVIDER_ID.to_string()),
+        placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: None,
+        placement_facets: Some(desktop_placement_facets()),
+        user_visible_url: local_url.clone(),
+        requested_by_client: Some(session_requested_by_client()),
+        runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
@@ -1354,7 +1393,7 @@ pub(super) fn start_orchestration_session_in_process(
         guest: None,
         web: Some(WebSessionDisplay {
             local_url: local_url.clone(),
-            healthcheck_url: local_url,
+            healthcheck_url: local_url.clone(),
             served_by: leaf_driver,
         }),
         terminal: None,
@@ -1382,6 +1421,14 @@ pub(super) fn start_orchestration_session_in_process(
         install_profile_key: None,
         install_revision_id: None,
         capsule_instance_key: None,
+        placement_provider: Some(DESKTOP_PLACEMENT_PROVIDER.to_string()),
+        placement_provider_id: Some(DESKTOP_PLACEMENT_PROVIDER_ID.to_string()),
+        placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: None,
+        placement_facets: Some(desktop_placement_facets()),
+        user_visible_url: Some(local_url.clone()),
+        requested_by_client: Some(session_requested_by_client()),
+        runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
     write_session_record(&session_root_path, &session)?;
 
@@ -1576,7 +1623,7 @@ pub(super) fn start_orchestration_session_supervisor(
         guest: None,
         web: Some(WebSessionDisplay {
             local_url: local_url.clone(),
-            healthcheck_url: local_url,
+            healthcheck_url: local_url.clone(),
             served_by: leaf_driver,
         }),
         terminal: None,
@@ -1602,6 +1649,14 @@ pub(super) fn start_orchestration_session_supervisor(
         install_profile_key: None,
         install_revision_id: None,
         capsule_instance_key: None,
+        placement_provider: Some(DESKTOP_PLACEMENT_PROVIDER.to_string()),
+        placement_provider_id: Some(DESKTOP_PLACEMENT_PROVIDER_ID.to_string()),
+        placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: None,
+        placement_facets: Some(desktop_placement_facets()),
+        user_visible_url: Some(local_url.clone()),
+        requested_by_client: Some(session_requested_by_client()),
+        runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
     write_session_record(&session_root, &session)?;
 
@@ -3684,6 +3739,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         // Provider-set parity: graph providers ≡ dependency_contracts providers.
@@ -3829,6 +3892,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -3903,6 +3974,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -4000,6 +4079,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -4076,6 +4163,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -4244,6 +4339,14 @@ mod tests {
                 install_profile_key: None,
                 install_revision_id: None,
                 capsule_instance_key: None,
+                placement_provider: None,
+                placement_provider_id: None,
+                placement_id: None,
+                placement_fingerprint: None,
+                placement_facets: None,
+                user_visible_url: None,
+                requested_by_client: None,
+                runtime_owner: None,
             },
         )
         .expect("write session record");
@@ -4349,6 +4452,14 @@ mod tests {
                 install_profile_key: None,
                 install_revision_id: None,
                 capsule_instance_key: None,
+                placement_provider: None,
+                placement_provider_id: None,
+                placement_id: None,
+                placement_fingerprint: None,
+                placement_facets: None,
+                user_visible_url: None,
+                requested_by_client: None,
+                runtime_owner: None,
             },
         )
         .expect("write session record");
@@ -4476,6 +4587,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4639,6 +4758,14 @@ mod tests {
                 install_profile_key: None,
                 install_revision_id: None,
                 capsule_instance_key: None,
+                placement_provider: None,
+                placement_provider_id: None,
+                placement_id: None,
+                placement_fingerprint: None,
+                placement_facets: None,
+                user_visible_url: None,
+                requested_by_client: None,
+                runtime_owner: None,
             },
         )
         .expect("write session record");
@@ -4808,6 +4935,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -5077,6 +5212,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
