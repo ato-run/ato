@@ -140,6 +140,12 @@ pub(crate) enum Commands {
         #[arg(long = "via", value_enum, default_value_t = ProviderToolchain::Auto)]
         via: ProviderToolchain,
 
+        /// Use an existing capsule.toml from a local file path or community URL
+        /// instead of auto-generating one. Accepts a local path or an https:// URL.
+        /// Skips community candidate discovery when provided.
+        #[arg(short = 'T', long = "use-existing-toml", value_name = "PATH_OR_URL")]
+        use_existing_toml: Option<String>,
+
         /// Pin a GitHub run to an explicit commit SHA and skip mutable-ref resolution
         #[arg(long = "commit", value_name = "SHA")]
         commit: Option<String>,
