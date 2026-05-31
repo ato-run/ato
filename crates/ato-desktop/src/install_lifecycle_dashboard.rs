@@ -21,6 +21,7 @@
 /// from a background task or action handler.
 use std::sync::Mutex;
 
+use crate::proc_util::CommandNoWindowExt;
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
@@ -285,6 +286,7 @@ pub fn list_app_revisions(
 /// `std::thread::spawn`).
 pub fn spawn_launch(ato_bin: &std::path::Path, install_profile_key: &str) -> Result<String> {
     let output = std::process::Command::new(ato_bin)
+        .no_console_window()
         .arg("launch")
         .arg(install_profile_key)
         .arg("-y")

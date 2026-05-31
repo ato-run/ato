@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+
+use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -643,6 +645,7 @@ fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope
     let ato_bin = resolve_ato_binary()?;
     debug!(bin = %ato_bin.display(), handle, "calling ato internal preflight");
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .args(["internal", "preflight", handle, "--json"])
         .output()
         .with_context(|| {
@@ -1132,6 +1135,7 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
             "Get-Process | Where-Object {{ $_.ProcessName -match '{escaped}' -or ($_.Path -ne $null -and $_.Path -match '{escaped}') }} | Select-Object -ExpandProperty Id"
         );
         let output = match Command::new("powershell")
+            .no_console_window()
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
         {
@@ -1177,6 +1181,7 @@ fn kill_pids(pids: &[u32]) -> usize {
             continue;
         }
         let ok = Command::new("taskkill")
+            .no_console_window()
             .args(["/PID", &pid.to_string(), "/F"])
             .output()
             .map(|output| output.status.success())
@@ -1605,6 +1610,7 @@ pub fn approve_execution_plan_consent(
         "calling ato internal consent approve-execution-plan"
     );
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .args([
             "internal",
             "consent",
@@ -1716,6 +1722,7 @@ fn oci_stop_args(session_id: &str) -> [&str; 3] {
 
 fn ato_helper_command(ato_bin: &Path) -> Command {
     let mut command = Command::new(ato_bin);
+    command.no_console_window();
     apply_desktop_ato_home(&mut command, std::env::var_os("ATO_HOME"));
     command
 }
@@ -2789,6 +2796,7 @@ fn start_web_service_from_workspace(
             "node_modules missing — running install before dev"
         );
         let install_status = Command::new(pm)
+            .no_console_window()
             .arg("install")
             .current_dir(&install_root)
             .status()
@@ -2806,6 +2814,7 @@ fn start_web_service_from_workspace(
     }
 
     let mut child = Command::new(pm)
+        .no_console_window()
         .args(["run", "dev"])
         .current_dir(&source_dir)
         .stdout(Stdio::piped())
@@ -3013,6 +3022,7 @@ fn decap_share(share_url: &str, into: &Path) -> Result<()> {
     let ato_bin = resolve_ato_binary()?;
     info!(share_url, dest = %into.display(), "running ato decap");
     let output = Command::new(&ato_bin)
+        .no_console_window()
         .args(["decap", share_url, "--into"])
         .arg(into)
         .output()
@@ -3984,6 +3994,7 @@ pub fn spawn_terminal_session(
 
     // Spawn nacelle subprocess with stdin/stdout piped
     let mut child = std::process::Command::new(&nacelle_bin)
+        .no_console_window()
         .args([
             "internal",
             "--input",
