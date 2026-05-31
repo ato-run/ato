@@ -18,6 +18,10 @@ pub struct CapsuleConfig {
     /// Registry-related user settings.
     #[serde(default)]
     pub registry: RegistryConfig,
+
+    /// Container runtime selection: `"auto"` (default), `"docker"`, or `"podman"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
