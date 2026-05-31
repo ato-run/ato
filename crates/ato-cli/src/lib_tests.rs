@@ -847,6 +847,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                             target,
                             from_materialized_record,
                             run_config_hash,
+                            community_toml_id: _,
                             json,
                         },
                 },

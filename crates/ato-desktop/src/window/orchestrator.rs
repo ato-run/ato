@@ -90,7 +90,7 @@ fn url_for_route(route: &GuestRoute) -> SharedString {
 fn title_subtitle_for_route(route: &GuestRoute) -> (SharedString, SharedString) {
     use crate::state::GuestRoute as R;
     let (title, subtitle) = match route {
-        R::CapsuleHandle { handle, label } => (label.clone(), handle.clone()),
+        R::CapsuleHandle { handle, label, .. } => (label.clone(), handle.clone()),
         R::LocalManifest(local) => (local.label.clone(), local.source_handle.clone()),
         R::CapsuleUrl { label, url, .. } => (label.clone(), url.to_string()),
         R::ExternalUrl(url) => (
@@ -842,7 +842,12 @@ fn open_app_window_with_capsule_input(
             other => other.label(),
         };
         cx.global_mut::<crate::window::focus_guest_panes::FocusGuestPaneRegistry>()
-            .register(gpui_window_id, route.clone(), handle_str.clone(), shell.downgrade());
+            .register(
+                gpui_window_id,
+                route.clone(),
+                handle_str.clone(),
+                shell.downgrade(),
+            );
         tracing::info!(
             app_window_id = gpui_window_id,
             handle = %handle_str,
@@ -900,6 +905,7 @@ mod tests {
         let route = GuestRoute::CapsuleHandle {
             handle: "capsule://example/app".to_string(),
             label: "Example".to_string(),
+            community_toml_id: None,
         };
         let configs = vec![("MODEL".to_string(), "gpt-5".to_string())];
 

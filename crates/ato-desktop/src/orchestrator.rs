@@ -118,6 +118,19 @@ pub fn take_pending_cli_command(session_id: &str) -> Option<CliLaunchSpec> {
 pub enum DesktopLaunchInput {
     Handle(String),
     LocalManifestPath(LocalManifestLaunchInput),
+    /// Launch via a pre-selected community capsule.toml. The CLI fetches
+    /// the recipe by ID, validates its source matches the handle, and
+    /// passes it to the session-start pipeline as a materialized record.
+    CommunityToml(CommunityTomlInput),
+}
+
+/// Input for a community-TOML-driven launch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommunityTomlInput {
+    /// The normalized source handle (e.g. `capsule://github.com/owner/repo`).
+    pub source_handle: String,
+    /// Community capsule.toml ID (e.g. `ctoml_xxx`).
+    pub ctoml_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +165,7 @@ impl DesktopLaunchInput {
         match self {
             Self::Handle(_) => "handle",
             Self::LocalManifestPath(_) => "local_manifest_path",
+            Self::CommunityToml(_) => "community_toml",
         }
     }
 
@@ -159,6 +173,9 @@ impl DesktopLaunchInput {
         match self {
             Self::Handle(handle) => handle.clone(),
             Self::LocalManifestPath(local) => local.manifest_path.display().to_string(),
+            // Community TOML: boundary arg is the source handle; the CLI will
+            // resolve the community recipe by ctoml_id before starting the session.
+            Self::CommunityToml(ct) => ct.source_handle.clone(),
         }
     }
 
@@ -166,20 +183,29 @@ impl DesktopLaunchInput {
         match self {
             Self::Handle(handle) => handle,
             Self::LocalManifestPath(local) => &local.source_handle,
+            Self::CommunityToml(ct) => &ct.source_handle,
         }
     }
 
     pub fn manifest_path_for_log(&self) -> Option<&Path> {
         match self {
-            Self::Handle(_) => None,
+            Self::Handle(_) | Self::CommunityToml(_) => None,
             Self::LocalManifestPath(local) => Some(local.manifest_path.as_path()),
         }
     }
 
     pub fn manifest_source_for_log(&self) -> Option<&'static str> {
         match self {
-            Self::Handle(_) => None,
+            Self::Handle(_) | Self::CommunityToml(_) => None,
             Self::LocalManifestPath(local) => Some(local.manifest_source.as_str()),
+        }
+    }
+
+    /// Return the community-toml-id if this is a `CommunityToml` input.
+    pub fn community_toml_id(&self) -> Option<&str> {
+        match self {
+            Self::CommunityToml(ct) => Some(&ct.ctoml_id),
+            _ => None,
         }
     }
 }
@@ -479,7 +505,14 @@ pub fn resolve_and_start_guest_with_input(
         }
     }
 
-    let mut session = resolve_and_start_capsule(&boundary_arg, secrets, plain_configs, on_step)?;
+    let community_toml_id = input.community_toml_id().map(str::to_string);
+    let mut session = resolve_and_start_capsule(
+        &boundary_arg,
+        secrets,
+        plain_configs,
+        on_step,
+        community_toml_id.as_deref(),
+    )?;
     if let DesktopLaunchInput::LocalManifestPath(local) = input {
         session.handle = local.source_handle.clone();
         session.normalized_handle = local.source_handle.clone();
@@ -637,6 +670,13 @@ fn collect_preflight_envelope_for_input(
         }
         DesktopLaunchInput::LocalManifestPath(local) => {
             collect_preflight_envelope(&local.manifest_path.display().to_string())
+        }
+        DesktopLaunchInput::CommunityToml(ct) => {
+            // Community TOML launches preflight against the source handle
+            // (before the recipe is materialized). This is best-effort —
+            // failures fall through to the lazy aggregation path.
+            let normalized = normalize_preflight_handle(&ct.source_handle);
+            collect_preflight_envelope(&normalized)
         }
     }
 }
@@ -926,6 +966,7 @@ pub fn resolve_and_start_capsule(
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
     on_step: Option<Box<dyn Fn(u8) + Send>>,
+    community_toml_id: Option<&str>,
 ) -> Result<CapsuleLaunchSession, LaunchError> {
     info!(handle, "resolving capsule");
 
@@ -1012,7 +1053,7 @@ pub fn resolve_and_start_capsule(
     }
     let started = {
         let timer = SurfaceStageTimer::start("session_start_subprocess");
-        let result = start_capsule(handle, secrets, plain_configs);
+        let result = start_capsule(handle, secrets, plain_configs, community_toml_id);
         timer.finish_ok();
         result?
     };
@@ -1375,6 +1416,7 @@ fn start_capsule(
     handle: &str,
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
+    community_toml_id: Option<&str>,
 ) -> Result<SessionStartInfo, LaunchError> {
     let ato_bin = resolve_ato_binary().map_err(LaunchError::from)?;
     debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
@@ -1384,6 +1426,9 @@ fn start_capsule(
     // in the ATO_HOME-relative path, causing stop to return stopped=false.
     let mut cmd = ato_helper_command(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
+    if let Some(cid) = community_toml_id {
+        cmd.args(["--community-toml-id", cid]);
+    }
     let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
     cmd.arg("--run-config-hash").arg(&run_config_hash);
 
@@ -3544,7 +3589,7 @@ mod tests {
         }
 
         // Materialise the share URL and start a session.
-        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[], None)
+        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[], None, None)
             .expect("resolve_and_start_capsule should succeed for the share URL");
 
         eprintln!("[e2e] session_id  = {}", session.session_id);
@@ -5563,7 +5608,8 @@ mod fast_path_tests {
             None,
         );
 
-        let resolved = resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
+        let resolved =
+            resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
         assert_eq!(resolved, nacelle);
     }
 
@@ -5588,7 +5634,8 @@ mod fast_path_tests {
             None,
         );
 
-        let resolved = resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
+        let resolved =
+            resolve_nacelle_binary_with_paths(&bundle_paths, None, None).expect("resolve");
         assert_eq!(resolved, nacelle);
     }
 

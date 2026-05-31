@@ -146,6 +146,7 @@ fn search_local_registry(query: &str) -> Vec<crate::state::CapsuleSearchResult> 
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string()),
+                ctoml_id: None,
             })
         })
         .collect()
@@ -226,18 +227,28 @@ pub(crate) fn parse_community_candidates(
                 .get("successfulReceipts")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let ctoml_id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let ctoml_id = c
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let ctoml_id_display = ctoml_id.as_deref().unwrap_or("");
 
             let description = if receipts > 0 {
-                format!("{trust} · {receipts} verified receipt(s) · {ctoml_id}")
+                format!("{trust} · {receipts} verified receipt(s) · {ctoml_id_display}")
             } else {
-                format!("{trust} · {ctoml_id}")
+                format!("{trust} · {ctoml_id_display}")
             };
 
+            // Prefix with "capsule://" so NavigateToUrl routes via the
+            // capsule:// handler instead of the GitHub Import surface.
+            let handle = format!("capsule://{launcher_handle}");
+
             Some(crate::state::CapsuleSearchResult {
-                handle: launcher_handle.to_string(),
+                handle,
                 display_name: format!("{title} · Community"),
                 description: Some(description),
+                ctoml_id,
             })
         })
         .collect()
@@ -4953,7 +4964,8 @@ mod tests {
         }"#;
         let results = parse_community_candidates(json, "github.com/usememos/memos");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].handle, "github.com/usememos/memos");
+        // handle is prefixed with capsule:// so NavigateToUrl routes correctly
+        assert_eq!(results[0].handle, "capsule://github.com/usememos/memos");
         assert!(results[0].display_name.contains("memos"));
         assert!(results[0].display_name.contains("Community"));
         let desc = results[0].description.as_deref().unwrap_or("");
@@ -4962,6 +4974,8 @@ mod tests {
             "description should mention receipt count"
         );
         assert!(desc.contains("ctoml_abc123"));
+        // ctoml_id should be populated from the "id" field
+        assert_eq!(results[0].ctoml_id.as_deref(), Some("ctoml_abc123"));
     }
 
     #[test]
@@ -5006,6 +5020,8 @@ mod tests {
         }"#;
         let results = parse_community_candidates(json, "github.com/sosedoff/pgweb");
         assert_eq!(results.len(), 1);
+        assert_eq!(results[0].handle, "capsule://github.com/sosedoff/pgweb");
+        assert_eq!(results[0].ctoml_id.as_deref(), Some("ctoml_xyz"));
         let desc = results[0].description.as_deref().unwrap_or("");
         assert!(
             !desc.contains("receipt"),
