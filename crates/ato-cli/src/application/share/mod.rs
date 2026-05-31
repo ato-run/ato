@@ -116,6 +116,7 @@ pub(crate) struct EncapArgs {
     pub(crate) allow_dirty: bool,
     pub(crate) yes: bool,
     pub(crate) save_config: bool,
+    pub(crate) dev: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +126,7 @@ pub(crate) struct DecapArgs {
     pub(crate) plan: bool,
     pub(crate) tool_runtime: ShareToolRuntime,
     pub(crate) strict: bool,
+    pub(crate) dev: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -470,7 +472,8 @@ pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Resu
             println!("{}", serde_json::to_string_pretty(&loaded.spec)?);
             return Ok(());
         }
-        let state = materialize_loaded_share(&loaded, &into, args.tool_runtime, args.strict)?;
+        let state =
+            materialize_loaded_share(&loaded, &into, args.tool_runtime, args.strict, args.dev)?;
         futures::executor::block_on(reporter.notify(build_decap_summary(&loaded.spec, &state)))?;
         return Ok(());
     }
@@ -554,6 +557,7 @@ fn materialize_loaded_share(
     into: &Path,
     tool_runtime: ShareToolRuntime,
     strict: bool,
+    dev: bool,
 ) -> Result<WorkspaceShareState> {
     let mut state = WorkspaceShareState {
         share_url: loaded.share_url.clone(),
@@ -634,33 +638,35 @@ fn materialize_loaded_share(
 
     let runtime_env = prepare_share_runtime_env(&loaded.spec.tool_requirements, tool_runtime);
 
-    for step in &loaded.spec.install_steps {
-        let started_at = Utc::now().to_rfc3339();
-        let step_root = into.join(&step.cwd);
-        match run_shell_command_with_env(&step.run, &step_root, &runtime_env) {
-            Ok(output) => state.install_steps.push(InstallStepState {
-                id: step.id.clone(),
-                status: "ok".to_string(),
-                started_at: Some(started_at),
-                finished_at: Some(Utc::now().to_rfc3339()),
-                stdout_digest: Some(sha256_label(output.stdout.as_bytes())),
-                stderr_digest: Some(sha256_label(output.stderr.as_bytes())),
-                last_error: None,
-            }),
-            Err(error) => {
-                state.install_steps.push(InstallStepState {
+    if dev {
+        for step in &loaded.spec.install_steps {
+            let started_at = Utc::now().to_rfc3339();
+            let step_root = into.join(&step.cwd);
+            match run_shell_command_with_env(&step.run, &step_root, &runtime_env) {
+                Ok(output) => state.install_steps.push(InstallStepState {
                     id: step.id.clone(),
-                    status: "error".to_string(),
+                    status: "ok".to_string(),
                     started_at: Some(started_at),
                     finished_at: Some(Utc::now().to_rfc3339()),
-                    stdout_digest: None,
-                    stderr_digest: None,
-                    last_error: Some(error.to_string()),
-                });
-                state
-                    .verification
-                    .issues
-                    .push(format!("install step {} failed: {}", step.id, error));
+                    stdout_digest: Some(sha256_label(output.stdout.as_bytes())),
+                    stderr_digest: Some(sha256_label(output.stderr.as_bytes())),
+                    last_error: None,
+                }),
+                Err(error) => {
+                    state.install_steps.push(InstallStepState {
+                        id: step.id.clone(),
+                        status: "error".to_string(),
+                        started_at: Some(started_at),
+                        finished_at: Some(Utc::now().to_rfc3339()),
+                        stdout_digest: None,
+                        stderr_digest: None,
+                        last_error: Some(error.to_string()),
+                    });
+                    state
+                        .verification
+                        .issues
+                        .push(format!("install step {} failed: {}", step.id, error));
+                }
             }
         }
     }
@@ -3603,7 +3609,7 @@ mod tests {
         );
 
         let into = temp.path().join("out");
-        let state = materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false)
+        let state = materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false, true)
             .expect("materialize");
         assert!(
             state
@@ -3775,7 +3781,7 @@ mod tests {
         )
         .expect("load should succeed");
         let into = temp.path().join("out");
-        let err = materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false)
+        let err = materialize_loaded_share(&loaded, &into, ShareToolRuntime::System, false, true)
             .expect_err("should error on missing source");
         assert!(
             err.to_string().contains("Missing resolved source"),
@@ -4094,8 +4100,9 @@ mod tests {
         };
 
         // non-strict: should succeed but leave verification issues
-        let state = materialize_loaded_share(&loaded, temp.path(), ShareToolRuntime::System, false)
-            .expect("non-strict should not bail");
+        let state =
+            materialize_loaded_share(&loaded, temp.path(), ShareToolRuntime::System, false, true)
+                .expect("non-strict should not bail");
         assert!(
             !state.verification.issues.is_empty(),
             "issues must be present"
@@ -4110,8 +4117,9 @@ mod tests {
             lock,
             spec_digest_verified: true,
         };
-        let err = materialize_loaded_share(&loaded2, temp2.path(), ShareToolRuntime::System, true)
-            .expect_err("strict mode must bail with issues");
+        let err =
+            materialize_loaded_share(&loaded2, temp2.path(), ShareToolRuntime::System, true, true)
+                .expect_err("strict mode must bail with issues");
         assert!(
             err.to_string().contains("--strict"),
             "error message must mention --strict"
