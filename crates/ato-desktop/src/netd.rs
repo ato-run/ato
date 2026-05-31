@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use crate::proc_util::CommandNoWindowExt;
+
 use ato_net::control::SyncClient;
 
 use crate::state::GuestRoute;
@@ -288,6 +290,7 @@ fn ensure_netd_connected() -> Result<SyncClient, IngressError> {
         "spawning ato-netd"
     );
     std::process::Command::new(&netd_bin)
+        .no_console_window()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
