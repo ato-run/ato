@@ -39,16 +39,36 @@ related: []
   - sha256（+ 将来的に署名検証/鍵固定）
   - 供給元（Node/Bun/python-build-standalone等）ごとに戦略を切替
 
-## 3. Build Hooks（後続・用途限定）
+## 3. Target-level `build` コマンド（`ato run` の build フェーズ）
 
-原則: 任意コード実行に近いので **後続フェーズで限定導入**。
+`[targets.<label>].build` フィールドで宣言された shell コマンドは、`ato run` の **build フェーズ**（primary runtime のプロビジョニング完了後、`run` コマンド起動前）に実行される。これは ato-cli 自身が直接実行する。
 
-- Phase 1（現行）: 依存関係は基本 **pre-pack 側で解決**（vendoring / bundling）
-- Phase 2（後続）: sandboxed hooks を導入する場合でも
-  - deny-by-default の sandbox
-  - lockfile/hashes による再現性
-  - 監査ログ（入力/出力digest、コマンド、ネットワーク方針）
-  を必須とする
+**ライフサイクル順序**（`ato run` 時）:
+
+```
+1. primary runtime を解決・プロビジョニング（例: uv venv --python 3.11）
+2. runtime_tools で宣言された追加 toolchain を解決・プロビジョニング（例: Node 20）
+3. 依存関係をインストール（例: uv pip install -r requirements.txt）
+4. [targets.<label>].build コマンドを実行（例: npm install && npm run build）
+5. [targets.<label>].run コマンドを起動
+```
+
+**混在 toolchain の典型例（Python + Node）**:
+
+```toml
+[targets.main]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+runtime_tools = { node = "20" }
+build = "npm install && npm run build"
+run = "python -m uvicorn app.main:app --host 127.0.0.1"
+port = 8000
+```
+
+この構成では、Node 20 が `runtime_tools` 経由でプロビジョニングされ、`build` フェーズで `npm run build` が実行されて `dist/` が生成される。実装は `crates/ato-cli/src/application/pipeline/phases/run.rs` の `run_build_phase` および `lifecycle_path.rs` の `materialize_lifecycle_toolchains` を参照。
+
+**旧記述について**: この文書の以前のバージョンでは「build hooks は後続・用途限定、依存関係は pre-pack 側で解決」と記載していたが、これは v0.5.x 時点の実装と乖離している。`[targets.<label>].build` は現行の `ato run` で動作する機能であり、CI/配布専用ではない。
 
 ## 4. 開発/配布（Hybrid）
 
