@@ -398,6 +398,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "capsule-core",
+ "capsule-wire",
  "chrono",
  "clap",
  "cliclack",
