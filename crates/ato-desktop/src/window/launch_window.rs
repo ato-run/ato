@@ -358,6 +358,7 @@ fn open_wizard(
     let composed = compose_init_script(locale, init_script.as_deref());
     let queue = system_ipc::new_queue();
     let handle = cx.open_window(options, |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
@@ -798,6 +799,7 @@ fn open_consent_wizard_inner(
     let queue_for_closure = queue.clone();
 
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
@@ -939,6 +941,7 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let queue_for_closure = queue.clone();
 
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
@@ -1453,6 +1456,7 @@ fn open_boot_wizard_inner(
     let queue_for_closure = queue.clone();
 
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
