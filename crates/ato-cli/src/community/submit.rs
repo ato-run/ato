@@ -8,8 +8,8 @@ use toml::Value as TomlValue;
 use tracing::debug;
 
 use super::capsule_toml::{
-    resolve_community_api_base_url, validate_capsule_toml_source_with_provenance,
-    SourceValidationOutcome,
+    extract_toml_source, resolve_community_api_base_url,
+    validate_capsule_toml_source_matches_run_target, SourceValidationOutcome,
 };
 
 #[derive(Debug, Serialize)]
@@ -33,7 +33,8 @@ struct SubmissionMetadata {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceIdentity {
-    declared: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared: Option<String>,
     provenance: String,
 }
 
@@ -80,11 +81,17 @@ pub(crate) fn validate_toml_shape(toml_content: &str) -> Result<()> {
         bail!("capsule.toml is missing required field 'schema_version'");
     }
 
+    let has_runnable_targets = table
+        .get("targets")
+        .and_then(|v| v.as_table())
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+
     let has_runnable = table.contains_key("run")
         || table.contains_key("run_command")
         || table.contains_key("entrypoint")
         || table.contains_key("cmd")
-        || table.get("targets").map(|v| v.is_table()).unwrap_or(false);
+        || has_runnable_targets;
 
     if !has_runnable {
         bail!(
@@ -209,16 +216,15 @@ pub(crate) async fn execute_submit(
         }
     }
 
-    let source_validation = validate_capsule_toml_source_with_provenance(
-        &toml_content,
-        &normalized_source,
-        &normalized_source,
-    );
+    let declared_source = extract_toml_source(&toml_content);
+    let source_validation =
+        validate_capsule_toml_source_matches_run_target(&toml_content, &normalized_source);
 
     match source_validation {
         SourceValidationOutcome::Match => {}
         SourceValidationOutcome::MissingSource => {
-            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+            let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+            if is_tty {
                 eprintln!(
                     "WARNING: capsule.toml does not declare a source.repository. \
                      The submission will be registered with source '{}'.",
@@ -305,7 +311,7 @@ pub(crate) async fn execute_submit(
             platform: detect_platform(),
             trust_requested: "community".to_string(),
             source_identity: SourceIdentity {
-                declared: normalized_source.clone(),
+                declared: declared_source,
                 provenance: normalized_source,
             },
         },
@@ -418,6 +424,33 @@ run = "index.js"
     }
 
     #[test]
+    fn validate_toml_shape_rejects_empty_targets_table() {
+        let toml = r#"
+schema_version = "0.3"
+name = "test"
+version = "1.0.0"
+[targets]
+"#;
+        let err = validate_toml_shape(toml).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("does not declare any runnable target"));
+    }
+
+    #[test]
+    fn validate_toml_shape_accepts_targets_with_entries() {
+        let toml = r#"
+schema_version = "0.3"
+name = "test"
+version = "1.0.0"
+[targets.default]
+runtime = "source"
+run_command = "index.js"
+"#;
+        assert!(validate_toml_shape(toml).is_ok());
+    }
+
+    #[test]
     fn validate_toml_shape_rejects_no_runnable_target() {
         let toml = r#"
 schema_version = "0.3"
@@ -483,7 +516,7 @@ port = 3000
                 platform: "macos-arm64".to_string(),
                 trust_requested: "community".to_string(),
                 source_identity: SourceIdentity {
-                    declared: "github.com/owner/repo".to_string(),
+                    declared: Some("github.com/owner/repo".to_string()),
                     provenance: "github.com/owner/repo".to_string(),
                 },
             },
@@ -494,6 +527,30 @@ port = 3000
         assert_eq!(json["metadata"]["client"], "ato-cli");
         assert_eq!(json["metadata"]["platform"], "macos-arm64");
         assert_eq!(json["metadata"]["trustRequested"], "community");
+    }
+
+    #[test]
+    fn payload_with_missing_declared_omits_field() {
+        let payload = SubmissionPayload {
+            source: "github.com/owner/repo".to_string(),
+            capsule_toml: "name = \"test\"\n".to_string(),
+            metadata: SubmissionMetadata {
+                client: "ato-cli".to_string(),
+                platform: "macos-arm64".to_string(),
+                trust_requested: "community".to_string(),
+                source_identity: SourceIdentity {
+                    declared: None,
+                    provenance: "github.com/owner/repo".to_string(),
+                },
+            },
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["source"], "github.com/owner/repo");
+        assert!(json["metadata"]["sourceIdentity"].get("declared").is_none());
+        assert_eq!(
+            json["metadata"]["sourceIdentity"]["provenance"],
+            "github.com/owner/repo"
+        );
     }
 
     #[test]
