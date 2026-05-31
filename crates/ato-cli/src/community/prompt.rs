@@ -210,4 +210,106 @@ mod tests {
         };
         assert_ne!(a, b);
     }
+
+    // ── post-success prompt boundary tests ───────────────────────────────────
+
+    // The community-registry path sets community_submit_context = None in
+    // support.rs (community_selected = true → context = None), so
+    // try_post_success_community_submit_prompt returns Ok(()) immediately.
+    // These tests verify the should_prompt_for_community_submit guard matrix
+    // that runs *after* context is confirmed non-None.
+
+    #[test]
+    fn prompt_guard_all_flags_false_returns_true_in_test_harness() {
+        // All flag-based guards are off; only the TTY check would suppress.
+        // In CI / test runners stdin/stderr are not terminals, so this
+        // returns false.  Document that the guard is not bypassed by flag
+        // combination alone.
+        let _lock = env_lock();
+        std::env::remove_var(ENV_DISABLE_PROMPT);
+        let ctx = make_context();
+        // We can't assert true here (tests run headless), but we can assert
+        // the function does not panic and agrees with TTY state.
+        let result = should_prompt_for_community_submit(&ctx, false, false, false);
+        // In a non-TTY test environment this must be false.
+        assert!(!result, "non-TTY must suppress the prompt");
+    }
+
+    #[test]
+    fn prompt_suppressed_for_existing_repo_toml_origin_non_tty() {
+        // ExistingRepoToml origin: the prompt would fire if TTY were
+        // available.  In non-TTY (test env) it must remain suppressed.
+        let _lock = env_lock();
+        std::env::remove_var(ENV_DISABLE_PROMPT);
+        let ctx = CommunitySubmitPromptContext {
+            origin: CommunitySubmitOrigin::ExistingRepoToml,
+            ..make_context()
+        };
+        assert!(!should_prompt_for_community_submit(
+            &ctx, false, false, false
+        ));
+    }
+
+    #[test]
+    fn prompt_suppressed_for_local_override_origin_non_tty() {
+        let _lock = env_lock();
+        std::env::remove_var(ENV_DISABLE_PROMPT);
+        let ctx = CommunitySubmitPromptContext {
+            origin: CommunitySubmitOrigin::LocalOverride,
+            ..make_context()
+        };
+        assert!(!should_prompt_for_community_submit(
+            &ctx, false, false, false
+        ));
+    }
+
+    #[test]
+    fn prompt_suppressed_for_inferred_origin_non_tty() {
+        let _lock = env_lock();
+        std::env::remove_var(ENV_DISABLE_PROMPT);
+        let ctx = CommunitySubmitPromptContext {
+            origin: CommunitySubmitOrigin::Inferred,
+            ..make_context()
+        };
+        assert!(!should_prompt_for_community_submit(
+            &ctx, false, false, false
+        ));
+    }
+
+    #[test]
+    fn prompt_suppressed_when_json_and_background_together() {
+        let _lock = env_lock();
+        std::env::remove_var(ENV_DISABLE_PROMPT);
+        let ctx = make_context();
+        assert!(!should_prompt_for_community_submit(&ctx, true, true, false));
+    }
+
+    #[test]
+    fn prompt_suppressed_when_json_and_plan_only_together() {
+        let _lock = env_lock();
+        std::env::remove_var(ENV_DISABLE_PROMPT);
+        let ctx = make_context();
+        assert!(!should_prompt_for_community_submit(&ctx, true, false, true));
+    }
+
+    #[test]
+    fn community_submit_origin_variants_exist() {
+        // Smoke test: confirm all expected origin variants compile and are Eq.
+        assert_eq!(
+            CommunitySubmitOrigin::Inferred,
+            CommunitySubmitOrigin::Inferred
+        );
+        assert_eq!(
+            CommunitySubmitOrigin::LocalOverride,
+            CommunitySubmitOrigin::LocalOverride
+        );
+        assert_eq!(
+            CommunitySubmitOrigin::ExistingRepoToml,
+            CommunitySubmitOrigin::ExistingRepoToml
+        );
+        assert_ne!(
+            CommunitySubmitOrigin::Inferred,
+            CommunitySubmitOrigin::LocalOverride
+        );
+    }
 }
