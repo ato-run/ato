@@ -71,6 +71,19 @@ pub(crate) struct CommunityCapsuleTomlCandidate {
     pub(crate) permissions_summary: Vec<String>,
     pub(crate) capsule_toml_url: String,
     pub(crate) revision: Option<String>,
+
+    #[serde(default)]
+    pub(crate) successful_receipts: Option<u64>,
+    #[serde(default)]
+    pub(crate) failed_receipts: Option<u64>,
+    #[serde(default)]
+    pub(crate) current_platform_verified: Option<bool>,
+    #[serde(default)]
+    pub(crate) source_ref: Option<String>,
+    #[serde(default)]
+    pub(crate) source_ref_age_days: Option<u64>,
+    #[serde(default)]
+    pub(crate) risk_score: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,9 +159,20 @@ pub(crate) fn sort_candidates(candidates: &mut [CommunityCapsuleTomlCandidate]) 
     candidates.sort_by(|a, b| {
         let a_platform_match = platform_matches(&a.platforms);
         let b_platform_match = platform_matches(&b.platforms);
+        let a_verified = a.current_platform_verified.unwrap_or(false);
+        let b_verified = b.current_platform_verified.unwrap_or(false);
+        let a_receipts = a.successful_receipts.unwrap_or(0);
+        let b_receipts = b.successful_receipts.unwrap_or(0);
+        let a_failed = a.failed_receipts.unwrap_or(0);
+        let b_failed = b.failed_receipts.unwrap_or(0);
+        let a_risk = a.risk_score.unwrap_or(50);
+        let b_risk = b.risk_score.unwrap_or(50);
+
         b_platform_match
             .cmp(&a_platform_match)
             .then_with(|| b.trust.trust_rank().cmp(&a.trust.trust_rank()))
+            .then_with(|| b_verified.cmp(&a_verified))
+            .then_with(|| b_receipts.cmp(&a_receipts))
             .then_with(|| b.stars.cmp(&a.stars))
             .then_with(|| {
                 let a_time = a
@@ -161,6 +185,8 @@ pub(crate) fn sort_candidates(candidates: &mut [CommunityCapsuleTomlCandidate]) 
                     .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok());
                 b_time.cmp(&a_time)
             })
+            .then_with(|| a_failed.cmp(&b_failed))
+            .then_with(|| a_risk.cmp(&b_risk))
     });
 }
 
@@ -350,22 +376,54 @@ pub(crate) fn format_candidate_for_display(
         .as_deref()
         .map(|v| format!("verified {}", format_relative_time(v)))
         .unwrap_or_else(|| "not verified".to_string());
+
+    let mut meta_parts = vec![
+        trust_label.to_string(),
+        format!("★{}", candidate.stars),
+        platforms,
+        verified,
+    ];
+
+    if let Some(receipts) = candidate.successful_receipts {
+        meta_parts.push(format!("{} successful receipts", receipts));
+    }
+    if let Some(verified) = candidate.current_platform_verified {
+        if verified {
+            meta_parts.push("platform-verified".to_string());
+        }
+    }
+
+    let mut detail_parts = Vec::new();
+    if let Some(ref source_ref) = candidate.source_ref {
+        detail_parts.push(format!("source: {}", source_ref));
+    }
+    if let Some(risk) = candidate.risk_score {
+        let label = match risk {
+            0..=33 => "low",
+            34..=66 => "medium",
+            _ => "high",
+        };
+        detail_parts.push(format!("risk: {}", label));
+    }
+
     let permissions = if candidate.permissions_summary.is_empty() {
         "none".to_string()
     } else {
         candidate.permissions_summary.join(", ")
     };
 
-    format!(
-        "{}. {}\n   {} · ★{} · {} · {}\n   permissions: {}",
+    let mut lines = vec![format!(
+        "{}. {}\n   {}",
         index + 1,
         candidate.title,
-        trust_label,
-        candidate.stars,
-        platforms,
-        verified,
-        permissions
-    )
+        meta_parts.join(" · "),
+    )];
+    if !detail_parts.is_empty() {
+        lines.push(format!("   {}", detail_parts.join(" · ")));
+    }
+    lines.push(format!("   permissions: {}", permissions));
+
+    lines.join("\n")
 }
 
 pub(crate) fn prompt_community_candidate_selection(
@@ -453,29 +511,16 @@ mod tests {
     #[test]
     fn candidate_sorting_prefers_platform_match() {
         let mut candidates = vec![
-            CommunityCapsuleTomlCandidate {
-                id: "1".into(),
-                title: "A".into(),
-                source: "github.com/a/b".into(),
-                trust: CommunityTrustLevel::Community,
-                stars: 10,
-                platforms: vec![],
-                last_verified_at: None,
-                permissions_summary: vec![],
-                capsule_toml_url: "https://a.toml".into(),
-                revision: None,
+            {
+                let mut c = minimal_candidate("1");
+                c.stars = 10;
+                c
             },
-            CommunityCapsuleTomlCandidate {
-                id: "2".into(),
-                title: "B".into(),
-                source: "github.com/a/b".into(),
-                trust: CommunityTrustLevel::Community,
-                stars: 5,
-                platforms: vec![platform_display_name().to_string()],
-                last_verified_at: None,
-                permissions_summary: vec![],
-                capsule_toml_url: "https://b.toml".into(),
-                revision: None,
+            {
+                let mut c = minimal_candidate("2");
+                c.stars = 5;
+                c.platforms = vec![platform_display_name().to_string()];
+                c
             },
         ];
 
@@ -486,29 +531,17 @@ mod tests {
     #[test]
     fn candidate_sorting_prefers_higher_trust() {
         let mut candidates = vec![
-            CommunityCapsuleTomlCandidate {
-                id: "1".into(),
-                title: "A".into(),
-                source: "github.com/a/b".into(),
-                trust: CommunityTrustLevel::Owner,
-                stars: 5,
-                platforms: vec![],
-                last_verified_at: None,
-                permissions_summary: vec![],
-                capsule_toml_url: "https://a.toml".into(),
-                revision: None,
+            {
+                let mut c = minimal_candidate("1");
+                c.trust = CommunityTrustLevel::Owner;
+                c.stars = 5;
+                c
             },
-            CommunityCapsuleTomlCandidate {
-                id: "2".into(),
-                title: "B".into(),
-                source: "github.com/a/b".into(),
-                trust: CommunityTrustLevel::Official,
-                stars: 1,
-                platforms: vec![],
-                last_verified_at: None,
-                permissions_summary: vec![],
-                capsule_toml_url: "https://b.toml".into(),
-                revision: None,
+            {
+                let mut c = minimal_candidate("2");
+                c.trust = CommunityTrustLevel::Official;
+                c.stars = 1;
+                c
             },
         ];
 
@@ -519,29 +552,15 @@ mod tests {
     #[test]
     fn candidate_sorting_prefers_more_stars() {
         let mut candidates = vec![
-            CommunityCapsuleTomlCandidate {
-                id: "1".into(),
-                title: "A".into(),
-                source: "github.com/a/b".into(),
-                trust: CommunityTrustLevel::Community,
-                stars: 5,
-                platforms: vec![],
-                last_verified_at: None,
-                permissions_summary: vec![],
-                capsule_toml_url: "https://a.toml".into(),
-                revision: None,
+            {
+                let mut c = minimal_candidate("1");
+                c.stars = 5;
+                c
             },
-            CommunityCapsuleTomlCandidate {
-                id: "2".into(),
-                title: "B".into(),
-                source: "github.com/a/b".into(),
-                trust: CommunityTrustLevel::Community,
-                stars: 100,
-                platforms: vec![],
-                last_verified_at: None,
-                permissions_summary: vec![],
-                capsule_toml_url: "https://b.toml".into(),
-                revision: None,
+            {
+                let mut c = minimal_candidate("2");
+                c.stars = 100;
+                c
             },
         ];
 
@@ -688,5 +707,218 @@ mod tests {
     fn resolve_community_api_base_url_defaults() {
         let url = resolve_community_api_base_url();
         assert_eq!(url, "https://api.ato.run");
+    }
+
+    fn minimal_candidate(id: &str) -> CommunityCapsuleTomlCandidate {
+        CommunityCapsuleTomlCandidate {
+            id: id.to_string(),
+            title: format!("Candidate {}", id),
+            source: "github.com/a/b".to_string(),
+            trust: CommunityTrustLevel::Community,
+            stars: 0,
+            platforms: vec![],
+            last_verified_at: None,
+            permissions_summary: vec![],
+            capsule_toml_url: format!("https://{}.toml", id),
+            revision: None,
+            successful_receipts: None,
+            failed_receipts: None,
+            current_platform_verified: None,
+            source_ref: None,
+            source_ref_age_days: None,
+            risk_score: None,
+        }
+    }
+
+    #[test]
+    fn candidate_without_new_fields_deserializes() {
+        let json = r#"{
+            "id": "abc123",
+            "title": "Test Capsule",
+            "source": "github.com/owner/repo",
+            "trust": "community",
+            "stars": 42,
+            "platforms": ["macOS"],
+            "lastVerifiedAt": "2025-01-15T10:30:00Z",
+            "permissionsSummary": ["network"],
+            "capsuleTomlUrl": "https://example.com/toml",
+            "revision": "v1"
+        }"#;
+        let c: CommunityCapsuleTomlCandidate = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(c.id, "abc123");
+        assert_eq!(c.successful_receipts, None);
+        assert_eq!(c.failed_receipts, None);
+        assert_eq!(c.current_platform_verified, None);
+        assert_eq!(c.source_ref, None);
+        assert_eq!(c.source_ref_age_days, None);
+        assert_eq!(c.risk_score, None);
+    }
+
+    #[test]
+    fn candidate_with_new_fields_deserializes() {
+        let json = r#"{
+            "id": "abc123",
+            "title": "Test Capsule",
+            "source": "github.com/owner/repo",
+            "trust": "official",
+            "stars": 124,
+            "platforms": ["macOS", "Linux", "Windows"],
+            "lastVerifiedAt": "2025-06-01T12:00:00Z",
+            "permissionsSummary": ["network", "persistent state"],
+            "capsuleTomlUrl": "https://example.com/toml",
+            "revision": "v2",
+            "successfulReceipts": 18,
+            "failedReceipts": 1,
+            "currentPlatformVerified": true,
+            "sourceRef": "a1b2c3d",
+            "sourceRefAgeDays": 14,
+            "riskScore": 10
+        }"#;
+        let c: CommunityCapsuleTomlCandidate = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(c.successful_receipts, Some(18));
+        assert_eq!(c.failed_receipts, Some(1));
+        assert_eq!(c.current_platform_verified, Some(true));
+        assert_eq!(c.source_ref, Some("a1b2c3d".to_string()));
+        assert_eq!(c.source_ref_age_days, Some(14));
+        assert_eq!(c.risk_score, Some(10));
+    }
+
+    #[test]
+    fn sorting_prefers_current_platform_verified() {
+        let mut candidates = vec![
+            {
+                let mut c = minimal_candidate("1");
+                c.trust = CommunityTrustLevel::Official;
+                c.stars = 100;
+                c.current_platform_verified = Some(false);
+                c
+            },
+            {
+                let mut c = minimal_candidate("2");
+                c.trust = CommunityTrustLevel::Official;
+                c.stars = 100;
+                c.current_platform_verified = Some(true);
+                c
+            },
+        ];
+        sort_candidates(&mut candidates);
+        assert_eq!(candidates[0].id, "2");
+    }
+
+    #[test]
+    fn sorting_penalizes_failed_receipts() {
+        let mut candidates = vec![
+            {
+                let mut c = minimal_candidate("1");
+                c.successful_receipts = Some(10);
+                c.failed_receipts = Some(5);
+                c
+            },
+            {
+                let mut c = minimal_candidate("2");
+                c.successful_receipts = Some(10);
+                c.failed_receipts = Some(0);
+                c
+            },
+        ];
+        sort_candidates(&mut candidates);
+        assert_eq!(candidates[0].id, "2");
+    }
+
+    #[test]
+    fn sorting_penalizes_higher_risk_score() {
+        let mut candidates = vec![
+            {
+                let mut c = minimal_candidate("1");
+                c.successful_receipts = Some(10);
+                c.failed_receipts = Some(0);
+                c.risk_score = Some(80);
+                c
+            },
+            {
+                let mut c = minimal_candidate("2");
+                c.successful_receipts = Some(10);
+                c.failed_receipts = Some(0);
+                c.risk_score = Some(10);
+                c
+            },
+        ];
+        sort_candidates(&mut candidates);
+        assert_eq!(candidates[0].id, "2");
+    }
+
+    #[test]
+    fn display_omits_unknown_fields() {
+        let c = minimal_candidate("x");
+        let output = format_candidate_for_display(&c, 0);
+        assert!(!output.contains("source:"));
+        assert!(!output.contains("risk:"));
+        assert!(!output.contains("receipts"));
+        assert!(!output.contains("platform-verified"));
+    }
+
+    #[test]
+    fn display_includes_receipt_risk_and_source_ref() {
+        let mut c = minimal_candidate("x");
+        c.successful_receipts = Some(18);
+        c.source_ref = Some("a1b2c3d".to_string());
+        c.risk_score = Some(10);
+        c.current_platform_verified = Some(true);
+        let output = format_candidate_for_display(&c, 0);
+        assert!(output.contains("18 successful receipts"));
+        assert!(output.contains("source: a1b2c3d"));
+        assert!(output.contains("risk: low"));
+        assert!(output.contains("platform-verified"));
+    }
+
+    #[test]
+    fn display_risk_labels() {
+        let mut low = minimal_candidate("low");
+        low.risk_score = Some(20);
+        assert!(format_candidate_for_display(&low, 0).contains("risk: low"));
+
+        let mut med = minimal_candidate("med");
+        med.risk_score = Some(50);
+        assert!(format_candidate_for_display(&med, 0).contains("risk: medium"));
+
+        let mut high = minimal_candidate("high");
+        high.risk_score = Some(90);
+        assert!(format_candidate_for_display(&high, 0).contains("risk: high"));
+    }
+
+    #[test]
+    fn sorting_none_risk_below_low_risk() {
+        let mut candidates = vec![
+            {
+                let mut c = minimal_candidate("none");
+                c.risk_score = None;
+                c
+            },
+            {
+                let mut c = minimal_candidate("low");
+                c.risk_score = Some(10);
+                c
+            },
+        ];
+        sort_candidates(&mut candidates);
+        assert_eq!(candidates[0].id, "low");
+    }
+
+    #[test]
+    fn sorting_none_risk_above_high_risk() {
+        let mut candidates = vec![
+            {
+                let mut c = minimal_candidate("high");
+                c.risk_score = Some(80);
+                c
+            },
+            {
+                let mut c = minimal_candidate("none");
+                c.risk_score = None;
+                c
+            },
+        ];
+        sort_candidates(&mut candidates);
+        assert_eq!(candidates[0].id, "none");
     }
 }
