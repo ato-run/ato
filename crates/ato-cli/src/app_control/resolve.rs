@@ -15,7 +15,8 @@ use capsule_core::handle_store::{
 };
 use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
 use capsule_core::router::{
-    execution_descriptor_from_manifest_parts, route_manifest, ExecutionProfile, ManifestData,
+    execution_descriptor_from_manifest_parts, route_manifest_with_state_overrides,
+    ExecutionProfile, ManifestData,
 };
 
 use super::guest_contract::{parse_guest_contract, preview_guest_contract, GuestContract};
@@ -140,12 +141,30 @@ pub fn resolve_handle(
     Ok(())
 }
 
+pub(super) fn build_resolution_for_session_start(
+    handle: &str,
+    target_label: Option<&str>,
+    registry: Option<&str>,
+    use_sample_recipes: bool,
+) -> Result<HandleResolution> {
+    build_resolution_inner(handle, target_label, registry, use_sample_recipes)
+}
+
 pub(super) fn build_resolution(
     handle: &str,
     target_label: Option<&str>,
     registry: Option<&str>,
 ) -> Result<HandleResolution> {
-    let normalized = normalize_handle(handle)?;
+    build_resolution_inner(handle, target_label, registry, true)
+}
+
+fn build_resolution_inner(
+    handle: &str,
+    target_label: Option<&str>,
+    registry: Option<&str>,
+    use_sample_recipes: bool,
+) -> Result<HandleResolution> {
+    let normalized = normalize_handle_with_options(handle, use_sample_recipes)?;
 
     match normalized.kind {
         NormalizedHandleKind::WebUrl => Ok(HandleResolution {
@@ -270,6 +289,14 @@ pub(super) fn resolve_local_plan(
     manifest_path: &std::path::Path,
     target_label: Option<&str>,
 ) -> Result<(ManifestData, Option<GuestContract>, Vec<String>)> {
+    resolve_local_plan_with_state_overrides(manifest_path, target_label, HashMap::new())
+}
+
+pub(super) fn resolve_local_plan_with_state_overrides(
+    manifest_path: &std::path::Path,
+    target_label: Option<&str>,
+    state_source_overrides: HashMap<String, String>,
+) -> Result<(ManifestData, Option<GuestContract>, Vec<String>)> {
     let raw = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("failed to read manifest at {}", manifest_path.display()))?;
     let raw_manifest: toml::Value = toml::from_str(&raw)
@@ -281,7 +308,12 @@ pub(super) fn resolve_local_plan(
             .unwrap_or_else(|| std::path::Path::new(".")),
     );
 
-    match route_manifest(manifest_path, ExecutionProfile::Release, target_label) {
+    match route_manifest_with_state_overrides(
+        manifest_path,
+        ExecutionProfile::Release,
+        target_label,
+        state_source_overrides.clone(),
+    ) {
         Ok(decision) => Ok((decision.plan, guest, Vec::new())),
         Err(err) => {
             let Some(driver) = experimental_guest_driver_from_error(&err) else {
@@ -299,7 +331,7 @@ pub(super) fn resolve_local_plan(
                     .unwrap_or_else(|| PathBuf::from(".")),
                 ExecutionProfile::Release,
                 target_label,
-                HashMap::new(),
+                state_source_overrides,
             )
             .with_context(|| {
                 format!(
@@ -754,6 +786,10 @@ pub(super) fn input_is_existing_local_path(input: &str) -> bool {
 }
 
 pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
+    normalize_handle_with_options(raw, true)
+}
+
+fn normalize_handle_with_options(raw: &str, use_sample_recipes: bool) -> Result<NormalizedHandle> {
     let input = raw.trim().to_string();
     if input.is_empty() {
         anyhow::bail!("handle must not be empty");
@@ -776,7 +812,10 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
         );
     }
 
-    if !input.starts_with("capsule://") && !input.starts_with("github.com/") && !input.contains('/')
+    if use_sample_recipes
+        && !input.starts_with("capsule://")
+        && !input.starts_with("github.com/")
+        && !input.contains('/')
     {
         if !input_is_existing_local_path(&input) {
             if let Some(resolved) = resolve_sample_recipe_for_input(&input)? {
@@ -805,16 +844,18 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
             let normalized_handle = canonical.display_string();
             let cli_ref = canonical.to_cli_ref();
 
-            if let CanonicalHandle::GithubRepo { owner, repo, .. } = &canonical {
-                if let Some(resolved) = resolve_sample_recipe_for_github(owner, repo)? {
-                    return Ok(NormalizedHandle {
-                        input,
-                        normalized_handle,
-                        kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
-                        canonical: Some(canonical),
-                        cli_ref,
-                        sample_recipe_slug: Some(resolved.slug),
-                    });
+            if use_sample_recipes {
+                if let CanonicalHandle::GithubRepo { owner, repo, .. } = &canonical {
+                    if let Some(resolved) = resolve_sample_recipe_for_github(owner, repo)? {
+                        return Ok(NormalizedHandle {
+                            input,
+                            normalized_handle,
+                            kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
+                            canonical: Some(canonical),
+                            cli_ref,
+                            sample_recipe_slug: Some(resolved.slug),
+                        });
+                    }
                 }
             }
 
