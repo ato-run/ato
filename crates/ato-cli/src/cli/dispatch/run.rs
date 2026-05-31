@@ -42,6 +42,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) dangerously_skip_permissions: bool,
     pub(crate) compatibility_fallback: Option<CompatibilityFallbackBackend>,
     pub(crate) provider_toolchain: ProviderToolchain,
+    pub(crate) use_existing_toml: Option<String>,
     pub(crate) explicit_commit: Option<String>,
     pub(crate) yes: bool,
     pub(crate) verbose: bool,
@@ -57,11 +58,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) cache_strategy: CacheStrategyArg,
     pub(crate) deprecation_warning: Option<&'static str>,
     pub(crate) plan_only: bool,
-    /// When true, detect a compose file, import it, and run through PodmanProvider.
-    /// This is an experimental explicit flag — it does not affect normal `ato run` behavior.
     pub(crate) oci_compose: bool,
-    /// When true, detect an install script (install.sh / setup.sh / …), extract
-    /// docker run intent, and run through PodmanProvider. Experimental.
     pub(crate) oci_install_sh: bool,
     pub(crate) reporter: Arc<reporters::CliReporter>,
 }
@@ -199,6 +196,7 @@ fn execute_standard_run_with_env_assistance(
                 .map(CompatibilityFallbackBackend::as_str)
                 .map(str::to_string),
             args.provider_toolchain,
+            args.use_existing_toml.clone(),
             args.explicit_commit.clone(),
             args.yes,
             resolve_run_verbose(args.verbose),
@@ -611,6 +609,7 @@ mod tests {
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain: crate::ProviderToolchain::Auto,
+            use_existing_toml: None,
             explicit_commit: None,
             yes: false,
             verbose: false,

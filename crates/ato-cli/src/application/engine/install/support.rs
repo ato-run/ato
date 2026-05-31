@@ -809,6 +809,7 @@ pub(crate) async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
     provider_toolchain: ProviderToolchain,
+    use_existing_toml: Option<String>,
     explicit_commit: Option<String>,
     keep_failed_artifacts: bool,
     auto_fix_mode: Option<GitHubAutoFixMode>,
@@ -903,6 +904,126 @@ pub(crate) async fn resolve_run_target_or_install(
                 );
             }
 
+            let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+            let selected_community_toml: Option<String> = if use_existing_toml.is_some() {
+                None
+            } else {
+                match crate::community::fetch_community_capsule_tomls(&repository).await {
+                    Ok(candidates) if !candidates.is_empty() => {
+                        let mut candidates = candidates;
+                        crate::community::sort_candidates(&mut candidates);
+                        let selected = if is_tty {
+                            match crate::community::prompt_community_candidate_selection(
+                                &repository,
+                                &candidates,
+                            ) {
+                                Ok(n) if n <= candidates.len() => Some(n - 1),
+                                Ok(_) => None,
+                                Err(_) => None,
+                            }
+                        } else if candidates.len() == 1 && yes {
+                            futures::executor::block_on(reporter.notify(format!(
+                                "Using community capsule.toml: {}",
+                                candidates[0].title
+                            )))?;
+                            Some(0)
+                        } else {
+                            return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                                AtoError::EntrypointInvalid {
+                                    message: format!(
+                                        "TOML_SELECTION_REQUIRED: multiple community \
+                                                 capsule.toml candidates exist for '{}'. \
+                                                 Use -T/--use-existing-toml, or run interactively.",
+                                        repository
+                                    ),
+                                    hint: Some(
+                                        "Re-run in a TTY or use -T/--use-existing-toml to \
+                                                 select a specific capsule.toml."
+                                            .to_string(),
+                                    ),
+                                    field: None,
+                                },
+                            )));
+                        };
+
+                        match selected {
+                            Some(idx) => {
+                                let toml_content =
+                                    crate::community::fetch_capsule_toml_by_id(&candidates[idx].id)
+                                        .await
+                                        .with_context(|| {
+                                            format!(
+                                                "Failed to fetch community capsule.toml '{}'",
+                                                candidates[idx].id
+                                            )
+                                        })?;
+                                crate::community::validate_capsule_toml_source_matches_run_target(
+                                    &toml_content,
+                                    &repository,
+                                )
+                                .with_context(|| {
+                                    format!(
+                                        "Community capsule.toml '{}' source mismatch",
+                                        candidates[idx].id
+                                    )
+                                })?;
+                                Some(toml_content)
+                            }
+                            None => None,
+                        }
+                    }
+                    Ok(_) => None,
+                    Err(err) => {
+                        debug!(
+                            %err,
+                            "community capsule.toml lookup failed; falling back to inference"
+                        );
+                        None
+                    }
+                }
+            };
+
+            let resolved_existing_toml = if let Some(toml_input) = use_existing_toml.as_deref() {
+                if toml_input.starts_with("http://") || toml_input.starts_with("https://") {
+                    let content = crate::community::fetch_toml_from_url(toml_input).await?;
+                    crate::community::validate_capsule_toml_source_matches_run_target(
+                        &content,
+                        &repository,
+                    )
+                    .with_context(|| {
+                        format!("Remote capsule.toml from {toml_input} source mismatch")
+                    })?;
+                    Some(content)
+                } else {
+                    let expanded = crate::local_input::expand_local_path(toml_input);
+                    let content = std::fs::read_to_string(&expanded).with_context(|| {
+                        format!("Failed to read TOML file: {}", expanded.display())
+                    })?;
+                    let is_explicit_mismatch =
+                        crate::community::validate_capsule_toml_source_matches_run_target(
+                            &content,
+                            &repository,
+                        )
+                        .is_err();
+                    if is_explicit_mismatch {
+                        anyhow::bail!(
+                            "Source identity mismatch: the capsule.toml at '{}' \
+                             does not match the run target '{}'. \
+                             The TOML must reference the same repository.",
+                            expanded.display(),
+                            repository
+                        );
+                    }
+                    Some(content)
+                }
+            } else {
+                None
+            };
+
+            let is_community_toml = selected_community_toml.is_some();
+            let is_explicit_toml = resolved_existing_toml.is_some();
+            let effective_toml = selected_community_toml.or(resolved_existing_toml);
+
             let resolved_commit = match explicit_commit.clone() {
                 Some(commit) => commit,
                 None => install::fetch_github_install_draft(&repository)
@@ -920,6 +1041,23 @@ pub(crate) async fn resolve_run_target_or_install(
                     .await?;
             let checkout_root = checkout.checkout_dir.clone();
             maybe_copy_env_example(&checkout_root, json_mode);
+
+            if let Some(toml_content) = effective_toml {
+                let toml_path = checkout_root.join("capsule.toml");
+                std::fs::write(&toml_path, toml_content).with_context(|| {
+                    format!("Failed to write capsule.toml to {}", toml_path.display())
+                })?;
+                let preserved_root = relocate_github_run_checkout(&checkout_root)?;
+                return Ok(ResolvedRunTarget {
+                    path: preserved_root.clone(),
+                    agent_local_root: Some(preserved_root.clone()),
+                    desktop_open_path: None,
+                    export_request: None,
+                    provider_workspace: None,
+                    transient_workspace_root: Some(preserved_root),
+                });
+            }
+
             if checkout_root.join("capsule.toml").exists() {
                 let preserved_root = relocate_github_run_checkout(&checkout_root)?;
                 return Ok(ResolvedRunTarget {
@@ -948,6 +1086,23 @@ pub(crate) async fn resolve_run_target_or_install(
                 explicit_commit.clone(),
             )
             .await?;
+
+            let needs_community_prompt = !is_explicit_toml
+                && !is_community_toml
+                && crate::community::should_prompt_community_sharing()
+                && !json_mode;
+
+            if needs_community_prompt {
+                let _ = futures::executor::block_on(
+                    reporter.notify(
+                        "Run succeeded! Do you want to share this capsule.toml recipe \
+                     to the Ato community? Community submission is not implemented \
+                     yet. Run will continue without submitting."
+                            .to_string(),
+                    ),
+                );
+            }
+
             let desktop_open_path = launchable_desktop_open_path(&install_result);
             return Ok(ResolvedRunTarget {
                 path: install_result.path,
@@ -2325,6 +2480,7 @@ pub(crate) fn execute_run_command(
     dangerously_skip_permissions: bool,
     compatibility_fallback: Option<String>,
     provider_toolchain: ProviderToolchain,
+    use_existing_toml: Option<String>,
     explicit_commit: Option<String>,
     assume_yes: bool,
     verbose: bool,
@@ -2362,6 +2518,7 @@ pub(crate) fn execute_run_command(
         dangerously_skip_permissions,
         compatibility_fallback,
         provider_toolchain_requested: provider_toolchain,
+        use_existing_toml,
         explicit_commit,
         assume_yes,
         verbose,
@@ -2374,13 +2531,6 @@ pub(crate) fn execute_run_command(
         write_grants: write,
         read_write_grants: read_write,
         caller_cwd: std::env::current_dir().or_else(|_| {
-            // Stale cwd (shell sat in a directory whose inode was replaced —
-            // e.g. the .app bundle was reinstalled under an open fish shell)
-            // returns ENOENT from getcwd(2). For remote-handle runs the
-            // caller_cwd is only used as a fallback for relative path
-            // resolution, so degrading to $HOME keeps `ato run koh0920/...`
-            // working from a stale shell. Local-path runs already failed
-            // earlier in dispatch when their relative path couldn't resolve.
             dirs::home_dir().ok_or_else(|| {
                 anyhow::anyhow!("failed to resolve current working directory and $HOME is unset")
             })
@@ -2751,6 +2901,7 @@ mod tests {
             PathBuf::from("github.com/octocat/nope"),
             true,
             ProviderToolchain::Auto,
+            None,
             Some("deadbeef".to_string()),
             false,
             None,
@@ -2827,6 +2978,7 @@ mod tests {
             PathBuf::from("@team/tool"),
             true,
             ProviderToolchain::Auto,
+            None,
             None,
             false,
             None,
@@ -3035,6 +3187,7 @@ target = "app"
             internal_path.clone(),
             true,
             ProviderToolchain::Auto,
+            None,
             None,
             false,
             None,
