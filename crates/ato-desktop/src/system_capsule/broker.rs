@@ -74,6 +74,11 @@ pub enum Capability {
     WindowsCloseTarget,
     /// Mark onboarding completed/skipped and proceed to startup surface.
     OnboardingComplete,
+    /// Quit the whole desktop application. Granted only to `AtoStart`,
+    /// whose page is the process-lifetime landing surface and therefore
+    /// the single legitimate place to terminate the app on platforms
+    /// without a native app menu (Windows).
+    AppQuit,
 }
 
 /// Typed envelope: every privileged request from a system capsule
