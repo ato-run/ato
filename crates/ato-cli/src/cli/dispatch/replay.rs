@@ -98,6 +98,7 @@ pub(super) fn execute_replay_command(
         dangerously_skip_permissions: false,
         compatibility_fallback: None::<CompatibilityFallbackBackend>,
         provider_toolchain: ProviderToolchain::Auto,
+        use_existing_toml: None,
         explicit_commit: None,
         yes: true,
         verbose: false,

@@ -302,6 +302,80 @@ Serena MCP が利用可能な場合、コード操作には Serena のシンボ�
 
 ---
 
+## Branching Model
+
+### Long-lived branches
+
+```
+main          — latest stable release only (every commit = a published vX.Y.Z tag)
+dev           — normal development integration; next stable candidate
+nightly       — 0.7.0 MVP / experimental integration
+release/0.6   — 0.6.x maintenance branch
+release/0.5   — 0.5.x maintenance branch (limited / security-only support)
+```
+
+Future: `release/0.7` is created when 0.7.0 ships; `nightly` advances to 0.8 work.
+
+### Feature branch naming
+
+Short-lived, one issue per branch: `feat/*`, `fix/*`, `hotfix/*`.
+
+### Development flows
+
+```
+0.7 new features:
+  feat/0.7-* ──PR──▶ nightly ──▶ dev ──▶ main
+
+0.6 patch:
+  fix/0.6-* ──PR──▶ release/0.6 ──▶ main
+                               ↘ cherry-pick / forward-port ──▶ dev ──▶ nightly
+
+0.5 patch:
+  fix/0.5-* ──PR──▶ release/0.5 ──▶ main
+                               ↘ forward-port ──▶ release/0.6 ──▶ dev ──▶ nightly
+
+Urgent hotfix:
+  hotfix/* from main ──▶ main
+                      ↘ cherry-pick ──▶ affected release branches / dev / nightly
+```
+
+**Forward-port rule — always flow fixes oldest → newest:**
+`release/0.5` → `release/0.6` → `dev` → `nightly`
+
+Never backport from `nightly` to `release/*`.
+
+### Base branch per work type
+
+| Work type | Base branch |
+|-----------|-------------|
+| 0.7 new feature / experiment | `nightly` |
+| 0.6.x patch or regression fix | `release/0.6` |
+| 0.5.x critical / security fix | `release/0.5` |
+| Normal dev (non-version-specific) | `dev` |
+| Urgent hotfix from stable | `main` |
+
+### Branch protection
+
+| Branch | Policy |
+|--------|--------|
+| `main` | No direct push. Release PR only. Full CI + manual smoke. |
+| `release/0.6` | No direct push. Patch / security / regression only. No new features. |
+| `release/0.5` | No direct push. Critical / security only. Limited support. |
+| `dev` | Normal integration. CI required. |
+| `nightly` | 0.7 experimental. Compile + test required. AODD degraded OK — log reason. |
+
+### Versioning
+
+| Branch | Version scheme |
+|--------|----------------|
+| `release/0.5` | `v0.5.x` |
+| `release/0.6` | `v0.6.x` |
+| `nightly` | `v0.7.0-nightly.YYYYMMDD+sha` |
+| `dev` | `v0.7.0-dev` (unreleased) |
+| `main` | stable tags only (`vX.Y.Z`) |
+
+---
+
 ## Git Commit Rules
 
 - Commit per logical change, not per file touched.

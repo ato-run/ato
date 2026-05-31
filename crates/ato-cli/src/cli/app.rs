@@ -70,6 +70,20 @@ pub(crate) enum SessionCommands {
         handle: String,
         #[arg(long)]
         target: Option<String>,
+        /// Use a specific community capsule.toml recipe by ID (e.g. `ctoml_xxx`).
+        /// The CLI fetches the recipe, validates its source matches the handle, and
+        /// uses it as the launch manifest instead of running discovery.
+        #[arg(
+            long = "community-toml-id",
+            conflicts_with = "from_materialized_record"
+        )]
+        community_toml_id: Option<String>,
+        #[arg(
+            long = "attach-state",
+            value_name = "STATE:PATH",
+            value_parser = validate_attach_state_arg
+        )]
+        attach_state: Vec<String>,
         #[arg(long = "from-materialized-record")]
         from_materialized_record: Option<String>,
         #[arg(long = "run-config-hash")]
@@ -98,6 +112,16 @@ pub(crate) enum SessionCommands {
         #[arg(long = "poll-ms", default_value_t = 500)]
         poll_ms: u64,
     },
+}
+
+fn validate_attach_state_arg(value: &str) -> std::result::Result<String, String> {
+    let (state_name, path) = value
+        .split_once(':')
+        .ok_or_else(|| "expected <state_name>:<path>".to_string())?;
+    if state_name.trim().is_empty() || path.trim().is_empty() {
+        return Err("expected <state_name>:<path>".to_string());
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
