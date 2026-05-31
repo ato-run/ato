@@ -1329,6 +1329,19 @@ pub fn start_boot_launch(
 
 fn launch_input_for_route(route: &GuestRoute) -> Option<DesktopLaunchInput> {
     match route {
+        // Community candidate: preserve the selected ctoml_id so the CLI
+        // fetches and validates the registry TOML rather than falling back
+        // to the local sample recipe or handle inference.
+        GuestRoute::CapsuleHandle {
+            handle,
+            community_toml_id: Some(ctoml_id),
+            ..
+        } => Some(DesktopLaunchInput::CommunityToml(
+            crate::orchestrator::CommunityTomlInput {
+                source_handle: handle.clone(),
+                ctoml_id: ctoml_id.clone(),
+            },
+        )),
         GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
             Some(DesktopLaunchInput::from_handle(handle.clone()))
         }
@@ -1620,5 +1633,38 @@ mod tests {
         assert!(script.contains(r#"const text = "a'b\nc";"#));
         assert!(script.contains("active.setRangeText(text, start, end, 'end');"));
         assert!(script.contains("inputType: 'insertText'"));
+    }
+
+    #[test]
+    fn launch_input_for_route_preserves_community_toml_id() {
+        let route = crate::state::GuestRoute::CapsuleHandle {
+            handle: "github.com/sosedoff/pgweb".to_string(),
+            label: "pgweb".to_string(),
+            community_toml_id: Some("ctoml_abc123".to_string()),
+        };
+        let input = launch_input_for_route(&route).expect("should return Some");
+        match input {
+            crate::orchestrator::DesktopLaunchInput::CommunityToml(ct) => {
+                assert_eq!(ct.source_handle, "github.com/sosedoff/pgweb");
+                assert_eq!(ct.ctoml_id, "ctoml_abc123");
+            }
+            other => panic!("expected CommunityToml, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn launch_input_for_route_without_community_toml_id_uses_handle() {
+        let route = crate::state::GuestRoute::CapsuleHandle {
+            handle: "github.com/usememos/memos".to_string(),
+            label: "memos".to_string(),
+            community_toml_id: None,
+        };
+        let input = launch_input_for_route(&route).expect("should return Some");
+        match input {
+            crate::orchestrator::DesktopLaunchInput::Handle(h) => {
+                assert_eq!(h, "github.com/usememos/memos");
+            }
+            other => panic!("expected Handle, got {other:?}"),
+        }
     }
 }
