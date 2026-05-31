@@ -2580,6 +2580,32 @@ fn test_publish_artifact_parsing_noop_works_without_conflict() {
 }
 
 #[test]
+fn test_publish_toml_conflicts_with_registry() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args([
+        "publish",
+        "--registry",
+        "https://private.example.test",
+        "--toml",
+        "/tmp/capsule.toml",
+        "--source",
+        "github.com/owner/repo",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_publish_yes_requires_toml() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["publish", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--toml"));
+}
+
+#[test]
 fn test_source_rebuild_help_uses_ref_flag() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
     cmd.args(["source", "rebuild", "--help"])

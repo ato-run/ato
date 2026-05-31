@@ -995,14 +995,30 @@ pub(crate) enum Commands {
         #[arg(
             long,
             value_name = "PATH",
-            conflicts_with_all = ["artifact", "ci", "prepare", "build", "deploy", "finalize_local"]
+            conflicts_with_all = [
+                "registry",
+                "artifact",
+                "scoped_id",
+                "ci",
+                "prepare",
+                "build",
+                "deploy",
+                "finalize_local",
+                "legacy_full_publish",
+                "force_large_payload",
+                "paid_large_payload",
+                "allow_existing",
+                "allow_external_finalize",
+                "fix",
+                "no_tui"
+            ]
         )]
         toml: Option<PathBuf>,
         /// Source locator for the capsule.toml (e.g. github.com/owner/repo)
         #[arg(long, value_name = "SOURCE", requires = "toml")]
         source: Option<String>,
         /// Skip interactive confirmation when using --toml
-        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        #[arg(short = 'y', long = "yes", requires = "toml", default_value_t = false)]
         yes: bool,
     },
 
