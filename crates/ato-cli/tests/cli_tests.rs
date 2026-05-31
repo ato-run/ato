@@ -2580,7 +2580,9 @@ fn test_publish_toml_dry_run_delegates_to_community_submit() {
     ])
     .assert()
     .success()
-    .stderr(predicate::str::contains("Publishing capsule.toml as community capsule record"))
+    .stderr(predicate::str::contains(
+        "Publishing capsule.toml as community capsule record",
+    ))
     .stderr(predicate::str::contains("[dry-run] Would submit"));
 }
 
