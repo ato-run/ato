@@ -1883,6 +1883,16 @@ fn test_run_help_shows_yes_flag() {
 }
 
 #[test]
+fn test_run_provider_shorthand_emits_deprecation_warning() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["run", "pypi:markitdown", "--plan-only"])
+        .assert()
+        .stderr(predicate::str::contains(
+            "direct package-provider run targets are deprecated",
+        ));
+}
+
+#[test]
 fn test_run_rejects_noncanonical_github_url_input() {
     let mut cmd = Command::cargo_bin("ato").unwrap();
     cmd.args(["run", "https://github.com/Koh0920/demo-repo", "--yes"])
