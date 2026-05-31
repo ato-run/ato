@@ -60,6 +60,11 @@ pub enum AtoStartCommand {
     OpenGithubRun,
     /// Close the start window. Requires `WindowsClose`.
     Close,
+    /// Quit the whole desktop application. Requires `AppQuit`. This is the
+    /// explicit exit affordance surfaced as the quit button on the Start
+    /// page — the only user-facing way to terminate the app in Focus View
+    /// on platforms without a native app menu.
+    Quit,
 }
 
 impl AtoStartCommand {
@@ -73,6 +78,7 @@ impl AtoStartCommand {
             AtoStartCommand::OpenLocalPath { .. } => Capability::WebviewCreate,
             AtoStartCommand::OpenGithubRun => Capability::WebviewCreate,
             AtoStartCommand::Close => Capability::WindowsClose,
+            AtoStartCommand::Quit => Capability::AppQuit,
         }
     }
 }
@@ -549,6 +555,23 @@ pub fn dispatch(
         AtoStartCommand::Close => {
             crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
                 let _ = host.update(cx, |_, window, _| window.remove_window());
+            });
+        }
+
+        AtoStartCommand::Quit => {
+            // Latch shutdown BEFORE quitting so the `on_window_closed`
+            // handler does not race to reopen the Start landing surface
+            // as GPUI tears the windows down.
+            crate::window::begin_shutdown();
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                if crate::window::is_multi_window_enabled() {
+                    let count = cx
+                        .global_mut::<crate::state::session::SessionRegistry>()
+                        .stop_all_running();
+                    tracing::info!(count, "ato_start: quit — stopped running sessions");
+                }
+                tracing::info!("ato_start: quit requested from Start page — quitting app");
+                cx.quit();
             });
         }
     }

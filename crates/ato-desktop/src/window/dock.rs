@@ -667,6 +667,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let entity_capture2 = entity_capture.clone();
 
     let handle = cx.open_window(options, move |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),

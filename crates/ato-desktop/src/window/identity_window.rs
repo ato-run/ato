@@ -192,6 +192,7 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
 
     let queue = system_ipc::new_queue();
     let handle = cx.open_window(options, |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
