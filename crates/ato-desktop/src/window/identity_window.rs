@@ -33,6 +33,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::orchestrator::resolve_ato_binary;
+use crate::proc_util::CommandNoWindowExt;
 use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
@@ -71,6 +72,7 @@ fn fetch_whoami_identity() -> Value {
     };
 
     let output = match Command::new(&bin)
+        .no_console_window()
         .arg("whoami")
         .stdin(std::process::Stdio::null())
         // 2-second cap so a flaky network call from whoami (it may
@@ -129,7 +131,7 @@ fn fetch_whoami_identity() -> Value {
 }
 
 pub struct IdentityWindowShell {
-    _webview: WebView,
+    _webview: Option<WebView>,
     window_size: Size<Pixels>,
     paste: WebViewPasteSupport,
 }
@@ -138,7 +140,7 @@ impl_focusable_via_paste!(IdentityWindowShell, paste);
 
 impl WebViewPasteShell for IdentityWindowShell {
     fn active_paste_target(&self) -> Option<&WebView> {
-        Some(&self._webview)
+        self._webview.as_ref()
     }
 }
 
@@ -159,14 +161,16 @@ impl IdentityWindowShell {
         if current == self.window_size {
             return;
         }
-        let _ = self._webview.set_bounds(Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(current.width) as u32,
-                f32::from(current.height) as u32,
-            )
-            .into(),
-        });
+        if let Some(webview) = self._webview.as_ref() {
+            let _ = webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, 0i32).into(),
+                size: LogicalSize::new(
+                    f32::from(current.width) as u32,
+                    f32::from(current.height) as u32,
+                )
+                .into(),
+            });
+        }
         self.window_size = current;
     }
 }
@@ -192,6 +196,7 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
 
     let queue = system_ipc::new_queue();
     let handle = cx.open_window(options, |window, cx| {
+        window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
@@ -210,9 +215,8 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
                 queue_for_ipc,
             ))
             .with_initialization_script(init_script.clone())
-            .with_bounds(webview_rect)
-            .build_as_child(window)
-            .expect("build_as_child must succeed for the Identity WebView");
+            .with_bounds(webview_rect);
+        let webview = crate::window::build_child_webview("Identity window", webview, window);
         let shell = cx.new(|cx| IdentityWindowShell {
             _webview: webview,
             window_size: win_size,
