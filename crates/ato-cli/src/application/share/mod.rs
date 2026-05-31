@@ -369,7 +369,7 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
         cfg.git_mode
             .as_deref()
             .and_then(|s| match s {
-                "latest-at-encap" => Some(GitMode::LatestAtEncap),
+                "latest-at-encap" => Some(GitMode::LatestAtShare),
                 _ => None,
             })
             .unwrap_or(args.git_mode)
@@ -999,7 +999,7 @@ fn resolve_source_lock(repo: &CandidateRepo, git_mode: GitMode) -> Result<Resolv
                 remote_branch: repo.branch.clone(),
             })
         }
-        GitMode::LatestAtEncap => {
+        GitMode::LatestAtShare => {
             let branch = repo.branch.as_deref().unwrap_or("HEAD");
             let remote_rev = fetch_remote_rev(&repo.url, branch)?;
             Ok(ResolvedSourceLock {
