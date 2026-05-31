@@ -111,6 +111,19 @@ static SAMPLE_RECIPE_CATALOG: &[SampleRecipeBinding] = &[
         manifest_content: include_str!("../../../../samples/recipes/filebrowser/capsule.toml"),
     },
     SampleRecipeBinding {
+        slug: "openlist-google-drive-crypt",
+        display_name: "OpenList Google Drive Crypt",
+        aliases: &[
+            "openlist-google-drive-crypt",
+            "openlist-gdrive-crypt",
+            "openlist",
+        ],
+        github: Some(("openlistteam", "openlist")),
+        manifest_content: include_str!(
+            "../../../../samples/recipes/openlist-google-drive-crypt/capsule.toml"
+        ),
+    },
+    SampleRecipeBinding {
         slug: "mailpit",
         display_name: "Mailpit",
         aliases: &["mailpit"],
@@ -288,6 +301,19 @@ mod tests {
             .expect("no error")
             .expect("github dify");
         assert_eq!(dify.slug, "dify");
+    }
+
+    #[test]
+    fn resolves_openlist_google_drive_crypt_by_alias_and_github_handle() {
+        let alias = resolve_sample_recipe_for_input("openlist-gdrive-crypt")
+            .expect("no error")
+            .expect("openlist alias");
+        assert_eq!(alias.slug, "openlist-google-drive-crypt");
+
+        let github = resolve_sample_recipe_for_github("openlistteam", "openlist")
+            .expect("no error")
+            .expect("github openlist");
+        assert_eq!(github.slug, "openlist-google-drive-crypt");
     }
 
     #[test]
