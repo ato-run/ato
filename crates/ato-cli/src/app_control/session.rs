@@ -1050,7 +1050,7 @@ pub(super) fn start_runtime_session(
         placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
         placement_fingerprint: None,
         placement_facets: Some(desktop_placement_facets()),
-        user_visible_url: local_url.clone(),
+        user_visible_url: None,
         requested_by_client: Some(session_requested_by_client()),
         runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
@@ -1426,7 +1426,7 @@ pub(super) fn start_orchestration_session_in_process(
         placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
         placement_fingerprint: None,
         placement_facets: Some(desktop_placement_facets()),
-        user_visible_url: Some(local_url.clone()),
+        user_visible_url: None,
         requested_by_client: Some(session_requested_by_client()),
         runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
@@ -1654,7 +1654,7 @@ pub(super) fn start_orchestration_session_supervisor(
         placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
         placement_fingerprint: None,
         placement_facets: Some(desktop_placement_facets()),
-        user_visible_url: Some(local_url.clone()),
+        user_visible_url: None,
         requested_by_client: Some(session_requested_by_client()),
         runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
