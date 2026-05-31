@@ -32,7 +32,7 @@ pub(crate) enum WorkspaceCommands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
 
-        /// How to resolve the git revision: same-commit (default) or latest-at-encap
+        /// How to resolve the git revision: same-commit (default) or latest-at-share
         #[arg(long, value_enum, default_value_t = GitMode::SameCommit)]
         git_mode: GitMode,
 
