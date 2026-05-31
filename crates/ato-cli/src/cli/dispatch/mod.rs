@@ -694,6 +694,23 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     &source, &toml_path, dry_run, yes, json,
                 ))
             }
+            crate::cli::community::CommunityCommands::Receipt { command } => match command {
+                crate::cli::community::ReceiptCommands::Upload {
+                    capsule_toml_id,
+                    receipt,
+                    dry_run,
+                    yes,
+                } => {
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(crate::community::receipt_upload::execute_receipt_upload(
+                        &capsule_toml_id,
+                        &receipt,
+                        dry_run,
+                        yes,
+                        json,
+                    ))
+                }
+            },
         },
     }
 }

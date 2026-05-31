@@ -1,4 +1,5 @@
 mod capsule_toml;
+pub(crate) mod receipt_upload;
 pub(crate) mod submit;
 
 pub(crate) use capsule_toml::{
