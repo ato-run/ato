@@ -21,6 +21,8 @@ fn top_level_help_hides_internal_surface() {
         .success()
         .stdout(predicate::str::contains("Primary Commands:"))
         .stdout(predicate::str::contains("Management:"))
+        .stdout(predicate::str::contains("  encap ").not())
+        .stdout(predicate::str::contains("  decap ").not())
         .stdout(predicate::str::contains("  fetch ").not())
         .stdout(predicate::str::contains("  finalize ").not())
         .stdout(predicate::str::contains("  project ").not())
@@ -38,7 +40,7 @@ fn top_level_help_hides_internal_surface() {
 
 #[test]
 fn hidden_commands_still_support_direct_help() {
-    for command in ["fetch", "finalize", "config", "registry"] {
+    for command in ["fetch", "finalize", "config", "registry", "encap", "decap"] {
         let mut cmd = Command::cargo_bin("ato").expect("binary");
         cmd.args([command, "--help"]).assert().success();
     }
@@ -594,11 +596,13 @@ fn test_cli_help() {
         .stdout(predicate::str::contains("Primary Commands:"))
         .stdout(predicate::str::contains("Management:"))
         .stdout(predicate::str::contains("run"))
-        .stdout(predicate::str::contains("decap"))
-        .stdout(predicate::str::contains("encap"))
+        .stdout(predicate::str::contains("workspace share"))
+        .stdout(predicate::str::contains("workspace setup"))
         .stdout(predicate::str::contains("ps"))
         .stdout(predicate::str::contains("stop"))
         .stdout(predicate::str::contains("logs"))
+        .stdout(predicate::str::contains("  encap ").not())
+        .stdout(predicate::str::contains("  decap ").not())
         .stdout(predicate::str::contains("\n  fetch ").not())
         .stdout(predicate::str::contains("\n  finalize ").not())
         .stdout(predicate::str::contains("\n  project ").not())
