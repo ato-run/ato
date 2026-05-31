@@ -92,6 +92,7 @@ pub struct RunArgs {
     pub dangerously_skip_permissions: bool,
     pub compatibility_fallback: Option<String>,
     pub provider_toolchain_requested: crate::ProviderToolchain,
+    pub use_existing_toml: Option<String>,
     pub explicit_commit: Option<String>,
     pub assume_yes: bool,
     pub verbose: bool,
@@ -112,18 +113,8 @@ pub struct RunArgs {
     pub cache_strategy: crate::application::dependency_materializer::CacheStrategy,
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
-    /// When true, run preflight collection and print the aggregate requirements
-    /// envelope without launching the capsule. Equivalent to
-    /// `ato internal preflight <target> --json` but driven from `ato run`.
     pub plan_only: bool,
-    /// Install lifecycle context set by `ato launch`. When `Some`, the run
-    /// pipeline stamps these IDs onto the session record.
     pub install_lifecycle_context: Option<InstallLifecycleContext>,
-    /// When set by `ato launch`, the run-install phase bypasses the normal
-    /// `resolve_run_target_or_install` (and the `~/.ato` path guard) and runs
-    /// the capsule directly from this frozen revision output directory. This
-    /// ensures `ato launch <ipk>` always executes the pinned `current_revision`,
-    /// not the latest installed version.
     pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
 
@@ -517,6 +508,7 @@ fn build_consumer_run_request(
             || std::env::var("CAPSULE_ALLOW_UNSAFE").as_deref() == Ok("1"),
         compatibility_fallback: args.compatibility_fallback.clone(),
         provider_toolchain_requested: args.provider_toolchain_requested,
+        use_existing_toml: args.use_existing_toml.clone(),
         explicit_commit: args.explicit_commit.clone(),
         assume_yes: args.assume_yes,
         verbose: args.verbose,
@@ -2012,6 +2004,7 @@ run = "node server.js""#,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            use_existing_toml: None,
             explicit_commit: None,
             assume_yes: true,
             verbose: false,
@@ -2118,6 +2111,7 @@ run = "main.py""#,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            use_existing_toml: None,
             explicit_commit: None,
             assume_yes: true,
             verbose: false,
@@ -2221,6 +2215,7 @@ run = "main.py""#,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            use_existing_toml: None,
             explicit_commit: None,
             assume_yes: true,
             verbose: false,
@@ -2312,6 +2307,7 @@ run = "node index.js"
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            use_existing_toml: None,
             explicit_commit: None,
             assume_yes: true,
             verbose: false,
