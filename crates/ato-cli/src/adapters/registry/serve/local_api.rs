@@ -561,7 +561,7 @@ pub(super) async fn handle_clear_process_logs(AxumPath(id): AxumPath<String>) ->
     (StatusCode::OK, Json(ClearLogsResponse { cleared: true })).into_response()
 }
 
-fn process_status_label(status: ProcessStatus) -> &'static str {
+pub(super) fn process_status_label(status: ProcessStatus) -> &'static str {
     match status {
         ProcessStatus::Starting => "starting",
         ProcessStatus::Ready => "ready",
