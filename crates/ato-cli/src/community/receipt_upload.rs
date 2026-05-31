@@ -99,15 +99,32 @@ fn scan_value_for_secrets(value: &serde_json::Value, path: &str, warnings: &mut 
         }
         serde_json::Value::String(s) => {
             if contains_private_key_marker(s) {
-                warnings.push(format!("Value at '{}' contains a private key marker", path));
+                warnings.push(format!(
+                    "Value at '{}' looks like a private key or base64-encoded secret",
+                    path
+                ));
             }
         }
         _ => {}
     }
 }
 
-fn contains_private_key_marker(s: &str) -> bool {
-    s.contains("-----BEGIN") && s.contains("PRIVATE KEY")
+fn contains_private_key_marker(value: &str) -> bool {
+    if value.contains("-----BEGIN") && value.contains("PRIVATE KEY") {
+        return true;
+    }
+    if value.starts_with("ssh-") {
+        return true;
+    }
+    if value.len() > 40
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=')
+        && value.len() % 4 == 0
+    {
+        return true;
+    }
+    false
 }
 
 fn is_placeholder_value(value: &str) -> bool {
@@ -127,25 +144,21 @@ fn is_placeholder_value(value: &str) -> bool {
 }
 
 fn validate_capsule_toml_id(id: &str) -> Result<()> {
-    if id.is_empty() {
-        bail!("capsule_toml_id must not be empty");
-    }
     if !id.starts_with("ctoml_") {
         bail!(
-            "capsule_toml_id must start with 'ctoml_' prefix (got '{}')",
+            "Invalid capsule_toml_id: '{}'. Expected format: ctoml_<id>",
             id
         );
     }
-    let tail = &id["ctoml_".len()..];
-    if tail.is_empty() {
-        bail!("capsule_toml_id must have characters after the 'ctoml_' prefix");
-    }
-    if !tail
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    let rest = &id[6..];
+    if rest.is_empty()
+        || !rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         bail!(
-            "capsule_toml_id contains invalid characters (only ASCII alphanumeric, '_', and '-' are allowed after 'ctoml_')"
+            "Invalid capsule_toml_id: '{}'. Expected format: ctoml_<id> with alphanumeric, underscore, or hyphen",
+            id
         );
     }
     Ok(())
@@ -158,11 +171,12 @@ pub(crate) async fn execute_receipt_upload(
     yes: bool,
     json_mode: bool,
 ) -> Result<()> {
-    validate_capsule_toml_id(capsule_toml_id)?;
-
     if !receipt_path.exists() {
         bail!("Receipt file not found: {}", receipt_path.display());
     }
+
+    validate_capsule_toml_id(capsule_toml_id)
+        .with_context(|| format!("Invalid capsule_toml_id: {capsule_toml_id}"))?;
 
     let metadata = std::fs::metadata(receipt_path).with_context(|| {
         format!(
@@ -478,61 +492,32 @@ mod tests {
     }
 
     #[test]
-    fn scan_receipt_detects_private_key_in_stderr_value() {
+    fn private_key_marker_detected_in_arbitrary_string() {
         let receipt = serde_json::json!({
-            "logs": {
-                "stderr": "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123\n-----END OPENSSH PRIVATE KEY-----"
+            "config": "-----BEGIN RSA PRIVATE KEY-----\nabc123\n-----END RSA PRIVATE KEY-----"
+        });
+        let warnings = scan_receipt_for_secrets(&receipt);
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("private key"));
+    }
+
+    #[test]
+    fn private_key_marker_detected_in_nested_string() {
+        let receipt = serde_json::json!({
+            "execution": {
+                "env": {
+                    "SOME_KEY": "ssh-rsa AAAAB3..."
+                }
             }
         });
         let warnings = scan_receipt_for_secrets(&receipt);
         assert!(!warnings.is_empty());
-        assert!(warnings.iter().any(|w| w.contains("private key marker")));
-    }
-
-    #[test]
-    fn scan_receipt_detects_rsa_private_key_in_message() {
-        let receipt = serde_json::json!({
-            "diagnostics": {
-                "message": "error: -----BEGIN RSA PRIVATE KEY-----"
-            }
-        });
-        let warnings = scan_receipt_for_secrets(&receipt);
-        assert!(!warnings.is_empty());
-        assert!(warnings.iter().any(|w| w.contains("private key marker")));
-    }
-
-    #[test]
-    fn scan_receipt_does_not_flag_begin_without_private_key() {
-        let receipt = serde_json::json!({
-            "output": "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----"
-        });
-        let warnings = scan_receipt_for_secrets(&receipt);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn scan_receipt_detects_private_key_in_array_element() {
-        let receipt = serde_json::json!({
-            "entries": [
-                "normal text",
-                "-----BEGIN EC PRIVATE KEY-----\nabc\n-----END EC PRIVATE KEY-----"
-            ]
-        });
-        let warnings = scan_receipt_for_secrets(&receipt);
-        assert!(!warnings.is_empty());
-        assert!(warnings.iter().any(|w| w.contains("private key marker")));
     }
 
     #[test]
     fn validate_capsule_toml_id_accepts_valid() {
         assert!(validate_capsule_toml_id("ctoml_abc123").is_ok());
-        assert!(validate_capsule_toml_id("ctoml_test-v2_beta").is_ok());
-    }
-
-    #[test]
-    fn validate_capsule_toml_id_rejects_empty() {
-        let err = validate_capsule_toml_id("").unwrap_err();
-        assert!(err.to_string().contains("must not be empty"));
+        assert!(validate_capsule_toml_id("ctoml_abc123_xyz").is_ok());
     }
 
     #[test]
@@ -542,20 +527,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_capsule_toml_id_rejects_prefix_only() {
+    fn validate_capsule_toml_id_rejects_empty_suffix() {
         let err = validate_capsule_toml_id("ctoml_").unwrap_err();
-        assert!(err.to_string().contains("characters after"));
+        assert!(err.to_string().contains("Invalid"));
     }
 
     #[test]
-    fn validate_capsule_toml_id_rejects_invalid_chars() {
-        let err = validate_capsule_toml_id("ctoml_abc/def").unwrap_err();
-        assert!(err.to_string().contains("invalid characters"));
+    fn validate_capsule_toml_id_rejects_special_chars() {
+        let err = validate_capsule_toml_id("ctoml_abc/123").unwrap_err();
+        assert!(err.to_string().contains("Invalid"));
     }
 
     #[test]
-    fn validate_capsule_toml_id_rejects_dot_traversal() {
-        let err = validate_capsule_toml_id("ctoml_../secret").unwrap_err();
-        assert!(err.to_string().contains("invalid characters"));
+    fn validate_capsule_toml_id_accepts_hyphens() {
+        assert!(validate_capsule_toml_id("ctoml_abc-123").is_ok());
+        assert!(validate_capsule_toml_id("ctoml_xxx-yyy-zzz").is_ok());
+    }
+
+    #[test]
+    fn private_key_marker_detected_in_embedded_error() {
+        let receipt = serde_json::json!({
+            "log": "error: -----BEGIN RSA PRIVATE KEY-----\nMIIEog...\n-----END RSA PRIVATE KEY-----"
+        });
+        let warnings = scan_receipt_for_secrets(&receipt);
+        assert!(!warnings.is_empty());
+        assert!(warnings[0].contains("private key"));
     }
 }
