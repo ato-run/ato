@@ -2280,7 +2280,10 @@ fn test_publish_command_exists() {
         ))
         .stdout(predicate::str::contains("--ci"))
         .stdout(predicate::str::contains("--dry-run"))
-        .stdout(predicate::str::contains("--no-tui"));
+        .stdout(predicate::str::contains("--no-tui"))
+        .stdout(predicate::str::contains("--toml <PATH>"))
+        .stdout(predicate::str::contains("--source <SOURCE>"))
+        .stdout(predicate::str::contains("--yes"));
 }
 
 #[test]
@@ -2480,6 +2483,100 @@ fn test_publish_phase_flags_conflict_with_ci_mode() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_publish_toml_help_shows_new_flags() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["publish", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--toml <PATH>"))
+        .stdout(predicate::str::contains("--source <SOURCE>"))
+        .stdout(predicate::str::contains("--yes"));
+}
+
+#[test]
+fn test_publish_toml_without_source_fails() {
+    let tmp = tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("capsule.toml"),
+        "schema_version = \"0.3\"\nname = \"test\"\nversion = \"1.0.0\"\nrun = \"index.js\"\n",
+    )
+    .unwrap();
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args([
+        "publish",
+        "--toml",
+        tmp.path().join("capsule.toml").to_str().unwrap(),
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("--source"));
+}
+
+#[test]
+fn test_publish_source_without_toml_fails() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["publish", "--source", "github.com/owner/repo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--toml"));
+}
+
+#[test]
+fn test_publish_toml_conflicts_with_artifact() {
+    let tmp = tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("capsule.toml"),
+        "schema_version = \"0.3\"\nname = \"test\"\nversion = \"1.0.0\"\nrun = \"index.js\"\n",
+    )
+    .unwrap();
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args([
+        "publish",
+        "--toml",
+        tmp.path().join("capsule.toml").to_str().unwrap(),
+        "--source",
+        "github.com/owner/repo",
+        "--artifact",
+        "/nonexistent.capsule",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_publish_toml_dry_run_delegates_to_community_submit() {
+    let tmp = tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("capsule.toml"),
+        "schema_version = \"0.3\"\nname = \"test\"\nversion = \"1.0.0\"\nrun = \"index.js\"\nsource.repository = \"owner/repo\"\n",
+    )
+    .unwrap();
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args([
+        "publish",
+        "--toml",
+        tmp.path().join("capsule.toml").to_str().unwrap(),
+        "--source",
+        "github.com/owner/repo",
+        "--dry-run",
+    ])
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("Publishing capsule.toml as community capsule record"))
+    .stderr(predicate::str::contains("[dry-run] Would submit"));
+}
+
+#[test]
+fn test_publish_artifact_parsing_noop_works_without_conflict() {
+    let mut cmd = Command::cargo_bin("ato").unwrap();
+    cmd.args(["publish", "--artifact", "/nonexistent.capsule", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--artifact <PATH>"));
 }
 
 #[test]
