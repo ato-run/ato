@@ -1,0 +1,36 @@
+schema_version = "0.3"
+name = "openlist-google-drive-crypt"
+version = "4.2.2"
+type = "app"
+description = "Self-hosted OpenList uploader backed by encrypted Google Drive storage via Crypt driver"
+homepage = "https://doc.oplist.org/"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "openlistteam/openlist:v4.2.2"
+port = 5244
+required_env = ["OPENLIST_ADMIN_PASSWORD"]
+env = { UMASK = "022", TZ = "Asia/Tokyo", OPENLIST_PORT = "5244", OPENLIST_UID = "1001", OPENLIST_GID = "1001", OPENLIST_PUBLIC_DOMAIN = "" }
+
+[[targets.app.config_schema]]
+name = "OPENLIST_ADMIN_PASSWORD"
+kind = "secret"
+label = "OpenList admin password"
+description = "Initial password for the OpenList admin account"
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "OpenList data, users, storage driver configuration, and local metadata"
+attach = "explicit"
+schema_id = "sha256:openlist-google-drive-crypt-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "5244", timeout_seconds = 120, initial_delay_seconds = 5 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/opt/openlist/data"
