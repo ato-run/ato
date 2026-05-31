@@ -83,31 +83,6 @@ pub(crate) async fn try_community_submit_after_run(
         return Ok(());
     };
 
-    let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-
-    if is_tty {
-        eprintln!();
-        eprintln!("Submit capsule.toml to Ato community?");
-        eprintln!();
-        eprintln!("  source: {}", context.source);
-        eprintln!("  toml: {}", context.capsule_toml_path.display());
-        eprintln!("  trust: community");
-        eprintln!("  visibility: public");
-        eprintln!();
-        eprintln!("This will publish the capsule.toml as public execution metadata.");
-        eprint!("Continue? [y/N] ");
-        use std::io::Write;
-        let _ = std::io::stderr().flush();
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).ok();
-        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-            eprintln!("Submission skipped.");
-            return Ok(());
-        }
-    } else {
-        return Ok(());
-    }
-
     let result = crate::community::submit::submit_prepared_with_response(&submission).await?;
 
     eprintln!();
