@@ -378,8 +378,8 @@ pub(crate) enum RuntimeOciProvider {
     DockerCompatible(DockerCompatibleOciProvider<BollardOciRuntimeClient>),
 }
 
-pub(crate) async fn select_ready_runtime_oci_provider(
-) -> Result<RuntimeOciProvider, OciProviderError> {
+pub(crate) async fn select_ready_runtime_oci_provider()
+-> Result<RuntimeOciProvider, OciProviderError> {
     let podman = PodmanProvider::new();
     let podman_ready = podman.ensure_ready().await;
     if podman_ready.is_ok() {
@@ -1756,8 +1756,8 @@ impl DockerCompatibleOciProvider<BollardOciRuntimeClient> {
     }
 }
 
-async fn connect_ready_docker_compatible_provider(
-) -> Result<DockerCompatibleOciProvider<BollardOciRuntimeClient>, OciProviderError> {
+async fn connect_ready_docker_compatible_provider()
+-> Result<DockerCompatibleOciProvider<BollardOciRuntimeClient>, OciProviderError> {
     let provider = DockerCompatibleOciProvider::connect_default(docker_compatible_semantics())?;
     let version =
         provider

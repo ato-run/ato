@@ -4334,12 +4334,16 @@ mod tests {
         )
         .expect("auto community state bindings");
 
-        assert!(attach_state
-            .iter()
-            .any(|binding| binding.starts_with("db-data:")));
-        assert!(attach_state
-            .iter()
-            .any(|binding| binding.starts_with("app-data:")));
+        assert!(
+            attach_state
+                .iter()
+                .any(|binding| binding.starts_with("db-data:"))
+        );
+        assert!(
+            attach_state
+                .iter()
+                .any(|binding| binding.starts_with("app-data:"))
+        );
 
         let (plan, _guest, _notes) = resolve_local_plan_for_session_start(
             &resolved.manifest_path,
