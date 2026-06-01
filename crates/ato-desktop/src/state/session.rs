@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 
-use anyhow::Result;
 
 use crate::orchestrator::GuestLaunchSession;
 
@@ -393,26 +392,7 @@ impl SessionRegistry {
         }
     }
 
-    /// Update the state of a client.
-    pub fn update_client_state(&mut self, client_id: SessionClientId, state: SessionClientState) {
-        if let Some(client) = self.clients.get_mut(&client_id) {
-            client.state = state;
-            client.last_seen_at = SystemTime::now();
-        }
-    }
 
-    /// Remove a client entirely (e.g. OS browser closed).
-    pub fn remove_client(&mut self, client_id: SessionClientId) {
-        if let Some(client) = self.clients.remove(&client_id)
-            && let Some(wid) = client.window_id
-            && let Some(ids) = self.window_to_clients.get_mut(&wid)
-        {
-            ids.retain(|id| *id != client_id);
-            if ids.is_empty() {
-                self.window_to_clients.remove(&wid);
-            }
-        }
-    }
 
     // ── queries ──────────────────────────────────────────────────────────
 
@@ -437,21 +417,7 @@ impl SessionRegistry {
             .collect()
     }
 
-    /// Find a session by its client's window ID.
-    pub fn get_session_by_window_id(&self, window_id: u64) -> Option<&CapsuleSession> {
-        let client_ids = self.clients_by_window_id(window_id);
-        if let Some(cid) = client_ids.first() {
-            self.session_id_for_client(*cid)
-                .and_then(|sid| self.sessions.get(sid))
-        } else {
-            None
-        }
-    }
 
-    /// Number of tracked sessions.
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
-    }
 
     /// Replace the CLI-originated OCI projection without touching Desktop-owned
     /// source sessions or their attached window clients.
@@ -474,10 +440,6 @@ impl SessionRegistry {
         }
     }
 
-    pub fn refresh_oci_sessions_from_cli(&mut self) -> Result<()> {
-        self.sync_oci_sessions(crate::orchestrator::list_oci_sessions()?);
-        Ok(())
-    }
 
     // ── lifecycle actions ──────────────────────────────────────────────
 
@@ -547,28 +509,6 @@ impl SessionRegistry {
         });
     }
 
-    pub fn stop_oci_session_and_refresh(&mut self, session_id: &str) -> Result<bool> {
-        let is_oci = self
-            .sessions
-            .get(session_id)
-            .map(|session| session.session_kind.is_oci())
-            .unwrap_or(false);
-        if !is_oci {
-            return Ok(false);
-        }
-        self.update_process_state(session_id, SessionProcessState::Stopping);
-        if let Err(error) = crate::orchestrator::stop_oci_session(session_id) {
-            self.update_process_state(
-                session_id,
-                SessionProcessState::FailedToStop {
-                    error: error.to_string(),
-                },
-            );
-            return Err(error);
-        }
-        self.refresh_oci_sessions_from_cli()?;
-        Ok(true)
-    }
 
     /// Stop every session that is still running (Starting or Ready).
     /// Called on app quit so the Focus-mode close path (which lacks
@@ -725,15 +665,7 @@ impl PendingLaunches {
         );
     }
 
-    pub fn remove(&mut self, launch_id: LaunchRequestId) -> Option<CapsuleLaunchRequest> {
-        self.launches.remove(&launch_id).map(|(r, _)| r)
-    }
 
-    pub fn update_state(&mut self, launch_id: LaunchRequestId, state: PendingLaunchState) {
-        if let Some(entry) = self.launches.get_mut(&launch_id) {
-            entry.1 = state;
-        }
-    }
 
     pub fn get(&self, launch_id: LaunchRequestId) -> Option<&CapsuleLaunchRequest> {
         self.launches.get(&launch_id).map(|(r, _)| r)

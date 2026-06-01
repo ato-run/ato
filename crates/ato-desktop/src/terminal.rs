@@ -164,13 +164,6 @@ impl TerminalSessionManager {
         }
     }
 
-    /// Record activity for resize/signal without rate limiting.
-    pub fn touch_session(&self, session_id: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(session) = inner.sessions.get_mut(session_id) {
-            session.touch();
-        }
-    }
 
     /// Update cols/rows after a resize.
     pub fn update_size(&self, session_id: &str, cols: u16, rows: u16) {
@@ -197,12 +190,6 @@ impl TerminalSessionManager {
         }
     }
 
-    /// Return count of active sessions.
-    pub fn active_count(&self) -> usize {
-        let mut inner = self.inner.lock().unwrap();
-        inner.evict_expired();
-        inner.sessions.len()
-    }
 }
 
 impl TerminalSessionManagerInner {
