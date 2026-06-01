@@ -13,7 +13,7 @@ const BUNDLED_SYSTEM_ASSET_EXCLUDED_DIRS: &[&str] =
     &["node_modules", ".vite", ".astro", ".next", "target"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BudleTarget {
+struct BundleTarget {
     DarwinArm64,
     DarwinX86_64,
     WindowsX86_64,
@@ -21,8 +21,8 @@ struct BudleTarget {
     LinuxArm64,
 }
 
-impl BudleTarget {
-    const DEFAULT_TARGET: Self = Self::DarwinArm64;
+impl BundleTarget {
+    const DEFAULT: Self = Self::DarwinArm64;
 
     const ALL: &'static [Self] = &[Self::DarwinArm64, Self::DarwinX86_64, Self::WindowsX86_64, Self::LinuxX86_64, Self::LinuxArm64];
 
