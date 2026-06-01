@@ -693,21 +693,49 @@ fn collect_preflight_envelope_for_input(
     }
 }
 
+/// Maximum number of automatic retries for a retryable preflight error.
+const PREFLIGHT_MAX_RETRIES: u32 = 2;
+/// Delay between preflight retries (linear, no jitter needed for a 2-retry budget).
+const PREFLIGHT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Returns `true` when the preflight CLI stdout carries a JSON error envelope
+/// with `"retryable": true`. Used to decide whether to retry on transient
+/// failures (e.g., a momentary community TOML registry fetch miss).
+fn preflight_stdout_is_retryable(stdout: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("retryable"))
+                .and_then(|r| r.as_bool())
+        })
+        .unwrap_or(false)
+}
+
 fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope> {
     let ato_bin = resolve_ato_binary()?;
     debug!(bin = %ato_bin.display(), handle, "calling ato internal preflight");
-    let output = Command::new(&ato_bin)
-        .no_console_window()
-        .args(["internal", "preflight", handle, "--json"])
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to invoke '{}' internal preflight",
-                ato_bin.display()
-            )
-        })?;
 
-    if !output.status.success() {
+    let mut attempt = 0u32;
+    loop {
+        let output = Command::new(&ato_bin)
+            .no_console_window()
+            .args(["internal", "preflight", handle, "--json"])
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to invoke '{}' internal preflight",
+                    ato_bin.display()
+                )
+            })?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let trimmed = stdout.trim();
+            return serde_json::from_str(trimmed)
+                .with_context(|| format!("failed to parse preflight JSON: {trimmed}"));
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
@@ -728,16 +756,23 @@ fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope
             });
         }
 
+        if attempt < PREFLIGHT_MAX_RETRIES && preflight_stdout_is_retryable(&stdout) {
+            attempt += 1;
+            tracing::warn!(
+                handle,
+                attempt,
+                max = PREFLIGHT_MAX_RETRIES,
+                "preflight transient error — retrying"
+            );
+            std::thread::sleep(PREFLIGHT_RETRY_DELAY);
+            continue;
+        }
+
         bail!(
             "ato internal preflight failed (exit {}): stderr={stderr} stdout={stdout}",
             output.status
         );
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim();
-    serde_json::from_str(trimmed)
-        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))
 }
 
 /// Preflight a community TOML candidate by passing `--community-toml-id` to
@@ -759,25 +794,34 @@ fn collect_preflight_envelope_for_community_toml(
         "calling ato internal preflight with --community-toml-id"
     );
     let normalized = normalize_preflight_handle(source_handle);
-    let output = Command::new(&ato_bin)
-        .no_console_window()
-        .args([
-            "internal",
-            "preflight",
-            &normalized,
-            "--community-toml-id",
-            ctoml_id,
-            "--json",
-        ])
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to invoke '{}' internal preflight --community-toml-id",
-                ato_bin.display()
-            )
-        })?;
 
-    if !output.status.success() {
+    let mut attempt = 0u32;
+    loop {
+        let output = Command::new(&ato_bin)
+            .no_console_window()
+            .args([
+                "internal",
+                "preflight",
+                &normalized,
+                "--community-toml-id",
+                ctoml_id,
+                "--json",
+            ])
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to invoke '{}' internal preflight --community-toml-id",
+                    ato_bin.display()
+                )
+            })?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let trimmed = stdout.trim();
+            return serde_json::from_str(trimmed)
+                .with_context(|| format!("failed to parse preflight JSON: {trimmed}"));
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
@@ -792,16 +836,24 @@ fn collect_preflight_envelope_for_community_toml(
             return collect_preflight_envelope(&normalized);
         }
 
+        if attempt < PREFLIGHT_MAX_RETRIES && preflight_stdout_is_retryable(&stdout) {
+            attempt += 1;
+            tracing::warn!(
+                source_handle,
+                ctoml_id,
+                attempt,
+                max = PREFLIGHT_MAX_RETRIES,
+                "community-toml preflight transient error — retrying"
+            );
+            std::thread::sleep(PREFLIGHT_RETRY_DELAY);
+            continue;
+        }
+
         bail!(
             "ato internal preflight --community-toml-id failed (exit {}): stderr={stderr} stdout={stdout}",
             output.status
         );
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim();
-    serde_json::from_str(trimmed)
-        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -5986,5 +6038,34 @@ mod launch_error_display_tests {
             "2024-01-01T00:00:00.000000Z ERROR ato_cli: bad"
         ));
         assert!(!is_tracing_noise_line("docker-compose: command not found"));
+    }
+}
+
+#[cfg(test)]
+mod preflight_retry_tests {
+    use super::*;
+
+    #[test]
+    fn retryable_detects_true_in_error_envelope() {
+        let stdout = r#"{"schema_version":"1","status":"error","error":{"code":"E999","name":"internal_error","phase":"internal","classification":"internal","message":"preflight: community TOML fetch/validate failed","retryable":true,"interactive_resolution":false,"causes":[]}}"#;
+        assert!(preflight_stdout_is_retryable(stdout));
+    }
+
+    #[test]
+    fn retryable_false_is_not_retried() {
+        let stdout = r#"{"schema_version":"1","status":"error","error":{"code":"E103","name":"missing_required_env","retryable":false}}"#;
+        assert!(!preflight_stdout_is_retryable(stdout));
+    }
+
+    #[test]
+    fn retryable_missing_field_is_not_retried() {
+        let stdout = r#"{"status":"error","error":{"code":"E999","message":"something"}}"#;
+        assert!(!preflight_stdout_is_retryable(stdout));
+    }
+
+    #[test]
+    fn retryable_empty_stdout_is_not_retried() {
+        assert!(!preflight_stdout_is_retryable(""));
+        assert!(!preflight_stdout_is_retryable("not json"));
     }
 }
