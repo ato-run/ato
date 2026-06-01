@@ -437,7 +437,7 @@ fn render_app_grid() -> impl IntoElement {
             div().flex().flex_wrap().gap(px(10.0)).children(
                 app_grid_items()
                     .into_iter()
-                    .map(|item| app_grid_tile(item))
+                    .map(app_grid_tile)
                     .collect::<Vec<_>>(),
             ),
         )
@@ -688,7 +688,7 @@ fn render_refresh_button() -> gpui::AnyElement {
                             message: format!("Refresh failed: {e}"),
                         },
                     }));
-                    let _ = async_cx.update(|app| {
+                    async_cx.update(|app| {
                         app.refresh_windows();
                     });
                 })

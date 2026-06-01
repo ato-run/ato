@@ -111,11 +111,10 @@ impl ImportWindowShell {
             "typeof window.__atoImportSnapshot==='function'&&window.__atoImportSnapshot({})",
             snapshot_json
         );
-        if let Some(webview) = self._webview.as_ref() {
-            if let Err(error) = webview.evaluate_script(&script) {
+        if let Some(webview) = self._webview.as_ref()
+            && let Err(error) = webview.evaluate_script(&script) {
                 tracing::warn!(?error, "ato-import: evaluate_script(push_snapshot) failed");
             }
-        }
     }
 }
 
@@ -149,11 +148,10 @@ pub fn push_current_snapshot(cx: &mut App) {
     let weak = cx
         .try_global::<ImportWindowSlot>()
         .and_then(|s| s.shell.clone());
-    if let Some(weak) = weak {
-        if let Some(shell) = weak.upgrade() {
+    if let Some(weak) = weak
+        && let Some(shell) = weak.upgrade() {
             shell.read(cx).push_snapshot(&json);
         }
-    }
 }
 
 /// Open the ato-import window. If one is already open, activates it
@@ -164,8 +162,8 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
     // somewhere to come from.
     let session = session_arc(cx);
 
-    if let Some(slot) = cx.try_global::<ImportWindowSlot>() {
-        if let Some(handle) = slot.window {
+    if let Some(slot) = cx.try_global::<ImportWindowSlot>()
+        && let Some(handle) = slot.window {
             // Try to bring the existing window forward. If activation
             // fails (handle is stale), fall through and reopen.
             let activate_ok = handle
@@ -175,7 +173,6 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
                 return Ok(handle);
             }
         }
-    }
 
     let bounds = Bounds::centered(None, size(px(IMPORT_W), px(IMPORT_H)), cx);
     let options = WindowOptions {

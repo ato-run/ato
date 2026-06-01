@@ -332,11 +332,10 @@ impl ControlBarShellPlaceholder {
         if self.omnibar_focused {
             return Self::parse_pin_key_from_value(&value);
         }
-        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
-            if let Some(capsule) = &entry.capsule {
+        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost()
+            && let Some(capsule) = &entry.capsule {
                 return Some(format!("capsule://{}", capsule.active_handle()));
             }
-        }
         Self::parse_pin_key_from_value(&value)
     }
 
@@ -383,7 +382,7 @@ impl ControlBarShellPlaceholder {
                         .unwrap_or_else(|| "No window".to_string()),
                     url: entry
                         .map(|e| e.url.to_string())
-                        .unwrap_or_else(|| String::new()),
+                        .unwrap_or_else(String::new),
                 }
             });
         if let Err(err) = open_info_popup(cx, model, self.locale) {
@@ -499,11 +498,10 @@ impl Render for ControlBarShellPlaceholder {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, window, cx| {
-                    if let Some(action) = this.gesture_state.on_mouse_up() {
-                        if matches!(action, GestureAction::OpenCardSwitcher) {
+                    if let Some(action) = this.gesture_state.on_mouse_up()
+                        && matches!(action, GestureAction::OpenCardSwitcher) {
                             window.dispatch_action(Box::new(OpenCardSwitcher), cx);
                         }
-                    }
                 }),
             )
             .on_mouse_move(|_event, window, cx| {
@@ -522,11 +520,9 @@ impl Render for ControlBarShellPlaceholder {
                     if let Some(action) = this
                         .gesture_state
                         .on_mouse_move(f32::from(event.position.x), f32::from(event.position.y))
-                    {
-                        if matches!(action, GestureAction::OpenCardSwitcher) {
+                        && matches!(action, GestureAction::OpenCardSwitcher) {
                             window.dispatch_action(Box::new(OpenCardSwitcher), cx);
                         }
-                    }
                 }),
             )
             .on_hover(move |hovered, window, cx| {
@@ -1408,11 +1404,10 @@ fn open_control_bar_inner(
         super::macos::round_window_corners(cx, *handle, (initial_h / 2.0) as f64);
         // #168 — attach the Control Bar as a child of the frontmost content
         // window so macOS orders them correctly and they move together.
-        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
-            if let Err(err) = super::macos::attach_as_child(cx, entry.handle, *handle) {
+        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost()
+            && let Err(err) = super::macos::attach_as_child(cx, entry.handle, *handle) {
                 tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
             }
-        }
     }
     #[cfg(target_os = "windows")]
     {

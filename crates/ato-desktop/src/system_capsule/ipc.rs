@@ -169,8 +169,8 @@ fn make_ipc_handler_inner(
                 return;
             }
         };
-        if let Some(expected) = expected_capsule {
-            if capsule != expected {
+        if let Some(expected) = expected_capsule
+            && capsule != expected {
                 tracing::warn!(
                     received = %envelope.capsule,
                     expected = ?expected,
@@ -178,7 +178,6 @@ fn make_ipc_handler_inner(
                 );
                 return;
             }
-        }
         let command_result = parse_system_command(capsule, envelope.command);
         match command_result {
             Ok(cmd) => {
@@ -367,7 +366,7 @@ where
         .spawn(async move {
             bg_exec.timer(delay).await;
             crate::webview_init_guard::wait_until_idle(&bg_exec).await;
-            let _ = update_app.update(action);
+            update_app.update(action);
         })
         .detach();
 }
