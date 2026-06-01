@@ -183,14 +183,13 @@ fn classify_closed_window_kind(cx: &App, window_id: u64) -> &'static str {
     }
 
     // Check singleton chrome windows.
-    if let Some(c) = cx.try_global::<crate::window::ControlBarController>() {
-        if c.handle
+    if let Some(c) = cx.try_global::<crate::window::ControlBarController>()
+        && c.handle
             .map(|h| h.window_id().as_u64() == window_id)
             .unwrap_or(false)
         {
             return "control-bar";
         }
-    }
     if cx
         .global::<crate::window::card_switcher::CardSwitcherWindowSlot>()
         .0
@@ -673,13 +672,12 @@ pub fn run(skip_onboarding: bool) {
                     "focus guest capsule pane unregistered on close"
                 );
             }
-            if let Some(handle) = cx.global::<crate::window::ControlBarController>().handle {
-                if handle.window_id() == window_id {
+            if let Some(handle) = cx.global::<crate::window::ControlBarController>().handle
+                && handle.window_id() == window_id {
                     cx.global_mut::<crate::window::ControlBarController>()
                         .clear_window(handle);
                     tracing::info!("Control Bar window closed; controller cleared");
                 }
-            }
 
             // Clear singleton slots when their tracked window closes
             // so the next Settings / Store / switcher click opens a
@@ -1029,8 +1027,8 @@ pub fn run(skip_onboarding: bool) {
             // is routed to the GitHub Import review surface rather than the
             // capsule consent or external-URL flows. Bare `owner/repo` is
             // not matched here to avoid colliding with other input intents.
-            if looks_like_github_repo_input(raw) {
-                if let Ok(normalized) =
+            if looks_like_github_repo_input(raw)
+                && let Ok(normalized) =
                     crate::source_import_session::normalize_github_import_input(raw)
                 {
                     if let Err(err) = crate::window::import_window::open_with_url(
@@ -1045,7 +1043,6 @@ pub fn run(skip_onboarding: bool) {
                     }
                     return;
                 }
-            }
 
             if let Some(rest) = raw.strip_prefix("capsule://") {
                 // Extract optional ?ctoml=<id> query parameter.
@@ -1411,7 +1408,7 @@ pub fn run(skip_onboarding: bool) {
                         .timer(std::time::Duration::from_millis(32))
                         .await;
                     crate::webview_init_guard::wait_until_idle(bg_exec).await;
-                    let _ = async_cx.update(|cx| {
+                    async_cx.update(|cx| {
                         if show_onboarding {
                             match crate::window::onboarding_window::open_onboarding_window(cx) {
                                 Ok(_) => tracing::info!("Onboarding window opened at startup"),
@@ -1610,15 +1607,14 @@ fn restart_focus_content_window(cx: &mut App, window_id: u64) {
                 }
                 _ => None,
             });
-    if let Some(session_id) = capsule_session_id.as_deref() {
-        if let Err(err) = crate::orchestrator::stop_guest_session_and_wait(
+    if let Some(session_id) = capsule_session_id.as_deref()
+        && let Err(err) = crate::orchestrator::stop_guest_session_and_wait(
             session_id,
             std::time::Duration::from_secs(3),
         ) {
             tracing::error!(error = %err, window_id, "RestartContentWindow stop failed");
             return;
         }
-    }
     let _ = entry
         .handle
         .update(cx, |_, window, _| window.remove_window());
