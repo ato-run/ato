@@ -56,11 +56,9 @@ struct EnvVarGuard {
 impl EnvVarGuard {
     fn set(key: &str, value: Option<&str>) -> Self {
         let previous = std::env::var(key).ok();
-        unsafe {
-            match value {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
         }
         Self {
             key: key.to_string(),
@@ -71,15 +69,13 @@ impl EnvVarGuard {
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        unsafe {
-            if let Some(value) = &self.previous {
-                unsafe {
-                    std::env::set_var(&self.key, value);
-                }
-            } else {
-                unsafe {
-                    std::env::remove_var(&self.key);
-                }
+        if let Some(value) = &self.previous {
+            unsafe {
+                std::env::set_var(&self.key, value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var(&self.key);
             }
         }
     }
@@ -1974,11 +1970,9 @@ fn test_github_api_base_url_uses_env_override() {
         std::env::set_var(key, "http://127.0.0.1:3000/");
     }
     assert_eq!(github_api_base_url(), "http://127.0.0.1:3000");
-    unsafe {
-        match previous {
-            Some(value) => unsafe { std::env::set_var(key, value) },
-            None => unsafe { std::env::remove_var(key) },
-        }
+    match previous {
+        Some(value) => unsafe { std::env::set_var(key, value) },
+        None => unsafe { std::env::remove_var(key) },
     }
 }
 
@@ -3068,9 +3062,7 @@ fn try_register_lifecycle_returns_some_when_given_valid_blake3_hash() {
     let ato_home = tempfile::tempdir().expect("tempdir");
     // Point ATO_HOME to our isolated temp dir so instances are written there.
     unsafe {
-        unsafe {
-            std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
-        }
+        std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
     }
 
     // Build a fake "installed" output directory with a regular file.
@@ -3126,9 +3118,7 @@ fn install_lifecycle_all_required_fields_are_populated() {
 
     let ato_home = tempfile::tempdir().expect("tempdir");
     unsafe {
-        unsafe {
-            std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
-        }
+        std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
     }
 
     let installed_dir = ato_home.path().join("fake_install2");
@@ -3210,9 +3200,7 @@ fn install_profile_key_is_stable_across_reinstalls() {
 
     let ato_home = tempfile::tempdir().expect("tempdir");
     unsafe {
-        unsafe {
-            std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
-        }
+        std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
     }
 
     let make_fake_install = |ato_home: &std::path::Path, subdir: &str, hash_char: char| {

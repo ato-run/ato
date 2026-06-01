@@ -1510,22 +1510,18 @@ contract = "service@1"
 
     fn scoped_env(key: &'static str, value: Option<&str>) -> EnvGuard {
         let previous = std::env::var_os(key);
-        unsafe {
-            match value {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
+        match value {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
         }
         EnvGuard { key, previous }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            unsafe {
-                match &self.previous {
-                    Some(v) => unsafe { std::env::set_var(self.key, v) },
-                    None => unsafe { std::env::remove_var(self.key) },
-                }
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }

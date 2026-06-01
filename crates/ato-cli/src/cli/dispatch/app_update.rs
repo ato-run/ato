@@ -135,9 +135,7 @@ mod tests {
         let ipk = derive_install_profile_key(&app_id, &profile_id);
 
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
+            std::env::set_var("ATO_HOME", dir.path());
         }
         let result = execute_app_update_command(AppUpdateArgs {
             install_profile_key: ipk.as_str().to_owned(),
@@ -165,9 +163,7 @@ mod tests {
     fn update_unknown_ipk_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
+            std::env::set_var("ATO_HOME", dir.path());
         }
         let result = execute_app_update_command(AppUpdateArgs {
             install_profile_key: "ipk_00000000000000000000000000000000".to_owned(),

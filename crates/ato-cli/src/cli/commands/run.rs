@@ -1750,12 +1750,10 @@ mod tests {
         let key_missing = "ATO_TEST_REQUIRED_ENV_MISSING";
         let key_empty = "ATO_TEST_REQUIRED_ENV_EMPTY";
         unsafe {
-            unsafe {
-                std::env::remove_var(key_missing);
-            }
-            unsafe {
-                std::env::set_var(key_empty, "");
-            }
+            std::env::remove_var(key_missing);
+        }
+        unsafe {
+            std::env::set_var(key_empty, "");
         }
 
         let plan = manifest_with_required_env(vec![key_missing, key_empty]);
@@ -1788,9 +1786,7 @@ mod tests {
     fn preflight_required_env_passes_with_runtime_override() {
         let key = "ATO_TEST_REQUIRED_ENV_FROM_OVERRIDE";
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_UI_OVERRIDE_ENV_JSON", format!(r#"{{"{}":"ok"}}"#, key));
-            }
+            std::env::set_var("ATO_UI_OVERRIDE_ENV_JSON", format!(r#"{{"{}":"ok"}}"#, key));
         }
 
         let plan = manifest_with_required_env(vec![key]);

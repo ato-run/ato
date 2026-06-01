@@ -438,6 +438,10 @@ impl ScopedAtoHome {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let prior = std::env::var_os("ATO_HOME");
+        // SAFETY: `ato_home_lock` serializes all `ScopedAtoHome` instances, and
+        // this fixture worker runs the build synchronously on one thread while
+        // holding the guard, so no other thread reads or writes `ATO_HOME`
+        // within the guard's scope.
         unsafe {
             std::env::set_var("ATO_HOME", path);
         }
@@ -450,11 +454,12 @@ impl ScopedAtoHome {
 
 impl Drop for ScopedAtoHome {
     fn drop(&mut self) {
-        unsafe {
-            match self.prior.take() {
-                Some(value) => unsafe { std::env::set_var("ATO_HOME", value) },
-                None => unsafe { std::env::remove_var("ATO_HOME") },
-            }
+        // SAFETY: the lock guard held by this `ScopedAtoHome` is still alive
+        // here, so the restore is serialized against every other instance and
+        // no other thread accesses `ATO_HOME` concurrently.
+        match self.prior.take() {
+            Some(value) => unsafe { std::env::set_var("ATO_HOME", value) },
+            None => unsafe { std::env::remove_var("ATO_HOME") },
         }
     }
 }

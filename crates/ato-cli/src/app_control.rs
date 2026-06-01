@@ -1337,11 +1337,9 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &str, value: Option<&str>) -> Self {
             let previous = std::env::var_os(key);
-            unsafe {
-                match value {
-                    Some(value) => unsafe { std::env::set_var(key, value) },
-                    None => unsafe { std::env::remove_var(key) },
-                }
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
             }
             Self {
                 key: key.to_string(),

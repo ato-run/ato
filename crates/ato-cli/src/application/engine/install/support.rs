@@ -2946,15 +2946,13 @@ mod tests {
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            unsafe {
-                if let Some(previous) = &self.previous {
-                    unsafe {
-                        std::env::set_var(self.key, previous);
-                    }
-                } else {
-                    unsafe {
-                        std::env::remove_var(self.key);
-                    }
+            if let Some(previous) = &self.previous {
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
                 }
             }
         }

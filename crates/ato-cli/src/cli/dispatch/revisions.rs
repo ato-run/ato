@@ -260,9 +260,7 @@ mod tests {
 
         let ipk = derive_install_profile_key(&app_id, &profile_id);
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
+            std::env::set_var("ATO_HOME", dir.path());
         }
         let result = execute_revisions_command(RevisionsArgs {
             install_profile_key: ipk.as_str().to_owned(),

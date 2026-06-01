@@ -3553,15 +3553,13 @@ mod tests {
                 session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
             };
             unsafe {
-                unsafe {
-                    std::env::set_var("ATO_HOME", ato_home_path);
-                }
-                unsafe {
-                    std::env::set_var("HOME", ato_home_path);
-                }
-                unsafe {
-                    std::env::set_var("ATO_DESKTOP_SESSION_ROOT", session_root);
-                }
+                std::env::set_var("ATO_HOME", ato_home_path);
+            }
+            unsafe {
+                std::env::set_var("HOME", ato_home_path);
+            }
+            unsafe {
+                std::env::set_var("ATO_DESKTOP_SESSION_ROOT", session_root);
             }
             guard
         }
@@ -3569,19 +3567,17 @@ mod tests {
 
     impl Drop for TestEnvGuard {
         fn drop(&mut self) {
-            unsafe {
-                match &self.ato_home {
-                    Some(v) => unsafe { std::env::set_var("ATO_HOME", v) },
-                    None => unsafe { std::env::remove_var("ATO_HOME") },
-                }
-                match &self.home {
-                    Some(v) => unsafe { std::env::set_var("HOME", v) },
-                    None => unsafe { std::env::remove_var("HOME") },
-                }
-                match &self.session_root {
-                    Some(v) => unsafe { std::env::set_var("ATO_DESKTOP_SESSION_ROOT", v) },
-                    None => unsafe { std::env::remove_var("ATO_DESKTOP_SESSION_ROOT") },
-                }
+            match &self.ato_home {
+                Some(v) => unsafe { std::env::set_var("ATO_HOME", v) },
+                None => unsafe { std::env::remove_var("ATO_HOME") },
+            }
+            match &self.home {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+            match &self.session_root {
+                Some(v) => unsafe { std::env::set_var("ATO_DESKTOP_SESSION_ROOT", v) },
+                None => unsafe { std::env::remove_var("ATO_DESKTOP_SESSION_ROOT") },
             }
         }
     }

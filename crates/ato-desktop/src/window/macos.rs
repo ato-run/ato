@@ -85,7 +85,7 @@ pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, radius: f64) 
                 return;
             }
         };
-        let content_view = match unsafe { nswindow.contentView() } {
+        let content_view = match nswindow.contentView() {
             Some(v) => v,
             None => {
                 warn!("round_window_corners: NSWindow has no contentView");
@@ -95,33 +95,31 @@ pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, radius: f64) 
         // SAFETY: `wantsLayer = true` is the documented opt-in for
         // layer-backed views. We need a layer to set a corner radius
         // on, and `masksToBounds` to clip children inside the radius.
-        unsafe {
-            content_view.setWantsLayer(true);
-            if let Some(layer) = content_view.layer() {
-                layer.setCornerRadius(radius);
-                layer.setMasksToBounds(true);
-            } else {
-                warn!("round_window_corners: contentView produced no layer");
-            }
-            // Make the window backing transparent so AppKit's
-            // window-level shadow follows the rounded contentView
-            // alpha mask instead of the full rectangle, and so the
-            // four rounded-corner cut-outs above the mask are truly
-            // transparent (no white halo, no rectangular boundary).
-            nswindow.setOpaque(false);
-            let clear = NSColor::clearColor();
-            nswindow.setBackgroundColor(Some(&clear));
-            // OS-level drop shadow renders OUTSIDE the window bounds
-            // and follows the alpha mask. This gives the pill visible
-            // separation from same-coloured backdrops (e.g. white
-            // Store) without re-introducing a padded host window. We
-            // re-enable + invalidate explicitly because some popup
-            // window kinds disable hasShadow by default and we need
-            // AppKit to recompute the shadow against the new rounded
-            // alpha mask we just installed via cornerRadius.
-            nswindow.setHasShadow(true);
-            nswindow.invalidateShadow();
+        content_view.setWantsLayer(true);
+        if let Some(layer) = content_view.layer() {
+            layer.setCornerRadius(radius);
+            layer.setMasksToBounds(true);
+        } else {
+            warn!("round_window_corners: contentView produced no layer");
         }
+        // Make the window backing transparent so AppKit's
+        // window-level shadow follows the rounded contentView
+        // alpha mask instead of the full rectangle, and so the
+        // four rounded-corner cut-outs above the mask are truly
+        // transparent (no white halo, no rectangular boundary).
+        nswindow.setOpaque(false);
+        let clear = NSColor::clearColor();
+        nswindow.setBackgroundColor(Some(&clear));
+        // OS-level drop shadow renders OUTSIDE the window bounds
+        // and follows the alpha mask. This gives the pill visible
+        // separation from same-coloured backdrops (e.g. white
+        // Store) without re-introducing a padded host window. We
+        // re-enable + invalidate explicitly because some popup
+        // window kinds disable hasShadow by default and we need
+        // AppKit to recompute the shadow against the new rounded
+        // alpha mask we just installed via cornerRadius.
+        nswindow.setHasShadow(true);
+        nswindow.invalidateShadow();
     });
     if let Err(err) = result {
         warn!(error = ?err, "round_window_corners: handle update failed");
@@ -181,7 +179,7 @@ pub fn resize_window_in_handler(window: &mut Window, new_w: f32, new_h: f32) {
             return;
         }
     };
-    let current = unsafe { nswindow.frame() };
+    let current = nswindow.frame();
     let top_y = current.origin.y + current.size.height;
     let center_x = current.origin.x + current.size.width / 2.0;
     let new_origin_x = center_x - new_w as f64 / 2.0;
@@ -190,17 +188,15 @@ pub fn resize_window_in_handler(window: &mut Window, new_w: f32, new_h: f32) {
         NSPoint::new(new_origin_x, new_origin_y),
         NSSize::new(new_w as f64, new_h as f64),
     );
-    unsafe {
-        nswindow.setFrame_display_animate(new_frame, true, false);
-        if let Some(content_view) = nswindow.contentView() {
-            content_view.setWantsLayer(true);
-            if let Some(layer) = content_view.layer() {
-                layer.setCornerRadius(new_h as f64 / 2.0);
-                layer.setMasksToBounds(true);
-            }
+    nswindow.setFrame_display_animate(new_frame, true, false);
+    if let Some(content_view) = nswindow.contentView() {
+        content_view.setWantsLayer(true);
+        if let Some(layer) = content_view.layer() {
+            layer.setCornerRadius(new_h as f64 / 2.0);
+            layer.setMasksToBounds(true);
         }
-        nswindow.invalidateShadow();
     }
+    nswindow.invalidateShadow();
 }
 
 /// Hide the NSWindow backing `window` without destroying it.
@@ -221,7 +217,7 @@ pub fn hide_window_in_handler(window: &mut Window) {
         RawWindowHandle::AppKit(h) => {
             let view: &NSView = unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
             if let Some(nswindow) = view.window() {
-                unsafe { nswindow.orderOut(None) };
+                nswindow.orderOut(None);
             }
         }
         other => {
@@ -330,10 +326,10 @@ pub fn request_wkwebview_snapshot(
     let handler = RcBlock::new(move |image: *mut NSImage, _error: *mut AnyObject| {
         let data_url = if !image.is_null() {
             let img = unsafe { &*image };
-            let tiff = unsafe { img.TIFFRepresentation() };
+            let tiff = img.TIFFRepresentation();
             let rep = tiff
                 .as_ref()
-                .and_then(|t| unsafe { NSBitmapImageRep::imageRepWithData(t) });
+                .and_then(|t| NSBitmapImageRep::imageRepWithData(t));
             let empty = NSDictionary::<NSString, AnyObject>::new();
             let png = rep.as_ref().and_then(|r| unsafe {
                 r.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
