@@ -519,9 +519,7 @@ pub fn open_consent_window_for_route_with_client(
     let (display_name, display_handle) = match &route {
         GuestRoute::CapsuleHandle { handle, label, .. } => {
             let pretty_name = label
-                .split(['/', '@', '-', '_'])
-                .filter(|s| !s.is_empty())
-                .next_back()
+                .split(['/', '@', '-', '_']).rfind(|s| !s.is_empty())
                 .unwrap_or(label.as_str())
                 .to_string();
             (pretty_name, handle.clone())
@@ -609,7 +607,7 @@ pub fn open_consent_window_for_route_with_client(
             .await;
 
         crate::webview_init_guard::wait_until_idle(&be).await;
-        let _ = aa.update(|cx| {
+        aa.update(|cx| {
             // Guard: only hydrate if this is still the active consent wizard.
             let current_id = cx
                 .try_global::<PendingConsentPreview>()
@@ -894,9 +892,7 @@ pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyW
         let (name, handle) = match r {
             GuestRoute::CapsuleHandle { handle, label, .. } => {
                 let pretty = label
-                    .split(['/', '@', '-', '_'])
-                    .filter(|s| !s.is_empty())
-                    .next_back()
+                    .split(['/', '@', '-', '_']).rfind(|s| !s.is_empty())
                     .unwrap_or(label.as_str())
                     .to_string();
                 (pretty, handle.clone())
@@ -1020,7 +1016,7 @@ pub fn start_boot_launch(
         abort_flag: Some(Arc::clone(&abort_flag)),
     });
     if let Some(shell) = boot_shell_weak.as_ref().and_then(|weak| weak.upgrade()) {
-        let _ = shell.update(cx, |shell, _cx| {
+        shell.update(cx, |shell, _cx| {
             shell.push_detail("Launching capsule");
             shell.push_detail("Preparing secure runtime and dependency resolution");
         });
@@ -1052,15 +1048,14 @@ pub fn start_boot_launch(
                 let _ = progress_tx.send(step);
             })),
         );
-        if let Ok(ref session) = result {
-            if session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl {
+        if let Ok(ref session) = result
+            && session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl {
                 super::app_capsule_shell::wait_for_session_upstream_ready(
                     session,
                     &abort_for_thread,
                     Duration::from_secs(60),
                 );
             }
-        }
         if abort_for_thread.load(Ordering::Acquire) {
             if let Ok(ref session) = result {
                 let _ = crate::orchestrator::stop_guest_session(&session.session_id);
@@ -1091,7 +1086,7 @@ pub fn start_boot_launch(
                     aa.update(move |cx: &mut App| {
                         if let Some(shell) = shell_for_steps.and_then(|weak| weak.upgrade()) {
                             for step in steps {
-                                let _ = shell.update(cx, |shell, _cx| {
+                                shell.update(cx, |shell, _cx| {
                                     shell.push_step(step);
                                     let msg = match step {
                                         0 => "Validating launch plan",
@@ -1127,7 +1122,7 @@ pub fn start_boot_launch(
                                     if let Some(shell) =
                                         shell_for_result.as_ref().and_then(|weak| weak.upgrade())
                                     {
-                                        let _ = shell.update(cx, |shell, _cx| {
+                                        shell.update(cx, |shell, _cx| {
                                             shell.push_detail(
                                                 "Capsule session started successfully",
                                             );
@@ -1261,7 +1256,7 @@ pub fn start_boot_launch(
                                                     .as_ref()
                                                     .and_then(|weak| weak.upgrade())
                                                 {
-                                                    let _ = shell.update(cx, |shell, _cx| {
+                                                    shell.update(cx, |shell, _cx| {
                                                         shell.push_detail(
                                                             "Failed to create app window from session",
                                                         );
@@ -1284,7 +1279,7 @@ pub fn start_boot_launch(
                                     if let Some(shell) =
                                         shell_for_result.as_ref().and_then(|weak| weak.upgrade())
                                     {
-                                        let _ = shell.update(cx, |shell, _cx| {
+                                        shell.update(cx, |shell, _cx| {
                                             shell.push_detail("Capsule launch returned an error");
                                         });
                                     }
@@ -1301,7 +1296,7 @@ pub fn start_boot_launch(
                                 if let Some(shell) =
                                     shell_for_result.as_ref().and_then(|weak| weak.upgrade())
                                 {
-                                    let _ = shell.update(cx, |shell, _cx| {
+                                    shell.update(cx, |shell, _cx| {
                                         shell.push_detail(
                                             "Launch worker disconnected before returning a result",
                                         );
@@ -1360,7 +1355,7 @@ fn show_boot_failure(
 ) {
     tracing::error!(error = %message, "ato_launch: capsule boot failed");
     if let Some(shell) = shell_weak.as_ref().and_then(|weak| weak.upgrade()) {
-        let _ = shell.update(cx, |shell, _cx| shell.show_failure(message));
+        shell.update(cx, |shell, _cx| shell.show_failure(message));
     }
 }
 

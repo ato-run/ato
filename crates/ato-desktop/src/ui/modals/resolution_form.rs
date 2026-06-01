@@ -199,10 +199,10 @@ impl ResolutionModal {
         for item in &request.secrets {
             for field in &item.fields {
                 let key = input_key(item.target.as_deref(), &field.name);
-                if !self.inputs.contains_key(&key) {
+                self.inputs.entry(key).or_insert_with(|| {
                     let entity = make_input(field, window, cx);
-                    self.inputs.insert(key, entity);
-                }
+                    entity
+                });
             }
         }
         // Preserve the user's current step across merges in the
@@ -699,8 +699,8 @@ fn render_field_row(
             ),
     );
 
-    if let Some(description) = &field.description {
-        if !description.is_empty() {
+    if let Some(description) = &field.description
+        && !description.is_empty() {
             row = row.child(
                 div()
                     .text_size(px(11.5))
@@ -708,7 +708,6 @@ fn render_field_row(
                     .child(description.clone()),
             );
         }
-    }
 
     let style_input = |i: Input| {
         i.h(px(32.0))

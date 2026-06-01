@@ -50,9 +50,9 @@ pub trait WebViewPasteShell: Sized + 'static {
     fn active_paste_target(&self) -> Option<&WebView>;
 
     fn on_native_paste(&mut self, _: &NativePaste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
-                if let Some(webview) = self.active_paste_target() {
+        if let Some(item) = cx.read_from_clipboard()
+            && let Some(text) = item.text()
+                && let Some(webview) = self.active_paste_target() {
                     // Give WKWebView macOS first-responder so document.activeElement
                     // is accurate by the time the script runs.
                     #[cfg(target_os = "macos")]
@@ -60,8 +60,6 @@ pub trait WebViewPasteShell: Sized + 'static {
                     let script = paste_script(&text);
                     let _ = webview.evaluate_script(&script);
                 }
-            }
-        }
     }
 
     fn on_native_copy(&mut self, _: &NativeCopy, _: &mut Window, _cx: &mut Context<Self>) {

@@ -771,8 +771,8 @@ impl WebViewManager {
                     },
                 }
             }
-        } else if matches!(reuse_action, WebViewReuseAction::Navigate) {
-            if let Some(existing) = self.views.get_mut(&active.pane_id) {
+        } else if matches!(reuse_action, WebViewReuseAction::Navigate)
+            && let Some(existing) = self.views.get_mut(&active.pane_id) {
                 if let Err(error) = existing.webview.load_url(&route_key) {
                     state.push_activity(
                         ActivityTone::Error,
@@ -788,7 +788,6 @@ impl WebViewManager {
                     existing.route_key = route_key.clone();
                 }
             }
-        }
 
         // navigate_to_url always resets the focused pane to
         // `WebSessionState::Launching`. The Rebuild branch above
@@ -927,8 +926,8 @@ impl WebViewManager {
 
             // Drain PTY output and push to xterm.js via evaluate_script.
             // Guard on page_loaded so xterm.js is fully initialised before we write.
-            if self.automation.is_page_loaded(active.pane_id) {
-                if let Some(view) = self.views.get_mut(&active.pane_id) {
+            if self.automation.is_page_loaded(active.pane_id)
+                && let Some(view) = self.views.get_mut(&active.pane_id) {
                     if let Some(proc) = self.terminal_sessions.get(&session_id) {
                         let mut disconnected = false;
                         loop {
@@ -964,7 +963,6 @@ impl WebViewManager {
                         }
                     }
                 }
-            }
         }
 
         if let Some(existing) = self.views.get_mut(&active.pane_id) {
@@ -1215,7 +1213,7 @@ impl WebViewManager {
             );
 
             if needs_loaded && !self.automation.is_page_loaded(pane_id) {
-                if req.wait_deadline.map_or(false, |d| Instant::now() < d) {
+                if req.wait_deadline.is_some_and(|d| Instant::now() < d) {
                     requeue.push(req);
                 } else {
                     req.send(Err(page_not_loaded_message(state, pane_id)));
@@ -1434,12 +1432,11 @@ impl WebViewManager {
         for event in events {
             match event {
                 ShellEvent::UrlChanged { pane_id, url } => {
-                    if let Some(view) = self.views.get_mut(pane_id) {
-                        if let Ok(parsed) = url.parse() {
+                    if let Some(view) = self.views.get_mut(pane_id)
+                        && let Ok(parsed) = url.parse() {
                             view.route = GuestRoute::ExternalUrl(parsed);
                             view.route_key = url.clone();
                         }
-                    }
                 }
                 ShellEvent::TerminalInput {
                     session_id,
@@ -1496,11 +1493,10 @@ impl WebViewManager {
                             "window.__ATO_HOST__ && window.__ATO_HOST__.resolveSecrets({}, {});",
                             request_id, payload_json
                         );
-                        if let Some(view) = self.views.get_mut(pid) {
-                            if let Err(e) = view.webview.evaluate_script(&script) {
+                        if let Some(view) = self.views.get_mut(pid)
+                            && let Err(e) = view.webview.evaluate_script(&script) {
                                 warn!(pane_id = pid, error = %e, "failed to deliver GetSecrets response");
                             }
-                        }
                     }
                 }
                 _ => {}
@@ -1661,7 +1657,7 @@ impl WebViewManager {
                                 served_by: None,
                                 install_profile_key: None,
                                 auth_flow: false,
-                                bounds: active.bounds.clone(),
+                                bounds: active.bounds,
                             };
                             match self.build_webview(
                                 window,
@@ -1973,11 +1969,10 @@ impl WebViewManager {
         // re-queue — this is the gate that breaks the infinite retry loop.
         // navigate_to_url() always sets Launching, so the user can explicitly retry by
         // re-entering the URL in the omnibar.
-        if let Some(active) = state.active_web_pane() {
-            if active.session == WebSessionState::LaunchFailed {
+        if let Some(active) = state.active_web_pane()
+            && active.session == WebSessionState::LaunchFailed {
                 return;
             }
-        }
 
         // Second gate: if a config modal is open for THIS handle, the
         // user is mid-edit. Re-spawning would just re-trip the same
@@ -1985,21 +1980,19 @@ impl WebViewManager {
         // cursor. The Save handler clears `pending_config`, which
         // collapses this guard on the next render and re-arms the
         // launch with the freshly stored secrets.
-        if let Some(pending) = &state.pending_config {
-            if pending.handle == handle {
+        if let Some(pending) = &state.pending_config
+            && pending.handle == handle {
                 return;
             }
-        }
 
         // Same gate, mirror for E302 consent: if the consent modal is
         // open for THIS handle, the user is mid-decision. The Approve
         // handler clears `pending_consent` and marks the retry budget;
         // both branches collapse this guard on the next render.
-        if let Some(pending) = &state.pending_consent {
-            if pending.handle == handle {
+        if let Some(pending) = &state.pending_consent
+            && pending.handle == handle {
                 return;
             }
-        }
 
         // #117 — same gate for the unified resolution modal. Without
         // this, every render frame after `LaunchError::PreflightAggregate`
@@ -2012,11 +2005,10 @@ impl WebViewManager {
         // Submit/Cancel handlers clear `pending_resolution`, which
         // collapses this guard on the next render so the freshly-
         // resolved retry can fire exactly once.
-        if let Some(pending) = &state.pending_resolution {
-            if pending.handle == handle {
+        if let Some(pending) = &state.pending_resolution
+            && pending.handle == handle {
                 return;
             }
-        }
 
         info!(pane_id, handle, "queuing guest session launch");
         let (sender, receiver) = channel();
@@ -2104,11 +2096,10 @@ impl WebViewManager {
                 info!(handle = %handle, route_key = %result.route_key, "guest session launched");
             }
 
-            if let Err(error) = sender.send(result) {
-                if let Ok(session) = error.0.session {
+            if let Err(error) = sender.send(result)
+                && let Ok(session) = error.0.session {
                     let _ = stop_guest_session(&session.session_id);
                 }
-            }
         });
 
         foreground_executor
@@ -2431,7 +2422,7 @@ impl WebViewManager {
         // so ato.run server can render Desktop-specific UX (Launch
         // buttons, no "Download Desktop" promo, etc.) without
         // round-tripping through JS detection.
-        builder = builder.with_user_agent(&format!(
+        builder = builder.with_user_agent(format!(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
              (KHTML, like Gecko) Version/17.0 Safari/605.1.15 AtoDesktop/{}",
             env!("CARGO_PKG_VERSION")
@@ -2686,11 +2677,10 @@ impl WebViewManager {
                 // those URLs off to the system browser.
                 if auth_policy.classify(&uri) == AuthMode::BrowserRequired && !auth_flow {
                     let pane_id = pane_binding.load(Ordering::Relaxed);
-                    if let Ok(mut q) = signals.lock() {
-                        if !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
+                    if let Ok(mut q) = signals.lock()
+                        && !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
                             q.push(AuthHandoffSignal { pane_id, url: uri });
                         }
-                    }
                     false // block navigation inside WebView
                 } else {
                     true
@@ -3259,8 +3249,8 @@ impl WebViewManager {
             pane_id, cached, visible
         ));
 
-        if let Some(view) = self.views.get_mut(&pane_id) {
-            if let Err(error) = view.set_visible(visible) {
+        if let Some(view) = self.views.get_mut(&pane_id)
+            && let Err(error) = view.set_visible(visible) {
                 state.push_activity(
                     ActivityTone::Error,
                     format!("Failed to update child webview visibility: {error}"),
@@ -3271,7 +3261,6 @@ impl WebViewManager {
                 ));
                 return;
             }
-        }
 
         self.visibility_cache.insert(pane_id, visible);
     }
@@ -5301,18 +5290,17 @@ pub(crate) fn dispatch_automation_command(
                     .unwrap_or(false);
 
                 if found {
-                    if let Ok(mut guard) = tx.lock() {
-                        if let Some(sender) = guard.take() {
+                    if let Ok(mut guard) = tx.lock()
+                        && let Some(sender) = guard.take() {
                             let _ = sender.send(Ok(serde_json::json!({ "found": true })));
                         }
-                    }
-                } else if deadline.map_or(false, |d| Instant::now() < d) {
+                } else if deadline.is_some_and(|d| Instant::now() < d) {
                     // Re-queue for retry; the foreground polling task retries within 50ms.
                     let remaining_ms = deadline
                         .map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u64)
                         .unwrap_or(0);
-                    if let Ok(mut guard) = tx.lock() {
-                        if let Some(original_tx) = guard.take() {
+                    if let Ok(mut guard) = tx.lock()
+                        && let Some(original_tx) = guard.take() {
                             let new_req = PendingAutomationRequest::new(
                                 pane_id,
                                 WaitFor {
@@ -5326,13 +5314,11 @@ pub(crate) fn dispatch_automation_command(
                                 .has_pending
                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                         }
-                    }
                 } else {
-                    if let Ok(mut guard) = tx.lock() {
-                        if let Some(sender) = guard.take() {
+                    if let Ok(mut guard) = tx.lock()
+                        && let Some(sender) = guard.take() {
                             let _ = sender.send(Err("wait_for timed out".into()));
                         }
-                    }
                 }
             }) {
                 req.send(Err(e.to_string()));
@@ -5345,25 +5331,22 @@ pub(crate) fn dispatch_automation_command(
             std::thread::spawn(
                 move || match inner_rx.recv_timeout(Duration::from_secs(10)) {
                     Ok(Ok(v)) => {
-                        if let Ok(mut guard) = req_tx.lock() {
-                            if let Some(sender) = guard.take() {
+                        if let Ok(mut guard) = req_tx.lock()
+                            && let Some(sender) = guard.take() {
                                 let _ = sender.send(Ok(v));
                             }
-                        }
                     }
                     Ok(Err(e)) => {
-                        if let Ok(mut guard) = req_tx.lock() {
-                            if let Some(sender) = guard.take() {
+                        if let Ok(mut guard) = req_tx.lock()
+                            && let Some(sender) = guard.take() {
                                 let _ = sender.send(Err(e));
                             }
-                        }
                     }
                     Err(_) => {
-                        if let Ok(mut guard) = req_tx.lock() {
-                            if let Some(sender) = guard.take() {
+                        if let Ok(mut guard) = req_tx.lock()
+                            && let Some(sender) = guard.take() {
                                 let _ = sender.send(Err("screenshot timed out".into()));
                             }
-                        }
                     }
                 },
             );
