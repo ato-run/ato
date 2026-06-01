@@ -1074,7 +1074,7 @@ pub fn start_boot_launch(
                                         // OsBrowser path: open in system browser,
                                         // register an OsBrowser client in SessionRegistry.
                                         if let Some(ref url) = session.local_url {
-                                            let _ = crate::ui::open_external_url(url);
+                                            let _ = crate::proc_util::open_external_url(url);
                                         }
                                         let registry = cx
                                             .global_mut::<crate::state::session::SessionRegistry>();

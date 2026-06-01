@@ -26,7 +26,6 @@ use crate::bridge::ShellEvent;
 use crate::config::SecretEntry;
 use crate::orchestrator::{CliLaunchSpec, register_pending_cli_command};
 use crate::proc_util::CommandNoWindowExt;
-use crate::ui::share::web_favicon_origin;
 
 pub type WorkspaceId = usize;
 pub type TaskSetId = usize;
@@ -1140,8 +1139,7 @@ pub struct AppState {
     /// writes to this field directly — both E103 and E302 surfaces
     /// are merged into [`pending_resolution`] which the unified
     /// resolution modal consumes. The field is kept as a fallback
-    /// rendering surface during migration: the legacy
-    /// [`crate::ui::modals::consent_form`] renders only when
+    /// rendering surface during migration; renders only when
     /// `pending_resolution.is_none() && pending_consent.is_some()`.
     pub pending_consent: Option<PendingConsentRequest>,
     /// #117 — unified pre-launch resolution request that replaces the
@@ -4146,6 +4144,16 @@ fn external_origin(url: &Url) -> Option<String> {
         "http" | "https" => Some(url.origin().ascii_serialization()),
         _ => None,
     }
+}
+
+/// Normalize a session local_url to its HTTP(S) origin for favicon lookup.
+/// Returns `None` for non-http(s) schemes.
+fn web_favicon_origin(local_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(local_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
 }
 
 fn short_label(title: &str) -> String {

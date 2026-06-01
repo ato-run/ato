@@ -1012,7 +1012,7 @@ fn info_popup_managed(
                 let url = local_url.clone();
                 move |_win, _cx| {
                     if let Some(ref url) = url {
-                        let _ = crate::ui::open_external_url(url);
+                        let _ = crate::proc_util::open_external_url(url);
                     }
                 }
             },
