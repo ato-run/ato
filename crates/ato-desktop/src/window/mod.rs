@@ -23,7 +23,6 @@ pub mod dock;
 pub mod focus_dispatcher;
 pub mod focus_guest_panes;
 pub mod gestures;
-pub mod identity_window;
 pub mod import_window;
 pub mod launch_window;
 pub mod webview_paste;
@@ -54,11 +53,11 @@ impl gpui::Global for crate::system_capsule::window_registry::SystemCapsuleWindo
 
 pub use card_switcher::open_card_switcher_window;
 pub use control_bar::{
-    control_bar_mode, focus_control_bar_input, hide_control_bar, install_control_bar_controller,
-    open_control_bar_window, open_focus_control_bar, set_control_bar_mode, show_control_bar,
-    toggle_control_bar, ControlBarController, ControlBarShellPlaceholder,
+    ControlBarController, control_bar_mode, focus_control_bar_input, hide_control_bar,
+    install_control_bar_controller, open_focus_control_bar, set_control_bar_mode, show_control_bar,
+    toggle_control_bar,
 };
-pub use orchestrator::{open_app_window, AppWindowShell};
+pub use orchestrator::open_app_window;
 
 /// Build a Wry child WebView, degrading gracefully on failure instead of
 /// aborting the process.
@@ -112,14 +111,6 @@ pub fn open_configured_startup_surface(
             Ok(())
         }
     }
-}
-
-/// Returns true if Focus View (multi-window) mode is active.
-/// Reads `desktop.focus_view_enabled` from the config file (default: true).
-/// The `ATO_DESKTOP_MULTI_WINDOW` env var is no longer honored; use the
-/// config key to opt out of Focus View.
-pub fn is_multi_window_enabled() -> bool {
-    crate::config::load_config().desktop.focus_view_enabled
 }
 
 /// Window caption shown in the OS taskbar / window list. GPUI creates its

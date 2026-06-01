@@ -240,10 +240,10 @@ fn resolve_runtime_bins(
 
     let mut required_tools: HashSet<String> = HashSet::new();
     for service in services.values() {
-        if let Some(head) = command_head(&service.entrypoint)? {
-            if matches!(head.as_str(), "node" | "python" | "uv" | "deno") {
-                required_tools.insert(head);
-            }
+        if let Some(head) = command_head(&service.entrypoint)?
+            && matches!(head.as_str(), "node" | "python" | "uv" | "deno")
+        {
+            required_tools.insert(head);
         }
     }
 
@@ -303,10 +303,10 @@ fn build_service_env(
     if let Some(extra) = service.env.as_ref() {
         env.extend(extra.clone());
     }
-    if service_name == "main" {
-        if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
-            env.insert("PORT".to_string(), port.to_string());
-        }
+    if service_name == "main"
+        && let Some(port) = runtime_overrides::override_port(plan.execution_port())
+    {
+        env.insert("PORT".to_string(), port.to_string());
     }
 
     if let Some(ipc_env) = launch_ctx.ipc_env_vars() {

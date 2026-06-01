@@ -94,18 +94,6 @@ impl DesktopBundlePaths {
         }
     }
 
-    pub fn for_current_exe(current_exe: PathBuf) -> Self {
-        Self {
-            platform: DesktopPlatform::current(),
-            current_exe: Some(current_exe),
-            current_dir: None,
-            ato_bin_env: None,
-            assets_dir_env: None,
-            path_entries: Vec::new(),
-            manifest_dir: None,
-        }
-    }
-
     #[cfg(test)]
     pub fn for_test(
         platform: DesktopPlatform,
@@ -246,10 +234,10 @@ impl DesktopBundlePaths {
             exe_dir.join("bin").join(&binary_name),
         ];
 
-        if self.platform == DesktopPlatform::Macos {
-            if let Some(contents) = exe_dir.parent() {
-                candidates.insert(0, contents.join("Helpers").join(&binary_name));
-            }
+        if self.platform == DesktopPlatform::Macos
+            && let Some(contents) = exe_dir.parent()
+        {
+            candidates.insert(0, contents.join("Helpers").join(&binary_name));
         }
 
         candidates
@@ -415,10 +403,12 @@ mod tests {
         );
 
         let error = resolver.resolve_ato_helper_with_extra([]).unwrap_err();
-        assert!(error
-            .searched_paths()
-            .iter()
-            .any(|path| path.ends_with("ato.exe")));
+        assert!(
+            error
+                .searched_paths()
+                .iter()
+                .any(|path| path.ends_with("ato.exe"))
+        );
         assert!(error.to_string().contains("Searched paths:"));
 
         fs::remove_dir_all(root).ok();
@@ -441,10 +431,12 @@ mod tests {
         );
 
         let error = resolver.resolve_assets_dir().unwrap_err();
-        assert!(error
-            .searched_paths()
-            .iter()
-            .any(|path| path.ends_with("assets")));
+        assert!(
+            error
+                .searched_paths()
+                .iter()
+                .any(|path| path.ends_with("assets"))
+        );
         assert!(error.to_string().contains("Searched paths:"));
 
         fs::remove_dir_all(root).ok();

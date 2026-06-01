@@ -574,7 +574,7 @@ pub(crate) fn create_unique_output_dir(output_root: &Path) -> Result<PathBuf> {
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(err)
-                    .with_context(|| format!("Failed to create {}", candidate.display()))
+                    .with_context(|| format!("Failed to create {}", candidate.display()));
             }
         }
     }
@@ -589,7 +589,7 @@ pub(crate) fn create_temp_subdir(root: &Path, prefix: &str) -> Result<PathBuf> {
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(err)
-                    .with_context(|| format!("Failed to create {}", candidate.display()))
+                    .with_context(|| format!("Failed to create {}", candidate.display()));
             }
         }
     }

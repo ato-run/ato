@@ -10,8 +10,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use capsule_core::attestation::{
-    sign_envelope, store_envelope, AttestationEnvelope, AttestationKey, AttestationPredicate,
-    AttestationStatement, AttestationSubject, FreezeMetadata, PolicySnapshot, StoredAttestationKey,
+    AttestationEnvelope, AttestationKey, AttestationPredicate, AttestationStatement,
+    AttestationSubject, FreezeMetadata, PolicySnapshot, StoredAttestationKey, sign_envelope,
+    store_envelope,
 };
 use capsule_core::blob::TreeHash;
 
@@ -102,7 +103,7 @@ fn default_builder_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::attestation::{generate_keypair, verify_envelope, TrustRoot};
+    use capsule_core::attestation::{TrustRoot, generate_keypair, verify_envelope};
     use std::ffi::OsStr;
     use tempfile::TempDir;
 
@@ -113,20 +114,24 @@ mod tests {
     impl EnvGuard {
         fn set<V: AsRef<OsStr>>(key: &'static str, value: V) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
         fn unset(key: &'static str) -> Self {
             let previous = std::env::var_os(key);
-            std::env::remove_var(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
             Self { key, previous }
         }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }

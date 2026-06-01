@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use blake3::Hasher;
 use fs2::FileExt;
 
-use crate::app_control::{http_get_ok, session_root, StoredSessionInfo};
+use crate::app_control::{StoredSessionInfo, http_get_ok, session_root};
 
 const LAUNCH_DIGEST_VERSION: &str = "ato-launch-digest-v2";
 const LAUNCH_KEY_VERSION: &str = "ato-launch-key-v1";

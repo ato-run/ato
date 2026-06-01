@@ -4,9 +4,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use capsule_core::smoke::{SmokeFailureClass, SmokeFailureReport};
 
 use super::{
-    draft_requires_manual_review, github_draft_manual_review_reason, preview_root,
-    required_env_from_preview_toml, DerivedExecutionPlan, PreviewPromotionEligibility,
-    PreviewSession, PreviewStorageLayout, PreviewTargetKind, ENV_PREVIEW_ROOT,
+    DerivedExecutionPlan, ENV_PREVIEW_ROOT, PreviewPromotionEligibility, PreviewSession,
+    PreviewStorageLayout, PreviewTargetKind, draft_requires_manual_review,
+    github_draft_manual_review_reason, preview_root, required_env_from_preview_toml,
 };
 use crate::install::{
     GitHubInstallDraftCapsuleToml, GitHubInstallDraftHint, GitHubInstallDraftRepo,
@@ -28,7 +28,9 @@ struct EnvVarGuard {
 impl EnvVarGuard {
     fn set(key: &'static str, value: &std::path::Path) -> Self {
         let original = std::env::var_os(key);
-        std::env::set_var(key, value);
+        unsafe {
+            std::env::set_var(key, value);
+        }
         Self { key, original }
     }
 }
@@ -36,9 +38,13 @@ impl EnvVarGuard {
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         if let Some(value) = self.original.take() {
-            std::env::set_var(self.key, value);
+            unsafe {
+                std::env::set_var(self.key, value);
+            }
         } else {
-            std::env::remove_var(self.key);
+            unsafe {
+                std::env::remove_var(self.key);
+            }
         }
     }
 }
@@ -404,7 +410,9 @@ struct EnvVarStrGuard {
 impl EnvVarStrGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let original = std::env::var(key).ok();
-        std::env::set_var(key, value);
+        unsafe {
+            std::env::set_var(key, value);
+        }
         Self { key, original }
     }
 }
@@ -412,9 +420,13 @@ impl EnvVarStrGuard {
 impl Drop for EnvVarStrGuard {
     fn drop(&mut self) {
         if let Some(ref v) = self.original {
-            std::env::set_var(self.key, v);
+            unsafe {
+                std::env::set_var(self.key, v);
+            }
         } else {
-            std::env::remove_var(self.key);
+            unsafe {
+                std::env::remove_var(self.key);
+            }
         }
     }
 }
@@ -433,7 +445,9 @@ fn required_env_partially_satisfied_still_blocks_for_missing_key() {
     let _lock = env_lock();
     let _guard = EnvVarStrGuard::set("NODE_ENV", "development");
     // DATABASE_URL is NOT set — draft should still block
-    std::env::remove_var("DATABASE_URL");
+    unsafe {
+        std::env::remove_var("DATABASE_URL");
+    }
     let draft = make_draft_with_required_env(&["NODE_ENV", "DATABASE_URL"]);
     assert!(draft_requires_manual_review(&draft));
 }

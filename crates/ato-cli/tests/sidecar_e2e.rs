@@ -2,8 +2,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use capsule_core::{
-    wait_for_ready, TsnetClient, TsnetConfig, TsnetEndpoint, TsnetHandle, TsnetState,
-    TsnetWaitConfig,
+    TsnetClient, TsnetConfig, TsnetEndpoint, TsnetHandle, TsnetState, TsnetWaitConfig,
+    wait_for_ready,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -82,7 +82,9 @@ async fn start_sidecar_for_test(temp_dir: &TempDir) -> (Child, TsnetClient, Tsne
 #[tokio::test]
 async fn sidecar_starts_and_responds_to_socks5() {
     let Some((control_url, auth_key, hostname)) = required_envs() else {
-        eprintln!("[skip] sidecar e2e requires ATO_TSNET_CONTROL_URL/ATO_TSNET_AUTH_KEY/ATO_TSNET_HOSTNAME");
+        eprintln!(
+            "[skip] sidecar e2e requires ATO_TSNET_CONTROL_URL/ATO_TSNET_AUTH_KEY/ATO_TSNET_HOSTNAME"
+        );
         return;
     };
 
@@ -139,7 +141,9 @@ async fn sidecar_starts_and_responds_to_socks5() {
 #[tokio::test]
 async fn sidecar_serve_lifecycle() {
     let Some((control_url, auth_key, hostname)) = required_envs() else {
-        eprintln!("[skip] sidecar e2e requires ATO_TSNET_CONTROL_URL/ATO_TSNET_AUTH_KEY/ATO_TSNET_HOSTNAME");
+        eprintln!(
+            "[skip] sidecar e2e requires ATO_TSNET_CONTROL_URL/ATO_TSNET_AUTH_KEY/ATO_TSNET_HOSTNAME"
+        );
         return;
     };
 
@@ -197,7 +201,9 @@ async fn sidecar_serve_lifecycle() {
 #[tokio::test]
 async fn sidecar_serve_rejects_non_loopback_target() {
     let Some((control_url, auth_key, hostname)) = required_envs() else {
-        eprintln!("[skip] sidecar e2e requires ATO_TSNET_CONTROL_URL/ATO_TSNET_AUTH_KEY/ATO_TSNET_HOSTNAME");
+        eprintln!(
+            "[skip] sidecar e2e requires ATO_TSNET_CONTROL_URL/ATO_TSNET_AUTH_KEY/ATO_TSNET_HOSTNAME"
+        );
         return;
     };
 

@@ -354,16 +354,15 @@ pub fn run_ipc_invoke(
         ),
     };
 
-    if let Some(schema_path) = &target.method.input_schema {
-        if let Err(err) =
+    if let Some(schema_path) = &target.method.input_schema
+        && let Err(err) =
             crate::ipc::schema::validate_input(schema_path, &target.capsule_root, &args_value)
-        {
-            exit_with_invoke_error(
-                request_id,
-                JsonRpcError::from_schema_error(&err),
-                json_output,
-            );
-        }
+    {
+        exit_with_invoke_error(
+            request_id,
+            JsonRpcError::from_schema_error(&err),
+            json_output,
+        );
     }
 
     let broker = IpcBroker::new(default_socket_dir());

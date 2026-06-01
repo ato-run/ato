@@ -6,13 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use adk_core::Llm;
 use anyhow::{Context, Result};
+use capsule_core::CapsuleReporter;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::isolation::HostIsolationContext;
 use capsule_core::router::ManifestData;
-use capsule_core::CapsuleReporter;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use walkdir::WalkDir;
 
 use crate::application::ports::OutputPort;
@@ -1544,10 +1544,12 @@ mod tests {
         let store =
             AgentSessionStore::create(tmp.path(), tmp.path(), &tmp.path().join("capsule.toml"))
                 .expect("store");
-        assert!(store
-            .artifact_dir()
-            .to_string_lossy()
-            .contains(".ato/tmp/agent/runs/run-"));
+        assert!(
+            store
+                .artifact_dir()
+                .to_string_lossy()
+                .contains(".ato/tmp/agent/runs/run-")
+        );
         assert!(store.workspace_dir().join("package.json").exists());
         assert!(!store.workspace_dir().join(".tmp").exists());
         assert!(!store.workspace_dir().join(".ato").join("tmp").exists());

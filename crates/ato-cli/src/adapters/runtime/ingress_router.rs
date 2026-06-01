@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use axum::routing::any;
-use axum::Router;
 use base64::Engine;
 use rand::RngCore;
 
@@ -371,12 +371,10 @@ fn rewrite_path(remaining_path: &str, entry: &RouteEntry) -> String {
     if entry.strip_prefix {
         if let Some(prefix) = &entry.upstream_path_prefix {
             format!("{}{}", prefix, path)
+        } else if path.is_empty() {
+            "/".to_string()
         } else {
-            if path.is_empty() {
-                "/".to_string()
-            } else {
-                path
-            }
+            path
         }
     } else {
         unreachable!("strip_prefix=false should not reach this code path in v1")

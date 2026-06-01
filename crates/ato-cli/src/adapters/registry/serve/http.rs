@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::IntoResponse;
 use axum::Json;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::IntoResponse;
 use serde_json::json;
 
 pub(super) fn resolve_public_base_url(headers: &HeaderMap, fallback: &str) -> String {

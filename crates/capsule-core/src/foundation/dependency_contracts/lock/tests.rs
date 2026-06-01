@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use super::{verify_and_lock, DependencyLockInput, ResolvedProviderManifest};
-use crate::foundation::dependency_contracts::{verify_consumer_only, LockError};
+use super::{DependencyLockInput, ResolvedProviderManifest, verify_and_lock};
+use crate::foundation::dependency_contracts::{LockError, verify_consumer_only};
 use crate::foundation::types::CapsuleManifest;
 
 // Use explicit `[targets.<X>]` block form so v0.3 normalizer does not

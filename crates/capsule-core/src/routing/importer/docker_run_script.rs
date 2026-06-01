@@ -209,11 +209,8 @@ pub fn import_docker_run_script(
         }
 
         // Other `docker` sub-commands.
-        if stmt.starts_with("docker ") {
-            let subcmd = stmt["docker ".len()..]
-                .split_whitespace()
-                .next()
-                .unwrap_or("?");
+        if let Some(rest) = stmt.strip_prefix("docker ") {
+            let subcmd = rest.split_whitespace().next().unwrap_or("?");
             match subcmd {
                 "build" | "compose" | "stack" => {
                     output.unsupported_features.push(format!(
@@ -585,16 +582,16 @@ fn parse_docker_run(
                 raw_env.push(parse_env_kv(&tok[kv_start..]));
             }
             _ if tok.starts_with("-p=") || tok.starts_with("--publish=") => {
-                let s = if tok.starts_with("-p=") {
-                    &tok[3..]
+                let s = if let Some(v) = tok.strip_prefix("-p=") {
+                    v
                 } else {
                     &tok["--publish=".len()..]
                 };
                 raw_ports.push(s.to_string());
             }
             _ if tok.starts_with("-v=") || tok.starts_with("--volume=") => {
-                let s = if tok.starts_with("-v=") {
-                    &tok[3..]
+                let s = if let Some(v) = tok.strip_prefix("-v=") {
+                    v
                 } else {
                     &tok["--volume=".len()..]
                 };
@@ -690,14 +687,15 @@ fn rewrite_database_url_aliases(
         }
         // Infer dependency: if DATABASE_URL mentions a logical label, depend on it.
         for label in name_to_label.values() {
-            if label != &raw.label && value.contains(format!("@{label}:").as_str()) {
-                if !raw.depends_on.contains(label) {
-                    raw.depends_on.push(label.clone());
-                    output.warnings.push(format!(
-                        "[{}] inferred depends_on '{}' from DATABASE_URL",
-                        raw.label, label
-                    ));
-                }
+            if label != &raw.label
+                && value.contains(format!("@{label}:").as_str())
+                && !raw.depends_on.contains(label)
+            {
+                raw.depends_on.push(label.clone());
+                output.warnings.push(format!(
+                    "[{}] inferred depends_on '{}' from DATABASE_URL",
+                    raw.label, label
+                ));
             }
         }
         if *value != original {
@@ -823,14 +821,13 @@ fn resolve_env_value(
     }
 
     // DATABASE_URL is always secret-like if it contains a URL with credentials.
-    if key.to_uppercase() == "DATABASE_URL" && raw_value.contains("://") {
-        if raw_value.contains(':') {
-            // Has credentials embedded.
-            output.warnings.push(format!(
-                "[{svc_label}] DATABASE_URL contains embedded credentials; \
+    if key.to_uppercase() == "DATABASE_URL" && raw_value.contains("://") && raw_value.contains(':')
+    {
+        // Has credentials embedded.
+        output.warnings.push(format!(
+            "[{svc_label}] DATABASE_URL contains embedded credentials; \
                  value redacted from receipt — use Ato secret references"
-            ));
-        }
+        ));
     }
 
     ImportedEnvValue::Literal(raw_value.to_string())
@@ -900,7 +897,7 @@ fn parse_volume_mount(
             "[{svc_label}] relative bind mount '{raw_source}:{target}' is project-root-scoped; \
              consider converting to a named volume"
         ));
-        let state_name = sanitize_service_label(&raw_source.trim_start_matches("./").to_string());
+        let state_name = sanitize_service_label(raw_source.trim_start_matches("./"));
         if !output
             .state_bindings
             .iter()
@@ -1278,7 +1275,7 @@ docker run -d --name blinko-website \
             .iter()
             .find(|s| s.name.contains("website"))
             .unwrap();
-        let db_url_entry = app.env.iter().find(|e| e.key == "DATABASE_URL").unwrap();
+        let _db_url_entry = app.env.iter().find(|e| e.key == "DATABASE_URL").unwrap();
         // blinko-postgres should remain as the alias since label == source_name here.
         // The dep should be inferred.
         assert!(!app.depends_on.is_empty(), "app should depend on db");

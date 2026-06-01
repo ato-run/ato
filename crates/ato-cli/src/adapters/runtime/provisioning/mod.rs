@@ -6,14 +6,14 @@ mod types;
 
 pub(crate) use dependency_root::{dependency_root, relative_dependency_root_from_manifest};
 pub(crate) use lifecycle_path::{
-    build_lifecycle_path_plan, materialize_lifecycle_toolchains, LifecyclePathPlan, LifecyclePhase,
+    LifecyclePathPlan, LifecyclePhase, build_lifecycle_path_plan, materialize_lifecycle_toolchains,
 };
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use capsule_core::router::ManifestData;
 use capsule_core::CapsuleReporter;
+use capsule_core::router::ManifestData;
 
 use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::reporters::CliReporter;
@@ -180,11 +180,11 @@ mod tests {
     use capsule_core::router::{ExecutionProfile, ManifestData};
 
     use super::{
+        AuditReporter, AutoProvisioningOptions,
         types::{
             ProvisioningAction, ProvisioningAudit, ProvisioningMaterializationStatus,
             ProvisioningPlan, ProvisioningSafetyClass,
         },
-        AuditReporter, AutoProvisioningOptions,
     };
 
     fn manifest_data() -> ManifestData {
@@ -260,7 +260,9 @@ run_command = "node server.js"
         assert!(body.contains(
             "Injected placeholder database environment variables via a synthetic .env file."
         ));
-        assert!(body.contains("Re-routed execution through the auto-provisioned shadow workspace."));
+        assert!(
+            body.contains("Re-routed execution through the auto-provisioned shadow workspace.")
+        );
     }
 
     #[test]

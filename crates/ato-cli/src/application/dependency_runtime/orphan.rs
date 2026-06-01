@@ -189,9 +189,9 @@ const KILL_ORPHAN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from
 /// recorded `provider_pid` is also the pgid. We send the signal to the
 /// negative pid (pgroup), which reaps the postmaster + every backend
 /// + every auxiliary worker in one syscall. On older sentinels written
-/// before that orchestrator change, the recorded pid may not be a
-/// pgroup leader; we fall back to signaling the pid alone after the
-/// pgroup attempt fails with ESRCH.
+///   before that orchestrator change, the recorded pid may not be a
+///   pgroup leader; we fall back to signaling the pid alone after the
+///   pgroup attempt fails with ESRCH.
 ///
 /// Falls back to [`OrphanProviderKillOutcome::NotPresent`] when the
 /// sentinel did not capture a `provider_pid` (legacy sentinels).

@@ -83,10 +83,10 @@ impl DnsResolver {
         // Parse TXT records
         for record in response.iter() {
             for txt in record.iter() {
-                if let Ok(txt_str) = std::str::from_utf8(txt) {
-                    if let Some(info) = self.parse_txt_record(txt_str, domain) {
-                        return Ok(Some(info));
-                    }
+                if let Ok(txt_str) = std::str::from_utf8(txt)
+                    && let Some(info) = self.parse_txt_record(txt_str, domain)
+                {
+                    return Ok(Some(info));
                 }
             }
         }
@@ -356,14 +356,18 @@ mod tests {
         assert_eq!(info.public_key, Some("did:key:z6Mk".to_string()));
 
         // Missing version
-        assert!(resolver
-            .parse_txt_record("url=https://registry.example.com", "example.com")
-            .is_none());
+        assert!(
+            resolver
+                .parse_txt_record("url=https://registry.example.com", "example.com")
+                .is_none()
+        );
 
         // Wrong version
-        assert!(resolver
-            .parse_txt_record("v=2 url=https://registry.example.com", "example.com")
-            .is_none());
+        assert!(
+            resolver
+                .parse_txt_record("v=2 url=https://registry.example.com", "example.com")
+                .is_none()
+        );
     }
 
     #[test]

@@ -6,34 +6,34 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use capsule_core::CapsuleReporter;
 use capsule_core::ato_lock::AtoLock;
 use capsule_core::dependency_contracts::{
-    verify_and_lock, DependencyLock, DependencyLockInput, ResolvedProviderManifest,
+    DependencyLock, DependencyLockInput, ResolvedProviderManifest, verify_and_lock,
 };
 use capsule_core::execution_identity::EnvOrigin;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lockfile::{
-    manifest_external_capsule_dependencies, verify_lockfile_external_dependencies, CapsuleLock,
-    CAPSULE_LOCK_FILE_NAME,
+    CAPSULE_LOCK_FILE_NAME, CapsuleLock, manifest_external_capsule_dependencies,
+    verify_lockfile_external_dependencies,
 };
 use capsule_core::types::{CapsuleManifest, CapsuleType, ConfigField, ConfigKind, StateDurability};
-use capsule_core::CapsuleReporter;
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
 use crate::application::build_materialization as bm;
 use crate::application::dependency_credentials::{HostEnv, ProcessHostEnv, RedactionRegistry};
 use crate::application::dependency_materializer::{
-    digest_file, AttestationStrategy, CacheStrategy, DependencyMaterializationRequest,
-    DependencyMaterializer, DependencyProjection, InstallPolicies, ManifestInputs, PlatformTriple,
-    RuntimeSelection, SessionDependencyMaterializer,
+    AttestationStrategy, CacheStrategy, DependencyMaterializationRequest, DependencyMaterializer,
+    DependencyProjection, InstallPolicies, ManifestInputs, PlatformTriple, RuntimeSelection,
+    SessionDependencyMaterializer, digest_file,
 };
 use crate::application::dependency_runtime::orchestrator::{
-    start_all as start_dependency_graph, OrchestratorError, OrchestratorInput,
-    OrchestratorProvider, RunningGraph,
+    OrchestratorError, OrchestratorInput, OrchestratorProvider, RunningGraph,
+    start_all as start_dependency_graph,
 };
 use crate::application::engine::install::support::{
     LocalRunManifestPreparationOutcome, ResolvedCliExportRequest, ResolvedRunTarget,
@@ -497,12 +497,12 @@ fn infer_io_candidates(args: &[String], effective_cwd: &Path) -> Vec<(String, In
     let mut index = 0;
     while index < args.len() {
         let current = &args[index];
-        if matches!(current.as_str(), "-o" | "--output") {
-            if let Some(next) = args.get(index + 1) {
-                inferred.push((next.clone(), InferredIoKind::Write));
-                index += 2;
-                continue;
-            }
+        if matches!(current.as_str(), "-o" | "--output")
+            && let Some(next) = args.get(index + 1)
+        {
+            inferred.push((next.clone(), InferredIoKind::Write));
+            index += 2;
+            continue;
         }
         if let Some(value) = current.strip_prefix("--output=") {
             if !value.trim().is_empty() {
@@ -1719,23 +1719,23 @@ where
         // context downstream); local-path runs go straight from the install
         // phase's authoritative_input into this branch.
         let capsule_toml = authoritative_input.workspace_root.join("capsule.toml");
-        if capsule_toml.exists() {
-            if let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
+        if capsule_toml.exists()
+            && let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
                 &capsule_toml,
                 validation_mode,
-            ) {
-                let raw = reconcile_compat_manifest_targets(
-                    &loaded.raw,
-                    decision.plan.selected_target_label(),
-                );
-                if let Ok(bridge) =
-                    capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
-                {
-                    decision.plan.compat_manifest = Some(bridge);
-                }
-                if let Ok(value) = toml::from_str::<toml::Value>(&loaded.raw_text) {
-                    prepared.bridge_manifest = DerivedBridgeManifest::new(value);
-                }
+            )
+        {
+            let raw = reconcile_compat_manifest_targets(
+                &loaded.raw,
+                decision.plan.selected_target_label(),
+            );
+            if let Ok(bridge) =
+                capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
+            {
+                decision.plan.compat_manifest = Some(bridge);
+            }
+            if let Ok(value) = toml::from_str::<toml::Value>(&loaded.raw_text) {
+                prepared.bridge_manifest = DerivedBridgeManifest::new(value);
             }
         }
         decision
@@ -1930,14 +1930,13 @@ where
         },
     )
     .await?;
-    if use_progressive_ui {
-        if let Some(audit_reporter) =
+    if use_progressive_ui
+        && let Some(audit_reporter) =
             provisioner::AuditReporter::from_outcome(&provisioning_outcome)
-        {
-            let body = audit_reporter.body();
-            if !body.is_empty() {
-                crate::progressive_ui::show_note(audit_reporter.title(), body)?;
-            }
+    {
+        let body = audit_reporter.body();
+        if !body.is_empty() {
+            crate::progressive_ui::show_note(audit_reporter.title(), body)?;
         }
     }
     launch_ctx = launch_ctx
@@ -1981,20 +1980,20 @@ where
             // from the original workspace and patch compat_manifest so that
             // run_v03_lifecycle_steps sees the build step (#301).
             let capsule_toml = pre_reroute_workspace_root.join("capsule.toml");
-            if capsule_toml.exists() {
-                if let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
+            if capsule_toml.exists()
+                && let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
                     &capsule_toml,
                     validation_mode,
-                ) {
-                    let raw = reconcile_compat_manifest_targets(
-                        &loaded.raw,
-                        decision.plan.selected_target_label(),
-                    );
-                    if let Ok(bridge) =
-                        capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
-                    {
-                        decision.plan.compat_manifest = Some(bridge);
-                    }
+                )
+            {
+                let raw = reconcile_compat_manifest_targets(
+                    &loaded.raw,
+                    decision.plan.selected_target_label(),
+                );
+                if let Ok(bridge) =
+                    capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
+                {
+                    decision.plan.compat_manifest = Some(bridge);
                 }
             }
         }
@@ -2185,10 +2184,10 @@ fn parse_external_service_contracts(manifest: &toml::Value) -> Vec<ExternalServi
                         .and_then(toml::Value::as_str)
                         .and_then(parse_external_service_mode)?;
                     let mut required_assets = Vec::new();
-                    if source_ref.eq_ignore_ascii_case("dependency:ollama") {
-                        if let Some(model) = legacy_ollama_model.clone() {
-                            required_assets.push(ServiceRequiredAsset::OllamaModel { model });
-                        }
+                    if source_ref.eq_ignore_ascii_case("dependency:ollama")
+                        && let Some(model) = legacy_ollama_model.clone()
+                    {
+                        required_assets.push(ServiceRequiredAsset::OllamaModel { model });
                     }
 
                     Some(ExternalServiceContract {
@@ -2811,13 +2810,13 @@ where
     state.decision = prepared.runtime_decision;
     state.launch_ctx = prepared.launch_ctx;
 
-    if state.use_progressive_ui {
-        if let Some(preview_session) = state.preview_session.as_ref() {
-            crate::progressive_ui::render_preview_plan(preview_session)?;
-            crate::progressive_ui::render_promotion_summary(
-                &preview_session.derived_plan.promotion_eligibility,
-            )?;
-        }
+    if state.use_progressive_ui
+        && let Some(preview_session) = state.preview_session.as_ref()
+    {
+        crate::progressive_ui::render_preview_plan(preview_session)?;
+        crate::progressive_ui::render_promotion_summary(
+            &preview_session.derived_plan.promotion_eligibility,
+        )?;
     }
 
     progress.ok(HourglassPhase::Verify, "execution plan resolved");
@@ -2974,11 +2973,11 @@ fn resolve_dep_template_inner(value: &str, graph: &RunningGraph) -> String {
     for cap in re.captures_iter(value) {
         let alias = &cap[1];
         let export_key = &cap[2];
-        if let Some(exports) = graph.runtime_exports(alias) {
-            if let Some(resolved) = exports.get(export_key) {
-                let pattern = format!("{{{{deps.{}.runtime_exports.{}}}}}", alias, export_key);
-                result = result.replace(&pattern, resolved);
-            }
+        if let Some(exports) = graph.runtime_exports(alias)
+            && let Some(resolved) = exports.get(export_key)
+        {
+            let pattern = format!("{{{{deps.{}.runtime_exports.{}}}}}", alias, export_key);
+            result = result.replace(&pattern, resolved);
         }
     }
     result
@@ -3157,26 +3156,34 @@ where
 
     let run_scoped_id = runtime_overrides::scoped_id_override();
 
-    // Auto-assign a unique port if none specified via manifest or override
-    if runtime_overrides::override_port(decision.plan.execution_port()).is_none() {
-        let identity = build_port_identity(
-            &decision.plan.manifest_path,
-            decision.plan.selected_target_label(),
-            run_scoped_id.as_deref(),
-        );
-        if let Ok(mgr) = crate::runtime::port_manager::PortManager::new() {
-            if let Ok(port) = mgr.resolve_port(&identity) {
-                std::env::set_var("ATO_UI_OVERRIDE_PORT", port.to_string());
-            }
-        }
-    }
+    // Auto-assign a unique port when none was specified via manifest or
+    // override. The override is installed through a restore-on-drop guard
+    // bound to this function's scope: it stays visible to the synchronous
+    // `runtime_overrides::override_port` reads in the executor path (and is
+    // inherited by the workload child at spawn time), then is restored when
+    // this run returns so it cannot leak into a subsequent run in the same
+    // process. See `scoped_override_port` for the env-safety rationale.
+    let _auto_port_guard: Option<runtime_overrides::PortOverrideGuard> =
+        if runtime_overrides::override_port(decision.plan.execution_port()).is_none() {
+            let identity = build_port_identity(
+                &decision.plan.manifest_path,
+                decision.plan.selected_target_label(),
+                run_scoped_id.as_deref(),
+            );
+            crate::runtime::port_manager::PortManager::new()
+                .ok()
+                .and_then(|mgr| mgr.resolve_port(&identity).ok())
+                .map(runtime_overrides::scoped_override_port)
+        } else {
+            None
+        };
 
-    if request.background {
-        if let Some(scoped_id) = run_scoped_id.as_deref() {
-            hooks
-                .cleanup_existing_scoped_processes_before_run(scoped_id, &request.reporter)
-                .await?;
-        }
+    if request.background
+        && let Some(scoped_id) = run_scoped_id.as_deref()
+    {
+        hooks
+            .cleanup_existing_scoped_processes_before_run(scoped_id, &request.reporter)
+            .await?;
     }
 
     if execution_plan.target.runtime == capsule_core::execution_plan::model::ExecutionRuntime::Web {
@@ -4155,7 +4162,12 @@ pub(crate) fn resolve_compatibility_host_mode(
 ) -> Result<CompatibilityHostMode> {
     match compatibility_fallback {
         None => Ok(CompatibilityHostMode::Disabled),
-        Some("host") if matches!(executor_kind, ExecutorKind::Native | ExecutorKind::NodeCompat) => {
+        Some("host")
+            if matches!(
+                executor_kind,
+                ExecutorKind::Native | ExecutorKind::NodeCompat
+            ) =>
+        {
             Ok(CompatibilityHostMode::Enabled)
         }
         Some("host") => anyhow::bail!(
@@ -4265,17 +4277,15 @@ fn reconcile_compat_manifest_targets(raw: &toml::Value, lock_target: &str) -> to
                 .map(|s| s.to_string())
         });
 
-    if let Some(ref capsule_target) = capsule_target {
-        if capsule_target != lock_target {
-            if let Some(targets) = value.get_mut("targets").and_then(toml::Value::as_table_mut) {
-                if let Some(real_target) = targets.get(capsule_target.as_str()).cloned() {
-                    // Only add the alias if the lock-label slot is not already occupied.
-                    targets
-                        .entry(lock_target.to_string())
-                        .or_insert(real_target);
-                }
-            }
-        }
+    if let Some(capsule_target) = capsule_target
+        && capsule_target != lock_target
+        && let Some(targets) = value.get_mut("targets").and_then(toml::Value::as_table_mut)
+        && let Some(real_target) = targets.get(capsule_target.as_str()).cloned()
+    {
+        // Only add the alias if the lock-label slot is not already occupied.
+        targets
+            .entry(lock_target.to_string())
+            .or_insert(real_target);
     }
 
     value
@@ -4284,12 +4294,12 @@ fn reconcile_compat_manifest_targets(raw: &toml::Value, lock_target: &str) -> to
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_existing_path, normalize_write_path, parent_package_id,
-        parse_external_service_contracts, parse_reuse_if_present_service_preflights,
-        reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
-        validate_sandbox_grants_best_effort, ConsumerRunRequest, DerivedBridgeManifest,
-        ExternalServiceContract, ExternalServiceHealthcheck, ExternalServiceHealthcheckKind,
-        ExternalServiceMode, PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
+        ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
+        ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
+        PreparedRunContext, RunPipelineState, ServiceRequiredAsset, normalize_existing_path,
+        normalize_write_path, parent_package_id, parse_external_service_contracts,
+        parse_reuse_if_present_service_preflights, reconcile_compat_manifest_targets,
+        resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -5069,8 +5079,7 @@ build = "npm run build"
     /// when the execution descriptor uses the lock target label.
     #[test]
     fn reconcile_enables_build_lifecycle_build_via_lock_target() {
-        use capsule_core::router::{execution_descriptor_from_manifest_parts, ExecutionProfile};
-        use std::path::PathBuf;
+        use capsule_core::router::{ExecutionProfile, execution_descriptor_from_manifest_parts};
 
         let tmp = workspace_tempdir("reconcile-build-test-");
         let manifest_dir = tmp.path().to_path_buf();

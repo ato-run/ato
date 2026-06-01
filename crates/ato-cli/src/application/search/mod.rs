@@ -222,17 +222,16 @@ pub async fn fetch_capsule_manifest(scoped_id: &str, registry_url: Option<&str>)
             .await
             .with_context(|| format!("Invalid capsule detail response: {}", scoped_id))?;
 
-    if let Some(manifest) = detail.manifest.as_ref().and_then(json_to_toml_value) {
-        if let Some(table) = manifest.as_table() {
-            return toml::to_string_pretty(table)
-                .with_context(|| "Failed to serialize manifest TOML");
-        }
+    if let Some(manifest) = detail.manifest.as_ref().and_then(json_to_toml_value)
+        && let Some(table) = manifest.as_table()
+    {
+        return toml::to_string_pretty(table).with_context(|| "Failed to serialize manifest TOML");
     }
 
-    if let Some(repository) = detail.repository {
-        if let Some(manifest) = fetch_manifest_from_github(&client, &repository).await? {
-            return Ok(manifest);
-        }
+    if let Some(repository) = detail.repository
+        && let Some(manifest) = fetch_manifest_from_github(&client, &repository).await?
+    {
+        return Ok(manifest);
     }
 
     if let Some(manifest) =

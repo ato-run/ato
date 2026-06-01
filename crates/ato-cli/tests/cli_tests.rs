@@ -8,7 +8,7 @@ use std::thread;
 
 use assert_cmd::Command;
 use capsule_core::ato_lock::{
-    recompute_lock_id, to_pretty_json, AtoLock, UnresolvedReason, UnresolvedValue,
+    AtoLock, UnresolvedReason, UnresolvedValue, recompute_lock_id, to_pretty_json,
 };
 use predicates::prelude::*;
 use tempfile::tempdir;
@@ -887,19 +887,23 @@ fn test_inspect_remediation_surface_prefers_lock_paths() {
         .iter()
         .find(|value| value.get("lockPath").and_then(|entry| entry.as_str()) == Some("binding"))
         .expect("binding suggestion");
-    assert!(binding
-        .get("recommendedAction")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| value.contains("workspace-local binding seed")));
+    assert!(
+        binding
+            .get("recommendedAction")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.contains("workspace-local binding seed"))
+    );
 
     let policy = suggestions
         .iter()
         .find(|value| value.get("lockPath").and_then(|entry| entry.as_str()) == Some("policy"))
         .expect("policy suggestion");
-    assert!(policy
-        .get("recommendedAction")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| value.contains("does not change lock identity")));
+    assert!(
+        policy
+            .get("recommendedAction")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.contains("does not change lock identity"))
+    );
 
     let attestations = suggestions
         .iter()
@@ -907,10 +911,12 @@ fn test_inspect_remediation_surface_prefers_lock_paths() {
             value.get("lockPath").and_then(|entry| entry.as_str()) == Some("attestations")
         })
         .expect("attestations suggestion");
-    assert!(attestations
-        .get("recommendedAction")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| value.contains("not part of canonical lock content")));
+    assert!(
+        attestations
+            .get("recommendedAction")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.contains("not part of canonical lock content"))
+    );
 }
 
 #[test]
@@ -962,14 +968,16 @@ fn test_init_materializes_durable_workspace_state_from_cli() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(tmp.path().join("ato.lock.json").exists());
-    assert!(tmp
-        .path()
-        .join(".ato/source-inference/provenance.json")
-        .exists());
-    assert!(tmp
-        .path()
-        .join(".ato/source-inference/provenance-cache.json")
-        .exists());
+    assert!(
+        tmp.path()
+            .join(".ato/source-inference/provenance.json")
+            .exists()
+    );
+    assert!(
+        tmp.path()
+            .join(".ato/source-inference/provenance-cache.json")
+            .exists()
+    );
     assert!(tmp.path().join(".ato/binding/seed.json").exists());
     assert!(tmp.path().join(".ato/policy/bundle.json").exists());
     assert!(tmp.path().join(".ato/attestations/store.json").exists());
@@ -1314,10 +1322,11 @@ fn test_init_materializes_durable_baseline_for_next_project_without_writing_mani
     assert!(stdout.contains("Created"), "stdout={stdout}");
     assert!(stdout.contains("ato.lock.json"), "stdout={stdout}");
     assert!(tmp.path().join("ato.lock.json").exists());
-    assert!(tmp
-        .path()
-        .join(".ato/source-inference/provenance.json")
-        .exists());
+    assert!(
+        tmp.path()
+            .join(".ato/source-inference/provenance.json")
+            .exists()
+    );
     assert!(!tmp.path().join("capsule.toml").exists());
 }
 
@@ -2120,10 +2129,12 @@ fn test_run_json_missing_manifest_fails_closed_without_generating_manifest() {
     };
     let value: serde_json::Value = serde_json::from_str(payload).unwrap();
     assert_eq!(value["code"], "ATO_ERR_AMBIGUOUS_ENTRYPOINT");
-    assert!(value["message"]
-        .as_str()
-        .expect("message string")
-        .contains("selected process"));
+    assert!(
+        value["message"]
+            .as_str()
+            .expect("message string")
+            .contains("selected process")
+    );
     assert!(!tmp.path().join("capsule.toml").exists());
 }
 
@@ -2390,10 +2401,12 @@ fn test_publish_json_invalid_artifact_prepare_range_uses_diagnostic_envelope() {
     assert_eq!(value["schema_version"], "1");
     assert_eq!(value["status"], "error");
     assert_eq!(value["error"]["code"], "E999");
-    assert!(value["error"]["message"]
-        .as_str()
-        .expect("message string")
-        .contains("cannot be combined"));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .expect("message string")
+            .contains("cannot be combined")
+    );
 }
 
 #[test]
@@ -2438,7 +2451,9 @@ fn test_publish_json_artifact_build_reports_six_phase_matrix() {
         .collect();
     assert_eq!(
         phase_names,
-        vec!["prepare", "build", "verify", "install", "dry_run", "publish"]
+        vec![
+            "prepare", "build", "verify", "install", "dry_run", "publish"
+        ]
     );
     assert_eq!(phases[2]["status"], "ok");
     assert_eq!(phases[3]["status"], "skipped");
@@ -2460,10 +2475,12 @@ fn test_publish_json_failure_uses_diagnostic_envelope() {
     assert_eq!(value["schema_version"], "1");
     assert_eq!(value["status"], "error");
     assert!(value["error"]["code"].as_str().is_some());
-    assert!(!value["error"]["message"]
-        .as_str()
-        .expect("message string")
-        .is_empty());
+    assert!(
+        !value["error"]["message"]
+            .as_str()
+            .expect("message string")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2484,10 +2501,12 @@ fn test_publish_legacy_full_publish_rejected_for_private_registry() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["error"]["code"], "E999");
-    assert!(value["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("--legacy-full-publish is only available for official registry publish"));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--legacy-full-publish is only available for official registry publish")
+    );
 }
 
 #[test]

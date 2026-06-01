@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::orchestrator::resolve_ato_binary;
 use crate::proc_util::CommandNoWindowExt;

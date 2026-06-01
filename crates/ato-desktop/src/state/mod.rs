@@ -15,18 +15,17 @@ use std::process::Command;
 
 use capsule_wire::config::ConfigField;
 use capsule_wire::handle::{
-    classify_surface_input, normalize_capsule_handle, parse_host_route, HandleInput,
-    InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
+    HandleInput, InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
+    classify_surface_input, normalize_capsule_handle, parse_host_route,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
-use url::{form_urlencoded, Url};
+use url::{Url, form_urlencoded};
 
 use crate::bridge::ShellEvent;
 use crate::config::SecretEntry;
-use crate::orchestrator::{register_pending_cli_command, CliLaunchSpec};
+use crate::orchestrator::{CliLaunchSpec, register_pending_cli_command};
 use crate::proc_util::CommandNoWindowExt;
-use crate::ui::share::web_favicon_origin;
 
 pub type WorkspaceId = usize;
 pub type TaskSetId = usize;
@@ -46,7 +45,9 @@ pub enum ThemeMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum SettingsTab {
+    #[default]
     General,
     Account,
     Runtime,
@@ -85,14 +86,6 @@ impl SettingsTab {
         }
     }
 
-    pub fn section(self) -> &'static str {
-        match self {
-            Self::General | Self::Account | Self::Runtime | Self::Sandbox => "Basic",
-            Self::Trust => "Security",
-            Self::Registry | Self::Projection | Self::Developer | Self::About => "System",
-        }
-    }
-
     pub fn badge(self) -> Option<&'static str> {
         match self {
             Self::Runtime => Some("Core"),
@@ -101,15 +94,11 @@ impl SettingsTab {
     }
 }
 
-impl Default for SettingsTab {
-    fn default() -> Self {
-        Self::General
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum CapsuleDetailTab {
+    #[default]
     Overview,
     Permissions,
     Logs,
@@ -134,12 +123,6 @@ impl CapsuleDetailTab {
             Self::Update => "Update",
             Self::Api => "API",
         }
-    }
-}
-
-impl Default for CapsuleDetailTab {
-    fn default() -> Self {
-        Self::Overview
     }
 }
 
@@ -207,19 +190,6 @@ impl CapabilityGrant {
             Self::Terminal => "terminal",
             Self::Automation => "automation",
             Self::Secrets => "secrets",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "read-file" => Some(Self::ReadFile),
-            "workspace-info" => Some(Self::WorkspaceInfo),
-            "open-external" => Some(Self::OpenExternal),
-            "clipboard-read" => Some(Self::ClipboardRead),
-            "terminal" => Some(Self::Terminal),
-            "automation" => Some(Self::Automation),
-            "secrets" => Some(Self::Secrets),
-            _ => None,
         }
     }
 }
@@ -1169,8 +1139,7 @@ pub struct AppState {
     /// writes to this field directly — both E103 and E302 surfaces
     /// are merged into [`pending_resolution`] which the unified
     /// resolution modal consumes. The field is kept as a fallback
-    /// rendering surface during migration: the legacy
-    /// [`crate::ui::modals::consent_form`] renders only when
+    /// rendering surface during migration; renders only when
     /// `pending_resolution.is_none() && pending_consent.is_some()`.
     pub pending_consent: Option<PendingConsentRequest>,
     /// #117 — unified pre-launch resolution request that replaces the
@@ -1605,33 +1574,6 @@ impl AppState {
         state
     }
 
-    /// Allocate an `AppWindow` for the given route in the multi-window
-    /// registry (#167). Returns the new id, which is also marked as
-    /// most-recently focused. Currently unused by the renderer — wired
-    /// up in #169.
-    pub fn open_app_window(&mut self, route: GuestRoute) -> AppWindowId {
-        self.app_windows.open(route)
-    }
-
-    /// Mark an `AppWindow` as most-recently focused. Returns true if the
-    /// id existed.
-    pub fn focus_window(&mut self, id: AppWindowId) -> bool {
-        self.app_windows.focus(id)
-    }
-
-    /// Remove the `AppWindow` from the registry. Returns the removed
-    /// record (so callers can demote its session to retention before
-    /// dropping it).
-    pub fn close_window(&mut self, id: AppWindowId) -> Option<AppWindow> {
-        self.app_windows.close(id)
-    }
-
-    /// Currently-open `AppWindow`s ordered most-recently-focused first.
-    /// Drives the future Card Switcher (#173).
-    pub fn app_window_mru_order(&self) -> Vec<AppWindowId> {
-        self.app_windows.mru_order()
-    }
-
     pub fn toggle_theme(&mut self) {
         self.theme_mode = match self.theme_mode {
             ThemeMode::Light => ThemeMode::Dark,
@@ -1650,10 +1592,6 @@ impl AppState {
             crate::config::ThemeConfig::Light => ThemeMode::Light,
             crate::config::ThemeConfig::Dark => ThemeMode::Dark,
         };
-    }
-
-    pub fn sync_theme_from_settings(&mut self) {
-        self.sync_theme_from_config();
     }
 
     /// Update a config value and persist to disk.
@@ -1695,15 +1633,6 @@ impl AppState {
         self.capsule_config_store
             .set_config(capsule_handle, key, value);
         crate::config::save_capsule_configs(&self.capsule_config_store);
-    }
-
-    /// Persist security / execution boundary overrides for one capsule.
-    pub fn update_capsule_policy_overrides(
-        &mut self,
-        f: impl FnOnce(&mut crate::config::CapsulePolicyOverrideStore),
-    ) {
-        f(&mut self.capsule_policy_overrides);
-        crate::config::save_capsule_policy_overrides(&self.capsule_policy_overrides);
     }
 
     /// Install a pending config request (overwriting any prior one).
@@ -1836,29 +1765,12 @@ impl AppState {
         self.consent_retry_consumed.retain(|(h, _)| h != handle);
     }
 
-    /// Remove a secret and persist to disk (#57).
-    pub fn remove_secret(&mut self, key: &str) -> Result<(), crate::config::BridgeError> {
-        self.secret_store.remove_secret(key)?;
-        self.rebuild_grant_cache();
-        Ok(())
-    }
-
     pub fn grant_secret_to_capsule(
         &mut self,
         capsule_handle: &str,
         key: &str,
     ) -> Result<(), crate::config::BridgeError> {
         self.secret_store.grant_secret(capsule_handle, key)?;
-        self.rebuild_grant_cache();
-        Ok(())
-    }
-
-    pub fn revoke_secret_from_capsule(
-        &mut self,
-        capsule_handle: &str,
-        key: &str,
-    ) -> Result<(), crate::config::BridgeError> {
-        self.secret_store.revoke_secret(capsule_handle, key)?;
         self.rebuild_grant_cache();
         Ok(())
     }
@@ -2161,11 +2073,11 @@ impl AppState {
 
     pub fn select_task(&mut self, task_id: TaskSetId) {
         let mut selected_title = None;
-        if let Some(workspace) = self.active_workspace_mut() {
-            if let Some(task) = workspace.tasks.iter().find(|task| task.id == task_id) {
-                workspace.active_task = task.id;
-                selected_title = Some(task.title.clone());
-            }
+        if let Some(workspace) = self.active_workspace_mut()
+            && let Some(task) = workspace.tasks.iter().find(|task| task.id == task_id)
+        {
+            workspace.active_task = task.id;
+            selected_title = Some(task.title.clone());
         }
 
         if let Some(title) = selected_title {
@@ -2214,16 +2126,16 @@ impl AppState {
             // egress proxy blocks that fetch and `ato run` exits with
             // "Failed to fetch share URL".
             let mut initial_allow_hosts = Vec::new();
-            if let Some(h) = host {
-                if !h.is_empty() {
-                    initial_allow_hosts.push(h.clone());
-                    // Don't add wildcard for localhost / bare IP — HostPattern::parse
-                    // would reject "*.localhost" and the exact form already suffices.
-                    let is_ip = h.parse::<std::net::IpAddr>().is_ok();
-                    let is_localhost = h.eq_ignore_ascii_case("localhost");
-                    if !is_ip && !is_localhost {
-                        initial_allow_hosts.push(format!("*.{h}"));
-                    }
+            if let Some(h) = host
+                && !h.is_empty()
+            {
+                initial_allow_hosts.push(h.clone());
+                // Don't add wildcard for localhost / bare IP — HostPattern::parse
+                // would reject "*.localhost" and the exact form already suffices.
+                let is_ip = h.parse::<std::net::IpAddr>().is_ok();
+                let is_localhost = h.eq_ignore_ascii_case("localhost");
+                if !is_ip && !is_localhost {
+                    initial_allow_hosts.push(format!("*.{h}"));
                 }
             }
             info!(
@@ -2353,40 +2265,40 @@ impl AppState {
         let partition_id = sanitize(&label);
         let mut navigated = None;
 
-        if let Some(task) = self.active_task_mut() {
-            if let Some(pane) = task.focused_pane_mut() {
-                let pane_id = pane.id;
-                pane.title = label.clone();
-                pane.surface = PaneSurface::Web(WebPane {
-                    route: next_route.clone(),
-                    partition_id,
-                    session,
-                    capabilities,
-                    profile,
-                    source_label,
-                    trust_state,
-                    restricted,
-                    snapshot_label: None,
-                    canonical_handle: match &next_route {
-                        GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
-                        GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
-                        _ => None,
-                    },
-                    session_id: None,
-                    adapter: None,
-                    manifest_path: None,
-                    runtime_label: None,
-                    display_strategy: None,
-                    log_path: None,
-                    local_url: None,
-                    healthcheck_url: None,
-                    invoke_url: None,
-                    served_by: None,
-                    install_profile_key: None,
-                    auth_flow: false,
-                });
-                navigated = Some(pane_id);
-            }
+        if let Some(task) = self.active_task_mut()
+            && let Some(pane) = task.focused_pane_mut()
+        {
+            let pane_id = pane.id;
+            pane.title = label.clone();
+            pane.surface = PaneSurface::Web(WebPane {
+                route: next_route.clone(),
+                partition_id,
+                session,
+                capabilities,
+                profile,
+                source_label,
+                trust_state,
+                restricted,
+                snapshot_label: None,
+                canonical_handle: match &next_route {
+                    GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
+                    GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
+                    _ => None,
+                },
+                session_id: None,
+                adapter: None,
+                manifest_path: None,
+                runtime_label: None,
+                display_strategy: None,
+                log_path: None,
+                local_url: None,
+                healthcheck_url: None,
+                invoke_url: None,
+                served_by: None,
+                install_profile_key: None,
+                auth_flow: false,
+            });
+            navigated = Some(pane_id);
         }
 
         let Some(pane_id) = navigated else {
@@ -2506,20 +2418,19 @@ impl AppState {
         // ato://open?handle=<percent-encoded-capsule-handle>
         // Lets external callers (browser, share menu, CLI) open a capsule in the desktop.
         if raw_route.starts_with("ato://open") {
-            if let Ok(url) = Url::parse(raw_route) {
-                if let Some(handle) = url
+            if let Ok(url) = Url::parse(raw_route)
+                && let Some(handle) = url
                     .query_pairs()
                     .find(|(k, _)| k == "handle")
                     .map(|(_, v)| v.into_owned())
-                {
-                    self.push_activity(
-                        ActivityTone::Info,
-                        format!("Opening capsule from deep link: {handle}"),
-                    );
-                    self.create_new_tab();
-                    self.navigate_to_url(&handle);
-                    return;
-                }
+            {
+                self.push_activity(
+                    ActivityTone::Info,
+                    format!("Opening capsule from deep link: {handle}"),
+                );
+                self.create_new_tab();
+                self.navigate_to_url(&handle);
+                return;
             }
             self.push_activity(
                 ActivityTone::Warning,
@@ -2695,59 +2606,17 @@ impl AppState {
         }
     }
 
-    pub fn toggle_dev_console(&mut self) {
-        let has_dev_console = self
-            .active_task()
-            .map(|task| {
-                task.panes
-                    .iter()
-                    .any(|p| matches!(p.surface, PaneSurface::DevConsole))
-            })
-            .unwrap_or(false);
-
-        if has_dev_console {
-            if let Some(task) = self.active_task_mut() {
-                task.panes
-                    .retain(|p| !matches!(p.surface, PaneSurface::DevConsole));
-                task.pane_tree = PaneTree::Leaf(task.focused_pane);
-            }
-            self.push_activity(ActivityTone::Info, "Closed developer console");
-        } else {
-            let next_id = self.next_pane_id;
-            if let Some(task) = self.active_task_mut() {
-                task.panes.push(Pane {
-                    id: next_id,
-                    title: "Developer console".to_string(),
-                    role: PaneRole::Companion,
-                    visible: true,
-                    bounds: PaneBounds::empty(),
-                    surface: PaneSurface::DevConsole,
-                });
-                task.pane_tree = PaneTree::Split {
-                    axis: SplitAxis::Vertical,
-                    ratio: task.split_ratio,
-                    first: Box::new(PaneTree::Leaf(task.focused_pane)),
-                    second: Box::new(PaneTree::Leaf(next_id)),
-                };
-            }
-            self.next_pane_id += 1;
-            self.push_activity(ActivityTone::Info, "Opened developer console");
-        }
-        self.shell_mode = ShellMode::Focus;
-    }
-
     /// Remove the GPUI DevConsole companion pane if it is present, without opening a new one.
     pub fn dismiss_dev_console(&mut self) {
-        if let Some(task) = self.active_task_mut() {
-            if task
+        if let Some(task) = self.active_task_mut()
+            && task
                 .panes
                 .iter()
                 .any(|p| matches!(p.surface, PaneSurface::DevConsole))
-            {
-                task.panes
-                    .retain(|p| !matches!(p.surface, PaneSurface::DevConsole));
-                task.pane_tree = PaneTree::Leaf(task.focused_pane);
-            }
+        {
+            task.panes
+                .retain(|p| !matches!(p.surface, PaneSurface::DevConsole));
+            task.pane_tree = PaneTree::Leaf(task.focused_pane);
         }
     }
 
@@ -2766,23 +2635,18 @@ impl AppState {
             .active_task()
             .and_then(|task| task.focused_pane())
             .map(|pane| pane.id);
-        if let Some(pane_id) = active_pane_id {
-            if let Some(terminal_spec) = self.terminal_reload_spec(pane_id) {
-                let (spec, title) = terminal_spec;
-                let new_session_id = format!("cli-{}-{}", pane_id, uuid_v4_simple());
-                register_pending_cli_command(new_session_id.clone(), spec.clone());
-                self.push_activity(
-                    ActivityTone::Info,
-                    format!("Reloading CLI session: {title}"),
-                );
-                self.mount_terminal_stream_pane_with_spec(
-                    pane_id,
-                    new_session_id,
-                    title,
-                    Some(spec),
-                );
-                return;
-            }
+        if let Some(pane_id) = active_pane_id
+            && let Some(terminal_spec) = self.terminal_reload_spec(pane_id)
+        {
+            let (spec, title) = terminal_spec;
+            let new_session_id = format!("cli-{}-{}", pane_id, uuid_v4_simple());
+            register_pending_cli_command(new_session_id.clone(), spec.clone());
+            self.push_activity(
+                ActivityTone::Info,
+                format!("Reloading CLI session: {title}"),
+            );
+            self.mount_terminal_stream_pane_with_spec(pane_id, new_session_id, title, Some(spec));
+            return;
         }
 
         let Some(active) = self.active_web_pane() else {
@@ -2838,14 +2702,14 @@ impl AppState {
         for workspace in &self.workspaces {
             for task in &workspace.tasks {
                 for pane in &task.panes {
-                    if pane.id == pane_id {
-                        if let PaneSurface::Terminal(terminal) = &pane.surface {
-                            let spec = terminal
-                                .cli_launch_spec
-                                .clone()
-                                .unwrap_or_else(crate::orchestrator::CliLaunchSpec::ato_run_repl);
-                            return Some((spec, terminal.capsule_handle.clone()));
-                        }
+                    if pane.id == pane_id
+                        && let PaneSurface::Terminal(terminal) = &pane.surface
+                    {
+                        let spec = terminal
+                            .cli_launch_spec
+                            .clone()
+                            .unwrap_or_else(crate::orchestrator::CliLaunchSpec::ato_run_repl);
+                        return Some((spec, terminal.capsule_handle.clone()));
                     }
                 }
             }
@@ -2953,13 +2817,13 @@ impl AppState {
                             web.session = WebSessionState::Mounted;
                         }
                     });
-                    if active_pane == Some(pane_id) {
-                        if !matches!(
+                    if active_pane == Some(pane_id)
+                        && !matches!(
                             self.active_capsule_pane().map(|pane| pane.route),
                             Some(GuestRoute::CapsuleUrl { .. })
-                        ) {
-                            self.command_bar_text = url;
-                        }
+                        )
+                    {
+                        self.command_bar_text = url;
                     }
                 }
                 ShellEvent::TitleChanged { pane_id, title } => {
@@ -3324,10 +3188,10 @@ impl AppState {
         for workspace in &self.workspaces {
             for task in &workspace.tasks {
                 for pane in &task.panes {
-                    if pane.id == pane_id {
-                        if let PaneSurface::Web(web) = &pane.surface {
-                            return web.source_label.clone();
-                        }
+                    if pane.id == pane_id
+                        && let PaneSurface::Web(web) = &pane.surface
+                    {
+                        return web.source_label.clone();
                     }
                 }
             }
@@ -3363,35 +3227,14 @@ impl AppState {
         for workspace in &mut self.workspaces {
             for task in &mut workspace.tasks {
                 for pane in &mut task.panes {
-                    if pane.id == pane_id {
-                        if let PaneSurface::Web(web) = &mut pane.surface {
-                            web.session = session.clone();
-                        }
+                    if pane.id == pane_id
+                        && let PaneSurface::Web(web) = &mut pane.surface
+                    {
+                        web.session = session.clone();
                     }
                 }
             }
         }
-    }
-
-    pub fn update_web_route(
-        &mut self,
-        pane_id: PaneId,
-        route: GuestRoute,
-        session: WebSessionState,
-        capabilities: Vec<CapabilityGrant>,
-    ) {
-        let label = route.to_string();
-        self.update_pane(pane_id, |pane| {
-            pane.title = label.clone();
-            if let PaneSurface::Web(web) = &mut pane.surface {
-                web.profile = route_profile(&route).to_string();
-                web.route = route.clone();
-                web.partition_id = sanitize(&label);
-                web.session = session.clone();
-                web.capabilities = capabilities.clone();
-            }
-        });
-        self.sync_command_bar_with_active_route();
     }
 
     pub fn active_capsule_inspector(&self) -> Option<CapsuleInspectorView> {
@@ -3758,54 +3601,6 @@ impl AppState {
             }
             _ => {}
         });
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn mount_capsule_status_pane(
-        &mut self,
-        pane_id: PaneId,
-        route: GuestRoute,
-        canonical_handle: Option<String>,
-        source_label: Option<String>,
-        trust_state: Option<String>,
-        restricted: bool,
-        snapshot_label: Option<String>,
-        session_id: Option<String>,
-        adapter: Option<String>,
-        manifest_path: Option<String>,
-        runtime_label: Option<String>,
-        display_strategy: Option<String>,
-        log_path: Option<String>,
-        local_url: Option<String>,
-        healthcheck_url: Option<String>,
-        invoke_url: Option<String>,
-        served_by: Option<String>,
-        install_profile_key: Option<String>,
-    ) {
-        self.update_pane(pane_id, |pane| {
-            pane.title = route.to_string();
-            pane.surface = PaneSurface::CapsuleStatus(CapsuleStatusPane {
-                route: route.clone(),
-                session: WebSessionState::Mounted,
-                source_label: source_label.clone(),
-                trust_state: trust_state.clone(),
-                restricted,
-                snapshot_label: snapshot_label.clone(),
-                canonical_handle: canonical_handle.clone(),
-                session_id: session_id.clone(),
-                adapter: adapter.clone(),
-                manifest_path: manifest_path.clone(),
-                runtime_label: runtime_label.clone(),
-                display_strategy: display_strategy.clone(),
-                log_path: log_path.clone(),
-                local_url: local_url.clone(),
-                healthcheck_url: healthcheck_url.clone(),
-                invoke_url: invoke_url.clone(),
-                served_by: served_by.clone(),
-                install_profile_key: install_profile_key.clone(),
-            });
-        });
-        self.command_bar_text = route.to_string();
     }
 
     /// Open a bare CLI panel in a new tab.
@@ -4351,6 +4146,16 @@ fn external_origin(url: &Url) -> Option<String> {
     }
 }
 
+/// Normalize a session local_url to its HTTP(S) origin for favicon lookup.
+/// Returns `None` for non-http(s) schemes.
+fn web_favicon_origin(local_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(local_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
 fn short_label(title: &str) -> String {
     title.chars().take(2).collect::<String>().to_uppercase()
 }
@@ -4457,15 +4262,15 @@ impl AppState {
         let title = route.label();
         let active_task_id = self.active_task().map(|task| task.id);
 
-        if let Some(workspace) = self.active_workspace_mut() {
-            if let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id) {
-                task.title = title.clone();
-                task.preview = title.clone();
-                for pane in &mut task.panes {
-                    if let PaneSurface::HostPanel(HostPanelRoute::Settings { .. }) = &pane.surface {
-                        pane.title = title.clone();
-                        pane.surface = PaneSurface::HostPanel(route.clone());
-                    }
+        if let Some(workspace) = self.active_workspace_mut()
+            && let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id)
+        {
+            task.title = title.clone();
+            task.preview = title.clone();
+            for pane in &mut task.panes {
+                if let PaneSurface::HostPanel(HostPanelRoute::Settings { .. }) = &pane.surface {
+                    pane.title = title.clone();
+                    pane.surface = PaneSurface::HostPanel(route.clone());
                 }
             }
         }
@@ -4484,21 +4289,21 @@ impl AppState {
         let title = route.label();
         let active_task_id = self.active_task().map(|task| task.id);
 
-        if let Some(workspace) = self.active_workspace_mut() {
-            if let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id) {
-                task.title = title.clone();
-                task.preview = title.clone();
-                for pane in &mut task.panes {
-                    if matches!(
-                        pane.surface,
-                        PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
-                            pane_id: route_pane_id,
-                            ..
-                        }) if route_pane_id == pane_id
-                    ) {
-                        pane.title = title.clone();
-                        pane.surface = PaneSurface::HostPanel(route.clone());
-                    }
+        if let Some(workspace) = self.active_workspace_mut()
+            && let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id)
+        {
+            task.title = title.clone();
+            task.preview = title.clone();
+            for pane in &mut task.panes {
+                if matches!(
+                    pane.surface,
+                    PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
+                        pane_id: route_pane_id,
+                        ..
+                    }) if route_pane_id == pane_id
+                ) {
+                    pane.title = title.clone();
+                    pane.surface = PaneSurface::HostPanel(route.clone());
                 }
             }
         }
@@ -4707,10 +4512,12 @@ mod tests {
         assert_eq!(prompt.capability, "read-file");
         assert_eq!(prompt.command.as_deref(), Some("fs.read"));
         let inspector = state.active_capsule_inspector().expect("inspector");
-        assert!(inspector
-            .logs
-            .iter()
-            .any(|entry| entry.stage == CapsuleLogStage::Permission));
+        assert!(
+            inspector
+                .logs
+                .iter()
+                .any(|entry| entry.stage == CapsuleLogStage::Permission)
+        );
     }
 
     #[test]
@@ -4983,9 +4790,11 @@ mod tests {
 
         let suggestions = state.omnibar_suggestions("ato");
 
-        assert!(suggestions
-            .iter()
-            .any(|item| matches!(item.action, OmnibarSuggestionAction::Navigate { .. })));
+        assert!(
+            suggestions
+                .iter()
+                .any(|item| matches!(item.action, OmnibarSuggestionAction::Navigate { .. }))
+        );
         assert!(suggestions.iter().any(|item| matches!(
             item.action,
             OmnibarSuggestionAction::SelectTask { task_id: 3 }
@@ -4998,9 +4807,11 @@ mod tests {
 
         let suggestions = state.omnibar_suggestions("");
 
-        assert!(suggestions
-            .iter()
-            .any(|item| matches!(item.action, OmnibarSuggestionAction::ShowSettings)));
+        assert!(
+            suggestions
+                .iter()
+                .any(|item| matches!(item.action, OmnibarSuggestionAction::ShowSettings))
+        );
     }
 
     #[test]
@@ -5325,10 +5136,12 @@ mod tests {
             crate::orchestrator::CliLaunchSpec::AtoRunRepl { .. }
         ));
 
-        assert!(state
-            .activity
-            .iter()
-            .any(|e| e.message.contains("ato://cli")));
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|e| e.message.contains("ato://cli"))
+        );
     }
 
     #[test]

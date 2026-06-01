@@ -6,16 +6,14 @@ pub(crate) mod submit;
 use anyhow::Context;
 
 pub(crate) use capsule_toml::{
-    extract_toml_source, fetch_capsule_toml_by_id, fetch_community_capsule_tomls,
-    fetch_toml_from_url, prompt_community_candidate_selection, prompt_no_candidates_flow,
-    sort_candidates, validate_candidate_source_matches_run_target,
+    CommunityCapsuleTomlCandidate, SourceValidationOutcome, fetch_capsule_toml_by_id,
+    fetch_community_capsule_tomls, fetch_toml_from_url, prompt_community_candidate_selection,
+    prompt_no_candidates_flow, sort_candidates, validate_candidate_source_matches_run_target,
     validate_capsule_toml_source_matches_run_target, validate_capsule_toml_source_with_provenance,
-    CommunityCapsuleTomlCandidate, CommunityTrustLevel, SourceValidationOutcome,
 };
 pub(crate) use prompt::{
-    community_submit_prompt_disabled, confirm_community_submit_prompt,
-    should_prompt_for_community_submit, try_community_submit_after_run, CommunitySubmitOrigin,
-    CommunitySubmitPromptContext,
+    CommunitySubmitOrigin, CommunitySubmitPromptContext, confirm_community_submit_prompt,
+    should_prompt_for_community_submit, try_community_submit_after_run,
 };
 
 /// Normalize an expected-source string to the API-stored form (`owner/repo`).
@@ -280,10 +278,14 @@ repository = "github.com/owner/repo"
                 {"id":"ctoml_other","title":"Other","source":"owner/repo","trust":"community","stars":0,"platforms":[],"lastVerifiedAt":null,"permissionsSummary":[],"capsuleTomlUrl":"http://x/ctoml_other","revision":null}
             ]}"#,
         )]);
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        unsafe {
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        }
         let err = fetch_and_validate_community_toml("ctoml_requested", "github.com/owner/repo")
             .expect_err("ctoml id must be registered under expected source");
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        unsafe {
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+        }
         assert!(err.to_string().contains("not registered under source"));
     }
 
@@ -299,10 +301,14 @@ repository = "github.com/owner/repo"
             ),
             (200, "[source]\nrepository = \"other/repo\"\n"),
         ]);
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        unsafe {
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        }
         let err = fetch_and_validate_community_toml("ctoml_ok", "github.com/owner/repo")
             .expect_err("TOML source mismatch must fail closed");
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        unsafe {
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+        }
         assert!(err.to_string().contains("source mismatch"));
     }
 
@@ -321,10 +327,14 @@ repository = "github.com/owner/repo"
                 "schema_version = \"0.3\"\nname = \"recipe\"\ntype = \"app\"\n",
             ),
         ]);
-        std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        unsafe {
+            std::env::set_var("ATO_COMMUNITY_API_URL", &base);
+        }
         let content = fetch_and_validate_community_toml("ctoml_ok", "github.com/owner/repo")
             .expect("registry provenance should anchor missing TOML source");
-        std::env::remove_var("ATO_COMMUNITY_API_URL");
+        unsafe {
+            std::env::remove_var("ATO_COMMUNITY_API_URL");
+        }
         assert!(content.contains("schema_version"));
     }
 }

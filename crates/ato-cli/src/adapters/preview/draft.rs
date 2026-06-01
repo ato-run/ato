@@ -10,7 +10,7 @@ use crate::preview::{
 use super::manifest::{required_env_from_preview_toml, summarize_preview_toml};
 use super::storage::persist_session_with_warning;
 use crate::application::dependency_materializer::{
-    write_source_resolution_record, SourceResolutionRecord,
+    SourceResolutionRecord, write_source_resolution_record,
 };
 
 pub async fn prepare_github_preview_session(

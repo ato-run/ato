@@ -51,26 +51,26 @@ pub(crate) fn stop_orchestration_service_record(
 ) -> Result<bool> {
     let mut signalled = false;
 
-    if let Some(container_id) = service.container_id.as_deref() {
-        if !container_id.is_empty() {
-            // OCI services: stop + remove via bollard. Build a local
-            // tokio runtime + client for this call. The runtime is
-            // cheap (current-thread) and only constructed when a
-            // container_id is actually present.
-            match stop_container_via_provider_cli(container_id, &service.name, grace) {
-                Ok(true) => signalled = true,
-                Ok(false) => {}
-                Err(err) => {
-                    eprintln!(
-                        "ATO-WARN failed to stop OCI container {} for service '{}': {}",
-                        container_id, service.name, err
-                    );
-                }
+    if let Some(container_id) = service.container_id.as_deref()
+        && !container_id.is_empty()
+    {
+        // OCI services: stop + remove via bollard. Build a local
+        // tokio runtime + client for this call. The runtime is
+        // cheap (current-thread) and only constructed when a
+        // container_id is actually present.
+        match stop_container_via_provider_cli(container_id, &service.name, grace) {
+            Ok(true) => signalled = true,
+            Ok(false) => {}
+            Err(err) => {
+                eprintln!(
+                    "ATO-WARN failed to stop OCI container {} for service '{}': {}",
+                    container_id, service.name, err
+                );
             }
-            // OCI path: container_id-bearing services don't carry a
-            // local pid, so skip the pid/listener fallbacks below.
-            return Ok(signalled);
         }
+        // OCI path: container_id-bearing services don't carry a
+        // local pid, so skip the pid/listener fallbacks below.
+        return Ok(signalled);
     }
 
     if let Some(pid) = service.local_pid {
@@ -194,10 +194,10 @@ pub(crate) fn stop_orchestration_service_record(
             // signal anything that's still bound to `published_port`.
             // Idempotent (returns false when the port is already free
             // or the resolved pid matches what we just signaled).
-            if let Some(port) = service.published_port {
-                if kill_listeners_on_published_port(port, pid, grace, &service.name) {
-                    signalled = true;
-                }
+            if let Some(port) = service.published_port
+                && kill_listeners_on_published_port(port, pid, grace, &service.name)
+            {
+                signalled = true;
             }
         }
         #[cfg(not(unix))]
@@ -416,6 +416,24 @@ pub(crate) fn listener_pids_on_port(port: u16) -> Result<Vec<u32>> {
 /// Stop + remove an OCI container by id via the provider CLI. Session
 /// orchestration uses the Podman provider, so teardown must not route
 /// through a stale Docker-compatible socket and hang before cleanup.
+/// Returns the ordered list of OCI CLI tools to try for container stop/rm.
+///
+/// `podman` is always first. `docker` is appended when `DOCKER_HOST` is set
+/// (an explicit engine endpoint was configured, so no hang risk) or when
+/// `ATO_ENABLE_DOCKER=1`. We do NOT add `docker` unconditionally: on
+/// podman-only hosts with the Docker CLI installed but daemon down,
+/// `docker stop` can hang waiting on the unix socket indefinitely.
+fn container_stop_cli_candidates() -> Vec<&'static str> {
+    let docker_host_set = std::env::var("DOCKER_HOST").is_ok();
+    let docker_enabled =
+        std::env::var(ato_session_core::process::ATO_ENABLE_DOCKER_ENV).as_deref() == Ok("1");
+    if docker_host_set || docker_enabled {
+        vec!["podman", "docker"]
+    } else {
+        vec!["podman"]
+    }
+}
+
 fn stop_container_via_provider_cli(
     container_id: &str,
     service_name: &str,
@@ -427,45 +445,69 @@ fn stop_container_via_provider_cli(
         grace.as_secs().min(u16::MAX as u64) as u16
     };
 
-    let stop = Command::new("podman")
-        .args([
-            "stop",
-            "--time",
-            &stop_timeout_secs.to_string(),
-            container_id,
-        ])
-        .output()
-        .with_context(|| "failed to run podman stop for OCI teardown")?;
-    let stopped = if stop.status.success() {
-        true
-    } else {
-        let stderr = String::from_utf8_lossy(&stop.stderr);
-        if !is_container_not_found(&stderr) {
-            eprintln!(
-                "ATO-WARN podman stop({}) for service '{}' failed: {}",
+    // Try each CLI in order. The first one that successfully reaches its
+    // daemon and stops (or confirms already-gone for) the container wins;
+    // remaining CLIs are skipped. A CLI that cannot be executed (binary
+    // absent) or whose daemon is unreachable is silently skipped so that
+    // the next candidate gets a chance. This allows a session that was
+    // started via the Docker-compatible bollard path to be torn down
+    // correctly even when Podman is also installed but not running.
+    for cli in container_stop_cli_candidates() {
+        let stop_out = Command::new(cli)
+            .args([
+                "stop",
+                "--time",
+                &stop_timeout_secs.to_string(),
                 container_id,
-                service_name,
-                stderr.trim()
-            );
-        }
-        false
-    };
+            ])
+            .output();
 
-    let remove = Command::new("podman")
-        .args(["rm", "--force", container_id])
-        .output()
-        .with_context(|| "failed to run podman rm for OCI teardown")?;
-    if !remove.status.success() {
-        let stderr = String::from_utf8_lossy(&remove.stderr);
-        eprintln!(
-            "ATO-WARN podman rm({}) for service '{}' failed: {}",
-            container_id,
-            service_name,
-            stderr.trim()
-        );
+        match stop_out {
+            Err(_) => {
+                // Binary not found or could not be executed — try next CLI.
+                continue;
+            }
+            Ok(out) if out.status.success() => {
+                // Container stopped via this CLI. Remove it with the same CLI
+                // and return.
+                let rm_out = Command::new(cli)
+                    .args(["rm", "--force", container_id])
+                    .output();
+                if let Ok(rm) = rm_out
+                    && !rm.status.success()
+                {
+                    let rm_err = String::from_utf8_lossy(&rm.stderr);
+                    eprintln!(
+                        "ATO-WARN {cli} rm({container_id}) for service \
+                             '{service_name}' failed: {}",
+                        rm_err.trim()
+                    );
+                }
+                return Ok(true);
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stderr_str = stderr.trim();
+                // "Container not found" in this runtime means it either never
+                // existed here or was already removed — try the next CLI in
+                // case it lives under a different engine (e.g., the session
+                // was started via Docker but Podman is also installed).
+                if is_container_not_found(stderr_str) {
+                    continue;
+                }
+                // Any other failure (daemon unavailable, permission error,
+                // …): emit a warning and try the next CLI.
+                eprintln!(
+                    "ATO-WARN {cli} stop({container_id}) for service \
+                     '{service_name}' failed: {stderr_str}"
+                );
+            }
+        }
     }
 
-    Ok(stopped)
+    // No CLI successfully stopped the container (already gone or all
+    // unreachable). Treat as not-signalled so the caller can decide.
+    Ok(false)
 }
 
 /// Outcome of a `remove_network_if_present` call. Returned to the
@@ -640,5 +682,84 @@ mod tests {
         assert!(is_network_not_found("Error response: not found"));
         assert!(!is_network_not_found("permission denied"));
         assert!(!is_network_not_found(""));
+    }
+
+    // --- #406 container_stop_cli_candidates tests ---
+    //
+    // These tests mutate process-global env vars, so they must not run
+    // concurrently with each other. A module-level Mutex serializes them
+    // without requiring a proc-macro dependency (serial_test, etc.).
+    static ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+    #[test]
+    fn stop_cli_candidates_podman_only_without_docker_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        // When neither DOCKER_HOST nor ATO_ENABLE_DOCKER is set, only podman
+        // is tried so we don't accidentally hang on a down Docker daemon.
+        let _g1 = EnvGuard::remove("DOCKER_HOST");
+        let _g2 = EnvGuard::remove(ato_session_core::process::ATO_ENABLE_DOCKER_ENV);
+        assert_eq!(container_stop_cli_candidates(), vec!["podman"]);
+    }
+
+    #[test]
+    fn stop_cli_candidates_includes_docker_when_docker_host_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        // DOCKER_HOST means the user has an explicit endpoint — no hang risk.
+        let _g1 = EnvGuard::set("DOCKER_HOST", "unix:///tmp/docker.sock");
+        let _g2 = EnvGuard::remove(ato_session_core::process::ATO_ENABLE_DOCKER_ENV);
+        assert_eq!(container_stop_cli_candidates(), vec!["podman", "docker"]);
+    }
+
+    #[test]
+    fn stop_cli_candidates_includes_docker_when_ato_enable_docker_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g1 = EnvGuard::remove("DOCKER_HOST");
+        let _g2 = EnvGuard::set(ato_session_core::process::ATO_ENABLE_DOCKER_ENV, "1");
+        assert_eq!(container_stop_cli_candidates(), vec!["podman", "docker"]);
+    }
+
+    #[test]
+    fn stop_cli_candidates_podman_only_when_ato_enable_docker_not_one() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g1 = EnvGuard::remove("DOCKER_HOST");
+        let _g2 = EnvGuard::set(ato_session_core::process::ATO_ENABLE_DOCKER_ENV, "0");
+        assert_eq!(container_stop_cli_candidates(), vec!["podman"]);
+    }
+
+    /// RAII guard that restores an env var to its previous value on drop.
+    struct EnvGuard {
+        key: String,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+        fn remove(key: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
     }
 }

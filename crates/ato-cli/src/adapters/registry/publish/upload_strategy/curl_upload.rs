@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rand::Rng;
 
 /// Response from a curl-based HTTP call.
@@ -554,14 +554,18 @@ mod tests {
     #[test]
     #[serial]
     fn with_retry_disabled_via_env_skips_retries() {
-        std::env::set_var("ATO_DISABLE_RETRY", "1");
+        unsafe {
+            std::env::set_var("ATO_DISABLE_RETRY", "1");
+        }
         let calls = RefCell::new(0);
         let out = with_retry(fast_policy(3), "test", || {
             *calls.borrow_mut() += 1;
             Ok(response(503, "fail"))
         })
         .expect("ok");
-        std::env::remove_var("ATO_DISABLE_RETRY");
+        unsafe {
+            std::env::remove_var("ATO_DISABLE_RETRY");
+        }
         assert_eq!(out.status, 503);
         assert_eq!(*calls.borrow(), 1);
     }

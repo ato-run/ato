@@ -69,11 +69,11 @@ impl GestureState {
     /// `Some(FocusNext)` when the horizontal swipe threshold is crossed.
     pub fn on_scroll_delta(&mut self, dx: f32, dy: f32) -> Option<GestureAction> {
         let now = Instant::now();
-        if let Some(last) = self.last_scroll_at {
-            if last.elapsed().as_millis() > SCROLL_RESET_MS {
-                self.scroll_accum_dx = 0.0;
-                self.scroll_accum_dy = 0.0;
-            }
+        if let Some(last) = self.last_scroll_at
+            && last.elapsed().as_millis() > SCROLL_RESET_MS
+        {
+            self.scroll_accum_dx = 0.0;
+            self.scroll_accum_dy = 0.0;
         }
         self.scroll_accum_dx += dx;
         self.scroll_accum_dy += dy;

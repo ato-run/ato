@@ -7,6 +7,6 @@ pub mod executor;
 pub mod types;
 
 pub use executor::{
-    execute_share, ShareExecutionMode, ShareExecutionResult, SharePipedSession, ShareRunRequest,
+    ShareExecutionMode, ShareExecutionResult, SharePipedSession, ShareRunRequest, execute_share,
 };
 pub use types::*;

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use super::credential_store::{AuthStore, WriteLocation};
 use super::{
-    read_env_non_empty, AuthManager, Credentials, CANONICAL_CREDENTIALS_DIR,
-    CANONICAL_CREDENTIALS_FILE, ENV_XDG_CONFIG_HOME, LEGACY_CREDENTIALS_FILE,
+    AuthManager, CANONICAL_CREDENTIALS_DIR, CANONICAL_CREDENTIALS_FILE, Credentials,
+    ENV_XDG_CONFIG_HOME, LEGACY_CREDENTIALS_FILE, read_env_non_empty,
 };
 
 /// Physical destination of a freshly persisted token.

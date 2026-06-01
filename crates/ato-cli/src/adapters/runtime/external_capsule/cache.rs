@@ -81,15 +81,15 @@ async fn ensure_github_runtime_tree_for_dependency(
         .with_context(|| format!("invalid github source '{}'", locked.source))?;
     // Defense-in-depth: lock generation pins the commit; verify the lock
     // entry's resolved_version matches the URL we're about to fetch.
-    if let Some(resolved) = locked.resolved_version.as_deref() {
-        if resolved.to_lowercase() != parsed.commit {
-            anyhow::bail!(
-                "github capsule dependency '{}' resolved_version mismatch: lock={} url={}",
-                locked.name,
-                resolved,
-                parsed.commit
-            );
-        }
+    if let Some(resolved) = locked.resolved_version.as_deref()
+        && resolved.to_lowercase() != parsed.commit
+    {
+        anyhow::bail!(
+            "github capsule dependency '{}' resolved_version mismatch: lock={} url={}",
+            locked.name,
+            resolved,
+            parsed.commit
+        );
     }
 
     let cache_dir = github_capsule_cache_dir(&parsed)?;
@@ -268,17 +268,17 @@ fn verify_artifact_bytes(locked: &LockedCapsuleDependency, bytes: &[u8]) -> Resu
         }
     }
 
-    if let Some(expected) = locked.digest.as_deref() {
-        if let Some(expected) = expected.strip_prefix("blake3:") {
-            let actual = blake3::hash(bytes).to_hex().to_string();
-            if actual != expected {
-                anyhow::bail!(
-                    "artifact blake3 mismatch for '{}': expected {} got {}",
-                    locked.name,
-                    expected,
-                    actual
-                );
-            }
+    if let Some(expected) = locked.digest.as_deref()
+        && let Some(expected) = expected.strip_prefix("blake3:")
+    {
+        let actual = blake3::hash(bytes).to_hex().to_string();
+        if actual != expected {
+            anyhow::bail!(
+                "artifact blake3 mismatch for '{}': expected {} got {}",
+                locked.name,
+                expected,
+                actual
+            );
         }
     }
 

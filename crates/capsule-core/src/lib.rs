@@ -114,7 +114,7 @@ pub use runtime::oci::OciHandle;
 pub use runtime::wasm::WasmHandle;
 pub use runtime::{Measurable, RuntimeHandle};
 pub use tsnet::{
-    discover_sidecar, spawn_sidecar, wait_for_ready, SidecarBaseConfig, SidecarRequest,
-    SidecarSpawnConfig, TsnetClient, TsnetConfig, TsnetEndpoint, TsnetHandle, TsnetServeStatus,
-    TsnetState, TsnetStatus, TsnetWaitConfig,
+    SidecarBaseConfig, SidecarRequest, SidecarSpawnConfig, TsnetClient, TsnetConfig, TsnetEndpoint,
+    TsnetHandle, TsnetServeStatus, TsnetState, TsnetStatus, TsnetWaitConfig, discover_sidecar,
+    spawn_sidecar, wait_for_ready,
 };

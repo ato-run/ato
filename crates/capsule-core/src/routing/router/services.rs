@@ -255,18 +255,17 @@ impl ManifestData {
                         service.name, dependency
                     )));
                 };
-                if let Some(network) = dependency_service.network.as_ref() {
-                    if !network.allow_from.is_empty()
-                        && !network
-                            .allow_from
-                            .iter()
-                            .any(|value| value == &service.name)
-                    {
-                        return Err(CapsuleError::Config(format!(
-                            "service '{}' is not allowed to connect to '{}'",
-                            service.name, dependency
-                        )));
-                    }
+                if let Some(network) = dependency_service.network.as_ref()
+                    && !network.allow_from.is_empty()
+                    && !network
+                        .allow_from
+                        .iter()
+                        .any(|value| value == &service.name)
+                {
+                    return Err(CapsuleError::Config(format!(
+                        "service '{}' is not allowed to connect to '{}'",
+                        service.name, dependency
+                    )));
                 }
 
                 let dependency_runtime =

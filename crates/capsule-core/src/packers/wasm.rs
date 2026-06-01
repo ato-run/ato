@@ -96,12 +96,11 @@ fn resolve_component(plan: &ManifestData) -> Result<String> {
             return Ok(entrypoint);
         }
 
-        if let Ok(parsed) = shell_words::split(&entrypoint) {
-            if let Some(first) = parsed.first() {
-                if is_wasm_path(first) {
-                    return Ok(first.to_string());
-                }
-            }
+        if let Ok(parsed) = shell_words::split(&entrypoint)
+            && let Some(first) = parsed.first()
+            && is_wasm_path(first)
+        {
+            return Ok(first.to_string());
         }
     }
 

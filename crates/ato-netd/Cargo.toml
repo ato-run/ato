@@ -1,8 +1,8 @@
 [package]
 name = "ato-netd"
 version = "0.5.2"
-edition = "2021"
-rust-version = "1.82"
+edition = "2024"
+rust-version = "1.96"
 license = "MPL-2.0"
 description = "ato network broker — session-scoped sidecar that hosts DNS resolution, proxy policy, and ingress / egress for ato sessions. Slice A ships the daemon skeleton; ingress / DNS / egress land in follow-up slices per #294."
 repository = "https://github.com/ato-run/ato"

@@ -255,10 +255,10 @@ pub(crate) fn validate_config_against_policy(
     policy: &WorkspacePolicyBundle,
 ) -> Result<(), AtoExecutionError> {
     let mut allow_hosts = Vec::new();
-    if let Some(egress) = config.sandbox.network.egress.as_ref() {
-        if let Some(rules) = egress.rules.as_ref() {
-            allow_hosts.extend(rules.iter().map(|rule| rule.value.clone()));
-        }
+    if let Some(egress) = config.sandbox.network.egress.as_ref()
+        && let Some(rules) = egress.rules.as_ref()
+    {
+        allow_hosts.extend(rules.iter().map(|rule| rule.value.clone()));
     }
     validate_string_scope(
         "network.allow_hosts",
@@ -736,9 +736,11 @@ mod tests {
 
         let error =
             resolve_effective_lock_state(dir.path(), &sample_lock(), &[]).expect_err("mismatch");
-        assert!(error
-            .to_string()
-            .contains("refusing to apply stale workspace bindings"));
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to apply stale workspace bindings")
+        );
     }
 
     #[test]
@@ -760,9 +762,11 @@ mod tests {
 
         let error =
             resolve_effective_lock_state(dir.path(), &sample_lock(), &[]).expect_err("mismatch");
-        assert!(error
-            .to_string()
-            .contains("refusing to consume stale attestations"));
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to consume stale attestations")
+        );
     }
 
     #[test]
@@ -837,9 +841,11 @@ mod tests {
         };
 
         let error = validate_execution_plan_against_policy(&plan, &policy).expect_err("deny");
-        assert!(error
-            .to_string()
-            .contains("policy denied network.allow_hosts entry"));
+        assert!(
+            error
+                .to_string()
+                .contains("policy denied network.allow_hosts entry")
+        );
     }
 
     #[test]

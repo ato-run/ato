@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
+use capsule_core::CapsuleReporter;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::router::{
     CompatManifestBridge, CompatProjectInput, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
 };
 use capsule_core::types::{CapsuleManifest, ValidationMode};
-use capsule_core::CapsuleReporter;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -17,7 +17,7 @@ use tracing::debug;
 use crate::adapters::runtime::provisioning::dependency_root;
 use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::application::source_inventory::{
-    collect_source_files, native_lockfiles, normalize_outputs, OutputSpec,
+    OutputSpec, collect_source_files, native_lockfiles, normalize_outputs,
 };
 use crate::build::native_delivery;
 use crate::project::init;
@@ -462,7 +462,7 @@ pub fn execute_pack_command_with_injected_manifest(
         capsule_core::router::RuntimeKind::Oci => {
             let result = capsule_core::packers::oci::pack(&decision.plan, None, reporter.as_ref())?;
             let archive = result.archive.clone();
-            if let Some(ref path) = archive {
+            if let Some(path) = &archive {
                 crate::payload_guard::ensure_payload_size(
                     path,
                     force_large_payload,
@@ -787,13 +787,13 @@ fn cleanup_failed_artifact(
         return Ok(());
     }
 
-    if artifact_path.exists() {
-        if let Err(err) = std::fs::remove_file(artifact_path) {
-            futures::executor::block_on(reporter.warn(format!(
-                "⚠️  Failed to remove artifact after smoke failure: {} ({err})",
-                artifact_path.display()
-            )))?;
-        }
+    if artifact_path.exists()
+        && let Err(err) = std::fs::remove_file(artifact_path)
+    {
+        futures::executor::block_on(reporter.warn(format!(
+            "⚠️  Failed to remove artifact after smoke failure: {} ({err})",
+            artifact_path.display()
+        )))?;
     }
 
     Ok(())
@@ -834,15 +834,14 @@ fn run_v03_build_lifecycle_steps(
                 install.label, install.command
             )))?;
             run_build_lifecycle_shell_command(&install_plan, &install.command, "install")?;
-        } else if provisioned_roots.insert(root.clone()) {
-            if let Some(command) = plan_v03_build_provision_command(&target_plan, strict_lockfile)?
-            {
-                futures::executor::block_on(reporter.notify(format!(
-                    "⚙️  Provision [{}]: {}",
-                    root_target.label, command
-                )))?;
-                run_build_lifecycle_shell_command(&target_plan, &command, "provision")?;
-            }
+        } else if provisioned_roots.insert(root.clone())
+            && let Some(command) = plan_v03_build_provision_command(&target_plan, strict_lockfile)?
+        {
+            futures::executor::block_on(reporter.notify(format!(
+                "⚙️  Provision [{}]: {}",
+                root_target.label, command
+            )))?;
+            run_build_lifecycle_shell_command(&target_plan, &command, "provision")?;
         }
     }
 
@@ -854,15 +853,15 @@ fn run_v03_build_lifecycle_steps(
             .filter(|value| !value.is_empty())
         {
             let build_cache = prepare_v03_build_cache(&target_plan, &command, reporter)?;
-            if let Some(build_cache) = build_cache.as_ref() {
-                if build_cache.restore_outputs()? {
-                    futures::executor::block_on(reporter.notify(format!(
-                        "♻️  Build cache hit [{}]: restored {}",
-                        target.label,
-                        build_cache.describe_outputs()
-                    )))?;
-                    continue;
-                }
+            if let Some(build_cache) = build_cache.as_ref()
+                && build_cache.restore_outputs()?
+            {
+                futures::executor::block_on(reporter.notify(format!(
+                    "♻️  Build cache hit [{}]: restored {}",
+                    target.label,
+                    build_cache.describe_outputs()
+                )))?;
+                continue;
             }
 
             futures::executor::block_on(
@@ -1414,7 +1413,9 @@ mod tests {
     impl EnvVarGuard {
         fn set_path(key: &'static str, value: &std::path::Path) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
@@ -1422,9 +1423,13 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
             } else {
-                std::env::remove_var(self.key);
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }
@@ -1537,7 +1542,9 @@ mod tests {
         );
         let reporter = std::sync::Arc::new(crate::reporters::CliReporter::new(true));
 
-        std::env::set_var("ATO_BUILD_CACHE_TEST_ENV", "test");
+        unsafe {
+            std::env::set_var("ATO_BUILD_CACHE_TEST_ENV", "test");
+        }
         run_v03_build_lifecycle_steps(&plan, &reporter, true).expect("first build");
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("build-scratch/build-count.txt"))
@@ -1561,7 +1568,9 @@ mod tests {
             std::fs::read_to_string(tmp.path().join("dist/out.txt")).expect("read restored output"),
             "cached"
         );
-        std::env::remove_var("ATO_BUILD_CACHE_TEST_ENV");
+        unsafe {
+            std::env::remove_var("ATO_BUILD_CACHE_TEST_ENV");
+        }
     }
 
     #[test]

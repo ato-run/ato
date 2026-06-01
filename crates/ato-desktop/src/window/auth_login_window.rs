@@ -18,8 +18,8 @@ use std::process::{Child, Command, Stdio};
 use anyhow::{Context, Result};
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context as GpuiContext, IntoElement, Pixels,
-    Render, Size, WindowBounds, WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context as GpuiContext, IntoElement, Pixels, Render, Size,
+    WindowBounds, WindowDecorations, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
 use serde::Deserialize;
@@ -97,14 +97,14 @@ struct DesktopLoginEvent {
 /// Call this from `DockCommand::Login` instead of spawning bare `ato login`.
 pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
     // Only one login window at a time.
-    if let Some(slot) = cx.try_global::<AuthLoginWindowSlot>() {
-        if let Some(handle) = slot.0 {
-            let result = handle.update(cx, |_, window, _| window.activate_window());
-            if result.is_ok() {
-                return Ok(());
-            }
-            cx.set_global(AuthLoginWindowSlot(None));
+    if let Some(slot) = cx.try_global::<AuthLoginWindowSlot>()
+        && let Some(handle) = slot.0
+    {
+        let result = handle.update(cx, |_, window, _| window.activate_window());
+        if result.is_ok() {
+            return Ok(());
         }
+        cx.set_global(AuthLoginWindowSlot(None));
     }
 
     let ato_bin = resolve_ato_binary().context("ato binary not found")?;
@@ -213,7 +213,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
             .spawn(async move { watch_login_completion(reader, child) })
             .await;
         crate::webview_init_guard::wait_until_idle(&be).await;
-        let _ = aa.update(|cx| {
+        aa.update(|cx| {
             on_login_completion(cx, completion);
         });
     })

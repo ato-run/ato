@@ -7,6 +7,9 @@ homepage = "https://github.com/toeverything/AFFiNE"
 
 default_target = "app"
 
+[source]
+repository = "toeverything/AFFiNE"
+
 [targets.db]
 runtime = "oci"
 image = "pgvector/pgvector:pg16"
@@ -38,14 +41,14 @@ kind = "filesystem"
 durability = "persistent"
 purpose = "AFFiNE PostgreSQL data"
 attach = "explicit"
-schema_id = "sha256:affine-pgdata-v1"
+schema_id = "sha256:4297dc12d5468fa991e92066897212d4465ae4bcfa236da2693e036d6c6373e6"
 
 [state.storage]
 kind = "filesystem"
 durability = "persistent"
 purpose = "AFFiNE uploads and blob storage"
 attach = "explicit"
-schema_id = "sha256:affine-storage-v1"
+schema_id = "sha256:33ce8b3bc7c6dfbef0a48d50b8750393a47c56d6e135e60f6ebdbf35dd8a8110"
 sharing = "same-capsule"
 
 [state.config]
@@ -53,7 +56,7 @@ kind = "filesystem"
 durability = "persistent"
 purpose = "AFFiNE self-host configuration"
 attach = "explicit"
-schema_id = "sha256:affine-config-v1"
+schema_id = "sha256:2967a201d6deeb3c2c723d19f22d195bc95580da4d2561fb16bbcfcd7be40301"
 sharing = "same-capsule"
 
 [services.db]

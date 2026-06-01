@@ -12,18 +12,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use flate2::write::GzEncoder;
-#[cfg(unix)]
 use flate2::Compression;
 #[cfg(unix)]
-use serde_json::{json, Value};
+use flate2::write::GzEncoder;
+#[cfg(unix)]
+use serde_json::{Value, json};
 #[cfg(unix)]
 use serial_test::serial;
 #[cfg(unix)]

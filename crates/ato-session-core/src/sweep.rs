@@ -384,41 +384,42 @@ fn sweep_session_records(session_root: &Path) -> Result<usize> {
 /// teardown pass to a pid-reuse coincidence is preferable to losing the
 /// teardown pass that would actually kill an orphan listener.
 fn session_record_is_alive(record: &StoredSessionInfo) -> bool {
-    if let Some(pid) = i32_to_pid(record.pid) {
-        if pid_is_alive(pid) && current_user_owns_process(pid) {
-            let start_time_matches = match record.process_start_time_unix_ms {
-                Some(expected) => {
-                    process_start_time_unix_ms(pid).is_some_and(|live| live == expected)
-                }
-                None => true,
-            };
-            if start_time_matches {
-                return true;
-            }
+    if let Some(pid) = i32_to_pid(record.pid)
+        && pid_is_alive(pid)
+        && current_user_owns_process(pid)
+    {
+        let start_time_matches = match record.process_start_time_unix_ms {
+            Some(expected) => process_start_time_unix_ms(pid).is_some_and(|live| live == expected),
+            None => true,
+        };
+        if start_time_matches {
+            return true;
         }
     }
     if let Some(snapshot) = record.orchestration_services.as_ref() {
         for service in &snapshot.services {
             // OCI services: addressed by container_id, not local_pid.
-            if let Some(container_id) = service.container_id.as_deref() {
-                if oci_container_is_running(container_id) {
-                    return true;
-                }
+            if let Some(container_id) = service.container_id.as_deref()
+                && oci_container_is_running(container_id)
+            {
+                return true;
             }
             // Managed (non-OCI) services: addressed by local_pid.
-            if let Some(pid) = service.local_pid.and_then(i32_to_pid) {
-                if pid_is_alive(pid) && current_user_owns_process(pid) {
-                    return true;
-                }
+            if let Some(pid) = service.local_pid.and_then(i32_to_pid)
+                && pid_is_alive(pid)
+                && current_user_owns_process(pid)
+            {
+                return true;
             }
         }
     }
     if let Some(snapshot) = record.dependency_contracts.as_ref() {
         for provider in &snapshot.providers {
-            if let Some(pid) = i32_to_pid(provider.pid) {
-                if pid_is_alive(pid) && current_user_owns_process(pid) {
-                    return true;
-                }
+            if let Some(pid) = i32_to_pid(provider.pid)
+                && pid_is_alive(pid)
+                && current_user_owns_process(pid)
+            {
+                return true;
             }
         }
     }
@@ -426,10 +427,10 @@ fn session_record_is_alive(record: &StoredSessionInfo) -> bool {
     // when orchestration_services is absent (older record format).
     if let Some(graph) = record.graph.as_ref() {
         for node in &graph.nodes {
-            if let Some(container_id) = node.container_id.as_deref() {
-                if oci_container_is_running(container_id) {
-                    return true;
-                }
+            if let Some(container_id) = node.container_id.as_deref()
+                && oci_container_is_running(container_id)
+            {
+                return true;
             }
         }
     }

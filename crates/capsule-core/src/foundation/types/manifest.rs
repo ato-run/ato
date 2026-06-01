@@ -42,8 +42,8 @@ pub use dependency_grammar::{
     TemplatedString, ValueType,
 };
 use manifest_v03::*;
-pub(crate) use manifest_validation::is_valid_mount_path;
 pub use manifest_validation::ValidationError;
+pub(crate) use manifest_validation::is_valid_mount_path;
 #[cfg(test)]
 pub(crate) use manifest_validation::{is_kebab_case, is_semver};
 
@@ -807,7 +807,9 @@ pub enum IngressError {
         route_name: String,
         template: String,
     },
-    #[error("ingress env_inject template '{template}' has unsupported field '.{field}' (allowed: url, base_url, path, origin)")]
+    #[error(
+        "ingress env_inject template '{template}' has unsupported field '.{field}' (allowed: url, base_url, path, origin)"
+    )]
     EnvInjectUnknownField {
         target: String,
         env_name: String,
@@ -1990,15 +1992,15 @@ impl CapsuleManifest {
     pub fn host_capability_grants(&self) -> Vec<crate::foundation::types::bridge::CapabilityGrant> {
         self.host_capabilities
             .iter()
-            .filter_map(|spec| match spec.name {
+            .map(|spec| match spec.name {
                 HostCapabilityName::OpenEditor => {
-                    Some(crate::foundation::types::bridge::CapabilityGrant::OpenEditor)
+                    crate::foundation::types::bridge::CapabilityGrant::OpenEditor
                 }
                 HostCapabilityName::OpenFile => {
-                    Some(crate::foundation::types::bridge::CapabilityGrant::OpenFile)
+                    crate::foundation::types::bridge::CapabilityGrant::OpenFile
                 }
                 HostCapabilityName::RevealWorkspace => {
-                    Some(crate::foundation::types::bridge::CapabilityGrant::RevealWorkspace)
+                    crate::foundation::types::bridge::CapabilityGrant::RevealWorkspace
                 }
             })
             .collect()
@@ -2168,9 +2170,10 @@ run = "node index.js"
 
         let err = crate::contract::manifest::load_manifest(&path)
             .expect_err("load_manifest must reject empty host capability reason");
-        assert!(err
-            .to_string()
-            .contains("host_capability 'open-file' must have a non-empty `reason` field"));
+        assert!(
+            err.to_string()
+                .contains("host_capability 'open-file' must have a non-empty `reason` field")
+        );
     }
 
     #[test]

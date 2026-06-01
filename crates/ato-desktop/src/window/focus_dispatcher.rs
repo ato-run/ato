@@ -19,15 +19,15 @@ use crate::app::{
     OpenDockWindow, OpenGithubRunWindow, OpenStartWindow, OpenStoreWindow, ShowControlBar,
     ShowSettings, ToggleControlBar,
 };
-use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
-use crate::state::session::SessionRegistry;
+use crate::automation::command::AutomationCommand;
 use crate::state::GuestRoute;
-use crate::system_capsule::ato_onboarding::{OnboardingCommand, ONBOARDING_VERSION};
-use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
+use crate::state::session::SessionRegistry;
+use crate::system_capsule::ato_onboarding::{ONBOARDING_VERSION, OnboardingCommand};
+use crate::webview::{DOCK_AUTOMATION_PANE_ID, dispatch_automation_command};
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::dock::DockEntitySlot;
-use crate::window::focus_guest_panes::{is_focus_guest_pane_id, FocusGuestPaneRegistry};
+use crate::window::focus_guest_panes::{FocusGuestPaneRegistry, is_focus_guest_pane_id};
 
 /// Start the Focus-mode automation dispatcher. Spawns the socket
 /// listener (`AutomationHost::start`) plus a foreground polling task
@@ -91,7 +91,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                     // so the caller gets consistent behaviour.
                     if let AutomationCommand::OpenUrl { url } = &req.command {
                         let url = url.clone();
-                        let _ = async_app_for_loop.update(|cx| {
+                        async_app_for_loop.update(|cx| {
                             let entity_opt = cx
                                 .try_global::<DockEntitySlot>()
                                 .and_then(|s| s.0.clone());
@@ -138,7 +138,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                         continue;
                     }
                     let host_clone = host.clone();
-                    let _ = async_app_for_loop.update(|cx| {
+                    async_app_for_loop.update(|cx| {
                         let entity_opt = cx
                             .try_global::<DockEntitySlot>()
                             .and_then(|s| s.0.clone());
@@ -170,7 +170,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                     let host_clone = host.clone();
                     let pending_ref = &pending;
                     let has_pending_ref = &has_pending;
-                    let _ = async_app_for_loop.update(|cx| {
+                    async_app_for_loop.update(|cx| {
                         // Resolve the target pane.
                         let pane_id = if req.pane_id == 0 {
                             frontmost_guest_pane_id(cx)
@@ -905,8 +905,8 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                         }
                                     });
 
-                                if let Some(ref sid) = session_id {
-                                    if let Err(err) =
+                                if let Some(ref sid) = session_id
+                                    && let Err(err) =
                                         crate::orchestrator::stop_guest_session_and_wait(
                                             sid,
                                             std::time::Duration::from_secs(3),
@@ -916,7 +916,6 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                             "Focus RestartActiveSession: stop failed: {err}"
                                         ));
                                     }
-                                }
 
                                 let _ = entry
                                     .handle

@@ -24,22 +24,21 @@ pub mod sweep;
 pub mod validate;
 
 pub use materialized::{
-    compute_run_config_hash, current_platform_tag, launch_cache_root,
-    materialized_launch_record_path, read_materialized_launch_record,
-    read_materialized_launch_records, validate_materialized_launch_record,
-    write_materialized_launch_record_atomic, MaterializedLaunchRecord,
-    MaterializedLaunchStaleReason, MaterializedLaunchValidationOutcome,
-    MATERIALIZED_LAUNCH_RECORD_SCHEMA_VERSION,
+    MATERIALIZED_LAUNCH_RECORD_SCHEMA_VERSION, MaterializedLaunchRecord,
+    MaterializedLaunchStaleReason, MaterializedLaunchValidationOutcome, compute_run_config_hash,
+    current_platform_tag, launch_cache_root, materialized_launch_record_path,
+    read_materialized_launch_record, read_materialized_launch_records,
+    validate_materialized_launch_record, write_materialized_launch_record_atomic,
 };
 pub use record::{
-    GuestSessionDisplay, ServiceBackgroundDisplay, StoredDependencyContracts,
+    GuestSessionDisplay, SCHEMA_VERSION_V2, ServiceBackgroundDisplay, StoredDependencyContracts,
     StoredDependencyProvider, StoredExecutionGraph, StoredGraphEdge, StoredGraphNode,
     StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
-    TerminalSessionDisplay, WebSessionDisplay, SCHEMA_VERSION_V2,
+    TerminalSessionDisplay, WebSessionDisplay,
 };
 pub use store::{
     read_session_records, session_record_path, session_root, write_session_record_atomic,
 };
 pub use validate::{
-    handle_matches_record, validate_record_only, RecordValidationOutcome, RecordValidationParams,
+    RecordValidationOutcome, RecordValidationParams, handle_matches_record, validate_record_only,
 };

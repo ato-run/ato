@@ -700,10 +700,10 @@ fn find_binary_recursive(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if candidates.contains(&name) {
-                    return Some(path);
-                }
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && candidates.contains(&name)
+            {
+                return Some(path);
             }
         }
     }

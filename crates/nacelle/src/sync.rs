@@ -12,7 +12,7 @@ use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 pub use capsule_sync::{NetworkScope, SharePolicy};
 
@@ -201,7 +201,7 @@ impl SyncRuntime {
 use tempfile::TempDir;
 use wasi_common::pipe::{ReadPipe, WritePipe};
 use wasmtime::{Config, Engine, Linker, Module, Store};
-use wasmtime_wasi::sync::{ambient_authority, Dir, WasiCtxBuilder};
+use wasmtime_wasi::sync::{Dir, WasiCtxBuilder, ambient_authority};
 
 pub struct WasmSandbox {
     engine: Engine,

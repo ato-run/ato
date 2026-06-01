@@ -6,9 +6,9 @@ use crate::cli::{
     ConfigCommands, ConfigEngineCommands, ConfigRegistryCommands, EngineCommands, RegistryCommands,
 };
 
+use super::Reporter;
 use super::engine;
 use super::registry;
-use super::Reporter;
 
 pub(super) fn execute_config_command(
     command: ConfigCommands,

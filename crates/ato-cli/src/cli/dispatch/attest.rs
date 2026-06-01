@@ -1,10 +1,10 @@
 use std::fs;
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use capsule_core::attestation::{
-    blob_attestations_dir, generate_keypair, read_envelope, verify_envelope,
-    write_trust_root_pubkey, AttestationKey, StoredAttestationKey, TrustRoot,
+    AttestationKey, StoredAttestationKey, TrustRoot, blob_attestations_dir, generate_keypair,
+    read_envelope, verify_envelope, write_trust_root_pubkey,
 };
 use capsule_core::common::paths::ato_trust_roots_dir;
 use serde_json::json;

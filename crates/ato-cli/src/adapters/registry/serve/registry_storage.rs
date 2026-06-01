@@ -657,10 +657,10 @@ pub(super) fn expand_user_path(raw: &str) -> PathBuf {
     if raw == "~" {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
     }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(raw)
 }
@@ -750,11 +750,7 @@ pub(super) fn find_latest_capsule_artifact_on_disk(
 pub(super) fn allocate_loopback_port() -> Option<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
     let port = listener.local_addr().ok()?.port();
-    if port == 0 {
-        None
-    } else {
-        Some(port)
-    }
+    if port == 0 { None } else { Some(port) }
 }
 
 pub(super) fn validate_capsule_segments(publisher: &str, slug: &str) -> Result<()> {

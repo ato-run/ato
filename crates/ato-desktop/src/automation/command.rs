@@ -208,10 +208,10 @@ impl PendingAutomationRequest {
 
     /// Send a response through the shared channel. Returns false if already consumed.
     pub fn send(&self, result: Result<Value, String>) -> bool {
-        if let Ok(mut guard) = self.response_tx.lock() {
-            if let Some(tx) = guard.take() {
-                return tx.send(result).is_ok();
-            }
+        if let Ok(mut guard) = self.response_tx.lock()
+            && let Some(tx) = guard.take()
+        {
+            return tx.send(result).is_ok();
         }
         false
     }

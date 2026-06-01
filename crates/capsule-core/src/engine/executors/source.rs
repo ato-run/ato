@@ -8,7 +8,7 @@ use crate::runtime::native::NativeHandle;
 use crate::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
 
 use crate::engine;
-use crate::packers::bundle::{build_bundle, PackBundleArgs};
+use crate::packers::bundle::{PackBundleArgs, build_bundle};
 use crate::router::ManifestData;
 use crate::runtime_config;
 
@@ -29,7 +29,7 @@ pub fn execute(plan: &ManifestData, nacelle_override: Option<PathBuf>) -> Result
 
     let bundle_path = {
         let mut rng = rand::thread_rng();
-        let suffix: u64 = rng.gen();
+        let suffix: u64 = rng.r#gen();
         let output = std::env::temp_dir().join(format!("capsule-dev-{}.bundle", suffix));
 
         runtime.block_on(build_bundle(
@@ -66,7 +66,7 @@ async fn run_bundle_with_metrics(bundle_path: &Path, manifest_dir: &Path) -> Res
     let pid = child.id();
     drop(child);
 
-    let session_id = format!("dev-{}", rand::thread_rng().gen::<u64>());
+    let session_id = format!("dev-{}", rand::thread_rng().r#gen::<u64>());
     let handle = NativeHandle::new(session_id, pid);
     let reporter = NoOpReporter;
     let config = SessionRunnerConfig::default();
