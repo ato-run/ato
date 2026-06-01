@@ -7,6 +7,9 @@ homepage = "https://github.com/axllent/mailpit"
 
 default_target = "app"
 
+[source]
+repository = "axllent/mailpit"
+
 [targets.app]
 runtime = "oci"
 # Pin note: proposed pin to axllent/mailpit:1.22.0 — not yet AODD-confirmed

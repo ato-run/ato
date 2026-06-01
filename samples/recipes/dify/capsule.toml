@@ -17,6 +17,9 @@ homepage = "https://github.com/langgenius/dify"
 
 default_target = "web"
 
+[source]
+repository = "langgenius/dify"
+
 # ── Postgres ─────────────────────────────────────────────────────────────────
 [targets.db]
 runtime = "oci"
@@ -72,21 +75,21 @@ kind = "filesystem"
 durability = "persistent"
 purpose = "Dify PostgreSQL data"
 attach = "explicit"
-schema_id = "sha256:dify-pgdata-v1"
+schema_id = "sha256:2641217d74b24c97603d73836b6b1bc536517476a19dde0839ac483348d98b92"
 
 [state.weaviate-data]
 kind = "filesystem"
 durability = "persistent"
 purpose = "Weaviate vector store data"
 attach = "explicit"
-schema_id = "sha256:dify-weaviate-v1"
+schema_id = "sha256:6992de7adba1d4db9e30b9a6da2c6aa869ba1094b85542544423456f6fa093cd"
 
 [state.api-storage]
 kind = "filesystem"
 durability = "persistent"
 purpose = "Dify file uploads and storage"
 attach = "explicit"
-schema_id = "sha256:dify-api-storage-v1"
+schema_id = "sha256:fb3b4b27b9d01e6b069b89de94302429e44503877559819f0694c1ed312d406d"
 sharing = "same-capsule"
 
 # ── Services ──────────────────────────────────────────────────────────────────

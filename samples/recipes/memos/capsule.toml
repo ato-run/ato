@@ -7,6 +7,9 @@ homepage = "https://github.com/usememos/memos"
 
 default_target = "app"
 
+[source]
+repository = "usememos/memos"
+
 [targets.app]
 runtime = "oci"
 image = "neosmemo/memos:stable"
