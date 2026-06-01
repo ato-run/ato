@@ -29,9 +29,7 @@ use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
 use crate::ProviderToolchain;
-use crate::adapters::runtime::oci_provider::{
-    DefaultOciProviderSelector, OciProvider, OciProviderSelector,
-};
+use crate::adapters::runtime::oci_provider::select_ready_runtime_oci_provider;
 #[cfg(unix)]
 use crate::application::orchestration_teardown::{collect_descendant_pids, listener_pids_on_port};
 use crate::application::pipeline::phases::run::{
@@ -390,6 +388,34 @@ fn validate_community_toml_id_for_session_start(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn auto_attach_state_args_for_community_toml_manifest(
+    manifest_path: &Path,
+    community_toml_id: &str,
+) -> Result<Vec<String>> {
+    use capsule_core::types::StateDurability;
+
+    let raw = fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = capsule_core::types::CapsuleManifest::from_toml(&raw)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let state_root = capsule_core::common::paths::ato_state_dir()
+        .join("community-tomls")
+        .join(community_toml_id);
+
+    Ok(manifest
+        .state
+        .iter()
+        .filter(|(_, requirement)| requirement.durability == StateDurability::Persistent)
+        .map(|(state_name, _)| {
+            format!(
+                "{}:{}",
+                state_name,
+                state_root.join(state_name).to_string_lossy()
+            )
+        })
+        .collect())
+}
+
 // On-disk session record schema lives in `ato-session-core` (see top-of-
 // file `pub(crate) use`). Keep this comment as a back-pointer because
 // `git blame` for this file should still surface the design rationale:
@@ -480,11 +506,16 @@ pub fn start_session(
             anyhow::bail!("--community-toml-id cannot be used with --from-materialized-record");
         }
         let manifest_path = fetch_community_toml_to_cache(cid, handle)?;
+        let effective_attach_state = if attach_state.is_empty() {
+            auto_attach_state_args_for_community_toml_manifest(&manifest_path, cid)?
+        } else {
+            attach_state.to_vec()
+        };
         super::session_runner::SessionStartPhaseRunner::from_toml_path(
             handle,
             manifest_path,
             target_label,
-            attach_state.to_vec(),
+            effective_attach_state,
             run_config_hash.map(str::to_string),
             json,
         )
@@ -1252,16 +1283,9 @@ pub(super) fn start_orchestration_session_in_process(
     };
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "orchestration_start_until_ready");
-    let oci_provider = DefaultOciProviderSelector.select_provider();
-    // Ensure the OCI provider is ready before touching networks or containers.
-    // On macOS/Windows this auto-starts a stopped Podman machine.  Without
-    // this gate, a stopped machine only surfaces as partial-setup failures deep
-    // inside `execute_until_ready_and_detach` (regression #289 / #328).
-    runtime_handle
-        .block_on(async { oci_provider.ensure_ready().await })
-        .map_err(|err| {
-            anyhow::Error::from(err).context("OCI provider not ready before session start")
-        })?;
+    let oci_provider = runtime_handle
+        .block_on(select_ready_runtime_oci_provider())
+        .context("OCI provider not ready before session start")?;
     let detached = runtime_handle
         .block_on(
             crate::executors::orchestrator::execute_until_ready_and_detach(
@@ -4289,6 +4313,62 @@ mod tests {
                 .iter()
                 .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn community_toml_launch_auto_binds_explicit_persistent_state() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
+        let resolved =
+            crate::app_control::sample_recipes::resolve_sample_recipe_for_input("blinko")
+                .expect("resolve sample recipe")
+                .expect("blinko recipe");
+        let attach_state = auto_attach_state_args_for_community_toml_manifest(
+            &resolved.manifest_path,
+            "ctoml_test",
+        )
+        .expect("auto community state bindings");
+
+        assert!(attach_state
+            .iter()
+            .any(|binding| binding.starts_with("db-data:")));
+        assert!(attach_state
+            .iter()
+            .any(|binding| binding.starts_with("app-data:")));
+
+        let (plan, _guest, _notes) = resolve_local_plan_for_session_start(
+            &resolved.manifest_path,
+            None,
+            None,
+            &attach_state,
+        )
+        .expect("resolve session plan with community auto-bound state");
+
+        let state_path = PathBuf::from(
+            plan.state_source_overrides
+                .get("db-data")
+                .expect("db-data state override"),
+        );
+        assert!(state_path.ends_with("state/community-tomls/ctoml_test/db-data"));
+        assert!(state_path.is_dir());
+    }
+
+    #[test]
+    fn community_toml_launch_skips_auto_bindings_without_persistent_state() {
+        let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("pgweb")
+            .expect("resolve sample recipe")
+            .expect("pgweb recipe");
+        let attach_state = auto_attach_state_args_for_community_toml_manifest(
+            &resolved.manifest_path,
+            "ctoml_test",
+        )
+        .expect("auto community state bindings");
+        assert!(attach_state.is_empty());
     }
 
     #[test]

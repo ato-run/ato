@@ -7,6 +7,9 @@ homepage = "https://github.com/filebrowser/filebrowser"
 
 default_target = "app"
 
+[source]
+repository = "filebrowser/filebrowser"
+
 [targets.app]
 runtime = "oci"
 # Pin note: proposed pin to filebrowser/filebrowser:v2.32.0 — not yet AODD-confirmed

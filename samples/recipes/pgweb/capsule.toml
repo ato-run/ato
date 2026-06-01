@@ -7,6 +7,9 @@ homepage = "https://github.com/sosedoff/pgweb"
 
 default_target = "app"
 
+[source]
+repository = "sosedoff/pgweb"
+
 [targets.app]
 runtime = "oci"
 # Runs standalone; shows connection form without a pre-configured DATABASE_URL.
