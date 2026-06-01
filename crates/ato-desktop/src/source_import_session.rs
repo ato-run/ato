@@ -509,8 +509,6 @@ impl GitHubImportSession {
         self.base_recipe_hash.as_deref()
     }
 
-
-
     /// True when the editable TOML's blake3 hash diverges from
     /// `base_recipe_hash`. The Submit payload uses this to mark the row
     /// `edited_locally=true` even when the recipe coincidentally fails to

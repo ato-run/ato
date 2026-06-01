@@ -191,7 +191,7 @@ impl StartPageHistoryStore {
             });
         }
         self.entries
-            .sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at));
+            .sort_by_key(|e| std::cmp::Reverse(e.last_opened_at));
         self.entries.truncate(MAX_HISTORY);
     }
 }
@@ -216,11 +216,11 @@ const MAX_SCAN_DEPTH: usize = 3;
 /// `MAX_LOCAL_APPS` results.
 pub fn scan_local_apps(root: &Path) -> Vec<LocalAppInfo> {
     let mut results = Vec::new();
-    scan_dir(root, root, 0, &mut results);
+    scan_dir(root, 0, &mut results);
     results
 }
 
-fn scan_dir(root: &Path, dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) {
+fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) {
     if depth >= MAX_SCAN_DEPTH || out.len() >= MAX_LOCAL_APPS {
         return;
     }
@@ -257,7 +257,7 @@ fn scan_dir(root: &Path, dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) 
                 name,
             });
         } else {
-            scan_dir(root, &path, depth + 1, out);
+            scan_dir(&path, depth + 1, out);
         }
     }
 }
