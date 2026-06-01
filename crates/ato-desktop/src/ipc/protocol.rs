@@ -8,17 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Normalised inbound request after transport parsing.
-#[derive(Debug, Clone)]
-pub struct IpcRequest {
-    /// `None` for legacy fire-and-forget envelopes.
-    pub id: Option<u64>,
-    /// Dot-separated namespace.action, e.g. `"capsule.context.get"`.
-    pub command: String,
-    /// Parsed payload; may be `Value::Null` if the command takes no params.
-    pub params: serde_json::Value,
-}
-
 /// Typed response delivered back to the caller.
 ///
 /// For system-capsule WebViews the response is serialised to JSON and

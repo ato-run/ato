@@ -263,10 +263,6 @@ pub(crate) struct AuthStatusResponse {
 }
 
 impl ManagedWebView {
-    fn bound_pane_id(&self) -> usize {
-        self.pane_binding.load(Ordering::Relaxed)
-    }
-
     fn rebind_pane_id(&mut self, pane_id: usize) {
         self.pane_binding.store(pane_id, Ordering::Relaxed);
         self.pane_id = pane_id;
@@ -4209,32 +4205,6 @@ fn rect_to_bounds(rect: Rect) -> PaneBounds {
     }
 }
 
-fn resolve_icon_source_for_payload(raw: &str) -> Option<String> {
-    if raw.starts_with("http://")
-        || raw.starts_with("https://")
-        || raw.starts_with("data:")
-        || raw.starts_with("file://")
-    {
-        return Some(raw.to_string());
-    }
-    let bytes = std::fs::read(raw).ok()?;
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let ext = std::path::Path::new(raw)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png");
-    let mime = match ext.to_lowercase().as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        _ => "image/png",
-    };
-    Some(format!("data:{mime};base64,{encoded}"))
-}
-
 fn page_not_loaded_message(state: &AppState, pane_id: PaneId) -> String {
     let Some(inspector) = state.capsule_inspector_by_pane_id(pane_id) else {
         return "page not yet loaded".to_string();
@@ -4327,13 +4297,6 @@ fn web_session_state_label(state: crate::state::WebSessionState) -> &'static str
     }
 }
 
-fn activity_tone_label(tone: crate::state::ActivityTone) -> &'static str {
-    match tone {
-        crate::state::ActivityTone::Info => "info",
-        crate::state::ActivityTone::Warning => "warning",
-        crate::state::ActivityTone::Error => "error",
-    }
-}
 #[cfg(target_os = "macos")]
 fn install_macos_frame_host(webview: &WebView) -> Result<Retained<NSView>> {
     let mtm =
