@@ -175,17 +175,13 @@ pub(crate) fn normalize_github_source(query: &str) -> Option<(String, String)> {
         r
     } else if let Some(r) = trimmed.strip_prefix("http://github.com/") {
         r
-    } else if let Some(r) = trimmed.strip_prefix("github.com/") {
-        r
-    } else {
-        return None;
-    };
+    } else { trimmed.strip_prefix("github.com/")? };
 
     // rest must be "owner/repo" (exactly one slash, non-empty on both sides)
     let rest = rest.trim_end_matches('/');
-    let mut parts = rest.splitn(2, '/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
+    let (owner, repo) = rest.split_once('/')?;
+    
+    
     if owner.is_empty() || repo.is_empty() || repo.contains('/') {
         return None;
     }
@@ -640,12 +636,11 @@ impl DesktopShell {
 
     /// Poll for capsule search results from the background thread.
     fn poll_capsule_search(&mut self) {
-        if let Some(ref rx) = self.capsule_search_rx {
-            if let Ok(results) = rx.try_recv() {
+        if let Some(ref rx) = self.capsule_search_rx
+            && let Ok(results) = rx.try_recv() {
                 self.state.capsule_search_results = results;
                 self.capsule_search_rx = None;
             }
-        }
     }
 
     /// Drain the `ato login` child-process exit signal. On successful
@@ -721,15 +716,14 @@ impl DesktopShell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let crate::state::UpdateCheck::Available { html_url, .. } = &self.state.update_check {
-            if let Err(error) = open_external_url(html_url) {
+        if let crate::state::UpdateCheck::Available { html_url, .. } = &self.state.update_check
+            && let Err(error) = open_external_url(html_url) {
                 self.state.push_activity(
                     crate::state::ActivityTone::Error,
                     format!("Failed to open release page: {error}"),
                 );
                 cx.notify();
             }
-        }
     }
 
     fn on_open_external_link(
@@ -1141,11 +1135,10 @@ impl DesktopShell {
     }
 
     fn on_native_paste(&mut self, _: &NativePaste, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.webviews.wants_host_focus(&self.state) {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        if !self.webviews.wants_host_focus(&self.state)
+            && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 let _ = self.webviews.delegate_paste(&self.state, &text);
             }
-        }
         cx.notify();
     }
 
@@ -1215,11 +1208,11 @@ impl DesktopShell {
         // session token. We watch the child from a thread and forward
         // the exit status back to the render loop via cli_login_rx;
         // poll_cli_login() then drives complete_ato_login on success.
-        match {
+        let res = {
             let mut cmd = std::process::Command::new(&ato_bin);
             crate::proc_util::CommandNoWindowExt::no_console_window(&mut cmd);
             cmd.arg("login").spawn()
-        } {
+        }; match res {
             Ok(mut child) => {
                 self.state.push_activity(
                     crate::state::ActivityTone::Info,
@@ -1728,8 +1721,8 @@ impl DesktopShell {
                     // in the field rather than dismissing the modal.
                     return;
                 }
-                if let ConfigKind::Enum { choices } = &field.kind {
-                    if !choices.iter().any(|c| c == &value) {
+                if let ConfigKind::Enum { choices } = &field.kind
+                    && !choices.iter().any(|c| c == &value) {
                         self.state.push_activity(
                             ActivityTone::Warning,
                             format!(
@@ -1740,7 +1733,6 @@ impl DesktopShell {
                         );
                         return;
                     }
-                }
                 secret_writes.push(PendingSecretWrite {
                     target: item.target.clone(),
                     field_name: field.name.clone(),
@@ -2084,8 +2076,7 @@ impl DesktopShell {
                     if let Some(shell_weak) = cx
                         .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
                         .and_then(|s| s.0.clone())
-                    {
-                        if let Some(shell) = shell_weak.upgrade() {
+                        && let Some(shell) = shell_weak.upgrade() {
                             let mock = serde_json::json!({
                                 "ok": true,
                                 "candidates": [{
@@ -2101,7 +2092,6 @@ impl DesktopShell {
                             });
                             shell.read(cx).inject_github_candidates(&mock);
                         }
-                    }
                 }
                 "OpenStoreWindow" => {
                     window.dispatch_action(Box::new(crate::app::OpenStoreWindow), cx);
@@ -3399,7 +3389,7 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
             &canonical_handle,
             &route_label,
             &publisher,
-            &session_label,
+            session_label,
             &version_label,
             log_entries,
             quick_open_url,
@@ -4583,30 +4573,27 @@ fn capsule_service_tabs(
     if let Some(service) = active.served_by.as_deref() {
         tabs.push(service.to_string());
     }
-    if let Some(adapter) = active.adapter.as_deref() {
-        if !tabs.iter().any(|tab| tab == adapter) {
+    if let Some(adapter) = active.adapter.as_deref()
+        && !tabs.iter().any(|tab| tab == adapter) {
             tabs.push(adapter.to_string());
         }
-    }
-    if let Some(web) = active_web {
-        if !tabs.iter().any(|tab| tab == &web.profile) {
+    if let Some(web) = active_web
+        && !tabs.iter().any(|tab| tab == &web.profile) {
             tabs.push(web.profile.clone());
         }
-    }
     tabs
 }
 
 fn unique_domain_count(network_logs: &[&crate::state::NetworkLogEntry]) -> usize {
     let mut hosts = Vec::new();
     for entry in network_logs {
-        if let Ok(url) = url::Url::parse(&entry.url) {
-            if let Some(host) = url.host_str() {
+        if let Ok(url) = url::Url::parse(&entry.url)
+            && let Some(host) = url.host_str() {
                 let host = host.to_string();
                 if !hosts.iter().any(|existing| existing == &host) {
                     hosts.push(host);
                 }
             }
-        }
     }
     hosts.len()
 }

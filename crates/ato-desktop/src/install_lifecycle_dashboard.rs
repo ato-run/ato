@@ -370,18 +370,16 @@ pub fn attach_running_sessions(items: &mut [InstalledAppDashboardItem]) -> Resul
 fn session_record_is_alive(record: &ato_session_core::record::StoredSessionInfo) -> bool {
     #[cfg(unix)]
     {
-        if let Some(pid) = nix_pid(record.pid) {
-            if ato_session_core::process::pid_is_alive(pid) {
+        if let Some(pid) = nix_pid(record.pid)
+            && ato_session_core::process::pid_is_alive(pid) {
                 return true;
             }
-        }
         if let Some(svcs) = &record.orchestration_services {
             for svc in &svcs.services {
-                if let Some(pid) = svc.local_pid.and_then(nix_pid) {
-                    if ato_session_core::process::pid_is_alive(pid) {
+                if let Some(pid) = svc.local_pid.and_then(nix_pid)
+                    && ato_session_core::process::pid_is_alive(pid) {
                         return true;
                     }
-                }
             }
         }
         false

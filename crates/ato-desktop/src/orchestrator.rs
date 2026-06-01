@@ -924,11 +924,10 @@ pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Resul
         if !ato_session_core::process::pid_is_alive(pid) {
             return Ok(());
         }
-        if let Some(expected) = expected_start_time {
-            if ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected) {
+        if let Some(expected) = expected_start_time
+            && ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected) {
                 return Ok(());
             }
-        }
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -1298,10 +1297,10 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
         if !output.status.success() {
             return Vec::new();
         }
-        return String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.trim().parse::<u32>().ok())
-            .collect();
+            .collect()
     }
 
     #[cfg(windows)]
@@ -1424,10 +1423,10 @@ fn find_port_pids(port: u16) -> Vec<u32> {
         if !output.status.success() {
             return Vec::new();
         }
-        return String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.trim().parse::<u32>().ok())
-            .collect();
+            .collect()
     }
 
     #[cfg(windows)]
@@ -1464,10 +1463,10 @@ fn count_owned_shm() -> usize {
         };
         let text = String::from_utf8_lossy(&output.stdout);
         let current_user = std::env::var("USER").unwrap_or_default();
-        return text
+        text
             .lines()
             .filter(|line| line.contains(&current_user))
-            .count();
+            .count()
     }
 
     #[cfg(not(unix))]
@@ -1491,14 +1490,13 @@ fn free_owned_shm() -> usize {
                 continue;
             }
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
+            if let Some(id_str) = parts.get(1)
+                && let Ok(id) = id_str.parse::<u32>() {
                     let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
                     freed += 1;
                 }
-            }
         }
-        return freed;
+        freed
     }
 
     #[cfg(not(unix))]
@@ -1690,9 +1688,9 @@ fn run_session_start_command(
             let is_missing_env = event.name.as_deref() == Some("missing_required_env")
                 || event.code == "ATO_ERR_MISSING_REQUIRED_ENV"
                 || event.code == "E103";
-            if is_missing_env {
-                if let Some(details) = event.missing_env_details() {
-                    if !details.missing_schema.is_empty() {
+            if is_missing_env
+                && let Some(details) = event.missing_env_details()
+                    && !details.missing_schema.is_empty() {
                         // #117 — interactive resolution is an expected
                         // state, not a failure. Log at warn (one line
                         // per launch attempt, no payload spam) and
@@ -1712,8 +1710,6 @@ fn run_session_start_command(
                             community_toml_id: community_toml_id.map(str::to_string),
                         });
                     }
-                }
-            }
 
             // E302 with the `execution_plan_consent_required` reason —
             // route to the consent modal flow. Generic E302 (no
@@ -1723,8 +1719,8 @@ fn run_session_start_command(
             let is_execution_contract = event.name.as_deref() == Some("execution_contract_invalid")
                 || event.code == "ATO_ERR_EXECUTION_CONTRACT_INVALID"
                 || event.code == "E302";
-            if is_execution_contract {
-                if let Some(details) = event.consent_required_details() {
+            if is_execution_contract
+                && let Some(details) = event.consent_required_details() {
                     // Same rationale as the missing-env branch:
                     // interactive consent is expected.
                     warn!(
@@ -1744,7 +1740,6 @@ fn run_session_start_command(
                         community_toml_id: community_toml_id.map(str::to_string),
                     });
                 }
-            }
         }
 
         // Genuinely unexpected — preserve the original error log so
@@ -2064,11 +2059,10 @@ fn is_actionable_error_line(line: &str) -> bool {
 /// keyword can be checked at position 0.  Timestamps end with 'Z' followed by
 /// a space; if the prefix does not match that shape the line is returned as-is.
 fn strip_tracing_timestamp(line: &str) -> &str {
-    if let Some(idx) = line.find('Z') {
-        if idx > 10 && line.as_bytes().get(idx + 1) == Some(&b' ') {
+    if let Some(idx) = line.find('Z')
+        && idx > 10 && line.as_bytes().get(idx + 1) == Some(&b' ') {
             return &line[idx + 2..];
         }
-    }
     line
 }
 
@@ -2144,11 +2138,10 @@ fn resolve_nacelle_binary_with_paths(
     override_path: Option<PathBuf>,
     dev_workspace_path: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    if let Some(path) = override_path {
-        if path.is_file() {
+    if let Some(path) = override_path
+        && path.is_file() {
             return Some(path);
         }
-    }
 
     for candidate in bundle_paths.bundle_binary_candidates("nacelle") {
         if candidate.is_file() {
@@ -2156,11 +2149,10 @@ fn resolve_nacelle_binary_with_paths(
         }
     }
 
-    if let Some(path) = dev_workspace_path {
-        if path.is_file() {
+    if let Some(path) = dev_workspace_path
+        && path.is_file() {
             return Some(path);
         }
-    }
 
     bundle_paths
         .path_candidates("nacelle")
@@ -2818,15 +2810,13 @@ fn collect_dev_script_dirs(
     max_depth: usize,
     out: &mut Vec<(PathBuf, usize)>,
 ) {
-    if let Ok(content) = fs::read_to_string(dir.join("package.json")) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if json["scripts"]["dev"].is_string() {
+    if let Ok(content) = fs::read_to_string(dir.join("package.json"))
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            && json["scripts"]["dev"].is_string() {
                 out.push((dir.to_path_buf(), depth));
             }
-        }
-    }
-    if depth < max_depth {
-        if let Ok(entries) = fs::read_dir(dir) {
+    if depth < max_depth
+        && let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -2838,7 +2828,6 @@ fn collect_dev_script_dirs(
                 }
             }
         }
-    }
 }
 
 fn frontend_score(path: &Path) -> usize {
@@ -2922,14 +2911,13 @@ fn start_web_service_from_workspace(
             failed_sources.join("\n")
         );
     }
-    if let Some(ref v) = state.verification {
-        if v.result == "error" {
+    if let Some(ref v) = state.verification
+        && v.result == "error" {
             bail!(
                 "workspace verification failed — cannot start web server:\n{}",
                 v.issues.join("\n")
             );
         }
-    }
 
     // Collect all source root directories.
     let source_roots: Vec<PathBuf> = state
@@ -4216,11 +4204,10 @@ pub fn spawn_terminal_session(
             };
             match value.get("event").and_then(|e| e.as_str()) {
                 Some("terminal_data") => {
-                    if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str()) {
-                        if output_tx.send(b64.to_string()).is_err() {
+                    if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str())
+                        && output_tx.send(b64.to_string()).is_err() {
                             break;
                         }
-                    }
                 }
                 Some("terminal_exited") => {
                     let code = value.get("exit_code").and_then(|c| c.as_i64());
@@ -4581,8 +4568,8 @@ pub fn spawn_ato_run_repl(
     // Seed the session allowlist with any caller-provided hosts (e.g. the
     // share URL's own origin for share-initiated REPLs). Invalid patterns
     // are skipped with a warn log so they surface in diagnostics.
-    if !initial_allow_hosts.is_empty() {
-        if let Ok(mut g) = egress_policy.lock() {
+    if !initial_allow_hosts.is_empty()
+        && let Ok(mut g) = egress_policy.lock() {
             for host in &initial_allow_hosts {
                 match HostPattern::parse(host) {
                     Ok(p) => {
@@ -4605,7 +4592,6 @@ pub fn spawn_ato_run_repl(
                 }
             }
         }
-    }
 
     // Pre-queue the prelude into the input channel BEFORE spawning the REPL
     // thread. The thread prints the banner + prompt first, then processes the
@@ -4941,15 +4927,14 @@ pub fn spawn_ato_run_repl(
                         // session_allow on install verbs only. Query
                         // commands stay gated (see userland::install_verb_allowlist).
                         let auto_allow = crate::userland::install_verb_allowlist(&argv);
-                        if !auto_allow.is_empty() {
-                            if let Ok(mut g) = egress_policy.lock() {
+                        if !auto_allow.is_empty()
+                            && let Ok(mut g) = egress_policy.lock() {
                                 let mut added_any = Vec::new();
                                 for host in &auto_allow {
-                                    if let Ok(p) = HostPattern::parse(host) {
-                                        if g.allow(p) {
+                                    if let Ok(p) = HostPattern::parse(host)
+                                        && g.allow(p) {
                                             added_any.push(host.clone());
                                         }
-                                    }
                                 }
                                 if !added_any.is_empty() {
                                     let msg = format!(
@@ -4959,7 +4944,6 @@ pub fn spawn_ato_run_repl(
                                     let _ = send(&output_tx, msg.as_bytes());
                                 }
                             }
-                        }
 
                         cmd_builder.env("FORCE_COLOR", "1");
                         cmd_builder.env("CLICOLOR_FORCE", "1");
@@ -5153,15 +5137,14 @@ pub fn spawn_ato_run_repl(
                         drop(master_for_ops);
                         let _ = output_thread.join();
 
-                        if let Some(status) = exit_status {
-                            if !status.success() {
+                        if let Some(status) = exit_status
+                            && !status.success() {
                                 let code = status.exit_code();
                                 let msg = format!(
                                     "\x1b[31m[{command_label} exited with status {code}]\x1b[0m\r\n"
                                 );
                                 let _ = send(&output_tx, msg.as_bytes());
                             }
-                        }
 
                         if !send(&output_tx, b"\x1b[32mato>\x1b[0m ") {
                             return;
@@ -5340,11 +5323,10 @@ fn find_executable_named(root: &Path, name: &str, max_depth: usize) -> Option<Pa
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = path.metadata() {
-                    if meta.permissions().mode() & 0o111 != 0 {
+                if let Ok(meta) = path.metadata()
+                    && meta.permissions().mode() & 0o111 != 0 {
                         return Some(path);
                     }
-                }
             }
             #[cfg(not(unix))]
             {
@@ -5446,7 +5428,7 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
         let b = line[start];
         // Leading byte: ASCII (0..=0x7F) or multi-byte leader (0xC0..=0xFF).
         // Continuation bytes are 0x80..=0xBF; keep walking past them.
-        if b < 0x80 || b >= 0xC0 {
+        if !(0x80..0xC0).contains(&b) {
             break;
         }
     }

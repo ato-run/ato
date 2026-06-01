@@ -112,15 +112,14 @@ pub fn dispatch(
             let pending_preview = cx
                 .try_global::<crate::window::launch_window::PendingConsentPreview>()
                 .and_then(|g| g.0.clone());
-            if let Some(ref preview) = pending_preview {
-                if preview.preview_id != preview_id {
+            if let Some(ref preview) = pending_preview
+                && preview.preview_id != preview_id {
                     tracing::warn!(
                         expected = %preview_id,
                         current = %preview.preview_id,
                         "ato_launch: preview_id mismatch on approve"
                     );
                 }
-            }
             cx.set_global(crate::window::launch_window::PendingConsentPreview(None));
 
             let stashed = cx
@@ -143,8 +142,8 @@ pub fn dispatch(
             };
 
             // Persist new secret values and grant them to this capsule.
-            if let Some(ref handle) = route_handle {
-                if !secrets.is_empty() {
+            if let Some(ref handle) = route_handle
+                && !secrets.is_empty() {
                     let mut store = crate::config::load_secrets();
                     for (key, value) in &secrets {
                         if !value.is_empty() {
@@ -161,7 +160,6 @@ pub fn dispatch(
                         }
                     }
                 }
-            }
 
             // Record execution-plan consents.
             for consent in &consents {
@@ -291,7 +289,7 @@ pub fn dispatch(
                     .await;
 
                 crate::webview_init_guard::wait_until_idle(&be).await;
-                let _ = async_app.update(|cx| {
+                async_app.update(|cx| {
                     if let Some(shell) = shell_weak.upgrade() {
                         shell.read(cx).inject_github_candidates(&result);
                     }
@@ -322,7 +320,7 @@ pub fn dispatch(
                     .await;
 
                 crate::webview_init_guard::wait_until_idle(&be).await;
-                let _ = async_app.update(|cx| {
+                async_app.update(|cx| {
                     if let Some(shell) = shell_weak.upgrade() {
                         shell.read(cx).inject_cli_inference_result(&result);
                     }
@@ -366,7 +364,7 @@ pub fn dispatch(
                     })
                     .await;
                 crate::webview_init_guard::wait_until_idle(&be).await;
-                let _ = async_app.update(|cx| match result {
+                async_app.update(|cx| match result {
                     Ok(route) => {
                         let _ = host.update(cx, |_, window, _| window.remove_window());
                         cx.set_global(crate::window::launch_window::ActiveGithubRunShell(None));
@@ -488,8 +486,8 @@ fn fetch_github_candidates(repo: &str) -> serde_json::Value {
 fn extract_toml_str(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with(key) {
-            if let Some(rest) = line.strip_prefix(key) {
+        if line.starts_with(key)
+            && let Some(rest) = line.strip_prefix(key) {
                 let rest = rest.trim();
                 if rest.starts_with('=') {
                     let value = rest[1..]
@@ -502,7 +500,6 @@ fn extract_toml_str(text: &str, key: &str) -> Option<String> {
                     }
                 }
             }
-        }
     }
     None
 }
@@ -590,7 +587,7 @@ fn github_fetch_file(repo: &str, path: &str) -> Result<Option<String>, String> {
 fn infer_capsule_toml(repo: &str) -> serde_json::Value {
     let mut runtime = String::new();
     let mut entry = String::new();
-    let mut name = repo.split('/').last().unwrap_or("my-capsule").to_string();
+    let mut name = repo.split('/').next_back().unwrap_or("my-capsule").to_string();
     let mut port: Option<u16> = None;
     let mut warnings: Vec<String> = Vec::new();
     let mut api_errors: Vec<String> = Vec::new();

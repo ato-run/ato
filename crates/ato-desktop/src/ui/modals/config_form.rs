@@ -258,8 +258,8 @@ fn render_field_row(
             ),
     );
 
-    if let Some(description) = &field.description {
-        if !description.is_empty() {
+    if let Some(description) = &field.description
+        && !description.is_empty() {
             row = row.child(
                 div()
                     .text_size(px(11.5))
@@ -267,7 +267,6 @@ fn render_field_row(
                     .child(description.clone()),
             );
         }
-    }
 
     // The Input widget inherits its text color from `gpui_component`'s
     // independent theme global, not from our `Theme`. In dark/auto

@@ -222,7 +222,7 @@ fn render_app_card(
                                         &ato_bin, &ipk,
                                     );
                                     DashboardCache::refresh();
-                                    let _ = async_cx.update(|app| {
+                                    async_cx.update(|app| {
                                         DashboardCache::set_action_status(Some(match result {
                                             Ok(_) => InstalledAppsActionStatus::Success {
                                                 message: format!("Launched {ipk}"),

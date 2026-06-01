@@ -91,7 +91,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                     // so the caller gets consistent behaviour.
                     if let AutomationCommand::OpenUrl { url } = &req.command {
                         let url = url.clone();
-                        let _ = async_app_for_loop.update(|cx| {
+                        async_app_for_loop.update(|cx| {
                             let entity_opt = cx
                                 .try_global::<DockEntitySlot>()
                                 .and_then(|s| s.0.clone());
@@ -138,7 +138,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                         continue;
                     }
                     let host_clone = host.clone();
-                    let _ = async_app_for_loop.update(|cx| {
+                    async_app_for_loop.update(|cx| {
                         let entity_opt = cx
                             .try_global::<DockEntitySlot>()
                             .and_then(|s| s.0.clone());
@@ -170,7 +170,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                     let host_clone = host.clone();
                     let pending_ref = &pending;
                     let has_pending_ref = &has_pending;
-                    let _ = async_app_for_loop.update(|cx| {
+                    async_app_for_loop.update(|cx| {
                         // Resolve the target pane.
                         let pane_id = if req.pane_id == 0 {
                             frontmost_guest_pane_id(cx)
@@ -905,8 +905,8 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                         }
                                     });
 
-                                if let Some(ref sid) = session_id {
-                                    if let Err(err) =
+                                if let Some(ref sid) = session_id
+                                    && let Err(err) =
                                         crate::orchestrator::stop_guest_session_and_wait(
                                             sid,
                                             std::time::Duration::from_secs(3),
@@ -916,7 +916,6 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                             "Focus RestartActiveSession: stop failed: {err}"
                                         ));
                                     }
-                                }
 
                                 let _ = entry
                                     .handle
