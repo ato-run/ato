@@ -7,6 +7,9 @@ homepage = "https://github.com/vrana/adminer"
 
 default_target = "app"
 
+[source]
+repository = "vrana/adminer"
+
 [targets.app]
 runtime = "oci"
 image = "adminer:4.8.1"

@@ -7,6 +7,9 @@ homepage = "https://github.com/node-red/node-red"
 
 default_target = "app"
 
+[source]
+repository = "node-red/node-red"
+
 [targets.app]
 runtime = "oci"
 image = "nodered/node-red:latest"
