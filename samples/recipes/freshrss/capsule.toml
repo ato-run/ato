@@ -7,6 +7,9 @@ homepage = "https://github.com/FreshRSS/FreshRSS"
 
 default_target = "app"
 
+[source]
+repository = "FreshRSS/FreshRSS"
+
 [targets.app]
 runtime = "oci"
 image = "freshrss/freshrss:latest"

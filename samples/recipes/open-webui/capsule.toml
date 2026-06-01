@@ -7,6 +7,9 @@ homepage = "https://github.com/open-webui/open-webui"
 
 default_target = "app"
 
+[source]
+repository = "open-webui/open-webui"
+
 [targets.app]
 runtime = "oci"
 image = "ghcr.io/open-webui/open-webui:main"

@@ -7,6 +7,9 @@ homepage = "https://github.com/blinkospace/blinko"
 
 default_target = "app"
 
+[source]
+repository = "blinkospace/blinko"
+
 [targets.db]
 runtime = "oci"
 image = "postgres:14"
@@ -25,14 +28,14 @@ kind = "filesystem"
 durability = "persistent"
 purpose = "Blinko PostgreSQL data"
 attach = "explicit"
-schema_id = "sha256:blinko-pgdata-v1"
+schema_id = "sha256:b184a1d5e1ef2a452eef9a97c8c8e55d00909dfef4d68e35be24f16e9f709bd5"
 
 [state.app-data]
 kind = "filesystem"
 durability = "persistent"
 purpose = "Blinko uploads and app-local data"
 attach = "explicit"
-schema_id = "sha256:blinko-appdata-v1"
+schema_id = "sha256:e32090e8be2bd12a69a8c4267facc5be51038910e5adf7d588b54ca56971ae30"
 
 [services.db]
 target = "db"

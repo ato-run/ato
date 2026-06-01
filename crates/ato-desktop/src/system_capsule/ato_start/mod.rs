@@ -98,7 +98,7 @@ pub enum QueryIntent {
 /// - `capsule://...` or `github.com/...` → `CapsuleHandle`
 /// - `http://...` or `https://...` → `ExternalUrl`
 /// - `~/...` or an absolute `/...` path → `LocalPath`
-/// - known featured sample aliases → `CapsuleHandle`
+/// - known featured sample aliases → canonical GitHub `CapsuleHandle`
 /// - Anything else → `Invalid`
 pub fn classify_query(value: &str) -> QueryIntent {
     let v = value.trim();
@@ -108,8 +108,8 @@ pub fn classify_query(value: &str) -> QueryIntent {
         QueryIntent::ExternalUrl(v.to_string())
     } else if v.starts_with("~/") || v.starts_with('/') {
         QueryIntent::LocalPath(v.to_string())
-    } else if is_featured_sample_alias(v) {
-        QueryIntent::CapsuleHandle(v.to_string())
+    } else if let Some(handle) = featured_sample_alias_to_github(v) {
+        QueryIntent::CapsuleHandle(handle.to_string())
     } else {
         QueryIntent::Invalid(format!(
             "'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。",
@@ -118,8 +118,13 @@ pub fn classify_query(value: &str) -> QueryIntent {
     }
 }
 
-fn is_featured_sample_alias(value: &str) -> bool {
-    matches!(value, "affine" | "open-webui" | "excalidraw")
+fn featured_sample_alias_to_github(value: &str) -> Option<&'static str> {
+    match value {
+        "affine" => Some("github.com/toeverything/AFFiNE"),
+        "open-webui" => Some("github.com/open-webui/open-webui"),
+        "excalidraw" => Some("github.com/excalidraw/excalidraw"),
+        _ => None,
+    }
 }
 
 // ─── StartPageHistoryStore ───────────────────────────────────────────────────
@@ -355,7 +360,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
     vec![
         FeaturedApp {
-            handle: "affine".to_string(),
+            handle: "github.com/toeverything/AFFiNE".to_string(),
             label: "AFFiNE".to_string(),
             description: tr(locale, "start.featured.affine_desc"),
             icon: "△".to_string(),
@@ -369,7 +374,7 @@ fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
             installed: false,
         },
         FeaturedApp {
-            handle: "open-webui".to_string(),
+            handle: "github.com/open-webui/open-webui".to_string(),
             label: "Open WebUI".to_string(),
             description: tr(locale, "start.featured.open_webui_desc"),
             icon: "OI".to_string(),
@@ -383,7 +388,7 @@ fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
             installed: false,
         },
         FeaturedApp {
-            handle: "capsule://github.com/excalidraw/excalidraw".to_string(),
+            handle: "github.com/excalidraw/excalidraw".to_string(),
             label: "Excalidraw".to_string(),
             description: tr(locale, "start.featured.excalidraw_desc"),
             icon: "✏️".to_string(),
@@ -691,15 +696,32 @@ mod tests {
     fn classify_featured_sample_aliases() {
         assert_eq!(
             classify_query("affine"),
-            QueryIntent::CapsuleHandle("affine".to_string())
+            QueryIntent::CapsuleHandle("github.com/toeverything/AFFiNE".to_string())
         );
         assert_eq!(
             classify_query("open-webui"),
-            QueryIntent::CapsuleHandle("open-webui".to_string())
+            QueryIntent::CapsuleHandle("github.com/open-webui/open-webui".to_string())
         );
         assert_eq!(
             classify_query("excalidraw"),
-            QueryIntent::CapsuleHandle("excalidraw".to_string())
+            QueryIntent::CapsuleHandle("github.com/excalidraw/excalidraw".to_string())
+        );
+    }
+
+    #[test]
+    fn static_featured_apps_use_github_handles() {
+        let handles: Vec<_> = static_featured_apps(LocaleCode::En)
+            .into_iter()
+            .map(|app| app.handle)
+            .collect();
+
+        assert_eq!(
+            handles,
+            vec![
+                "github.com/toeverything/AFFiNE".to_string(),
+                "github.com/open-webui/open-webui".to_string(),
+                "github.com/excalidraw/excalidraw".to_string(),
+            ]
         );
     }
 
