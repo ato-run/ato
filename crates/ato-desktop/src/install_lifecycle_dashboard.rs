@@ -400,26 +400,6 @@ fn nix_pid(raw: i32) -> Option<u32> {
 
 // ── Internal builders (Blocker 3 fix: no silent .ok().flatten()) ────────────
 
-/// Read `finalized_at` from a single revision's artifact manifest.
-/// Returns `Ok(None)` when the manifest does not contain the field
-/// (unfinalized revision).  Returns `Err` when the manifest file is
-/// missing, unreadable, or not valid JSON.
-fn revision_finalized_at(
-    store: &InstallInstanceStore,
-    rev: &InstallRevisionId,
-) -> Result<Option<String>> {
-    store
-        .read_revision_manifest(rev)
-        .with_context(|| format!("read manifest for revision {}", rev.as_str()))
-        .map(|v| {
-            v.and_then(|v| {
-                v.get("finalized_at")
-                    .and_then(|s| s.as_str())
-                    .map(String::from)
-            })
-        })
-}
-
 fn build_app_item(
     store: &InstallInstanceStore,
     app_id: &InstalledAppId,
