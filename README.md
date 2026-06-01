@@ -513,6 +513,20 @@ Most users only need `ato-cli`.
 
 ## Develop
 
+### Pre-commit quality checks
+
+Install the local pre-commit hook:
+
+```bash
+./scripts/install-pre-commit-hook.sh
+```
+
+Run the same checks manually:
+
+```bash
+./scripts/pre-commit-quality.sh
+```
+
 ```bash
 cargo check --workspace --all-targets
 cargo test -p ato-cli
