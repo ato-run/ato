@@ -94,7 +94,6 @@ impl DesktopBundlePaths {
         }
     }
 
-
     #[cfg(test)]
     pub fn for_test(
         platform: DesktopPlatform,

@@ -58,9 +58,6 @@ impl IpcResponse {
             format!("unknown command: {command}"),
         )
     }
-
-
-
 }
 
 #[cfg(test)]

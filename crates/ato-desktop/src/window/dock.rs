@@ -11,7 +11,6 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -442,7 +441,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     // stay alive, so the next dock click only needs to call
     // makeKeyAndOrderFront + activate_window without running
     // `fetch_identity`, creating a new WebView, or loading the page.
-    handle.update(cx, |_, window, app_cx| {
+    let _ = handle.update(cx, |_, window, app_cx| {
         window.on_window_should_close(app_cx, move |window, _app| {
             #[cfg(target_os = "macos")]
             {

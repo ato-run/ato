@@ -144,7 +144,7 @@ impl AppWindowRegistry {
             .map(|(id, w)| (*id, w.last_focused_at))
             .collect();
         // Reverse-sort by last_focused_at: most recent first.
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
         entries.into_iter().map(|(id, _)| id).collect()
     }
 }
