@@ -230,7 +230,7 @@ where
             Ok(s) => s,
             Err(err) => {
                 warn!(error = %err, "ato-netd: failed to serialize response");
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
+                return Err(std::io::Error::other(err));
             }
         };
         writer.write_all(serialized.as_bytes()).await?;

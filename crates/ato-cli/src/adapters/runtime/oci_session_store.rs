@@ -427,7 +427,7 @@ impl RunningContainerGuard {
 }
 
 pub fn podman_machine_status() -> PodmanMachineStatus {
-    podman_machine_status_with(|args| run_podman_machine_command(args))
+    podman_machine_status_with(run_podman_machine_command)
 }
 
 fn podman_machine_status_with<F>(mut run: F) -> PodmanMachineStatus
@@ -447,9 +447,9 @@ where
 pub fn stop_podman_machines_if_idle(store: &OciSessionStore) -> PodmanMachineStopResult {
     stop_podman_machines_if_idle_with(
         store,
-        |args| run_podman_machine_command(args),
-        |args| run_podman_machine_command(args),
-        |args| run_podman_machine_command(args),
+        run_podman_machine_command,
+        run_podman_machine_command,
+        run_podman_machine_command,
     )
 }
 
@@ -701,7 +701,7 @@ fn unix_to_ymdhms(mut secs: u64) -> (u64, u64, u64, u64, u64, u64) {
 }
 
 fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

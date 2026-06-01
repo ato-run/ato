@@ -600,7 +600,7 @@ impl ProcessManager {
         let mut report = ImportPreviewSweepReport::default();
         let sessions = self.list_import_preview_sessions()?;
         for session in &sessions {
-            if !import_preview_session_is_stale(&session) {
+            if !import_preview_session_is_stale(session) {
                 report.active_sessions_kept += 1;
                 continue;
             }
