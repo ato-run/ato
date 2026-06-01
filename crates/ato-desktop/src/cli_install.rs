@@ -82,11 +82,10 @@ pub fn locate_bundled_helper(current_exe: &Path) -> Result<PathBuf> {
 pub fn try_install(helper: &Path) -> Result<InstallOutcome> {
     // Short-circuit: if `ato` already resolves and points at the
     // same helper, the install is already done.
-    if let Some(existing) = which_in_path("ato") {
-        if same_canonical(&existing, helper) {
+    if let Some(existing) = which_in_path("ato")
+        && same_canonical(&existing, helper) {
             return Ok(InstallOutcome::AlreadyInstalled { existing });
         }
-    }
 
     let target_dir = pick_install_dir()?;
     let helper_name = if cfg!(windows) { "ato.exe" } else { "ato" };

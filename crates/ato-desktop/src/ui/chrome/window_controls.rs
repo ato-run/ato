@@ -67,10 +67,10 @@ pub(super) fn render_window_controls(
 ) -> impl IntoElement {
     #[cfg(target_os = "macos")]
     {
-        return div()
+        div()
             .w(px(MACOS_TRAFFIC_LIGHT_SPACER_WIDTH))
             .h(px(12.0))
-            .flex_none();
+            .flex_none()
     }
 
     #[cfg(not(target_os = "macos"))]

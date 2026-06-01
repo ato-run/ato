@@ -810,7 +810,7 @@ fn open_app_window_with_capsule_input(
             // registry doesn't accumulate stale entries.
             cx.global_mut::<crate::state::AppWindowRegistry>()
                 .close(app_window_id);
-            return Err(err.into());
+            return Err(err);
         }
     };
 
@@ -826,7 +826,7 @@ fn open_app_window_with_capsule_input(
         "open_app_window_with_capsule_input: AppWindow created"
     );
     if let Some(shell) = capsule_shell_slot.borrow().clone() {
-        let _ = shell.update(cx, |shell, _cx| shell.set_content_window_id(gpui_window_id));
+        shell.update(cx, |shell, _cx| shell.set_content_window_id(gpui_window_id));
         // Register this real `AppCapsuleShell` as a Focus-mode guest
         // automation pane (#370) so MCP `browser_tabs` lists it and
         // `browser_snapshot` / `browser_take_screenshot` can target its
