@@ -94,17 +94,6 @@ impl DesktopBundlePaths {
         }
     }
 
-    pub fn for_current_exe(current_exe: PathBuf) -> Self {
-        Self {
-            platform: DesktopPlatform::current(),
-            current_exe: Some(current_exe),
-            current_dir: None,
-            ato_bin_env: None,
-            assets_dir_env: None,
-            path_entries: Vec::new(),
-            manifest_dir: None,
-        }
-    }
 
     #[cfg(test)]
     pub fn for_test(
