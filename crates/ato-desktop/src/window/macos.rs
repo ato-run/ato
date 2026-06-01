@@ -295,7 +295,7 @@ fn find_wkwebview_in_content(content: &NSView) -> Option<Retained<NSView>> {
 
     static WK_CLASS: std::sync::OnceLock<Option<&'static AnyClass>> = std::sync::OnceLock::new();
     let wk_class = *WK_CLASS.get_or_init(|| {
-        let name = std::ffi::CStr::from_bytes_with_nul(b"WKWebView\0").unwrap();
+        let name = c"WKWebView";
         AnyClass::get(name)
     });
     let wk_class = wk_class?;
@@ -358,7 +358,7 @@ pub fn request_wkwebview_snapshot(
                 r.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
             });
             png.map(|data| {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&data.to_vec());
+                let b64 = base64::engine::general_purpose::STANDARD.encode(data.to_vec());
                 format!("data:image/png;base64,{}", b64)
             })
         } else {

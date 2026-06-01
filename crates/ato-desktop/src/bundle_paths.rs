@@ -246,11 +246,10 @@ impl DesktopBundlePaths {
             exe_dir.join("bin").join(&binary_name),
         ];
 
-        if self.platform == DesktopPlatform::Macos {
-            if let Some(contents) = exe_dir.parent() {
+        if self.platform == DesktopPlatform::Macos
+            && let Some(contents) = exe_dir.parent() {
                 candidates.insert(0, contents.join("Helpers").join(&binary_name));
             }
-        }
 
         candidates
     }

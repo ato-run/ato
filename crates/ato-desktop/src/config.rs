@@ -85,6 +85,7 @@ pub struct RuntimeSettings {
 
 /// Backend engine selection for the three capsule execution categories.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct BackendEngineSettings {
     /// Engine for source-execution capsules (e.g. nacelle).
     #[serde(default)]
@@ -97,15 +98,6 @@ pub struct BackendEngineSettings {
     pub wasm: WasmBackendEngine,
 }
 
-impl Default for BackendEngineSettings {
-    fn default() -> Self {
-        Self {
-            source: SourceBackendEngine::default(),
-            oci: OciBackendEngine::default(),
-            wasm: WasmBackendEngine::default(),
-        }
-    }
-}
 
 /// Source execution engine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -288,6 +280,7 @@ pub struct DesktopSettings {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct OnboardingSettings {
     #[serde(default)]
     pub completed: bool,
@@ -297,15 +290,6 @@ pub struct OnboardingSettings {
     pub version: u16,
 }
 
-impl Default for OnboardingSettings {
-    fn default() -> Self {
-        Self {
-            completed: false,
-            skipped: false,
-            version: 0,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ControlBarSettings {
@@ -872,7 +856,7 @@ pub struct SecretStore {
 pub(crate) use crate::secret_bridge::BridgeError;
 
 impl SecretStore {
-    pub fn canonicalize_handle<'a>(handle: &'a str) -> &'a str {
+    pub fn canonicalize_handle(handle: &str) -> &str {
         let last_sep = handle.rfind('/');
         let search_start = last_sep.map_or(0, |p| p + 1);
         if let Some(pos) = handle[search_start..].find('@') {
@@ -970,11 +954,10 @@ impl SecretStore {
 /// Return a display path for the age-based credential store.
 pub fn secrets_path_display() -> Option<String> {
     let ato_home = ato_path("credentials/secrets/default.age").ok()?;
-    if let Ok(home) = home_dir_path() {
-        if let Ok(rel) = ato_home.strip_prefix(&home) {
+    if let Ok(home) = home_dir_path()
+        && let Ok(rel) = ato_home.strip_prefix(&home) {
             return Some(format!("~/{}", rel.display()));
         }
-    }
     Some(ato_home.display().to_string())
 }
 

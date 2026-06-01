@@ -159,11 +159,10 @@ impl DockWebView {
     fn emit_event(&mut self, event: &Value) {
         let payload = serde_json::to_string(event).unwrap_or_else(|_| "null".to_string());
         let script = format!("window.__ATO_DOCK_EVENT__ && window.__ATO_DOCK_EVENT__({payload});");
-        if let Some(webview) = self.webview.as_ref() {
-            if let Err(error) = webview.evaluate_script(&script) {
+        if let Some(webview) = self.webview.as_ref()
+            && let Err(error) = webview.evaluate_script(&script) {
                 tracing::warn!(?error, "dock: evaluate_script event dispatch failed");
             }
-        }
     }
 
     fn sync_webview_bounds(&mut self, window: &mut Window) {
@@ -527,11 +526,10 @@ pub fn submit_publish(cx: &mut App, request_id: String, visibility: Option<Strin
 }
 
 pub fn cleanup_dock_window(cx: &mut App) {
-    if let Ok(runtime) = dock_runtime(cx) {
-        if let Ok(mut guard) = runtime.lock() {
+    if let Ok(runtime) = dock_runtime(cx)
+        && let Ok(mut guard) = runtime.lock() {
             stop_preview_via_runtime(&mut guard);
         }
-    }
     cx.set_global(DockWindowSlot(None));
     cx.set_global(DockEntitySlot(None));
     cx.set_global(DockIdentityCache(None));
@@ -732,11 +730,10 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                     if let Some(automation) = &automation_for_load {
                         automation.mark_page_loaded(crate::webview::DOCK_AUTOMATION_PANE_ID);
                     }
-                } else if matches!(event, PageLoadEvent::Started) {
-                    if let Some(automation) = &automation_for_load {
+                } else if matches!(event, PageLoadEvent::Started)
+                    && let Some(automation) = &automation_for_load {
                         automation.mark_page_unloaded(crate::webview::DOCK_AUTOMATION_PANE_ID);
                     }
-                }
             })
             .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
                 SystemCapsuleId::AtoDock,
@@ -828,11 +825,10 @@ pub fn notify_login_success(cx: &mut App) {
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0);
             let reload_url = format!("{DOCK_SCHEME}://localhost/?t={ts}");
-            if let Some(webview) = view.webview.as_ref() {
-                if let Err(error) = webview.load_url(&reload_url) {
+            if let Some(webview) = view.webview.as_ref()
+                && let Err(error) = webview.load_url(&reload_url) {
                     tracing::warn!(?error, "dock: load_url after login failed");
                 }
-            }
         });
 
         if let Some(handle) = cx.try_global::<DockWindowSlot>().and_then(|slot| slot.0) {
@@ -853,11 +849,10 @@ fn dock_runtime(cx: &mut App) -> Result<Arc<Mutex<DockRuntimeState>>> {
 
 fn queue_runtime_event(runtime: &Arc<Mutex<DockRuntimeState>>, event: Value) {
     let queue = runtime.lock().ok().map(|guard| guard.event_queue.clone());
-    if let Some(queue) = queue {
-        if let Ok(mut events) = queue.lock() {
+    if let Some(queue) = queue
+        && let Ok(mut events) = queue.lock() {
             events.push(event);
         }
-    }
 }
 
 fn spawn_dock_event_loop(cx: &mut App, queue: DockEventQueue, host: AnyWindowHandle) {
@@ -888,7 +883,7 @@ fn spawn_dock_event_loop(cx: &mut App, queue: DockEventQueue, host: AnyWindowHan
                         .try_global::<DockEntitySlot>()
                         .and_then(|slot| slot.0.clone())
                     {
-                        let _ = entity.update(cx, |view, _cx| view.emit_event(&event));
+                        entity.update(cx, |view, _cx| view.emit_event(&event));
                     }
                 });
             }
@@ -1452,13 +1447,11 @@ fn read_session_token_from_credentials() -> Option<String> {
     let legacy = home.join(".ato").join("credentials.toml");
 
     for path in &[canonical, legacy] {
-        if let Ok(text) = fs::read_to_string(path) {
-            if let Ok(creds) = toml::from_str::<Creds>(&text) {
-                if let Some(tok) = creds.session_token.filter(|s| !s.is_empty()) {
+        if let Ok(text) = fs::read_to_string(path)
+            && let Ok(creds) = toml::from_str::<Creds>(&text)
+                && let Some(tok) = creds.session_token.filter(|s| !s.is_empty()) {
                     return Some(tok);
                 }
-            }
-        }
     }
     None
 }

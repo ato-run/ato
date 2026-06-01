@@ -337,11 +337,10 @@ impl SessionRegistry {
             .map(|(id, _)| *id)
             .collect();
         for cid in &client_ids {
-            if let Some(client) = self.clients.remove(cid) {
-                if let Some(wid) = client.window_id {
+            if let Some(client) = self.clients.remove(cid)
+                && let Some(wid) = client.window_id {
                     self.window_to_clients.remove(&wid);
                 }
-            }
         }
         self.sessions.remove(session_id);
     }
@@ -382,14 +381,13 @@ impl SessionRegistry {
             client.last_seen_at = SystemTime::now();
             // Remove from window mapping so this window-id is no longer
             // considered "attached".
-            if let Some(wid) = client.window_id {
-                if let Some(ids) = self.window_to_clients.get_mut(&wid) {
+            if let Some(wid) = client.window_id
+                && let Some(ids) = self.window_to_clients.get_mut(&wid) {
                     ids.retain(|id| *id != client_id);
                     if ids.is_empty() {
                         self.window_to_clients.remove(&wid);
                     }
                 }
-            }
         }
     }
 
@@ -403,16 +401,14 @@ impl SessionRegistry {
 
     /// Remove a client entirely (e.g. OS browser closed).
     pub fn remove_client(&mut self, client_id: SessionClientId) {
-        if let Some(client) = self.clients.remove(&client_id) {
-            if let Some(wid) = client.window_id {
-                if let Some(ids) = self.window_to_clients.get_mut(&wid) {
+        if let Some(client) = self.clients.remove(&client_id)
+            && let Some(wid) = client.window_id
+                && let Some(ids) = self.window_to_clients.get_mut(&wid) {
                     ids.retain(|id| *id != client_id);
                     if ids.is_empty() {
                         self.window_to_clients.remove(&wid);
                     }
                 }
-            }
-        }
     }
 
     // ── queries ──────────────────────────────────────────────────────────

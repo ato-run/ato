@@ -18,7 +18,6 @@ use crate::proc_util::CommandNoWindowExt;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use ureq;
 
 use crate::orchestrator::resolve_ato_binary;
 use crate::source_import_session::{ImportRun, ImportSource, SubmitPayload};

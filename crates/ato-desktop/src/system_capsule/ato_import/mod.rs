@@ -154,7 +154,7 @@ pub fn begin_open(cx: &mut App, url: String) {
             None => None,
         };
 
-        let _ = aa.update(move |cx| {
+        aa.update(move |cx| {
             store_creds(cx, creds.clone());
             match outcome {
                 Ok(output) => {
@@ -214,7 +214,6 @@ fn handle_edit(cx: &mut App, toml: String) {
         };
         if let Err(error) = session.edit_recipe(toml) {
             tracing::debug!(?error, "ato-import: edit_recipe rejected");
-            return;
         }
     }
     // Editing is high-frequency (keystrokes); skip pushing snapshot
@@ -251,14 +250,13 @@ fn handle_retry_inference(cx: &mut App) {
     fe.spawn(async move {
         let outcome: Result<ImportOutput, anyhow::Error> =
             be.spawn(async move { runner_infer(&repo_url) }).await;
-        let _ = aa.update(move |cx| {
+        aa.update(move |cx| {
             match outcome {
                 Ok(output) => {
-                    if let Ok(mut session) = session_for_bg.lock() {
-                        if let Err(error) = session.apply_inferred_output(output) {
+                    if let Ok(mut session) = session_for_bg.lock()
+                        && let Err(error) = session.apply_inferred_output(output) {
                             tracing::warn!(?error, "ato-import: apply_inferred on retry failed");
                         }
-                    }
                 }
                 Err(error) => {
                     if let Ok(mut session) = session_for_bg.lock() {
@@ -356,20 +354,18 @@ pub(crate) fn handle_run(cx: &mut App) {
                 }
                 _ => None,
             };
-        if let Some(task) = attempt_task {
-            if let Err(error) = task.await {
+        if let Some(task) = attempt_task
+            && let Err(error) = task.await {
                 tracing::warn!(?error, "ato-import: record_attempt failed");
             }
-        }
 
-        let _ = aa.update(move |cx| {
+        aa.update(move |cx| {
             match outcome {
                 Ok(output) => {
-                    if let Ok(mut session) = session_for_bg.lock() {
-                        if let Err(error) = session.apply_run_result(output) {
+                    if let Ok(mut session) = session_for_bg.lock()
+                        && let Err(error) = session.apply_run_result(output) {
                             tracing::warn!(?error, "ato-import: apply_run_result failed");
                         }
-                    }
                 }
                 Err(error) => {
                     tracing::warn!(?error, "ato-import: run failed before CLI completion");
@@ -476,18 +472,17 @@ fn handle_submit_intent(cx: &mut App) {
                 )
             })
             .await;
-        let _ = aa.update(move |cx| {
+        aa.update(move |cx| {
             match result {
                 Ok(()) => {
                     let run_session_id = session_for_bg
                         .lock()
                         .ok()
                         .and_then(|session| session.active_run_session_id().map(str::to_string));
-                    if let Ok(mut session) = session_for_bg.lock() {
-                        if let Err(error) = session.mark_submitted() {
+                    if let Ok(mut session) = session_for_bg.lock()
+                        && let Err(error) = session.mark_submitted() {
                             tracing::warn!(?error, "ato-import: mark_submitted rejected");
                         }
-                    }
                     if let Some(run_session_id) = run_session_id {
                         stop_import_preview_in_background(
                             be.clone(),
