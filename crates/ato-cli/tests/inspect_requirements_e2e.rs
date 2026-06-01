@@ -174,15 +174,21 @@ fn inspect_requirements_json_succeeds_for_local_manifest() {
     );
 
     let consent = payload["requirements"]["consent"].as_array().unwrap();
-    assert!(consent
-        .iter()
-        .any(|item| item.get("key").and_then(Value::as_str) == Some("filesystem.write")));
-    assert!(consent
-        .iter()
-        .any(|item| item.get("key").and_then(Value::as_str) == Some("network.egress")));
-    assert!(consent
-        .iter()
-        .any(|item| item.get("key").and_then(Value::as_str) == Some("secrets.access")));
+    assert!(
+        consent
+            .iter()
+            .any(|item| item.get("key").and_then(Value::as_str) == Some("filesystem.write"))
+    );
+    assert!(
+        consent
+            .iter()
+            .any(|item| item.get("key").and_then(Value::as_str) == Some("network.egress"))
+    );
+    assert!(
+        consent
+            .iter()
+            .any(|item| item.get("key").and_then(Value::as_str) == Some("secrets.access"))
+    );
 }
 
 #[test]

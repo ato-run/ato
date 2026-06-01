@@ -603,12 +603,12 @@ impl RuntimeFetcher {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Some(name) = out_path.file_name().and_then(|s| s.to_str()) {
-                    if name == "node" || name == "deno" || name == "bun" {
-                        let mut perms = fs::metadata(&out_path)?.permissions();
-                        perms.set_mode(0o755);
-                        fs::set_permissions(&out_path, perms)?;
-                    }
+                if let Some(name) = out_path.file_name().and_then(|s| s.to_str())
+                    && (name == "node" || name == "deno" || name == "bun")
+                {
+                    let mut perms = fs::metadata(&out_path)?.permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&out_path, perms)?;
                 }
             }
         }
@@ -634,10 +634,10 @@ impl RuntimeFetcher {
                     }
                     continue;
                 }
-                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                    if candidates.iter().any(|c| c.eq_ignore_ascii_case(name)) {
-                        return Ok(Some(path));
-                    }
+                if let Some(name) = path.file_name().and_then(|s| s.to_str())
+                    && candidates.iter().any(|c| c.eq_ignore_ascii_case(name))
+                {
+                    return Ok(Some(path));
                 }
             }
             Ok(None)
@@ -720,7 +720,7 @@ impl RuntimeFetcher {
                 return Err(CapsuleError::Pack(format!(
                     "Unsupported platform: {} {}",
                     os, arch
-                )))
+                )));
             }
         };
 
@@ -816,7 +816,7 @@ impl RuntimeFetcher {
                 return Err(CapsuleError::Pack(format!(
                     "Unsupported OS for Node: {}",
                     os
-                )))
+                )));
             }
         };
 
@@ -829,7 +829,7 @@ impl RuntimeFetcher {
                 return Err(CapsuleError::Pack(format!(
                     "Unsupported arch for Node: {}",
                     arch
-                )))
+                )));
             }
         };
 

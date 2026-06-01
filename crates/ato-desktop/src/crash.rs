@@ -74,7 +74,7 @@ pub fn install_panic_hook() {
             os = std::env::consts::OS,
             arch = std::env::consts::ARCH,
         );
-        let report_path = write_crash_report(&report);
+        let _report_path = write_crash_report(&report);
 
         #[cfg(target_os = "windows")]
         show_dialog(
@@ -138,7 +138,7 @@ fn write_crash_report(report: &str) -> Option<PathBuf> {
 #[cfg(target_os = "windows")]
 fn show_dialog(title: &str, location: &str, message: &str, report_path: Option<&PathBuf>) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+        MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
     };
 
     let location_line = if location.is_empty() {

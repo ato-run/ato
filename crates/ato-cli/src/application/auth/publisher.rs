@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use capsule_core::common::paths::ato_path;
 use ed25519_dalek::Signer;
 use reqwest::StatusCode;
@@ -8,12 +8,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::Credentials;
 use super::github::{
-    ensure_github_app_installation_with_tui, fetch_github_app_installations, GitHubAppInstallation,
+    GitHubAppInstallation, ensure_github_app_installation_with_tui, fetch_github_app_installations,
 };
 use super::prompt::prompt_line;
 use super::store::{parse_store_error_text, store_api_base_url, store_session_cookie_header};
-use super::Credentials;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct PublisherMeResponse {
@@ -258,10 +258,11 @@ async fn register_publisher_silently(
         let body = response.text().await.unwrap_or_default();
         let err_text = parse_store_error_text(&body);
 
-        if status == StatusCode::CONFLICT && err_text.contains("already_registered") {
-            if let Some(me) = fetch_publisher_me(client, api_base, session_token).await? {
-                return Ok(me);
-            }
+        if status == StatusCode::CONFLICT
+            && err_text.contains("already_registered")
+            && let Some(me) = fetch_publisher_me(client, api_base, session_token).await?
+        {
+            return Ok(me);
         }
 
         if status == StatusCode::CONFLICT && err_text.contains("handle_taken") {
@@ -349,14 +350,15 @@ async fn register_publisher_with_prompt(
             eprintln!("⚠️  Handle is already taken. Choose another one.");
             continue;
         }
-        if status == StatusCode::CONFLICT && err_text.contains("already_registered") {
-            if let Some(me) = fetch_publisher_me(client, api_base, session_token).await? {
-                return Ok(PublisherRegisterResponse {
-                    id: me.id,
-                    handle: me.handle,
-                    author_did: me.author_did,
-                });
-            }
+        if status == StatusCode::CONFLICT
+            && err_text.contains("already_registered")
+            && let Some(me) = fetch_publisher_me(client, api_base, session_token).await?
+        {
+            return Ok(PublisherRegisterResponse {
+                id: me.id,
+                handle: me.handle,
+                author_did: me.author_did,
+            });
         }
 
         anyhow::bail!("Publisher registration failed ({}): {}", status, err_text);

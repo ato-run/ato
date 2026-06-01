@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -40,7 +40,7 @@ fn main() {
 /// `[target.'cfg(windows)'.build-dependencies]` so it is not even resolved
 /// on macOS/Linux builds.
 #[cfg(windows)]
-fn embed_windows_icon(manifest_dir: &PathBuf) {
+fn embed_windows_icon(manifest_dir: &Path) {
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("assets/AppIcon.ico").display()
@@ -72,7 +72,7 @@ fn embed_windows_icon(manifest_dir: &PathBuf) {
 ///
 /// Opt out with `ATO_DESKTOP_SKIP_HELPER_BUILD=1` (CI/release pipelines
 /// that pre-stage helpers, or when iterating on `ato-desktop` alone).
-fn rebuild_helpers(manifest_dir: &PathBuf) {
+fn rebuild_helpers(manifest_dir: &Path) {
     println!("cargo:rerun-if-env-changed=ATO_DESKTOP_SKIP_HELPER_BUILD");
 
     let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) else {
@@ -161,7 +161,7 @@ fn rebuild_helpers(manifest_dir: &PathBuf) {
     }
 }
 
-fn check_onboarding_dist(manifest_dir: &PathBuf) {
+fn check_onboarding_dist(manifest_dir: &Path) {
     let capsule_dir = manifest_dir
         .join("assets")
         .join("system")
@@ -213,7 +213,7 @@ fn check_onboarding_dist(manifest_dir: &PathBuf) {
     );
 }
 
-fn check_dock_dist(manifest_dir: &PathBuf) {
+fn check_dock_dist(manifest_dir: &Path) {
     let dock_dir = manifest_dir.join("assets").join("system").join("ato-dock");
     let dist_dir = dock_dir.join("dist");
 
@@ -317,7 +317,7 @@ fn run_command(binary: &str, args: &[&str], cwd: &PathBuf, label: &str) {
     }
 }
 
-fn check_start_dist(manifest_dir: &PathBuf) {
+fn check_start_dist(manifest_dir: &Path) {
     let capsule_dir = manifest_dir.join("assets").join("system").join("ato-start");
     let dist_dir = capsule_dir.join("dist");
     let entrypoint = dist_dir.join("index.html");
@@ -359,7 +359,7 @@ fn check_start_dist(manifest_dir: &PathBuf) {
     );
 }
 
-fn check_store_dist(manifest_dir: &PathBuf) {
+fn check_store_dist(manifest_dir: &Path) {
     let dist_dir = manifest_dir
         .join("assets")
         .join("system")

@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, point, px, BoxShadow, Div, FontWeight, Image,
-    InteractiveElement, IntoElement, MouseButton, Stateful, Window,
+    BoxShadow, Div, FontWeight, Image, InteractiveElement, IntoElement, MouseButton, Stateful,
+    Window, div, img, linear_color_stop, linear_gradient, point, px,
 };
 use gpui_component::{Icon, IconName};
 
-use super::theme::{task_hue, Theme};
+use super::theme::{Theme, task_hue};
 use crate::app::{CloseTask, FocusCommandBar, MoveTask, NewTab, SelectTask, ShowSettings};
 use crate::state::{HostPanelRoute, PaneSurface};
 
@@ -778,7 +778,7 @@ fn settings_nav_active(state: &crate::state::AppState) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{favicon_candidate_urls, FaviconState, MAX_FAVICON_ATTEMPTS};
+    use super::{FaviconState, MAX_FAVICON_ATTEMPTS, favicon_candidate_urls};
     use std::time::{Duration, Instant};
 
     #[test]

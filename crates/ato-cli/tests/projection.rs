@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use ato_cli::projection::{project_payload, ProjectionError, ProjectionStrategy};
+use ato_cli::projection::{ProjectionError, ProjectionStrategy, project_payload};
 use tempfile::TempDir;
 
 fn write_file(root: &Path, rel: &str, contents: &[u8]) {

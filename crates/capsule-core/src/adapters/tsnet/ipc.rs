@@ -9,8 +9,8 @@ use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
 use crate::error::{CapsuleError, Result};
-use crate::tsnet::proto::tsnet_service_client::TsnetServiceClient;
 use crate::tsnet::TsnetEndpoint;
+use crate::tsnet::proto::tsnet_service_client::TsnetServiceClient;
 
 #[derive(Debug, Clone)]
 pub enum IpcTransport {

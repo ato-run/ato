@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use capsule_core::CapsuleReporter;
 use capsule_core::contract::lock_runtime::resolve_oci_image_for_target;
 use capsule_core::execution_plan::model::OciPolicyMode;
 use capsule_core::router::ManifestData;
@@ -33,22 +34,20 @@ use capsule_core::types::{
     IngressConfig, OciImageResolution, OrchestrationPlan, ResolvedService, ResolvedServiceRuntime,
     StateDurability,
 };
-use capsule_core::CapsuleReporter;
 use tokio::task::JoinSet;
 
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::ingress_router;
 use crate::adapters::runtime::oci_provider::{
-    build_digest_pull_ref, DefaultOciProviderSelector, OciImageResolutionMode,
-    OciImageResolutionRequest, OciPlatformPolicy, OciProvider, OciProviderError,
-    OciProviderSelector,
+    DefaultOciProviderSelector, OciImageResolutionMode, OciImageResolutionRequest,
+    OciPlatformPolicy, OciProvider, OciProviderError, OciProviderSelector, build_digest_pull_ref,
 };
 use crate::adapters::runtime::oci_session_store::{
-    now_iso8601, IngressRouteRecord, OciServiceRecord, OciSessionIngressRecord, OciSessionMeta,
-    OciSessionRecord, OciSessionStatus, OciSessionStore,
+    IngressRouteRecord, OciServiceRecord, OciSessionIngressRecord, OciSessionMeta,
+    OciSessionRecord, OciSessionStatus, OciSessionStore, now_iso8601,
 };
 use crate::application::preflight::{
-    preflight_oci_provider_readiness, OciProviderReadinessMode, OciProviderReadinessRequirements,
+    OciProviderReadinessMode, OciProviderReadinessRequirements, preflight_oci_provider_readiness,
 };
 use crate::reporters::CliReporter;
 
@@ -285,6 +284,7 @@ async fn try_start_ingress_router(
 ///
 /// Does **not** perform provider readiness check — the caller (`execute_multi_service`)
 /// is responsible for that gate.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     orch_plan: &OrchestrationPlan,
     images: &HashMap<String, OciImageResolution>,
@@ -671,7 +671,7 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
                 // Ingress init failed after services started. Clean up
                 // containers/network so we don't orphan them.
                 cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
-                return Err(e.into());
+                return Err(e);
             }
         }
     } else {
@@ -684,17 +684,16 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
         .map(|i| i.primary_url.clone())
         .or_else(|| main_endpoint.clone());
 
-    if let Some(ref endpoint) = display_endpoint {
-        if let Err(e) = reporter
+    if let Some(endpoint) = &display_endpoint
+        && let Err(e) = reporter
             .notify(format!("🌐 OCI service available at {endpoint}"))
             .await
-        {
-            cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
-            if let Some(ref mut handle) = router_handle {
-                handle.stop().await;
-            }
-            return Err(e.into());
+    {
+        cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+        if let Some(ref mut handle) = router_handle {
+            handle.stop().await;
         }
+        return Err(e.into());
     }
 
     // Write OCI session record so `ato ps` and `ato stop --all` can track it.
@@ -1123,10 +1122,10 @@ pub(crate) async fn wait_http_ready(url: &str, attempts: u32, interval: Duration
         Err(_) => return false,
     };
     for _ in 0..attempts {
-        if let Ok(resp) = client.get(url).send().await {
-            if resp.status().is_success() || resp.status().is_redirection() {
-                return true;
-            }
+        if let Ok(resp) = client.get(url).send().await
+            && (resp.status().is_success() || resp.status().is_redirection())
+        {
+            return true;
         }
         tokio::time::sleep(interval).await;
     }
@@ -1150,10 +1149,10 @@ pub(crate) async fn wait_exec_ready(
             .stderr(std::process::Stdio::null())
             .status()
             .await;
-        if let Ok(status) = result {
-            if status.success() {
-                return true;
-            }
+        if let Ok(status) = result
+            && status.success()
+        {
+            return true;
         }
         tokio::time::sleep(interval).await;
     }
@@ -1181,18 +1180,18 @@ async fn run_readiness_probe(
     let _ = service_label; // reserved for future structured logging
 
     // Exec probe: run command inside the container; exit 0 means ready.
-    if let Some(cmd) = &probe.exec {
-        if let Some(cname) = container_name {
-            return wait_exec_ready(cname, cmd, attempts, interval).await;
-        }
+    if let Some(cmd) = &probe.exec
+        && let Some(cname) = container_name
+    {
+        return wait_exec_ready(cname, cmd, attempts, interval).await;
     }
 
     // HTTP probe: GET the path on the host port.
-    if let Some(path) = &probe.http_get {
-        if let Some(port) = host_port {
-            let url = format!("http://127.0.0.1:{port}{path}");
-            return wait_http_ready(&url, attempts, interval).await;
-        }
+    if let Some(path) = &probe.http_get
+        && let Some(port) = host_port
+    {
+        let url = format!("http://127.0.0.1:{port}{path}");
+        return wait_http_ready(&url, attempts, interval).await;
     }
 
     // TCP probe: connect to the host or the resolved host port.
@@ -1989,7 +1988,7 @@ mod tests {
 
     #[test]
     fn imported_graph_can_be_executed_with_fake_multi_service_provider() {
-        use capsule_core::routing::importer::compose::{import_compose, ComposeImportInput};
+        use capsule_core::routing::importer::compose::{ComposeImportInput, import_compose};
         use std::path::PathBuf;
 
         let compose_text = r#"
@@ -2453,30 +2452,30 @@ volumes:
     /// tests may run concurrently.  We restore the prior value at the end.
     #[tokio::test]
     async fn run_once_timeout_returns_typed_error() {
-        // Acquire a single lock so timeout-affecting env tweaks don't race
-        // with other run_once tests.  The lock is process-static.
-        let _guard = run_once_test_env_lock().lock().unwrap();
-        let prev = std::env::var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS").ok();
-        // SAFETY: tests sharing this env var hold _guard for their duration.
-        unsafe {
-            std::env::set_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS", "1");
-        }
-
-        let provider = FakeOciProvider::ready();
-        // Block wait_container for 3 seconds (> 1s timeout).
-        *provider.wait_block_ms.lock().unwrap() = Some(3_000);
-        provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
-
-        let result = run_run_once_plan(&provider).await;
-
-        // Restore env var ASAP so a later test panic on the assertion below
-        // doesn't leave the variable set.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS", v),
-                None => std::env::remove_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS"),
+        let result = {
+            let _guard = run_once_test_env_lock().lock().unwrap();
+            let prev = std::env::var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS").ok();
+            // SAFETY: tests sharing this env var hold _guard for their duration.
+            unsafe {
+                std::env::set_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS", "1");
             }
-        }
+
+            let provider = FakeOciProvider::ready();
+            // Block wait_container for 3 seconds (> 1s timeout).
+            *provider.wait_block_ms.lock().unwrap() = Some(3_000);
+            provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
+
+            let result = run_run_once_plan(&provider).await;
+
+            // Restore env var ASAP so a later test panic on the assertion below
+            // doesn't leave the variable set.
+            match prev {
+                Some(v) => unsafe { std::env::set_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS", v) },
+                None => unsafe { std::env::remove_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS") },
+            }
+
+            result
+        };
 
         assert!(result.is_err(), "timeout must surface as Err");
         let msg = format!("{:?}", result.unwrap_err());
@@ -2572,7 +2571,7 @@ volumes:
     async fn shared_state_same_capsule_services_receive_same_mount() {
         use capsule_core::types::Mount;
 
-        let mut provider = make_provider_with_unique_ids();
+        let provider = make_provider_with_unique_ids();
         // Queue 3 container IDs: db, api, worker.
         provider.create_container_queue.lock().unwrap().extend([
             Ok("fake-db-id".to_string()),
@@ -2688,6 +2687,7 @@ volumes:
 
     // ── OCI proxy env tests ───────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     fn make_service_with_egress_proxy(egress_proxy: bool) -> ResolvedService {
         use capsule_core::types::orchestration::ResolvedServiceNetwork;
         let svc = make_service("app", "app", vec![], true, Some(8080), vec![]);
@@ -2804,9 +2804,7 @@ volumes:
     #[tokio::test]
     async fn oci_multi_service_strips_proxy_when_egress_proxy_false() {
         use crate::adapters::runtime::executors::launch_context::RuntimeLaunchContext;
-        use capsule_core::types::orchestration::{
-            ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
-        };
+        use capsule_core::types::orchestration::{ResolvedService, ResolvedServiceNetwork};
 
         // Build a single-service plan with egress_proxy = false.
         let svc = make_service("app", "blinko", vec![], true, Some(3000), vec![]);

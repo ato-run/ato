@@ -552,7 +552,6 @@ mod tests {
     /// deserialize cleanly with `network_name = None`.
     #[test]
     fn orchestration_services_network_name_omitted_when_none() {
-        use std::collections::BTreeMap;
         let services = StoredOrchestrationServices {
             wrapper_pid: 42,
             services: vec![],

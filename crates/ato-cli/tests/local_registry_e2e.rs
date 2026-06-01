@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{compute_closure_digest, recompute_lock_id, to_pretty_json, AtoLock};
+use capsule_core::ato_lock::{AtoLock, compute_closure_digest, recompute_lock_id, to_pretty_json};
 use capsule_core::packers::payload::compute_manifest_hash_without_signatures;
 use capsule_core::types::CapsuleManifest;
 use tempfile::TempDir;
@@ -1710,7 +1710,9 @@ fn e2e_local_registry_web_static_build_publish_install() -> Result<()> {
     let static_port = if local_tcp_bind_available() {
         reserve_port()
     } else {
-        eprintln!("skipping e2e_local_registry_web_static_build_publish_install: local TCP bind is not permitted in this environment");
+        eprintln!(
+            "skipping e2e_local_registry_web_static_build_publish_install: local TCP bind is not permitted in this environment"
+        );
         return Ok(());
     };
     let data_dir = tmp.path().join("registry-data");

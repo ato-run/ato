@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id};
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
 use capsule_core::router::{CompatManifestBridge, CompatProjectInput, ExecutionDescriptor};
@@ -13,8 +13,8 @@ use serde_json::Value;
 
 use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
 use crate::application::source_inference::{
-    materialize_run_from_canonical_lock, materialize_run_from_compatibility,
-    materialize_run_from_source_only, RunMaterialization,
+    RunMaterialization, materialize_run_from_canonical_lock, materialize_run_from_compatibility,
+    materialize_run_from_source_only,
 };
 use crate::application::workspace::state;
 use crate::reporters::CliReporter;
@@ -192,23 +192,23 @@ impl ProducerAuthoritativeInput {
 
         let runtime_model =
             resolve_lock_runtime_model(&self.descriptor.lock, None).map_err(anyhow::Error::from)?;
-        if let Some(expected_name) = runtime_model.metadata.name.as_ref() {
-            if bridge.package_name() != expected_name {
-                anyhow::bail!(
-                    "generated manifest bridge diverged from authoritative lock metadata: manifest name '{}' != lock name '{}'",
-                    bridge.package_name(),
-                    expected_name
-                );
-            }
+        if let Some(expected_name) = runtime_model.metadata.name.as_ref()
+            && bridge.package_name() != expected_name
+        {
+            anyhow::bail!(
+                "generated manifest bridge diverged from authoritative lock metadata: manifest name '{}' != lock name '{}'",
+                bridge.package_name(),
+                expected_name
+            );
         }
-        if let Some(expected_version) = runtime_model.metadata.version.as_ref() {
-            if bridge.package_version() != expected_version {
-                anyhow::bail!(
-                    "generated manifest bridge diverged from authoritative lock metadata: manifest version '{}' != lock version '{}'",
-                    bridge.package_version(),
-                    expected_version
-                );
-            }
+        if let Some(expected_version) = runtime_model.metadata.version.as_ref()
+            && bridge.package_version() != expected_version
+        {
+            anyhow::bail!(
+                "generated manifest bridge diverged from authoritative lock metadata: manifest version '{}' != lock version '{}'",
+                bridge.package_version(),
+                expected_version
+            );
         }
 
         let expected_target = runtime_model

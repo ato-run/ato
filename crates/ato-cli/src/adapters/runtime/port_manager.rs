@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::net::TcpListener;
@@ -53,21 +53,21 @@ impl PortManager {
         let mut map = self.load_map();
 
         // Sticky: reuse existing allocation if port is still free
-        if let Some(alloc) = map.allocations.get(identity) {
-            if is_port_available(alloc.port) {
-                // Update PID to current process
-                let port = alloc.port;
-                map.allocations.insert(
-                    identity.to_string(),
-                    PortAllocation {
-                        port,
-                        pid: std::process::id(),
-                        allocated_at: SystemTime::now(),
-                    },
-                );
-                self.save_map(&map)?;
-                return Ok(port);
-            }
+        if let Some(alloc) = map.allocations.get(identity)
+            && is_port_available(alloc.port)
+        {
+            // Update PID to current process
+            let port = alloc.port;
+            map.allocations.insert(
+                identity.to_string(),
+                PortAllocation {
+                    port,
+                    pid: std::process::id(),
+                    allocated_at: SystemTime::now(),
+                },
+            );
+            self.save_map(&map)?;
+            return Ok(port);
         }
 
         // Compute deterministic preferred port

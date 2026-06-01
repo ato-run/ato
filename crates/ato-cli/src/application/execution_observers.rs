@@ -699,11 +699,13 @@ run = "main.py"
             observed.view_hash.status,
             capsule_core::execution_identity::TrackingStatus::Untracked
         );
-        assert!(observed
-            .view_hash
-            .value
-            .expect("hash")
-            .starts_with("blake3:"));
+        assert!(
+            observed
+                .view_hash
+                .value
+                .expect("hash")
+                .starts_with("blake3:")
+        );
     }
 
     #[test]

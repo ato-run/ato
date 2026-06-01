@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use tempfile::TempDir;
-use zip::{write::FileOptions, ZipWriter};
+use zip::{ZipWriter, write::FileOptions};
 
 fn create_test_sync_file(temp_dir: &std::path::PathBuf) -> std::path::PathBuf {
     let manifest_toml = r#"

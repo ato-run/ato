@@ -6,39 +6,39 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::application::compat_import::{
-    compile_compatibility_project, CompatibilityCompileResult, CompatibilityDiagnostic,
-    CompatibilityDiagnosticSeverity, ProvenanceRecord as CompatibilityProvenanceRecord,
+    CompatibilityCompileResult, CompatibilityDiagnostic, CompatibilityDiagnosticSeverity,
+    ProvenanceRecord as CompatibilityProvenanceRecord, compile_compatibility_project,
 };
 use crate::application::engine::build::native_delivery::{
-    detect_build_strategy_with_legacy_fallback, imported_native_artifact_closure,
-    imported_native_artifact_delivery_contract, imported_native_artifact_type,
-    native_delivery_build_environment_skeleton, native_delivery_contract_from_build_plan,
-    path_has_extension, NativeBuildCommand, NativeBuildPlan,
+    NativeBuildCommand, NativeBuildPlan, detect_build_strategy_with_legacy_fallback,
+    imported_native_artifact_closure, imported_native_artifact_delivery_contract,
+    imported_native_artifact_type, native_delivery_build_environment_skeleton,
+    native_delivery_contract_from_build_plan, path_has_extension,
 };
 use crate::application::pipeline::cleanup::CleanupScope;
 use crate::application::ports::OutputPort;
 use crate::project::init::detect::{
-    detect_project, DetectedProject, NodePackageManager, ProjectType,
+    DetectedProject, NodePackageManager, ProjectType, detect_project,
 };
-use crate::project::init::recipe::{project_info_from_detection, ProjectInfo};
+use crate::project::init::recipe::{ProjectInfo, project_info_from_detection};
 use crate::reporters::CliReporter;
 use anyhow::{Context, Result};
+use capsule_core::CapsuleReporter;
 use capsule_core::ato_lock::{
-    self, closure_info, normalize_lock_closure, AtoLock, UnresolvedReason, UnresolvedValue,
+    self, AtoLock, UnresolvedReason, UnresolvedValue, closure_info, normalize_lock_closure,
 };
 use capsule_core::common::paths::{ato_cache_dir, ato_runs_dir, path_contains_workspace_state_dir};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::importer::{
-    probe_ecosystem_lockfile_evidence, probe_native_framework_evidence, ImportedEvidence,
+    ImportedEvidence, probe_ecosystem_lockfile_evidence, probe_native_framework_evidence,
 };
 use capsule_core::input_resolver::{
-    ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript, ResolvedSourceOnly,
-    SingleScriptLanguage, ATO_LOCK_FILE_NAME,
+    ATO_LOCK_FILE_NAME, ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript,
+    ResolvedSourceOnly, SingleScriptLanguage,
 };
-use capsule_core::CapsuleReporter;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use walkdir::WalkDir;
 
 const GLOBAL_RUN_SOURCE_INFERENCE_DIR: &str = "source-inference";
@@ -1470,26 +1470,27 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             .insert("workloads".to_string(), Value::Array(Vec::new()));
         // Detect workspace monorepo root to provide actionable context.
         let workspace_packages = detect_workspace_packages(&input.project_root);
-        let (unresolved_reason, unresolved_detail, unresolved_candidates) =
-            if let Some(packages) = workspace_packages {
-                (
-                    UnresolvedReason::ExplicitSelectionRequired,
-                    format!(
+        let (unresolved_reason, unresolved_detail, unresolved_candidates) = if let Some(packages) =
+            workspace_packages
+        {
+            (
+                UnresolvedReason::ExplicitSelectionRequired,
+                format!(
                     "workspace monorepo root detected: run ato from a sub-package directory ({})",
                     packages.join(", ")
                 ),
-                    packages,
-                )
+                packages,
+            )
+        } else {
+            // Use the pre-computed LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
+            // leip_hints was computed earlier and is empty only when LEIP had no opinion.
+            let detail = if !leip_hints.is_empty() {
+                leip_hints.join("; ")
             } else {
-                // Use the pre-computed LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
-                // leip_hints was computed earlier and is empty only when LEIP had no opinion.
-                let detail = if !leip_hints.is_empty() {
-                    leip_hints.join("; ")
-                } else {
-                    "could not infer a primary process from source evidence".to_string()
-                };
-                (UnresolvedReason::InsufficientEvidence, detail, Vec::new())
+                "could not infer a primary process from source evidence".to_string()
             };
+            (UnresolvedReason::InsufficientEvidence, detail, Vec::new())
+        };
         lock.contract.unresolved.push(UnresolvedValue {
             field: Some("contract.process".to_string()),
             reason: unresolved_reason,
@@ -1663,24 +1664,24 @@ fn promote_draft_execution_resolution(
     project_root: &Path,
     provenance: &mut Vec<SourceInferenceProvenance>,
 ) {
-    if !lock.resolution.entries.contains_key("runtime") {
-        if let Some(runtime) = draft_runtime_from_resolution(lock) {
-            lock.resolution
-                .entries
-                .insert("runtime".to_string(), runtime);
-            provenance.push(SourceInferenceProvenance {
-                field: "resolution.runtime".to_string(),
-                kind: SourceInferenceProvenanceKind::CompatibilityImport,
-                source_path: Some(project_root.to_path_buf()),
-                importer_id: None,
-                evidence_kind: None,
-                source_field: Some("resolution.target_selection".to_string()),
-                note: Some(
-                    "draft compatibility target hints promoted into an execution-ready runtime"
-                        .to_string(),
-                ),
-            });
-        }
+    if !lock.resolution.entries.contains_key("runtime")
+        && let Some(runtime) = draft_runtime_from_resolution(lock)
+    {
+        lock.resolution
+            .entries
+            .insert("runtime".to_string(), runtime);
+        provenance.push(SourceInferenceProvenance {
+            field: "resolution.runtime".to_string(),
+            kind: SourceInferenceProvenanceKind::CompatibilityImport,
+            source_path: Some(project_root.to_path_buf()),
+            importer_id: None,
+            evidence_kind: None,
+            source_field: Some("resolution.target_selection".to_string()),
+            note: Some(
+                "draft compatibility target hints promoted into an execution-ready runtime"
+                    .to_string(),
+            ),
+        });
     }
 
     if !lock.resolution.entries.contains_key("closure") {
@@ -1791,16 +1792,16 @@ fn selected_draft_target(lock: &AtoLock) -> Option<&Value> {
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    if let Some(default_target) = default_target {
-        if let Some(target) = targets.iter().find(|target| {
+    if let Some(default_target) = default_target
+        && let Some(target) = targets.iter().find(|target| {
             target
                 .get("label")
                 .and_then(Value::as_str)
                 .map(|label| label == default_target)
                 .unwrap_or(false)
-        }) {
-            return Some(target);
-        }
+        })
+    {
+        return Some(target);
     }
 
     if targets.len() == 1 {
@@ -1844,10 +1845,10 @@ fn resolve(result: &mut SourceInferenceResult) -> Result<bool> {
         unresolved: unresolved.clone(),
     };
 
-    if !process_resolved {
-        if let Some(gate) = selection_gate_from_lock(&result.lock, &result.infer.candidate_sets) {
-            result.selection_gate = Some(gate);
-        }
+    if !process_resolved
+        && let Some(gate) = selection_gate_from_lock(&result.lock, &result.infer.candidate_sets)
+    {
+        result.selection_gate = Some(gate);
     }
 
     Ok(build_derive_involved)
@@ -1977,20 +1978,21 @@ fn apply_source_native_delivery_inference(
     provenance: &mut Vec<SourceInferenceProvenance>,
     diagnostics: &mut Vec<SourceInferenceDiagnostic>,
 ) -> Result<()> {
-    if let Some(explicit_artifact) = explicit_native_artifact {
-        if let Some(artifact_type) = imported_native_artifact_type(explicit_artifact) {
-            lock.contract.entries.insert(
-                "delivery".to_string(),
-                imported_native_artifact_delivery_contract(
-                    &relative_or_absolute_path(project_root, explicit_artifact),
-                    artifact_type,
-                ),
-            );
-            lock.resolution.entries.insert(
-                "closure".to_string(),
-                imported_native_artifact_closure(explicit_artifact, artifact_type)?,
-            );
-            provenance.push(SourceInferenceProvenance {
+    if let Some(explicit_artifact) = explicit_native_artifact
+        && let Some(artifact_type) = imported_native_artifact_type(explicit_artifact)
+    {
+        lock.contract.entries.insert(
+            "delivery".to_string(),
+            imported_native_artifact_delivery_contract(
+                &relative_or_absolute_path(project_root, explicit_artifact),
+                artifact_type,
+            ),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            imported_native_artifact_closure(explicit_artifact, artifact_type)?,
+        );
+        provenance.push(SourceInferenceProvenance {
                 field: "contract.delivery".to_string(),
                 kind: SourceInferenceProvenanceKind::ExplicitArtifact,
                 source_path: Some(explicit_artifact.to_path_buf()),
@@ -2002,7 +2004,7 @@ fn apply_source_native_delivery_inference(
                         .to_string(),
                 ),
             });
-            provenance.push(SourceInferenceProvenance {
+        provenance.push(SourceInferenceProvenance {
                 field: "resolution.closure".to_string(),
                 kind: SourceInferenceProvenanceKind::ExplicitArtifact,
                 source_path: Some(explicit_artifact.to_path_buf()),
@@ -2014,8 +2016,7 @@ fn apply_source_native_delivery_inference(
                         .to_string(),
                 ),
             });
-            return Ok(());
-        }
+        return Ok(());
     }
 
     if let Some(plan) = infer_source_native_delivery_plan(project_root, detected)? {
@@ -2343,10 +2344,10 @@ fn read_electron_builder_config(project_root: &Path) -> Option<ElectronBuilderCo
     }
 
     let json_path = project_root.join("electron-builder.json");
-    if let Ok(raw) = fs::read_to_string(json_path) {
-        if let Ok(parsed) = serde_json::from_str::<ElectronBuilderConfig>(&raw) {
-            return Some(parsed);
-        }
+    if let Ok(raw) = fs::read_to_string(json_path)
+        && let Ok(parsed) = serde_json::from_str::<ElectronBuilderConfig>(&raw)
+    {
+        return Some(parsed);
     }
 
     let package_json_path = project_root.join("package.json");
@@ -2392,7 +2393,11 @@ fn inferred_delivery_config_toml(
         .join(", ");
     format!(
         "schema_version = \"0.1\"\n[artifact]\nframework = {:?}\nstage = \"unsigned\"\ntarget = {:?}\ninput = {:?}\n[finalize]\ntool = {:?}\nargs = [{}]\n",
-        framework, target, input.as_ref(), tool, rendered_args
+        framework,
+        target,
+        input.as_ref(),
+        tool,
+        rendered_args
     )
 }
 
@@ -2414,14 +2419,14 @@ fn infer_source_native_build_command(
             return Some(tauri_build_command(project_root, node.package_manager));
         }
 
-        if matches!(framework, capsule_core::importer::ImporterId::Electron) {
-            if let Some(script_name) = preferred_electron_packaged_build_script(project_root) {
-                return Some(node_script_build_command(
-                    project_root,
-                    node.package_manager,
-                    &script_name,
-                ));
-            }
+        if matches!(framework, capsule_core::importer::ImporterId::Electron)
+            && let Some(script_name) = preferred_electron_packaged_build_script(project_root)
+        {
+            return Some(node_script_build_command(
+                project_root,
+                node.package_manager,
+                &script_name,
+            ));
         }
 
         if node.scripts.has_build {
@@ -2620,19 +2625,19 @@ fn infer_desktop_execution_override(
     info: &ProjectInfo,
     explicit_native_artifact: Option<&Path>,
 ) -> Result<Option<DesktopOverrideResult>> {
-    if let Some(explicit_artifact) = explicit_native_artifact {
-        if let Some(artifact_type) = imported_native_artifact_type(explicit_artifact) {
-            return Ok(Some(DesktopOverrideResult::Execute(
-                desktop_execution_from_artifact(
-                    project_root,
-                    explicit_artifact,
-                    artifact_type,
-                    "explicit-native-artifact".to_string(),
-                    "explicit native artifact input fixed the desktop execution path before run"
-                        .to_string(),
-                )?,
-            )));
-        }
+    if let Some(explicit_artifact) = explicit_native_artifact
+        && let Some(artifact_type) = imported_native_artifact_type(explicit_artifact)
+    {
+        return Ok(Some(DesktopOverrideResult::Execute(
+            desktop_execution_from_artifact(
+                project_root,
+                explicit_artifact,
+                artifact_type,
+                "explicit-native-artifact".to_string(),
+                "explicit native artifact input fixed the desktop execution path before run"
+                    .to_string(),
+            )?,
+        )));
     }
 
     if let Some(plan) = infer_source_native_delivery_plan(project_root, detected)? {
@@ -2652,19 +2657,23 @@ fn infer_desktop_execution_override(
         if let Some(process) =
             infer_source_native_run_process(project_root, detected, info, &plan.plan.framework)
         {
-            return Ok(Some(DesktopOverrideResult::Execute(desktop_execution_from_process(
-                process,
-                format!("framework:{}", plan.plan.framework),
-                format!(
-                    "desktop source-derived execution selected a native dev/run process for framework '{}'",
-                    plan.plan.framework
+            return Ok(Some(DesktopOverrideResult::Execute(
+                desktop_execution_from_process(
+                    process,
+                    format!("framework:{}", plan.plan.framework),
+                    format!(
+                        "desktop source-derived execution selected a native dev/run process for framework '{}'",
+                        plan.plan.framework
+                    ),
                 ),
-            ))));
+            )));
         }
 
-        if plan.plan.source_app_path.exists() {
-            if let Some(artifact_type) = imported_native_artifact_type(&plan.plan.source_app_path) {
-                return Ok(Some(DesktopOverrideResult::Execute(desktop_execution_from_artifact(
+        if plan.plan.source_app_path.exists()
+            && let Some(artifact_type) = imported_native_artifact_type(&plan.plan.source_app_path)
+        {
+            return Ok(Some(DesktopOverrideResult::Execute(
+                desktop_execution_from_artifact(
                     project_root,
                     &plan.plan.source_app_path,
                     artifact_type,
@@ -2673,8 +2682,8 @@ fn infer_desktop_execution_override(
                         "desktop source-derived execution fell back to the built native artifact for framework '{}'",
                         plan.plan.framework
                     ),
-                )?)));
-            }
+                )?,
+            )));
         }
     }
 
@@ -2835,15 +2844,15 @@ fn native_artifact_launch_path(artifact_path: &Path, artifact_type: &str) -> Res
         .collect::<Vec<_>>();
     files.sort();
 
-    if let Some(expected_name) = expected_name {
-        if let Some(path) = files.iter().find(|path| {
+    if let Some(expected_name) = expected_name
+        && let Some(path) = files.iter().find(|path| {
             path.file_name()
                 .and_then(|value| value.to_str())
                 .map(|value| value == expected_name)
                 .unwrap_or(false)
-        }) {
-            return Ok(path.clone());
-        }
+        })
+    {
+        return Ok(path.clone());
     }
 
     match files.as_slice() {
@@ -3514,18 +3523,16 @@ fn infer_node_engine_version(project_root: &Path) -> Option<String> {
 
 fn infer_rust_runtime_version(project_root: &Path) -> Option<String> {
     let toolchain = project_root.join("rust-toolchain.toml");
-    if let Ok(raw) = fs::read_to_string(toolchain) {
-        if let Ok(value) = toml::from_str::<toml::Value>(&raw) {
-            if let Some(channel) = value
-                .get("toolchain")
-                .and_then(|value| value.get("channel"))
-                .and_then(toml::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                return Some(channel.to_string());
-            }
-        }
+    if let Ok(raw) = fs::read_to_string(toolchain)
+        && let Ok(value) = toml::from_str::<toml::Value>(&raw)
+        && let Some(channel) = value
+            .get("toolchain")
+            .and_then(|value| value.get("channel"))
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        return Some(channel.to_string());
     }
 
     infer_first_existing_trimmed(project_root, &["rust-toolchain"])
@@ -4059,28 +4066,24 @@ pub(crate) fn detect_ai_agent_hint(project_root: &Path) -> Option<AiAgentHint> {
     }
 
     // package.json — parse JSON and inspect dependencies / devDependencies.
-    if let Ok(content) = fs::read_to_string(project_root.join("package.json")) {
-        if let Ok(value) = serde_json::from_str::<Value>(&content) {
-            for section in ["dependencies", "devDependencies", "peerDependencies"] {
-                let Some(map) = value.get(section).and_then(|v| v.as_object()) else {
-                    continue;
-                };
-                for name in map.keys() {
-                    for (needle, env, host) in NODE_SDKS {
-                        if name == *needle {
-                            found |= push(env, host, &mut hint);
-                        }
+    if let Ok(content) = fs::read_to_string(project_root.join("package.json"))
+        && let Ok(value) = serde_json::from_str::<Value>(&content)
+    {
+        for section in ["dependencies", "devDependencies", "peerDependencies"] {
+            let Some(map) = value.get(section).and_then(|v| v.as_object()) else {
+                continue;
+            };
+            for name in map.keys() {
+                for (needle, env, host) in NODE_SDKS {
+                    if name == *needle {
+                        found |= push(env, host, &mut hint);
                     }
                 }
             }
         }
     }
 
-    if found {
-        Some(hint)
-    } else {
-        None
-    }
+    if found { Some(hint) } else { None }
 }
 
 /// Extract a package name from a single `requirements.txt` line.
@@ -4097,11 +4100,7 @@ fn parse_requirements_line(line: &str) -> Option<&str> {
         .find(['=', '<', '>', '~', '!', ';', '[', ' ', '\t'])
         .unwrap_or(trimmed.len());
     let pkg = trimmed[..end].trim();
-    if pkg.is_empty() {
-        None
-    } else {
-        Some(pkg)
-    }
+    if pkg.is_empty() { None } else { Some(pkg) }
 }
 
 /// Extract dependency package names from `pyproject.toml`.
@@ -4120,10 +4119,10 @@ fn extract_pyproject_dependencies(content: &str) -> Vec<String> {
         .and_then(|d| d.as_array())
     {
         for entry in deps {
-            if let Some(s) = entry.as_str() {
-                if let Some(pkg) = parse_requirements_line(s) {
-                    out.push(pkg.to_string());
-                }
+            if let Some(s) = entry.as_str()
+                && let Some(pkg) = parse_requirements_line(s)
+            {
+                out.push(pkg.to_string());
             }
         }
     }
@@ -4170,39 +4169,37 @@ struct LeipProjection {
 fn detect_workspace_packages(root: &Path) -> Option<Vec<String>> {
     // pnpm-workspace.yaml takes priority
     let pnpm_ws = root.join("pnpm-workspace.yaml");
-    if pnpm_ws.is_file() {
-        if let Ok(text) = fs::read_to_string(&pnpm_ws) {
-            let packages: Vec<String> = text
-                .lines()
-                .filter_map(|line| {
-                    let trimmed = line.trim();
-                    trimmed
-                        .strip_prefix("- ")
-                        .map(|p| p.trim().trim_matches('\'').trim_matches('"').to_string())
-                })
-                .filter(|p| !p.is_empty())
-                .collect();
-            if !packages.is_empty() {
-                return Some(packages);
-            }
+    if pnpm_ws.is_file()
+        && let Ok(text) = fs::read_to_string(&pnpm_ws)
+    {
+        let packages: Vec<String> = text
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                trimmed
+                    .strip_prefix("- ")
+                    .map(|p| p.trim().trim_matches('\'').trim_matches('"').to_string())
+            })
+            .filter(|p| !p.is_empty())
+            .collect();
+        if !packages.is_empty() {
+            return Some(packages);
         }
     }
 
     // npm/yarn workspaces in package.json
     let pkg_json = root.join("package.json");
-    if pkg_json.is_file() {
-        if let Ok(text) = fs::read_to_string(&pkg_json) {
-            if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                if let Some(workspaces) = v.get("workspaces").and_then(Value::as_array) {
-                    let packages: Vec<String> = workspaces
-                        .iter()
-                        .filter_map(|w| w.as_str().map(str::to_string))
-                        .collect();
-                    if !packages.is_empty() {
-                        return Some(packages);
-                    }
-                }
-            }
+    if pkg_json.is_file()
+        && let Ok(text) = fs::read_to_string(&pkg_json)
+        && let Ok(v) = serde_json::from_str::<Value>(&text)
+        && let Some(workspaces) = v.get("workspaces").and_then(Value::as_array)
+    {
+        let packages: Vec<String> = workspaces
+            .iter()
+            .filter_map(|w| w.as_str().map(str::to_string))
+            .collect();
+        if !packages.is_empty() {
+            return Some(packages);
         }
     }
 
@@ -4285,7 +4282,7 @@ fn build_leip_input_from_root(root: &Path) -> lock_draft_engine::leip::LeipInput
 /// (NeedsSelection, Unresolved, Rejected) so the caller falls through to the
 /// legacy detect_project path.
 fn leip_projection_from_root(root: &Path) -> Option<LeipProjection> {
-    use lock_draft_engine::leip::{evaluate_launch_graphs, LeipDecision};
+    use lock_draft_engine::leip::{LeipDecision, evaluate_launch_graphs};
 
     let leip_input = build_leip_input_from_root(root);
     let result = evaluate_launch_graphs(&leip_input);
@@ -4320,7 +4317,7 @@ fn leip_projection_from_root(root: &Path) -> Option<LeipProjection> {
 /// These provide actionable hints (e.g. Go/Rust unsupported runtime messages) that should
 /// be surfaced to the user instead of the generic "could not infer" fallback.
 fn leip_unresolved_hints(root: &Path) -> Vec<String> {
-    use lock_draft_engine::leip::{evaluate_launch_graphs, LeipDecision};
+    use lock_draft_engine::leip::{LeipDecision, evaluate_launch_graphs};
     let leip_input = build_leip_input_from_root(root);
     let result = evaluate_launch_graphs(&leip_input);
     if matches!(&result.decision, LeipDecision::Unresolved { .. }) {
@@ -4357,8 +4354,8 @@ mod tests {
 
     use capsule_core::ato_lock::{self, AtoLock};
     use capsule_core::input_resolver::{
-        resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedSingleScript,
-        ResolvedSourceOnly, SingleScriptLanguage,
+        ResolveInputOptions, ResolvedInput, ResolvedSingleScript, ResolvedSourceOnly,
+        SingleScriptLanguage, resolve_authoritative_input,
     };
     use tempfile::tempdir;
 
@@ -4379,7 +4376,9 @@ mod tests {
     impl EnvVarGuard {
         fn set_path(key: &'static str, value: &Path) -> Self {
             let original = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, original }
         }
     }
@@ -4387,9 +4386,13 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(value) = self.original.take() {
-                std::env::set_var(self.key, value);
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
             } else {
-                std::env::remove_var(self.key);
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }
@@ -4694,11 +4697,13 @@ mod tests {
             inferred.result.input_kind,
             SourceInferenceInputKind::CanonicalLock
         );
-        assert!(inferred
-            .result
-            .provenance
-            .iter()
-            .all(|record| record.kind != SourceInferenceProvenanceKind::DeterministicHeuristic));
+        assert!(
+            inferred
+                .result
+                .provenance
+                .iter()
+                .all(|record| record.kind != SourceInferenceProvenanceKind::DeterministicHeuristic)
+        );
     }
 
     #[test]
@@ -4910,16 +4915,20 @@ mod tests {
 
         assert_eq!(first.workspace_root, dir.path());
         assert_eq!(first.project_root, second.project_root);
-        assert!(first.project_root.starts_with(
-            ato_home
-                .join("cache")
-                .join("source-inference")
-                .join("single-script-cache")
-        ));
+        assert!(
+            first.project_root.starts_with(
+                ato_home
+                    .join("cache")
+                    .join("source-inference")
+                    .join("single-script-cache")
+            )
+        );
         assert!(!dir.path().join(".ato").exists());
-        assert!(first
-            .lock_path
-            .starts_with(ato_home.join("runs").join("source-inference")));
+        assert!(
+            first
+                .lock_path
+                .starts_with(ato_home.join("runs").join("source-inference"))
+        );
         assert!(!first.lock_path.starts_with(&first.project_root));
     }
 
@@ -5283,17 +5292,21 @@ run = "npm start""#,
         let inferred = infer_phase(SourceInferenceInput::DraftLock(draft_input)).expect("infer");
 
         assert!(inferred.result.infer.candidate_sets.is_empty());
-        assert!(inferred
-            .result
-            .provenance
-            .iter()
-            .any(|record| record.kind == SourceInferenceProvenanceKind::CompatibilityImport));
-        assert!(inferred
-            .result
-            .provenance
-            .iter()
-            .all(|record| !(record.field == "contract.process"
-                && record.kind == SourceInferenceProvenanceKind::DeterministicHeuristic)));
+        assert!(
+            inferred
+                .result
+                .provenance
+                .iter()
+                .any(|record| record.kind == SourceInferenceProvenanceKind::CompatibilityImport)
+        );
+        assert!(
+            inferred
+                .result
+                .provenance
+                .iter()
+                .all(|record| !(record.field == "contract.process"
+                    && record.kind == SourceInferenceProvenanceKind::DeterministicHeuristic))
+        );
 
         let resolved = resolve_phase(inferred).expect("resolve");
         assert!(resolved.import_involved);
@@ -5543,34 +5556,42 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             .get("build_environment")
             .and_then(Value::as_object)
             .expect("build_environment");
-        assert!(environment
-            .get("toolchains")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("rust"))));
-        assert!(environment
-            .get("package_managers")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values.iter().any(|value| value.as_str() == Some("cargo"))
-                    && values.iter().any(|value| value.as_str() == Some("npm"))
-            }));
-        assert!(environment
-            .get("helper_tools")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values
-                    .iter()
-                    .any(|value| value.as_str() == Some("tauri-cli"))
-                    && values
+        assert!(
+            environment
+                .get("toolchains")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("rust")))
+        );
+        assert!(
+            environment
+                .get("package_managers")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values.iter().any(|value| value.as_str() == Some("cargo"))
+                        && values.iter().any(|value| value.as_str() == Some("npm"))
+                })
+        );
+        assert!(
+            environment
+                .get("helper_tools")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values
                         .iter()
-                        .any(|value| value.as_str() == Some("codesign"))
-            }));
-        assert!(result
-            .lock
-            .resolution
-            .unresolved
-            .iter()
-            .all(|value| value.field.as_deref() != Some("resolution.closure")));
+                        .any(|value| value.as_str() == Some("tauri-cli"))
+                        && values
+                            .iter()
+                            .any(|value| value.as_str() == Some("codesign"))
+                })
+        );
+        assert!(
+            result
+                .lock
+                .resolution
+                .unresolved
+                .iter()
+                .all(|value| value.field.as_deref() != Some("resolution.closure"))
+        );
         assert_eq!(
             delivery.get("mode").and_then(Value::as_str),
             Some("source-derivation")
@@ -5634,31 +5655,37 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             closure.get("kind").and_then(Value::as_str),
             Some("build_closure")
         );
-        assert!(environment
-            .get("toolchains")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values.iter().any(|value| value.as_str() == Some("rust"))
-                    && values.iter().any(|value| value.as_str() == Some("node"))
-            }));
-        assert!(environment
-            .get("package_managers")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values.iter().any(|value| value.as_str() == Some("cargo"))
-                    && values.iter().any(|value| value.as_str() == Some("npm"))
-            }));
-        assert!(environment
-            .get("helper_tools")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values
-                    .iter()
-                    .any(|value| value.as_str() == Some("tauri-cli"))
-                    && values
+        assert!(
+            environment
+                .get("toolchains")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values.iter().any(|value| value.as_str() == Some("rust"))
+                        && values.iter().any(|value| value.as_str() == Some("node"))
+                })
+        );
+        assert!(
+            environment
+                .get("package_managers")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values.iter().any(|value| value.as_str() == Some("cargo"))
+                        && values.iter().any(|value| value.as_str() == Some("npm"))
+                })
+        );
+        assert!(
+            environment
+                .get("helper_tools")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values
                         .iter()
-                        .any(|value| value.as_str() == Some("codesign"))
-            }));
+                        .any(|value| value.as_str() == Some("tauri-cli"))
+                        && values
+                            .iter()
+                            .any(|value| value.as_str() == Some("codesign"))
+                })
+        );
     }
 
     #[test]
@@ -5706,13 +5733,15 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             delivery.get("mode").and_then(Value::as_str),
             Some("source-derivation")
         );
-        assert!(environment
-            .get("package_managers")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values.iter().any(|value| value.as_str() == Some("cargo"))
-                    && values.iter().any(|value| value.as_str() == Some("npm"))
-            }));
+        assert!(
+            environment
+                .get("package_managers")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values.iter().any(|value| value.as_str() == Some("cargo"))
+                        && values.iter().any(|value| value.as_str() == Some("npm"))
+                })
+        );
     }
 
     #[test]
@@ -5789,25 +5818,31 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             closure.get("kind").and_then(Value::as_str),
             Some("build_closure")
         );
-        assert!(environment
-            .get("toolchains")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("node"))));
-        assert!(environment
-            .get("package_managers")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("npm"))));
-        assert!(environment
-            .get("helper_tools")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values
-                    .iter()
-                    .any(|value| value.as_str() == Some("electron"))
-                    && values
+        assert!(
+            environment
+                .get("toolchains")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("node")))
+        );
+        assert!(
+            environment
+                .get("package_managers")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("npm")))
+        );
+        assert!(
+            environment
+                .get("helper_tools")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values
                         .iter()
-                        .any(|value| value.as_str() == Some("codesign"))
-            }));
+                        .any(|value| value.as_str() == Some("electron"))
+                        && values
+                            .iter()
+                            .any(|value| value.as_str() == Some("codesign"))
+                })
+        );
     }
 
     #[test]
@@ -5941,23 +5976,29 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             closure.get("kind").and_then(Value::as_str),
             Some("build_closure")
         );
-        assert!(environment
-            .get("toolchains")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("go"))));
-        assert!(environment
-            .get("package_managers")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("go"))));
-        assert!(environment
-            .get("helper_tools")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values.iter().any(|value| value.as_str() == Some("wails"))
-                    && values
-                        .iter()
-                        .any(|value| value.as_str() == Some("codesign"))
-            }));
+        assert!(
+            environment
+                .get("toolchains")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("go")))
+        );
+        assert!(
+            environment
+                .get("package_managers")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("go")))
+        );
+        assert!(
+            environment
+                .get("helper_tools")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values.iter().any(|value| value.as_str() == Some("wails"))
+                        && values
+                            .iter()
+                            .any(|value| value.as_str() == Some("codesign"))
+                })
+        );
     }
 
     #[test]
@@ -6638,9 +6679,11 @@ target = "worker"
         )
         .expect_err("canonical lock without resolved targets must fail closed");
 
-        assert!(error
-            .to_string()
-            .contains("ATO_ERR_EXECUTION_CONTRACT_INVALID"));
+        assert!(
+            error
+                .to_string()
+                .contains("ATO_ERR_EXECUTION_CONTRACT_INVALID")
+        );
         assert!(error.to_string().contains("resolved target-compatible"));
     }
 
