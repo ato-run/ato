@@ -325,9 +325,6 @@ fn spawn_capsule_nav_drain(cx: &mut Context<WebLinkViewShell>, queue: CapsuleNav
 }
 
 fn handle_capsule_url(cx: &mut gpui::App, url: String) {
-    if !crate::window::is_multi_window_enabled() {
-        return;
-    }
     let handle = match url.strip_prefix("capsule://") {
         Some(s) => s.trim_end_matches('/').to_string(),
         None => return,
