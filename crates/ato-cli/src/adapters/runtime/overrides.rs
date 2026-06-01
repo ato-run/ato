@@ -38,11 +38,13 @@ pub struct PortOverrideGuard {
 
 impl Drop for PortOverrideGuard {
     fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var(ENV_OVERRIDE_PORT, value) },
-                None => unsafe { std::env::remove_var(ENV_OVERRIDE_PORT) },
-            }
+        // SAFETY: the guard is constructed and dropped on the main thread of
+        // the synchronous warm-launch path, around a single child spawn. No
+        // other thread reads or writes the process environment within the
+        // guard's scope, so restoring `ATO_UI_OVERRIDE_PORT` here is sound.
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var(ENV_OVERRIDE_PORT, value) },
+            None => unsafe { std::env::remove_var(ENV_OVERRIDE_PORT) },
         }
     }
 }
@@ -51,10 +53,11 @@ impl Drop for PortOverrideGuard {
 /// (if any) is captured and restored when the returned guard is dropped.
 pub fn scoped_override_port(port: u16) -> PortOverrideGuard {
     let previous = std::env::var(ENV_OVERRIDE_PORT).ok();
+    // SAFETY: called on the main thread of the synchronous warm-launch path
+    // before the child runtime is spawned; no other thread accesses the
+    // process environment within the returned guard's scope.
     unsafe {
-        unsafe {
-            std::env::set_var(ENV_OVERRIDE_PORT, port.to_string());
-        }
+        std::env::set_var(ENV_OVERRIDE_PORT, port.to_string());
     }
     PortOverrideGuard { previous }
 }

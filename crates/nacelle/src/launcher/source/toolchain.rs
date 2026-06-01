@@ -315,7 +315,7 @@ struct RuntimeInstallLock {
 }
 
 fn is_internal_mode() -> bool {
-    std::env::var_os("NACELLE_INTERNAL").is_some()
+    crate::common::is_internal_mode()
 }
 
 macro_rules! toolchain_out {
