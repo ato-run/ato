@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub const DEFAULT_MAX_PAYLOAD_BYTES: u64 = 200 * 1024 * 1024;
 pub const PAID_MAX_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
@@ -75,7 +75,7 @@ pub fn ensure_payload_bytes_size(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_payload_bytes_size, DEFAULT_MAX_PAYLOAD_BYTES, PAID_MAX_PAYLOAD_BYTES};
+    use super::{DEFAULT_MAX_PAYLOAD_BYTES, PAID_MAX_PAYLOAD_BYTES, ensure_payload_bytes_size};
 
     #[test]
     fn payload_guard_rejects_paid_sized_payload_without_paid_flag() {
@@ -103,9 +103,10 @@ mod tests {
         )
         .expect_err("must require force override");
 
-        assert!(err
-            .to_string()
-            .contains(&(PAID_MAX_PAYLOAD_BYTES as f64 / (1024.0 * 1024.0)).to_string()));
+        assert!(
+            err.to_string()
+                .contains(&(PAID_MAX_PAYLOAD_BYTES as f64 / (1024.0 * 1024.0)).to_string())
+        );
     }
 
     #[test]

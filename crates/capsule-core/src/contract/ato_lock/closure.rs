@@ -571,9 +571,11 @@ mod tests {
         }))
         .expect_err("metadata_only complete should fail");
 
-        assert!(errors
-            .iter()
-            .any(|error| error.contains("status='incomplete'")));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("status='incomplete'"))
+        );
     }
 
     #[test]

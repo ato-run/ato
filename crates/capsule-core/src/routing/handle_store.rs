@@ -156,7 +156,9 @@ mod tests {
     fn metadata_cache_and_trust_store_are_separate() {
         let _guard = env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("ATO_HOME", temp.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", temp.path());
+        }
 
         let canonical = CanonicalHandle::RegistryCapsule {
             registry: RegistryIdentity::ato_official(),
@@ -203,6 +205,8 @@ mod tests {
         assert!(metadata_cache_path(&canonical).exists());
         assert!(local_trust_path(&canonical).exists());
 
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 }

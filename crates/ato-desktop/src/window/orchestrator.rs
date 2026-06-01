@@ -10,9 +10,9 @@ use std::rc::Rc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, linear_color_stop, linear_gradient, px, rgb, size, AnyWindowHandle, App, Bounds,
-    Context, Entity, FontWeight, IntoElement, Render, SharedString, WindowBounds,
-    WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, Entity, FontWeight, IntoElement, Render, SharedString,
+    WindowBounds, WindowDecorations, WindowOptions, div, hsla, linear_color_stop, linear_gradient,
+    px, rgb, size,
 };
 use gpui_component::{Icon, IconName, TitleBar};
 

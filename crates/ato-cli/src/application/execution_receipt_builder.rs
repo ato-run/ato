@@ -24,9 +24,9 @@ use serde::Serialize;
 use crate::application::build_materialization::BuildObservation;
 use crate::application::execution_graph_adapter::build_input_from_external_dependencies;
 use crate::application::execution_observers_v2::{
-    build_local_locator, build_policy_identity_v2, observe_dependencies_v2, observe_environment_v2,
-    observe_filesystem_v2, observe_launch_v2, observe_runtime_v2, observe_source_provenance,
-    observe_source_v2, ObserverContextV2,
+    ObserverContextV2, build_local_locator, build_policy_identity_v2, observe_dependencies_v2,
+    observe_environment_v2, observe_filesystem_v2, observe_launch_v2, observe_runtime_v2,
+    observe_source_provenance, observe_source_v2,
 };
 use crate::executors::launch_context::RuntimeLaunchContext;
 
@@ -163,6 +163,7 @@ fn sandbox_policy_hash(execution_plan: &ExecutionPlan) -> Result<String> {
 /// pipeline so the receipt builder is the single composition site.
 /// Thin wrapper over [`build_prelaunch_receipt_v2_with_graph`] for
 /// call sites that do not yet need to carry the bundle forward.
+#[allow(dead_code)]
 pub(crate) fn build_prelaunch_receipt_v2(
     plan: &ManifestData,
     execution_plan: &ExecutionPlan,
@@ -479,6 +480,7 @@ pub(crate) struct PrelaunchReceiptOutput {
     pub(crate) launch_graph: Option<LaunchGraphBundle>,
 }
 
+#[allow(dead_code)]
 pub(crate) fn build_prelaunch_receipt_document(
     plan: &ManifestData,
     execution_plan: &ExecutionPlan,
@@ -530,6 +532,7 @@ pub(crate) fn build_prelaunch_receipt_document_with_graph(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod graph_identity_tests {
     //! Receipt-side tests for graph-derived declared/resolved execution
     //! ids (refs #98, #99). These exercise the same wires that
@@ -544,7 +547,7 @@ mod graph_identity_tests {
     //! right domain.
     use super::{build_declared_graph, extend_to_resolved_graph};
     use capsule_core::engine::execution_graph::{
-        identity_labels, CanonicalGraphDomain, ExecutionGraph,
+        CanonicalGraphDomain, ExecutionGraph, identity_labels,
     };
     use capsule_core::execution_identity::{
         CaseSensitivity, FilesystemIdentityV2, FilesystemSemantics, PolicyIdentityV2,

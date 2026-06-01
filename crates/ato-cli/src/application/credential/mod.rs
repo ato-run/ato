@@ -14,7 +14,7 @@ pub(crate) mod chain;
 pub(crate) mod config;
 
 pub(crate) use backend::{
-    load_identity_bytes, AgeFileBackend, BackendEntry, CredentialKey, EnvBackend, MemoryBackend,
+    AgeFileBackend, BackendEntry, CredentialKey, EnvBackend, MemoryBackend, load_identity_bytes,
 };
 pub(crate) use chain::BackendChain;
 

@@ -18,8 +18,8 @@ use std::process::{Child, Command, Stdio};
 use anyhow::{Context, Result};
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context as GpuiContext, IntoElement, Pixels,
-    Render, Size, WindowBounds, WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context as GpuiContext, IntoElement, Pixels, Render, Size,
+    WindowBounds, WindowDecorations, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
 use serde::Deserialize;

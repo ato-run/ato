@@ -202,10 +202,12 @@ fn internal_exec_v2_rejects_missing_manifest() {
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["ok"], false);
     assert_eq!(response["spec_version"], "2.0");
-    assert!(response["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("manifest not found"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("manifest not found")
+    );
 }
 
 #[test]
@@ -223,10 +225,12 @@ fn internal_pack_returns_machine_readable_unsupported_error() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["spec_version"], "1.0");
     assert_eq!(response["error"]["code"], "UNSUPPORTED");
-    assert!(response["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("internal pack is not supported"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("internal pack is not supported")
+    );
 }
 
 #[test]
@@ -264,10 +268,12 @@ fn internal_exec_requires_manifest_path() {
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["ok"], false);
     assert_eq!(response["error"]["code"], "INVALID_INPUT");
-    assert!(response["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("manifest path is required"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("manifest path is required")
+    );
 }
 
 #[test]

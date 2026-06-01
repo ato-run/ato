@@ -18,23 +18,23 @@
 //!      changes size.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TryRecvError;
-use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, App, Context, FontWeight, IntoElement, Pixels, Render, SharedString, Size,
-    WeakEntity,
+    App, Context, FontWeight, IntoElement, Pixels, Render, SharedString, Size, WeakEntity, div,
+    hsla, px,
 };
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{PageLoadEvent, Rect, WebView, WebViewBuilder};
 
 use capsule_wire::handle::CapsuleDisplayStrategy;
 
-use crate::automation::command::PendingAutomationRequest;
 use crate::automation::AutomationHost;
+use crate::automation::command::PendingAutomationRequest;
 use crate::orchestrator::{DesktopLaunchInput, GuestLaunchSession, LaunchError};
 use crate::state::session::{
     CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession, SessionClient, SessionClientId,
@@ -740,7 +740,7 @@ impl AppCapsuleShell {
                     source: CapsuleOpenSource::NavigateToUrl,
                 };
                 let capsule_session = CapsuleSession::from_launch_session(&session, launch_context);
-                let mut registry = cx.global_mut::<SessionRegistry>();
+                let registry = cx.global_mut::<SessionRegistry>();
                 registry.register_session(capsule_session);
                 let client = SessionClient {
                     client_id: SessionClientId::next(),
@@ -1166,7 +1166,7 @@ pub(crate) fn describe_launch_error(err: &LaunchError) -> String {
 }
 
 fn render_booting(handle: &str) -> gpui::AnyElement {
-    use gpui::{rgb, ParentElement, Styled};
+    use gpui::{ParentElement, Styled, rgb};
 
     div()
         .size_full()
@@ -1193,7 +1193,7 @@ fn render_booting(handle: &str) -> gpui::AnyElement {
 }
 
 fn render_error(handle: &str, error: &str) -> gpui::AnyElement {
-    use gpui::{rgb, ParentElement, Styled};
+    use gpui::{ParentElement, Styled, rgb};
 
     div()
         .size_full()

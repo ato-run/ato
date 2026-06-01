@@ -50,9 +50,9 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
 
 fn sample_file_delivery_toml() -> String {
     format!(
-            "schema_version = \"0.1\"\n[artifact]\nframework = \"tauri\"\nstage = \"unsigned\"\ntarget = \"{}\"\ninput = \"dist/MyApp.exe\"\n[finalize]\ntool = \"signtool\"\nargs = [\"sign\", \"/fd\", \"SHA256\", \"dist/MyApp.exe\"]\n",
-            default_delivery_target_for_input("dist/MyApp.exe")
-        )
+        "schema_version = \"0.1\"\n[artifact]\nframework = \"tauri\"\nstage = \"unsigned\"\ntarget = \"{}\"\ninput = \"dist/MyApp.exe\"\n[finalize]\ntool = \"signtool\"\nargs = [\"sign\", \"/fd\", \"SHA256\", \"dist/MyApp.exe\"]\n",
+        default_delivery_target_for_input("dist/MyApp.exe")
+    )
 }
 
 fn sample_windows_pe_bytes(is_dll: bool) -> Vec<u8> {
@@ -231,26 +231,36 @@ fn build_environment_skeleton_captures_native_delivery_inputs() -> Result<()> {
         .get("toolchains")
         .and_then(serde_json::Value::as_array)
         .expect("toolchains");
-    assert!(toolchains
-        .iter()
-        .any(|value| value.as_str() == Some("rust")));
-    assert!(toolchains
-        .iter()
-        .any(|value| value.as_str() == Some("cargo")));
-    assert!(toolchains
-        .iter()
-        .any(|value| value.as_str() == Some("node")));
+    assert!(
+        toolchains
+            .iter()
+            .any(|value| value.as_str() == Some("rust"))
+    );
+    assert!(
+        toolchains
+            .iter()
+            .any(|value| value.as_str() == Some("cargo"))
+    );
+    assert!(
+        toolchains
+            .iter()
+            .any(|value| value.as_str() == Some("node"))
+    );
 
     let package_managers = skeleton
         .get("package_managers")
         .and_then(serde_json::Value::as_array)
         .expect("package_managers");
-    assert!(package_managers
-        .iter()
-        .any(|value| value.as_str() == Some("cargo")));
-    assert!(package_managers
-        .iter()
-        .any(|value| value.as_str() == Some("npm")));
+    assert!(
+        package_managers
+            .iter()
+            .any(|value| value.as_str() == Some("cargo"))
+    );
+    assert!(
+        package_managers
+            .iter()
+            .any(|value| value.as_str() == Some("npm"))
+    );
 
     let sdks = skeleton
         .get("sdks")
@@ -262,12 +272,16 @@ fn build_environment_skeleton_captures_native_delivery_inputs() -> Result<()> {
         .get("helper_tools")
         .and_then(serde_json::Value::as_array)
         .expect("helper_tools");
-    assert!(helper_tools
-        .iter()
-        .any(|value| value.as_str() == Some("tauri-cli")));
-    assert!(helper_tools
-        .iter()
-        .any(|value| value.as_str() == Some("codesign")));
+    assert!(
+        helper_tools
+            .iter()
+            .any(|value| value.as_str() == Some("tauri-cli"))
+    );
+    assert!(
+        helper_tools
+            .iter()
+            .any(|value| value.as_str() == Some("codesign"))
+    );
     Ok(())
 }
 
@@ -307,9 +321,10 @@ run = "sh build-app.sh""#,
     )?;
 
     let err = detect_build_strategy(&manifest_dir).expect_err("source sidecar must be rejected");
-    assert!(err
-        .to_string()
-        .contains("is no longer accepted in source projects"));
+    assert!(
+        err.to_string()
+            .contains("is no longer accepted in source projects")
+    );
     Ok(())
 }
 
@@ -502,9 +517,10 @@ args = ["--deep", "--force", "--sign", "-", "Other.app"]
     }
 
     let err = detect_build_strategy(&manifest_dir).expect_err("source sidecar must be rejected");
-    assert!(err
-        .to_string()
-        .contains("is no longer accepted in source projects"));
+    assert!(
+        err.to_string()
+            .contains("is no longer accepted in source projects")
+    );
 }
 
 #[test]
@@ -532,9 +548,10 @@ input = "dist/time-management-desktop.app"
 
     let err =
         detect_build_strategy(&manifest_dir).expect_err("should reject partial inline config");
-    assert!(err
-        .to_string()
-        .contains("defines [artifact] without [finalize]"));
+    assert!(
+        err.to_string()
+            .contains("defines [artifact] without [finalize]")
+    );
 }
 
 #[test]
@@ -618,9 +635,10 @@ fn validate_native_bundle_directory_rejects_invalid_linux_elf() -> Result<()> {
 
     let err = validate_native_bundle_directory(&linux_file)
         .expect_err("invalid AppImage should fail ELF validation");
-    assert!(err
-        .to_string()
-        .contains("Linux executable failed minimum ELF validation"));
+    assert!(
+        err.to_string()
+            .contains("Linux executable failed minimum ELF validation")
+    );
     Ok(())
 }
 
@@ -667,9 +685,10 @@ fn validate_native_bundle_directory_rejects_invalid_windows_executable() -> Resu
 
     let err = validate_native_bundle_directory(&windows_exe)
         .expect_err("invalid exe should fail PE validation");
-    assert!(err
-        .to_string()
-        .contains("Windows executable failed minimum PE validation"));
+    assert!(
+        err.to_string()
+            .contains("Windows executable failed minimum PE validation")
+    );
     Ok(())
 }
 
@@ -1003,9 +1022,10 @@ fn resolve_linux_projection_command_target_rejects_multiple_candidates() -> Resu
 
     let err = resolve_linux_projection_command_target(&app_dir)
         .expect_err("multiple executable candidates should fail");
-    assert!(err
-        .to_string()
-        .contains("multiple executable command candidates"));
+    assert!(
+        err.to_string()
+            .contains("multiple executable command candidates")
+    );
     Ok(())
 }
 
@@ -1061,9 +1081,10 @@ fn delivery_config_rejects_unknown_signtool_switch() {
     )
     .expect("config parse");
     let err = validate_delivery_config(&config).expect_err("config should be rejected");
-    assert!(err
-        .to_string()
-        .contains("Unsupported finalize.args entry '/bogus'"));
+    assert!(
+        err.to_string()
+            .contains("Unsupported finalize.args entry '/bogus'")
+    );
 }
 
 #[test]
@@ -1082,9 +1103,10 @@ fn delivery_config_rejects_unsupported_target() {
     )
     .expect("config parse");
     let err = validate_delivery_config(&config).expect_err("config should be rejected");
-    assert!(err
-        .to_string()
-        .contains("Unsupported artifact.target 'solaris/x86_64'"));
+    assert!(
+        err.to_string()
+            .contains("Unsupported artifact.target 'solaris/x86_64'")
+    );
 }
 
 #[test]
@@ -1332,9 +1354,10 @@ fn configure_native_build_process_rehomes_nested_cargo_outputs() {
         .get_envs()
         .map(|(key, value)| (key.to_os_string(), value.map(|entry| entry.to_os_string())))
         .collect::<Vec<_>>();
-    assert!(envs
-        .iter()
-        .any(|(key, value)| { key == "CARGO_BUILD_TARGET" && value.is_none() }));
+    assert!(
+        envs.iter()
+            .any(|(key, value)| { key == "CARGO_BUILD_TARGET" && value.is_none() })
+    );
     assert!(envs.iter().any(|(key, value)| {
         key == "CARGO_TARGET_DIR"
             && value.as_ref() == Some(&std::ffi::OsString::from("/workspace/app/src-tauri/target"))
@@ -1406,8 +1429,8 @@ fn lock_native_build_command_object_accepts_nested_shape() {
     );
 }
 #[test]
-fn native_delivery_draft_contract_skips_generic_native_targets_without_delivery_metadata(
-) -> Result<()> {
+fn native_delivery_draft_contract_skips_generic_native_targets_without_delivery_metadata()
+-> Result<()> {
     let tmp = tempdir()?;
     let manifest_path = tmp.path().join("capsule.toml");
     fs::write(
@@ -1506,10 +1529,12 @@ fn build_native_artifact_preserves_source_and_payload_executable_mode() -> Resul
         0o111
     );
     let manifest_value = read_capsule_manifest_value(&artifact_path)?;
-    assert!(manifest_value
-        .get("distribution")
-        .and_then(|value| value.as_table())
-        .is_some());
+    assert!(
+        manifest_value
+            .get("distribution")
+            .and_then(|value| value.as_table())
+            .is_some()
+    );
     Ok(())
 }
 
@@ -1768,7 +1793,9 @@ fn ensure_tree_writable_clears_readonly_on_files() -> Result<()> {
 #[serial_test::serial]
 fn materialize_fetch_cache_extracts_payload_tree() -> Result<()> {
     let tmp_home = tempdir()?;
-    std::env::set_var("HOME", tmp_home.path());
+    unsafe {
+        std::env::set_var("HOME", tmp_home.path());
+    }
 
     let payload_tar = {
         let mut out = Vec::new();
@@ -1796,10 +1823,12 @@ fn materialize_fetch_cache_extracts_payload_tree() -> Result<()> {
 
     assert!(result.cache_dir.exists());
     assert!(result.artifact_dir.join(DELIVERY_CONFIG_FILE).exists());
-    assert!(result
-        .artifact_dir
-        .join("MyApp.app/Contents/MacOS/MyApp")
-        .exists());
+    assert!(
+        result
+            .artifact_dir
+            .join("MyApp.app/Contents/MacOS/MyApp")
+            .exists()
+    );
     let metadata = load_fetch_metadata(&result.cache_dir)?;
     assert_eq!(metadata.parent_digest, result.parent_digest);
     Ok(())
@@ -1809,7 +1838,9 @@ fn materialize_fetch_cache_extracts_payload_tree() -> Result<()> {
 #[serial_test::serial]
 fn materialize_fetch_cache_preserves_executable_mode_from_payload() -> Result<()> {
     let tmp_home = tempdir()?;
-    std::env::set_var("HOME", tmp_home.path());
+    unsafe {
+        std::env::set_var("HOME", tmp_home.path());
+    }
 
     let payload_tar = {
         let mut out = Vec::new();
@@ -1870,9 +1901,11 @@ fn project_creates_projection_metadata_without_mutating_derived_artifact() -> Re
         assert!(desktop.contains("[Desktop Entry]"));
         assert!(desktop.contains("Exec="));
         let command_path = command_dir.join("my-app");
-        assert!(fs::symlink_metadata(&command_path)?
-            .file_type()
-            .is_symlink());
+        assert!(
+            fs::symlink_metadata(&command_path)?
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(
             fs::read_link(&command_path)?,
             sample_projection_binary_path(&derived_app)
@@ -1941,10 +1974,12 @@ fn project_list_reports_broken_projection_when_target_missing() -> Result<()> {
     assert_eq!(listing.total, 1);
     assert_eq!(listing.broken, 1);
     assert_eq!(listing.projections[0].projection_id, result.projection_id);
-    assert!(listing.projections[0]
-        .problems
-        .iter()
-        .any(|problem| problem == "derived_app_missing"));
+    assert!(
+        listing.projections[0]
+            .problems
+            .iter()
+            .any(|problem| problem == "derived_app_missing")
+    );
     Ok(())
 }
 
@@ -1970,10 +2005,12 @@ fn linux_project_list_reports_missing_command_symlink() -> Result<()> {
     assert_eq!(listing.total, 1);
     assert_eq!(listing.broken, 1);
     assert_eq!(listing.projections[0].projection_id, result.projection_id);
-    assert!(listing.projections[0]
-        .problems
-        .iter()
-        .any(|problem| problem == "projected_command_missing"));
+    assert!(
+        listing.projections[0]
+            .problems
+            .iter()
+            .any(|problem| problem == "projected_command_missing")
+    );
     Ok(())
 }
 

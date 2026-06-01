@@ -18,8 +18,8 @@ mod fail_closed_support;
 use fail_closed_support::ato_cmd;
 
 #[allow(dead_code)] // `has_run_session_record` is part of the documented predicate
-                    // surface (see the brief in the PR body) even though the four
-                    // landed tests do not yet need it.
+// surface (see the brief in the PR body) even though the four
+// landed tests do not yet need it.
 mod predicates {
     //! Path-shape predicates over a temporary `ATO_HOME`. These intentionally
     //! avoid asserting exact directory names — the RFC permits the state

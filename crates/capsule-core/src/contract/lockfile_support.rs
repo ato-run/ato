@@ -14,7 +14,7 @@ use crate::error::{CapsuleError, Result};
 use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
 
-use super::{platform_triple, METADATA_CACHE_DIR_NAME, UV_VERSION};
+use super::{METADATA_CACHE_DIR_NAME, UV_VERSION, platform_triple};
 
 pub(super) async fn ensure_uv(reporter: Arc<dyn CapsuleReporter + 'static>) -> Result<PathBuf> {
     if let Ok(found) = which::which("uv") {

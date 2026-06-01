@@ -218,7 +218,7 @@ pub fn execute_host(
             force_python_no_bytecode || force_python_server_tool,
         );
 
-        if let Some(ref port) = injected_port {
+        if let Some(port) = &injected_port {
             cmd.env("PORT", port);
         }
 
@@ -234,10 +234,11 @@ pub fn execute_host(
 
         // For direct server-tool invocations (command = "uvicorn") inject before
         // positional args so the flag is clearly grouped with the binary.
-        if needs_port_injection && force_python_server_tool {
-            if let Some(ref port) = injected_port {
-                cmd.args(["--port", port]);
-            }
+        if needs_port_injection
+            && force_python_server_tool
+            && let Some(port) = &injected_port
+        {
+            cmd.args(["--port", port]);
         }
 
         if !launch_spec.args.is_empty() {
@@ -246,10 +247,11 @@ pub fn execute_host(
 
         // For `python -m uvicorn` (command = "-m") inject after all args so
         // the module can see the flag — `python -m uvicorn <args> --port N`.
-        if needs_port_injection && !force_python_server_tool {
-            if let Some(ref port) = injected_port {
-                cmd.args(["--port", port]);
-            }
+        if needs_port_injection
+            && !force_python_server_tool
+            && let Some(port) = &injected_port
+        {
+            cmd.args(["--port", port]);
         }
     }
 
@@ -648,12 +650,11 @@ fn is_python_module_server_invocation(args: &[String]) -> bool {
     ];
     let mut iter = args.iter();
     while let Some(token) = iter.next() {
-        if token == "-m" {
-            if let Some(module) = iter.next() {
-                if PYTHON_SERVER_MODULES.contains(&module.to_ascii_lowercase().as_str()) {
-                    return true;
-                }
-            }
+        if token == "-m"
+            && let Some(module) = iter.next()
+            && PYTHON_SERVER_MODULES.contains(&module.to_ascii_lowercase().as_str())
+        {
+            return true;
         }
     }
     false
@@ -1056,10 +1057,8 @@ fn write_normalized_manifest(
     if let Some(command) = command {
         execution.insert("command".to_string(), toml::Value::String(command));
     }
-    if is_python {
-        if let Some(env_table) = python_runtime_selector_env(runtime_version.as_deref()) {
-            execution.insert("env".to_string(), toml::Value::Table(env_table));
-        }
+    if is_python && let Some(env_table) = python_runtime_selector_env(runtime_version.as_deref()) {
+        execution.insert("env".to_string(), toml::Value::Table(env_table));
     }
     manifest.insert("execution".to_string(), toml::Value::Table(execution));
 
@@ -1140,7 +1139,7 @@ fn write_normalized_manifest(
     let owner = current_nacelle_manifest_owner();
     let path = nacelle_dir.join(format_nacelle_manifest_file_name(
         owner,
-        rand::thread_rng().gen::<u64>(),
+        rand::thread_rng().r#gen::<u64>(),
     ));
     fs::write(&path, toml::to_string(&toml::Value::Table(manifest))?)
         .with_context(|| format!("Failed to write normalized manifest: {}", path.display()))?;
@@ -1539,7 +1538,7 @@ pub async fn wait_for_exit(child: &mut Child) -> Result<i32> {
 }
 
 pub async fn wait_for_pid_exit(pid: u32) -> Result<i32> {
-    let session_id = format!("dev-{}", rand::thread_rng().gen::<u64>());
+    let session_id = format!("dev-{}", rand::thread_rng().r#gen::<u64>());
     let handle = NativeHandle::new(session_id, pid);
     let config = SessionRunnerConfig::default();
 
@@ -1563,7 +1562,7 @@ fn extract_exit_code(metrics: &capsule_core::UnifiedMetrics) -> i32 {
 mod tests {
     use super::*;
     use crate::ipc::inject::{IpcContext, SessionActivationMode};
-    use filetime::{set_file_mtime, FileTime};
+    use filetime::{FileTime, set_file_mtime};
     use std::collections::HashMap;
     use tempfile::tempdir;
 
@@ -1575,7 +1574,9 @@ mod tests {
     impl EnvVarGuard {
         fn set_path(key: &'static str, value: &Path) -> Self {
             let previous = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
@@ -1583,9 +1584,13 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
             } else {
-                std::env::remove_var(self.key);
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }

@@ -386,16 +386,16 @@ fn is_nextjs_project(working_dir: &Path) -> bool {
     {
         return true;
     }
-    if let Ok(text) = std::fs::read_to_string(working_dir.join("package.json")) {
-        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&text) {
-            for section in ["dependencies", "devDependencies", "peerDependencies"] {
-                if pkg
-                    .get(section)
-                    .and_then(|v| v.as_object())
-                    .is_some_and(|map| map.contains_key("next"))
-                {
-                    return true;
-                }
+    if let Ok(text) = std::fs::read_to_string(working_dir.join("package.json"))
+        && let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        for section in ["dependencies", "devDependencies", "peerDependencies"] {
+            if pkg
+                .get(section)
+                .and_then(|v| v.as_object())
+                .is_some_and(|map| map.contains_key("next"))
+            {
+                return true;
             }
         }
     }

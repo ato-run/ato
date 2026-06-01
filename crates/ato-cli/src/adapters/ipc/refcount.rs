@@ -10,8 +10,8 @@
 //! - **Exclusive**: One instance per client. Stopped when client disconnects.
 //! - **Daemon**: Long-lived process. Idle timeout is ignored.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};

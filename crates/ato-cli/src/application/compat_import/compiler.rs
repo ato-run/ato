@@ -1,19 +1,19 @@
 use std::path::Path;
 
 use anyhow::Result;
-use capsule_core::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue, ATO_LOCK_SCHEMA_VERSION};
+use capsule_core::ato_lock::{ATO_LOCK_SCHEMA_VERSION, AtoLock, UnresolvedReason, UnresolvedValue};
 use capsule_core::input_resolver::ResolvedCompatibilityProject;
 use capsule_core::lockfile::CapsuleLock;
 use capsule_core::manifest::LoadedManifest;
 use serde::Serialize;
 
 use super::diagnostics::{
-    sort_diagnostics, CompatibilityDiagnostic, CompatibilityDiagnosticCode,
-    CompatibilityDiagnosticSeverity,
+    CompatibilityDiagnostic, CompatibilityDiagnosticCode, CompatibilityDiagnosticSeverity,
+    sort_diagnostics,
 };
 use super::legacy_lock_import::import_legacy_lock;
 use super::manifest_import::import_manifest;
-use super::provenance::{sort_provenance, CompilerOwnedField, ProvenanceRecord};
+use super::provenance::{CompilerOwnedField, ProvenanceRecord, sort_provenance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,7 +178,7 @@ mod tests {
     use std::fs;
 
     use capsule_core::input_resolver::{
-        resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+        ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
     };
     use serde_json::Value;
     use tempfile::tempdir;
@@ -283,10 +283,12 @@ run = "dist/MyApp.app""#,
             artifact.get("provenance_limited").and_then(Value::as_bool),
             Some(true)
         );
-        assert!(artifact
-            .get("digest")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.starts_with("blake3:")));
+        assert!(
+            artifact
+                .get("digest")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("blake3:"))
+        );
         assert!(result.provenance.iter().any(|record| {
             record.field
                 == crate::application::compat_import::CompilerOwnedField::new(
@@ -434,10 +436,12 @@ target = "worker"
                 )
                 && record.source_field.as_deref() == Some("services")
         }));
-        assert!(result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.lock_path == "contract.process"));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.lock_path == "contract.process")
+        );
     }
 
     #[test]
@@ -524,21 +528,27 @@ run = "main.ts""#,
 
         let result = compile_from_dir(dir.path());
         assert!(result.draft_lock.contract.entries.contains_key("process"));
-        assert!(result
-            .draft_lock
-            .resolution
-            .entries
-            .contains_key("locked_runtimes"));
-        assert!(result
-            .draft_lock
-            .resolution
-            .entries
-            .contains_key("locked_injected_data"));
-        assert!(!result
-            .draft_lock
-            .contract
-            .entries
-            .contains_key("locked_injected_data"));
+        assert!(
+            result
+                .draft_lock
+                .resolution
+                .entries
+                .contains_key("locked_runtimes")
+        );
+        assert!(
+            result
+                .draft_lock
+                .resolution
+                .entries
+                .contains_key("locked_injected_data")
+        );
+        assert!(
+            !result
+                .draft_lock
+                .contract
+                .entries
+                .contains_key("locked_injected_data")
+        );
         assert!(result.provenance.iter().any(|record| {
             record.field
                 == crate::application::compat_import::CompilerOwnedField::new(
@@ -583,10 +593,12 @@ run = "main.ts""#,
         .expect("write lock");
 
         let result = compile_from_dir(dir.path());
-        assert!(result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("runtime version conflict")));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("runtime version conflict"))
+        );
         assert!(result.unresolved_summary.resolution >= 1);
     }
 
@@ -856,15 +868,19 @@ run = "main.ts""#,
             baseline.unresolved_summary.contract,
             conflicted.unresolved_summary.contract
         );
-        assert!(conflicted
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.lock_path.starts_with("contract.")
-                || diagnostic.lock_path.starts_with("resolution.")));
-        assert!(conflicted
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.lock_path.starts_with("resolution.")));
+        assert!(
+            conflicted
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.lock_path.starts_with("contract.")
+                    || diagnostic.lock_path.starts_with("resolution."))
+        );
+        assert!(
+            conflicted
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.lock_path.starts_with("resolution."))
+        );
         assert!(conflicted.unresolved_summary.resolution > baseline.unresolved_summary.resolution);
     }
 
@@ -887,10 +903,12 @@ port = 4173
 
         let result = compile_from_dir(dir.path());
         assert!(result.draft_lock.contract.entries.contains_key("process"));
-        assert!(result
-            .draft_lock
-            .resolution
-            .entries
-            .contains_key("target_selection"));
+        assert!(
+            result
+                .draft_lock
+                .resolution
+                .entries
+                .contains_key("target_selection")
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! `account.*` commands — authentication status and login/logout, system-capsule only.
 
-use super::{spec, IpcCommandSpec};
+use super::{IpcCommandSpec, spec};
 use crate::ipc::policy::IpcVisibility::SystemCapsule;
 use crate::system_capsule::broker::Capability;
 

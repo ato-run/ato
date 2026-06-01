@@ -25,15 +25,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use capsule_core::CapsuleReporter;
 use capsule_core::execution_plan::model::OciPolicyMode;
 use capsule_core::oci_compose_lock::{
-    self, compute_compose_source_hash, OciComposeLock, OciImageLockEntry, OciImportMeta,
+    self, OciComposeLock, OciImageLockEntry, OciImportMeta, compute_compose_source_hash,
 };
 use capsule_core::routing::importer::compose::{
-    detect_compose_candidate, import_compose, ComposeImportInput, ComposeImportOutput,
+    ComposeImportInput, ComposeImportOutput, detect_compose_candidate, import_compose,
 };
 use capsule_core::types::OciImageResolution;
-use capsule_core::CapsuleReporter;
 
 use super::launch_context::RuntimeLaunchContext;
 use super::oci_multi_service::execute_service_graph_with_provider;
@@ -43,7 +43,7 @@ use crate::adapters::runtime::oci_provider::{
 };
 use crate::adapters::runtime::oci_session_store::OciSessionMeta;
 use crate::application::preflight::{
-    preflight_oci_provider_readiness, OciProviderReadinessMode, OciProviderReadinessRequirements,
+    OciProviderReadinessMode, OciProviderReadinessRequirements, preflight_oci_provider_readiness,
 };
 use crate::reporters::CliReporter;
 
@@ -195,8 +195,8 @@ pub(crate) async fn execute_compose_run(
     // Also write OCI facts into main ato.lock.json.
     {
         use capsule_core::ato_lock::oci::{
-            construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
             OciImageLockEntry as MainOciImageLockEntry, OciImportEntry,
+            construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
         };
         let main_images: BTreeMap<String, MainOciImageLockEntry> = new_lock
             .images
@@ -378,6 +378,7 @@ pub(crate) async fn resolve_images_with_lock_replay<P: OciProvider>(
 /// cannot resolve), returns a typed error asking the caller to run `ato lock`
 /// first. On any other provider error, propagates with context.
 /// Kept for use by existing tests that don't need lock replay.
+#[allow(dead_code)]
 pub(crate) async fn resolve_images_for_compose<P: OciProvider>(
     import_output: &ComposeImportOutput,
     provider: &P,
@@ -427,6 +428,7 @@ pub(crate) async fn resolve_images_for_compose<P: OciProvider>(
 ///
 /// Does **not** perform provider readiness check or image resolution — those are
 /// the caller's responsibility. This is the path used by all unit tests.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_compose_run_with_provider<P: OciProvider>(
     import_output: &ComposeImportOutput,
     images: &HashMap<String, OciImageResolution>,
@@ -468,12 +470,12 @@ mod tests {
     use std::path::PathBuf;
 
     use capsule_core::routing::importer::compose::{
-        detect_compose_candidate, import_compose, ComposeImportInput,
+        ComposeImportInput, detect_compose_candidate, import_compose,
     };
     use capsule_core::types::OciImageResolution;
 
     use super::*;
-    use crate::adapters::runtime::oci_provider::{fake_oci_semantics, FakeOciProvider};
+    use crate::adapters::runtime::oci_provider::{FakeOciProvider, fake_oci_semantics};
     use crate::reporters::CliReporter;
 
     // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -683,7 +685,7 @@ services:
         assert_eq!(images.len(), 2, "should resolve 2 service images");
         assert!(images.contains_key("db"), "should contain 'db'");
         assert!(images.contains_key("app"), "should contain 'app'");
-        for (_, img) in &images {
+        for img in images.values() {
             assert!(
                 !img.resolved_digest.is_empty(),
                 "every image must have a non-empty digest"
@@ -1180,7 +1182,7 @@ volumes: {}
         assert_eq!(loaded.images.len(), 2);
         assert!(loaded.images.contains_key("db"));
         assert!(loaded.images.contains_key("app"));
-        for (_, entry) in &loaded.images {
+        for entry in loaded.images.values() {
             assert!(!entry.resolved_digest.is_empty());
         }
         // images map also has 2 entries.
@@ -1585,7 +1587,7 @@ services:
         let import = oci_read.imports.get("default").unwrap();
         assert_eq!(import.kind, "compose");
         assert_eq!(import.source_path, "docker-compose.yml");
-        for (_, entry) in &oci_read.images {
+        for entry in oci_read.images.values() {
             assert!(entry.resolved_ref.ends_with(&entry.resolved_digest));
             assert_eq!(entry.import_id.as_deref(), Some("default"));
         }

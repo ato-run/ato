@@ -3,7 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::capsule::{
-    verify_artifact_hash, CasProvider, CasStore, PayloadManifest, PAYLOAD_MANIFEST_PATH,
+    CasProvider, CasStore, PAYLOAD_MANIFEST_PATH, PayloadManifest, verify_artifact_hash,
 };
 use crate::error::{CapsuleError, Result};
 
@@ -349,10 +349,10 @@ mod tests {
     use zstd;
 
     use super::{
-        unpack_payload_from_manifest, unpack_payload_from_manifest_file_with_cas,
-        ChainedChunkReader, PAYLOAD_MANIFEST_PATH, STAGING_PREFIX,
+        ChainedChunkReader, PAYLOAD_MANIFEST_PATH, STAGING_PREFIX, unpack_payload_from_manifest,
+        unpack_payload_from_manifest_file_with_cas,
     };
-    use crate::capsule::manifest::{blake3_digest, CdcParams, ChunkMeta, PayloadManifest};
+    use crate::capsule::manifest::{CdcParams, ChunkMeta, PayloadManifest, blake3_digest};
     use crate::capsule::set_artifact_hash;
 
     use crate::capsule::CasStore;
