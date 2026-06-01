@@ -43,7 +43,7 @@ impl BundleTarget {
             "windows-x86_64" => Ok(Self::WindowsX86_64),
             "linux-x86_64" => Ok(Self::LinuxX86_64),
             "linux-arm64" => Ok(Self::LinuxArm64),
-            other => bail("unsupported target: {}", other)
+            other => bail!("unsupported target: {}", other)
         }
     }
 
