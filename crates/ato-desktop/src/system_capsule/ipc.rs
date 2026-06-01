@@ -47,51 +47,6 @@ use super::manifest;
 use super::window_registry::SystemCapsuleWindowRegistry;
 use crate::ipc::protocol::IpcResponse;
 
-/// JS preload injected into every system-capsule WebView via
-/// `WebViewBuilder::with_initialization_script`.
-///
-/// Installs:
-/// - `window.__atoPendingIpc`: `Map<requestId, {resolve, reject}>`
-/// - `window.__atoIpcResolve(id, responseJson)`: called by Rust
-/// - `window.__ATO_IPC__.invoke(capsule, command, params)`: returns `Promise`
-pub const SYSTEM_IPC_INIT_SCRIPT: &str = r#"(function () {
-  if (!window.__atoPendingIpc) {
-    window.__atoPendingIpc = new Map();
-  }
-  window.__atoIpcResolve = function (requestId, responseJson) {
-    var pending = window.__atoPendingIpc.get(requestId);
-    if (!pending) return;
-    window.__atoPendingIpc.delete(requestId);
-    try {
-      var response = JSON.parse(responseJson);
-      if (response.status === 'ok') {
-        pending.resolve(response.payload);
-      } else {
-        pending.reject(response);
-      }
-    } catch (e) {
-      pending.reject({ status: 'error', code: 'parse_error', message: String(e) });
-    }
-  };
-  if (!window.__ATO_IPC__) {
-    var _nextRequestId = 1;
-    window.__ATO_IPC__ = {
-      invoke: function (capsule, command, params) {
-        return new Promise(function (resolve, reject) {
-          var requestId = _nextRequestId++;
-          window.__atoPendingIpc.set(requestId, { resolve: resolve, reject: reject });
-          window.ipc.postMessage(JSON.stringify({
-            capsule: capsule,
-            command: command,
-            params: params || {},
-            requestId: requestId
-          }));
-        });
-      }
-    };
-  }
-})();"#;
-
 #[derive(Debug, Deserialize)]
 struct Envelope {
     /// Slug — resolved via `manifest::lookup_by_slug`, which accepts both
@@ -122,18 +77,6 @@ pub fn new_queue() -> SystemBridgeQueue {
 /// The `u64` is the `request_id` and the `String` is the serialised
 /// `IpcResponse` JSON.
 pub type IpcResponseCallback = Box<dyn Fn(&mut App, u64, String) + 'static>;
-
-/// Build the closure handed to `WebViewBuilder::with_ipc_handler`.
-/// Runs on whatever thread Wry chooses; only touches the queue.
-/// Errors are logged at WARN and dropped so a malformed message
-/// never propagates beyond the bridge boundary.
-///
-/// **Security note**: this variant accepts any capsule slug in the envelope.
-/// Prefer [`make_ipc_handler_for_capsule`] which rejects envelopes whose
-/// capsule slug does not match the expected capsule for this WebView.
-pub fn make_ipc_handler(queue: SystemBridgeQueue) -> impl Fn(wry::http::Request<String>) + 'static {
-    make_ipc_handler_inner(None, queue)
-}
 
 /// Capsule-bound IPC handler — the preferred variant for all system-capsule
 /// WebViews.
@@ -238,21 +181,6 @@ fn parse_system_command(
 /// to deliver typed `IpcResponse` JSON back to the JS caller.
 pub fn spawn_drain_loop(cx: &mut App, queue: SystemBridgeQueue, host: AnyWindowHandle) {
     spawn_drain_loop_inner(cx, queue, host, None);
-}
-
-/// Spawn the foreground drain loop with a typed-response callback.
-///
-/// `response_cb` receives `(&mut App, request_id, response_json)` on the GPUI
-/// main thread after each dispatched command that carries a `request_id`.
-/// Callers typically implement this by calling
-/// `webview.evaluate_script(&format!("window.__atoIpcResolve({}, ...)", id))`.
-pub fn spawn_drain_loop_with_response(
-    cx: &mut App,
-    queue: SystemBridgeQueue,
-    host: AnyWindowHandle,
-    response_cb: IpcResponseCallback,
-) {
-    spawn_drain_loop_inner(cx, queue, host, Some(response_cb));
 }
 
 fn spawn_drain_loop_inner(

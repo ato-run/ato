@@ -38,10 +38,6 @@ impl AppWindowShell {
             route_label: SharedString::from(route.label()),
         }
     }
-
-    pub fn route_label(&self) -> SharedString {
-        self.route_label.clone()
-    }
 }
 
 fn short_title_from_route(route: &GuestRoute) -> String {
@@ -638,19 +634,6 @@ fn start_capsule_input_for_route(
         }),
         _ => None,
     }
-}
-
-pub fn open_app_window_from_materialized_record(
-    cx: &mut App,
-    route: GuestRoute,
-    record_path: PathBuf,
-) -> Result<AnyWindowHandle> {
-    let launch_configs: Vec<(String, String)> = cx
-        .try_global::<crate::window::launch_window::PendingLaunchConfigs>()
-        .map(|g| g.0.clone())
-        .unwrap_or_default();
-    cx.set_global(crate::window::launch_window::PendingLaunchConfigs(vec![]));
-    open_app_window_from_materialized_record_with_configs(cx, route, record_path, launch_configs)
 }
 
 pub fn open_app_window_from_materialized_record_with_configs(

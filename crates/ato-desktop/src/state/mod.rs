@@ -87,14 +87,6 @@ impl SettingsTab {
         }
     }
 
-    pub fn section(self) -> &'static str {
-        match self {
-            Self::General | Self::Account | Self::Runtime | Self::Sandbox => "Basic",
-            Self::Trust => "Security",
-            Self::Registry | Self::Projection | Self::Developer | Self::About => "System",
-        }
-    }
-
     pub fn badge(self) -> Option<&'static str> {
         match self {
             Self::Runtime => Some("Core"),
@@ -199,19 +191,6 @@ impl CapabilityGrant {
             Self::Terminal => "terminal",
             Self::Automation => "automation",
             Self::Secrets => "secrets",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "read-file" => Some(Self::ReadFile),
-            "workspace-info" => Some(Self::WorkspaceInfo),
-            "open-external" => Some(Self::OpenExternal),
-            "clipboard-read" => Some(Self::ClipboardRead),
-            "terminal" => Some(Self::Terminal),
-            "automation" => Some(Self::Automation),
-            "secrets" => Some(Self::Secrets),
-            _ => None,
         }
     }
 }
@@ -1687,15 +1666,6 @@ impl AppState {
         self.capsule_config_store
             .set_config(capsule_handle, key, value);
         crate::config::save_capsule_configs(&self.capsule_config_store);
-    }
-
-    /// Persist security / execution boundary overrides for one capsule.
-    pub fn update_capsule_policy_overrides(
-        &mut self,
-        f: impl FnOnce(&mut crate::config::CapsulePolicyOverrideStore),
-    ) {
-        f(&mut self.capsule_policy_overrides);
-        crate::config::save_capsule_policy_overrides(&self.capsule_policy_overrides);
     }
 
     /// Install a pending config request (overwriting any prior one).

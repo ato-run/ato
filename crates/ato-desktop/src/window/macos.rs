@@ -230,25 +230,6 @@ pub fn hide_window_in_handler(window: &mut Window) {
     }
 }
 
-/// Hide an NSWindow identified by `handle` via `orderOut:`.
-/// Call from outside any `handle.update()` (e.g. action handler)
-/// to avoid GPUI reentrancy.
-#[cfg(target_os = "macos")]
-pub fn hide_ns_window(cx: &mut App, handle: AnyWindowHandle) {
-    if let Some(nswindow) = ns_window_for(cx, handle) {
-        unsafe { nswindow.orderOut(None) };
-    }
-}
-
-/// Show (unhide) an NSWindow identified by `handle` via
-/// `makeKeyAndOrderFront:`. Call from outside any `handle.update()`.
-#[cfg(target_os = "macos")]
-pub fn show_ns_window(cx: &mut App, handle: AnyWindowHandle) {
-    if let Some(nswindow) = ns_window_for(cx, handle) {
-        unsafe { nswindow.makeKeyAndOrderFront(None) };
-    }
-}
-
 /// Make `child` a real AppKit child of `parent` via
 /// `[parent addChildWindow:child ordered:NSWindowAbove]`. Also bumps
 /// the child window's level to `NSFloatingWindowLevel` so it paints
