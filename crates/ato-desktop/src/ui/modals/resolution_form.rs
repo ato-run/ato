@@ -700,14 +700,15 @@ fn render_field_row(
     );
 
     if let Some(description) = &field.description
-        && !description.is_empty() {
-            row = row.child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_secondary)
-                    .child(description.clone()),
-            );
-        }
+        && !description.is_empty()
+    {
+        row = row.child(
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.text_secondary)
+                .child(description.clone()),
+        );
+    }
 
     let style_input = |i: Input| {
         i.h(px(32.0))

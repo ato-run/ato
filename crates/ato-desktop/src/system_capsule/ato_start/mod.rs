@@ -345,9 +345,10 @@ pub fn build_start_snapshot(
 
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
     PathBuf::from(path)
 }
 

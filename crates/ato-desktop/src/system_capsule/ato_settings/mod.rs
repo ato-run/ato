@@ -191,9 +191,9 @@ pub fn dispatch(
             if patch.get("controlBarMode").is_some()
                 && let Err(err) =
                     crate::window::set_control_bar_mode(cx, config.desktop.control_bar.mode)
-                {
-                    tracing::error!(error = %err, "ato_settings: applying Control Bar mode failed");
-                }
+            {
+                tracing::error!(error = %err, "ato_settings: applying Control Bar mode failed");
+            }
             let snap = settings_snapshot_from_config(&config);
             let mut response = patch_resp;
             response["snapshot"] = snap;

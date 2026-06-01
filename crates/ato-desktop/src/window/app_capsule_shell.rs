@@ -185,9 +185,10 @@ impl AppCapsuleShell {
             // checking the abort flag on every iteration so a cancelled launch
             // exits within ~500 ms.
             if let Ok(ref session) = result
-                && session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
-                }
+                && session.display_strategy == CapsuleDisplayStrategy::WebUrl
+            {
+                wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
+            }
             // If already aborted and the session started, stop it immediately.
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
@@ -227,21 +228,22 @@ impl AppCapsuleShell {
                         if !steps.is_empty() {
                             aa.update(|cx: &mut App| {
                                 if let Some(weak) = &boot_shell_weak
-                                    && let Some(shell) = weak.upgrade() {
-                                        for step in steps {
-                                            shell.update(cx, |s, _cx| {
-                                                s.push_step(step);
-                                                let msg = match step {
-                                                    0 => "Validating launch plan",
-                                                    1 => "Resolving capsule targets",
-                                                    2 => "Starting capsule session",
-                                                    3 => "Connecting to capsule endpoint",
-                                                    _ => "Processing launch step",
-                                                };
-                                                s.push_detail(msg);
-                                            });
-                                        }
+                                    && let Some(shell) = weak.upgrade()
+                                {
+                                    for step in steps {
+                                        shell.update(cx, |s, _cx| {
+                                            s.push_step(step);
+                                            let msg = match step {
+                                                0 => "Validating launch plan",
+                                                1 => "Resolving capsule targets",
+                                                2 => "Starting capsule session",
+                                                3 => "Connecting to capsule endpoint",
+                                                _ => "Processing launch step",
+                                            };
+                                            s.push_detail(msg);
+                                        });
                                     }
+                                }
                             });
                         }
 
@@ -254,19 +256,18 @@ impl AppCapsuleShell {
                                     match entity.upgrade() {
                                         Some(entity) => {
                                             if let Some(weak) = &boot_shell_weak
-                                                && let Some(shell) = weak.upgrade() {
-                                                    shell.update(cx, |s, _cx| {
-                                                        match &result {
-                                                            Ok(_) => s.push_detail(
-                                                                "Capsule session started successfully",
-                                                            ),
-                                                            Err(err) => s.push_detail(&format!(
-                                                                "Launch failed: {}",
-                                                                describe_launch_error(err)
-                                                            )),
-                                                        }
-                                                    });
-                                                }
+                                                && let Some(shell) = weak.upgrade()
+                                            {
+                                                shell.update(cx, |s, _cx| match &result {
+                                                    Ok(_) => s.push_detail(
+                                                        "Capsule session started successfully",
+                                                    ),
+                                                    Err(err) => s.push_detail(&format!(
+                                                        "Launch failed: {}",
+                                                        describe_launch_error(err)
+                                                    )),
+                                                });
+                                            }
                                             entity.update(cx, |shell, cx| {
                                                 shell.pending_result = Some(result);
                                                 cx.notify();
@@ -361,9 +362,10 @@ impl AppCapsuleShell {
                 })),
             );
             if let Ok(ref session) = result
-                && session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
-                }
+                && session.display_strategy == CapsuleDisplayStrategy::WebUrl
+            {
+                wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
+            }
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
                     let sid = session.session_id.clone();
@@ -499,9 +501,10 @@ impl AppCapsuleShell {
                 )
             });
             if let Ok(ref session) = result
-                && session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
-                }
+                && session.display_strategy == CapsuleDisplayStrategy::WebUrl
+            {
+                wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
+            }
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
                     let sid = session.session_id.clone();
@@ -537,21 +540,22 @@ impl AppCapsuleShell {
                         if !steps.is_empty() {
                             aa.update(|cx: &mut App| {
                                 if let Some(weak) = &boot_shell_weak
-                                    && let Some(shell) = weak.upgrade() {
-                                        for step in steps {
-                                            shell.update(cx, |s, _cx| {
-                                                s.push_step(step);
-                                                let msg = match step {
-                                                    0 => "Validating launch plan",
-                                                    1 => "Resolving capsule targets",
-                                                    2 => "Starting capsule session",
-                                                    3 => "Connecting to capsule endpoint",
-                                                    _ => "Processing launch step",
-                                                };
-                                                s.push_detail(msg);
-                                            });
-                                        }
+                                    && let Some(shell) = weak.upgrade()
+                                {
+                                    for step in steps {
+                                        shell.update(cx, |s, _cx| {
+                                            s.push_step(step);
+                                            let msg = match step {
+                                                0 => "Validating launch plan",
+                                                1 => "Resolving capsule targets",
+                                                2 => "Starting capsule session",
+                                                3 => "Connecting to capsule endpoint",
+                                                _ => "Processing launch step",
+                                            };
+                                            s.push_detail(msg);
+                                        });
                                     }
+                                }
                             });
                         }
 
@@ -563,19 +567,18 @@ impl AppCapsuleShell {
                                     match entity.upgrade() {
                                         Some(entity) => {
                                             if let Some(weak) = &boot_shell_weak
-                                                && let Some(shell) = weak.upgrade() {
-                                                    shell.update(cx, |s, _cx| {
-                                                            match &result {
-                                                        Ok(_) => s.push_detail(
-                                                            "Capsule session started successfully",
-                                                        ),
-                                                        Err(err) => s.push_detail(&format!(
-                                                            "Launch failed: {}",
-                                                            describe_launch_error(err)
-                                                        )),
-                                                    }
-                                                        });
-                                                }
+                                                && let Some(shell) = weak.upgrade()
+                                            {
+                                                shell.update(cx, |s, _cx| match &result {
+                                                    Ok(_) => s.push_detail(
+                                                        "Capsule session started successfully",
+                                                    ),
+                                                    Err(err) => s.push_detail(&format!(
+                                                        "Launch failed: {}",
+                                                        describe_launch_error(err)
+                                                    )),
+                                                });
+                                            }
                                             entity.update(cx, |shell, cx| {
                                                 shell.pending_result = Some(result);
                                                 cx.notify();
