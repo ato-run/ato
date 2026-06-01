@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, svg, AnyElement, Context, Entity, IntoElement, MouseButton, Pixels, Render,
-    SharedString, Size,
+    AnyElement, Context, Entity, IntoElement, MouseButton, Pixels, Render, SharedString, Size, div,
+    hsla, px, rgb, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
@@ -270,10 +270,10 @@ fn build_tab(
             // deferred callback path; the on_mouse_down on url_pill provides
             // an earlier synchronous reclaim for better responsiveness.
             InputEvent::Focus => {
-                if let Some(tab) = this.active_tab() {
-                    if let Some(webview) = tab.webview.as_ref() {
-                        let _ = webview.focus_parent();
-                    }
+                if let Some(tab) = this.active_tab()
+                    && let Some(webview) = tab.webview.as_ref()
+                {
+                    let _ = webview.focus_parent();
                 }
                 cx.notify();
             }
@@ -317,7 +317,7 @@ fn spawn_capsule_nav_drain(cx: &mut Context<WebLinkViewShell>, queue: CapsuleNav
                 continue;
             }
             for url in drained {
-                let _ = aa.update(|cx: &mut gpui::App| handle_capsule_url(cx, url));
+                aa.update(|cx: &mut gpui::App| handle_capsule_url(cx, url));
             }
         }
     })
@@ -596,10 +596,10 @@ fn url_pill(url_input: Entity<InputState>, entity: Entity<WebLinkViewShell>) -> 
         // first-responder status from the user clicking web content.
         .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
             entity.update(cx, |this, _cx| {
-                if let Some(tab) = this.active_tab() {
-                    if let Some(webview) = tab.webview.as_ref() {
-                        let _ = webview.focus_parent();
-                    }
+                if let Some(tab) = this.active_tab()
+                    && let Some(webview) = tab.webview.as_ref()
+                {
+                    let _ = webview.focus_parent();
                 }
             });
         })

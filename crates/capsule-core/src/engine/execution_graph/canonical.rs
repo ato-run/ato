@@ -507,9 +507,11 @@ mod tests {
         let hex = form.digest_hex();
         assert!(hex.starts_with("sha256:"));
         assert_eq!(hex.len(), "sha256:".len() + 64);
-        assert!(hex[7..]
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            hex[7..]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     /// Declared-domain sensitivity (refs #98, #99): changing a

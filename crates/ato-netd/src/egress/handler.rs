@@ -40,7 +40,7 @@ use tokio::{
 };
 use tracing::debug;
 
-use super::policy::{normalize_hostname, EgressPolicy, PolicyDecision};
+use super::policy::{EgressPolicy, PolicyDecision, normalize_hostname};
 
 /// Maximum bytes consumed while reading CONNECT request headers.
 /// Prevents memory exhaustion from a client sending infinite headers.
@@ -106,20 +106,18 @@ async fn handle_connect_inner(
     // Only check hostname policy for actual hostnames (not IP literals).
     let is_ip_literal = host.parse::<IpAddr>().is_ok();
 
-    if !is_ip_literal {
-        if let PolicyDecision::DenyHost = policy.check_hostname(&host) {
-            write_error_response(&mut client, 403, "hostname", &host, port).await?;
-            let _ = receipt_tx.try_send(NetworkEgressDecision {
-                target: host,
-                port,
-                protocol: "tcp".to_string(),
-                decision: EgressDecision::DenyHost,
-                resolved_addr: None,
-                decided_at_unix: decided_at,
-                stage: "hostname".to_string(),
-            });
-            return Ok(());
-        }
+    if !is_ip_literal && let PolicyDecision::DenyHost = policy.check_hostname(&host) {
+        write_error_response(&mut client, 403, "hostname", &host, port).await?;
+        let _ = receipt_tx.try_send(NetworkEgressDecision {
+            target: host,
+            port,
+            protocol: "tcp".to_string(),
+            decision: EgressDecision::DenyHost,
+            resolved_addr: None,
+            decided_at_unix: decided_at,
+            stage: "hostname".to_string(),
+        });
+        return Ok(());
     }
 
     // ── 3. DNS resolve (skipped for IP literals) ──────────────────────────────
@@ -176,10 +174,8 @@ async fn handle_connect_inner(
                     first_denied = Some(addr);
                 }
             }
-            PolicyDecision::Allow => {
-                if first_allowed.is_none() {
-                    first_allowed = Some(addr);
-                }
+            PolicyDecision::Allow if first_allowed.is_none() => {
+                first_allowed = Some(addr);
             }
             _ => {}
         }

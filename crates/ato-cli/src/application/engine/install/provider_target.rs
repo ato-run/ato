@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1567,15 +1567,15 @@ fn pypi_normalize_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::{
+        PROVIDER_RESOLUTION_METADATA_FILE, ParsedRunTarget, ProviderKind, ProviderTargetRef,
         capsule_manifest_for_provider_run, classify_run_target, materialize_provider_run_workspace,
         npm_install_command_args, parse_npm_package_ref, parse_provider_target_ref,
         parse_pypi_requirement_ref, pnpm_install_command_args, resolve_console_script_metadata,
-        resolve_effective_provider_toolchain, resolve_npm_bin_metadata, ParsedRunTarget,
-        ProviderKind, ProviderTargetRef, PROVIDER_RESOLUTION_METADATA_FILE,
+        resolve_effective_provider_toolchain, resolve_npm_bin_metadata,
     };
     use crate::ProviderToolchain;
     use capsule_core::ato_lock;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use serial_test::serial;
     use std::fs;
     use std::fs::File;
@@ -1583,12 +1583,12 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
-    use zip::{write::FileOptions, ZipWriter};
+    use zip::{ZipWriter, write::FileOptions};
 
     struct TestWheelSpec<'a> {
         package_name: &'a str,
@@ -1638,7 +1638,9 @@ mod tests {
             let mut original = Vec::with_capacity(entries.len());
             for (key, value) in entries {
                 original.push((*key, std::env::var(key).ok()));
-                std::env::set_var(key, value);
+                unsafe {
+                    std::env::set_var(key, value);
+                }
             }
             Self { original }
         }
@@ -1648,9 +1650,13 @@ mod tests {
         fn drop(&mut self) {
             for (key, value) in self.original.drain(..).rev() {
                 if let Some(value) = value {
-                    std::env::set_var(key, value);
+                    unsafe {
+                        std::env::set_var(key, value);
+                    }
                 } else {
-                    std::env::remove_var(key);
+                    unsafe {
+                        std::env::remove_var(key);
+                    }
                 }
             }
         }
@@ -2022,25 +2028,28 @@ Tag: py3-none-any\n";
     #[test]
     fn parse_npm_package_ref_rejects_inline_version() {
         let err = parse_npm_package_ref("tsx@4.9.0").expect_err("version must fail");
-        assert!(err
-            .to_string()
-            .contains("does not support inline versions or dist-tags"));
+        assert!(
+            err.to_string()
+                .contains("does not support inline versions or dist-tags")
+        );
     }
 
     #[test]
     fn parse_npm_package_ref_rejects_direct_url() {
         let err = parse_npm_package_ref("https://example.com/demo.tgz").expect_err("url must fail");
-        assert!(err
-            .to_string()
-            .contains("does not support direct URL, git, or file references"));
+        assert!(
+            err.to_string()
+                .contains("does not support direct URL, git, or file references")
+        );
     }
 
     #[test]
     fn parse_npm_package_ref_rejects_subpath() {
         let err = parse_npm_package_ref("@scope/pkg/bin").expect_err("subpath must fail");
-        assert!(err
-            .to_string()
-            .contains("does not support package subpaths"));
+        assert!(
+            err.to_string()
+                .contains("does not support package subpaths")
+        );
     }
 
     #[test]
@@ -2070,18 +2079,20 @@ Tag: py3-none-any\n";
     #[test]
     fn parse_pypi_requirement_ref_rejects_version_suffix() {
         let err = parse_pypi_requirement_ref("demo@1.2.3").expect_err("version must fail");
-        assert!(err
-            .to_string()
-            .contains("does not support inline version syntax"));
+        assert!(
+            err.to_string()
+                .contains("does not support inline version syntax")
+        );
     }
 
     #[test]
     fn parse_pypi_requirement_ref_rejects_direct_urls() {
         let err =
             parse_pypi_requirement_ref("https://example.com/demo.whl").expect_err("url must fail");
-        assert!(err
-            .to_string()
-            .contains("does not support direct URL, VCS, or path references"));
+        assert!(
+            err.to_string()
+                .contains("does not support direct URL, VCS, or path references")
+        );
     }
 
     #[test]
@@ -2207,9 +2218,10 @@ Tag: py3-none-any\n";
 
         let err = resolve_npm_bin_metadata(temp.path(), "demo-npm-needs-install-script")
             .expect_err("install script package must fail");
-        assert!(err
-            .to_string()
-            .contains("declares install lifecycle scripts"));
+        assert!(
+            err.to_string()
+                .contains("declares install lifecycle scripts")
+        );
         assert!(err.to_string().contains("--ignore-scripts"));
     }
 
@@ -2245,9 +2257,10 @@ Tag: py3-none-any\n";
 
         let err = resolve_console_script_metadata(temp.path(), "demo-provider")
             .expect_err("multiple entrypoints must fail");
-        assert!(err
-            .to_string()
-            .contains("multiple console script entrypoints"));
+        assert!(
+            err.to_string()
+                .contains("multiple console script entrypoints")
+        );
     }
 
     #[test]

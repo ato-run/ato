@@ -80,18 +80,17 @@ pub fn try_emit_from_anyhow(err: &AnyhowError, json_mode: bool) -> bool {
         return false;
     }
 
-    if let Some(attempt_err) = err.downcast_ref::<PipelineAttemptError>() {
-        if let Some(execution_err) = attempt_err
+    if let Some(attempt_err) = err.downcast_ref::<PipelineAttemptError>()
+        && let Some(execution_err) = attempt_err
             .source_error()
             .downcast_ref::<AtoExecutionError>()
-        {
-            let enriched = execution_err.clone().with_cleanup(
-                attempt_err.cleanup_report().status,
-                attempt_err.cleanup_report().actions.clone(),
-            );
-            emit_ato_error_jsonl(&enriched);
-            return true;
-        }
+    {
+        let enriched = execution_err.clone().with_cleanup(
+            attempt_err.cleanup_report().status,
+            attempt_err.cleanup_report().actions.clone(),
+        );
+        emit_ato_error_jsonl(&enriched);
+        return true;
     }
 
     if let Some(execution_err) = err.downcast_ref::<AtoExecutionError>() {
@@ -117,27 +116,25 @@ pub fn try_emit_from_anyhow(err: &AnyhowError, json_mode: bool) -> bool {
 /// continue to the human-readable diagnostic path so the user message
 /// is not swallowed.
 pub fn try_emit_interactive_resolution_envelope(err: &AnyhowError) -> bool {
-    if let Some(attempt_err) = err.downcast_ref::<PipelineAttemptError>() {
-        if let Some(execution_err) = attempt_err
+    if let Some(attempt_err) = err.downcast_ref::<PipelineAttemptError>()
+        && let Some(execution_err) = attempt_err
             .source_error()
             .downcast_ref::<AtoExecutionError>()
-        {
-            if execution_err.interactive_resolution {
-                let enriched = execution_err.clone().with_cleanup(
-                    attempt_err.cleanup_report().status,
-                    attempt_err.cleanup_report().actions.clone(),
-                );
-                emit_ato_error_jsonl(&enriched);
-                return true;
-            }
-        }
+        && execution_err.interactive_resolution
+    {
+        let enriched = execution_err.clone().with_cleanup(
+            attempt_err.cleanup_report().status,
+            attempt_err.cleanup_report().actions.clone(),
+        );
+        emit_ato_error_jsonl(&enriched);
+        return true;
     }
 
-    if let Some(execution_err) = err.downcast_ref::<AtoExecutionError>() {
-        if execution_err.interactive_resolution {
-            emit_ato_error_jsonl(execution_err);
-            return true;
-        }
+    if let Some(execution_err) = err.downcast_ref::<AtoExecutionError>()
+        && execution_err.interactive_resolution
+    {
+        emit_ato_error_jsonl(execution_err);
+        return true;
     }
 
     false
@@ -183,8 +180,8 @@ fn legacy_message_fallback(err: &AnyhowError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::execution_plan::error::AtoExecutionError;
     use capsule_core::AtoError;
+    use capsule_core::execution_plan::error::AtoExecutionError;
 
     /// `try_emit_from_anyhow` keeps its existing contract: gated on
     /// `--json`. Without it, no envelope is emitted (regardless of error

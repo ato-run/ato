@@ -8,10 +8,10 @@
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    derive_install_profile_key, InstallInstanceStore, InstalledAppId, ProfileId,
+    InstallInstanceStore, InstalledAppId, ProfileId, derive_install_profile_key,
 };
 
-use super::install::{execute_install_command, InstallCommandArgs};
+use super::install::{InstallCommandArgs, execute_install_command};
 
 pub(crate) struct AppUpdateArgs {
     pub(crate) install_profile_key: String,
@@ -96,7 +96,7 @@ fn find_app_handle(
 mod tests {
     use super::*;
     use capsule_core::foundation::install_lifecycle::{
-        derive_install_profile_key, AppRecord, InstallInstanceStore, LaunchProfile,
+        AppRecord, InstallInstanceStore, LaunchProfile, derive_install_profile_key,
     };
     use serial_test::serial;
 
@@ -105,7 +105,7 @@ mod tests {
     #[serial]
     fn update_non_default_profile_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
+        let store = InstallInstanceStore::new(dir.path().join("instances")).unwrap();
         let app_id =
             capsule_core::foundation::install_lifecycle::InstalledAppId::new("app_test_upd_nd");
         let profile_id = capsule_core::foundation::install_lifecycle::ProfileId::new("staging");
@@ -134,13 +134,17 @@ mod tests {
             .unwrap();
         let ipk = derive_install_profile_key(&app_id, &profile_id);
 
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let result = execute_app_update_command(AppUpdateArgs {
             install_profile_key: ipk.as_str().to_owned(),
             yes: true,
             json: false,
         });
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
 
         assert!(
             result.is_err(),
@@ -158,13 +162,17 @@ mod tests {
     #[serial]
     fn update_unknown_ipk_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let result = execute_app_update_command(AppUpdateArgs {
             install_profile_key: "ipk_00000000000000000000000000000000".to_owned(),
             yes: true,
             json: false,
         });
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
 
         assert!(result.is_err(), "expected error for unknown ipk, got Ok");
         let msg = format!("{:?}", result.unwrap_err());

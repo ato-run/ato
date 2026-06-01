@@ -78,12 +78,12 @@ impl EgressPolicy {
         let h = normalize_hostname(host);
 
         // Deny always wins.
-        if self.hostname_deny.iter().any(|d| *d == h) {
+        if self.hostname_deny.contains(&h) {
             return PolicyDecision::DenyHost;
         }
 
         // Non-empty allow-list: host must be present.
-        if !self.hostname_allow.is_empty() && !self.hostname_allow.iter().any(|a| *a == h) {
+        if !self.hostname_allow.is_empty() && !self.hostname_allow.contains(&h) {
             return PolicyDecision::DenyHost;
         }
 

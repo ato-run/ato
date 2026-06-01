@@ -168,21 +168,21 @@ fn check_reserved_prefixes(
     }
 
     // Check IPC export name
-    if let Some(exports) = &ipc_config.exports {
-        if let Some(ref name) = exports.name {
-            for prefix in RESERVED_PREFIXES {
-                if name.starts_with(prefix) {
-                    diagnostics.push(IpcDiagnostic {
-                        severity: Severity::Error,
-                        code: "IPC-002",
-                        message: format!(
-                            "IPC export name '{}' uses reserved prefix '{}'",
-                            name, prefix
-                        ),
-                        location: "[ipc.exports]".to_string(),
-                        hint: format!("Rename the export to avoid the '{}' prefix.", prefix),
-                    });
-                }
+    if let Some(exports) = &ipc_config.exports
+        && let Some(name) = &exports.name
+    {
+        for prefix in RESERVED_PREFIXES {
+            if name.starts_with(prefix) {
+                diagnostics.push(IpcDiagnostic {
+                    severity: Severity::Error,
+                    code: "IPC-002",
+                    message: format!(
+                        "IPC export name '{}' uses reserved prefix '{}'",
+                        name, prefix
+                    ),
+                    location: "[ipc.exports]".to_string(),
+                    hint: format!("Rename the export to avoid the '{}' prefix.", prefix),
+                });
             }
         }
     }
@@ -349,21 +349,22 @@ fn check_import_resolvability(
 
 /// IPC-007: Empty exports validation.
 fn check_empty_exports(ipc_config: &IpcConfig, diagnostics: &mut Vec<IpcDiagnostic>) {
-    if let Some(exports) = &ipc_config.exports {
-        if exports.methods.is_empty() && exports.name.is_some() {
-            diagnostics.push(IpcDiagnostic {
-                severity: Severity::Warning,
-                code: "IPC-007",
-                message: format!(
-                    "IPC exports section has a name ('{}') but no methods defined",
-                    exports.name.as_deref().unwrap_or("unnamed")
-                ),
-                location: "[ipc.exports]".to_string(),
-                hint: "Add methods to [ipc.exports.methods] or remove [ipc.exports] \
+    if let Some(exports) = &ipc_config.exports
+        && exports.methods.is_empty()
+        && exports.name.is_some()
+    {
+        diagnostics.push(IpcDiagnostic {
+            severity: Severity::Warning,
+            code: "IPC-007",
+            message: format!(
+                "IPC exports section has a name ('{}') but no methods defined",
+                exports.name.as_deref().unwrap_or("unnamed")
+            ),
+            location: "[ipc.exports]".to_string(),
+            hint: "Add methods to [ipc.exports.methods] or remove [ipc.exports] \
                        if this capsule does not provide IPC services."
-                    .to_string(),
-            });
-        }
+                .to_string(),
+        });
     }
 }
 

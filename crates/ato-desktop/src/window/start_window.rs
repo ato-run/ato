@@ -13,11 +13,11 @@ use std::borrow::Cow;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, App, Bounds, Context, IntoElement, Pixels, Render, Size, WindowBounds,
-    WindowDecorations, WindowOptions,
+    App, Bounds, Context, IntoElement, Pixels, Render, Size, WindowBounds, WindowDecorations,
+    WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::Response;

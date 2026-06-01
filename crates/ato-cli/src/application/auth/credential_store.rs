@@ -17,8 +17,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::application::credential::{
-    self, backend::CredentialBackend, AgeFileBackend, BackendChain, CredentialKey, EnvBackend,
-    MemoryBackend,
+    self, AgeFileBackend, BackendChain, CredentialKey, EnvBackend, MemoryBackend,
+    backend::CredentialBackend,
 };
 
 pub(crate) const SESSION_NAMESPACE: &str = "auth/session";
@@ -198,13 +198,12 @@ fn build_chain(
 fn try_load_identity_non_interactive(age: &mut AgeFileBackend) -> bool {
     if let Ok(session_path) = std::env::var("ATO_SESSION_KEY_FILE") {
         let p = std::path::Path::new(&session_path);
-        if p.exists() {
-            if let Ok(raw) = std::fs::read(p) {
-                if let Ok(id) = credential::load_identity_bytes(&raw, None) {
-                    age.install_identity(id);
-                    return true;
-                }
-            }
+        if p.exists()
+            && let Ok(raw) = std::fs::read(p)
+            && let Ok(id) = credential::load_identity_bytes(&raw, None)
+        {
+            age.install_identity(id);
+            return true;
         }
     }
 
@@ -233,8 +232,8 @@ mod tests {
         fn set(key: &'static str, value: Option<&str>) -> Self {
             let previous = std::env::var(key).ok();
             match value {
-                Some(next) => std::env::set_var(key, next),
-                None => std::env::remove_var(key),
+                Some(next) => unsafe { std::env::set_var(key, next) },
+                None => unsafe { std::env::remove_var(key) },
             }
             Self { key, previous }
         }
@@ -243,8 +242,8 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }

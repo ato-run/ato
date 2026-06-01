@@ -7,15 +7,14 @@ mod store;
 
 #[allow(unused_imports)]
 pub(crate) use contract::{
-    host_service_binding_scope, SERVICE_BINDING_ADAPTER_LOCAL_SERVICE,
-    SERVICE_BINDING_ADAPTER_REVERSE_PROXY, SERVICE_BINDING_KIND_INGRESS,
-    SERVICE_BINDING_KIND_SERVICE, SERVICE_BINDING_TLS_MODE_DISABLED,
-    SERVICE_BINDING_TLS_MODE_EXPLICIT,
+    SERVICE_BINDING_ADAPTER_LOCAL_SERVICE, SERVICE_BINDING_ADAPTER_REVERSE_PROXY,
+    SERVICE_BINDING_KIND_INGRESS, SERVICE_BINDING_KIND_SERVICE, SERVICE_BINDING_TLS_MODE_DISABLED,
+    SERVICE_BINDING_TLS_MODE_EXPLICIT, host_service_binding_scope,
 };
 pub(crate) use ingress::{bootstrap_ingress_tls, serve_ingress_binding};
 #[allow(unused_imports)]
 pub(crate) use proxy::{
-    bootstrap_tls, load_tls_bootstrap, IngressProxyConfig, IngressTlsBootstrapRecord,
+    IngressProxyConfig, IngressTlsBootstrapRecord, bootstrap_tls, load_tls_bootstrap,
 };
 pub(crate) use register::{
     cleanup_service_bindings_for_process_info, register_ingress_binding,

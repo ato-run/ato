@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use rand::rngs::OsRng;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rand::RngCore;
+use rand::rngs::OsRng;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use super::prompt::try_open_browser;
 use super::publisher::{
-    fetch_publisher_me_blocking, run_publisher_onboarding_flow, PublisherMeResponse,
+    PublisherMeResponse, fetch_publisher_me_blocking, run_publisher_onboarding_flow,
 };
-use super::storage::{merge_metadata, TokenStorageLocation};
+use super::storage::{TokenStorageLocation, merge_metadata};
 use super::{
-    read_env_non_empty, AuthManager, Credentials, DEFAULT_STORE_API_URL, DEFAULT_STORE_SITE_URL,
-    ENV_STORE_API_URL, ENV_STORE_SITE_URL,
+    AuthManager, Credentials, DEFAULT_STORE_API_URL, DEFAULT_STORE_SITE_URL, ENV_STORE_API_URL,
+    ENV_STORE_SITE_URL, read_env_non_empty,
 };
 
 #[derive(Debug, Deserialize)]
@@ -276,15 +276,14 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
     // complete the browser handshake and discover afterward that nothing was
     // persisted. Headless mode writes to the canonical TOML file directly and
     // does not need age, so we skip the prompt there.
-    if !headless {
-        if let Err(error) =
+    if !headless
+        && let Err(error) =
             tokio::task::spawn_blocking(crate::application::secrets::ensure_identity_interactive)
                 .await
                 .context("failed to run age identity bootstrap")?
-        {
-            eprintln!("⚠️  Skipping age identity bootstrap: {error}");
-            eprintln!("   Login will proceed, but the token may not persist across sessions.");
-        }
+    {
+        eprintln!("⚠️  Skipping age identity bootstrap: {error}");
+        eprintln!("   Login will proceed, but the token may not persist across sessions.");
     }
 
     let api_base = store_api_base_url();

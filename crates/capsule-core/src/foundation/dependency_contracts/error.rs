@@ -6,7 +6,9 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LockError {
-    #[error("[v9.1.3] dependency '{dep}' requested contract '{contract}' but provider does not declare it")]
+    #[error(
+        "[v9.1.3] dependency '{dep}' requested contract '{contract}' but provider does not declare it"
+    )]
     ContractNotFound { dep: String, contract: String },
 
     #[error(
@@ -39,7 +41,9 @@ pub enum LockError {
     #[error("[v9.1.6] dependency '{dep}' is missing required credential '{key}'")]
     CredentialRequired { dep: String, key: String },
 
-    #[error("[v9.1.6] dependency '{dep}' declares unknown credential '{key}' (not in provider contract)")]
+    #[error(
+        "[v9.1.6] dependency '{dep}' declares unknown credential '{key}' (not in provider contract)"
+    )]
     CredentialUnknown { dep: String, key: String },
 
     #[error(
@@ -75,13 +79,19 @@ pub enum LockError {
     )]
     IdentityExportContainsCredential { contract: String, key: String },
 
-    #[error("[v9.1.8] dependency '{dep}' provider requires state but consumer did not specify [dependencies.{dep}.state] name")]
+    #[error(
+        "[v9.1.8] dependency '{dep}' provider requires state but consumer did not specify [dependencies.{dep}.state] name"
+    )]
     StateRequiredButMissing { dep: String },
 
-    #[error("[v9.1.8] dependency '{dep}' state.ownership = \"shared\" is not implemented in v1; only \"parent\" is allowed")]
+    #[error(
+        "[v9.1.8] dependency '{dep}' state.ownership = \"shared\" is not implemented in v1; only \"parent\" is allowed"
+    )]
     StateOwnershipShared { dep: String },
 
-    #[error("[v9.1.8] contract '{contract}' has state.required = true but does not declare state.version")]
+    #[error(
+        "[v9.1.8] contract '{contract}' has state.required = true but does not declare state.version"
+    )]
     StateVersionMissing { contract: String },
 
     #[error(
@@ -110,7 +120,9 @@ pub enum LockError {
         contract: String,
     },
 
-    #[error("[v9.1.13] dependency '{dep}' provider target uses unix_socket = \"auto\" which is reserved-only in v1 (lock fail-closed)")]
+    #[error(
+        "[v9.1.13] dependency '{dep}' provider target uses unix_socket = \"auto\" which is reserved-only in v1 (lock fail-closed)"
+    )]
     ReservedVariantUnixSocketEndpoint { dep: String },
 
     #[error(

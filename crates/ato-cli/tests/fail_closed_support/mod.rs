@@ -6,8 +6,8 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 use tar::Builder;

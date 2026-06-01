@@ -8,7 +8,7 @@ use super::shared_env_lock as env_lock;
 use super::storage::TokenStorageLocation;
 use super::store::{hydrate_publisher_identity_with, is_local_store_api_base_url};
 use super::{
-    current_session_token, require_session_token, AuthManager, Credentials, ENV_ATO_TOKEN,
+    AuthManager, Credentials, ENV_ATO_TOKEN, current_session_token, require_session_token,
 };
 
 const ENV_CRED_AUTH_SESSION_TOKEN: &str = "ATO_CRED_AUTH_SESSION__SESSION_TOKEN";
@@ -22,8 +22,8 @@ impl EnvVarGuard {
     fn set(key: &'static str, value: Option<&str>) -> Self {
         let previous = std::env::var(key).ok();
         match value {
-            Some(next) => std::env::set_var(key, next),
-            None => std::env::remove_var(key),
+            Some(next) => unsafe { std::env::set_var(key, next) },
+            None => unsafe { std::env::remove_var(key) },
         }
         Self { key, previous }
     }
@@ -32,8 +32,8 @@ impl EnvVarGuard {
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
         }
     }
 }
@@ -138,10 +138,12 @@ fn test_require_fails_when_not_authenticated() {
     let result = manager.require();
 
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Not authenticated"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Not authenticated")
+    );
 }
 
 #[test]
@@ -474,8 +476,10 @@ async fn persist_session_token_interactive_writes_to_age_when_identity_loaded() 
         manager.resolve_session_token().unwrap().as_deref(),
         Some("interactive-token")
     );
-    assert!(manager
-        .age_home
-        .join("credentials/auth/session.age")
-        .exists());
+    assert!(
+        manager
+            .age_home
+            .join("credentials/auth/session.age")
+            .exists()
+    );
 }

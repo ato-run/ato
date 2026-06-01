@@ -293,7 +293,7 @@ fn deno_artifact_filename(os: &str, arch: &str) -> Result<String> {
             return Err(CapsuleError::Pack(format!(
                 "Unsupported Deno platform: {} {}",
                 os, arch
-            )))
+            )));
         }
     };
     Ok(format!("deno-{}.zip", target))

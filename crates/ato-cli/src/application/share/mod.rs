@@ -6,19 +6,19 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use capsule_core::CapsuleReporter;
 use capsule_core::share::{
     self as share_types, EntryEnvSpec, EnvRequirementSpec, EnvState, GeneratedFrom,
     InstallStepSpec, InstallStepState, LoadedShareInput, ResolvedSourceLock, ResolvedToolLock,
     ServiceSpec, ShareEntrySpec, ShareLock, ShareNotes, ShareSourceSpec, ShareSourceState,
     ShareSpec, ToolRequirementSpec, VerificationState, WorkspaceShareState,
 };
-use capsule_core::CapsuleReporter;
 use chrono::Utc;
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -28,8 +28,8 @@ use crate::fs_copy;
 use crate::reporters::CliReporter;
 
 use share_types::{
-    default_runtime_source_str, SHARE_DIR, SHARE_LOCK_FILE, SHARE_SCHEMA_VERSION, SHARE_SPEC_FILE,
-    SHARE_STATE_FILE,
+    SHARE_DIR, SHARE_LOCK_FILE, SHARE_SCHEMA_VERSION, SHARE_SPEC_FILE, SHARE_STATE_FILE,
+    default_runtime_source_str,
 };
 const SHARE_GUIDE_FILE: &str = "guide.md";
 const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
@@ -238,7 +238,7 @@ fn execute_encap_dry_run(
     capture: &CapturedWorkspace,
     reporter: &Arc<CliReporter>,
 ) -> Result<()> {
-    use crate::application::secrets::scanner::{scan_for_secret_patterns, SecretScanHit};
+    use crate::application::secrets::scanner::{SecretScanHit, scan_for_secret_patterns};
     use capsule_core::packers::pack_filter::PackFilter;
 
     futures::executor::block_on(
@@ -365,7 +365,7 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
     let config = load_share_config(&root);
     let effective_git_mode = if args.git_mode != GitMode::SameCommit {
         args.git_mode
-    } else if let Some(ref cfg) = config {
+    } else if let Some(cfg) = &config {
         cfg.git_mode
             .as_deref()
             .and_then(|s| match s {
@@ -378,7 +378,7 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
     };
     let effective_tool_runtime = if args.tool_runtime != ShareToolRuntime::Auto {
         args.tool_runtime
-    } else if let Some(ref cfg) = config {
+    } else if let Some(cfg) = &config {
         cfg.tool_runtime
             .as_deref()
             .and_then(|s| match s {
@@ -414,10 +414,10 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
     let mut spec = capture.spec;
 
     // Apply exclude filters from capsule.toml [share.exclude].
-    if let Some(ref cfg) = config {
-        if let Some(ref exclude) = cfg.exclude {
-            apply_share_exclude(&mut spec, exclude);
-        }
+    if let Some(cfg) = &config
+        && let Some(exclude) = &cfg.exclude
+    {
+        apply_share_exclude(&mut spec, exclude);
     }
 
     finalize_capture(&mut spec, effective_yes, &reporter)?;
@@ -1354,10 +1354,10 @@ fn discover_repositories(root: &Path, ignore: &IgnoreMatcher) -> Result<Vec<Cand
         if ignore.matches(root, &candidate) {
             continue;
         }
-        if let Some(repo) = load_repository_candidate(root, &candidate)? {
-            if seen.insert(repo.rel_path.clone()) {
-                candidates.push(repo);
-            }
+        if let Some(repo) = load_repository_candidate(root, &candidate)?
+            && seen.insert(repo.rel_path.clone())
+        {
+            candidates.push(repo);
         }
     }
 
@@ -1905,10 +1905,10 @@ fn detect_services(scan_dir: &Path, relative_dir: &str, acc: &mut Vec<ServiceSpe
 
 fn infer_port_hint(script: &str) -> Option<u16> {
     for token in script.split_whitespace() {
-        if let Some(port) = token.strip_prefix("--port=") {
-            if let Ok(parsed) = port.parse::<u16>() {
-                return Some(parsed);
-            }
+        if let Some(port) = token.strip_prefix("--port=")
+            && let Ok(parsed) = port.parse::<u16>()
+        {
+            return Some(parsed);
         }
     }
     None
@@ -2272,10 +2272,10 @@ fn rewrite_api_to_site_url(url: &str) -> String {
 /// This avoids a 404 when `fetch_share_url` is handed a site-domain URL.
 fn api_base_for_share_host(host: &str) -> String {
     let site_base = auth::share_display_base_url();
-    if let Ok(site_parsed) = reqwest::Url::parse(&site_base) {
-        if site_parsed.host_str() == Some(host) {
-            return auth::default_store_registry_url();
-        }
+    if let Ok(site_parsed) = reqwest::Url::parse(&site_base)
+        && site_parsed.host_str() == Some(host)
+    {
+        return auth::default_store_registry_url();
     }
     // Preserve scheme-less host references (e.g. staging.api.ato.run) as-is.
     format!("https://{}", host)
@@ -2447,10 +2447,7 @@ fn select_run_entry(
     if entries.is_empty() {
         anyhow::bail!(
             "This target looks like a workspace but has no runnable entries. Set it up locally with: ato decap {} --into ./{}",
-            loaded
-                .resolved_revision_url
-                .as_deref()
-                .unwrap_or(input),
+            loaded.resolved_revision_url.as_deref().unwrap_or(input),
             loaded.spec.root
         );
     }
@@ -2610,11 +2607,7 @@ fn resolve_entry_env_overlay(
             anyhow::bail!(
                 "Cancelled before supplying required environment. Re-run with --env-file or use ato decap {} --into ./{}.",
                 input,
-                entry
-                    .cwd
-                    .split('/')
-                    .next()
-                    .unwrap_or("workspace")
+                entry.cwd.split('/').next().unwrap_or("workspace")
             );
         }
     }
@@ -3194,33 +3187,43 @@ mod tests {
         )
         .expect("capture");
         assert_eq!(capture.spec.sources.len(), 2);
-        assert!(capture
-            .spec
-            .install_steps
-            .iter()
-            .any(|step| step.run == "uv sync"));
-        assert!(capture
-            .spec
-            .install_steps
-            .iter()
-            .any(|step| step.run == "bun install"));
-        assert!(capture
-            .spec
-            .services
-            .iter()
-            .any(|service| service.run.contains("bun run dev")));
-        assert!(capture
-            .spec
-            .env_requirements
-            .iter()
-            .all(|env| !env.evidence.iter().any(|line| line.contains("SECRET="))));
+        assert!(
+            capture
+                .spec
+                .install_steps
+                .iter()
+                .any(|step| step.run == "uv sync")
+        );
+        assert!(
+            capture
+                .spec
+                .install_steps
+                .iter()
+                .any(|step| step.run == "bun install")
+        );
+        assert!(
+            capture
+                .spec
+                .services
+                .iter()
+                .any(|service| service.run.contains("bun run dev"))
+        );
+        assert!(
+            capture
+                .spec
+                .env_requirements
+                .iter()
+                .all(|env| !env.evidence.iter().any(|line| line.contains("SECRET=")))
+        );
         assert!(capture.spec.entries.iter().any(|entry| entry.primary));
-        assert!(capture
-            .spec
-            .entries
-            .iter()
-            .any(|entry| entry.id == "dashboard-dev"
-                && entry.env.files.iter().any(|path| path.ends_with(".env"))));
+        assert!(
+            capture
+                .spec
+                .entries
+                .iter()
+                .any(|entry| entry.id == "dashboard-dev"
+                    && entry.env.files.iter().any(|path| path.ends_with(".env")))
+        );
     }
 
     // When the workspace root IS the single git repo (single-repo encap), entry.cwd

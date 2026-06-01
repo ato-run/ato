@@ -1,4 +1,4 @@
-use axum::http::{header, HeaderMap};
+use axum::http::{HeaderMap, header};
 use subtle::ConstantTimeEq;
 
 pub(super) fn validate_write_auth(

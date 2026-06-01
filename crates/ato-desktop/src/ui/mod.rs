@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, linear_color_stop, linear_gradient, point, px, AnyElement, AsyncWindowContext,
-    BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image,
-    ImageFormat, IntoElement, MouseButton, Render, WeakEntity, Window,
+    AnyElement, AsyncWindowContext, BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle,
+    Focusable, FontWeight, Image, ImageFormat, IntoElement, MouseButton, Render, WeakEntity,
+    Window, div, hsla, linear_color_stop, linear_gradient, point, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
@@ -24,7 +24,7 @@ use gpui_component::scroll::ScrollableElement;
 use self::chrome::render_command_chrome;
 use self::panels::render_stage;
 use self::sidebar::{
-    favicon_candidate_urls, parse_link_icon_candidates, render_task_rail, FaviconState,
+    FaviconState, favicon_candidate_urls, parse_link_icon_candidates, render_task_rail,
 };
 use crate::logging::TARGET_FAVICON;
 
@@ -175,17 +175,14 @@ pub(crate) fn normalize_github_source(query: &str) -> Option<(String, String)> {
         r
     } else if let Some(r) = trimmed.strip_prefix("http://github.com/") {
         r
-    } else if let Some(r) = trimmed.strip_prefix("github.com/") {
-        r
     } else {
-        return None;
+        trimmed.strip_prefix("github.com/")?
     };
 
     // rest must be "owner/repo" (exactly one slash, non-empty on both sides)
     let rest = rest.trim_end_matches('/');
-    let mut parts = rest.splitn(2, '/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
+    let (owner, repo) = rest.split_once('/')?;
+
     if owner.is_empty() || repo.is_empty() || repo.contains('/') {
         return None;
     }
@@ -214,7 +211,7 @@ pub(crate) fn parse_community_candidates(
     candidates
         .iter()
         .take(5)
-        .filter_map(|c| {
+        .map(|c| {
             let title = c
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -244,12 +241,12 @@ pub(crate) fn parse_community_candidates(
             // capsule:// handler instead of the GitHub Import surface.
             let handle = format!("capsule://{launcher_handle}");
 
-            Some(crate::state::CapsuleSearchResult {
+            crate::state::CapsuleSearchResult {
                 handle,
                 display_name: format!("{title} · Community"),
                 description: Some(description),
                 ctoml_id,
-            })
+            }
         })
         .collect()
 }
@@ -329,7 +326,7 @@ fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
         Err(error) => {
             return crate::state::UpdateCheck::Failed {
                 message: format!("network error: {error}"),
-            }
+            };
         }
     };
     let body = match response.into_string() {
@@ -337,7 +334,7 @@ fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
         Err(error) => {
             return crate::state::UpdateCheck::Failed {
                 message: format!("read error: {error}"),
-            }
+            };
         }
     };
     let json: serde_json::Value = match serde_json::from_str(&body) {
@@ -345,7 +342,7 @@ fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
         Err(error) => {
             return crate::state::UpdateCheck::Failed {
                 message: format!("parse error: {error}"),
-            }
+            };
         }
     };
     let tag = json
@@ -640,11 +637,11 @@ impl DesktopShell {
 
     /// Poll for capsule search results from the background thread.
     fn poll_capsule_search(&mut self) {
-        if let Some(ref rx) = self.capsule_search_rx {
-            if let Ok(results) = rx.try_recv() {
-                self.state.capsule_search_results = results;
-                self.capsule_search_rx = None;
-            }
+        if let Some(ref rx) = self.capsule_search_rx
+            && let Ok(results) = rx.try_recv()
+        {
+            self.state.capsule_search_results = results;
+            self.capsule_search_rx = None;
         }
     }
 
@@ -721,14 +718,14 @@ impl DesktopShell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let crate::state::UpdateCheck::Available { html_url, .. } = &self.state.update_check {
-            if let Err(error) = open_external_url(html_url) {
-                self.state.push_activity(
-                    crate::state::ActivityTone::Error,
-                    format!("Failed to open release page: {error}"),
-                );
-                cx.notify();
-            }
+        if let crate::state::UpdateCheck::Available { html_url, .. } = &self.state.update_check
+            && let Err(error) = open_external_url(html_url)
+        {
+            self.state.push_activity(
+                crate::state::ActivityTone::Error,
+                format!("Failed to open release page: {error}"),
+            );
+            cx.notify();
         }
     }
 
@@ -926,7 +923,10 @@ impl DesktopShell {
             f32::from(size.width),
             f32::from(size.height),
             format_bounds(stage_bounds),
-            active.as_ref().map(|pane| pane.pane_id.to_string()).unwrap_or_else(|| "<none>".to_string()),
+            active
+                .as_ref()
+                .map(|pane| pane.pane_id.to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
             active
                 .as_ref()
                 .map(|pane| pane.route.to_string())
@@ -1138,10 +1138,10 @@ impl DesktopShell {
     }
 
     fn on_native_paste(&mut self, _: &NativePaste, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.webviews.wants_host_focus(&self.state) {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let _ = self.webviews.delegate_paste(&self.state, &text);
-            }
+        if !self.webviews.wants_host_focus(&self.state)
+            && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+        {
+            let _ = self.webviews.delegate_paste(&self.state, &text);
         }
         cx.notify();
     }
@@ -1212,11 +1212,12 @@ impl DesktopShell {
         // session token. We watch the child from a thread and forward
         // the exit status back to the render loop via cli_login_rx;
         // poll_cli_login() then drives complete_ato_login on success.
-        match {
+        let res = {
             let mut cmd = std::process::Command::new(&ato_bin);
             crate::proc_util::CommandNoWindowExt::no_console_window(&mut cmd);
             cmd.arg("login").spawn()
-        } {
+        };
+        match res {
             Ok(mut child) => {
                 self.state.push_activity(
                     crate::state::ActivityTone::Info,
@@ -1725,18 +1726,18 @@ impl DesktopShell {
                     // in the field rather than dismissing the modal.
                     return;
                 }
-                if let ConfigKind::Enum { choices } = &field.kind {
-                    if !choices.iter().any(|c| c == &value) {
-                        self.state.push_activity(
-                            ActivityTone::Warning,
-                            format!(
-                                "'{value}' is not a valid choice for {}. Allowed: {}",
-                                field.name,
-                                choices.join(", ")
-                            ),
-                        );
-                        return;
-                    }
+                if let ConfigKind::Enum { choices } = &field.kind
+                    && !choices.iter().any(|c| c == &value)
+                {
+                    self.state.push_activity(
+                        ActivityTone::Warning,
+                        format!(
+                            "'{value}' is not a valid choice for {}. Allowed: {}",
+                            field.name,
+                            choices.join(", ")
+                        ),
+                    );
+                    return;
                 }
                 secret_writes.push(PendingSecretWrite {
                     target: item.target.clone(),
@@ -2081,23 +2082,22 @@ impl DesktopShell {
                     if let Some(shell_weak) = cx
                         .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
                         .and_then(|s| s.0.clone())
+                        && let Some(shell) = shell_weak.upgrade()
                     {
-                        if let Some(shell) = shell_weak.upgrade() {
-                            let mock = serde_json::json!({
-                                "ok": true,
-                                "candidates": [{
-                                    "title": "mock/candidate",
-                                    "version": "0.1.0",
-                                    "description": "AODD mock candidate (DesktopShell mode)",
-                                    "author": "mock",
-                                    "status": "community",
-                                    "source": "github",
-                                    "toml": "[capsule]\nname = \"mock\"\nversion = \"0.1.0\"\n",
-                                    "repo": "mock/candidate",
-                                }]
-                            });
-                            shell.read(cx).inject_github_candidates(&mock);
-                        }
+                        let mock = serde_json::json!({
+                            "ok": true,
+                            "candidates": [{
+                                "title": "mock/candidate",
+                                "version": "0.1.0",
+                                "description": "AODD mock candidate (DesktopShell mode)",
+                                "author": "mock",
+                                "status": "community",
+                                "source": "github",
+                                "toml": "[capsule]\nname = \"mock\"\nversion = \"0.1.0\"\n",
+                                "repo": "mock/candidate",
+                            }]
+                        });
+                        shell.read(cx).inject_github_candidates(&mock);
                     }
                 }
                 "OpenStoreWindow" => {
@@ -3396,7 +3396,7 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
             &canonical_handle,
             &route_label,
             &publisher,
-            &session_label,
+            session_label,
             &version_label,
             log_entries,
             quick_open_url,
@@ -3880,11 +3880,13 @@ fn render_capsule_permissions_page(
         .child(render_capsule_section(
             "Environment",
             if granted_envs.is_empty() {
-                vec![render_capsule_empty(
-                    "No explicit env grants recorded for this capsule.",
-                    theme,
-                )
-                .into_any_element()]
+                vec![
+                    render_capsule_empty(
+                        "No explicit env grants recorded for this capsule.",
+                        theme,
+                    )
+                    .into_any_element(),
+                ]
             } else {
                 granted_envs
                     .iter()
@@ -3904,11 +3906,13 @@ fn render_capsule_permissions_page(
         .child(render_capsule_section(
             "Role / Capabilities",
             if capabilities.is_empty() {
-                vec![render_capsule_empty(
-                    "No capability grants surfaced for the active pane.",
-                    theme,
-                )
-                .into_any_element()]
+                vec![
+                    render_capsule_empty(
+                        "No capability grants surfaced for the active pane.",
+                        theme,
+                    )
+                    .into_any_element(),
+                ]
             } else {
                 capabilities
                     .iter()
@@ -4144,11 +4148,13 @@ fn render_capsule_api_page(
         .child(render_capsule_section(
             "Inbound",
             if inbound_rows.is_empty() {
-                vec![render_capsule_empty(
-                    "No inbound endpoints are exposed for this capsule.",
-                    theme,
-                )
-                .into_any_element()]
+                vec![
+                    render_capsule_empty(
+                        "No inbound endpoints are exposed for this capsule.",
+                        theme,
+                    )
+                    .into_any_element(),
+                ]
             } else {
                 inbound_rows
             },
@@ -4157,11 +4163,13 @@ fn render_capsule_api_page(
         .child(render_capsule_section(
             "Outbound",
             if granted_envs.is_empty() {
-                vec![render_capsule_empty(
-                    "No outbound credentials are bound to this capsule.",
-                    theme,
-                )
-                .into_any_element()]
+                vec![
+                    render_capsule_empty(
+                        "No outbound credentials are bound to this capsule.",
+                        theme,
+                    )
+                    .into_any_element(),
+                ]
             } else {
                 granted_envs
                     .iter()
@@ -4180,13 +4188,15 @@ fn render_capsule_api_page(
         ))
         .child(render_capsule_section(
             "Schema registry",
-            vec![render_capsule_detail_row(
-                "Resolved runtime",
-                active.runtime_label.as_deref().unwrap_or("unknown"),
-                "std.* alias resolution and schema hash materialize in this block.",
-                theme,
-            )
-            .into_any_element()],
+            vec![
+                render_capsule_detail_row(
+                    "Resolved runtime",
+                    active.runtime_label.as_deref().unwrap_or("unknown"),
+                    "std.* alias resolution and schema hash materialize in this block.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
             theme,
         ))
         .child(render_capsule_section(
@@ -4570,15 +4580,15 @@ fn capsule_service_tabs(
     if let Some(service) = active.served_by.as_deref() {
         tabs.push(service.to_string());
     }
-    if let Some(adapter) = active.adapter.as_deref() {
-        if !tabs.iter().any(|tab| tab == adapter) {
-            tabs.push(adapter.to_string());
-        }
+    if let Some(adapter) = active.adapter.as_deref()
+        && !tabs.iter().any(|tab| tab == adapter)
+    {
+        tabs.push(adapter.to_string());
     }
-    if let Some(web) = active_web {
-        if !tabs.iter().any(|tab| tab == &web.profile) {
-            tabs.push(web.profile.clone());
-        }
+    if let Some(web) = active_web
+        && !tabs.iter().any(|tab| tab == &web.profile)
+    {
+        tabs.push(web.profile.clone());
     }
     tabs
 }
@@ -4586,12 +4596,12 @@ fn capsule_service_tabs(
 fn unique_domain_count(network_logs: &[&crate::state::NetworkLogEntry]) -> usize {
     let mut hosts = Vec::new();
     for entry in network_logs {
-        if let Ok(url) = url::Url::parse(&entry.url) {
-            if let Some(host) = url.host_str() {
-                let host = host.to_string();
-                if !hosts.iter().any(|existing| existing == &host) {
-                    hosts.push(host);
-                }
+        if let Ok(url) = url::Url::parse(&entry.url)
+            && let Some(host) = url.host_str()
+        {
+            let host = host.to_string();
+            if !hosts.iter().any(|existing| existing == &host) {
+                hosts.push(host);
             }
         }
     }
@@ -4729,8 +4739,8 @@ fn render_permission_button<A: gpui::Action + Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::{
-        determine_image_format, fetch_image_from_url_with_headers, transcode_ico_to_png,
-        ImageFormat,
+        ImageFormat, determine_image_format, fetch_image_from_url_with_headers,
+        transcode_ico_to_png,
     };
 
     /// Real PNG header (8-byte magic + an IHDR chunk for a 1×1 image).

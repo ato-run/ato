@@ -28,7 +28,7 @@ mod tests;
 
 pub use endpoint::{EndpointAllocator, EndpointError};
 pub use orphan::{
-    detect_orphan_state, write_session_sentinel, OrphanCheckOutcome, SessionSentinel,
+    OrphanCheckOutcome, SessionSentinel, detect_orphan_state, write_session_sentinel,
 };
-pub use ready::{wait_for_ready, ReadyError, ReadyOutcome, ReadyProbeKind};
-pub use teardown::{teardown_reverse_topological, TeardownError, TeardownTarget};
+pub use ready::{ReadyError, ReadyOutcome, ReadyProbeKind, wait_for_ready};
+pub use teardown::{TeardownError, TeardownTarget, teardown_reverse_topological};

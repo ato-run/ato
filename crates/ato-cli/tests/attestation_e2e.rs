@@ -6,15 +6,15 @@
 use std::fs;
 use std::path::Path;
 
-use ato_cli::dependency_materializer::freeze::freeze_dep_tree;
 use ato_cli::dependency_materializer::DepDerivationKeyV1;
+use ato_cli::dependency_materializer::freeze::freeze_dep_tree;
 use ato_cli::dependency_materializer::{
     AttestationStrategy, CacheStrategy, DependencyMaterializationRequest, InstallPolicies,
     ManifestInputs, PlatformTriple, RuntimeSelection,
 };
 use capsule_core::attestation::{
-    blob_attestations_dir, generate_keypair, read_envelope, verify_envelope,
-    write_trust_root_pubkey, TrustRoot,
+    TrustRoot, blob_attestations_dir, generate_keypair, read_envelope, verify_envelope,
+    write_trust_root_pubkey,
 };
 use capsule_core::common::paths::ato_trust_roots_dir;
 use serial_test::serial;
@@ -149,7 +149,9 @@ fn freeze_emits_attestation_when_attestation_key_env_is_set() {
 #[serial]
 fn freeze_skips_attestation_when_key_env_is_unset() {
     let env = IsolatedAto::new();
-    std::env::remove_var("ATO_ATTESTATION_KEY");
+    unsafe {
+        std::env::remove_var("ATO_ATTESTATION_KEY");
+    }
 
     let deps = env.path().join("install");
     write_file(&deps, "lib.js", b"// shared\n");

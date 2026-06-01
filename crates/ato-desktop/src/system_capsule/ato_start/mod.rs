@@ -28,7 +28,7 @@ use anyhow::Result;
 use gpui::{AnyWindowHandle, App};
 use serde::{Deserialize, Serialize};
 
-use crate::localization::{tr, LocaleCode};
+use crate::localization::{LocaleCode, tr};
 use crate::state::GuestRoute;
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::content_windows::OpenContentWindows;
@@ -111,7 +111,10 @@ pub fn classify_query(value: &str) -> QueryIntent {
     } else if let Some(handle) = featured_sample_alias_to_github(v) {
         QueryIntent::CapsuleHandle(handle.to_string())
     } else {
-        QueryIntent::Invalid(format!("'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。", v))
+        QueryIntent::Invalid(format!(
+            "'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。",
+            v
+        ))
     }
 }
 
@@ -193,7 +196,7 @@ impl StartPageHistoryStore {
             });
         }
         self.entries
-            .sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at));
+            .sort_by_key(|e| std::cmp::Reverse(e.last_opened_at));
         self.entries.truncate(MAX_HISTORY);
     }
 }
@@ -218,11 +221,11 @@ const MAX_SCAN_DEPTH: usize = 3;
 /// `MAX_LOCAL_APPS` results.
 pub fn scan_local_apps(root: &Path) -> Vec<LocalAppInfo> {
     let mut results = Vec::new();
-    scan_dir(root, root, 0, &mut results);
+    scan_dir(root, 0, &mut results);
     results
 }
 
-fn scan_dir(root: &Path, dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) {
+fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) {
     if depth >= MAX_SCAN_DEPTH || out.len() >= MAX_LOCAL_APPS {
         return;
     }
@@ -259,7 +262,7 @@ fn scan_dir(root: &Path, dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) 
                 name,
             });
         } else {
-            scan_dir(root, &path, depth + 1, out);
+            scan_dir(&path, depth + 1, out);
         }
     }
 }
@@ -346,10 +349,10 @@ pub fn build_start_snapshot(
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }

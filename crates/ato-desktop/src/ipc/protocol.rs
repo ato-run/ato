@@ -8,17 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Normalised inbound request after transport parsing.
-#[derive(Debug, Clone)]
-pub struct IpcRequest {
-    /// `None` for legacy fire-and-forget envelopes.
-    pub id: Option<u64>,
-    /// Dot-separated namespace.action, e.g. `"capsule.context.get"`.
-    pub command: String,
-    /// Parsed payload; may be `Value::Null` if the command takes no params.
-    pub params: serde_json::Value,
-}
-
 /// Typed response delivered back to the caller.
 ///
 /// For system-capsule WebViews the response is serialised to JSON and
@@ -68,22 +57,6 @@ impl IpcResponse {
             "unknown_command",
             format!("unknown command: {command}"),
         )
-    }
-
-    /// Convenience: access denied / capability not granted.
-    pub fn forbidden(request_id: Option<u64>, reason: impl Into<String>) -> Self {
-        Self::error(request_id, "forbidden", reason)
-    }
-
-    /// Convenience: JSON schema validation failure.
-    pub fn validation_error(request_id: Option<u64>, detail: impl Into<String>) -> Self {
-        Self::error(request_id, "validation_error", detail)
-    }
-
-    pub fn request_id(&self) -> Option<u64> {
-        match self {
-            Self::Ok { request_id, .. } | Self::Error { request_id, .. } => *request_id,
-        }
     }
 }
 

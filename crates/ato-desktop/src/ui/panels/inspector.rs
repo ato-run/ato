@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, px, Div, FontWeight};
+use gpui::{Div, FontWeight, div, px};
 use gpui_component::scroll::ScrollableElement;
 
 use crate::state::{ActivityTone, AppState, CapsuleInspectorView};

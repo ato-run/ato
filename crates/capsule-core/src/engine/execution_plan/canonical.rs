@@ -290,8 +290,9 @@ mod tests {
     fn canonicalize_path_rejects_home_alias() {
         let temp = tempfile::tempdir().unwrap();
         let err = canonicalize_path(temp.path(), "~/dist").unwrap_err();
-        assert!(err
-            .message
-            .contains("home-directory aliases are not allowed"));
+        assert!(
+            err.message
+                .contains("home-directory aliases are not allowed")
+        );
     }
 }

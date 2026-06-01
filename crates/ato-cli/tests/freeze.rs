@@ -6,14 +6,14 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use ato_cli::dependency_materializer::freeze::{freeze_dep_tree, DerivationLock};
+use ato_cli::dependency_materializer::freeze::{DerivationLock, freeze_dep_tree};
 use ato_cli::dependency_materializer::{
     AttestationStrategy, CacheLookupResult, CacheStrategy, DepDerivationKeyV1,
     DependencyMaterializationRequest, DependencyMaterializer, InstallPolicies, ManifestInputs,
     PlatformTriple, RuntimeSelection, SessionDependencyMaterializer, StoreRefRecord,
 };
 use capsule_core::blob::BlobManifest;
-use capsule_core::common::store::{ato_store_dep_ref_path, BlobAddress};
+use capsule_core::common::store::{BlobAddress, ato_store_dep_ref_path};
 use serial_test::serial;
 
 mod support;
@@ -230,7 +230,7 @@ fn derivation_lock_serializes_concurrent_acquisitions() {
 #[test]
 #[serial]
 fn freeze_preserves_executable_bit_and_symlink() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     let env = IsolatedAto::new();
 

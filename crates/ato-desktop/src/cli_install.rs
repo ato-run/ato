@@ -19,8 +19,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path;
 
-use crate::bundle_paths::DesktopBundlePaths;
-
 /// Outcome of [`try_install`] — surfaced to the UI as a toast.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
@@ -46,32 +44,6 @@ pub fn first_launch_prompt_marker() -> Result<PathBuf> {
     ato_path("desktop/cli-install-prompted").context("could not resolve ato home directory")
 }
 
-pub fn first_launch_prompt_already_shown() -> bool {
-    first_launch_prompt_marker()
-        .map(|p| p.exists())
-        .unwrap_or(false)
-}
-
-pub fn record_first_launch_prompt_shown() -> Result<()> {
-    let marker = first_launch_prompt_marker()?;
-    if let Some(parent) = marker.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    fs::write(&marker, b"").with_context(|| format!("failed to write {}", marker.display()))?;
-    Ok(())
-}
-
-/// Resolve the in-bundle `ato` helper that should be installed.
-/// Returns an error if the caller-supplied executable directory does
-/// not contain the expected helper layout — exposing a typed error
-/// here keeps `app.rs` from string-matching on filesystem messages.
-pub fn locate_bundled_helper(current_exe: &Path) -> Result<PathBuf> {
-    DesktopBundlePaths::for_current_exe(current_exe.to_path_buf())
-        .locate_bundled_ato_helper()
-        .map_err(anyhow::Error::new)
-}
-
 /// Try to install the helper into a stable PATH location. Picks the
 /// first writable target in this priority order:
 ///   1. `/usr/local/bin/ato`     (macOS / Linux — preferred, matches
@@ -82,10 +54,10 @@ pub fn locate_bundled_helper(current_exe: &Path) -> Result<PathBuf> {
 pub fn try_install(helper: &Path) -> Result<InstallOutcome> {
     // Short-circuit: if `ato` already resolves and points at the
     // same helper, the install is already done.
-    if let Some(existing) = which_in_path("ato") {
-        if same_canonical(&existing, helper) {
-            return Ok(InstallOutcome::AlreadyInstalled { existing });
-        }
+    if let Some(existing) = which_in_path("ato")
+        && same_canonical(&existing, helper)
+    {
+        return Ok(InstallOutcome::AlreadyInstalled { existing });
     }
 
     let target_dir = pick_install_dir()?;
@@ -263,7 +235,9 @@ mod tests {
         // at the same helper. We can't fully exercise the symlink
         // path on every CI runner, so this asserts the early-return
         // branch.
-        std::env::set_var("PATH", tmp.to_string_lossy().to_string());
+        unsafe {
+            std::env::set_var("PATH", tmp.to_string_lossy().to_string());
+        }
         // PATH already containing the helper means the canonical-
         // match short-circuit fires.
         let outcome = try_install(&helper).expect("install should succeed");

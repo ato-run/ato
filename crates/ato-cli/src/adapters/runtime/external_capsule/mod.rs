@@ -6,16 +6,16 @@ mod spawn;
 use std::collections::HashMap;
 
 use anyhow::Result;
-use capsule_core::lockfile::{manifest_external_capsule_dependencies, CapsuleLock};
-use capsule_core::router::{ExecutionProfile, ManifestData};
 use capsule_core::CapsuleReporter;
+use capsule_core::lockfile::{CapsuleLock, manifest_external_capsule_dependencies};
+use capsule_core::router::{ExecutionProfile, ManifestData};
 
 use crate::reporters::CliReporter;
 
 use self::bindings::{connection_env_vars, merged_dependency_bindings, parse_cli_bindings};
 use self::cache::ensure_runtime_tree_for_dependency;
 use self::probe::wait_for_dependency_readiness;
-use self::spawn::{spawn_external_capsule_child, ExternalCapsuleChild};
+use self::spawn::{ExternalCapsuleChild, spawn_external_capsule_child};
 
 const EXTERNAL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const EXTERNAL_READY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);

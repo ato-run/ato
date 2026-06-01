@@ -11,9 +11,9 @@ use std::net::TcpListener;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::thread;
 #[cfg(unix)]
@@ -28,7 +28,7 @@ use serial_test::serial;
 #[cfg(unix)]
 use tempfile::TempDir;
 #[cfg(unix)]
-use zip::{write::FileOptions, ZipWriter};
+use zip::{ZipWriter, write::FileOptions};
 
 #[cfg(unix)]
 struct MockGitHubArchiveServer {

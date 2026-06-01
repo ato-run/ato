@@ -117,41 +117,57 @@ mod tests {
     #[test]
     fn disable_env_var_true_returns_true() {
         let _lock = env_lock();
-        std::env::set_var(ENV_DISABLE_PROMPT, "1");
+        unsafe {
+            std::env::set_var(ENV_DISABLE_PROMPT, "1");
+        }
         assert!(community_submit_prompt_disabled());
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
     }
 
     #[test]
     fn disable_env_var_true_string_returns_true() {
         let _lock = env_lock();
-        std::env::set_var(ENV_DISABLE_PROMPT, "true");
+        unsafe {
+            std::env::set_var(ENV_DISABLE_PROMPT, "true");
+        }
         assert!(community_submit_prompt_disabled());
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
     }
 
     #[test]
     fn disable_env_var_absent_returns_false() {
         let _lock = env_lock();
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         assert!(!community_submit_prompt_disabled());
     }
 
     #[test]
     fn prompt_suppressed_when_disabled_env_set() {
         let _lock = env_lock();
-        std::env::set_var(ENV_DISABLE_PROMPT, "1");
+        unsafe {
+            std::env::set_var(ENV_DISABLE_PROMPT, "1");
+        }
         let ctx = make_context();
         assert!(!should_prompt_for_community_submit(
             &ctx, false, false, false
         ));
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
     }
 
     #[test]
     fn prompt_suppressed_in_json_mode() {
         let _lock = env_lock();
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = make_context();
         assert!(!should_prompt_for_community_submit(
             &ctx, true, false, false
@@ -160,7 +176,9 @@ mod tests {
 
     #[test]
     fn prompt_suppressed_in_background_mode() {
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = make_context();
         assert!(!should_prompt_for_community_submit(
             &ctx, false, true, false
@@ -169,7 +187,9 @@ mod tests {
 
     #[test]
     fn prompt_suppressed_in_plan_only_mode() {
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = make_context();
         assert!(!should_prompt_for_community_submit(
             &ctx, false, false, true
@@ -226,7 +246,9 @@ mod tests {
         // returns false.  Document that the guard is not bypassed by flag
         // combination alone.
         let _lock = env_lock();
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = make_context();
         // We can't assert true here (tests run headless), but we can assert
         // the function does not panic and agrees with TTY state.
@@ -240,7 +262,9 @@ mod tests {
         // ExistingRepoToml origin: the prompt would fire if TTY were
         // available.  In non-TTY (test env) it must remain suppressed.
         let _lock = env_lock();
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = CommunitySubmitPromptContext {
             origin: CommunitySubmitOrigin::ExistingRepoToml,
             ..make_context()
@@ -253,7 +277,9 @@ mod tests {
     #[test]
     fn prompt_suppressed_for_local_override_origin_non_tty() {
         let _lock = env_lock();
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = CommunitySubmitPromptContext {
             origin: CommunitySubmitOrigin::LocalOverride,
             ..make_context()
@@ -266,7 +292,9 @@ mod tests {
     #[test]
     fn prompt_suppressed_for_inferred_origin_non_tty() {
         let _lock = env_lock();
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = CommunitySubmitPromptContext {
             origin: CommunitySubmitOrigin::Inferred,
             ..make_context()
@@ -279,7 +307,9 @@ mod tests {
     #[test]
     fn prompt_suppressed_when_json_and_background_together() {
         let _lock = env_lock();
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = make_context();
         assert!(!should_prompt_for_community_submit(&ctx, true, true, false));
     }
@@ -287,7 +317,9 @@ mod tests {
     #[test]
     fn prompt_suppressed_when_json_and_plan_only_together() {
         let _lock = env_lock();
-        std::env::remove_var(ENV_DISABLE_PROMPT);
+        unsafe {
+            std::env::remove_var(ENV_DISABLE_PROMPT);
+        }
         let ctx = make_context();
         assert!(!should_prompt_for_community_submit(&ctx, true, false, true));
     }

@@ -2,18 +2,18 @@ use anyhow::Result;
 use capsule_core::engine::execution_graph::{ExecutionGraphBuilder, ExecutionGraphNode};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
 use capsule_core::lockfile::{
-    manifest_external_capsule_dependencies, verify_lockfile_external_dependencies,
-    CAPSULE_LOCK_FILE_NAME,
+    CAPSULE_LOCK_FILE_NAME, manifest_external_capsule_dependencies,
+    verify_lockfile_external_dependencies,
 };
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::application::execution_graph_adapter::build_input_from_external_dependencies;
-use crate::application::graph_views::{build_declared_only_bundle, DependencyContracts};
+use crate::application::graph_views::{DependencyContracts, build_declared_only_bundle};
 use crate::application::source_inference::{
     materialize_run_from_compatibility, materialize_run_from_source_only,
 };
@@ -464,10 +464,12 @@ mod tests {
         let input = build_input_from_external_dependencies(&dependencies, None);
         let graph = ExecutionGraphBuilder::build(input);
 
-        assert!(graph
-            .nodes
-            .iter()
-            .all(|node| !matches!(node, ExecutionGraphNode::Provider { .. })));
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .all(|node| !matches!(node, ExecutionGraphNode::Provider { .. }))
+        );
     }
 
     fn locked_dependency(alias: &str) -> capsule_core::lockfile::LockedCapsuleDependency {

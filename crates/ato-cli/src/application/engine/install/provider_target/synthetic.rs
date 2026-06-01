@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use semver::Version;

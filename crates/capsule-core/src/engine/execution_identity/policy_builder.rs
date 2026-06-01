@@ -45,7 +45,7 @@
 //!   explicitly)
 
 use super::{ExecutionIdentityInputV2, PolicyIdentityV2, Tracked};
-use crate::engine::execution_graph::{identity_labels, ExecutionGraph};
+use crate::engine::execution_graph::{ExecutionGraph, identity_labels};
 
 /// Typed entry point for producing a [`PolicyIdentityV2`].
 ///

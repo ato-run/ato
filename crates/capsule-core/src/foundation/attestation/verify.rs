@@ -6,7 +6,7 @@
 //! base64-encoded 32-byte public key and a key id matching the envelope's
 //! claim.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signature as DalekSignature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -145,7 +145,7 @@ fn fingerprint(public_key: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::sign::{generate_keypair, sign_envelope, AttestationKey};
+    use super::super::sign::{AttestationKey, generate_keypair, sign_envelope};
     use super::super::types::*;
     use super::*;
 

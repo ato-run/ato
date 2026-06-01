@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use blake3::Hasher;
-use capsule_core::handle::{normalize_capsule_handle, CanonicalHandle};
+use capsule_core::handle::{CanonicalHandle, normalize_capsule_handle};
 use fs2::FileExt;
 
-use crate::app_control::{resolve_local_plan_for_session, StoredSessionInfo};
+use crate::app_control::{StoredSessionInfo, resolve_local_plan_for_session};
 use crate::application::build_materialization as bm;
 use crate::application::launch_materialization as lm;
 use crate::runtime::tree as runtime_tree;
@@ -68,6 +68,7 @@ impl ProjectionKey {
     }
 
     /// Short human-readable label: `"v1:<hex12>"`. Use in logs and display only.
+    #[allow(dead_code)]
     pub(crate) fn display_key(&self) -> String {
         format!("v1:{}", &self.full_hex[..12])
     }
@@ -91,6 +92,7 @@ pub(crate) enum ProjectionStatus {
 }
 
 /// Result of resolving (or creating) a content-addressed projection root.
+#[allow(dead_code)]
 pub(crate) struct ProjectionResolution {
     pub(crate) projection_key: ProjectionKey,
     /// `<projections_dir>/v1/<full_key>/source` — projected source files.

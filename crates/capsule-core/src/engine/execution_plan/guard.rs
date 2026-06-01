@@ -10,7 +10,7 @@ use crate::execution_plan::model::{
     ExecutionDriver, ExecutionPlan, ExecutionRuntime, ExecutionTier,
 };
 use crate::lockfile::{
-    lockfile_output_path, resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME,
+    CAPSULE_LOCK_FILE_NAME, lockfile_output_path, resolve_existing_lockfile_path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

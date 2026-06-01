@@ -86,11 +86,11 @@ impl TerminalHarness {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            if let Ok(event) = serde_json::from_str::<Value>(line.trim()) {
-                if let Some(sid) = event.get("session_id").and_then(|s| s.as_str()) {
-                    harness.session_id = sid.to_string();
-                    break;
-                }
+            if let Ok(event) = serde_json::from_str::<Value>(line.trim())
+                && let Some(sid) = event.get("session_id").and_then(|s| s.as_str())
+            {
+                harness.session_id = sid.to_string();
+                break;
             }
         }
 
@@ -104,7 +104,7 @@ impl TerminalHarness {
 
     /// Send text as a TerminalInput command (auto base64-encodes).
     fn send_input(&mut self, text: &str) {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let cmd = serde_json::json!({
             "type": "terminal_input",
             "session_id": self.session_id,
@@ -168,20 +168,19 @@ impl TerminalHarness {
 
     /// Collect decoded terminal output until `needle` is found or timeout.
     fn expect_output_containing(&mut self, needle: &str, timeout: Duration) -> bool {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let deadline = Instant::now() + timeout;
         let mut accumulated = String::new();
         while Instant::now() < deadline {
             let remaining = deadline - Instant::now();
             if let Some(event) = self.read_event(remaining) {
-                if event.get("event").and_then(|e| e.as_str()) == Some("terminal_data") {
-                    if let Some(b64) = event.get("data_b64").and_then(|d| d.as_str()) {
-                        if let Ok(bytes) = STANDARD.decode(b64) {
-                            accumulated.push_str(&String::from_utf8_lossy(&bytes));
-                            if accumulated.contains(needle) {
-                                return true;
-                            }
-                        }
+                if event.get("event").and_then(|e| e.as_str()) == Some("terminal_data")
+                    && let Some(b64) = event.get("data_b64").and_then(|d| d.as_str())
+                    && let Ok(bytes) = STANDARD.decode(b64)
+                {
+                    accumulated.push_str(&String::from_utf8_lossy(&bytes));
+                    if accumulated.contains(needle) {
+                        return true;
                     }
                 }
                 if event.get("event").and_then(|e| e.as_str()) == Some("terminal_exited") {
@@ -201,10 +200,10 @@ impl TerminalHarness {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let remaining = deadline - Instant::now();
-            if let Some(event) = self.read_event(remaining) {
-                if event.get("event").and_then(|e| e.as_str()) == Some("terminal_exited") {
-                    return event.get("exit_code").and_then(|c| c.as_i64());
-                }
+            if let Some(event) = self.read_event(remaining)
+                && event.get("event").and_then(|e| e.as_str()) == Some("terminal_exited")
+            {
+                return event.get("exit_code").and_then(|c| c.as_i64());
             }
         }
         None
@@ -495,7 +494,7 @@ fn t11_wrong_session_id_is_ignored() {
 
     // Send input with the wrong session_id — it should be silently ignored
     // (the shell should NOT receive this)
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     let bad_cmd = serde_json::json!({
         "type": "terminal_input",
         "session_id": "wrong-session-id",
