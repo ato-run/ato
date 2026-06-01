@@ -519,7 +519,8 @@ pub fn open_consent_window_for_route_with_client(
     let (display_name, display_handle) = match &route {
         GuestRoute::CapsuleHandle { handle, label, .. } => {
             let pretty_name = label
-                .split(['/', '@', '-', '_']).rfind(|s| !s.is_empty())
+                .split(['/', '@', '-', '_'])
+                .rfind(|s| !s.is_empty())
                 .unwrap_or(label.as_str())
                 .to_string();
             (pretty_name, handle.clone())
@@ -892,7 +893,8 @@ pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyW
         let (name, handle) = match r {
             GuestRoute::CapsuleHandle { handle, label, .. } => {
                 let pretty = label
-                    .split(['/', '@', '-', '_']).rfind(|s| !s.is_empty())
+                    .split(['/', '@', '-', '_'])
+                    .rfind(|s| !s.is_empty())
                     .unwrap_or(label.as_str())
                     .to_string();
                 (pretty, handle.clone())
@@ -1049,13 +1051,14 @@ pub fn start_boot_launch(
             })),
         );
         if let Ok(ref session) = result
-            && session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl {
-                super::app_capsule_shell::wait_for_session_upstream_ready(
-                    session,
-                    &abort_for_thread,
-                    Duration::from_secs(60),
-                );
-            }
+            && session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl
+        {
+            super::app_capsule_shell::wait_for_session_upstream_ready(
+                session,
+                &abort_for_thread,
+                Duration::from_secs(60),
+            );
+        }
         if abort_for_thread.load(Ordering::Acquire) {
             if let Ok(ref session) = result {
                 let _ = crate::orchestrator::stop_guest_session(&session.session_id);

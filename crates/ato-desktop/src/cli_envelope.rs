@@ -183,9 +183,10 @@ pub fn parse_cli_error_event(stderr: &str) -> Option<AtoCliErrorEventDto> {
             continue;
         }
         if let Ok(event) = serde_json::from_str::<AtoCliErrorEventDto>(line)
-            && event.level == "fatal" {
-                return Some(event);
-            }
+            && event.level == "fatal"
+        {
+            return Some(event);
+        }
     }
     None
 }
