@@ -314,7 +314,7 @@ fn capture_hwnd_png_data_url(hwnd: HWND) -> Result<String, String> {
     }
 }
 
-unsafe fn capture_bitmap_to_png_data_url(
+fn capture_bitmap_to_png_data_url(
     hwnd: HWND,
     window_dc: windows_sys::Win32::Graphics::Gdi::HDC,
     memory_dc: windows_sys::Win32::Graphics::Gdi::HDC,
@@ -324,15 +324,19 @@ unsafe fn capture_bitmap_to_png_data_url(
 ) -> Result<String, String> {
     use base64::Engine as _;
 
-    let previous = SelectObject(memory_dc, bitmap as HGDIOBJ);
-    if previous.is_null() {
-        return Err(last_error_context("SelectObject"));
-    }
-
-    let rendered = PrintWindow(hwnd, memory_dc, 2);
-    if rendered == 0 && BitBlt(memory_dc, 0, 0, width, height, window_dc, 0, 0, SRCCOPY) == 0 {
-        let _ = SelectObject(memory_dc, previous);
-        return Err(last_error_context("PrintWindow/BitBlt"));
+    let (previous, rendered) = unsafe {
+        let prev = SelectObject(memory_dc, bitmap as HGDIOBJ);
+        if prev.is_null() {
+            return Err(last_error_context("SelectObject"));
+        }
+        let rendered = PrintWindow(hwnd, memory_dc, 2);
+        (prev, rendered)
+    };
+    unsafe {
+        if rendered == 0 && BitBlt(memory_dc, 0, 0, width, height, window_dc, 0, 0, SRCCOPY) == 0 {
+            let _ = SelectObject(memory_dc, previous);
+            return Err(last_error_context("PrintWindow/BitBlt"));
+        }
     }
 
     let mut info = BITMAPINFO {
@@ -357,18 +361,20 @@ unsafe fn capture_bitmap_to_png_data_url(
         }; 1],
     };
     let mut bgra = vec![0u8; (width as usize) * (height as usize) * 4];
-    let rows = GetDIBits(
-        memory_dc,
-        bitmap,
-        0,
-        height as u32,
-        bgra.as_mut_ptr().cast(),
-        &mut info,
-        DIB_RGB_COLORS,
-    );
-    let _ = SelectObject(memory_dc, previous);
-    if rows == 0 {
-        return Err(last_error_context("GetDIBits"));
+    unsafe {
+        let rows = GetDIBits(
+            memory_dc,
+            bitmap,
+            0,
+            height as u32,
+            bgra.as_mut_ptr().cast(),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        let _ = SelectObject(memory_dc, previous);
+        if rows == 0 {
+            return Err(last_error_context("GetDIBits"));
+        }
     }
 
     for pixel in bgra.chunks_exact_mut(4) {
