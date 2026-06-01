@@ -772,22 +772,23 @@ impl WebViewManager {
                 }
             }
         } else if matches!(reuse_action, WebViewReuseAction::Navigate)
-            && let Some(existing) = self.views.get_mut(&active.pane_id) {
-                if let Err(error) = existing.webview.load_url(&route_key) {
-                    state.push_activity(
-                        ActivityTone::Error,
-                        format!("Failed to navigate child webview: {error}"),
-                    );
-                    // load_url failed: don't force-promote to Mounted below —
-                    // the new navigation never happened and the user should
-                    // see something other than a confidently-mounted stale
-                    // page.
-                    navigate_load_url_failed = true;
-                } else {
-                    existing.route = active.route.clone();
-                    existing.route_key = route_key.clone();
-                }
+            && let Some(existing) = self.views.get_mut(&active.pane_id)
+        {
+            if let Err(error) = existing.webview.load_url(&route_key) {
+                state.push_activity(
+                    ActivityTone::Error,
+                    format!("Failed to navigate child webview: {error}"),
+                );
+                // load_url failed: don't force-promote to Mounted below —
+                // the new navigation never happened and the user should
+                // see something other than a confidently-mounted stale
+                // page.
+                navigate_load_url_failed = true;
+            } else {
+                existing.route = active.route.clone();
+                existing.route_key = route_key.clone();
             }
+        }
 
         // navigate_to_url always resets the focused pane to
         // `WebSessionState::Launching`. The Rebuild branch above
@@ -927,42 +928,43 @@ impl WebViewManager {
             // Drain PTY output and push to xterm.js via evaluate_script.
             // Guard on page_loaded so xterm.js is fully initialised before we write.
             if self.automation.is_page_loaded(active.pane_id)
-                && let Some(view) = self.views.get_mut(&active.pane_id) {
-                    if let Some(proc) = self.terminal_sessions.get(&session_id) {
-                        let mut disconnected = false;
-                        loop {
-                            match proc.try_recv_output() {
-                                TryRecvOutput::Data(b64) => {
-                                    let json = serde_json::to_string(&b64).unwrap_or_default();
-                                    let script = format!("window.__ato_write_terminal({json});");
-                                    if let Err(e) = view.webview.evaluate_script(&script) {
-                                        warn!(error = %e, "evaluate_script for terminal output failed");
-                                    }
-                                }
-                                TryRecvOutput::Empty => break,
-                                TryRecvOutput::Disconnected => {
-                                    let _ = view
-                                        .webview
-                                        .evaluate_script("window.__ato_terminal_exit(0);");
-                                    disconnected = true;
-                                    break;
+                && let Some(view) = self.views.get_mut(&active.pane_id)
+            {
+                if let Some(proc) = self.terminal_sessions.get(&session_id) {
+                    let mut disconnected = false;
+                    loop {
+                        match proc.try_recv_output() {
+                            TryRecvOutput::Data(b64) => {
+                                let json = serde_json::to_string(&b64).unwrap_or_default();
+                                let script = format!("window.__ato_write_terminal({json});");
+                                if let Err(e) = view.webview.evaluate_script(&script) {
+                                    warn!(error = %e, "evaluate_script for terminal output failed");
                                 }
                             }
-                        }
-                        if disconnected {
-                            self.terminal_sessions.remove(&session_id);
-                            self.completed_terminal_sessions.insert(session_id.clone());
+                            TryRecvOutput::Empty => break,
+                            TryRecvOutput::Disconnected => {
+                                let _ = view
+                                    .webview
+                                    .evaluate_script("window.__ato_terminal_exit(0);");
+                                disconnected = true;
+                                break;
+                            }
                         }
                     }
-
-                    if let Some(error_message) = self.pending_terminal_errors.remove(&session_id) {
-                        let json = serde_json::to_string(&error_message).unwrap_or_default();
-                        let script = format!("window.__ato_terminal_error({json});");
-                        if let Err(e) = view.webview.evaluate_script(&script) {
-                            warn!(session_id = %session_id, error = %e, "failed to report terminal startup error");
-                        }
+                    if disconnected {
+                        self.terminal_sessions.remove(&session_id);
+                        self.completed_terminal_sessions.insert(session_id.clone());
                     }
                 }
+
+                if let Some(error_message) = self.pending_terminal_errors.remove(&session_id) {
+                    let json = serde_json::to_string(&error_message).unwrap_or_default();
+                    let script = format!("window.__ato_terminal_error({json});");
+                    if let Err(e) = view.webview.evaluate_script(&script) {
+                        warn!(session_id = %session_id, error = %e, "failed to report terminal startup error");
+                    }
+                }
+            }
         }
 
         if let Some(existing) = self.views.get_mut(&active.pane_id) {
@@ -1433,10 +1435,11 @@ impl WebViewManager {
             match event {
                 ShellEvent::UrlChanged { pane_id, url } => {
                     if let Some(view) = self.views.get_mut(pane_id)
-                        && let Ok(parsed) = url.parse() {
-                            view.route = GuestRoute::ExternalUrl(parsed);
-                            view.route_key = url.clone();
-                        }
+                        && let Ok(parsed) = url.parse()
+                    {
+                        view.route = GuestRoute::ExternalUrl(parsed);
+                        view.route_key = url.clone();
+                    }
                 }
                 ShellEvent::TerminalInput {
                     session_id,
@@ -1494,9 +1497,10 @@ impl WebViewManager {
                             request_id, payload_json
                         );
                         if let Some(view) = self.views.get_mut(pid)
-                            && let Err(e) = view.webview.evaluate_script(&script) {
-                                warn!(pane_id = pid, error = %e, "failed to deliver GetSecrets response");
-                            }
+                            && let Err(e) = view.webview.evaluate_script(&script)
+                        {
+                            warn!(pane_id = pid, error = %e, "failed to deliver GetSecrets response");
+                        }
                     }
                 }
                 _ => {}
@@ -1970,9 +1974,10 @@ impl WebViewManager {
         // navigate_to_url() always sets Launching, so the user can explicitly retry by
         // re-entering the URL in the omnibar.
         if let Some(active) = state.active_web_pane()
-            && active.session == WebSessionState::LaunchFailed {
-                return;
-            }
+            && active.session == WebSessionState::LaunchFailed
+        {
+            return;
+        }
 
         // Second gate: if a config modal is open for THIS handle, the
         // user is mid-edit. Re-spawning would just re-trip the same
@@ -1981,18 +1986,20 @@ impl WebViewManager {
         // collapses this guard on the next render and re-arms the
         // launch with the freshly stored secrets.
         if let Some(pending) = &state.pending_config
-            && pending.handle == handle {
-                return;
-            }
+            && pending.handle == handle
+        {
+            return;
+        }
 
         // Same gate, mirror for E302 consent: if the consent modal is
         // open for THIS handle, the user is mid-decision. The Approve
         // handler clears `pending_consent` and marks the retry budget;
         // both branches collapse this guard on the next render.
         if let Some(pending) = &state.pending_consent
-            && pending.handle == handle {
-                return;
-            }
+            && pending.handle == handle
+        {
+            return;
+        }
 
         // #117 — same gate for the unified resolution modal. Without
         // this, every render frame after `LaunchError::PreflightAggregate`
@@ -2006,9 +2013,10 @@ impl WebViewManager {
         // collapses this guard on the next render so the freshly-
         // resolved retry can fire exactly once.
         if let Some(pending) = &state.pending_resolution
-            && pending.handle == handle {
-                return;
-            }
+            && pending.handle == handle
+        {
+            return;
+        }
 
         info!(pane_id, handle, "queuing guest session launch");
         let (sender, receiver) = channel();
@@ -2097,9 +2105,10 @@ impl WebViewManager {
             }
 
             if let Err(error) = sender.send(result)
-                && let Ok(session) = error.0.session {
-                    let _ = stop_guest_session(&session.session_id);
-                }
+                && let Ok(session) = error.0.session
+            {
+                let _ = stop_guest_session(&session.session_id);
+            }
         });
 
         foreground_executor
@@ -2678,9 +2687,10 @@ impl WebViewManager {
                 if auth_policy.classify(&uri) == AuthMode::BrowserRequired && !auth_flow {
                     let pane_id = pane_binding.load(Ordering::Relaxed);
                     if let Ok(mut q) = signals.lock()
-                        && !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
-                            q.push(AuthHandoffSignal { pane_id, url: uri });
-                        }
+                        && !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id)
+                    {
+                        q.push(AuthHandoffSignal { pane_id, url: uri });
+                    }
                     false // block navigation inside WebView
                 } else {
                     true
@@ -3250,17 +3260,18 @@ impl WebViewManager {
         ));
 
         if let Some(view) = self.views.get_mut(&pane_id)
-            && let Err(error) = view.set_visible(visible) {
-                state.push_activity(
-                    ActivityTone::Error,
-                    format!("Failed to update child webview visibility: {error}"),
-                );
-                log_devtools(format!(
-                    "visibility change failed pane={} to={} error={error}",
-                    pane_id, visible
-                ));
-                return;
-            }
+            && let Err(error) = view.set_visible(visible)
+        {
+            state.push_activity(
+                ActivityTone::Error,
+                format!("Failed to update child webview visibility: {error}"),
+            );
+            log_devtools(format!(
+                "visibility change failed pane={} to={} error={error}",
+                pane_id, visible
+            ));
+            return;
+        }
 
         self.visibility_cache.insert(pane_id, visible);
     }
@@ -5291,34 +5302,37 @@ pub(crate) fn dispatch_automation_command(
 
                 if found {
                     if let Ok(mut guard) = tx.lock()
-                        && let Some(sender) = guard.take() {
-                            let _ = sender.send(Ok(serde_json::json!({ "found": true })));
-                        }
+                        && let Some(sender) = guard.take()
+                    {
+                        let _ = sender.send(Ok(serde_json::json!({ "found": true })));
+                    }
                 } else if deadline.is_some_and(|d| Instant::now() < d) {
                     // Re-queue for retry; the foreground polling task retries within 50ms.
                     let remaining_ms = deadline
                         .map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u64)
                         .unwrap_or(0);
                     if let Ok(mut guard) = tx.lock()
-                        && let Some(original_tx) = guard.take() {
-                            let new_req = PendingAutomationRequest::new(
-                                pane_id,
-                                WaitFor {
-                                    selector: selector_clone.clone(),
-                                    timeout_ms: remaining_ms,
-                                },
-                                original_tx,
-                            );
-                            host_clone.requeue(vec![new_req]);
-                            host_clone
-                                .has_pending
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
+                        && let Some(original_tx) = guard.take()
+                    {
+                        let new_req = PendingAutomationRequest::new(
+                            pane_id,
+                            WaitFor {
+                                selector: selector_clone.clone(),
+                                timeout_ms: remaining_ms,
+                            },
+                            original_tx,
+                        );
+                        host_clone.requeue(vec![new_req]);
+                        host_clone
+                            .has_pending
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                 } else {
                     if let Ok(mut guard) = tx.lock()
-                        && let Some(sender) = guard.take() {
-                            let _ = sender.send(Err("wait_for timed out".into()));
-                        }
+                        && let Some(sender) = guard.take()
+                    {
+                        let _ = sender.send(Err("wait_for timed out".into()));
+                    }
                 }
             }) {
                 req.send(Err(e.to_string()));
@@ -5332,21 +5346,24 @@ pub(crate) fn dispatch_automation_command(
                 move || match inner_rx.recv_timeout(Duration::from_secs(10)) {
                     Ok(Ok(v)) => {
                         if let Ok(mut guard) = req_tx.lock()
-                            && let Some(sender) = guard.take() {
-                                let _ = sender.send(Ok(v));
-                            }
+                            && let Some(sender) = guard.take()
+                        {
+                            let _ = sender.send(Ok(v));
+                        }
                     }
                     Ok(Err(e)) => {
                         if let Ok(mut guard) = req_tx.lock()
-                            && let Some(sender) = guard.take() {
-                                let _ = sender.send(Err(e));
-                            }
+                            && let Some(sender) = guard.take()
+                        {
+                            let _ = sender.send(Err(e));
+                        }
                     }
                     Err(_) => {
                         if let Ok(mut guard) = req_tx.lock()
-                            && let Some(sender) = guard.take() {
-                                let _ = sender.send(Err("screenshot timed out".into()));
-                            }
+                            && let Some(sender) = guard.take()
+                        {
+                            let _ = sender.send(Err("screenshot timed out".into()));
+                        }
                     }
                 },
             );

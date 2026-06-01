@@ -98,13 +98,14 @@ struct DesktopLoginEvent {
 pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
     // Only one login window at a time.
     if let Some(slot) = cx.try_global::<AuthLoginWindowSlot>()
-        && let Some(handle) = slot.0 {
-            let result = handle.update(cx, |_, window, _| window.activate_window());
-            if result.is_ok() {
-                return Ok(());
-            }
-            cx.set_global(AuthLoginWindowSlot(None));
+        && let Some(handle) = slot.0
+    {
+        let result = handle.update(cx, |_, window, _| window.activate_window());
+        if result.is_ok() {
+            return Ok(());
         }
+        cx.set_global(AuthLoginWindowSlot(None));
+    }
 
     let ato_bin = resolve_ato_binary().context("ato binary not found")?;
     tracing::info!(ato_bin = %ato_bin.display(), "open_auth_login_window: spawning ato login --desktop-webview");

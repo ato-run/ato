@@ -84,8 +84,7 @@ pub struct RuntimeSettings {
 }
 
 /// Backend engine selection for the three capsule execution categories.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct BackendEngineSettings {
     /// Engine for source-execution capsules (e.g. nacelle).
     #[serde(default)]
@@ -97,7 +96,6 @@ pub struct BackendEngineSettings {
     #[serde(default)]
     pub wasm: WasmBackendEngine,
 }
-
 
 /// Source execution engine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -279,8 +277,7 @@ pub struct DesktopSettings {
     pub pinned_capsules: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct OnboardingSettings {
     #[serde(default)]
     pub completed: bool,
@@ -289,7 +286,6 @@ pub struct OnboardingSettings {
     #[serde(default)]
     pub version: u16,
 }
-
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ControlBarSettings {
@@ -955,9 +951,10 @@ impl SecretStore {
 pub fn secrets_path_display() -> Option<String> {
     let ato_home = ato_path("credentials/secrets/default.age").ok()?;
     if let Ok(home) = home_dir_path()
-        && let Ok(rel) = ato_home.strip_prefix(&home) {
-            return Some(format!("~/{}", rel.display()));
-        }
+        && let Ok(rel) = ato_home.strip_prefix(&home)
+    {
+        return Some(format!("~/{}", rel.display()));
+    }
     Some(ato_home.display().to_string())
 }
 

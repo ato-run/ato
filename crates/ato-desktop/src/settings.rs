@@ -453,9 +453,10 @@ fn active_or_matching_capsule(
 ) -> Option<crate::state::CapsuleInspectorView> {
     // Fast path: the focused pane is the capsule pane.
     if let Some(active) = state.active_capsule_inspector()
-        && active.pane_id == pane_id {
-            return Some(active);
-        }
+        && active.pane_id == pane_id
+    {
+        return Some(active);
+    }
     // Fallback: the HostPanel pane is focused (capsule detail page) but the capsule
     // pane is in the background — search all panes directly.
     state.capsule_inspector_by_pane_id(pane_id)
@@ -493,15 +494,17 @@ fn patch_global_settings(state: &mut AppState, payload: Value) -> Result<Value, 
 
     state.update_config(|config| {
         if let Some(value) = patch.get("theme").and_then(Value::as_str)
-            && let Some(theme) = parse_theme(value) {
-                config.general.theme = theme;
-                changed.push("theme".to_string());
-            }
+            && let Some(theme) = parse_theme(value)
+        {
+            config.general.theme = theme;
+            changed.push("theme".to_string());
+        }
         if let Some(value) = patch.get("language").and_then(Value::as_str)
-            && let Some(language) = parse_language(value) {
-                config.general.language = language;
-                changed.push("language".to_string());
-            }
+            && let Some(language) = parse_language(value)
+        {
+            config.general.language = language;
+            changed.push("language".to_string());
+        }
         if let Some(value) = patch.get("showInTray").and_then(Value::as_bool) {
             config.general.show_in_tray = value;
             changed.push("showInTray".to_string());
@@ -515,19 +518,21 @@ fn patch_global_settings(state: &mut AppState, payload: Value) -> Result<Value, 
             changed.push("showWhatsNew".to_string());
         }
         if let Some(value) = patch.get("updateChannel").and_then(Value::as_str)
-            && let Some(channel) = parse_update_channel(value) {
-                config.updates.channel = channel;
-                changed.push("updateChannel".to_string());
-            }
+            && let Some(channel) = parse_update_channel(value)
+        {
+            config.updates.channel = channel;
+            changed.push("updateChannel".to_string());
+        }
         if let Some(value) = patch.get("automaticUpdates").and_then(Value::as_bool) {
             config.updates.automatic_updates = value;
             changed.push("automaticUpdates".to_string());
         }
         if let Some(value) = patch.get("logLevel").and_then(Value::as_str)
-            && let Some(level) = parse_log_level(value) {
-                config.developer.log_level = level;
-                changed.push("logLevel".to_string());
-            }
+            && let Some(level) = parse_log_level(value)
+        {
+            config.developer.log_level = level;
+            changed.push("logLevel".to_string());
+        }
         if let Some(value) = patch.get("telemetry").and_then(Value::as_bool) {
             config.developer.telemetry = value;
             changed.push("telemetry".to_string());
@@ -711,9 +716,10 @@ fn patch_capsule_policy(
         let override_entry = store.override_for_mut(&handle);
         for op in &ops {
             if apply_capsule_policy_op(override_entry, op)
-                && let Some(name) = op.get("op").and_then(Value::as_str) {
-                    changed.push(name.to_string());
-                }
+                && let Some(name) = op.get("op").and_then(Value::as_str)
+            {
+                changed.push(name.to_string());
+            }
         }
     });
 
@@ -915,9 +921,10 @@ fn expand_tilde(raw: &str) -> PathBuf {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
     }
     if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
     PathBuf::from(raw)
 }
 
@@ -988,43 +995,48 @@ fn apply_desktop_patch_immediate(
         changed.push("focusViewEnabled".to_string());
     }
     if let Some(v) = patch.get("startupSurface").and_then(Value::as_str)
-        && let Some(s) = parse_startup_surface(v) {
-            config.desktop.startup_surface = s;
-            changed.push("startupSurface".to_string());
-        }
+        && let Some(s) = parse_startup_surface(v)
+    {
+        config.desktop.startup_surface = s;
+        changed.push("startupSurface".to_string());
+    }
     if let Some(v) = patch
         .get("contentWindowDefaultPresentation")
         .and_then(Value::as_str)
-        && let Some(p) = parse_content_window_presentation(v) {
-            config.desktop.content_window_default_presentation = p;
-            changed.push("contentWindowDefaultPresentation".to_string());
-        }
+        && let Some(p) = parse_content_window_presentation(v)
+    {
+        config.desktop.content_window_default_presentation = p;
+        changed.push("contentWindowDefaultPresentation".to_string());
+    }
     if let Some(v) = patch.get("capsuleOpenMode").and_then(Value::as_str)
-        && let Some(mode) = parse_capsule_open_mode(v) {
-            config.desktop.capsule_open_mode = mode;
-            changed.push("capsuleOpenMode".to_string());
-        }
+        && let Some(mode) = parse_capsule_open_mode(v)
+    {
+        config.desktop.capsule_open_mode = mode;
+        changed.push("capsuleOpenMode".to_string());
+    }
     if let Some(v) = patch.get("restoreWindowFrames").and_then(Value::as_bool) {
         config.desktop.restore_window_frames = v;
         changed.push("restoreWindowFrames".to_string());
     }
     if let Some(v) = patch.get("windowCloseBehavior").and_then(Value::as_str)
-        && let Some(behavior) = parse_window_close_behavior(v) {
-            config.desktop.window_close_behavior = behavior;
-            changed.push("windowCloseBehavior".to_string());
-        }
+        && let Some(behavior) = parse_window_close_behavior(v)
+    {
+        config.desktop.window_close_behavior = behavior;
+        changed.push("windowCloseBehavior".to_string());
+    }
     if let Some(v) = patch.get("controlBarAlwaysOnTop").and_then(Value::as_bool) {
         config.desktop.control_bar.always_on_top = v;
         changed.push("controlBarAlwaysOnTop".to_string());
     }
     if let Some(v) = patch.get("controlBarMode").and_then(Value::as_str)
-        && let Some(mode) = parse_control_bar_mode(v) {
-            let _ = mode;
-            config.desktop.control_bar.mode = ControlBarMode::Floating;
-            config.desktop.control_bar.visible_on_startup = true;
-            config.desktop.control_bar.auto_hide = false;
-            changed.push("controlBarMode".to_string());
-        }
+        && let Some(mode) = parse_control_bar_mode(v)
+    {
+        let _ = mode;
+        config.desktop.control_bar.mode = ControlBarMode::Floating;
+        config.desktop.control_bar.visible_on_startup = true;
+        config.desktop.control_bar.auto_hide = false;
+        changed.push("controlBarMode".to_string());
+    }
     if let Some(v) = patch
         .get("controlBarVisibleOnStartup")
         .and_then(Value::as_bool)
@@ -1036,10 +1048,11 @@ fn apply_desktop_patch_immediate(
         changed.push("controlBarVisibleOnStartup".to_string());
     }
     if let Some(v) = patch.get("controlBarPosition").and_then(Value::as_str)
-        && let Some(pos) = parse_control_bar_position(v) {
-            config.desktop.control_bar.position = pos;
-            changed.push("controlBarPosition".to_string());
-        }
+        && let Some(pos) = parse_control_bar_position(v)
+    {
+        config.desktop.control_bar.position = pos;
+        changed.push("controlBarPosition".to_string());
+    }
     if let Some(v) = patch.get("controlBarAutoHide").and_then(Value::as_bool) {
         let _ = v;
         config.desktop.control_bar.auto_hide = false;
@@ -1113,15 +1126,17 @@ pub fn patch_config_for_capsule(
 
     // General
     if let Some(v) = patch.get("theme").and_then(Value::as_str)
-        && let Some(t) = parse_theme(v) {
-            config.general.theme = t;
-            changed.push("theme".to_string());
-        }
+        && let Some(t) = parse_theme(v)
+    {
+        config.general.theme = t;
+        changed.push("theme".to_string());
+    }
     if let Some(v) = patch.get("language").and_then(Value::as_str)
-        && let Some(l) = parse_language(v) {
-            config.general.language = l;
-            changed.push("language".to_string());
-        }
+        && let Some(l) = parse_language(v)
+    {
+        config.general.language = l;
+        changed.push("language".to_string());
+    }
     if let Some(v) = patch.get("launchAtLogin").and_then(Value::as_bool) {
         config.general.launch_at_login = v;
         changed.push("launchAtLogin".to_string());
@@ -1136,20 +1151,22 @@ pub fn patch_config_for_capsule(
     }
     // Updates
     if let Some(v) = patch.get("updateChannel").and_then(Value::as_str)
-        && let Some(ch) = parse_update_channel(v) {
-            config.updates.channel = ch;
-            changed.push("updateChannel".to_string());
-        }
+        && let Some(ch) = parse_update_channel(v)
+    {
+        config.updates.channel = ch;
+        changed.push("updateChannel".to_string());
+    }
     if let Some(v) = patch.get("automaticUpdates").and_then(Value::as_bool) {
         config.updates.automatic_updates = v;
         changed.push("automaticUpdates".to_string());
     }
     // Developer
     if let Some(v) = patch.get("logLevel").and_then(Value::as_str)
-        && let Some(l) = parse_log_level(v) {
-            config.developer.log_level = l;
-            changed.push("logLevel".to_string());
-        }
+        && let Some(l) = parse_log_level(v)
+    {
+        config.developer.log_level = l;
+        changed.push("logLevel".to_string());
+    }
     if let Some(v) = patch.get("telemetry").and_then(Value::as_bool) {
         config.developer.telemetry = v;
         changed.push("telemetry".to_string());

@@ -185,10 +185,11 @@ pub(crate) fn save_tabs(state: &AppState) {
         }
     };
     if let Some(parent) = path.parent()
-        && let Err(err) = fs::create_dir_all(parent) {
-            warn!(error = %err, dir = %parent.display(), "failed to create desktop-tabs dir");
-            return;
-        }
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        warn!(error = %err, dir = %parent.display(), "failed to create desktop-tabs dir");
+        return;
+    }
     if let Err(err) = fs::write(&path, body) {
         warn!(error = %err, path = %path.display(), "failed to write desktop tabs");
     } else {

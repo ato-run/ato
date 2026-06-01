@@ -925,9 +925,10 @@ pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Resul
             return Ok(());
         }
         if let Some(expected) = expected_start_time
-            && ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected) {
-                return Ok(());
-            }
+            && ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected)
+        {
+            return Ok(());
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -1463,8 +1464,7 @@ fn count_owned_shm() -> usize {
         };
         let text = String::from_utf8_lossy(&output.stdout);
         let current_user = std::env::var("USER").unwrap_or_default();
-        text
-            .lines()
+        text.lines()
             .filter(|line| line.contains(&current_user))
             .count()
     }
@@ -1491,10 +1491,11 @@ fn free_owned_shm() -> usize {
             }
             let parts: Vec<&str> = line.split_whitespace().collect();
             if let Some(id_str) = parts.get(1)
-                && let Ok(id) = id_str.parse::<u32>() {
-                    let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
-                    freed += 1;
-                }
+                && let Ok(id) = id_str.parse::<u32>()
+            {
+                let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
+                freed += 1;
+            }
         }
         freed
     }
@@ -1690,26 +1691,27 @@ fn run_session_start_command(
                 || event.code == "E103";
             if is_missing_env
                 && let Some(details) = event.missing_env_details()
-                    && !details.missing_schema.is_empty() {
-                        // #117 — interactive resolution is an expected
-                        // state, not a failure. Log at warn (one line
-                        // per launch attempt, no payload spam) and
-                        // return the typed variant so the modal flow
-                        // takes over. The `error!` reserved for
-                        // unexpected CLI breakage stays at error.
-                        warn!(
-                            handle,
-                            target = ?details.target,
-                            "guest launch needs configuration; surfacing modal"
-                        );
-                        return Err(LaunchError::MissingConfig {
-                            handle: handle.to_string(),
-                            target: details.target.or(event.target.clone()),
-                            fields: details.missing_schema,
-                            original_secrets: secrets.to_vec(),
-                            community_toml_id: community_toml_id.map(str::to_string),
-                        });
-                    }
+                && !details.missing_schema.is_empty()
+            {
+                // #117 — interactive resolution is an expected
+                // state, not a failure. Log at warn (one line
+                // per launch attempt, no payload spam) and
+                // return the typed variant so the modal flow
+                // takes over. The `error!` reserved for
+                // unexpected CLI breakage stays at error.
+                warn!(
+                    handle,
+                    target = ?details.target,
+                    "guest launch needs configuration; surfacing modal"
+                );
+                return Err(LaunchError::MissingConfig {
+                    handle: handle.to_string(),
+                    target: details.target.or(event.target.clone()),
+                    fields: details.missing_schema,
+                    original_secrets: secrets.to_vec(),
+                    community_toml_id: community_toml_id.map(str::to_string),
+                });
+            }
 
             // E302 with the `execution_plan_consent_required` reason —
             // route to the consent modal flow. Generic E302 (no
@@ -1719,27 +1721,26 @@ fn run_session_start_command(
             let is_execution_contract = event.name.as_deref() == Some("execution_contract_invalid")
                 || event.code == "ATO_ERR_EXECUTION_CONTRACT_INVALID"
                 || event.code == "E302";
-            if is_execution_contract
-                && let Some(details) = event.consent_required_details() {
-                    // Same rationale as the missing-env branch:
-                    // interactive consent is expected.
-                    warn!(
-                        handle,
-                        target = %details.target_label,
-                        "guest launch needs ExecutionPlan consent; surfacing modal"
-                    );
-                    return Err(LaunchError::MissingConsent {
-                        handle: handle.to_string(),
-                        scoped_id: details.scoped_id,
-                        version: details.version,
-                        target_label: details.target_label,
-                        policy_segment_hash: details.policy_segment_hash,
-                        provisioning_policy_hash: details.provisioning_policy_hash,
-                        summary: details.summary,
-                        original_secrets: secrets.to_vec(),
-                        community_toml_id: community_toml_id.map(str::to_string),
-                    });
-                }
+            if is_execution_contract && let Some(details) = event.consent_required_details() {
+                // Same rationale as the missing-env branch:
+                // interactive consent is expected.
+                warn!(
+                    handle,
+                    target = %details.target_label,
+                    "guest launch needs ExecutionPlan consent; surfacing modal"
+                );
+                return Err(LaunchError::MissingConsent {
+                    handle: handle.to_string(),
+                    scoped_id: details.scoped_id,
+                    version: details.version,
+                    target_label: details.target_label,
+                    policy_segment_hash: details.policy_segment_hash,
+                    provisioning_policy_hash: details.provisioning_policy_hash,
+                    summary: details.summary,
+                    original_secrets: secrets.to_vec(),
+                    community_toml_id: community_toml_id.map(str::to_string),
+                });
+            }
         }
 
         // Genuinely unexpected — preserve the original error log so
@@ -2060,9 +2061,11 @@ fn is_actionable_error_line(line: &str) -> bool {
 /// a space; if the prefix does not match that shape the line is returned as-is.
 fn strip_tracing_timestamp(line: &str) -> &str {
     if let Some(idx) = line.find('Z')
-        && idx > 10 && line.as_bytes().get(idx + 1) == Some(&b' ') {
-            return &line[idx + 2..];
-        }
+        && idx > 10
+        && line.as_bytes().get(idx + 1) == Some(&b' ')
+    {
+        return &line[idx + 2..];
+    }
     line
 }
 
@@ -2139,9 +2142,10 @@ fn resolve_nacelle_binary_with_paths(
     dev_workspace_path: Option<PathBuf>,
 ) -> Option<PathBuf> {
     if let Some(path) = override_path
-        && path.is_file() {
-            return Some(path);
-        }
+        && path.is_file()
+    {
+        return Some(path);
+    }
 
     for candidate in bundle_paths.bundle_binary_candidates("nacelle") {
         if candidate.is_file() {
@@ -2150,9 +2154,10 @@ fn resolve_nacelle_binary_with_paths(
     }
 
     if let Some(path) = dev_workspace_path
-        && path.is_file() {
-            return Some(path);
-        }
+        && path.is_file()
+    {
+        return Some(path);
+    }
 
     bundle_paths
         .path_candidates("nacelle")
@@ -2812,22 +2817,24 @@ fn collect_dev_script_dirs(
 ) {
     if let Ok(content) = fs::read_to_string(dir.join("package.json"))
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
-            && json["scripts"]["dev"].is_string() {
-                out.push((dir.to_path_buf(), depth));
-            }
+        && json["scripts"]["dev"].is_string()
+    {
+        out.push((dir.to_path_buf(), depth));
+    }
     if depth < max_depth
-        && let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if !DEV_SCAN_SKIP.iter().any(|skip| name_str.as_ref() == *skip) {
-                        collect_dev_script_dirs(&path, depth + 1, max_depth, out);
-                    }
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if !DEV_SCAN_SKIP.iter().any(|skip| name_str.as_ref() == *skip) {
+                    collect_dev_script_dirs(&path, depth + 1, max_depth, out);
                 }
             }
         }
+    }
 }
 
 fn frontend_score(path: &Path) -> usize {
@@ -2912,12 +2919,13 @@ fn start_web_service_from_workspace(
         );
     }
     if let Some(ref v) = state.verification
-        && v.result == "error" {
-            bail!(
-                "workspace verification failed — cannot start web server:\n{}",
-                v.issues.join("\n")
-            );
-        }
+        && v.result == "error"
+    {
+        bail!(
+            "workspace verification failed — cannot start web server:\n{}",
+            v.issues.join("\n")
+        );
+    }
 
     // Collect all source root directories.
     let source_roots: Vec<PathBuf> = state
@@ -4205,9 +4213,10 @@ pub fn spawn_terminal_session(
             match value.get("event").and_then(|e| e.as_str()) {
                 Some("terminal_data") => {
                     if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str())
-                        && output_tx.send(b64.to_string()).is_err() {
-                            break;
-                        }
+                        && output_tx.send(b64.to_string()).is_err()
+                    {
+                        break;
+                    }
                 }
                 Some("terminal_exited") => {
                     let code = value.get("exit_code").and_then(|c| c.as_i64());
@@ -4569,29 +4578,30 @@ pub fn spawn_ato_run_repl(
     // share URL's own origin for share-initiated REPLs). Invalid patterns
     // are skipped with a warn log so they surface in diagnostics.
     if !initial_allow_hosts.is_empty()
-        && let Ok(mut g) = egress_policy.lock() {
-            for host in &initial_allow_hosts {
-                match HostPattern::parse(host) {
-                    Ok(p) => {
-                        let added = g.allow(p);
-                        debug!(
-                            session_id = %sid,
-                            host = %host,
-                            added,
-                            "ato-run REPL: seeded initial allow host"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            session_id = %sid,
-                            host = %host,
-                            error = %e,
-                            "ato-run REPL: invalid initial_allow_hosts pattern, skipped"
-                        );
-                    }
+        && let Ok(mut g) = egress_policy.lock()
+    {
+        for host in &initial_allow_hosts {
+            match HostPattern::parse(host) {
+                Ok(p) => {
+                    let added = g.allow(p);
+                    debug!(
+                        session_id = %sid,
+                        host = %host,
+                        added,
+                        "ato-run REPL: seeded initial allow host"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        session_id = %sid,
+                        host = %host,
+                        error = %e,
+                        "ato-run REPL: invalid initial_allow_hosts pattern, skipped"
+                    );
                 }
             }
         }
+    }
 
     // Pre-queue the prelude into the input channel BEFORE spawning the REPL
     // thread. The thread prints the banner + prompt first, then processes the
@@ -4928,22 +4938,24 @@ pub fn spawn_ato_run_repl(
                         // commands stay gated (see userland::install_verb_allowlist).
                         let auto_allow = crate::userland::install_verb_allowlist(&argv);
                         if !auto_allow.is_empty()
-                            && let Ok(mut g) = egress_policy.lock() {
-                                let mut added_any = Vec::new();
-                                for host in &auto_allow {
-                                    if let Ok(p) = HostPattern::parse(host)
-                                        && g.allow(p) {
-                                            added_any.push(host.clone());
-                                        }
-                                }
-                                if !added_any.is_empty() {
-                                    let msg = format!(
-                                        "\x1b[90m[hint] auto-allow for install: {}\x1b[0m\r\n",
-                                        added_any.join(", ")
-                                    );
-                                    let _ = send(&output_tx, msg.as_bytes());
+                            && let Ok(mut g) = egress_policy.lock()
+                        {
+                            let mut added_any = Vec::new();
+                            for host in &auto_allow {
+                                if let Ok(p) = HostPattern::parse(host)
+                                    && g.allow(p)
+                                {
+                                    added_any.push(host.clone());
                                 }
                             }
+                            if !added_any.is_empty() {
+                                let msg = format!(
+                                    "\x1b[90m[hint] auto-allow for install: {}\x1b[0m\r\n",
+                                    added_any.join(", ")
+                                );
+                                let _ = send(&output_tx, msg.as_bytes());
+                            }
+                        }
 
                         cmd_builder.env("FORCE_COLOR", "1");
                         cmd_builder.env("CLICOLOR_FORCE", "1");
@@ -5138,13 +5150,14 @@ pub fn spawn_ato_run_repl(
                         let _ = output_thread.join();
 
                         if let Some(status) = exit_status
-                            && !status.success() {
-                                let code = status.exit_code();
-                                let msg = format!(
-                                    "\x1b[31m[{command_label} exited with status {code}]\x1b[0m\r\n"
-                                );
-                                let _ = send(&output_tx, msg.as_bytes());
-                            }
+                            && !status.success()
+                        {
+                            let code = status.exit_code();
+                            let msg = format!(
+                                "\x1b[31m[{command_label} exited with status {code}]\x1b[0m\r\n"
+                            );
+                            let _ = send(&output_tx, msg.as_bytes());
+                        }
 
                         if !send(&output_tx, b"\x1b[32mato>\x1b[0m ") {
                             return;
@@ -5324,9 +5337,10 @@ fn find_executable_named(root: &Path, name: &str, max_depth: usize) -> Option<Pa
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Ok(meta) = path.metadata()
-                    && meta.permissions().mode() & 0o111 != 0 {
-                        return Some(path);
-                    }
+                    && meta.permissions().mode() & 0o111 != 0
+                {
+                    return Some(path);
+                }
             }
             #[cfg(not(unix))]
             {
