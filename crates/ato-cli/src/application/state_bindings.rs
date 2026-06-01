@@ -83,10 +83,9 @@ fn resolve_attach_state_source_overrides_from_requested(
                 && requirement.attach == StateAttach::Explicit
         })
         .collect();
-    if explicit_persistent_states.is_empty()
-        && requested.is_empty() {
-            return Ok(HashMap::new());
-        }
+    if explicit_persistent_states.is_empty() && requested.is_empty() {
+        return Ok(HashMap::new());
+    }
 
     let mut resolved = HashMap::new();
     for (state_name, locator) in requested {

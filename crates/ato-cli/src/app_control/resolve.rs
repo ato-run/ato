@@ -816,21 +816,22 @@ fn normalize_handle_with_options(raw: &str, use_sample_recipes: bool) -> Result<
         && !input.starts_with("capsule://")
         && !input.starts_with("github.com/")
         && !input.contains('/')
-        && !input_is_existing_local_path(&input) {
-            if let Some(resolved) = resolve_sample_recipe_for_input(&input)? {
-                return Ok(NormalizedHandle {
-                    input,
-                    normalized_handle: resolved
-                        .canonical_handle
-                        .clone()
-                        .unwrap_or_else(|| format!("sample-recipe://{}", resolved.slug)),
-                    kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
-                    canonical: None,
-                    cli_ref: None,
-                    sample_recipe_slug: Some(resolved.slug),
-                });
-            }
+        && !input_is_existing_local_path(&input)
+    {
+        if let Some(resolved) = resolve_sample_recipe_for_input(&input)? {
+            return Ok(NormalizedHandle {
+                input,
+                normalized_handle: resolved
+                    .canonical_handle
+                    .clone()
+                    .unwrap_or_else(|| format!("sample-recipe://{}", resolved.slug)),
+                kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
+                canonical: None,
+                cli_ref: None,
+                sample_recipe_slug: Some(resolved.slug),
+            });
         }
+    }
 
     match classify_surface_input(HandleInput {
         raw: input.clone(),
