@@ -59,21 +59,8 @@ impl IpcResponse {
         )
     }
 
-    /// Convenience: access denied / capability not granted.
-    pub fn forbidden(request_id: Option<u64>, reason: impl Into<String>) -> Self {
-        Self::error(request_id, "forbidden", reason)
-    }
 
-    /// Convenience: JSON schema validation failure.
-    pub fn validation_error(request_id: Option<u64>, detail: impl Into<String>) -> Self {
-        Self::error(request_id, "validation_error", detail)
-    }
 
-    pub fn request_id(&self) -> Option<u64> {
-        match self {
-            Self::Ok { request_id, .. } | Self::Error { request_id, .. } => *request_id,
-        }
-    }
 }
 
 #[cfg(test)]

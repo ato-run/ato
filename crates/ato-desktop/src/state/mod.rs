@@ -1576,32 +1576,9 @@ impl AppState {
         state
     }
 
-    /// Allocate an `AppWindow` for the given route in the multi-window
-    /// registry (#167). Returns the new id, which is also marked as
-    /// most-recently focused. Currently unused by the renderer — wired
-    /// up in #169.
-    pub fn open_app_window(&mut self, route: GuestRoute) -> AppWindowId {
-        self.app_windows.open(route)
-    }
 
-    /// Mark an `AppWindow` as most-recently focused. Returns true if the
-    /// id existed.
-    pub fn focus_window(&mut self, id: AppWindowId) -> bool {
-        self.app_windows.focus(id)
-    }
 
-    /// Remove the `AppWindow` from the registry. Returns the removed
-    /// record (so callers can demote its session to retention before
-    /// dropping it).
-    pub fn close_window(&mut self, id: AppWindowId) -> Option<AppWindow> {
-        self.app_windows.close(id)
-    }
 
-    /// Currently-open `AppWindow`s ordered most-recently-focused first.
-    /// Drives the future Card Switcher (#173).
-    pub fn app_window_mru_order(&self) -> Vec<AppWindowId> {
-        self.app_windows.mru_order()
-    }
 
     pub fn toggle_theme(&mut self) {
         self.theme_mode = match self.theme_mode {
@@ -1623,9 +1600,6 @@ impl AppState {
         };
     }
 
-    pub fn sync_theme_from_settings(&mut self) {
-        self.sync_theme_from_config();
-    }
 
     /// Update a config value and persist to disk.
     pub fn update_config(&mut self, f: impl FnOnce(&mut crate::config::DesktopConfig)) {
@@ -1798,12 +1772,6 @@ impl AppState {
         self.consent_retry_consumed.retain(|(h, _)| h != handle);
     }
 
-    /// Remove a secret and persist to disk (#57).
-    pub fn remove_secret(&mut self, key: &str) -> Result<(), crate::config::BridgeError> {
-        self.secret_store.remove_secret(key)?;
-        self.rebuild_grant_cache();
-        Ok(())
-    }
 
     pub fn grant_secret_to_capsule(
         &mut self,
@@ -1815,15 +1783,6 @@ impl AppState {
         Ok(())
     }
 
-    pub fn revoke_secret_from_capsule(
-        &mut self,
-        capsule_handle: &str,
-        key: &str,
-    ) -> Result<(), crate::config::BridgeError> {
-        self.secret_store.revoke_secret(capsule_handle, key)?;
-        self.rebuild_grant_cache();
-        Ok(())
-    }
 
     pub fn focus_command_bar(&mut self) {
         self.shell_mode = ShellMode::CommandBar;
@@ -2656,46 +2615,6 @@ impl AppState {
         }
     }
 
-    pub fn toggle_dev_console(&mut self) {
-        let has_dev_console = self
-            .active_task()
-            .map(|task| {
-                task.panes
-                    .iter()
-                    .any(|p| matches!(p.surface, PaneSurface::DevConsole))
-            })
-            .unwrap_or(false);
-
-        if has_dev_console {
-            if let Some(task) = self.active_task_mut() {
-                task.panes
-                    .retain(|p| !matches!(p.surface, PaneSurface::DevConsole));
-                task.pane_tree = PaneTree::Leaf(task.focused_pane);
-            }
-            self.push_activity(ActivityTone::Info, "Closed developer console");
-        } else {
-            let next_id = self.next_pane_id;
-            if let Some(task) = self.active_task_mut() {
-                task.panes.push(Pane {
-                    id: next_id,
-                    title: "Developer console".to_string(),
-                    role: PaneRole::Companion,
-                    visible: true,
-                    bounds: PaneBounds::empty(),
-                    surface: PaneSurface::DevConsole,
-                });
-                task.pane_tree = PaneTree::Split {
-                    axis: SplitAxis::Vertical,
-                    ratio: task.split_ratio,
-                    first: Box::new(PaneTree::Leaf(task.focused_pane)),
-                    second: Box::new(PaneTree::Leaf(next_id)),
-                };
-            }
-            self.next_pane_id += 1;
-            self.push_activity(ActivityTone::Info, "Opened developer console");
-        }
-        self.shell_mode = ShellMode::Focus;
-    }
 
     /// Remove the GPUI DevConsole companion pane if it is present, without opening a new one.
     pub fn dismiss_dev_console(&mut self) {
@@ -3328,26 +3247,6 @@ impl AppState {
         }
     }
 
-    pub fn update_web_route(
-        &mut self,
-        pane_id: PaneId,
-        route: GuestRoute,
-        session: WebSessionState,
-        capabilities: Vec<CapabilityGrant>,
-    ) {
-        let label = route.to_string();
-        self.update_pane(pane_id, |pane| {
-            pane.title = label.clone();
-            if let PaneSurface::Web(web) = &mut pane.surface {
-                web.profile = route_profile(&route).to_string();
-                web.route = route.clone();
-                web.partition_id = sanitize(&label);
-                web.session = session.clone();
-                web.capabilities = capabilities.clone();
-            }
-        });
-        self.sync_command_bar_with_active_route();
-    }
 
     pub fn active_capsule_inspector(&self) -> Option<CapsuleInspectorView> {
         let active = self.active_capsule_pane()?;
@@ -3715,53 +3614,6 @@ impl AppState {
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn mount_capsule_status_pane(
-        &mut self,
-        pane_id: PaneId,
-        route: GuestRoute,
-        canonical_handle: Option<String>,
-        source_label: Option<String>,
-        trust_state: Option<String>,
-        restricted: bool,
-        snapshot_label: Option<String>,
-        session_id: Option<String>,
-        adapter: Option<String>,
-        manifest_path: Option<String>,
-        runtime_label: Option<String>,
-        display_strategy: Option<String>,
-        log_path: Option<String>,
-        local_url: Option<String>,
-        healthcheck_url: Option<String>,
-        invoke_url: Option<String>,
-        served_by: Option<String>,
-        install_profile_key: Option<String>,
-    ) {
-        self.update_pane(pane_id, |pane| {
-            pane.title = route.to_string();
-            pane.surface = PaneSurface::CapsuleStatus(CapsuleStatusPane {
-                route: route.clone(),
-                session: WebSessionState::Mounted,
-                source_label: source_label.clone(),
-                trust_state: trust_state.clone(),
-                restricted,
-                snapshot_label: snapshot_label.clone(),
-                canonical_handle: canonical_handle.clone(),
-                session_id: session_id.clone(),
-                adapter: adapter.clone(),
-                manifest_path: manifest_path.clone(),
-                runtime_label: runtime_label.clone(),
-                display_strategy: display_strategy.clone(),
-                log_path: log_path.clone(),
-                local_url: local_url.clone(),
-                healthcheck_url: healthcheck_url.clone(),
-                invoke_url: invoke_url.clone(),
-                served_by: served_by.clone(),
-                install_profile_key: install_profile_key.clone(),
-            });
-        });
-        self.command_bar_text = route.to_string();
-    }
 
     /// Open a bare CLI panel in a new tab.
     ///
