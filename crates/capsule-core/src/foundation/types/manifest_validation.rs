@@ -503,8 +503,8 @@ impl CapsuleManifest {
                     .unwrap_or(false);
                 let has_exec = probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                 // port is required for HTTP/TCP probes; exec probes do not need it.
-                if (has_http_get || has_tcp_connect) && !has_exec {
-                    if probe
+                if (has_http_get || has_tcp_connect) && !has_exec
+                    && probe
                         .port
                         .as_deref()
                         .map(|s| s.trim().is_empty())
@@ -515,7 +515,6 @@ impl CapsuleManifest {
                             label
                         )));
                     }
-                }
                 if !has_http_get && !has_tcp_connect && !has_exec {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "target '{}': readiness_probe must define http_get, tcp_connect, or exec",
@@ -745,8 +744,8 @@ impl CapsuleManifest {
                         let has_exec_svc =
                             probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                         // port is required for HTTP/TCP probes; exec probes do not need it.
-                        if (has_http_get || has_tcp_connect) && !has_exec_svc {
-                            if probe
+                        if (has_http_get || has_tcp_connect) && !has_exec_svc
+                            && probe
                                 .port
                                 .as_deref()
                                 .map(|s| s.trim().is_empty())
@@ -758,7 +757,6 @@ impl CapsuleManifest {
                                         .to_string(),
                                 ));
                             }
-                        }
                         if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
                                 name.to_string(),
@@ -906,8 +904,8 @@ impl CapsuleManifest {
                         let has_exec_svc =
                             probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                         // port is required for HTTP/TCP probes; exec probes do not need it.
-                        if (has_http_get || has_tcp_connect) && !has_exec_svc {
-                            if probe
+                        if (has_http_get || has_tcp_connect) && !has_exec_svc
+                            && probe
                                 .port
                                 .as_deref()
                                 .map(|s| s.trim().is_empty())
@@ -919,7 +917,6 @@ impl CapsuleManifest {
                                         .to_string(),
                                 ));
                             }
-                        }
                         if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
                                 name.to_string(),
@@ -1537,7 +1534,7 @@ fn is_valid_ingress_alias(alias: &str) -> bool {
     if lower.contains("%2f") || lower.contains("%5c") {
         return false;
     }
-    if alias.as_bytes().iter().any(|b| *b == b'%') {
+    if alias.as_bytes().contains(&b'%') {
         return false;
     }
     alias
@@ -1961,7 +1958,7 @@ fn validate_upstream_prefix_segments(prefix: &str) -> Option<String> {
     if lower.contains("%2f") || lower.contains("%5c") {
         return Some("must not contain percent-encoded slash or backslash".to_string());
     }
-    if prefix.as_bytes().iter().any(|b| *b == b'%') {
+    if prefix.as_bytes().contains(&b'%') {
         return Some("must not contain percent-encoded characters".to_string());
     }
     None

@@ -202,7 +202,7 @@ pub(crate) async fn execute_submit(
 
     let payload = prepare_submission(
         &normalized_source,
-        &toml_path,
+        toml_path,
         &toml_content,
         yes,
         dry_run_mode.as_ref(),

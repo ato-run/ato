@@ -288,7 +288,7 @@ impl InstallInstanceStore {
             let rev_id = target
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|s| InstallRevisionId::new(s))
+                .map(InstallRevisionId::new)
                 .with_context(|| "extract revision id from symlink target")?;
             Ok(rev_id)
         }

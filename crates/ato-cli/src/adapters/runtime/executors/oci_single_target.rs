@@ -21,7 +21,7 @@ use capsule_core::CapsuleReporter;
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::oci_provider::{
     build_digest_pull_ref, DefaultOciProviderSelector, OciProvider, OciProviderError,
-    OciProviderSelector, SystemCommandRunner,
+    OciProviderSelector,
 };
 use crate::application::preflight::{
     preflight_oci_provider_readiness, OciProviderReadinessMode, OciProviderReadinessRequirements,
