@@ -2,8 +2,8 @@
 //!
 //! Implements Proof of License (PoL) verification for nacelle runtime.
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use blake3::Hasher;
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -187,32 +187,31 @@ pub fn verify_license(
     }
 
     // Verify expiry
-    if let Some(ref expiry_str) = manifest.license.expiry {
-        if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expiry_str) {
-            let expiry_utc = expiry.with_timezone(&Utc);
-            let now = Utc::now();
+    if let Some(ref expiry_str) = manifest.license.expiry
+        && let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expiry_str)
+    {
+        let expiry_utc = expiry.with_timezone(&Utc);
+        let now = Utc::now();
 
-            if now > expiry_utc {
-                let grace_end = expiry_utc + Duration::days(GRACE_PERIOD_DAYS);
-                let grace_remaining = if manifest.license.license_type == LicenseType::Subscription
-                    && now < grace_end
-                {
+        if now > expiry_utc {
+            let grace_end = expiry_utc + Duration::days(GRACE_PERIOD_DAYS);
+            let grace_remaining =
+                if manifest.license.license_type == LicenseType::Subscription && now < grace_end {
                     Some(grace_end - now)
                 } else {
                     None
                 };
 
-                return Ok(LicenseVerificationResult::Expired {
-                    expired_at: expiry_utc,
-                    grace_remaining,
-                });
-            }
-
-            return Ok(LicenseVerificationResult::Valid {
-                entitlements: manifest.license.entitlements.clone(),
-                expiry: Some(expiry_utc),
+            return Ok(LicenseVerificationResult::Expired {
+                expired_at: expiry_utc,
+                grace_remaining,
             });
         }
+
+        return Ok(LicenseVerificationResult::Valid {
+            entitlements: manifest.license.entitlements.clone(),
+            expiry: Some(expiry_utc),
+        });
     }
 
     // Perpetual license (no expiry)

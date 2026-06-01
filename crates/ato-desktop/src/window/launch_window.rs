@@ -34,8 +34,8 @@ use anyhow::Result;
 use capsule_wire::config::ConfigKind;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render,
-    Size, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render, Size, WeakEntity,
+    Window, WindowBounds, WindowDecorations, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
 use serde::Serialize;
@@ -347,70 +347,6 @@ impl LaunchWindowShell {
     }
 }
 
-fn open_wizard(
-    cx: &mut App,
-    w: f32,
-    h: f32,
-    init_script: Option<String>,
-) -> Result<AnyWindowHandle> {
-    let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-    let options = WindowOptions {
-        titlebar: Some(TitleBar::title_bar_options()),
-        focus: true,
-        show: true,
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_decorations: Some(WindowDecorations::Client),
-        ..Default::default()
-    };
-
-    let locale = resolve_locale(crate::config::load_config().general.language);
-    let composed = compose_init_script(locale, init_script.as_deref());
-    let queue = system_ipc::new_queue();
-    let handle = cx.open_window(options, |window, cx| {
-        window.set_window_title(crate::window::WINDOW_TITLE);
-        let win_size = window.bounds().size;
-        let webview_rect = Rect {
-            position: LogicalPosition::new(0i32, 0i32).into(),
-            size: LogicalSize::new(
-                f32::from(win_size.width) as u32,
-                f32::from(win_size.height) as u32,
-            )
-            .into(),
-        };
-        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
-        let queue_for_ipc = queue.clone();
-        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
-        let webview = WebViewBuilder::new()
-            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
-                let response =
-                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
-                responder.respond(response);
-            })
-            .with_url(&launch_url)
-            .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
-                SystemCapsuleId::AtoLaunch,
-                queue_for_ipc,
-            ))
-            .with_bounds(webview_rect);
-        let webview = crate::window::build_child_webview("Launch wizard", webview, window);
-        let shell = cx.new(|cx| LaunchWindowShell {
-            _webview: webview,
-            window_size: win_size,
-            paste: WebViewPasteSupport::new(cx),
-        });
-        // Give GPUI focus to LaunchWindowShell so NativePaste/NativeCopy
-        // key bindings dispatch here even when WKWebView has OS first-responder.
-        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
-        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
-    })?;
-
-    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
-        .register(SystemCapsuleId::AtoLaunch, *handle);
-    system_ipc::spawn_drain_loop(cx, queue, *handle);
-    Ok(*handle)
-}
-
 // Window dimensions are tuned to the card content so the window IS
 // the card — no surrounding chrome padding. Update these together
 // when the HTML content grows or shrinks.
@@ -520,8 +456,7 @@ pub fn open_consent_window_for_route_with_client(
         GuestRoute::CapsuleHandle { handle, label, .. } => {
             let pretty_name = label
                 .split(['/', '@', '-', '_'])
-                .filter(|s| !s.is_empty())
-                .next_back()
+                .rfind(|s| !s.is_empty())
                 .unwrap_or(label.as_str())
                 .to_string();
             (pretty_name, handle.clone())
@@ -548,7 +483,7 @@ pub fn open_consent_window_for_route_with_client(
         route: route.clone(),
         requested_client,
     };
-    let mut launches = cx.global_mut::<PendingLaunches>();
+    let launches = cx.global_mut::<PendingLaunches>();
     launches.0.insert(preview_id.clone(), stashed);
 
     // Inject loading-state preview so the wizard renders immediately.
@@ -609,7 +544,7 @@ pub fn open_consent_window_for_route_with_client(
             .await;
 
         crate::webview_init_guard::wait_until_idle(&be).await;
-        let _ = aa.update(|cx| {
+        aa.update(|cx| {
             // Guard: only hydrate if this is still the active consent wizard.
             let current_id = cx
                 .try_global::<PendingConsentPreview>()
@@ -669,7 +604,7 @@ fn build_consent_preview(
             let requirements = data
                 .requirements
                 .into_iter()
-                .filter_map(|env| match env.kind {
+                .map(|env| match env.kind {
                     InteractiveResolutionKind::SecretsRequired { target, schema } => {
                         let fields = schema
                             .into_iter()
@@ -698,12 +633,12 @@ fn build_consent_preview(
                                 }
                             })
                             .collect();
-                        Some(ConsentRequirementItem::Secret {
+                        ConsentRequirementItem::Secret {
                             target,
                             display_message: env.display.message,
                             display_hint: env.display.hint,
                             fields,
-                        })
+                        }
                     }
                     InteractiveResolutionKind::ConsentRequired {
                         scoped_id,
@@ -712,14 +647,14 @@ fn build_consent_preview(
                         policy_segment_hash,
                         provisioning_policy_hash,
                         summary,
-                    } => Some(ConsentRequirementItem::Consent {
+                    } => ConsentRequirementItem::Consent {
                         scoped_id,
                         version,
                         target_label,
                         policy_segment_hash,
                         provisioning_policy_hash,
                         summary,
-                    }),
+                    },
                 })
                 .collect();
 
@@ -895,8 +830,7 @@ pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyW
             GuestRoute::CapsuleHandle { handle, label, .. } => {
                 let pretty = label
                     .split(['/', '@', '-', '_'])
-                    .filter(|s| !s.is_empty())
-                    .next_back()
+                    .rfind(|s| !s.is_empty())
                     .unwrap_or(label.as_str())
                     .to_string();
                 (pretty, handle.clone())
@@ -1020,7 +954,7 @@ pub fn start_boot_launch(
         abort_flag: Some(Arc::clone(&abort_flag)),
     });
     if let Some(shell) = boot_shell_weak.as_ref().and_then(|weak| weak.upgrade()) {
-        let _ = shell.update(cx, |shell, _cx| {
+        shell.update(cx, |shell, _cx| {
             shell.push_detail("Launching capsule");
             shell.push_detail("Preparing secure runtime and dependency resolution");
         });
@@ -1052,14 +986,14 @@ pub fn start_boot_launch(
                 let _ = progress_tx.send(step);
             })),
         );
-        if let Ok(ref session) = result {
-            if session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl {
-                super::app_capsule_shell::wait_for_session_upstream_ready(
-                    session,
-                    &abort_for_thread,
-                    Duration::from_secs(60),
-                );
-            }
+        if let Ok(ref session) = result
+            && session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl
+        {
+            super::app_capsule_shell::wait_for_session_upstream_ready(
+                session,
+                &abort_for_thread,
+                Duration::from_secs(60),
+            );
         }
         if abort_for_thread.load(Ordering::Acquire) {
             if let Ok(ref session) = result {
@@ -1091,7 +1025,7 @@ pub fn start_boot_launch(
                     aa.update(move |cx: &mut App| {
                         if let Some(shell) = shell_for_steps.and_then(|weak| weak.upgrade()) {
                             for step in steps {
-                                let _ = shell.update(cx, |shell, _cx| {
+                                shell.update(cx, |shell, _cx| {
                                     shell.push_step(step);
                                     let msg = match step {
                                         0 => "Validating launch plan",
@@ -1127,7 +1061,7 @@ pub fn start_boot_launch(
                                     if let Some(shell) =
                                         shell_for_result.as_ref().and_then(|weak| weak.upgrade())
                                     {
-                                        let _ = shell.update(cx, |shell, _cx| {
+                                        shell.update(cx, |shell, _cx| {
                                             shell.push_detail(
                                                 "Capsule session started successfully",
                                             );
@@ -1140,9 +1074,9 @@ pub fn start_boot_launch(
                                         // OsBrowser path: open in system browser,
                                         // register an OsBrowser client in SessionRegistry.
                                         if let Some(ref url) = session.local_url {
-                                            let _ = crate::ui::open_external_url(url);
+                                            let _ = crate::proc_util::open_external_url(url);
                                         }
-                                        let mut registry = cx
+                                        let registry = cx
                                             .global_mut::<crate::state::session::SessionRegistry>();
                                         use crate::state::session::{
                                             CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession,
@@ -1261,7 +1195,7 @@ pub fn start_boot_launch(
                                                     .as_ref()
                                                     .and_then(|weak| weak.upgrade())
                                                 {
-                                                    let _ = shell.update(cx, |shell, _cx| {
+                                                    shell.update(cx, |shell, _cx| {
                                                         shell.push_detail(
                                                             "Failed to create app window from session",
                                                         );
@@ -1284,7 +1218,7 @@ pub fn start_boot_launch(
                                     if let Some(shell) =
                                         shell_for_result.as_ref().and_then(|weak| weak.upgrade())
                                     {
-                                        let _ = shell.update(cx, |shell, _cx| {
+                                        shell.update(cx, |shell, _cx| {
                                             shell.push_detail("Capsule launch returned an error");
                                         });
                                     }
@@ -1301,7 +1235,7 @@ pub fn start_boot_launch(
                                 if let Some(shell) =
                                     shell_for_result.as_ref().and_then(|weak| weak.upgrade())
                                 {
-                                    let _ = shell.update(cx, |shell, _cx| {
+                                    shell.update(cx, |shell, _cx| {
                                         shell.push_detail(
                                             "Launch worker disconnected before returning a result",
                                         );
@@ -1360,7 +1294,7 @@ fn show_boot_failure(
 ) {
     tracing::error!(error = %message, "ato_launch: capsule boot failed");
     if let Some(shell) = shell_weak.as_ref().and_then(|weak| weak.upgrade()) {
-        let _ = shell.update(cx, |shell, _cx| shell.show_failure(message));
+        shell.update(cx, |shell, _cx| shell.show_failure(message));
     }
 }
 

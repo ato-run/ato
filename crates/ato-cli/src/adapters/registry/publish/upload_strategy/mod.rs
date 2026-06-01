@@ -240,11 +240,15 @@ mod tests {
     #[test]
     #[serial]
     fn resolved_selector_honors_environment_override_for_presigned_strategy() {
-        std::env::set_var(ENV_UPLOAD_STRATEGY, "presigned");
+        unsafe {
+            std::env::set_var(ENV_UPLOAD_STRATEGY, "presigned");
+        }
 
         let selection = resolve_upload_strategy_kind("https://api.ato.run");
 
-        std::env::remove_var(ENV_UPLOAD_STRATEGY);
+        unsafe {
+            std::env::remove_var(ENV_UPLOAD_STRATEGY);
+        }
         assert_eq!(selection.kind, UploadStrategyKind::Presigned);
         assert_eq!(
             selection.reason,
@@ -255,11 +259,15 @@ mod tests {
     #[test]
     #[serial]
     fn resolved_selector_honors_environment_override_for_direct_strategy() {
-        std::env::set_var(ENV_UPLOAD_STRATEGY, "direct");
+        unsafe {
+            std::env::set_var(ENV_UPLOAD_STRATEGY, "direct");
+        }
 
         let selection = resolve_upload_strategy_kind("https://api.ato.run");
 
-        std::env::remove_var(ENV_UPLOAD_STRATEGY);
+        unsafe {
+            std::env::remove_var(ENV_UPLOAD_STRATEGY);
+        }
         assert_eq!(selection.kind, UploadStrategyKind::Direct);
         assert_eq!(
             selection.reason,

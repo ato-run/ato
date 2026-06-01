@@ -55,15 +55,15 @@ pub(crate) fn build_capsule_artifact(
     let mut out = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut out);
-        if let Some(manifest_toml) = capsule_toml {
-            if !manifest_toml.is_empty() {
-                append_capsule_entry(&mut builder, "capsule.toml", manifest_toml.as_bytes())?;
-            }
+        if let Some(manifest_toml) = capsule_toml
+            && !manifest_toml.is_empty()
+        {
+            append_capsule_entry(&mut builder, "capsule.toml", manifest_toml.as_bytes())?;
         }
-        if let Some(lockfile) = capsule_lock {
-            if !lockfile.is_empty() {
-                append_capsule_entry(&mut builder, "capsule.lock.json", lockfile.as_bytes())?;
-            }
+        if let Some(lockfile) = capsule_lock
+            && !lockfile.is_empty()
+        {
+            append_capsule_entry(&mut builder, "capsule.lock.json", lockfile.as_bytes())?;
         }
         append_capsule_entry(&mut builder, "payload.tar.zst", payload_tar_zst)?;
         builder
@@ -120,7 +120,7 @@ pub(crate) fn sweep_stale_tmp_capsules(install_dir: &Path) -> Result<()> {
                 "Failed to read install directory {}: {}",
                 install_dir.display(),
                 err
-            ))
+            ));
         }
     };
     for entry in entries {

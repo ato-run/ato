@@ -503,7 +503,7 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::{run_sigint_cleanup, CleanupJournal, CleanupReport, PipelineAttemptContext};
+    use super::{CleanupJournal, CleanupReport, PipelineAttemptContext, run_sigint_cleanup};
     use crate::application::pipeline::hourglass::HourglassPhase;
 
     fn ok_record(action: &str) -> CleanupActionRecord {

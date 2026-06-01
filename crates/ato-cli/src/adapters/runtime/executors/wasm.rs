@@ -29,18 +29,15 @@ pub fn execute(
     cmd.arg("run").arg(component_path);
 
     let mut args = plan.targets_wasm_args();
-    if args.is_empty() {
-        if let Some(entrypoint) = plan
+    if args.is_empty()
+        && let Some(entrypoint) = plan
             .execution_entrypoint()
             .or_else(|| plan.execution_run_command())
-        {
-            if let Ok(mut parsed) = shell_words::split(&entrypoint) {
-                if !parsed.is_empty() {
-                    parsed.remove(0);
-                    args = parsed;
-                }
-            }
-        }
+        && let Ok(mut parsed) = shell_words::split(&entrypoint)
+        && !parsed.is_empty()
+    {
+        parsed.remove(0);
+        args = parsed;
     }
 
     if !args.is_empty() {
@@ -80,12 +77,11 @@ fn resolve_component(plan: &ManifestData) -> Result<String> {
             return Ok(entrypoint);
         }
 
-        if let Ok(parsed) = shell_words::split(&entrypoint) {
-            if let Some(first) = parsed.first() {
-                if is_wasm_path(first) {
-                    return Ok(first.to_string());
-                }
-            }
+        if let Ok(parsed) = shell_words::split(&entrypoint)
+            && let Some(first) = parsed.first()
+            && is_wasm_path(first)
+        {
+            return Ok(first.to_string());
         }
     }
 

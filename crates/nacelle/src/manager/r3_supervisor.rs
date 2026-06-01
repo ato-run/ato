@@ -144,7 +144,7 @@ async fn wait_for_service_ready(
     health_check: &crate::config::HealthCheck,
     event_tx: Option<&tokio::sync::mpsc::UnboundedSender<NacelleEvent>>,
 ) -> Result<(), String> {
-    use tokio::time::{sleep, Instant};
+    use tokio::time::{Instant, sleep};
 
     let timeout = Duration::from_secs(u64::from(health_check.timeout_secs.unwrap_or(30)));
     let interval = Duration::from_secs(u64::from(health_check.interval_secs.unwrap_or(1).max(1)));
@@ -354,10 +354,10 @@ fn resolve_path(bundle_root: &Path, path: &str) -> PathBuf {
 
     // If the config provides a bare executable name (e.g. "bash"), resolve it from PATH
     // so that host-provided runtimes work in bundle mode.
-    if !trimmed.contains('/') {
-        if let Ok(found) = which::which(trimmed) {
-            return found;
-        }
+    if !trimmed.contains('/')
+        && let Ok(found) = which::which(trimmed)
+    {
+        return found;
     }
 
     // Otherwise, treat it as a path relative to the extracted bundle root.

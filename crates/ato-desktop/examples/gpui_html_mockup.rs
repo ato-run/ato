@@ -17,9 +17,8 @@ use std::borrow::Cow;
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, rgba, size, svg, Bounds, Context, FontWeight, Hsla, InteractiveElement,
-    IntoElement, MouseButton, SharedString, Styled, Window, WindowBounds, WindowDecorations,
-    WindowOptions,
+    Bounds, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, SharedString,
+    Styled, Window, WindowBounds, WindowDecorations, WindowOptions, div, px, rgb, rgba, size, svg,
 };
 use gpui_component::{Icon, IconName, IconNamed};
 

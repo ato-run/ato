@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::capsule::manifest::blake3_digest;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -507,18 +507,6 @@ impl GitHubImportSession {
     /// until `apply_inferred_output` runs.
     pub(crate) fn base_recipe_hash(&self) -> Option<&str> {
         self.base_recipe_hash.as_deref()
-    }
-
-    /// Origin tag captured at inference time ("registry" / "inference").
-    /// Restored onto `recipe.origin` after a same-hash run.
-    pub(crate) fn base_recipe_origin(&self) -> Option<&str> {
-        self.base_recipe_origin.as_deref()
-    }
-
-    /// `RecipeResolution` captured at inference time. `None` when the CLI
-    /// did not emit one (older CLI, or `--no-remote-recipe` skipped lookup).
-    pub(crate) fn base_recipe_resolution(&self) -> Option<&RecipeResolution> {
-        self.base_recipe_resolution.as_ref()
     }
 
     /// True when the editable TOML's blake3 hash diverges from
@@ -1174,13 +1162,17 @@ mod tests {
     #[test]
     fn record_inference_failure_rejected_outside_inferring_state() {
         let mut session = GitHubImportSession::default();
-        assert!(session
-            .record_inference_failure("x".to_string(), "y".to_string())
-            .is_err());
+        assert!(
+            session
+                .record_inference_failure("x".to_string(), "y".to_string())
+                .is_err()
+        );
         session.begin_resolve("owner/repo").expect("resolve");
-        assert!(session
-            .record_inference_failure("x".to_string(), "y".to_string())
-            .is_err());
+        assert!(
+            session
+                .record_inference_failure("x".to_string(), "y".to_string())
+                .is_err()
+        );
     }
 
     #[test]

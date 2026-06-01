@@ -404,9 +404,11 @@ mod tests {
         fs::write(tmp.path().join("uv.lock"), "version = 1").expect("write uv.lock");
 
         let evidence = probe_ecosystem_lockfile_evidence(tmp.path()).expect("probe");
-        assert!(evidence
-            .iter()
-            .any(|value| value.importer_id == ImporterId::Uv));
+        assert!(
+            evidence
+                .iter()
+                .any(|value| value.importer_id == ImporterId::Uv)
+        );
     }
 
     #[test]

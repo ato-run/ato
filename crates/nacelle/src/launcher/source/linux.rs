@@ -573,7 +573,9 @@ pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
         Ok(result) => {
             let stderr = String::from_utf8_lossy(&result.stderr);
             if stderr.contains("permission denied") || stderr.contains("Operation not permitted") {
-                warn!("User namespaces may be disabled. Try: sudo sysctl kernel.unprivileged_userns_clone=1");
+                warn!(
+                    "User namespaces may be disabled. Try: sudo sysctl kernel.unprivileged_userns_clone=1"
+                );
                 Err(RuntimeError::SandboxSetupFailed(
                     "User namespaces not available. Check kernel.unprivileged_userns_clone"
                         .to_string(),
@@ -668,9 +670,11 @@ mod tests {
         let policy = generate_landlock_policy(&target);
 
         // Source dir always present
-        assert!(policy
-            .read_write_paths
-            .contains(&PathBuf::from("/app/project")));
+        assert!(
+            policy
+                .read_write_paths
+                .contains(&PathBuf::from("/app/project"))
+        );
         // System dirs added
         assert!(policy.read_only_paths.contains(&PathBuf::from("/usr")));
         // Network from isolation policy
@@ -753,12 +757,16 @@ mod tests {
 
         // IPC socket paths should be forwarded to the policy
         assert_eq!(policy.ipc_socket_paths.len(), 2);
-        assert!(policy
-            .ipc_socket_paths
-            .contains(&PathBuf::from("/tmp/capsule-ipc/greeter.sock")));
-        assert!(policy
-            .ipc_socket_paths
-            .contains(&PathBuf::from("/tmp/capsule-ipc/db-service.sock")));
+        assert!(
+            policy
+                .ipc_socket_paths
+                .contains(&PathBuf::from("/tmp/capsule-ipc/greeter.sock"))
+        );
+        assert!(
+            policy
+                .ipc_socket_paths
+                .contains(&PathBuf::from("/tmp/capsule-ipc/db-service.sock"))
+        );
     }
 
     #[test]

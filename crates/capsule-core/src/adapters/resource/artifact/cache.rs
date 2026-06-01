@@ -45,50 +45,43 @@ impl ArtifactCache {
         };
 
         while let Ok(Some(entry)) = entries.next_entry().await {
-            if let Ok(file_type) = entry.file_type().await {
-                if file_type.is_dir() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    // Iterate versions
-                    if let Ok(mut ver_entries) = fs::read_dir(entry.path()).await {
-                        while let Ok(Some(ver_entry)) = ver_entries.next_entry().await {
-                            if let Ok(ver_type) = ver_entry.file_type().await {
-                                if ver_type.is_dir() {
-                                    let version =
-                                        ver_entry.file_name().to_string_lossy().to_string();
-                                    // Iterate platforms
-                                    if let Ok(mut plat_entries) =
-                                        fs::read_dir(ver_entry.path()).await
+            if let Ok(file_type) = entry.file_type().await
+                && file_type.is_dir()
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Iterate versions
+                if let Ok(mut ver_entries) = fs::read_dir(entry.path()).await {
+                    while let Ok(Some(ver_entry)) = ver_entries.next_entry().await {
+                        if let Ok(ver_type) = ver_entry.file_type().await
+                            && ver_type.is_dir()
+                        {
+                            let version = ver_entry.file_name().to_string_lossy().to_string();
+                            // Iterate platforms
+                            if let Ok(mut plat_entries) = fs::read_dir(ver_entry.path()).await {
+                                while let Ok(Some(plat_entry)) = plat_entries.next_entry().await {
+                                    if let Ok(plat_type) = plat_entry.file_type().await
+                                        && plat_type.is_dir()
                                     {
-                                        while let Ok(Some(plat_entry)) =
-                                            plat_entries.next_entry().await
-                                        {
-                                            if let Ok(plat_type) = plat_entry.file_type().await {
-                                                if plat_type.is_dir() {
-                                                    let platform = plat_entry
-                                                        .file_name()
-                                                        .to_string_lossy()
-                                                        .to_string();
-                                                    let path = plat_entry.path();
+                                        let platform =
+                                            plat_entry.file_name().to_string_lossy().to_string();
+                                        let path = plat_entry.path();
 
-                                                    // Basic metadata (could be improved)
-                                                    let metadata = fs::metadata(&path).await.ok();
-                                                    let last_used = metadata
-                                                        .as_ref()
-                                                        .and_then(|m| m.accessed().ok())
-                                                        .unwrap_or(SystemTime::now());
-                                                    let size_bytes = 0; // TODO: Calculate size
+                                        // Basic metadata (could be improved)
+                                        let metadata = fs::metadata(&path).await.ok();
+                                        let last_used = metadata
+                                            .as_ref()
+                                            .and_then(|m| m.accessed().ok())
+                                            .unwrap_or(SystemTime::now());
+                                        let size_bytes = 0; // TODO: Calculate size
 
-                                                    cached.push(CachedRuntime {
-                                                        name: name.clone(),
-                                                        version: version.clone(),
-                                                        platform,
-                                                        path,
-                                                        last_used,
-                                                        size_bytes,
-                                                    });
-                                                }
-                                            }
-                                        }
+                                        cached.push(CachedRuntime {
+                                            name: name.clone(),
+                                            version: version.clone(),
+                                            platform,
+                                            path,
+                                            last_used,
+                                            size_bytes,
+                                        });
                                     }
                                 }
                             }

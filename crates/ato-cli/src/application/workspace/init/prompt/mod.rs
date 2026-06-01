@@ -2,14 +2,14 @@
 
 use anyhow::{Context, Result};
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
+    ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::PromptArgs;
 use super::detect::{self, DetectedProject, NodePackageManager, ProjectType};
 use super::recipe::{self, ProjectInfo};
-use super::PromptArgs;
 
 mod frameworks;
 

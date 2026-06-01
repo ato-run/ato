@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result};
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedCompatibilityProject, ResolvedInput,
-    ResolvedSourceOnly,
+    ResolveInputOptions, ResolvedCompatibilityProject, ResolvedInput, ResolvedSourceOnly,
+    resolve_authoritative_input,
 };
 use std::fs;
 use std::path::{Path, PathBuf};

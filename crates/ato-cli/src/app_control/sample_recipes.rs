@@ -204,14 +204,17 @@ pub fn resolve_sample_recipe_for_github(
     }))
 }
 
+#[allow(dead_code)]
 pub fn is_sample_recipe_alias(input: &str) -> bool {
     resolve_for_alias(input).is_some()
 }
 
+#[allow(dead_code)]
 pub fn is_sample_recipe_github(owner: &str, repo: &str) -> bool {
     resolve_for_github(owner, repo).is_some()
 }
 
+#[allow(dead_code)]
 pub fn materialize_all_sample_recipes() -> Result<()> {
     for binding in SAMPLE_RECIPE_CATALOG {
         materialize_recipe(binding)?;
@@ -292,16 +295,20 @@ mod tests {
 
     #[test]
     fn unknown_alias_returns_none() {
-        assert!(resolve_sample_recipe_for_input("unknown-app")
-            .expect("no error")
-            .is_none());
+        assert!(
+            resolve_sample_recipe_for_input("unknown-app")
+                .expect("no error")
+                .is_none()
+        );
     }
 
     #[test]
     fn unknown_github_returns_none() {
-        assert!(resolve_sample_recipe_for_github("unknown", "repo")
-            .expect("no error")
-            .is_none());
+        assert!(
+            resolve_sample_recipe_for_github("unknown", "repo")
+                .expect("no error")
+                .is_none()
+        );
     }
 
     #[test]
@@ -319,19 +326,25 @@ mod tests {
 
     #[test]
     fn case_insensitive_alias() {
-        assert!(resolve_sample_recipe_for_input("Memos")
-            .expect("no error")
-            .is_some());
-        assert!(resolve_sample_recipe_for_input("N8N")
-            .expect("no error")
-            .is_some());
+        assert!(
+            resolve_sample_recipe_for_input("Memos")
+                .expect("no error")
+                .is_some()
+        );
+        assert!(
+            resolve_sample_recipe_for_input("N8N")
+                .expect("no error")
+                .is_some()
+        );
     }
 
     #[test]
     fn case_insensitive_github() {
-        assert!(resolve_sample_recipe_for_github("Usememos", "Memos")
-            .expect("no error")
-            .is_some());
+        assert!(
+            resolve_sample_recipe_for_github("Usememos", "Memos")
+                .expect("no error")
+                .is_some()
+        );
     }
 
     #[test]
@@ -355,6 +368,56 @@ mod tests {
                 "materialized manifest should exist for {}",
                 binding.slug
             );
+        }
+    }
+
+    #[test]
+    fn catalog_manifests_are_publishable_to_community() {
+        for binding in SAMPLE_RECIPE_CATALOG {
+            let manifest: toml::Value = toml::from_str(binding.manifest_content)
+                .unwrap_or_else(|err| panic!("{} manifest parses: {err}", binding.slug));
+
+            let source_repo = manifest
+                .get("source")
+                .and_then(|source| source.get("repository"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or_else(|| panic!("{} has [source].repository", binding.slug));
+            let expected_repo = binding
+                .github
+                .map(|(owner, repo)| format!("{owner}/{repo}"))
+                .expect("catalog entries are public GitHub recipes");
+            assert_eq!(
+                source_repo, expected_repo,
+                "{} source repository",
+                binding.slug
+            );
+
+            assert_valid_schema_ids(binding.slug, &manifest);
+        }
+    }
+
+    fn assert_valid_schema_ids(slug: &str, value: &toml::Value) {
+        match value {
+            toml::Value::String(value) if value.starts_with("sha256:") => {
+                let hash = &value["sha256:".len()..];
+                assert_eq!(hash.len(), 64, "{slug} schema_id length: {value}");
+                assert!(
+                    hash.bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                    "{slug} schema_id must be lowercase hex: {value}"
+                );
+            }
+            toml::Value::Array(values) => {
+                for value in values {
+                    assert_valid_schema_ids(slug, value);
+                }
+            }
+            toml::Value::Table(values) => {
+                for value in values.values() {
+                    assert_valid_schema_ids(slug, value);
+                }
+            }
+            _ => {}
         }
     }
 }
