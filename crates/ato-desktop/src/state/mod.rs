@@ -103,7 +103,6 @@ impl SettingsTab {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
@@ -135,7 +134,6 @@ impl CapsuleDetailTab {
         }
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -2156,10 +2154,11 @@ impl AppState {
     pub fn select_task(&mut self, task_id: TaskSetId) {
         let mut selected_title = None;
         if let Some(workspace) = self.active_workspace_mut()
-            && let Some(task) = workspace.tasks.iter().find(|task| task.id == task_id) {
-                workspace.active_task = task.id;
-                selected_title = Some(task.title.clone());
-            }
+            && let Some(task) = workspace.tasks.iter().find(|task| task.id == task_id)
+        {
+            workspace.active_task = task.id;
+            selected_title = Some(task.title.clone());
+        }
 
         if let Some(title) = selected_title {
             self.sync_command_bar_with_active_route();
@@ -2208,16 +2207,17 @@ impl AppState {
             // "Failed to fetch share URL".
             let mut initial_allow_hosts = Vec::new();
             if let Some(h) = host
-                && !h.is_empty() {
-                    initial_allow_hosts.push(h.clone());
-                    // Don't add wildcard for localhost / bare IP — HostPattern::parse
-                    // would reject "*.localhost" and the exact form already suffices.
-                    let is_ip = h.parse::<std::net::IpAddr>().is_ok();
-                    let is_localhost = h.eq_ignore_ascii_case("localhost");
-                    if !is_ip && !is_localhost {
-                        initial_allow_hosts.push(format!("*.{h}"));
-                    }
+                && !h.is_empty()
+            {
+                initial_allow_hosts.push(h.clone());
+                // Don't add wildcard for localhost / bare IP — HostPattern::parse
+                // would reject "*.localhost" and the exact form already suffices.
+                let is_ip = h.parse::<std::net::IpAddr>().is_ok();
+                let is_localhost = h.eq_ignore_ascii_case("localhost");
+                if !is_ip && !is_localhost {
+                    initial_allow_hosts.push(format!("*.{h}"));
                 }
+            }
             info!(
                 share_url = %normalized,
                 share_id = %share_id,
@@ -2346,39 +2346,40 @@ impl AppState {
         let mut navigated = None;
 
         if let Some(task) = self.active_task_mut()
-            && let Some(pane) = task.focused_pane_mut() {
-                let pane_id = pane.id;
-                pane.title = label.clone();
-                pane.surface = PaneSurface::Web(WebPane {
-                    route: next_route.clone(),
-                    partition_id,
-                    session,
-                    capabilities,
-                    profile,
-                    source_label,
-                    trust_state,
-                    restricted,
-                    snapshot_label: None,
-                    canonical_handle: match &next_route {
-                        GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
-                        GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
-                        _ => None,
-                    },
-                    session_id: None,
-                    adapter: None,
-                    manifest_path: None,
-                    runtime_label: None,
-                    display_strategy: None,
-                    log_path: None,
-                    local_url: None,
-                    healthcheck_url: None,
-                    invoke_url: None,
-                    served_by: None,
-                    install_profile_key: None,
-                    auth_flow: false,
-                });
-                navigated = Some(pane_id);
-            }
+            && let Some(pane) = task.focused_pane_mut()
+        {
+            let pane_id = pane.id;
+            pane.title = label.clone();
+            pane.surface = PaneSurface::Web(WebPane {
+                route: next_route.clone(),
+                partition_id,
+                session,
+                capabilities,
+                profile,
+                source_label,
+                trust_state,
+                restricted,
+                snapshot_label: None,
+                canonical_handle: match &next_route {
+                    GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
+                    GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
+                    _ => None,
+                },
+                session_id: None,
+                adapter: None,
+                manifest_path: None,
+                runtime_label: None,
+                display_strategy: None,
+                log_path: None,
+                local_url: None,
+                healthcheck_url: None,
+                invoke_url: None,
+                served_by: None,
+                install_profile_key: None,
+                auth_flow: false,
+            });
+            navigated = Some(pane_id);
+        }
 
         let Some(pane_id) = navigated else {
             self.push_activity(
@@ -2502,15 +2503,15 @@ impl AppState {
                     .query_pairs()
                     .find(|(k, _)| k == "handle")
                     .map(|(_, v)| v.into_owned())
-                {
-                    self.push_activity(
-                        ActivityTone::Info,
-                        format!("Opening capsule from deep link: {handle}"),
-                    );
-                    self.create_new_tab();
-                    self.navigate_to_url(&handle);
-                    return;
-                }
+            {
+                self.push_activity(
+                    ActivityTone::Info,
+                    format!("Opening capsule from deep link: {handle}"),
+                );
+                self.create_new_tab();
+                self.navigate_to_url(&handle);
+                return;
+            }
             self.push_activity(
                 ActivityTone::Warning,
                 "ato://open deep link is missing the 'handle' query parameter",
@@ -2733,11 +2734,11 @@ impl AppState {
                 .panes
                 .iter()
                 .any(|p| matches!(p.surface, PaneSurface::DevConsole))
-            {
-                task.panes
-                    .retain(|p| !matches!(p.surface, PaneSurface::DevConsole));
-                task.pane_tree = PaneTree::Leaf(task.focused_pane);
-            }
+        {
+            task.panes
+                .retain(|p| !matches!(p.surface, PaneSurface::DevConsole));
+            task.pane_tree = PaneTree::Leaf(task.focused_pane);
+        }
     }
 
     pub fn browser_back(&mut self) {
@@ -2756,22 +2757,18 @@ impl AppState {
             .and_then(|task| task.focused_pane())
             .map(|pane| pane.id);
         if let Some(pane_id) = active_pane_id
-            && let Some(terminal_spec) = self.terminal_reload_spec(pane_id) {
-                let (spec, title) = terminal_spec;
-                let new_session_id = format!("cli-{}-{}", pane_id, uuid_v4_simple());
-                register_pending_cli_command(new_session_id.clone(), spec.clone());
-                self.push_activity(
-                    ActivityTone::Info,
-                    format!("Reloading CLI session: {title}"),
-                );
-                self.mount_terminal_stream_pane_with_spec(
-                    pane_id,
-                    new_session_id,
-                    title,
-                    Some(spec),
-                );
-                return;
-            }
+            && let Some(terminal_spec) = self.terminal_reload_spec(pane_id)
+        {
+            let (spec, title) = terminal_spec;
+            let new_session_id = format!("cli-{}-{}", pane_id, uuid_v4_simple());
+            register_pending_cli_command(new_session_id.clone(), spec.clone());
+            self.push_activity(
+                ActivityTone::Info,
+                format!("Reloading CLI session: {title}"),
+            );
+            self.mount_terminal_stream_pane_with_spec(pane_id, new_session_id, title, Some(spec));
+            return;
+        }
 
         let Some(active) = self.active_web_pane() else {
             return;
@@ -2827,13 +2824,14 @@ impl AppState {
             for task in &workspace.tasks {
                 for pane in &task.panes {
                     if pane.id == pane_id
-                        && let PaneSurface::Terminal(terminal) = &pane.surface {
-                            let spec = terminal
-                                .cli_launch_spec
-                                .clone()
-                                .unwrap_or_else(crate::orchestrator::CliLaunchSpec::ato_run_repl);
-                            return Some((spec, terminal.capsule_handle.clone()));
-                        }
+                        && let PaneSurface::Terminal(terminal) = &pane.surface
+                    {
+                        let spec = terminal
+                            .cli_launch_spec
+                            .clone()
+                            .unwrap_or_else(crate::orchestrator::CliLaunchSpec::ato_run_repl);
+                        return Some((spec, terminal.capsule_handle.clone()));
+                    }
                 }
             }
         }
@@ -2944,9 +2942,10 @@ impl AppState {
                         && !matches!(
                             self.active_capsule_pane().map(|pane| pane.route),
                             Some(GuestRoute::CapsuleUrl { .. })
-                        ) {
-                            self.command_bar_text = url;
-                        }
+                        )
+                    {
+                        self.command_bar_text = url;
+                    }
                 }
                 ShellEvent::TitleChanged { pane_id, title } => {
                     self.update_pane(pane_id, |pane| {
@@ -3311,9 +3310,10 @@ impl AppState {
             for task in &workspace.tasks {
                 for pane in &task.panes {
                     if pane.id == pane_id
-                        && let PaneSurface::Web(web) = &pane.surface {
-                            return web.source_label.clone();
-                        }
+                        && let PaneSurface::Web(web) = &pane.surface
+                    {
+                        return web.source_label.clone();
+                    }
                 }
             }
         }
@@ -3349,9 +3349,10 @@ impl AppState {
             for task in &mut workspace.tasks {
                 for pane in &mut task.panes {
                     if pane.id == pane_id
-                        && let PaneSurface::Web(web) = &mut pane.surface {
-                            web.session = session.clone();
-                        }
+                        && let PaneSurface::Web(web) = &mut pane.surface
+                    {
+                        web.session = session.clone();
+                    }
                 }
             }
         }
@@ -4442,16 +4443,17 @@ impl AppState {
         let active_task_id = self.active_task().map(|task| task.id);
 
         if let Some(workspace) = self.active_workspace_mut()
-            && let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id) {
-                task.title = title.clone();
-                task.preview = title.clone();
-                for pane in &mut task.panes {
-                    if let PaneSurface::HostPanel(HostPanelRoute::Settings { .. }) = &pane.surface {
-                        pane.title = title.clone();
-                        pane.surface = PaneSurface::HostPanel(route.clone());
-                    }
+            && let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id)
+        {
+            task.title = title.clone();
+            task.preview = title.clone();
+            for pane in &mut task.panes {
+                if let PaneSurface::HostPanel(HostPanelRoute::Settings { .. }) = &pane.surface {
+                    pane.title = title.clone();
+                    pane.surface = PaneSurface::HostPanel(route.clone());
                 }
             }
+        }
 
         if active_task_id == Some(task_id) {
             self.sync_command_bar_with_active_route();
@@ -4468,22 +4470,23 @@ impl AppState {
         let active_task_id = self.active_task().map(|task| task.id);
 
         if let Some(workspace) = self.active_workspace_mut()
-            && let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id) {
-                task.title = title.clone();
-                task.preview = title.clone();
-                for pane in &mut task.panes {
-                    if matches!(
-                        pane.surface,
-                        PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
-                            pane_id: route_pane_id,
-                            ..
-                        }) if route_pane_id == pane_id
-                    ) {
-                        pane.title = title.clone();
-                        pane.surface = PaneSurface::HostPanel(route.clone());
-                    }
+            && let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id)
+        {
+            task.title = title.clone();
+            task.preview = title.clone();
+            for pane in &mut task.panes {
+                if matches!(
+                    pane.surface,
+                    PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
+                        pane_id: route_pane_id,
+                        ..
+                    }) if route_pane_id == pane_id
+                ) {
+                    pane.title = title.clone();
+                    pane.surface = PaneSurface::HostPanel(route.clone());
                 }
             }
+        }
 
         if active_task_id == Some(task_id) {
             self.sync_command_bar_with_active_route();

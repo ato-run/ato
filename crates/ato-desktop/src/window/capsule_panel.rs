@@ -270,14 +270,15 @@ fn panel_bounds(cx: &mut App) -> Bounds<Pixels> {
     let panel_size = size(px(PANEL_W), px(PANEL_H));
     let control_bar = cx.global::<ControlBarController>().handle;
     if let Some(handle) = control_bar
-        && let Ok(bounds) = handle.update(cx, |_, window, _| window.bounds()) {
-            let left = bounds.origin.x + (bounds.size.width - panel_size.width) / 2.0;
-            let top = bounds.origin.y + bounds.size.height + px(12.0);
-            return Bounds {
-                origin: point(left, top),
-                size: panel_size,
-            };
-        }
+        && let Ok(bounds) = handle.update(cx, |_, window, _| window.bounds())
+    {
+        let left = bounds.origin.x + (bounds.size.width - panel_size.width) / 2.0;
+        let top = bounds.origin.y + bounds.size.height + px(12.0);
+        return Bounds {
+            origin: point(left, top),
+            size: panel_size,
+        };
+    }
     Bounds::centered(None, panel_size, cx)
 }
 

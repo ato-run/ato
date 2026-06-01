@@ -271,9 +271,10 @@ fn build_tab(
             // an earlier synchronous reclaim for better responsiveness.
             InputEvent::Focus => {
                 if let Some(tab) = this.active_tab()
-                    && let Some(webview) = tab.webview.as_ref() {
-                        let _ = webview.focus_parent();
-                    }
+                    && let Some(webview) = tab.webview.as_ref()
+                {
+                    let _ = webview.focus_parent();
+                }
                 cx.notify();
             }
             InputEvent::Change | InputEvent::Blur => cx.notify(),
@@ -596,9 +597,10 @@ fn url_pill(url_input: Entity<InputState>, entity: Entity<WebLinkViewShell>) -> 
         .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
             entity.update(cx, |this, _cx| {
                 if let Some(tab) = this.active_tab()
-                    && let Some(webview) = tab.webview.as_ref() {
-                        let _ = webview.focus_parent();
-                    }
+                    && let Some(webview) = tab.webview.as_ref()
+                {
+                    let _ = webview.focus_parent();
+                }
             });
         })
         .child(

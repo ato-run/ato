@@ -170,14 +170,15 @@ fn make_ipc_handler_inner(
             }
         };
         if let Some(expected) = expected_capsule
-            && capsule != expected {
-                tracing::warn!(
-                    received = %envelope.capsule,
-                    expected = ?expected,
-                    "system_capsule::ipc: cross-capsule spoof rejected"
-                );
-                return;
-            }
+            && capsule != expected
+        {
+            tracing::warn!(
+                received = %envelope.capsule,
+                expected = ?expected,
+                "system_capsule::ipc: cross-capsule spoof rejected"
+            );
+            return;
+        }
         let command_result = parse_system_command(capsule, envelope.command);
         match command_result {
             Ok(cmd) => {
