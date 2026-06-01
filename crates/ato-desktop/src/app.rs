@@ -1,8 +1,5 @@
 use capsule_core::common::paths::ato_path;
-use gpui::{
-    Action, App, AppContext, AssetSource, Bounds, KeyBinding, SharedString, WindowBounds,
-    WindowDecorations, WindowOptions, actions, px, size,
-};
+use gpui::{Action, App, AssetSource, KeyBinding, SharedString, actions};
 #[cfg(target_os = "macos")]
 use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
 #[cfg(target_os = "macos")]
@@ -18,9 +15,7 @@ use serde::Deserialize;
 
 use crate::bundle_paths::DesktopBundlePaths;
 use crate::config::ControlBarMode;
-use crate::ui::DesktopShell;
 use gpui::AsyncApp;
-use gpui_component::TitleBar;
 
 actions!(
     ato_desktop,
@@ -541,14 +536,11 @@ pub fn run(skip_onboarding: bool) {
             KeyBinding::new("cmd-shift-w", StopActiveSession, Some("AtoDesktopShell")),
             // #169 / #170 / #173 — Focus View companion windows.
             // Keystroke bindings are intentionally limited to
-            // in-Focus navigation (Launcher, Card Switcher). The
-            // legacy ↔ Focus mode itself is chosen via config key
-            // `desktop.focus_view_enabled` at startup; there is no
-            // in-session toggle. `OpenAppWindowExperiment` survives as an
-            // action handler (reachable via the automation socket
-            // `host_dispatch_action` for AODD scripts that need to
-            // spawn an additional Focus AppWindow), but has no key
-            // binding.
+            // in-Focus navigation (Launcher, Card Switcher).
+            // `OpenAppWindowExperiment` survives as an action handler
+            // (reachable via the automation socket `host_dispatch_action`
+            // for AODD scripts that need to spawn an additional Focus
+            // AppWindow), but has no key binding.
             // Stage D: cmd-shift-k previously opened the Launcher.
             // The Launcher window has been retired. ShowSettings
             // (cmd-,) now reaches the ato-settings system capsule
@@ -573,20 +565,16 @@ pub fn run(skip_onboarding: bool) {
         cx.on_action(|_: &NativeCopy, _: &mut App| {});
         cx.on_action(|_: &NativePaste, _: &mut App| {});
         cx.on_action(|_: &NativeSelectAll, _: &mut App| {});
-        // Quit is intercepted by DesktopShell so it can prompt the
-        // user to keep or clear persisted tabs. ConfirmQuitKeep /
-        // ConfirmQuitClear / CancelQuit are the resolution actions.
+        // ConfirmQuitKeep / ConfirmQuitClear / CancelQuit resolve the quit prompt.
         cx.on_action(|_: &ConfirmQuitKeep, cx| {
             crate::system_capsule::ato_import::stop_active_import_preview_blocking(
                 cx,
                 "desktop_shutdown",
             );
-            if crate::window::is_multi_window_enabled() {
-                let count = cx
-                    .global_mut::<crate::state::session::SessionRegistry>()
-                    .stop_all_running();
-                tracing::info!(count, "app quit: stopped running sessions");
-            }
+            let count = cx
+                .global_mut::<crate::state::session::SessionRegistry>()
+                .stop_all_running();
+            tracing::info!(count, "app quit: stopped running sessions");
             cx.quit();
         });
         cx.on_action(|_: &ConfirmQuitClear, cx| {
@@ -594,12 +582,10 @@ pub fn run(skip_onboarding: bool) {
                 cx,
                 "desktop_shutdown",
             );
-            if crate::window::is_multi_window_enabled() {
-                let count = cx
-                    .global_mut::<crate::state::session::SessionRegistry>()
-                    .stop_all_running();
-                tracing::info!(count, "app quit: stopped running sessions");
-            }
+            let count = cx
+                .global_mut::<crate::state::session::SessionRegistry>()
+                .stop_all_running();
+            tracing::info!(count, "app quit: stopped running sessions");
             if let Ok(path) = ato_path("desktop-tabs.json") {
                 let _ = std::fs::remove_file(&path);
             }
@@ -805,9 +791,7 @@ pub fn run(skip_onboarding: bool) {
 
             // Window-lifecycle endgame.
             //
-            // Legacy single-window mode: quit when the last window closes.
-            //
-            // Focus View: the Control Bar is a process-lifetime singleton, so
+            // The Control Bar is a process-lifetime singleton, so
             // `cx.windows()` is effectively never empty while the bar is up —
             // and the bar is a WS_EX_TOOLWINDOW that never appears in the
             // Windows taskbar. A user who closes every content window from the
@@ -817,58 +801,39 @@ pub fn run(skip_onboarding: bool) {
             // landing surface (its quit button is the explicit exit). If the
             // Start page cannot be opened and only the Control Bar remains,
             // that is an unrecoverable state — quit as abnormal.
-            if crate::window::is_multi_window_enabled() {
-                if !crate::window::is_shutting_down()
-                    && cx
-                        .global::<crate::window::content_windows::OpenContentWindows>()
-                        .is_empty()
-                {
-                    reopen_start_or_quit(cx);
-                }
-            } else if cx.windows().is_empty() {
-                cx.quit();
+            if !crate::window::is_shutting_down()
+                && cx
+                    .global::<crate::window::content_windows::OpenContentWindows>()
+                    .is_empty()
+            {
+                reopen_start_or_quit(cx);
             }
         })
         .detach();
 
         cx.on_action(|_: &ShowControlBar, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             if let Err(err) = crate::window::show_control_bar(cx) {
                 tracing::error!(error = %err, "ShowControlBar failed");
             }
         });
 
         cx.on_action(|_: &HideControlBar, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             crate::window::hide_control_bar(cx);
         });
 
         cx.on_action(|_: &ToggleControlBar, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             if let Err(err) = crate::window::toggle_control_bar(cx) {
                 tracing::error!(error = %err, "ToggleControlBar failed");
             }
         });
 
         cx.on_action(|_: &FocusControlBarInput, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             if let Err(err) = crate::window::focus_control_bar_input(cx) {
                 tracing::error!(error = %err, "FocusControlBarInput failed");
             }
         });
 
         cx.on_action(|_action: &SetControlBarMode, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             // Temporary safety gate: keep control bar in floating mode only.
             let mode = ControlBarMode::Floating;
             let mut config = crate::config::load_config();
@@ -882,33 +847,18 @@ pub fn run(skip_onboarding: bool) {
         });
 
         cx.on_action(|_: &StopActiveSession, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             stop_active_focus_capsule(cx);
         });
         cx.on_action(|action: &StopContentWindow, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             stop_focus_content_window(cx, action.window_id);
         });
         cx.on_action(|action: &RestartContentWindow, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             restart_focus_content_window(cx, action.window_id);
         });
         cx.on_action(|action: &OpenContentWindowLogs, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             open_focus_content_window_logs(cx, action.window_id);
         });
         cx.on_action(|action: &OpenContentWindowSettings, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) =
                 crate::window::capsule_panel::open_capsule_settings_window(cx, action.window_id)
@@ -918,23 +868,14 @@ pub fn run(skip_onboarding: bool) {
         });
 
         cx.on_action(|_: &StopAllRetainedSessions, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             stop_all_focus_capsules(cx);
         });
 
         // #169 — multi-window experiment action. Opens a placeholder
-        // `AppWindowShell` window (Focus View is now the default;
-        // opt out via config `desktop.focus_view_enabled = false`).
+        // `AppWindowShell` window via the consent wizard so the full
+        // boot flow is exercised from the automation socket.
         cx.on_action(|_: &OpenAppWindowExperiment, cx: &mut App| {
             tracing::info!("OpenAppWindowExperiment handler entered");
-            if !crate::window::is_multi_window_enabled() {
-                tracing::warn!(
-                    "OpenAppWindowExperiment dispatched but multi-window flag is off"
-                );
-                return;
-            }
             // Go through the consent wizard so the full boot flow is
             // exercised end-to-end from the keyboard shortcut.
             let route = crate::state::GuestRoute::CapsuleHandle {
@@ -961,9 +902,6 @@ pub fn run(skip_onboarding: bool) {
         // OpenDockWindow directly, but external callers may still
         // send OpenIdentityMenu.
         cx.on_action(|_: &OpenIdentityMenu, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             crate::system_capsule::ipc::defer_after_dispatch_for(
                 cx,
                 std::time::Duration::from_millis(50),
@@ -982,9 +920,6 @@ pub fn run(skip_onboarding: bool) {
         // Bar dispatches ShowSettings as the sole action for the
         // settings cog click.
         cx.on_action(|_: &ShowSettings, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             crate::system_capsule::ipc::defer_after_dispatch_for(
                 cx,
                 std::time::Duration::from_millis(50),
@@ -997,12 +932,8 @@ pub fn run(skip_onboarding: bool) {
             );
         });
 
-        // Focus-mode handler for the Control Bar URL pill's
-        // PressEnter. Parses the typed URL and spawns an AppWindow
-        // with the matching GuestRoute. The legacy DesktopShell has
-        // its own `on_navigate_to_url` for the single-window mode;
-        // it never runs here because DesktopShell isn't instantiated
-        // when the multi-window flag is on.
+        // Handler for the Control Bar URL pill's PressEnter. Parses the
+        // typed URL and spawns an AppWindow with the matching GuestRoute.
         //
         // Supported schemes:
         //   - capsule://<handle...>  → CapsuleHandle route (spawns an
@@ -1014,9 +945,6 @@ pub fn run(skip_onboarding: bool) {
         //   - http(s)://...          → ExternalUrl route.
         //   - anything else          → log + ignore.
         cx.on_action(|action: &NavigateToUrl, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             let raw = action.url.trim();
             if raw.is_empty() {
                 return;
@@ -1146,7 +1074,7 @@ pub fn run(skip_onboarding: bool) {
                     match open_mode {
                         crate::config::CapsuleOpenMode::OsBrowser => {
                             let url_str = parsed.to_string();
-                            if let Err(e) = crate::ui::open_external_url(&url_str) {
+                            if let Err(e) = crate::proc_util::open_external_url(&url_str) {
                                 tracing::error!(
                                     error = %e,
                                     url = %url_str,
@@ -1189,18 +1117,9 @@ pub fn run(skip_onboarding: bool) {
             }
         });
 
-        // #173 — open Card Switcher overlay. No-op when multi-window
-        // flag is off. The overlay snapshots open `AppWindow`s and
-        // renders them as MRU-ordered cards; until the per-window
-        // WebViewManager migration lands the snapshot/dismissal logic
-        // is placeholder.
+        // #173 — open Card Switcher overlay. The overlay snapshots open
+        // `AppWindow`s and renders them as MRU-ordered cards.
         cx.on_action(|_: &OpenCardSwitcher, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                tracing::debug!(
-                    "OpenCardSwitcher dispatched but multi-window flag is off"
-                );
-                return;
-            }
             crate::system_capsule::ipc::defer_after_dispatch_for(
                 cx,
                 std::time::Duration::from_millis(50),
@@ -1224,12 +1143,6 @@ pub fn run(skip_onboarding: bool) {
 
         // Open / focus the Store window (Wry WebView → ato.run).
         cx.on_action(|_: &OpenStoreWindow, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                tracing::debug!(
-                    "OpenStoreWindow dispatched but multi-window flag is off"
-                );
-                return;
-            }
             crate::system_capsule::ipc::defer_after_dispatch_for(
                 cx,
                 std::time::Duration::from_millis(50),
@@ -1245,12 +1158,6 @@ pub fn run(skip_onboarding: bool) {
         // Toggle Dock visibility. If the dock window exists, close it.
         // If not, open it. The identity cache makes re-opening fast.
         cx.on_action(|_: &ToggleDock, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                tracing::debug!(
-                    "ToggleDock dispatched but multi-window flag is off"
-                );
-                return;
-            }
             let slot = cx.global::<crate::window::dock::DockWindowSlot>();
             if let Some(handle) = slot.0 {
                 crate::system_capsule::ipc::defer_after_dispatch_for(
@@ -1275,12 +1182,6 @@ pub fn run(skip_onboarding: bool) {
 
         // Open / focus the Dock window.
         cx.on_action(|_: &OpenDockWindow, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                tracing::debug!(
-                    "OpenDockWindow dispatched but multi-window flag is off"
-                );
-                return;
-            }
             crate::system_capsule::ipc::defer_after_dispatch_for(
                 cx,
                 std::time::Duration::from_millis(50),
@@ -1310,9 +1211,6 @@ pub fn run(skip_onboarding: bool) {
         });
 
         cx.on_action(|_: &OpenCapsulePanel, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                return;
-            }
             crate::system_capsule::ipc::defer_after_dispatch_for(
                 cx,
                 std::time::Duration::from_millis(50),
@@ -1356,126 +1254,92 @@ pub fn run(skip_onboarding: bool) {
             );
         });
 
-        // The two startup modes are mutually exclusive — there is no
-        // in-session toggle, only a process-lifetime choice. Focus View
-        // (AppWindow + Control Bar) is the default; config key
-        // `desktop.focus_view_enabled = false` selects legacy DesktopShell.
-        if crate::window::is_multi_window_enabled() {
-            tracing::info!("Focus View mode — selected by desktop.focus_view_enabled config");
-            // Spawn the Control Bar FIRST as a Focus-mode singleton.
-            // Its lifecycle is independent of any AppWindow: closing
-            // the active AppWindow does not close the bar; opening a
-            // new AppWindow re-uses the existing bar. The bar stays
-            // until the user explicitly closes it or the process
-            // exits.
-            let control_bar_handle = if matches!(
-                crate::window::control_bar_mode(cx),
-                ControlBarMode::Hidden
-            ) {
-                tracing::info!("Focus View Control Bar starts hidden");
-                None
-            } else {
-                match crate::window::open_focus_control_bar(cx) {
-                    Ok(h) => Some(h),
-                    Err(err) => {
-                        tracing::error!(error = %err, "Focus View Control Bar startup failed; quitting");
-                        cx.quit();
+        // Spawn the Control Bar FIRST as a Focus-mode singleton.
+        // Its lifecycle is independent of any AppWindow: closing
+        // the active AppWindow does not close the bar; opening a
+        // new AppWindow re-uses the existing bar. The bar stays
+        // until the user explicitly closes it or the process
+        // exits.
+        let control_bar_handle = if matches!(
+            crate::window::control_bar_mode(cx),
+            ControlBarMode::Hidden
+        ) {
+            tracing::info!("Focus View Control Bar starts hidden");
+            None
+        } else {
+            match crate::window::open_focus_control_bar(cx) {
+                Ok(h) => Some(h),
+                Err(err) => {
+                    tracing::error!(error = %err, "Focus View Control Bar startup failed; quitting");
+                    cx.quit();
+                    return;
+                }
+            }
+        };
+        tracing::info!("Focus View Control Bar opened at startup");
+
+        // Opening a Wry WebView synchronously during GPUI startup
+        // (before the macOS RunLoop has completed its first pass)
+        // causes WKWebView to initialize in a broken state where
+        // inline JavaScript is silently blocked. Defer store window
+        // creation by one event-loop tick so the RunLoop is fully
+        // live before WKWebView initializes.
+        let startup_config = crate::config::load_config();
+        let startup_surface = startup_config.desktop.startup_surface;
+        let show_onboarding =
+            crate::system_capsule::ato_onboarding::should_show_onboarding(&startup_config)
+                && !skip_onboarding;
+        let async_cx = cx.to_async();
+        cx.foreground_executor()
+            .spawn(async move {
+                // One frame is enough for the macOS RunLoop to complete
+                // its first pass and for WKWebView to initialize normally.
+                let bg_exec = async_cx.background_executor();
+                async_cx
+                    .background_executor()
+                    .timer(std::time::Duration::from_millis(32))
+                    .await;
+                crate::webview_init_guard::wait_until_idle(bg_exec).await;
+                async_cx.update(|cx| {
+                    if show_onboarding {
+                        match crate::window::onboarding_window::open_onboarding_window(cx) {
+                            Ok(_) => tracing::info!("Onboarding window opened at startup"),
+                            Err(err) => {
+                                tracing::error!(error = %err, "Onboarding window failed at startup")
+                            }
+                        }
                         return;
                     }
-                }
-            };
-            tracing::info!("Focus View Control Bar opened at startup");
-
-            // Opening a Wry WebView synchronously during GPUI startup
-            // (before the macOS RunLoop has completed its first pass)
-            // causes WKWebView to initialize in a broken state where
-            // inline JavaScript is silently blocked. Defer store window
-            // creation by one event-loop tick so the RunLoop is fully
-            // live before WKWebView initializes.
-            let startup_config = crate::config::load_config();
-            let startup_surface = startup_config.desktop.startup_surface;
-            let show_onboarding =
-                crate::system_capsule::ato_onboarding::should_show_onboarding(&startup_config)
-                    && !skip_onboarding;
-            let async_cx = cx.to_async();
-            cx.foreground_executor()
-                .spawn(async move {
-                    // One frame is enough for the macOS RunLoop to complete
-                    // its first pass and for WKWebView to initialize normally.
-                    let bg_exec = async_cx.background_executor();
-                    async_cx
-                        .background_executor()
-                        .timer(std::time::Duration::from_millis(32))
-                        .await;
-                    crate::webview_init_guard::wait_until_idle(bg_exec).await;
-                    async_cx.update(|cx| {
-                        if show_onboarding {
-                            match crate::window::onboarding_window::open_onboarding_window(cx) {
-                                Ok(_) => tracing::info!("Onboarding window opened at startup"),
-                                Err(err) => {
-                                    tracing::error!(error = %err, "Onboarding window failed at startup")
-                                }
-                            }
-                            return;
+                    match crate::window::open_configured_startup_surface(cx, startup_surface) {
+                        Ok(_) => {
+                            tracing::info!(?startup_surface, "Startup surface opened");
                         }
-                        match crate::window::open_configured_startup_surface(cx, startup_surface) {
-                            Ok(_) => {
-                                tracing::info!(?startup_surface, "Startup surface opened");
-                            }
-                            Err(err) => {
-                                tracing::error!(error = %err, ?startup_surface, "Startup surface failed")
-                            }
+                        Err(err) => {
+                            tracing::error!(error = %err, ?startup_surface, "Startup surface failed")
                         }
-                        // Background-refresh the installed-apps cache after the
-                        // surface is open so the launcher has data on first paint.
-                        cx.background_executor()
-                            .spawn(async move {
-                                let _ = crate::install_lifecycle_dashboard::DashboardCache::refresh();
-                            })
-                            .detach();
-                    });
-                })
-                .detach();
-
-            // Focus mode has no DesktopShell / WebViewManager, so the
-            // automation socket would never start and host_dispatch_action
-            // would have nowhere to land. Start a thin dispatcher that
-            // owns its own `AutomationHost`, drains socket-delivered
-            // requests, and routes `HostDispatchAction { action }` to
-            // the initial window as a real GPUI action dispatch.
-            // Actions are App-level so dispatching via any window handle
-            // reaches the registered handler — the Control Bar handle
-            // is used here since the Store window is deferred.
-            if let Some(control_bar_handle) = control_bar_handle {
-                crate::window::focus_dispatcher::start(cx, control_bar_handle);
-            } else {
-                tracing::warn!(
-                    "Focus dispatcher not started because the Control Bar is hidden at startup"
-                );
-            }
-        } else {
-            tracing::info!("Legacy DesktopShell mode — desktop.focus_view_enabled is false");
-            let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
-            cx.open_window(
-                WindowOptions {
-                    titlebar: Some(TitleBar::title_bar_options()),
-                    focus: true,
-                    show: true,
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_decorations: Some(WindowDecorations::Client),
-                    ..Default::default()
-                },
-                {
-                    let open_url_bridge = open_url_bridge.clone();
-                    move |window, cx| {
-                        window.set_window_title(crate::window::WINDOW_TITLE);
-                        let shell =
-                            cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
-                        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
                     }
-                },
-            )
-            .expect("failed to open ato-desktop window");
+                    // Background-refresh the installed-apps cache after the
+                    // surface is open so the launcher has data on first paint.
+                    cx.background_executor()
+                        .spawn(async move {
+                            let _ = crate::install_lifecycle_dashboard::DashboardCache::refresh();
+                        })
+                        .detach();
+                });
+            })
+            .detach();
+
+        // Start the focus dispatcher, which owns its own `AutomationHost`,
+        // drains socket-delivered requests, and routes `HostDispatchAction`
+        // to a real GPUI action dispatch. Actions are App-level so
+        // dispatching via any window handle reaches the registered handler —
+        // the Control Bar handle is used here since the Store window is deferred.
+        if let Some(control_bar_handle) = control_bar_handle {
+            crate::window::focus_dispatcher::start(cx, control_bar_handle);
+        } else {
+            tracing::warn!(
+                "Focus dispatcher not started because the Control Bar is hidden at startup"
+            );
         }
 
         cx.activate(true);
