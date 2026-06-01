@@ -1,6 +1,6 @@
 <div align="center">
   <br />
-  <img src="./docs/assets/ato-logo.png" alt="Ato logo" width="132" height="132" />
+  <img src="./docs/ato-logo.png" alt="Ato logo" width="132" height="132" />
   <h1>Ato</h1>
   <p>
     <strong>GitHub projects, runnable without setup.</strong>
