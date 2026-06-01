@@ -12,6 +12,46 @@ const DEFAULT_TARGET: &str = "darwin-arm64";
 const BUNDLED_SYSTEM_ASSET_EXCLUDED_DIRS: &[&str] =
     &["node_modules", ".vite", ".astro", ".next", "target"];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BudleTarget {
+    DarwinArm64,
+    DarwinX86_64,
+    WindowsX86_64,
+    LinuxX86_64,
+    LinuxArm64,
+}
+
+impl BudleTarget {
+    const DEFAULT_TARGET: Self = Self::DarwinArm64;
+
+    const ALL: &'static [Self] = &[Self::DarwinArm64, Self::DarwinX86_64, Self::WindowsX86_64, Self::LinuxX86_64, Self::LinuxArm64];
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::DarwinArm64 => "darwin-arm64",
+            Self::DarwinX86_64 => "darwin-x86_64",
+            Self::WindowsX86_64 => "windows-x86_64",
+            Self::LinuxX86_64 => "linux-x86_64",
+            Self::LinuxArm64 => "linux-arm64",
+        }
+    }
+
+    fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "darwin-arm64" => Ok(Self::DarwinArm64),
+            "darwin-x86_64" => Ok(Self::DarwinX86_64),
+            "windows-x86_64" => Ok(Self::WindowsX86_64),
+            "linux-x86_64" => Ok(Self::LinuxX86_64),
+            "linux-arm64" => Ok(Self::LinuxArm64),
+            other => bail("unsupported target: {}", other)
+        }
+    }
+
+    fn help_list() -> String {
+        Self::ALL.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+    }
+}
+
 fn main() -> Result<()> {
     let all: Vec<String> = std::env::args().skip(1).collect();
 
@@ -24,7 +64,7 @@ fn main() -> Result<()> {
         "bundle" => {
             let forwarded = &all[1..];
 
-            let mut target = DEFAULT_TARGET.to_string();
+            let mut target = BundleTarget::DEFAULT;
             let mut sign = false;
             let mut do_notarize = false;
             let mut do_zip = false;
@@ -38,10 +78,11 @@ fn main() -> Result<()> {
                 i += 1;
                 match arg.as_str() {
                     "--target" => {
-                        target = forwarded
+                        let raw = forwarded
                             .get(i)
                             .context("--target requires a value such as darwin-arm64")?
                             .clone();
+                        target = BundleTarget::parse(&raw)?;
                         i += 1;
                     }
                     "--sign" => sign = true,
@@ -87,8 +128,8 @@ fn main() -> Result<()> {
             // quarantine-tainted when downloaded via Safari, so the
             // zip path is now the canonical install.sh delivery.
             match target.as_str() {
-                "darwin-arm64" | "darwin-x86_64" => {
-                    let bundle = bundle_macos_app(&target, &helper_source)?;
+                BundleTarget::DarwinArm64 | BundleTarget::DarwinX86_64 => {
+                    let bundle = bundle_macos_app(target, &helper_source)?;
                     if sign {
                         codesign_bundle(&bundle)?;
                     }
@@ -96,24 +137,24 @@ fn main() -> Result<()> {
                         notarize_bundle(&bundle)?;
                     }
                     if do_zip {
-                        package_macos_zip(&bundle, &target)?;
+                        package_macos_zip(&bundle, target)?;
                     }
                     Ok(())
                 }
-                "windows-x86_64" => {
-                    let staging = bundle_windows_app(&target, &helper_source)?;
+                BundleTarget::WindowsX86_64 => {
+                    let staging = bundle_windows_app(target, &helper_source)?;
                     if do_msi {
                         package_msi(&staging, &target)?;
                     }
                     if do_zip {
-                        package_windows_zip(&staging, &target)?;
+                        package_windows_zip(&staging, target)?;
                     }
                     Ok(())
                 }
-                "linux-x86_64" | "linux-arm64" => {
-                    let staging = bundle_linux_app(&target, &helper_source)?;
+                BundleTarget::LinuxX86_64 | BundleTarget::LinuxArm64 => {
+                    let staging = bundle_linux_app(target, &helper_source)?;
                     if do_appimage {
-                        package_appimage(&staging, &target)?;
+                        package_appimage(&staging, target)?;
                     }
                     Ok(())
                 }
