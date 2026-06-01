@@ -2,7 +2,7 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -152,13 +152,17 @@ pub(crate) struct SyncCommitResponse {
 pub enum PublishArtifactError {
     #[error("Artifact upload conflict (409 version_exists): {message}")]
     VersionExists { message: String },
-    #[error("Managed Store direct publish cannot accept artifacts larger than the current conservative limit for {registry_url}: artifact is {size_bytes} bytes, limit is {limit_bytes} bytes. The current edge-backed single PUT path has been timing out before the registry accepts larger bodies.")]
+    #[error(
+        "Managed Store direct publish cannot accept artifacts larger than the current conservative limit for {registry_url}: artifact is {size_bytes} bytes, limit is {limit_bytes} bytes. The current edge-backed single PUT path has been timing out before the registry accepts larger bodies."
+    )]
     ManagedStoreDirectPayloadLimitExceeded {
         registry_url: String,
         size_bytes: u64,
         limit_bytes: u64,
     },
-    #[error("Managed Store direct publish does not support large payload override flags for {registry_url}: {message}")]
+    #[error(
+        "Managed Store direct publish does not support large payload override flags for {registry_url}: {message}"
+    )]
     ManagedStoreLargePayloadOverrideUnsupported {
         registry_url: String,
         message: String,
@@ -269,10 +273,10 @@ pub fn infer_publish_metadata_from_capsule_bytes(
         return Ok(Some(metadata));
     }
 
-    if let Some(lock) = extract_capsule_lock_from_capsule(bytes)? {
-        if let Some(metadata) = publish_metadata_from_lock(&lock) {
-            return Ok(Some(metadata));
-        }
+    if let Some(lock) = extract_capsule_lock_from_capsule(bytes)?
+        && let Some(metadata) = publish_metadata_from_lock(&lock)
+    {
+        return Ok(Some(metadata));
     }
 
     if crate::build::native_delivery::detect_install_requires_local_derivation(bytes)?.is_some() {
@@ -872,11 +876,7 @@ fn extract_repository_owner(manifest_raw: &str) -> Option<String> {
     let normalized = crate::publish_preflight::normalize_repository_value(&raw).ok()?;
     let (owner, _) = normalized.split_once('/')?;
     let owner = normalize_segment(owner);
-    if owner.is_empty() {
-        None
-    } else {
-        Some(owner)
-    }
+    if owner.is_empty() { None } else { Some(owner) }
 }
 
 fn normalize_segment(input: &str) -> String {
@@ -906,8 +906,8 @@ mod tests {
     use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
     use std::io::Write;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
@@ -916,7 +916,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::{post, put};
     use axum::{Json, Router};
-    use capsule_core::capsule::{set_artifact_hash, ChunkMeta, PayloadManifest};
+    use capsule_core::capsule::{ChunkMeta, PayloadManifest, set_artifact_hash};
     use tar::Builder;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::time::sleep;
@@ -936,8 +936,8 @@ mod tests {
         fn set(key: &'static str, value: Option<&OsStr>) -> Self {
             let previous = std::env::var_os(key);
             match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
             }
             Self { key, previous }
         }
@@ -946,8 +946,8 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }
@@ -1412,9 +1412,10 @@ args = ["--deep", "--force", "--sign", "-", "Demo.app"]
         let bytes = test_capsule_bytes("sample-capsule", "1.0.0");
         let err = load_artifact_payload_from_bytes(&bytes, "koh0920/another-slug")
             .expect_err("must fail");
-        assert!(err
-            .to_string()
-            .contains("must match artifact manifest.name"));
+        assert!(
+            err.to_string()
+                .contains("must match artifact manifest.name")
+        );
     }
 
     #[test]

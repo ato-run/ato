@@ -5,8 +5,8 @@ use thiserror::Error;
 
 use crate::ato_lock::hash::compute_lock_id;
 use crate::ato_lock::schema::{
-    parse_delivery_environment_value, AtoLock, DeliveryEnvironment, FeatureName, KnownFeature,
-    LockSignature, UnresolvedReason, UnresolvedValue, ATO_LOCK_SCHEMA_VERSION,
+    ATO_LOCK_SCHEMA_VERSION, AtoLock, DeliveryEnvironment, FeatureName, KnownFeature,
+    LockSignature, UnresolvedReason, UnresolvedValue, parse_delivery_environment_value,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,12 +68,12 @@ pub fn validate_structural(
         });
     }
 
-    if let Some(generated_at) = &lock.generated_at {
-        if DateTime::parse_from_rfc3339(generated_at).is_err() {
-            errors.push(AtoLockValidationError::InvalidGeneratedAt(
-                generated_at.clone(),
-            ));
-        }
+    if let Some(generated_at) = &lock.generated_at
+        && DateTime::parse_from_rfc3339(generated_at).is_err()
+    {
+        errors.push(AtoLockValidationError::InvalidGeneratedAt(
+            generated_at.clone(),
+        ));
     }
 
     validate_declared_features(&lock.features.declared, mode, &mut errors);
@@ -276,12 +276,12 @@ fn validate_delivery_value(lock: &AtoLock, value: &Value) -> std::result::Result
     validate_delivery_section(object, "install", &mut errors);
     validate_delivery_section(object, "projection", &mut errors);
 
-    if let Some(install) = object.get("install").and_then(Value::as_object) {
-        if let Some(environment) = install.get("environment") {
-            match parse_delivery_environment_value(environment) {
-                Ok(environment) => validate_delivery_environment(&environment, &mut errors),
-                Err(err) => errors.push(err),
-            }
+    if let Some(install) = object.get("install").and_then(Value::as_object)
+        && let Some(environment) = install.get("environment")
+    {
+        match parse_delivery_environment_value(environment) {
+            Ok(environment) => validate_delivery_environment(&environment, &mut errors),
+            Err(err) => errors.push(err),
         }
     }
 
@@ -475,13 +475,13 @@ fn validate_delivery_environment(environment: &DeliveryEnvironment, errors: &mut
                 service.name
             ));
         }
-        if let Some(healthcheck) = &service.healthcheck {
-            if healthcheck.kind.trim().is_empty() {
-                errors.push(format!(
+        if let Some(healthcheck) = &service.healthcheck
+            && healthcheck.kind.trim().is_empty()
+        {
+            errors.push(format!(
                     "contract.delivery.install.environment.services[{}].healthcheck.kind must be non-empty",
                     service.name
                 ));
-            }
         }
     }
 }
@@ -492,9 +492,9 @@ fn is_supported_feature(_feature: KnownFeature) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
-    use super::{validate_structural, AtoLock, ValidationMode};
+    use super::{AtoLock, ValidationMode, validate_structural};
 
     fn lock_with_delivery(delivery: Value, closure: Option<Value>) -> AtoLock {
         let mut lock = AtoLock::default();
@@ -540,12 +540,16 @@ mod tests {
         let errors = validate_structural(&lock, ValidationMode::Strict)
             .expect_err("artifact-import with build/finalize should fail");
 
-        assert!(errors.iter().any(|error| error
-            .to_string()
-            .contains("contract.delivery.build must be omitted for mode 'artifact-import'")));
-        assert!(errors.iter().any(|error| error
-            .to_string()
-            .contains("contract.delivery.finalize must be omitted for mode 'artifact-import'")));
+        assert!(errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("contract.delivery.build must be omitted for mode 'artifact-import'")
+        }));
+        assert!(errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("contract.delivery.finalize must be omitted for mode 'artifact-import'")
+        }));
     }
 
     #[test]
@@ -622,8 +626,10 @@ mod tests {
         let errors = validate_structural(&lock, ValidationMode::Strict)
             .expect_err("invalid environment should fail");
 
-        assert!(errors.iter().any(|error| error
-            .to_string()
-            .contains("contract.delivery.install.environment.services[].name must be non-empty")));
+        assert!(errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("contract.delivery.install.environment.services[].name must be non-empty")
+        }));
     }
 }

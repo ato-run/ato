@@ -21,8 +21,8 @@
 //!   turns the connection into a raw I/O stream.
 //! - Upstream side: `hyper::upgrade::on(&mut upstream_resp)` does the
 //!   same for the outbound connection.
-//! Both futures are joined and `tokio::io::copy_bidirectional` relays
-//! bytes forever until either side closes.
+//!   Both futures are joined and `tokio::io::copy_bidirectional` relays
+//!   bytes forever until either side closes.
 //!
 //! The server `Connection` **must** be wrapped with `.with_upgrades()` —
 //! see `run_ingress_listener` in `mod.rs`.
@@ -267,7 +267,7 @@ async fn proxy_http(
     const CONNECT_RETRIES: u32 = 3;
     const CONNECT_RETRY_MS: u64 = 150;
     let stream = {
-        let mut last_err: Option<std::io::Error> = None;
+        let mut _last_err: Option<std::io::Error> = None;
         let mut connected = None;
         for attempt in 0..=CONNECT_RETRIES {
             if attempt > 0 {
@@ -280,7 +280,7 @@ async fn proxy_http(
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                     tracing::debug!(attempt, addr = %addr, "upstream connect refused, retrying");
-                    last_err = Some(e);
+                    _last_err = Some(e);
                 }
                 Err(e) => return Err(anyhow::anyhow!("upstream connect failed: {e}")),
             }

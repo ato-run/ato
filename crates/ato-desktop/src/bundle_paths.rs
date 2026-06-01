@@ -415,10 +415,12 @@ mod tests {
         );
 
         let error = resolver.resolve_ato_helper_with_extra([]).unwrap_err();
-        assert!(error
-            .searched_paths()
-            .iter()
-            .any(|path| path.ends_with("ato.exe")));
+        assert!(
+            error
+                .searched_paths()
+                .iter()
+                .any(|path| path.ends_with("ato.exe"))
+        );
         assert!(error.to_string().contains("Searched paths:"));
 
         fs::remove_dir_all(root).ok();
@@ -441,10 +443,12 @@ mod tests {
         );
 
         let error = resolver.resolve_assets_dir().unwrap_err();
-        assert!(error
-            .searched_paths()
-            .iter()
-            .any(|path| path.ends_with("assets")));
+        assert!(
+            error
+                .searched_paths()
+                .iter()
+                .any(|path| path.ends_with("assets"))
+        );
         assert!(error.to_string().contains("Searched paths:"));
 
         fs::remove_dir_all(root).ok();

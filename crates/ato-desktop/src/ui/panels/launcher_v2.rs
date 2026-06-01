@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, img, point, px, AnyElement, BoxShadow, Entity, FontWeight, IntoElement, MouseButton,
-    ObjectFit,
+    AnyElement, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, ObjectFit, div, hsla, img,
+    point, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;

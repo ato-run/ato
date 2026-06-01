@@ -487,8 +487,8 @@ fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspa
 #[cfg(unix)]
 #[test]
 #[serial]
-fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspace_with_cwd_override(
-) {
+fn single_file_python_sandbox_markitdown_relative_output_stays_in_caller_workspace_with_cwd_override()
+ {
     let Some((nacelle, _uv)) = require_native_prerequisites() else {
         return;
     };

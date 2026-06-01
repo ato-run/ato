@@ -450,14 +450,18 @@ mod tests {
             segment,
             TemplateSegment::Expr(TemplateExpr::Credentials(key)) if key == "password"
         )));
-        assert!(parsed
-            .segments
-            .iter()
-            .any(|segment| matches!(segment, TemplateSegment::Expr(TemplateExpr::Host))));
-        assert!(parsed
-            .segments
-            .iter()
-            .any(|segment| matches!(segment, TemplateSegment::Expr(TemplateExpr::Port))));
+        assert!(
+            parsed
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, TemplateSegment::Expr(TemplateExpr::Host)))
+        );
+        assert!(
+            parsed
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, TemplateSegment::Expr(TemplateExpr::Port)))
+        );
     }
 
     #[test]

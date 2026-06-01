@@ -20,7 +20,7 @@
 //! 1. Sanity check: Catch typos and misconfiguration early
 //! 2. Portability check: Reject absolute paths that won't work on other machines
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::Path;
 use tracing::debug;
 
@@ -170,10 +170,12 @@ mod tests {
         let cmd = vec!["../../../bin/sh".to_string()];
         let result = validate_cmd(&cmd, &capsule_root(), false);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Directory traversal"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Directory traversal")
+        );
     }
 
     #[test]

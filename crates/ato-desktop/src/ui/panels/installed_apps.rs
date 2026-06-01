@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, hsla, px, AnyElement, FontWeight, IntoElement, MouseButton, Styled};
+use gpui::{AnyElement, FontWeight, IntoElement, MouseButton, Styled, div, hsla, px};
 
 use super::super::theme::Theme;
 use crate::app::SelectInstalledApp;

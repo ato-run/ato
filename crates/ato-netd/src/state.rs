@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
-use crate::egress::{policy::EgressPolicy, EgressManager};
+use crate::egress::{EgressManager, policy::EgressPolicy};
 use crate::ingress::IngressManager;
 
 /// Shared, cheaply-cloneable handle into the daemon's runtime state.

@@ -300,7 +300,7 @@ fn status_label(code: Option<i32>) -> String {
 mod tests {
     use tempfile::tempdir;
 
-    use super::{detect_prepare_command, detect_prepare_specs, PrepareSource};
+    use super::{PrepareSource, detect_prepare_command, detect_prepare_specs};
 
     #[test]
     fn detect_prefers_manifest_prepare_over_package_script() {

@@ -8,8 +8,8 @@ mod provenance;
 
 #[allow(unused_imports)]
 pub(crate) use compiler::{
-    compile_compatibility_input, compile_compatibility_project, CompatibilityCompileResult,
-    CompatibilityCompilerInput, DraftCompleteness, DraftGuarantee, UnresolvedSummary,
+    CompatibilityCompileResult, CompatibilityCompilerInput, DraftCompleteness, DraftGuarantee,
+    UnresolvedSummary, compile_compatibility_input, compile_compatibility_project,
 };
 #[allow(unused_imports)]
 pub(crate) use diagnostics::{

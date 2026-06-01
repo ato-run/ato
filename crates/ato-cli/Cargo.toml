@@ -1,7 +1,7 @@
 [package]
 name = "ato-cli"
 version = "0.5.5"
-edition = "2021"
+edition = "2024"
 description = "ato CLI (meta-runtime)"
 authors = ["ato-run"]
 homepage = "https://ato.run"

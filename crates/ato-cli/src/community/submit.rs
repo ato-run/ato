@@ -2,19 +2,19 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use toml::Value as TomlValue;
 use tracing::debug;
 
 use super::capsule_toml::{
-    extract_toml_source, resolve_community_api_base_url,
-    validate_capsule_toml_source_matches_run_target, SourceValidationOutcome,
+    SourceValidationOutcome, extract_toml_source, resolve_community_api_base_url,
+    validate_capsule_toml_source_matches_run_target,
 };
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SubmissionPayload {
+pub(crate) struct SubmissionPayload {
     source: String,
     capsule_toml: String,
     metadata: SubmissionMetadata,
@@ -471,9 +471,10 @@ name = "test"
 run = "index.js"
 "#;
         let err = validate_toml_shape(toml).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("missing required field 'schema_version'"));
+        assert!(
+            err.to_string()
+                .contains("missing required field 'schema_version'")
+        );
     }
 
     #[test]
@@ -485,9 +486,10 @@ version = "1.0.0"
 [targets]
 "#;
         let err = validate_toml_shape(toml).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("does not declare any runnable target"));
+        assert!(
+            err.to_string()
+                .contains("does not declare any runnable target")
+        );
     }
 
     #[test]
@@ -511,9 +513,10 @@ name = "test"
 version = "1.0.0"
 "#;
         let err = validate_toml_shape(toml).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("does not declare any runnable target"));
+        assert!(
+            err.to_string()
+                .contains("does not declare any runnable target")
+        );
     }
 
     #[test]

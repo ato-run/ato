@@ -99,7 +99,7 @@ fn ensure_windows_bootstrapped_npm(
             return Err(std::io::Error::new(
                 ErrorKind::Other,
                 format!("unsupported Windows architecture for UI npm bootstrap: {other}"),
-            ))
+            ));
         }
         None => "x64",
     };
@@ -233,7 +233,9 @@ fn main() {
     }
 
     if env::var("CARGO_FEATURE_WEBUI").is_err() {
-        println!("cargo:warning=Skipping UI build because the 'webui' feature is not enabled. Pass --features webui to include the Web UI.");
+        println!(
+            "cargo:warning=Skipping UI build because the 'webui' feature is not enabled. Pass --features webui to include the Web UI."
+        );
         return;
     }
 

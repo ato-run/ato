@@ -1,7 +1,7 @@
 use capsule_core::common::paths::ato_path;
 use gpui::{
-    actions, px, size, Action, App, AppContext, AssetSource, Bounds, KeyBinding, SharedString,
-    WindowBounds, WindowDecorations, WindowOptions,
+    Action, App, AppContext, AssetSource, Bounds, KeyBinding, SharedString, WindowBounds,
+    WindowDecorations, WindowOptions, actions, px, size,
 };
 #[cfg(target_os = "macos")]
 use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
@@ -778,7 +778,7 @@ pub fn run(skip_onboarding: bool) {
             let close_behavior =
                 crate::config::load_config().desktop.window_close_behavior;
             let affected_session_ids = {
-                let mut registry =
+                let registry =
                     cx.global_mut::<crate::state::session::SessionRegistry>();
                 let ids = registry.detach_clients_by_window_id(closed_id);
                 if close_behavior == crate::config::WindowCloseBehavior::StopSession {

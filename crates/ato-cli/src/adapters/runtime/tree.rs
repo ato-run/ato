@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::Value;
@@ -312,13 +312,14 @@ fn extract_capsule_to_runtime_dir(capsule_bytes: &[u8], runtime_dir: &Path) -> R
 
 fn switch_current_symlink(base_dir: &Path, runtime_dir: &Path) -> Result<()> {
     let current_path = base_dir.join(CURRENT_SYMLINK);
-    if let Ok(meta) = fs::symlink_metadata(&current_path) {
-        if meta.file_type().is_dir() && !meta.file_type().is_symlink() {
-            bail!(
-                "Refusing to replace runtime current directory that is not a symlink: {}",
-                current_path.display()
-            );
-        }
+    if let Ok(meta) = fs::symlink_metadata(&current_path)
+        && meta.file_type().is_dir()
+        && !meta.file_type().is_symlink()
+    {
+        bail!(
+            "Refusing to replace runtime current directory that is not a symlink: {}",
+            current_path.display()
+        );
     }
 
     let tmp_link = base_dir.join(format!(".{}.tmp-{}", CURRENT_SYMLINK, random_suffix()));

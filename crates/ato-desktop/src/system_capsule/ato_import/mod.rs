@@ -16,7 +16,7 @@ use gpui::{AnyWindowHandle, App, BackgroundExecutor};
 use serde::Deserialize;
 
 use crate::source_import_api::{
-    discover as discover_api_creds, ApiClient, ApiCreds, AttemptStatus,
+    ApiClient, ApiCreds, AttemptStatus, discover as discover_api_creds,
 };
 use crate::source_import_runner::{
     infer as runner_infer, run_with_recipe as runner_run,
@@ -24,7 +24,7 @@ use crate::source_import_runner::{
 };
 use crate::source_import_session::{GitHubImportSessionState, ImportOutput};
 use crate::system_capsule::broker::{BrokerError, Capability};
-use crate::window::import_window::{push_current_snapshot, session_arc, ImportApiCreds};
+use crate::window::import_window::{ImportApiCreds, push_current_snapshot, session_arc};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::adapters::runtime::oci_session_store::{
-    podman_machine_status, OciSessionStatus, OciSessionStore, PodmanMachineStatus,
+    OciSessionStatus, OciSessionStore, PodmanMachineStatus, podman_machine_status,
 };
 use crate::binding;
 use crate::reporters::CliReporter;
-use crate::runtime::process::{format_duration, get_process_uptime, ProcessManager, ProcessStatus};
+use crate::runtime::process::{ProcessManager, ProcessStatus, format_duration, get_process_uptime};
 use capsule_core::CapsuleReporter;
 
 pub struct PsArgs {
@@ -225,24 +225,22 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                 p.pid, id, name, status_str, runtime_str, uptime
             )))?;
 
-            if let Some(snapshot) = pm.read_dependency_session_snapshot(&p.id).ok().flatten() {
-                if !snapshot.providers.is_empty() {
-                    let deps = snapshot
-                        .providers
-                        .iter()
-                        .map(|provider| {
-                            let port = provider
-                                .allocated_port
-                                .map(|port| format!(", port=127.0.0.1:{port}"))
-                                .unwrap_or_default();
-                            format!("{}(pid={}{})", provider.alias, provider.pid, port)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    futures::executor::block_on(
-                        reporter.notify(format!("         deps: {}", deps)),
-                    )?;
-                }
+            if let Some(snapshot) = pm.read_dependency_session_snapshot(&p.id).ok().flatten()
+                && !snapshot.providers.is_empty()
+            {
+                let deps = snapshot
+                    .providers
+                    .iter()
+                    .map(|provider| {
+                        let port = provider
+                            .allocated_port
+                            .map(|port| format!(", port=127.0.0.1:{port}"))
+                            .unwrap_or_default();
+                        format!("{}(pid={}{})", provider.alias, provider.pid, port)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                futures::executor::block_on(reporter.notify(format!("         deps: {}", deps)))?;
             }
         }
 

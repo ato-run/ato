@@ -224,7 +224,9 @@ mod tests {
     use serial_test::serial;
 
     fn clear_env() {
-        std::env::remove_var("ATO_CACHE_STRATEGY");
+        unsafe {
+            std::env::remove_var("ATO_CACHE_STRATEGY");
+        }
     }
 
     #[test]
@@ -259,7 +261,9 @@ mod tests {
     #[serial]
     fn auto_honors_env_var_for_derivation() {
         clear_env();
-        std::env::set_var("ATO_CACHE_STRATEGY", "derivation");
+        unsafe {
+            std::env::set_var("ATO_CACHE_STRATEGY", "derivation");
+        }
         let resolved = CacheStrategyArg::Auto.resolve();
         clear_env();
         assert_eq!(resolved, CacheStrategy::DerivationCache);
@@ -269,7 +273,9 @@ mod tests {
     #[serial]
     fn auto_honors_env_var_for_none() {
         clear_env();
-        std::env::set_var("ATO_CACHE_STRATEGY", "none");
+        unsafe {
+            std::env::set_var("ATO_CACHE_STRATEGY", "none");
+        }
         let resolved = CacheStrategyArg::Auto.resolve();
         clear_env();
         assert_eq!(resolved, CacheStrategy::None);
@@ -279,7 +285,9 @@ mod tests {
     #[serial]
     fn unrecognized_env_value_falls_back_to_default() {
         clear_env();
-        std::env::set_var("ATO_CACHE_STRATEGY", "yolo");
+        unsafe {
+            std::env::set_var("ATO_CACHE_STRATEGY", "yolo");
+        }
         let resolved = CacheStrategyArg::Auto.resolve();
         clear_env();
         assert_eq!(resolved, CacheStrategy::DerivationCache);
@@ -289,7 +297,9 @@ mod tests {
     #[serial]
     fn explicit_flag_overrides_env_var() {
         clear_env();
-        std::env::set_var("ATO_CACHE_STRATEGY", "derivation");
+        unsafe {
+            std::env::set_var("ATO_CACHE_STRATEGY", "derivation");
+        }
         let resolved = CacheStrategyArg::None.resolve();
         clear_env();
         assert_eq!(resolved, CacheStrategy::None);

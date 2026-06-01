@@ -17,8 +17,8 @@ use std::sync::mpsc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Pixels, Render, Size,
-    WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, IntoElement, Pixels, Render, Size, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions, div, px, rgb, size,
 };
 use serde::Serialize;
 use wry::dpi::{LogicalPosition, LogicalSize};

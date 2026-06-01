@@ -209,11 +209,8 @@ pub fn import_docker_run_script(
         }
 
         // Other `docker` sub-commands.
-        if stmt.starts_with("docker ") {
-            let subcmd = stmt["docker ".len()..]
-                .split_whitespace()
-                .next()
-                .unwrap_or("?");
+        if let Some(rest) = stmt.strip_prefix("docker ") {
+            let subcmd = rest.split_whitespace().next().unwrap_or("?");
             match subcmd {
                 "build" | "compose" | "stack" => {
                     output.unsupported_features.push(format!(
@@ -585,16 +582,16 @@ fn parse_docker_run(
                 raw_env.push(parse_env_kv(&tok[kv_start..]));
             }
             _ if tok.starts_with("-p=") || tok.starts_with("--publish=") => {
-                let s = if tok.starts_with("-p=") {
-                    &tok[3..]
+                let s = if let Some(v) = tok.strip_prefix("-p=") {
+                    v
                 } else {
                     &tok["--publish=".len()..]
                 };
                 raw_ports.push(s.to_string());
             }
             _ if tok.starts_with("-v=") || tok.starts_with("--volume=") => {
-                let s = if tok.starts_with("-v=") {
-                    &tok[3..]
+                let s = if let Some(v) = tok.strip_prefix("-v=") {
+                    v
                 } else {
                     &tok["--volume=".len()..]
                 };
@@ -1278,7 +1275,7 @@ docker run -d --name blinko-website \
             .iter()
             .find(|s| s.name.contains("website"))
             .unwrap();
-        let db_url_entry = app.env.iter().find(|e| e.key == "DATABASE_URL").unwrap();
+        let _db_url_entry = app.env.iter().find(|e| e.key == "DATABASE_URL").unwrap();
         // blinko-postgres should remain as the alias since label == source_name here.
         // The dep should be inferred.
         assert!(!app.depends_on.is_empty(), "app should depend on db");

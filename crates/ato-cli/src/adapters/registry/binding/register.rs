@@ -6,9 +6,9 @@ use crate::runtime::process::{ProcessInfo, ProcessManager};
 use capsule_core::types::CapsuleManifest;
 
 use super::contract::{
-    auto_bindable_service_names, derive_service_endpoint_locator, host_service_binding_scope,
-    ingress_binding_contract, local_service_binding_contract, normalize_endpoint_locator,
-    normalize_local_service_locator, SERVICE_BINDING_KIND_SERVICE,
+    SERVICE_BINDING_KIND_SERVICE, auto_bindable_service_names, derive_service_endpoint_locator,
+    host_service_binding_scope, ingress_binding_contract, local_service_binding_contract,
+    normalize_endpoint_locator, normalize_local_service_locator,
 };
 use super::manifest::load_manifest;
 use super::store::open_binding_store;

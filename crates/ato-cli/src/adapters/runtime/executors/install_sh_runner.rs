@@ -26,14 +26,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use capsule_core::CapsuleReporter;
 use capsule_core::execution_plan::model::OciPolicyMode;
 use capsule_core::oci_compose_lock::{self, OciComposeLock, OciImageLockEntry, OciImportMeta};
 use capsule_core::routing::importer::docker_run_script::{
-    detect_install_script_candidate, import_docker_run_script, DockerRunScriptImportInput,
-    DockerRunScriptImportOutput,
+    DockerRunScriptImportInput, DockerRunScriptImportOutput, detect_install_script_candidate,
+    import_docker_run_script,
 };
 use capsule_core::types::OciImageResolution;
-use capsule_core::CapsuleReporter;
 
 use super::launch_context::RuntimeLaunchContext;
 use super::oci_multi_service::execute_service_graph_with_provider;
@@ -43,7 +43,7 @@ use crate::adapters::runtime::oci_provider::{
 };
 use crate::adapters::runtime::oci_session_store::OciSessionMeta;
 use crate::application::preflight::{
-    preflight_oci_provider_readiness, OciProviderReadinessMode, OciProviderReadinessRequirements,
+    OciProviderReadinessMode, OciProviderReadinessRequirements, preflight_oci_provider_readiness,
 };
 use crate::reporters::CliReporter;
 
@@ -218,8 +218,8 @@ pub(crate) async fn execute_install_sh_run(
     // Also write OCI facts into main ato.lock.json.
     {
         use capsule_core::ato_lock::oci::{
-            construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
             OciImageLockEntry as MainOciImageLockEntry, OciImportEntry,
+            construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
         };
         let main_images: BTreeMap<String, MainOciImageLockEntry> = new_lock
             .images
@@ -404,6 +404,7 @@ pub(crate) async fn resolve_install_sh_images_with_lock_replay<P: OciProvider>(
 ///
 /// Does **not** perform provider readiness check or image resolution — those
 /// are the caller's responsibility. This is the path used by all unit tests.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_install_sh_run_with_provider<P: OciProvider>(
     import_output: &DockerRunScriptImportOutput,
     images: &HashMap<String, OciImageResolution>,
@@ -443,7 +444,7 @@ mod tests {
     use std::path::PathBuf;
 
     use capsule_core::routing::importer::docker_run_script::{
-        import_docker_run_script, DockerRunScriptImportInput,
+        DockerRunScriptImportInput, import_docker_run_script,
     };
     use capsule_core::types::OciImageResolution;
 
@@ -532,7 +533,7 @@ docker run -d \
 
         assert_eq!(images.len(), 2, "both services should be resolved");
         // Both should use the cached digest "sha256:aaaa..." not re-resolved.
-        for (_, img) in &images {
+        for img in images.values() {
             assert!(
                 img.resolved_digest.starts_with("sha256:aaaa"),
                 "expected cached digest, got: {}",
@@ -576,7 +577,7 @@ docker run -d \
         // Lock should now have the current hash.
         assert_eq!(new_lock.import.source_hash, *current_hash);
         // Images were re-resolved — the fake provider returns "bbbbb..." digests.
-        for (_, img) in &images {
+        for img in images.values() {
             assert!(
                 !img.resolved_digest.starts_with("sha256:aaaa"),
                 "expected fresh digest after drift, got: {}",
@@ -1034,7 +1035,7 @@ echo "done"
         let import = oci_read.imports.get("default").unwrap();
         assert_eq!(import.kind, "docker-run-script");
         assert_eq!(import.source_path, "install.sh");
-        for (_, entry) in &oci_read.images {
+        for entry in oci_read.images.values() {
             assert!(entry.resolved_ref.ends_with(&entry.resolved_digest));
             assert_eq!(entry.import_id.as_deref(), Some("default"));
         }

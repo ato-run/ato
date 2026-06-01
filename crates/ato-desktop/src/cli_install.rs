@@ -263,7 +263,9 @@ mod tests {
         // at the same helper. We can't fully exercise the symlink
         // path on every CI runner, so this asserts the early-return
         // branch.
-        std::env::set_var("PATH", tmp.to_string_lossy().to_string());
+        unsafe {
+            std::env::set_var("PATH", tmp.to_string_lossy().to_string());
+        }
         // PATH already containing the helper means the canonical-
         // match short-circuit fires.
         let outcome = try_install(&helper).expect("install should succeed");

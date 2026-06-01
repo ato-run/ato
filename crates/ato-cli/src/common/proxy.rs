@@ -207,16 +207,22 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            std::env::remove_var(self.0);
+            unsafe {
+                std::env::remove_var(self.0);
+            }
             if !self.1.is_empty() {
-                std::env::set_var(self.0, &self.1);
+                unsafe {
+                    std::env::set_var(self.0, &self.1);
+                }
             }
         }
     }
 
     fn env_guard(key: &'static str, value: &str) -> EnvGuard {
         let original = std::env::var(key).ok();
-        std::env::set_var(key, value);
+        unsafe {
+            std::env::set_var(key, value);
+        }
         EnvGuard(key, original.unwrap_or_default())
     }
 

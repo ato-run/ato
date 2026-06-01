@@ -3,18 +3,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use capsule_core::CapsuleReporter;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::handle::normalize_capsule_handle;
-use capsule_core::CapsuleReporter;
 
 #[cfg(test)]
 pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as RunPhaseBoundary;
 use crate::application::ports::OutputPort;
 use crate::application::share;
 use crate::cli::shared::CacheStrategyArg;
-use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
 #[cfg(test)]
 pub(crate) use crate::install::support::{LocalRunManifestPreparationOutcome, ResolvedRunTarget};
+use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
 use crate::progressive_ui;
 use crate::reporters;
 use crate::{
@@ -489,7 +489,9 @@ impl ScopedEnv {
             if self.previous.iter().all(|(existing, _)| existing != &key) {
                 self.previous.push((key.clone(), std::env::var(&key).ok()));
             }
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
         }
     }
 }
@@ -497,10 +499,16 @@ impl ScopedEnv {
 impl Drop for ScopedEnv {
     fn drop(&mut self) {
         for (key, previous) in self.previous.drain(..).rev() {
-            if let Some(previous) = previous {
-                std::env::set_var(key, previous);
-            } else {
-                std::env::remove_var(key);
+            unsafe {
+                if let Some(previous) = previous {
+                    unsafe {
+                        std::env::set_var(key, previous);
+                    }
+                } else {
+                    unsafe {
+                        std::env::remove_var(key);
+                    }
+                }
             }
         }
     }
@@ -541,11 +549,10 @@ mod tests {
 
     use capsule_core::ato_lock::{self, AtoLock};
     use serde_json::json;
-    use std::sync::{Mutex, OnceLock};
 
     use super::{
-        ato_log_requests_verbose, resolve_run_verbose, LocalRunManifestPreparationOutcome,
-        ResolvedRunTarget, RunPhaseBoundary,
+        LocalRunManifestPreparationOutcome, ResolvedRunTarget, RunPhaseBoundary,
+        ato_log_requests_verbose, resolve_run_verbose,
     };
     use crate::install::support::LocalRunManifestStatus;
     use std::sync::Arc;
@@ -600,11 +607,13 @@ mod tests {
             backup_path.parent().expect("parent"),
             tmp.path().join(".ato/tmp/run-invalid-manifests")
         );
-        assert!(backup_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .expect("file name")
-            .starts_with("capsule.toml.invalid."));
+        assert!(
+            backup_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("file name")
+                .starts_with("capsule.toml.invalid.")
+        );
     }
 
     #[test]
@@ -731,23 +740,31 @@ mod tests {
     #[test]
     fn ato_log_info_enables_verbose_run_output() {
         let _lock = env_lock();
-        std::env::set_var("ATO_LOG", "info");
+        unsafe {
+            std::env::set_var("ATO_LOG", "info");
+        }
 
         assert!(ato_log_requests_verbose());
         assert!(resolve_run_verbose(false));
 
-        std::env::remove_var("ATO_LOG");
+        unsafe {
+            std::env::remove_var("ATO_LOG");
+        }
     }
 
     #[test]
     fn explicit_verbose_overrides_silent_ato_log() {
         let _lock = env_lock();
-        std::env::set_var("ATO_LOG", "warn");
+        unsafe {
+            std::env::set_var("ATO_LOG", "warn");
+        }
 
         assert!(!ato_log_requests_verbose());
         assert!(resolve_run_verbose(true));
 
-        std::env::remove_var("ATO_LOG");
+        unsafe {
+            std::env::remove_var("ATO_LOG");
+        }
     }
 
     #[test]
