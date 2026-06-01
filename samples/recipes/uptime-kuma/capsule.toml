@@ -7,6 +7,9 @@ homepage = "https://github.com/louislam/uptime-kuma"
 
 default_target = "app"
 
+[source]
+repository = "louislam/uptime-kuma"
+
 [targets.app]
 runtime = "oci"
 image = "louislam/uptime-kuma:1"
