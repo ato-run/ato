@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Error as AnyhowError, Result};
-use capsule_core::ato_lock::{closure_info, AtoLock, UnresolvedValue};
+use capsule_core::ato_lock::{AtoLock, UnresolvedValue, closure_info};
 use capsule_core::common::paths::ato_runs_dir;
 use capsule_core::execution_identity::{
     ExecutionReceipt, ExecutionReceiptDocument, ReproducibilityCause, ReproducibilityClass,
     Tracked, TrackingStatus,
 };
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
+    ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
 use capsule_core::manifest;
 use capsule_core::types::{
@@ -18,7 +18,7 @@ use capsule_core::types::{
     StateSharing,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::application::compat_import::{
@@ -1203,24 +1203,22 @@ fn collect_diagnostic_views(snapshot: &InspectionSnapshot) -> Vec<InspectDiagnos
         });
     }
 
-    if let Some(closure) = snapshot.lock.resolution.entries.get("closure") {
-        if let Ok(info) = closure_info(closure) {
-            if info.status == "incomplete"
-                && !diagnostics
-                    .iter()
-                    .any(|value| value.lock_path == "resolution.closure")
-            {
-                diagnostics.push(InspectDiagnosticView {
-                    severity: "warning".to_string(),
-                    lock_path: "resolution.closure".to_string(),
-                    message: format!("resolution.closure remains incomplete ({})", info.kind),
-                    reason_class: Some("incomplete_closure".to_string()),
-                    source_mapping: source_mapping_for_field(snapshot, "resolution.closure"),
-                    inspect_command: inspect_command.clone(),
-                    preview_command: preview_command.clone(),
-                });
-            }
-        }
+    if let Some(closure) = snapshot.lock.resolution.entries.get("closure")
+        && let Ok(info) = closure_info(closure)
+        && info.status == "incomplete"
+        && !diagnostics
+            .iter()
+            .any(|value| value.lock_path == "resolution.closure")
+    {
+        diagnostics.push(InspectDiagnosticView {
+            severity: "warning".to_string(),
+            lock_path: "resolution.closure".to_string(),
+            message: format!("resolution.closure remains incomplete ({})", info.kind),
+            reason_class: Some("incomplete_closure".to_string()),
+            source_mapping: source_mapping_for_field(snapshot, "resolution.closure"),
+            inspect_command: inspect_command.clone(),
+            preview_command: preview_command.clone(),
+        });
     }
 
     diagnostics.sort_by(|left, right| {
@@ -1341,23 +1339,25 @@ fn lock_field_entries(lock: &AtoLock) -> BTreeMap<String, Option<Value>> {
     if !lock.features.declared.is_empty() {
         fields.insert(
             "features.declared".to_string(),
-            Some(json!(lock
-                .features
-                .declared
-                .iter()
-                .map(|value| value.as_str())
-                .collect::<Vec<_>>())),
+            Some(json!(
+                lock.features
+                    .declared
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+            )),
         );
     }
     if !lock.features.required_for_execution.is_empty() {
         fields.insert(
             "features.required_for_execution".to_string(),
-            Some(json!(lock
-                .features
-                .required_for_execution
-                .iter()
-                .map(|value| value.as_str())
-                .collect::<Vec<_>>())),
+            Some(json!(
+                lock.features
+                    .required_for_execution
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+            )),
         );
     }
     if !lock.features.implementation_phase.is_empty() {
@@ -2028,10 +2028,12 @@ mod tests {
                 && diff.path == "reproducibility.class"
                 && diff.drift_kind == "classification"
         }));
-        assert!(!comparison
-            .differences
-            .iter()
-            .any(|diff| diff.component == "execution_id"));
+        assert!(
+            !comparison
+                .differences
+                .iter()
+                .any(|diff| diff.component == "execution_id")
+        );
     }
 
     #[test]
@@ -2132,21 +2134,21 @@ fn collect_tracking_gaps_from_value(
 ) {
     match value {
         Value::Object(map) => {
-            if let Some(Value::String(status)) = map.get("status") {
-                if status == "unknown" || status == "untracked" {
-                    gaps.push(ExecutionTrackingGap {
-                        path: if path.is_empty() {
-                            "$".to_string()
-                        } else {
-                            path.to_string()
-                        },
-                        status: status.clone(),
-                        reason: map
-                            .get("reason")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned),
-                    });
-                }
+            if let Some(Value::String(status)) = map.get("status")
+                && (status == "unknown" || status == "untracked")
+            {
+                gaps.push(ExecutionTrackingGap {
+                    path: if path.is_empty() {
+                        "$".to_string()
+                    } else {
+                        path.to_string()
+                    },
+                    status: status.clone(),
+                    reason: map
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                });
             }
             for (key, child) in map {
                 collect_tracking_gaps_from_value(&join_json_path(path, key), child, gaps);
@@ -2254,10 +2256,10 @@ fn print_remediation_view(view: &RemediationLockView) {
     for suggestion in &view.suggestions {
         println!("  - {} ({})", suggestion.lock_path, suggestion.reason_class);
         println!("    {}", suggestion.recommended_action);
-        if let Some(mapping) = suggestion.source_mapping.as_ref() {
-            if let Some(path) = mapping.source_path.as_ref() {
-                println!("    source: {}", path);
-            }
+        if let Some(mapping) = suggestion.source_mapping.as_ref()
+            && let Some(path) = mapping.source_path.as_ref()
+        {
+            println!("    source: {}", path);
         }
     }
 }

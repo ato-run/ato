@@ -39,7 +39,7 @@ mod ffi {
     #[allow(dead_code)] // kept for documentation / future named-profile fallbacks
     pub const SANDBOX_NAMED: u64 = 0x0001;
 
-    extern "C" {
+    unsafe extern "C" {
         /// Apply a sandbox profile to the current process.
         ///
         /// Returns 0 on success, -1 on failure. `errorbuf` is populated with

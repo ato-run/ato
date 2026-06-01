@@ -13,14 +13,13 @@
 mod support;
 
 use capsule_core::foundation::install_lifecycle::{
-    self,
+    self, AppRecord, InstallInstanceStore, LaunchProfile,
     ids::{InstallRevisionId, InstalledAppId, ProfileId},
-    AppRecord, InstallInstanceStore, LaunchProfile,
 };
 use serial_test::serial;
 
 fn make_store(dir: &tempfile::TempDir) -> InstallInstanceStore {
-    InstallInstanceStore::new(&dir.path().join("instances")).unwrap()
+    InstallInstanceStore::new(dir.path().join("instances")).unwrap()
 }
 
 fn make_app_record(
@@ -72,7 +71,7 @@ fn scaffold(
 
     let mut revs = Vec::new();
     for i in 0..n_revs {
-        let rev = InstallRevisionId::new(&format!("rev_{:016x}_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", i));
+        let rev = InstallRevisionId::new(format!("rev_{:016x}_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", i));
         store.scaffold_revision(&rev).unwrap();
         store
             .set_current_revision(&app_id, &profile_id, &rev)
@@ -280,8 +279,12 @@ fn gc_protects_active_session_revision() {
     )
     .unwrap();
 
-    std::env::set_var("ATO_HOME", dir.path());
-    std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+    unsafe {
+        std::env::set_var("ATO_HOME", dir.path());
+    }
+    unsafe {
+        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+    }
 
     let mut protected = std::collections::HashSet::new();
     // Collect current_revision of each profile.
@@ -289,8 +292,8 @@ fn gc_protects_active_session_revision() {
     for app in &apps {
         let profiles = store.list_profiles(app).unwrap();
         for profile in &profiles {
-            if store.current_revision_link(app, &profile).exists() {
-                let rev = store.current_revision(app, &profile).unwrap();
+            if store.current_revision_link(app, profile).exists() {
+                let rev = store.current_revision(app, profile).unwrap();
                 protected.insert(rev.as_str().to_owned());
             }
         }
@@ -327,17 +330,17 @@ fn gc_protects_active_session_revision() {
         "session-referenced rev must be protected"
     );
 
-    std::env::remove_var("ATO_HOME");
-    std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
+    unsafe {
+        std::env::remove_var("ATO_HOME");
+    }
+    unsafe {
+        std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
+    }
 }
 
 #[cfg(unix)]
 fn nix_pid_u32(raw: i32) -> Option<u32> {
-    if raw <= 0 {
-        None
-    } else {
-        Some(raw as u32)
-    }
+    if raw <= 0 { None } else { Some(raw as u32) }
 }
 
 // ── GC error boundaries ─────────────────────────────────────────────────────
@@ -415,11 +418,13 @@ fn delete_revision_refuses_current() {
     let result = store.delete_revision(&current);
     assert!(result.is_err());
     assert!(format!("{:#}", result.unwrap_err()).contains("still current"));
-    assert!(store
-        .list_all_revisions()
-        .unwrap()
-        .iter()
-        .any(|r| r.as_str() == current.as_str()));
+    assert!(
+        store
+            .list_all_revisions()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str() == current.as_str())
+    );
 }
 
 // ── Multiple profiles / apps ────────────────────────────────────────────────
@@ -493,8 +498,7 @@ fn gc_keep_last_scoped_per_profile() {
 
     let mut revs_a = Vec::new();
     for i in 0..5 {
-        let rev =
-            InstallRevisionId::new(&format!("rev_a{0:01x}_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", i));
+        let rev = InstallRevisionId::new(format!("rev_a{0:01x}_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", i));
         store.scaffold_revision(&rev).unwrap();
         store.set_current_revision(&app_a, &profile, &rev).unwrap();
         revs_a.push(rev);
@@ -656,7 +660,7 @@ fn gc_protects_current_even_when_not_in_log() {
     {
         let link = store.current_revision_link(&app_id, &profile_id);
         std::fs::remove_file(&link).unwrap();
-        std::os::unix::fs::symlink(&store.revision_dir(&ghost), &link).unwrap();
+        std::os::unix::fs::symlink(store.revision_dir(&ghost), &link).unwrap();
     }
 
     let mut protected = std::collections::HashSet::new();

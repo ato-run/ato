@@ -97,14 +97,13 @@ pub fn run_git_checks(manifest_repo: Option<&str>) -> Result<GitCheckResult> {
 
     if let (Some(expected_repo), Some(actual_repo)) =
         (manifest_repository.as_deref(), origin_norm.as_deref())
+        && expected_repo != actual_repo
     {
-        if expected_repo != actual_repo {
-            anyhow::bail!(
-                "Repository mismatch: capsule.toml repository '{}' != git origin '{}'",
-                expected_repo,
-                actual_repo
-            );
-        }
+        anyhow::bail!(
+            "Repository mismatch: capsule.toml repository '{}' != git origin '{}'",
+            expected_repo,
+            actual_repo
+        );
     }
 
     if manifest_repository.is_some() && origin_norm.is_none() {

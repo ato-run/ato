@@ -15,10 +15,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::proc_util::CommandNoWindowExt;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use ureq;
 
 use crate::orchestrator::resolve_ato_binary;
 use crate::source_import_session::{ImportRun, ImportSource, SubmitPayload};
@@ -244,11 +243,7 @@ fn parse_success<T: for<'de> Deserialize<'de>>(resp: ureq::Response) -> Result<T
 }
 
 fn optional(s: &str) -> Option<&str> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn head_lines(text: &str, n: usize) -> String {

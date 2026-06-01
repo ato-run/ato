@@ -9,7 +9,7 @@ use capsule_core::router::ManifestData;
 use toml::Value;
 use walkdir::WalkDir;
 
-use crate::application::secrets::store::{write_secure_file, SecretStore};
+use crate::application::secrets::store::{SecretStore, write_secure_file};
 
 use super::relative_dependency_root_from_manifest;
 use super::types::{
@@ -165,10 +165,10 @@ fn resolve_env_value(
     if synthetic != "ato-placeholder" {
         return synthetic;
     }
-    if let Some(store) = store {
-        if let Ok(Some(real_value)) = store.get(key) {
-            return real_value;
-        }
+    if let Some(store) = store
+        && let Ok(Some(real_value)) = store.get(key)
+    {
+        return real_value;
     }
     synthetic
 }
@@ -272,16 +272,13 @@ pub fn materialize_shadow_manifest(
             "runtime_tools",
         ] {
             if let Some(val) = manifest_table.remove(key) {
-                if key == "runtime" {
-                    if let Some(rt_str) = val.as_str() {
-                        if let Some((rt, drv)) = rt_str.split_once('/') {
-                            target_table
-                                .insert("runtime".to_string(), Value::String(rt.to_string()));
-                            target_table
-                                .insert("driver".to_string(), Value::String(drv.to_string()));
-                            continue;
-                        }
-                    }
+                if key == "runtime"
+                    && let Some(rt_str) = val.as_str()
+                    && let Some((rt, drv)) = rt_str.split_once('/')
+                {
+                    target_table.insert("runtime".to_string(), Value::String(rt.to_string()));
+                    target_table.insert("driver".to_string(), Value::String(drv.to_string()));
+                    continue;
                 }
                 if key == "run" {
                     target_table.insert("run_command".to_string(), val);
@@ -828,13 +825,15 @@ build = "npm run build"
         let dir = tempfile::tempdir().expect("tempdir");
         let isolated_ato_home = tempfile::tempdir().expect("ato_home tempdir");
         let previous_ato_home = std::env::var_os("ATO_HOME");
-        std::env::set_var("ATO_HOME", isolated_ato_home.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", isolated_ato_home.path());
+        }
         struct AtoHomeRestore(Option<std::ffi::OsString>);
         impl Drop for AtoHomeRestore {
             fn drop(&mut self) {
                 match self.0.take() {
-                    Some(value) => std::env::set_var("ATO_HOME", value),
-                    None => std::env::remove_var("ATO_HOME"),
+                    Some(value) => unsafe { std::env::set_var("ATO_HOME", value) },
+                    None => unsafe { std::env::remove_var("ATO_HOME") },
                 }
             }
         }
@@ -1083,16 +1082,20 @@ run_command = "node app.js"
         let error = materialize_shadow_lockfiles(&plan, &summary, &shadow, &mut audit)
             .expect_err("npm should fail on invalid package.json");
 
-        assert!(error
-            .to_string()
-            .contains("shadow lockfile generation failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("shadow lockfile generation failed")
+        );
         assert_eq!(audit.materialization_records.len(), 1);
         let record = &audit.materialization_records[0];
         assert_eq!(record.status, ProvisioningMaterializationStatus::Failed);
         assert_eq!(record.driver.as_deref(), Some("node"));
-        assert!(record
-            .detail
-            .contains("npm install --package-lock-only --ignore-scripts"));
+        assert!(
+            record
+                .detail
+                .contains("npm install --package-lock-only --ignore-scripts")
+        );
     }
 
     #[test]
@@ -1133,9 +1136,11 @@ run_command = "python app.py"
         let error = materialize_shadow_lockfiles(&plan, &summary, &shadow, &mut audit)
             .expect_err("uv should fail on invalid pyproject.toml");
 
-        assert!(error
-            .to_string()
-            .contains("shadow lockfile generation failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("shadow lockfile generation failed")
+        );
         assert_eq!(audit.materialization_records.len(), 1);
         let record = &audit.materialization_records[0];
         assert_eq!(record.status, ProvisioningMaterializationStatus::Failed);

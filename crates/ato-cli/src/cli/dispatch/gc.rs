@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{InstallInstanceStore, InstallRevisionId};
+use capsule_core::foundation::install_lifecycle::InstallInstanceStore;
 use serde::Serialize;
 
 pub(crate) struct GcArgs {
@@ -215,17 +215,17 @@ fn collect_active_session_revisions(
 fn session_record_is_alive(record: &ato_session_core::record::StoredSessionInfo) -> bool {
     #[cfg(unix)]
     {
-        if let Some(pid) = nix_pid(record.pid) {
-            if ato_session_core::process::pid_is_alive(pid) {
-                return true;
-            }
+        if let Some(pid) = nix_pid(record.pid)
+            && ato_session_core::process::pid_is_alive(pid)
+        {
+            return true;
         }
         if let Some(svcs) = &record.orchestration_services {
             for svc in &svcs.services {
-                if let Some(pid) = svc.local_pid.and_then(nix_pid) {
-                    if ato_session_core::process::pid_is_alive(pid) {
-                        return true;
-                    }
+                if let Some(pid) = svc.local_pid.and_then(nix_pid)
+                    && ato_session_core::process::pid_is_alive(pid)
+                {
+                    return true;
                 }
             }
         }
@@ -247,19 +247,15 @@ fn session_record_is_alive(record: &ato_session_core::record::StoredSessionInfo)
 
 #[cfg(unix)]
 fn nix_pid(raw: i32) -> Option<u32> {
-    if raw <= 0 {
-        None
-    } else {
-        Some(raw as u32)
-    }
+    if raw <= 0 { None } else { Some(raw as u32) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use capsule_core::foundation::install_lifecycle::{
-        ids::{InstalledAppId, ProfileId},
         AppRecord, InstallInstanceStore, LaunchProfile,
+        ids::{InstallRevisionId, InstalledAppId, ProfileId},
     };
     use serial_test::serial;
 
@@ -272,7 +268,7 @@ mod tests {
         ProfileId,
         Vec<InstallRevisionId>,
     ) {
-        let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
+        let store = InstallInstanceStore::new(dir.path().join("instances")).unwrap();
         let app_id = InstalledAppId::new("app_gc_test");
         let profile_id = ProfileId::new("default");
         store
@@ -300,7 +296,7 @@ mod tests {
             .unwrap();
         let mut revs = Vec::new();
         for i in 0..n_revs {
-            let rev = InstallRevisionId::new(&format!("rev_{:032x}", i + 1));
+            let rev = InstallRevisionId::new(format!("rev_{:032x}", i + 1));
             store.scaffold_revision(&rev).unwrap();
             store
                 .set_current_revision(&app_id, &profile_id, &rev)
@@ -540,16 +536,24 @@ mod tests {
         )
         .unwrap();
 
-        std::env::set_var("ATO_HOME", dir.path());
-        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        }
         let result = execute_gc_command(GcArgs {
             dry_run: false,
             keep_last: 2,
             retention_days: 0,
             json: false,
         });
-        std::env::remove_var("ATO_HOME");
-        std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
+        }
         assert!(result.is_ok(), "gc failed: {:?}", result);
 
         let surviving: Vec<String> = store
@@ -580,16 +584,24 @@ mod tests {
         std::fs::create_dir_all(&session_root).unwrap();
         std::fs::write(session_root.join("broken.json"), b"{ not valid json").unwrap();
 
-        std::env::set_var("ATO_HOME", dir.path());
-        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        }
         let result = execute_gc_command(GcArgs {
             dry_run: false,
             keep_last: 2,
             retention_days: 0,
             json: false,
         });
-        std::env::remove_var("ATO_HOME");
-        std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
+        }
 
         assert!(
             result.is_err(),
@@ -617,14 +629,18 @@ mod tests {
     fn gc_command_dry_run_does_not_delete() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _app_id, _profile_id, revs) = make_store_with_revs(&dir, 4);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let result = execute_gc_command(GcArgs {
             dry_run: true,
             keep_last: 2,
             retention_days: 0,
             json: false,
         });
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
         assert!(result.is_ok(), "gc dry-run failed: {:?}", result);
         // All 4 revisions should still be on disk.
         let all_revs = store.list_all_revisions().unwrap();
@@ -638,14 +654,18 @@ mod tests {
     fn gc_command_deletes_reclaimable() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _app_id, _profile_id, _revs) = make_store_with_revs(&dir, 4);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let result = execute_gc_command(GcArgs {
             dry_run: false,
             keep_last: 2,
             retention_days: 0,
             json: false,
         });
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
         assert!(result.is_ok(), "gc failed: {:?}", result);
         let all_revs = store.list_all_revisions().unwrap();
         assert_eq!(

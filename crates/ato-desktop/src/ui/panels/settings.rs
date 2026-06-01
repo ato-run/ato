@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, hsla, px, AnyElement, Div, FontWeight, MouseButton};
+use gpui::{AnyElement, Div, FontWeight, MouseButton, div, hsla, px};
 use gpui_component::scroll::ScrollableElement;
 
 use super::super::theme::Theme;
@@ -353,13 +353,15 @@ fn render_sandbox_page(state: &AppState, theme: &Theme) -> Div {
             render_page_column(vec![
                 render_group(
                     "Nacelle",
-                    vec![render_toggle_row(
-                        "Nacelle engine",
-                        "Required for stricter runtime tiers.",
-                        true,
-                        theme,
-                    )
-                    .into_any_element()],
+                    vec![
+                        render_toggle_row(
+                            "Nacelle engine",
+                            "Required for stricter runtime tiers.",
+                            true,
+                            theme,
+                        )
+                        .into_any_element(),
+                    ],
                     theme,
                 ),
                 render_group(
@@ -458,17 +460,19 @@ fn render_trust_page(state: &AppState, theme: &Theme) -> Div {
                         )
                         .into_any_element()]
                 } else {
-                    vec![render_trust_entry(
-                        state
-                            .desktop_auth
-                            .publisher_handle
-                            .as_deref()
-                            .unwrap_or("ato.run"),
-                        "Verified",
-                        hsla(145.0 / 360.0, 0.68, 0.55, 1.0),
-                        theme,
-                    )
-                    .into_any_element()]
+                    vec![
+                        render_trust_entry(
+                            state
+                                .desktop_auth
+                                .publisher_handle
+                                .as_deref()
+                                .unwrap_or("ato.run"),
+                            "Verified",
+                            hsla(145.0 / 360.0, 0.68, 0.55, 1.0),
+                            theme,
+                        )
+                        .into_any_element(),
+                    ]
                 },
                 theme,
             )]),

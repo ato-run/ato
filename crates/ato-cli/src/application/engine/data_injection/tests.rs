@@ -78,7 +78,9 @@ async fn resolves_string_injection_from_cli_binding() {
 #[tokio::test]
 async fn resolves_directory_injection_from_file_uri() {
     let (cache_dir, cache_dir_string) = with_cache_dir("data-injection-dir");
-    std::env::set_var(ENV_INJECTED_DATA_CACHE_DIR, &cache_dir_string);
+    unsafe {
+        std::env::set_var(ENV_INJECTED_DATA_CACHE_DIR, &cache_dir_string);
+    }
     let fixture_root = cache_dir.join("fixture");
     fs::create_dir_all(&fixture_root).unwrap();
     fs::write(fixture_root.join("weights.bin"), b"abc").unwrap();
@@ -143,13 +145,17 @@ async fn resolves_directory_injection_from_file_uri() {
     let injected_path = PathBuf::from(&resolved.env["MODEL_DIR"]);
     assert!(injected_path.exists());
     assert!(injected_path.join("weights.bin").exists());
-    std::env::remove_var(ENV_INJECTED_DATA_CACHE_DIR);
+    unsafe {
+        std::env::remove_var(ENV_INJECTED_DATA_CACHE_DIR);
+    }
 }
 
 #[tokio::test]
 async fn resolves_oci_file_injection_as_mount() {
     let (cache_dir, cache_dir_string) = with_cache_dir("data-injection-oci-file");
-    std::env::set_var(ENV_INJECTED_DATA_CACHE_DIR, &cache_dir_string);
+    unsafe {
+        std::env::set_var(ENV_INJECTED_DATA_CACHE_DIR, &cache_dir_string);
+    }
     let fixture = cache_dir.join("config.json");
     fs::write(&fixture, b"{}\n").unwrap();
 
@@ -214,5 +220,7 @@ async fn resolves_oci_file_injection_as_mount() {
         "/var/run/ato/injected/CONFIG_FILE"
     );
     assert!(resolved.mounts[0].readonly);
-    std::env::remove_var(ENV_INJECTED_DATA_CACHE_DIR);
+    unsafe {
+        std::env::remove_var(ENV_INJECTED_DATA_CACHE_DIR);
+    }
 }

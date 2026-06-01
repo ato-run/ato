@@ -5,12 +5,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::{env, ffi::OsString};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::bootstrap::{BootstrapBoundary, BootstrapSubjectKind};
 use capsule_core::common::paths::runtime_cache_dir;
 use capsule_core::lockfile::{
-    parse_lockfile_text, resolve_existing_lockfile_path, CapsuleLock, RuntimeArtifact,
-    RuntimeEntry, ToolArtifact, CAPSULE_LOCK_FILE_NAME,
+    CAPSULE_LOCK_FILE_NAME, CapsuleLock, RuntimeArtifact, RuntimeEntry, ToolArtifact,
+    parse_lockfile_text, resolve_existing_lockfile_path,
 };
 use capsule_core::packers::runtime_fetcher::RuntimeFetcher;
 use capsule_core::router::ManifestData;
@@ -123,15 +123,15 @@ impl RuntimeManager {
         required_version: Option<String>,
         candidates: &[&str],
     ) -> Result<PathBuf> {
-        if let Some(required) = required_version {
-            if required != runtime.version {
-                bail!(
-                    "capsule.lock.json {} version mismatch (manifest={}, lock={})",
-                    runtime_name,
-                    required,
-                    runtime.version
-                );
-            }
+        if let Some(required) = required_version
+            && required != runtime.version
+        {
+            bail!(
+                "capsule.lock.json {} version mismatch (manifest={}, lock={})",
+                runtime_name,
+                required,
+                runtime.version
+            );
         }
         let artifact =
             select_runtime_artifact(&runtime.targets, &self.target_triple, &self.platform_key)
@@ -697,12 +697,12 @@ fn extract_archive(archive_path: &Path, dest: &Path, extension: &str) -> Result<
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    if let Some(name) = out_path.file_name().and_then(|n| n.to_str()) {
-                        if matches!(name, "deno" | "python" | "python3" | "uv" | "node") {
-                            let mut perms = fs::metadata(&out_path)?.permissions();
-                            perms.set_mode(0o755);
-                            fs::set_permissions(&out_path, perms)?;
-                        }
+                    if let Some(name) = out_path.file_name().and_then(|n| n.to_str())
+                        && matches!(name, "deno" | "python" | "python3" | "uv" | "node")
+                    {
+                        let mut perms = fs::metadata(&out_path)?.permissions();
+                        perms.set_mode(0o755);
+                        fs::set_permissions(&out_path, perms)?;
                     }
                 }
             }
@@ -799,9 +799,11 @@ mod tests {
             BootstrapAuthorityKind::HostCapability
         );
         assert_eq!(boundary.closure_role, BootstrapClosureRole::HostCapability);
-        assert!(boundary
-            .missing_on_path_message()
-            .contains("host-local 'node' runtime on PATH"));
+        assert!(
+            boundary
+                .missing_on_path_message()
+                .contains("host-local 'node' runtime on PATH")
+        );
     }
 
     #[test]
@@ -812,9 +814,11 @@ mod tests {
             BootstrapAuthorityKind::HostCapability
         );
         assert_eq!(boundary.closure_role, BootstrapClosureRole::HostCapability);
-        assert!(boundary
-            .missing_on_path_message()
-            .contains("host-local 'uv' tool on PATH"));
+        assert!(
+            boundary
+                .missing_on_path_message()
+                .contains("host-local 'uv' tool on PATH")
+        );
     }
 
     /// Regression for #104: `block_on_runtime_fetch` must not panic

@@ -4,17 +4,17 @@ use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use crate::ProviderToolchain;
 use crate::dispatch::publish as publish_command_dispatch;
 use crate::dispatch::registry as catalog_registry_dispatch;
 use crate::install::support as run_install_dispatch;
 use crate::install::support::{
-    build_github_manual_intervention_error, build_github_manual_intervention_message,
+    ParsedSemver, build_github_manual_intervention_error, build_github_manual_intervention_message,
     can_prompt_interactively, compare_semver, enforce_sandbox_mode_flags,
     ensure_run_auto_install_allowed, github_build_error_manual_review_reason,
     github_build_error_requires_manual_intervention, resolve_installed_capsule_archive_in_store,
-    run_blocking_github_install_step, select_capsule_file_in_version, ParsedSemver,
+    run_blocking_github_install_step, select_capsule_file_in_version,
 };
-use crate::ProviderToolchain;
 
 /// Shared mutex for tests that mutate process-global env vars
 /// (`HOME`, `ATO_HOME`, `ATO_DESKTOP_SESSION_ROOT`, etc.).
@@ -112,15 +112,17 @@ fn run_auto_install_gate_requires_yes_or_tty() {
 
     let err = ensure_run_auto_install_allowed(false, false, false, false)
         .expect_err("non-interactive auto-install must fail without --yes");
-    assert!(err
-        .to_string()
-        .contains("Interactive install confirmation requires a TTY"));
+    assert!(
+        err.to_string()
+            .contains("Interactive install confirmation requires a TTY")
+    );
 
     let err = ensure_run_auto_install_allowed(false, true, true, true)
         .expect_err("json mode must require --yes");
-    assert!(err
-        .to_string()
-        .contains("Non-interactive JSON mode requires -y/--yes"));
+    assert!(
+        err.to_string()
+            .contains("Non-interactive JSON mode requires -y/--yes")
+    );
 }
 
 #[test]
@@ -1248,14 +1250,17 @@ fn extract_first_sha256_hex_reads_single_file_checksum() {
 #[test]
 fn dangerous_skip_permissions_requires_explicit_opt_in_env() {
     let _guard = env_lock().lock().expect("env lock");
-    std::env::remove_var("CAPSULE_ALLOW_UNSAFE");
+    unsafe {
+        std::env::remove_var("CAPSULE_ALLOW_UNSAFE");
+    }
 
     let reporter = std::sync::Arc::new(reporters::CliReporter::new(true));
     let err = enforce_sandbox_mode_flags(EnforcementMode::Strict, false, true, None, reporter)
         .expect_err("must fail closed without env opt-in");
-    assert!(err
-        .to_string()
-        .contains("--dangerously-skip-permissions requires CAPSULE_ALLOW_UNSAFE=1"));
+    assert!(
+        err.to_string()
+            .contains("--dangerously-skip-permissions requires CAPSULE_ALLOW_UNSAFE=1")
+    );
     // Regression for issue #194: the error must be a typed AtoExecutionError so
     // the diagnostic mapper reaches E301, not the E999 fallback.
     assert!(
@@ -1286,13 +1291,17 @@ fn dangerous_skip_permissions_requires_explicit_opt_in_env() {
 #[test]
 fn dangerous_skip_permissions_allows_with_explicit_opt_in_env() {
     let _guard = env_lock().lock().expect("env lock");
-    std::env::set_var("CAPSULE_ALLOW_UNSAFE", "1");
+    unsafe {
+        std::env::set_var("CAPSULE_ALLOW_UNSAFE", "1");
+    }
 
     let reporter = std::sync::Arc::new(reporters::CliReporter::new(true));
     let result = enforce_sandbox_mode_flags(EnforcementMode::Strict, false, true, None, reporter);
     assert!(result.is_ok());
 
-    std::env::remove_var("CAPSULE_ALLOW_UNSAFE");
+    unsafe {
+        std::env::remove_var("CAPSULE_ALLOW_UNSAFE");
+    }
 }
 
 #[test]

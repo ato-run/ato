@@ -8,17 +8,17 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
 #[cfg(feature = "webui")]
 use axum::http::Uri;
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use capsule_core::capsule::manifest::validate_blake3_digest;
-use capsule_core::capsule::{verify_artifact_hash, CasStore};
+use capsule_core::capsule::{CasStore, verify_artifact_hash};
 use chrono::Utc;
 #[cfg(feature = "webui")]
 use rust_embed::RustEmbed;
@@ -533,7 +533,7 @@ fn parse_publish_metadata_headers(
                 return Err(format!(
                     "x-ato-publish-provenance-limited must be 'true' or 'false' (got '{}')",
                     value
-                ))
+                ));
             }
             None => false,
         };
@@ -605,7 +605,9 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
     }
     #[cfg(feature = "webui")]
     if ui_enabled && LocalRegistryUiAssets::get("index.html").is_none() {
-        println!("⚠️  Web UI assets are missing. Rebuild with `cargo build --features webui` after installing npm deps in apps/ato-store-local.");
+        println!(
+            "⚠️  Web UI assets are missing. Rebuild with `cargo build --features webui` after installing npm deps in apps/ato-store-local."
+        );
     }
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -934,7 +936,7 @@ async fn handle_manifest_negotiate(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.negotiate(&request) {
@@ -972,7 +974,7 @@ async fn handle_manifest_get_manifest(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.load_manifest_document(&manifest_hash) {
@@ -1023,7 +1025,7 @@ async fn handle_manifest_resolve_version(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.resolve_release_version(&publisher, &slug, &version) {
@@ -1071,7 +1073,7 @@ async fn handle_manifest_get_chunk(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.load_chunk_bytes(&chunk_hash) {
@@ -1105,7 +1107,7 @@ async fn handle_manifest_epoch_resolve(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.resolve_epoch_pointer(&request.scoped_id) {
@@ -1138,7 +1140,7 @@ async fn handle_manifest_lease_refresh(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     let ttl_secs = request.ttl_secs.unwrap_or(300).max(1);
@@ -1167,7 +1169,7 @@ async fn handle_manifest_lease_release(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.release_lease(&request.lease_id) {
@@ -1196,7 +1198,7 @@ async fn handle_manifest_key_rotate(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.rotate_signing_key(request.overlap_hours.unwrap_or(24)) {
@@ -1225,7 +1227,7 @@ async fn handle_manifest_key_revoke(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.revoke_key(&request.key_id, request.did.as_deref()) {
@@ -1254,7 +1256,7 @@ async fn handle_manifest_rollback(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.rollback_to_manifest(&request.scoped_id, &request.target_manifest_hash) {
@@ -1307,7 +1309,7 @@ async fn handle_manifest_yank(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     match store.yank_manifest(&request.scoped_id, &request.target_manifest_hash) {
@@ -1673,17 +1675,16 @@ async fn handle_get_release_manifest(
     let mut manifest_path = state
         .data_dir
         .join(release_manifest_rel_path(&publisher, &slug, &version));
-    if let Ok(index) = load_index(&state.data_dir) {
-        if let Some(rel_path) = index
+    if let Ok(index) = load_index(&state.data_dir)
+        && let Some(rel_path) = index
             .capsules
             .iter()
             .find(|c| c.publisher == publisher && c.slug == slug)
             .and_then(|c| c.releases.iter().find(|r| r.version == version))
             .and_then(|r| r.payload_v3.as_ref())
             .map(|v| v.manifest_rel_path.clone())
-        {
-            manifest_path = state.data_dir.join(rel_path);
-        }
+    {
+        manifest_path = state.data_dir.join(rel_path);
     }
     let bytes = match std::fs::read(&manifest_path) {
         Ok(bytes) => bytes,
@@ -1692,7 +1693,7 @@ async fn handle_get_release_manifest(
                 StatusCode::NOT_FOUND,
                 "not_found",
                 "payload v3 manifest not found",
-            )
+            );
         }
     };
 
@@ -1775,7 +1776,7 @@ async fn handle_put_local_capsule(
                 StatusCode::BAD_REQUEST,
                 "invalid_artifact",
                 &format!("manifest parse failed: {}", err),
-            )
+            );
         }
     };
     if artifact_meta.name != slug {
@@ -1801,7 +1802,7 @@ async fn handle_put_local_capsule(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
 
@@ -1812,7 +1813,7 @@ async fn handle_put_local_capsule(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "registry_query_failed",
                 &err.to_string(),
-            )
+            );
         }
     } {
         match existing_release_outcome(&existing_release.sha256, allow_existing, &actual_sha) {
@@ -1847,14 +1848,14 @@ async fn handle_put_local_capsule(
     }
 
     let artifact_path = artifact_path(&state.data_dir, &publisher, &slug, &version, &file_name);
-    if let Some(parent) = artifact_path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "storage_error",
-                &format!("failed to create artifact dir: {}", err),
-            );
-        }
+    if let Some(parent) = artifact_path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "storage_error",
+            &format!("failed to create artifact dir: {}", err),
+        );
     }
     if let Err(err) = std::fs::write(&artifact_path, &body) {
         return json_error(

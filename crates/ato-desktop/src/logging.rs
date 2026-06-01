@@ -24,7 +24,7 @@
 //!    Errors from gated targets still surface; routine chatter is silent.
 
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, fmt, prelude::*};
 
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 

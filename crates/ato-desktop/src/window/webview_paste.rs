@@ -21,9 +21,6 @@
 use gpui::{Context, FocusHandle, Window};
 use wry::WebView;
 
-#[cfg(target_os = "macos")]
-use wry::WebViewExtMacOS;
-
 use crate::app::{NativeCopy, NativeCut, NativePaste, NativeSelectAll};
 
 /// The GPUI key-context string shared by every WebView-hosting shell.
@@ -53,17 +50,16 @@ pub trait WebViewPasteShell: Sized + 'static {
     fn active_paste_target(&self) -> Option<&WebView>;
 
     fn on_native_paste(&mut self, _: &NativePaste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
-                if let Some(webview) = self.active_paste_target() {
-                    // Give WKWebView macOS first-responder so document.activeElement
-                    // is accurate by the time the script runs.
-                    #[cfg(target_os = "macos")]
-                    let _ = webview.focus();
-                    let script = paste_script(&text);
-                    let _ = webview.evaluate_script(&script);
-                }
-            }
+        if let Some(item) = cx.read_from_clipboard()
+            && let Some(text) = item.text()
+            && let Some(webview) = self.active_paste_target()
+        {
+            // Give WKWebView macOS first-responder so document.activeElement
+            // is accurate by the time the script runs.
+            #[cfg(target_os = "macos")]
+            let _ = webview.focus();
+            let script = paste_script(&text);
+            let _ = webview.evaluate_script(&script);
         }
     }
 

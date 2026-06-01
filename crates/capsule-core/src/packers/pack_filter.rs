@@ -146,10 +146,10 @@ impl PackFilter {
             return false;
         }
 
-        if let Some(include) = &self.include {
-            if !include.is_match(&rel) {
-                return false;
-            }
+        if let Some(include) = &self.include
+            && !include.is_match(&rel)
+        {
+            return false;
         }
 
         // Next.js standalone runtime bundles node_modules under `.next/standalone`.
@@ -490,8 +490,10 @@ mod tests {
         assert!(filter.should_include_file(Path::new(
             "apps/dashboard/.next/standalone/apps/dashboard/server.js"
         )));
-        assert!(!filter
-            .should_include_file(Path::new("apps/dashboard/node_modules/next/dist/bin/next")));
+        assert!(
+            !filter
+                .should_include_file(Path::new("apps/dashboard/node_modules/next/dist/bin/next"))
+        );
     }
 
     #[test]
@@ -678,8 +680,10 @@ mod tests {
         let filter = PackFilter::from_manifest_with_profile(&manifest, PublishProfile::Source)
             .expect("filter");
         // The Next.js standalone subtree must NOT be allowed through Source profile.
-        assert!(!filter
-            .should_include_file(Path::new(".next/standalone/node_modules/next/package.json")));
+        assert!(
+            !filter
+                .should_include_file(Path::new(".next/standalone/node_modules/next/package.json"))
+        );
         assert!(!filter.should_include_file(Path::new(
             "apps/web/.next/standalone/apps/web/node_modules/react/index.js"
         )));
@@ -698,8 +702,10 @@ mod tests {
         );
         let filter = PackFilter::from_manifest_with_profile(&manifest, PublishProfile::Artifact)
             .expect("filter");
-        assert!(filter
-            .should_include_file(Path::new(".next/standalone/node_modules/next/package.json")));
+        assert!(
+            filter
+                .should_include_file(Path::new(".next/standalone/node_modules/next/package.json"))
+        );
         assert!(filter.should_include_file(Path::new(
             "apps/web/.next/standalone/apps/web/node_modules/react/index.js"
         )));

@@ -73,19 +73,19 @@ pub fn discover_sidecar(req: SidecarRequest) -> Result<PathBuf> {
     }
 
     // 2) Environment override
-    if let Ok(env_path) = std::env::var(ENV_SIDECAR_PATH) {
-        if !env_path.trim().is_empty() {
-            return validate_sidecar_path(PathBuf::from(env_path));
-        }
+    if let Ok(env_path) = std::env::var(ENV_SIDECAR_PATH)
+        && !env_path.trim().is_empty()
+    {
+        return validate_sidecar_path(PathBuf::from(env_path));
     }
 
     // 3) Portable mode: look next to capsule binary
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(DEFAULT_SIDECAR_BINARY);
-            if candidate.exists() {
-                return validate_sidecar_path(candidate);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(DEFAULT_SIDECAR_BINARY);
+        if candidate.exists() {
+            return validate_sidecar_path(candidate);
         }
     }
 

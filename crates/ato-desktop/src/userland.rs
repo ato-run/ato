@@ -306,13 +306,10 @@ mod tests {
         );
         assert!(install_verb_allowlist(&["claude".into(), "--help".into()]).is_empty());
         // `python -m pip list` is a query, not install.
-        assert!(install_verb_allowlist(&[
-            "python".into(),
-            "-m".into(),
-            "pip".into(),
-            "list".into()
-        ])
-        .is_empty());
+        assert!(
+            install_verb_allowlist(&["python".into(), "-m".into(), "pip".into(), "list".into()])
+                .is_empty()
+        );
     }
 
     #[test]
