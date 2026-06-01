@@ -20,7 +20,7 @@ use serial_test::serial;
 #[cfg(unix)]
 use tempfile::TempDir;
 #[cfg(unix)]
-use zip::{write::FileOptions, ZipWriter};
+use zip::{ZipWriter, write::FileOptions};
 
 #[cfg(unix)]
 struct TestWheelSpec<'a> {

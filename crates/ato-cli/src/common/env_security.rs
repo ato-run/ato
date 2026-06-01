@@ -128,10 +128,12 @@ mod tests {
         for key in HARD_DENIED_ENV_KEYS {
             let result = check_user_env_safety(key, "anything");
             assert!(result.is_err(), "expected '{}' to be denied", key);
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("blocked for security"));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("blocked for security")
+            );
         }
     }
 

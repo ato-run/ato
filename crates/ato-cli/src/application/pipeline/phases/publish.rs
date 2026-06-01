@@ -10,7 +10,7 @@ use crate::application::ports::publish::{
     SharedDestinationPort,
 };
 use crate::application::producer_input::{
-    resolve_producer_authoritative_input, ProducerAuthoritativeInput,
+    ProducerAuthoritativeInput, resolve_producer_authoritative_input,
 };
 
 use crate::publish_artifact::ArtifactManifestInfo;
@@ -348,14 +348,13 @@ fn resolve_private_publisher(
         return repo_owner;
     }
 
-    if let Ok(origin) = crate::publish_preflight::run_git(&["remote", "get-url", "origin"]) {
-        if let Some(repo) = crate::publish_preflight::normalize_origin_to_repo(&origin) {
-            if let Some((owner, _)) = repo.split_once('/') {
-                let normalized = normalize_segment(owner);
-                if !normalized.is_empty() {
-                    return normalized;
-                }
-            }
+    if let Ok(origin) = crate::publish_preflight::run_git(&["remote", "get-url", "origin"])
+        && let Some(repo) = crate::publish_preflight::normalize_origin_to_repo(&origin)
+        && let Some((owner, _)) = repo.split_once('/')
+    {
+        let normalized = normalize_segment(owner);
+        if !normalized.is_empty() {
+            return normalized;
         }
     }
 
@@ -366,11 +365,7 @@ fn repository_owner(raw: &str) -> Option<String> {
     let normalized = crate::publish_preflight::normalize_repository_value(raw).ok()?;
     let (owner, _) = normalized.split_once('/')?;
     let owner = normalize_segment(owner);
-    if owner.is_empty() {
-        None
-    } else {
-        Some(owner)
-    }
+    if owner.is_empty() { None } else { Some(owner) }
 }
 
 fn manifest_slug(raw: &str) -> Result<String> {
@@ -705,9 +700,9 @@ mod tests {
     use tar::Builder;
 
     use super::{
+        DirectPublishRequest, PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
         enforce_direct_publish_preflight, normalize_segment, prepare_private_publish_artifact,
-        resolve_private_publisher, summarize_private_publish, DirectPublishRequest,
-        PrivatePublishRequest, PublishPhase, PublishPhaseRequest,
+        resolve_private_publisher, summarize_private_publish,
     };
     use crate::application::ports::publish::{
         DestinationPort, DestinationSpec, PublishArtifactIdentityClass, PublishableArtifact,

@@ -17,8 +17,8 @@ use nacelle::capsule_types::capsule_v1::{
     CapsuleExecution, CapsuleManifestV1, CapsuleRequirements, CapsuleRouting, CapsuleStorage,
     CapsuleType, RuntimeType, SourceTarget, TargetsConfig, WasmTarget,
 };
-use nacelle::launcher::resolver::{resolve_runtime, ResolveContext, ResolveError, ResolvedTarget};
 use nacelle::launcher::RuntimeKind;
+use nacelle::launcher::resolver::{ResolveContext, ResolveError, ResolvedTarget, resolve_runtime};
 
 fn base_manifest(name: &str, runtime: RuntimeType) -> CapsuleManifestV1 {
     CapsuleManifestV1 {

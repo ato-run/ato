@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use capsule_core::CapsuleReporter;
 use capsule_core::execution_plan::canonical::{
     compute_policy_segment_hash, compute_provisioning_policy_hash,
 };
@@ -14,7 +15,6 @@ use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::lock_runtime;
 use capsule_core::lockfile;
 use capsule_core::router::{ManifestData, RuntimeDecision};
-use capsule_core::CapsuleReporter;
 use tracing::debug;
 
 use super::launch_context::RuntimeLaunchContext;
@@ -280,9 +280,8 @@ pub fn prepare_target_execution(
             has_authoritative_lock,
         )?;
         let sandbox_gate_pending = preview_guard.requires_sandbox_opt_in && !options.sandbox_mode;
-        let consent_gate_pending = !(options.assume_yes
-            && is_transient_provider_workspace(&runtime_decision.plan))
-            && !crate::consent_store::has_consent(&execution_plan)?;
+        let consent_gate_pending = !(crate::consent_store::has_consent(&execution_plan)?
+            || options.assume_yes && is_transient_provider_workspace(&runtime_decision.plan));
 
         if sandbox_gate_pending && consent_gate_pending {
             return Err(AtoExecutionError::from_ato_error(
@@ -458,8 +457,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        preflight_required_environment_variables, prepare_target_execution, resolve_launch_context,
-        verify_lockfile_integrity, TargetLaunchOptions,
+        TargetLaunchOptions, preflight_required_environment_variables, prepare_target_execution,
+        resolve_launch_context, verify_lockfile_integrity,
     };
     use crate::application::pipeline::phases::run::{
         CompatibilityLegacyLockContext, DerivedBridgeManifest, PreparedRunContext,
@@ -475,7 +474,7 @@ mod tests {
     use capsule_core::router::{self, ExecutionProfile};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     #[test]
     fn injected_env_satisfies_required_env() {

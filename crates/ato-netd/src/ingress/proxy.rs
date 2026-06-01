@@ -21,8 +21,8 @@
 //!   turns the connection into a raw I/O stream.
 //! - Upstream side: `hyper::upgrade::on(&mut upstream_resp)` does the
 //!   same for the outbound connection.
-//! Both futures are joined and `tokio::io::copy_bidirectional` relays
-//! bytes forever until either side closes.
+//!   Both futures are joined and `tokio::io::copy_bidirectional` relays
+//!   bytes forever until either side closes.
 //!
 //! The server `Connection` **must** be wrapped with `.with_upgrades()` —
 //! see `run_ingress_listener` in `mod.rs`.
@@ -120,21 +120,19 @@ fn rewrite_uri(upstream_base: &Url, original: &Uri) -> Result<Uri, http::Error> 
         Some(p) => format!("{}:{}", upstream_base.host_str().unwrap_or("127.0.0.1"), p),
         None => upstream_base.host_str().unwrap_or("127.0.0.1").to_string(),
     };
-    parts.authority = Some(host_and_port.parse().map_err(|_| {
-        http::Error::from(http::status::InvalidStatusCode::from(
-            "invalid authority".parse::<StatusCode>().unwrap_err(),
-        ))
-    })?);
+    parts.authority =
+        Some(host_and_port.parse().map_err(|_| {
+            http::Error::from("invalid authority".parse::<StatusCode>().unwrap_err())
+        })?);
 
     let pq = original
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
-    parts.path_and_query = Some(pq.parse().map_err(|_| {
-        http::Error::from(http::status::InvalidStatusCode::from(
-            "invalid pq".parse::<StatusCode>().unwrap_err(),
-        ))
-    })?);
+    parts.path_and_query = Some(
+        pq.parse()
+            .map_err(|_| http::Error::from("invalid pq".parse::<StatusCode>().unwrap_err()))?,
+    );
 
     Uri::from_parts(parts).map_err(Into::into)
 }
@@ -269,7 +267,7 @@ async fn proxy_http(
     const CONNECT_RETRIES: u32 = 3;
     const CONNECT_RETRY_MS: u64 = 150;
     let stream = {
-        let mut last_err: Option<std::io::Error> = None;
+        let mut _last_err: Option<std::io::Error> = None;
         let mut connected = None;
         for attempt in 0..=CONNECT_RETRIES {
             if attempt > 0 {
@@ -282,7 +280,7 @@ async fn proxy_http(
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                     tracing::debug!(attempt, addr = %addr, "upstream connect refused, retrying");
-                    last_err = Some(e);
+                    _last_err = Some(e);
                 }
                 Err(e) => return Err(anyhow::anyhow!("upstream connect failed: {e}")),
             }

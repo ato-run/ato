@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use bollard::Docker;
 use bollard::container::{
     Config, CreateContainerOptions, LogsOptions, NetworkingConfig, RemoveContainerOptions,
     StartContainerOptions, StatsOptions, StopContainerOptions, WaitContainerOptions,
@@ -8,12 +9,11 @@ use bollard::exec::{CreateExecOptions, StartExecOptions};
 use bollard::image::CreateImageOptions;
 use bollard::models::{EndpointSettings, HostConfig, PortBinding};
 use bollard::network::{ConnectNetworkOptions, CreateNetworkOptions};
-use bollard::Docker;
 use futures_util::stream::StreamExt;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::error::{CapsuleError, Result};
 use crate::metrics::{MetricsSession, ResourceStats, RuntimeMetadata, UnifiedMetrics};
@@ -301,27 +301,26 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
         let exit_code = inspect.state.as_ref().and_then(|state| state.exit_code);
 
         let mut host_ports = HashMap::new();
-        if let Some(network_settings) = inspect.network_settings {
-            if let Some(ports) = network_settings.ports {
-                for (container_port, bindings) in ports {
-                    let Some((port_raw, _)) = container_port.split_once('/') else {
-                        continue;
-                    };
-                    let Ok(container_port) = port_raw.parse::<u16>() else {
-                        continue;
-                    };
-                    let Some(binding) = bindings.and_then(|values| values.into_iter().next())
-                    else {
-                        continue;
-                    };
-                    let Some(host_port) = binding
-                        .host_port
-                        .and_then(|value| value.parse::<u16>().ok())
-                    else {
-                        continue;
-                    };
-                    host_ports.insert(container_port, host_port);
-                }
+        if let Some(network_settings) = inspect.network_settings
+            && let Some(ports) = network_settings.ports
+        {
+            for (container_port, bindings) in ports {
+                let Some((port_raw, _)) = container_port.split_once('/') else {
+                    continue;
+                };
+                let Ok(container_port) = port_raw.parse::<u16>() else {
+                    continue;
+                };
+                let Some(binding) = bindings.and_then(|values| values.into_iter().next()) else {
+                    continue;
+                };
+                let Some(host_port) = binding
+                    .host_port
+                    .and_then(|value| value.parse::<u16>().ok())
+                else {
+                    continue;
+                };
+                host_ports.insert(container_port, host_port);
             }
         }
 

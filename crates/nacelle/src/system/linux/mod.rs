@@ -4,8 +4,8 @@ use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 
-use crate::system::common::{IsolationRule, SystemError};
 use crate::system::NetworkSandbox;
+use crate::system::common::{IsolationRule, SystemError};
 
 pub mod cgroup;
 pub mod ebpf;

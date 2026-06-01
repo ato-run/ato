@@ -44,3 +44,26 @@ impl CommandNoWindowExt for Command {
         self
     }
 }
+
+/// Open a URL in the user's default browser using the OS shell.
+///
+/// Uses `open` on macOS, `cmd /C start` on Windows, `xdg-open` on Linux.
+pub(crate) fn open_external_url(url: &str) -> std::io::Result<()> {
+    let mut command = if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    } else {
+        Command::new("xdg-open")
+    };
+    CommandNoWindowExt::no_console_window(&mut command);
+    let status = command.arg(url).status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "browser-open exited with status {status}"
+        )));
+    }
+    Ok(())
+}

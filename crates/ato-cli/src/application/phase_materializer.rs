@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use blake3::Hasher;
-use capsule_core::blob::{hash_tree, BlobManifest};
+use capsule_core::blob::{BlobManifest, hash_tree};
 use capsule_core::common::paths::{ato_cache_dir, workspace_tmp_dir};
 use capsule_core::common::store::BlobAddress;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use std::os::unix::fs::MetadataExt;
 use crate::application::build_materialization::BuildObservation;
 use crate::application::dependency_materializer::freeze::DerivationLock;
 use crate::application::projection::project_payload;
-use crate::application::source_inventory::{normalize_outputs, OutputSpec};
+use crate::application::source_inventory::{OutputSpec, normalize_outputs};
 
 const BUILD_OUTPUT_KEY_VERSION: &str = "ato-phase-build-output-key-v1";
 pub(crate) const MATERIALIZER_SCHEMA_VERSION: &str = "ato-phase-materializer-schema-v1";
@@ -840,7 +840,9 @@ mod tests {
     impl TestHomeGuard {
         fn set(path: &Path) -> Self {
             let prior = std::env::var_os("HOME");
-            std::env::set_var("HOME", path);
+            unsafe {
+                std::env::set_var("HOME", path);
+            }
             Self { prior }
         }
     }
@@ -848,8 +850,8 @@ mod tests {
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
             match self.prior.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
+                Some(value) => unsafe { std::env::set_var("HOME", value) },
+                None => unsafe { std::env::remove_var("HOME") },
             }
         }
     }

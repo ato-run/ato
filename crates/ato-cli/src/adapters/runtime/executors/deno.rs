@@ -111,10 +111,10 @@ pub fn execute(
     let (exit_code, stderr) =
         run_and_stream_child(prepared).context("Failed to execute deno run")?;
 
-    if exit_code != 0 {
-        if let Some(err) = map_deno_permission_error(&stderr) {
-            return Err(err.into());
-        }
+    if exit_code != 0
+        && let Some(err) = map_deno_permission_error(&stderr)
+    {
+        return Err(err.into());
     }
 
     Ok(exit_code)
@@ -816,7 +816,7 @@ fn map_deno_permission_error(stderr: &[u8]) -> Option<AtoExecutionError> {
     }
 
     let target = extract_deno_net_target(&text);
-    let message = if let Some(ref host) = target {
+    let message = if let Some(host) = &target {
         format!("network policy violation: blocked egress to {}", host)
     } else {
         "network policy violation: blocked egress".to_string()
@@ -859,10 +859,10 @@ fn collect_runtime_secrets(execution_plan: &ExecutionPlan) -> BTreeMap<String, S
 
     let mut secrets = BTreeMap::new();
     for key in keys {
-        if let Ok(value) = std::env::var(&key) {
-            if !value.is_empty() {
-                secrets.insert(key, value);
-            }
+        if let Ok(value) = std::env::var(&key)
+            && !value.is_empty()
+        {
+            secrets.insert(key, value);
         }
     }
 
@@ -1020,11 +1020,13 @@ mod tests {
         assert!(paths.home.exists());
         assert!(paths.xdg_cache_home.exists());
         assert!(paths.deno_dir.exists());
-        assert!(runtime_dir
-            .join(".ato-home")
-            .join("Library")
-            .join("Caches")
-            .exists());
+        assert!(
+            runtime_dir
+                .join(".ato-home")
+                .join("Library")
+                .join("Caches")
+                .exists()
+        );
     }
 
     #[test]

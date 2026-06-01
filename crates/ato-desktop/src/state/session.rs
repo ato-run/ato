@@ -12,8 +12,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 
-use anyhow::Result;
-
 use crate::orchestrator::GuestLaunchSession;
 
 // ── Client identity ─────────────────────────────────────────────────────────
@@ -337,10 +335,10 @@ impl SessionRegistry {
             .map(|(id, _)| *id)
             .collect();
         for cid in &client_ids {
-            if let Some(client) = self.clients.remove(cid) {
-                if let Some(wid) = client.window_id {
-                    self.window_to_clients.remove(&wid);
-                }
+            if let Some(client) = self.clients.remove(cid)
+                && let Some(wid) = client.window_id
+            {
+                self.window_to_clients.remove(&wid);
             }
         }
         self.sessions.remove(session_id);
@@ -382,34 +380,12 @@ impl SessionRegistry {
             client.last_seen_at = SystemTime::now();
             // Remove from window mapping so this window-id is no longer
             // considered "attached".
-            if let Some(wid) = client.window_id {
-                if let Some(ids) = self.window_to_clients.get_mut(&wid) {
-                    ids.retain(|id| *id != client_id);
-                    if ids.is_empty() {
-                        self.window_to_clients.remove(&wid);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Update the state of a client.
-    pub fn update_client_state(&mut self, client_id: SessionClientId, state: SessionClientState) {
-        if let Some(client) = self.clients.get_mut(&client_id) {
-            client.state = state;
-            client.last_seen_at = SystemTime::now();
-        }
-    }
-
-    /// Remove a client entirely (e.g. OS browser closed).
-    pub fn remove_client(&mut self, client_id: SessionClientId) {
-        if let Some(client) = self.clients.remove(&client_id) {
-            if let Some(wid) = client.window_id {
-                if let Some(ids) = self.window_to_clients.get_mut(&wid) {
-                    ids.retain(|id| *id != client_id);
-                    if ids.is_empty() {
-                        self.window_to_clients.remove(&wid);
-                    }
+            if let Some(wid) = client.window_id
+                && let Some(ids) = self.window_to_clients.get_mut(&wid)
+            {
+                ids.retain(|id| *id != client_id);
+                if ids.is_empty() {
+                    self.window_to_clients.remove(&wid);
                 }
             }
         }
@@ -438,22 +414,6 @@ impl SessionRegistry {
             .collect()
     }
 
-    /// Find a session by its client's window ID.
-    pub fn get_session_by_window_id(&self, window_id: u64) -> Option<&CapsuleSession> {
-        let client_ids = self.clients_by_window_id(window_id);
-        if let Some(cid) = client_ids.first() {
-            self.session_id_for_client(*cid)
-                .and_then(|sid| self.sessions.get(sid))
-        } else {
-            None
-        }
-    }
-
-    /// Number of tracked sessions.
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
-    }
-
     /// Replace the CLI-originated OCI projection without touching Desktop-owned
     /// source sessions or their attached window clients.
     pub fn sync_oci_sessions(&mut self, snapshots: Vec<OciSessionSnapshot>) {
@@ -473,11 +433,6 @@ impl SessionRegistry {
         for snapshot in snapshots {
             self.register_session(CapsuleSession::from_oci_snapshot(snapshot));
         }
-    }
-
-    pub fn refresh_oci_sessions_from_cli(&mut self) -> Result<()> {
-        self.sync_oci_sessions(crate::orchestrator::list_oci_sessions()?);
-        Ok(())
     }
 
     // ── lifecycle actions ──────────────────────────────────────────────
@@ -505,17 +460,14 @@ impl SessionRegistry {
     /// The caller SHOULD arrange for the completion event to update the
     /// process state on the UI thread (via `AsyncApp::update()`).
     pub fn stop_session_once(&mut self, session_id: &str) {
-        let needs_stop = match self.sessions.get(session_id) {
+        let needs_stop = matches!(
+            self.sessions.get(session_id),
             Some(s)
                 if !matches!(
                     s.process_state,
                     SessionProcessState::Stopping | SessionProcessState::Stopped
-                ) =>
-            {
-                true
-            }
-            _ => false,
-        };
+                )
+        );
         if !needs_stop {
             return;
         }
@@ -546,29 +498,6 @@ impl SessionRegistry {
             }
             // TODO(D4): post completion to UI thread to update process_state to Stopped
         });
-    }
-
-    pub fn stop_oci_session_and_refresh(&mut self, session_id: &str) -> Result<bool> {
-        let is_oci = self
-            .sessions
-            .get(session_id)
-            .map(|session| session.session_kind.is_oci())
-            .unwrap_or(false);
-        if !is_oci {
-            return Ok(false);
-        }
-        self.update_process_state(session_id, SessionProcessState::Stopping);
-        if let Err(error) = crate::orchestrator::stop_oci_session(session_id) {
-            self.update_process_state(
-                session_id,
-                SessionProcessState::FailedToStop {
-                    error: error.to_string(),
-                },
-            );
-            return Err(error);
-        }
-        self.refresh_oci_sessions_from_cli()?;
-        Ok(true)
     }
 
     /// Stop every session that is still running (Starting or Ready).
@@ -724,16 +653,6 @@ impl PendingLaunches {
             request.launch_id,
             (request, PendingLaunchState::AwaitingApproval),
         );
-    }
-
-    pub fn remove(&mut self, launch_id: LaunchRequestId) -> Option<CapsuleLaunchRequest> {
-        self.launches.remove(&launch_id).map(|(r, _)| r)
-    }
-
-    pub fn update_state(&mut self, launch_id: LaunchRequestId, state: PendingLaunchState) {
-        if let Some(entry) = self.launches.get_mut(&launch_id) {
-            entry.1 = state;
-        }
     }
 
     pub fn get(&self, launch_id: LaunchRequestId) -> Option<&CapsuleLaunchRequest> {

@@ -3,14 +3,14 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::common::paths::nacelle_home_dir;
 use serde::{Deserialize, Serialize};
 
 use super::policy::SecretPolicy;
 use crate::application::credential::{
-    self, backend::CredentialBackend, AgeFileBackend, BackendChain, BackendEntry, CredentialKey,
-    EnvBackend, MemoryBackend,
+    self, AgeFileBackend, BackendChain, BackendEntry, CredentialKey, EnvBackend, MemoryBackend,
+    backend::CredentialBackend,
 };
 
 // ── Public types (kept for backward compat) ──────────────────────────────────
@@ -264,13 +264,12 @@ fn try_load_identity(age: &mut AgeFileBackend) -> bool {
     // Check for a session key file exported by `ato session start`.
     if let Ok(session_path) = std::env::var("ATO_SESSION_KEY_FILE") {
         let p = std::path::Path::new(&session_path);
-        if p.exists() {
-            if let Ok(raw) = std::fs::read(p) {
-                if let Ok(id) = credential::load_identity_bytes(&raw, None) {
-                    age.install_identity(id);
-                    return true;
-                }
-            }
+        if p.exists()
+            && let Ok(raw) = std::fs::read(p)
+            && let Ok(id) = credential::load_identity_bytes(&raw, None)
+        {
+            age.install_identity(id);
+            return true;
         }
     }
 
@@ -384,9 +383,13 @@ mod tests {
         store.set("MY_KEY", "age-value", None, None, None).unwrap();
 
         // New env var form: ATO_CRED_SECRETS_DEFAULT__<KEY>
-        std::env::set_var("ATO_CRED_SECRETS_DEFAULT__MY_KEY", "env-value");
+        unsafe {
+            std::env::set_var("ATO_CRED_SECRETS_DEFAULT__MY_KEY", "env-value");
+        }
         let result = store.get("MY_KEY").unwrap();
-        std::env::remove_var("ATO_CRED_SECRETS_DEFAULT__MY_KEY");
+        unsafe {
+            std::env::remove_var("ATO_CRED_SECRETS_DEFAULT__MY_KEY");
+        }
 
         assert_eq!(result, Some("env-value".to_string()));
     }
@@ -400,9 +403,13 @@ mod tests {
             .set("BREAKING_KEY", "age-value", None, None, None)
             .unwrap();
 
-        std::env::set_var("ATO_SECRET_BREAKING_KEY", "legacy-value");
+        unsafe {
+            std::env::set_var("ATO_SECRET_BREAKING_KEY", "legacy-value");
+        }
         let got = store.get("BREAKING_KEY").unwrap();
-        std::env::remove_var("ATO_SECRET_BREAKING_KEY");
+        unsafe {
+            std::env::remove_var("ATO_SECRET_BREAKING_KEY");
+        }
 
         assert_eq!(got, Some("age-value".to_string()));
     }

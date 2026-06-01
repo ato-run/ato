@@ -7,6 +7,9 @@ homepage = "https://github.com/n8n-io/n8n"
 
 default_target = "app"
 
+[source]
+repository = "n8n-io/n8n"
+
 [targets.app]
 runtime = "oci"
 # Pin note: proposed pin to n8nio/n8n:1.93.0 — not yet AODD-confirmed

@@ -7,17 +7,17 @@ use std::sync::Mutex;
 use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use ato_session_core::{
-    compute_run_config_hash, materialized_launch_record_path, read_materialized_launch_record,
-    read_session_records, session_record_path, session_root as shared_session_root,
-    validate_record_only, RecordValidationOutcome, RecordValidationParams, StoredSessionInfo,
+    RecordValidationOutcome, RecordValidationParams, StoredSessionInfo, compute_run_config_hash,
+    materialized_launch_record_path, read_materialized_launch_record, read_session_records,
+    session_record_path, session_root as shared_session_root, validate_record_only,
 };
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path;
 use capsule_wire::handle::{
-    normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
-    ResolvedSnapshot,
+    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
+    normalize_capsule_handle,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -382,13 +382,7 @@ pub enum LaunchError {
     Other(String),
 }
 
-impl LaunchError {
-    /// Wrap any `Display` value (typically `anyhow::Error`,
-    /// `io::Error`, or `&str`) as the opaque variant.
-    pub fn other<E: std::fmt::Display>(err: E) -> Self {
-        Self::Other(err.to_string())
-    }
-}
+impl LaunchError {}
 
 impl std::fmt::Display for LaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -613,22 +607,6 @@ fn filter_already_provided_secrets(
         .collect()
 }
 
-/// Shell out to `ato internal preflight <handle> --json` and parse
-/// the aggregate envelope. Returns the list of pending
-/// `InteractiveResolutionEnvelope` items — empty list means the
-/// launch can proceed without further interaction.
-///
-/// Errors from this helper are non-fatal: the caller falls through
-/// to the legacy launch loop. We intentionally do NOT bubble them up
-/// as `LaunchError::Other` because that would short-circuit the
-/// existing fallback story and confuse users whose capsule simply
-/// hasn't been cached yet.
-fn collect_preflight_requirements(
-    handle: &str,
-) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
-    collect_preflight_requirements_with_input(&DesktopLaunchInput::from_handle(handle.to_string()))
-}
-
 fn collect_preflight_requirements_with_input(
     input: &DesktopLaunchInput,
 ) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
@@ -693,21 +671,49 @@ fn collect_preflight_envelope_for_input(
     }
 }
 
+/// Maximum number of automatic retries for a retryable preflight error.
+const PREFLIGHT_MAX_RETRIES: u32 = 2;
+/// Delay between preflight retries (linear, no jitter needed for a 2-retry budget).
+const PREFLIGHT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Returns `true` when the preflight CLI stdout carries a JSON error envelope
+/// with `"retryable": true`. Used to decide whether to retry on transient
+/// failures (e.g., a momentary community TOML registry fetch miss).
+fn preflight_stdout_is_retryable(stdout: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("retryable"))
+                .and_then(|r| r.as_bool())
+        })
+        .unwrap_or(false)
+}
+
 fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope> {
     let ato_bin = resolve_ato_binary()?;
     debug!(bin = %ato_bin.display(), handle, "calling ato internal preflight");
-    let output = Command::new(&ato_bin)
-        .no_console_window()
-        .args(["internal", "preflight", handle, "--json"])
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to invoke '{}' internal preflight",
-                ato_bin.display()
-            )
-        })?;
 
-    if !output.status.success() {
+    let mut attempt = 0u32;
+    loop {
+        let output = Command::new(&ato_bin)
+            .no_console_window()
+            .args(["internal", "preflight", handle, "--json"])
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to invoke '{}' internal preflight",
+                    ato_bin.display()
+                )
+            })?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let trimmed = stdout.trim();
+            return serde_json::from_str(trimmed)
+                .with_context(|| format!("failed to parse preflight JSON: {trimmed}"));
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
@@ -728,16 +734,23 @@ fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope
             });
         }
 
+        if attempt < PREFLIGHT_MAX_RETRIES && preflight_stdout_is_retryable(&stdout) {
+            attempt += 1;
+            tracing::warn!(
+                handle,
+                attempt,
+                max = PREFLIGHT_MAX_RETRIES,
+                "preflight transient error — retrying"
+            );
+            std::thread::sleep(PREFLIGHT_RETRY_DELAY);
+            continue;
+        }
+
         bail!(
             "ato internal preflight failed (exit {}): stderr={stderr} stdout={stdout}",
             output.status
         );
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim();
-    serde_json::from_str(trimmed)
-        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))
 }
 
 /// Preflight a community TOML candidate by passing `--community-toml-id` to
@@ -759,25 +772,34 @@ fn collect_preflight_envelope_for_community_toml(
         "calling ato internal preflight with --community-toml-id"
     );
     let normalized = normalize_preflight_handle(source_handle);
-    let output = Command::new(&ato_bin)
-        .no_console_window()
-        .args([
-            "internal",
-            "preflight",
-            &normalized,
-            "--community-toml-id",
-            ctoml_id,
-            "--json",
-        ])
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to invoke '{}' internal preflight --community-toml-id",
-                ato_bin.display()
-            )
-        })?;
 
-    if !output.status.success() {
+    let mut attempt = 0u32;
+    loop {
+        let output = Command::new(&ato_bin)
+            .no_console_window()
+            .args([
+                "internal",
+                "preflight",
+                &normalized,
+                "--community-toml-id",
+                ctoml_id,
+                "--json",
+            ])
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to invoke '{}' internal preflight --community-toml-id",
+                    ato_bin.display()
+                )
+            })?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let trimmed = stdout.trim();
+            return serde_json::from_str(trimmed)
+                .with_context(|| format!("failed to parse preflight JSON: {trimmed}"));
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
@@ -792,16 +814,24 @@ fn collect_preflight_envelope_for_community_toml(
             return collect_preflight_envelope(&normalized);
         }
 
+        if attempt < PREFLIGHT_MAX_RETRIES && preflight_stdout_is_retryable(&stdout) {
+            attempt += 1;
+            tracing::warn!(
+                source_handle,
+                ctoml_id,
+                attempt,
+                max = PREFLIGHT_MAX_RETRIES,
+                "community-toml preflight transient error — retrying"
+            );
+            std::thread::sleep(PREFLIGHT_RETRY_DELAY);
+            continue;
+        }
+
         bail!(
             "ato internal preflight --community-toml-id failed (exit {}): stderr={stderr} stdout={stdout}",
             output.status
         );
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim();
-    serde_json::from_str(trimmed)
-        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -872,10 +902,10 @@ pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Resul
         if !ato_session_core::process::pid_is_alive(pid) {
             return Ok(());
         }
-        if let Some(expected) = expected_start_time {
-            if ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected) {
-                return Ok(());
-            }
+        if let Some(expected) = expected_start_time
+            && ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected)
+        {
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -1246,10 +1276,10 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
         if !output.status.success() {
             return Vec::new();
         }
-        return String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.trim().parse::<u32>().ok())
-            .collect();
+            .collect()
     }
 
     #[cfg(windows)]
@@ -1372,10 +1402,10 @@ fn find_port_pids(port: u16) -> Vec<u32> {
         if !output.status.success() {
             return Vec::new();
         }
-        return String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.trim().parse::<u32>().ok())
-            .collect();
+            .collect()
     }
 
     #[cfg(windows)]
@@ -1412,10 +1442,9 @@ fn count_owned_shm() -> usize {
         };
         let text = String::from_utf8_lossy(&output.stdout);
         let current_user = std::env::var("USER").unwrap_or_default();
-        return text
-            .lines()
+        text.lines()
             .filter(|line| line.contains(&current_user))
-            .count();
+            .count()
     }
 
     #[cfg(not(unix))]
@@ -1439,14 +1468,14 @@ fn free_owned_shm() -> usize {
                 continue;
             }
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
-                    freed += 1;
-                }
+            if let Some(id_str) = parts.get(1)
+                && let Ok(id) = id_str.parse::<u32>()
+            {
+                let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
+                freed += 1;
             }
         }
-        return freed;
+        freed
     }
 
     #[cfg(not(unix))]
@@ -1638,29 +1667,28 @@ fn run_session_start_command(
             let is_missing_env = event.name.as_deref() == Some("missing_required_env")
                 || event.code == "ATO_ERR_MISSING_REQUIRED_ENV"
                 || event.code == "E103";
-            if is_missing_env {
-                if let Some(details) = event.missing_env_details() {
-                    if !details.missing_schema.is_empty() {
-                        // #117 — interactive resolution is an expected
-                        // state, not a failure. Log at warn (one line
-                        // per launch attempt, no payload spam) and
-                        // return the typed variant so the modal flow
-                        // takes over. The `error!` reserved for
-                        // unexpected CLI breakage stays at error.
-                        warn!(
-                            handle,
-                            target = ?details.target,
-                            "guest launch needs configuration; surfacing modal"
-                        );
-                        return Err(LaunchError::MissingConfig {
-                            handle: handle.to_string(),
-                            target: details.target.or(event.target.clone()),
-                            fields: details.missing_schema,
-                            original_secrets: secrets.to_vec(),
-                            community_toml_id: community_toml_id.map(str::to_string),
-                        });
-                    }
-                }
+            if is_missing_env
+                && let Some(details) = event.missing_env_details()
+                && !details.missing_schema.is_empty()
+            {
+                // #117 — interactive resolution is an expected
+                // state, not a failure. Log at warn (one line
+                // per launch attempt, no payload spam) and
+                // return the typed variant so the modal flow
+                // takes over. The `error!` reserved for
+                // unexpected CLI breakage stays at error.
+                warn!(
+                    handle,
+                    target = ?details.target,
+                    "guest launch needs configuration; surfacing modal"
+                );
+                return Err(LaunchError::MissingConfig {
+                    handle: handle.to_string(),
+                    target: details.target.or(event.target.clone()),
+                    fields: details.missing_schema,
+                    original_secrets: secrets.to_vec(),
+                    community_toml_id: community_toml_id.map(str::to_string),
+                });
             }
 
             // E302 with the `execution_plan_consent_required` reason —
@@ -1671,27 +1699,25 @@ fn run_session_start_command(
             let is_execution_contract = event.name.as_deref() == Some("execution_contract_invalid")
                 || event.code == "ATO_ERR_EXECUTION_CONTRACT_INVALID"
                 || event.code == "E302";
-            if is_execution_contract {
-                if let Some(details) = event.consent_required_details() {
-                    // Same rationale as the missing-env branch:
-                    // interactive consent is expected.
-                    warn!(
-                        handle,
-                        target = %details.target_label,
-                        "guest launch needs ExecutionPlan consent; surfacing modal"
-                    );
-                    return Err(LaunchError::MissingConsent {
-                        handle: handle.to_string(),
-                        scoped_id: details.scoped_id,
-                        version: details.version,
-                        target_label: details.target_label,
-                        policy_segment_hash: details.policy_segment_hash,
-                        provisioning_policy_hash: details.provisioning_policy_hash,
-                        summary: details.summary,
-                        original_secrets: secrets.to_vec(),
-                        community_toml_id: community_toml_id.map(str::to_string),
-                    });
-                }
+            if is_execution_contract && let Some(details) = event.consent_required_details() {
+                // Same rationale as the missing-env branch:
+                // interactive consent is expected.
+                warn!(
+                    handle,
+                    target = %details.target_label,
+                    "guest launch needs ExecutionPlan consent; surfacing modal"
+                );
+                return Err(LaunchError::MissingConsent {
+                    handle: handle.to_string(),
+                    scoped_id: details.scoped_id,
+                    version: details.version,
+                    target_label: details.target_label,
+                    policy_segment_hash: details.policy_segment_hash,
+                    provisioning_policy_hash: details.provisioning_policy_hash,
+                    summary: details.summary,
+                    original_secrets: secrets.to_vec(),
+                    community_toml_id: community_toml_id.map(str::to_string),
+                });
             }
         }
 
@@ -2012,10 +2038,11 @@ fn is_actionable_error_line(line: &str) -> bool {
 /// keyword can be checked at position 0.  Timestamps end with 'Z' followed by
 /// a space; if the prefix does not match that shape the line is returned as-is.
 fn strip_tracing_timestamp(line: &str) -> &str {
-    if let Some(idx) = line.find('Z') {
-        if idx > 10 && line.as_bytes().get(idx + 1) == Some(&b' ') {
-            return &line[idx + 2..];
-        }
+    if let Some(idx) = line.find('Z')
+        && idx > 10
+        && line.as_bytes().get(idx + 1) == Some(&b' ')
+    {
+        return &line[idx + 2..];
     }
     line
 }
@@ -2092,10 +2119,10 @@ fn resolve_nacelle_binary_with_paths(
     override_path: Option<PathBuf>,
     dev_workspace_path: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    if let Some(path) = override_path {
-        if path.is_file() {
-            return Some(path);
-        }
+    if let Some(path) = override_path
+        && path.is_file()
+    {
+        return Some(path);
     }
 
     for candidate in bundle_paths.bundle_binary_candidates("nacelle") {
@@ -2104,10 +2131,10 @@ fn resolve_nacelle_binary_with_paths(
         }
     }
 
-    if let Some(path) = dev_workspace_path {
-        if path.is_file() {
-            return Some(path);
-        }
+    if let Some(path) = dev_workspace_path
+        && path.is_file()
+    {
+        return Some(path);
     }
 
     bundle_paths
@@ -2133,11 +2160,6 @@ fn dev_workspace_binary(name: &str) -> Option<PathBuf> {
     };
     let candidate = PathBuf::from(target_root).join(profile).join(bin_name);
     candidate.is_file().then_some(candidate)
-}
-
-fn which_in_path(binary: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    which_in_path_entries(binary, std::env::split_paths(&path_var))
 }
 
 fn which_in_path_entries(
@@ -2766,23 +2788,22 @@ fn collect_dev_script_dirs(
     max_depth: usize,
     out: &mut Vec<(PathBuf, usize)>,
 ) {
-    if let Ok(content) = fs::read_to_string(dir.join("package.json")) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if json["scripts"]["dev"].is_string() {
-                out.push((dir.to_path_buf(), depth));
-            }
-        }
+    if let Ok(content) = fs::read_to_string(dir.join("package.json"))
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+        && json["scripts"]["dev"].is_string()
+    {
+        out.push((dir.to_path_buf(), depth));
     }
-    if depth < max_depth {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if !DEV_SCAN_SKIP.iter().any(|skip| name_str.as_ref() == *skip) {
-                        collect_dev_script_dirs(&path, depth + 1, max_depth, out);
-                    }
+    if depth < max_depth
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if !DEV_SCAN_SKIP.iter().any(|skip| name_str.as_ref() == *skip) {
+                    collect_dev_script_dirs(&path, depth + 1, max_depth, out);
                 }
             }
         }
@@ -2870,13 +2891,13 @@ fn start_web_service_from_workspace(
             failed_sources.join("\n")
         );
     }
-    if let Some(ref v) = state.verification {
-        if v.result == "error" {
-            bail!(
-                "workspace verification failed — cannot start web server:\n{}",
-                v.issues.join("\n")
-            );
-        }
+    if let Some(ref v) = state.verification
+        && v.result == "error"
+    {
+        bail!(
+            "workspace verification failed — cannot start web server:\n{}",
+            v.issues.join("\n")
+        );
     }
 
     // Collect all source root directories.
@@ -3078,7 +3099,9 @@ fn detect_dev_server_url(
             }
         }
     }
-    bail!("web dev server did not emit a URL within {timeout:?} and no HTML server found on common ports")
+    bail!(
+        "web dev server did not emit a URL within {timeout:?} and no HTML server found on common ports"
+    )
 }
 
 /// Return true when a quick HTTP HEAD request to `url` receives a `text/html` response.
@@ -3144,27 +3167,6 @@ fn share_tmp_dir(share_url: &str) -> Result<PathBuf> {
     let hash = hasher.finish();
     ato_path(format!("apps/ato-desktop/shared-runs/{hash:016x}"))
         .context("failed to resolve ato home for shared run temp dir")
-}
-
-/// Materializes a share URL into a local directory by calling `ato decap`.
-fn decap_share(share_url: &str, into: &Path) -> Result<()> {
-    fs::create_dir_all(into)
-        .with_context(|| format!("failed to create share tmp dir {}", into.display()))?;
-    let ato_bin = resolve_ato_binary()?;
-    info!(share_url, dest = %into.display(), "running ato decap");
-    let output = Command::new(&ato_bin)
-        .no_console_window()
-        .args(["decap", share_url, "--into"])
-        .arg(into)
-        .output()
-        .with_context(|| format!("failed to spawn ato decap for {share_url}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        error!(share_url, stderr = %stderr, "ato decap failed");
-        bail!("ato decap failed for {share_url}: {stderr}");
-    }
-    info!(share_url, dest = %into.display(), "ato decap completed");
-    Ok(())
 }
 
 /// Resolve and start a capsule from a share URL by materializing it locally first.
@@ -3269,10 +3271,10 @@ mod tests {
     use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
 
     use super::{
-        allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
-        detect_package_manager, extract_localhost_url, find_capsule_root, find_dev_script_dir,
-        pop_last_codepoint_width, url_port, which_in_path_entries, DesktopLaunchInput,
-        ResolvePayload, SessionStartInfo,
+        DesktopLaunchInput, ResolvePayload, SessionStartInfo, allows_registry_guest_recovery,
+        build_launch_session, collect_dev_script_dirs, detect_package_manager,
+        extract_localhost_url, find_capsule_root, find_dev_script_dir, pop_last_codepoint_width,
+        url_port, which_in_path_entries,
     };
 
     fn resolved_payload(
@@ -3359,10 +3361,12 @@ mod tests {
 
         assert_eq!(session.adapter.as_deref(), Some("tauri"));
         assert_eq!(session.snapshot_label.as_deref(), Some("version 0.1.0"));
-        assert!(session
-            .notes
-            .iter()
-            .any(|note| note.contains("metadata-only")));
+        assert!(
+            session
+                .notes
+                .iter()
+                .any(|note| note.contains("metadata-only"))
+        );
     }
 
     #[test]
@@ -4043,7 +4047,7 @@ mod tests {
 
 // ── Terminal PTY session management ──────────────────────────────────────────
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// A live terminal session routed through nacelle, owned by `WebViewManager`.
 pub struct TerminalProcess {
@@ -4057,10 +4061,6 @@ pub struct TerminalProcess {
 }
 
 impl TerminalCore for TerminalProcess {
-    fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
     fn send_input(&self, data: Vec<u8>) -> bool {
         self.input_tx.send(data).is_ok()
     }
@@ -4160,10 +4160,10 @@ pub fn spawn_terminal_session(
             };
             match value.get("event").and_then(|e| e.as_str()) {
                 Some("terminal_data") => {
-                    if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str()) {
-                        if output_tx.send(b64.to_string()).is_err() {
-                            break;
-                        }
+                    if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str())
+                        && output_tx.send(b64.to_string()).is_err()
+                    {
+                        break;
                     }
                 }
                 Some("terminal_exited") => {
@@ -4499,7 +4499,7 @@ pub fn spawn_ato_run_repl(
 ) -> Result<TerminalProcess> {
     use crate::egress_policy::{EgressPolicy, HostPattern};
     use crate::egress_proxy::{DenyEvent, EgressProxy, EgressProxyHandle};
-    use std::sync::{mpsc::channel as std_channel, Arc, Mutex as StdMutex};
+    use std::sync::{Arc, Mutex as StdMutex, mpsc::channel as std_channel};
 
     let ato_bin =
         resolve_ato_binary().context("cannot resolve ato binary for ato://cli (ato run REPL)")?;
@@ -4525,27 +4525,27 @@ pub fn spawn_ato_run_repl(
     // Seed the session allowlist with any caller-provided hosts (e.g. the
     // share URL's own origin for share-initiated REPLs). Invalid patterns
     // are skipped with a warn log so they surface in diagnostics.
-    if !initial_allow_hosts.is_empty() {
-        if let Ok(mut g) = egress_policy.lock() {
-            for host in &initial_allow_hosts {
-                match HostPattern::parse(host) {
-                    Ok(p) => {
-                        let added = g.allow(p);
-                        debug!(
-                            session_id = %sid,
-                            host = %host,
-                            added,
-                            "ato-run REPL: seeded initial allow host"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            session_id = %sid,
-                            host = %host,
-                            error = %e,
-                            "ato-run REPL: invalid initial_allow_hosts pattern, skipped"
-                        );
-                    }
+    if !initial_allow_hosts.is_empty()
+        && let Ok(mut g) = egress_policy.lock()
+    {
+        for host in &initial_allow_hosts {
+            match HostPattern::parse(host) {
+                Ok(p) => {
+                    let added = g.allow(p);
+                    debug!(
+                        session_id = %sid,
+                        host = %host,
+                        added,
+                        "ato-run REPL: seeded initial allow host"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        session_id = %sid,
+                        host = %host,
+                        error = %e,
+                        "ato-run REPL: invalid initial_allow_hosts pattern, skipped"
+                    );
                 }
             }
         }
@@ -4885,23 +4885,23 @@ pub fn spawn_ato_run_repl(
                         // session_allow on install verbs only. Query
                         // commands stay gated (see userland::install_verb_allowlist).
                         let auto_allow = crate::userland::install_verb_allowlist(&argv);
-                        if !auto_allow.is_empty() {
-                            if let Ok(mut g) = egress_policy.lock() {
-                                let mut added_any = Vec::new();
-                                for host in &auto_allow {
-                                    if let Ok(p) = HostPattern::parse(host) {
-                                        if g.allow(p) {
-                                            added_any.push(host.clone());
-                                        }
-                                    }
+                        if !auto_allow.is_empty()
+                            && let Ok(mut g) = egress_policy.lock()
+                        {
+                            let mut added_any = Vec::new();
+                            for host in &auto_allow {
+                                if let Ok(p) = HostPattern::parse(host)
+                                    && g.allow(p)
+                                {
+                                    added_any.push(host.clone());
                                 }
-                                if !added_any.is_empty() {
-                                    let msg = format!(
-                                        "\x1b[90m[hint] auto-allow for install: {}\x1b[0m\r\n",
-                                        added_any.join(", ")
-                                    );
-                                    let _ = send(&output_tx, msg.as_bytes());
-                                }
+                            }
+                            if !added_any.is_empty() {
+                                let msg = format!(
+                                    "\x1b[90m[hint] auto-allow for install: {}\x1b[0m\r\n",
+                                    added_any.join(", ")
+                                );
+                                let _ = send(&output_tx, msg.as_bytes());
                             }
                         }
 
@@ -5097,14 +5097,14 @@ pub fn spawn_ato_run_repl(
                         drop(master_for_ops);
                         let _ = output_thread.join();
 
-                        if let Some(status) = exit_status {
-                            if !status.success() {
-                                let code = status.exit_code();
-                                let msg = format!(
-                                    "\x1b[31m[{command_label} exited with status {code}]\x1b[0m\r\n"
-                                );
-                                let _ = send(&output_tx, msg.as_bytes());
-                            }
+                        if let Some(status) = exit_status
+                            && !status.success()
+                        {
+                            let code = status.exit_code();
+                            let msg = format!(
+                                "\x1b[31m[{command_label} exited with status {code}]\x1b[0m\r\n"
+                            );
+                            let _ = send(&output_tx, msg.as_bytes());
                         }
 
                         if !send(&output_tx, b"\x1b[32mato>\x1b[0m ") {
@@ -5240,11 +5240,7 @@ fn find_ato_toolchain_binary(name: &str) -> Option<PathBuf> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let path = e.path();
-            if path.is_dir() {
-                Some(path)
-            } else {
-                None
-            }
+            if path.is_dir() { Some(path) } else { None }
         })
         .collect();
 
@@ -5288,10 +5284,10 @@ fn find_executable_named(root: &Path, name: &str, max_depth: usize) -> Option<Pa
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = path.metadata() {
-                    if meta.permissions().mode() & 0o111 != 0 {
-                        return Some(path);
-                    }
+                if let Ok(meta) = path.metadata()
+                    && meta.permissions().mode() & 0o111 != 0
+                {
+                    return Some(path);
                 }
             }
             #[cfg(not(unix))]
@@ -5394,7 +5390,7 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
         let b = line[start];
         // Leading byte: ASCII (0..=0x7F) or multi-byte leader (0xC0..=0xFF).
         // Continuation bytes are 0x80..=0xBF; keep walking past them.
-        if b < 0x80 || b >= 0xC0 {
+        if !(0x80..0xC0).contains(&b) {
             break;
         }
     }
@@ -5683,19 +5679,27 @@ mod fast_path_tests {
     fn resolve_ato_binary_prefers_ato_desktop_ato_bin() {
         let tmp = tempfile::NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
-        std::env::set_var("ATO_DESKTOP_ATO_BIN", &path);
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_ATO_BIN", &path);
+        }
         let resolved = resolve_ato_binary().expect("resolve");
         assert_eq!(resolved, path);
-        std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+        }
     }
 
     #[test]
     #[serial]
     fn resolve_ato_binary_errors_on_missing_env_path() {
-        std::env::set_var("ATO_DESKTOP_ATO_BIN", "/nonexistent/ato/helper/binary");
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_ATO_BIN", "/nonexistent/ato/helper/binary");
+        }
         let err = resolve_ato_binary().unwrap_err();
         assert!(format!("{err:#}").contains("points to a missing file"));
-        std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+        }
     }
 
     #[test]
@@ -5947,8 +5951,7 @@ mod launch_error_display_tests {
     fn desktop_launch_failure_shows_actionable_error_not_debug_line() {
         // Simulate the exact problem: stderr is only a DEBUG provision line,
         // stdout is empty. The result should be None (not the debug line).
-        let stderr =
-            "  DEBUG ato_cli::commands::run::preflight: Provision command path diagnostics phase=\"run\" runtime=\"oci\" driver=\"docker-compose\"";
+        let stderr = "  DEBUG ato_cli::commands::run::preflight: Provision command path diagnostics phase=\"run\" runtime=\"oci\" driver=\"docker-compose\"";
         let result = extract_user_facing_error(stderr, "");
         assert!(
             result.is_none(),
@@ -5986,5 +5989,34 @@ mod launch_error_display_tests {
             "2024-01-01T00:00:00.000000Z ERROR ato_cli: bad"
         ));
         assert!(!is_tracing_noise_line("docker-compose: command not found"));
+    }
+}
+
+#[cfg(test)]
+mod preflight_retry_tests {
+    use super::*;
+
+    #[test]
+    fn retryable_detects_true_in_error_envelope() {
+        let stdout = r#"{"schema_version":"1","status":"error","error":{"code":"E999","name":"internal_error","phase":"internal","classification":"internal","message":"preflight: community TOML fetch/validate failed","retryable":true,"interactive_resolution":false,"causes":[]}}"#;
+        assert!(preflight_stdout_is_retryable(stdout));
+    }
+
+    #[test]
+    fn retryable_false_is_not_retried() {
+        let stdout = r#"{"schema_version":"1","status":"error","error":{"code":"E103","name":"missing_required_env","retryable":false}}"#;
+        assert!(!preflight_stdout_is_retryable(stdout));
+    }
+
+    #[test]
+    fn retryable_missing_field_is_not_retried() {
+        let stdout = r#"{"status":"error","error":{"code":"E999","message":"something"}}"#;
+        assert!(!preflight_stdout_is_retryable(stdout));
+    }
+
+    #[test]
+    fn retryable_empty_stdout_is_not_retried() {
+        assert!(!preflight_stdout_is_retryable(""));
+        assert!(!preflight_stdout_is_retryable("not json"));
     }
 }
