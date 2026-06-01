@@ -14,28 +14,27 @@ use anyhow::{Context, Result};
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
 pub(crate) use ato_session_core::{
-    launch_cache_root, write_materialized_launch_record_atomic, write_session_record_atomic,
     GuestSessionDisplay, MaterializedLaunchRecord, ServiceBackgroundDisplay,
     StoredDependencyContracts, StoredDependencyProvider, StoredOrchestrationService,
     StoredOrchestrationServices, StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay,
+    launch_cache_root, write_materialized_launch_record_atomic, write_session_record_atomic,
 };
 use capsule_core::ato_lock;
 use capsule_core::handle::{
-    normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
-    ResolvedSnapshot, TrustState,
+    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
+    TrustState, normalize_capsule_handle,
 };
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
-use crate::adapters::runtime::oci_provider::{
-    DefaultOciProviderSelector, OciProvider, OciProviderSelector,
-};
+use crate::ProviderToolchain;
+use crate::adapters::runtime::oci_provider::select_ready_runtime_oci_provider;
 #[cfg(unix)]
 use crate::application::orchestration_teardown::{collect_descendant_pids, listener_pids_on_port};
 use crate::application::pipeline::phases::run::{
-    persist_background_dependency_contracts, setup_dependency_contracts_launch_context,
     DependencyContractGuard, DerivedBridgeManifest, PreparedRunContext,
+    persist_background_dependency_contracts, setup_dependency_contracts_launch_context,
 };
 use crate::application::session_graph_populate::{
     EDGE_KIND_PROVIDES, NODE_KIND_PROVIDER, NODE_KIND_SERVICE,
@@ -45,7 +44,7 @@ use crate::application::state_bindings::{
 };
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
-    prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
+    TargetLaunchOptions, prepare_target_execution, resolve_launch_context,
 };
 use crate::install::support::resolve_run_target_or_install;
 use crate::reporters;
@@ -53,20 +52,19 @@ use crate::reporters::CliReporter;
 use crate::runtime::process::{ProcessInfo, ProcessManager, ProcessStatus};
 use crate::runtime::tree as runtime_tree;
 use crate::runtime::{overrides as runtime_overrides, port_manager::PortManager};
-use crate::ProviderToolchain;
 
 use super::guest_contract::GuestContract;
 use super::resolve::resolve_local_plan_with_state_overrides;
 
-/// Thread-local install lifecycle context set by `ato launch` before calling
-/// `execute_run_command`. Using thread-local (rather than process-global OnceLock)
-/// means:
-/// - Multiple sequential launches in the same process work correctly (daemon / Desktop)
-/// - Test isolation: each test thread gets its own slot; no cross-test leakage
-/// - The context is automatically cleared when the thread terminates
-///
-/// Always use [`ScopedInstallLifecycleGuard`] to set/clear the context so it is
-/// guaranteed to be cleaned up on return, even if the run pipeline panics.
+// Thread-local install lifecycle context set by `ato launch` before calling
+// `execute_run_command`. Using thread-local (rather than process-global OnceLock)
+// means:
+// - Multiple sequential launches in the same process work correctly (daemon / Desktop)
+// - Test isolation: each test thread gets its own slot; no cross-test leakage
+// - The context is automatically cleared when the thread terminates
+//
+// Always use [`ScopedInstallLifecycleGuard`] to set/clear the context so it is
+// guaranteed to be cleaned up on return, even if the run pipeline panics.
 thread_local! {
     static INSTALL_LIFECYCLE_CONTEXT: std::cell::RefCell<
         Option<crate::cli::commands::run::InstallLifecycleContext>,
@@ -141,7 +139,7 @@ fn apply_install_lifecycle(record: &mut StoredSessionInfo) {
             // reflects the actual receipt/execution closure, not a random id.
             if let Some(exec_id_str) = &record.execution_id {
                 use capsule_core::foundation::install_lifecycle::{
-                    derive_capsule_instance_key, ExecutionId, InstallProfileKey, InstallRevisionId,
+                    ExecutionId, InstallProfileKey, InstallRevisionId, derive_capsule_instance_key,
                 };
                 let ipk = InstallProfileKey::new(ctx.install_profile_key.clone());
                 let rev_id = InstallRevisionId::new(ctx.install_revision_id.clone());
@@ -390,6 +388,34 @@ fn validate_community_toml_id_for_session_start(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn auto_attach_state_args_for_community_toml_manifest(
+    manifest_path: &Path,
+    community_toml_id: &str,
+) -> Result<Vec<String>> {
+    use capsule_core::types::StateDurability;
+
+    let raw = fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = capsule_core::types::CapsuleManifest::from_toml(&raw)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let state_root = capsule_core::common::paths::ato_state_dir()
+        .join("community-tomls")
+        .join(community_toml_id);
+
+    Ok(manifest
+        .state
+        .iter()
+        .filter(|(_, requirement)| requirement.durability == StateDurability::Persistent)
+        .map(|(state_name, _)| {
+            format!(
+                "{}:{}",
+                state_name,
+                state_root.join(state_name).to_string_lossy()
+            )
+        })
+        .collect())
+}
+
 // On-disk session record schema lives in `ato-session-core` (see top-of-
 // file `pub(crate) use`). Keep this comment as a back-pointer because
 // `git blame` for this file should still surface the design rationale:
@@ -480,11 +506,16 @@ pub fn start_session(
             anyhow::bail!("--community-toml-id cannot be used with --from-materialized-record");
         }
         let manifest_path = fetch_community_toml_to_cache(cid, handle)?;
+        let effective_attach_state = if attach_state.is_empty() {
+            auto_attach_state_args_for_community_toml_manifest(&manifest_path, cid)?
+        } else {
+            attach_state.to_vec()
+        };
         super::session_runner::SessionStartPhaseRunner::from_toml_path(
             handle,
             manifest_path,
             target_label,
-            attach_state.to_vec(),
+            effective_attach_state,
             run_config_hash.map(str::to_string),
             json,
         )
@@ -1252,16 +1283,9 @@ pub(super) fn start_orchestration_session_in_process(
     };
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "orchestration_start_until_ready");
-    let oci_provider = DefaultOciProviderSelector.select_provider();
-    // Ensure the OCI provider is ready before touching networks or containers.
-    // On macOS/Windows this auto-starts a stopped Podman machine.  Without
-    // this gate, a stopped machine only surfaces as partial-setup failures deep
-    // inside `execute_until_ready_and_detach` (regression #289 / #328).
-    runtime_handle
-        .block_on(async { oci_provider.ensure_ready().await })
-        .map_err(|err| {
-            anyhow::Error::from(err).context("OCI provider not ready before session start")
-        })?;
+    let oci_provider = runtime_handle
+        .block_on(select_ready_runtime_oci_provider())
+        .context("OCI provider not ready before session start")?;
     let detached = runtime_handle
         .block_on(
             crate::executors::orchestrator::execute_until_ready_and_detach(
@@ -1847,11 +1871,7 @@ fn manifest_service_depends_on_map(
             out.insert(service_name.clone(), targets);
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInfo {
@@ -1936,65 +1956,61 @@ pub(super) fn resolve_session_launch_plan(
     capsule_core::launch_spec::LaunchSpec,
     Vec<String>,
 )> {
-    if community_toml_path.is_none() && !super::resolve::input_is_existing_local_path(handle) {
-        if let Some(resolved) = super::sample_recipes::resolve_sample_recipe_for_input(handle)? {
-            let manifest_path = resolved.manifest_path;
-            let mut notes = vec![format!(
-                "Resolved via bundled sample recipe '{}'.",
-                resolved.slug
-            )];
-            let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
-                &manifest_path,
-                target_label,
-                Some(resolved.slug.as_str()),
-                attach_state,
-            )?;
-            notes.extend(plan_notes);
-            let launch = derive_launch_spec(&plan).with_context(|| {
-                format!(
-                    "failed to derive launch spec for sample recipe '{}' at {}",
-                    resolved.slug,
-                    manifest_path.display()
-                )
-            })?;
-            return Ok((manifest_path, plan, launch, notes));
-        }
+    if community_toml_path.is_none()
+        && !super::resolve::input_is_existing_local_path(handle)
+        && let Some(resolved) = super::sample_recipes::resolve_sample_recipe_for_input(handle)?
+    {
+        let manifest_path = resolved.manifest_path;
+        let mut notes = vec![format!(
+            "Resolved via bundled sample recipe '{}'.",
+            resolved.slug
+        )];
+        let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
+            &manifest_path,
+            target_label,
+            Some(resolved.slug.as_str()),
+            attach_state,
+        )?;
+        notes.extend(plan_notes);
+        let launch = derive_launch_spec(&plan).with_context(|| {
+            format!(
+                "failed to derive launch spec for sample recipe '{}' at {}",
+                resolved.slug,
+                manifest_path.display()
+            )
+        })?;
+        return Ok((manifest_path, plan, launch, notes));
     }
 
-    if let Ok(canonical) = normalize_capsule_handle(handle) {
-        if let CanonicalHandle::GithubRepo {
-            ref owner,
-            ref repo,
-            ..
-        } = canonical
-        {
-            if community_toml_path.is_none() {
-                if let Some(resolved) =
-                    super::sample_recipes::resolve_sample_recipe_for_github(owner, repo)?
-                {
-                    let manifest_path = resolved.manifest_path;
-                    let mut notes = vec![format!(
-                        "Resolved via bundled sample recipe '{}' for github.com/{}/{}.",
-                        resolved.slug, owner, repo
-                    )];
-                    let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
-                        &manifest_path,
-                        target_label,
-                        Some(resolved.slug.as_str()),
-                        attach_state,
-                    )?;
-                    notes.extend(plan_notes);
-                    let launch = derive_launch_spec(&plan).with_context(|| {
-                        format!(
-                            "failed to derive launch spec for sample recipe '{}' at {}",
-                            resolved.slug,
-                            manifest_path.display()
-                        )
-                    })?;
-                    return Ok((manifest_path, plan, launch, notes));
-                }
-            }
-        }
+    if let Ok(CanonicalHandle::GithubRepo {
+        ref owner,
+        ref repo,
+        ..
+    }) = normalize_capsule_handle(handle)
+        && community_toml_path.is_none()
+        && let Some(resolved) =
+            super::sample_recipes::resolve_sample_recipe_for_github(owner, repo)?
+    {
+        let manifest_path = resolved.manifest_path;
+        let mut notes = vec![format!(
+            "Resolved via bundled sample recipe '{}' for github.com/{}/{}.",
+            resolved.slug, owner, repo
+        )];
+        let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
+            &manifest_path,
+            target_label,
+            Some(resolved.slug.as_str()),
+            attach_state,
+        )?;
+        notes.extend(plan_notes);
+        let launch = derive_launch_spec(&plan).with_context(|| {
+            format!(
+                "failed to derive launch spec for sample recipe '{}' at {}",
+                resolved.slug,
+                manifest_path.display()
+            )
+        })?;
+        return Ok((manifest_path, plan, launch, notes));
     }
 
     if let Some(manifest_path) = community_toml_path {
@@ -2093,11 +2109,10 @@ pub(super) fn resolve_local_plan_for_session_start(
         target_label,
         state_source_overrides,
     )?;
-    if sample_recipe_slug.is_some()
+    if let Some(slug) = sample_recipe_slug
         && !plan.state_source_overrides.is_empty()
         && attach_state.is_empty()
     {
-        let slug = sample_recipe_slug.unwrap();
         notes.push(format!(
             "Auto-bound persistent sample recipe state under ~/.ato/state/sample-recipes/{slug}."
         ));
@@ -2510,10 +2525,7 @@ fn read_session_record(path: &Path) -> Option<StoredSessionInfo> {
             return None;
         }
     };
-    match serde_json::from_slice::<StoredSessionInfo>(&bytes) {
-        Ok(record) => Some(record),
-        Err(_) => None,
-    }
+    serde_json::from_slice::<StoredSessionInfo>(&bytes).ok()
 }
 
 /// Tear down the `[services]` graph subset persisted on the session record
@@ -2766,8 +2778,7 @@ fn dependency_teardown_plan_from_graph(
             .map(|provider| provider.alias.as_str()),
     );
     debug_assert_eq!(
-        graph_aliases_sorted,
-        contract_aliases_sorted,
+        graph_aliases_sorted, contract_aliases_sorted,
         "session record graph/provider alias divergence (graph={graph_aliases_sorted:?}, contracts={contract_aliases_sorted:?})"
     );
     if graph_aliases_sorted != contract_aliases_sorted {
@@ -2979,10 +2990,10 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
             }
         }
     }
-    if let Some(err) = stop_error {
-        if !stopped {
-            return Err(err);
-        }
+    if let Some(err) = stop_error
+        && !stopped
+    {
+        return Err(err);
     }
 
     // Prune the OCI network created for this session (#273). Runs
@@ -2996,7 +3007,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
             .and_then(|s| s.network_name.as_deref())
         {
             use crate::application::orchestration_teardown::{
-                remove_network_if_present, NetworkRemovalOutcome,
+                NetworkRemovalOutcome, remove_network_if_present,
             };
             match remove_network_if_present(network_name) {
                 NetworkRemovalOutcome::Removed | NetworkRemovalOutcome::AlreadyGone => None,
@@ -3127,7 +3138,7 @@ fn maybe_spawn_parent_death_watcher(session_id: &str) -> Result<()> {
 #[cfg(windows)]
 fn clear_std_handle_inheritance() {
     use windows_sys::Win32::Foundation::{
-        GetLastError, SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        GetLastError, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
     };
     use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
 
@@ -3301,10 +3312,10 @@ fn local_port_is_available(port: u16) -> bool {
 }
 
 fn reserve_port(default_port: Option<u16>) -> Result<u16> {
-    if let Some(port) = default_port {
-        if local_port_is_available(port) {
-            return Ok(port);
-        }
+    if let Some(port) = default_port
+        && local_port_is_available(port)
+    {
+        return Ok(port);
     }
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).context("failed to allocate local port")?;
@@ -3541,9 +3552,15 @@ mod tests {
                 home: std::env::var("HOME").ok(),
                 session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
             };
-            std::env::set_var("ATO_HOME", ato_home_path);
-            std::env::set_var("HOME", ato_home_path);
-            std::env::set_var("ATO_DESKTOP_SESSION_ROOT", session_root);
+            unsafe {
+                std::env::set_var("ATO_HOME", ato_home_path);
+            }
+            unsafe {
+                std::env::set_var("HOME", ato_home_path);
+            }
+            unsafe {
+                std::env::set_var("ATO_DESKTOP_SESSION_ROOT", session_root);
+            }
             guard
         }
     }
@@ -3551,16 +3568,16 @@ mod tests {
     impl Drop for TestEnvGuard {
         fn drop(&mut self) {
             match &self.ato_home {
-                Some(v) => std::env::set_var("ATO_HOME", v),
-                None => std::env::remove_var("ATO_HOME"),
+                Some(v) => unsafe { std::env::set_var("ATO_HOME", v) },
+                None => unsafe { std::env::remove_var("ATO_HOME") },
             }
             match &self.home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
             }
             match &self.session_root {
-                Some(v) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", v),
-                None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
+                Some(v) => unsafe { std::env::set_var("ATO_DESKTOP_SESSION_ROOT", v) },
+                None => unsafe { std::env::remove_var("ATO_DESKTOP_SESSION_ROOT") },
             }
         }
     }
@@ -3584,9 +3601,11 @@ mod tests {
 
         assert_ne!(selected.port, occupied_port);
         assert_eq!(selected.remapped_from, Some(occupied_port));
-        assert!(notes
-            .iter()
-            .any(|note| note.contains(&format!("remapped this session to {}", selected.port))));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains(&format!("remapped this session to {}", selected.port)))
+        );
     }
 
     #[cfg(unix)]
@@ -4238,12 +4257,13 @@ mod tests {
             .resolve_services()
             .expect("explicit state should be bound");
         let main = services.service("main").expect("main service");
-        assert!(main
-            .runtime
-            .runtime()
-            .mounts
-            .iter()
-            .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos"));
+        assert!(
+            main.runtime
+                .runtime()
+                .mounts
+                .iter()
+                .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos")
+        );
     }
 
     #[test]
@@ -4282,12 +4302,73 @@ mod tests {
         );
         let services = plan.resolve_services().expect("resolve services");
         let main = services.service("main").expect("main service");
-        assert!(main
-            .runtime
-            .runtime()
-            .mounts
-            .iter()
-            .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos"));
+        assert!(
+            main.runtime
+                .runtime()
+                .mounts
+                .iter()
+                .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn community_toml_launch_auto_binds_explicit_persistent_state() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
+        let resolved =
+            crate::app_control::sample_recipes::resolve_sample_recipe_for_input("blinko")
+                .expect("resolve sample recipe")
+                .expect("blinko recipe");
+        let attach_state = auto_attach_state_args_for_community_toml_manifest(
+            &resolved.manifest_path,
+            "ctoml_test",
+        )
+        .expect("auto community state bindings");
+
+        assert!(
+            attach_state
+                .iter()
+                .any(|binding| binding.starts_with("db-data:"))
+        );
+        assert!(
+            attach_state
+                .iter()
+                .any(|binding| binding.starts_with("app-data:"))
+        );
+
+        let (plan, _guest, _notes) = resolve_local_plan_for_session_start(
+            &resolved.manifest_path,
+            None,
+            None,
+            &attach_state,
+        )
+        .expect("resolve session plan with community auto-bound state");
+
+        let state_path = PathBuf::from(
+            plan.state_source_overrides
+                .get("db-data")
+                .expect("db-data state override"),
+        );
+        assert!(state_path.ends_with("state/community-tomls/ctoml_test/db-data"));
+        assert!(state_path.is_dir());
+    }
+
+    #[test]
+    fn community_toml_launch_skips_auto_bindings_without_persistent_state() {
+        let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("pgweb")
+            .expect("resolve sample recipe")
+            .expect("pgweb recipe");
+        let attach_state = auto_attach_state_args_for_community_toml_manifest(
+            &resolved.manifest_path,
+            "ctoml_test",
+        )
+        .expect("auto community state bindings");
+        assert!(attach_state.is_empty());
     }
 
     #[test]
@@ -4305,9 +4386,10 @@ mod tests {
         let err = resolve_local_plan_for_session_start(&resolved.manifest_path, None, None, &[])
             .expect_err("missing attach-state should fail");
         assert!(err.to_string().contains("state 'data' requires"));
-        assert!(err
-            .to_string()
-            .contains("--attach-state data:/path/to/data"));
+        assert!(
+            err.to_string()
+                .contains("--attach-state data:/path/to/data")
+        );
     }
 
     #[test]
@@ -4433,11 +4515,13 @@ mod tests {
         assert!(consumer.try_wait().expect("consumer wait").is_some());
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
-        assert!(ProcessManager::new()
-            .expect("process manager after stop")
-            .read_dependency_session_snapshot(&session_id)
-            .expect("read dependency session after stop")
-            .is_none());
+        assert!(
+            ProcessManager::new()
+                .expect("process manager after stop")
+                .read_dependency_session_snapshot(&session_id)
+                .expect("read dependency session after stop")
+                .is_none()
+        );
     }
 
     #[cfg(unix)]
@@ -4537,11 +4621,13 @@ mod tests {
 
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
-        assert!(ProcessManager::new()
-            .expect("process manager after stop")
-            .read_dependency_session_snapshot(&session_id)
-            .expect("read dependency session after stop")
-            .is_none());
+        assert!(
+            ProcessManager::new()
+                .expect("process manager after stop")
+                .read_dependency_session_snapshot(&session_id)
+                .expect("read dependency session after stop")
+                .is_none()
+        );
     }
 
     #[test]
@@ -5324,7 +5410,7 @@ mod tests {
     #[test]
     fn apply_install_lifecycle_stamps_all_fields_and_derives_cik() {
         use capsule_core::foundation::install_lifecycle::{
-            derive_capsule_instance_key, ExecutionId, InstallProfileKey, InstallRevisionId,
+            ExecutionId, InstallProfileKey, InstallRevisionId, derive_capsule_instance_key,
         };
 
         let ipk_str = "ipk_aabbccdd1122334455667788aabbccdd";

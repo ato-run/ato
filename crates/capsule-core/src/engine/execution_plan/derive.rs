@@ -8,11 +8,11 @@ use crate::execution_plan::canonical::{
 };
 use crate::execution_plan::error::AtoExecutionError;
 use crate::execution_plan::model::{
-    CapsuleRef, Consent, ConsentKey, ExecutionDriver, ExecutionPlan, ExecutionRuntime,
-    ExecutionTier, NonInteractiveBehavior, OciPolicyEnvelope, OciPolicyMode, Platform,
-    Provisioning, ProvisioningNetwork, Reproducibility, Runtime, RuntimeFilesystemPolicy,
-    RuntimeNetworkPolicy, RuntimePolicy, RuntimeSecretsPolicy, SecretDelivery, TargetRef,
-    EXECUTION_PLAN_SCHEMA_VERSION, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION,
+    CapsuleRef, Consent, ConsentKey, EXECUTION_PLAN_SCHEMA_VERSION, ExecutionDriver, ExecutionPlan,
+    ExecutionRuntime, ExecutionTier, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION,
+    NonInteractiveBehavior, OciPolicyEnvelope, OciPolicyMode, Platform, Provisioning,
+    ProvisioningNetwork, Reproducibility, Runtime, RuntimeFilesystemPolicy, RuntimeNetworkPolicy,
+    RuntimePolicy, RuntimeSecretsPolicy, SecretDelivery, TargetRef,
 };
 use crate::foundation::types::oci::OciImageResolution;
 use crate::lock_runtime::{LockCompilerOverlay, ResolvedLockRuntimeModel};
@@ -300,12 +300,11 @@ fn build_runtime_section(
         (runtime, driver),
         (ExecutionRuntime::Source, ExecutionDriver::Deno)
             | (ExecutionRuntime::Source, ExecutionDriver::Node)
-    ) {
-        if let Some(port) = port {
-            allow_hosts.push(format!("127.0.0.1:{port}"));
-            allow_hosts.push(format!("localhost:{port}"));
-            allow_hosts.push(format!("0.0.0.0:{port}"));
-        }
+    ) && let Some(port) = port
+    {
+        allow_hosts.push(format!("127.0.0.1:{port}"));
+        allow_hosts.push(format!("localhost:{port}"));
+        allow_hosts.push(format!("0.0.0.0:{port}"));
     }
 
     let read_only = overlay.filesystem_read_only.clone().unwrap_or_else(|| {
@@ -525,7 +524,7 @@ fn build_oci_policy_envelope(
 mod tests {
     use super::*;
     use crate::ato_lock::AtoLock;
-    use crate::lock_runtime::{resolve_lock_runtime_model, LockCompilerOverlay};
+    use crate::lock_runtime::{LockCompilerOverlay, resolve_lock_runtime_model};
     use serde_json::json;
     use std::fs;
 

@@ -145,10 +145,10 @@ pub fn clear_all() -> Result<CacheClearOutcome> {
     }
 
     for entry in refs {
-        if let Some(hash) = entry.blob_hash.as_deref() {
-            if referenced.contains(hash) {
-                continue;
-            }
+        if let Some(hash) = entry.blob_hash.as_deref()
+            && referenced.contains(hash)
+        {
+            continue;
         }
         if entry.path.is_file() {
             fs::remove_file(&entry.path)
@@ -324,10 +324,10 @@ fn directory_size(path: &Path) -> Option<u64> {
     let mut total = 0u64;
     for entry in walkdir::WalkDir::new(path) {
         let entry = entry.ok()?;
-        if entry.file_type().is_file() {
-            if let Ok(metadata) = entry.path().symlink_metadata() {
-                total = total.saturating_add(metadata.len());
-            }
+        if entry.file_type().is_file()
+            && let Ok(metadata) = entry.path().symlink_metadata()
+        {
+            total = total.saturating_add(metadata.len());
         }
     }
     Some(total)

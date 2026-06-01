@@ -22,7 +22,7 @@
 
 #[test]
 fn test_dns_rule_generation_default_config() {
-    use nacelle::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use nacelle::security::dns_monitor::{DnsConfig, generate_dns_rules};
 
     let config = DnsConfig::default();
     let rules = generate_dns_rules(&config, "CAPSULE_OUT");
@@ -70,7 +70,7 @@ fn test_dns_rule_generation_default_config() {
 
 #[test]
 fn test_dns_rule_generation_custom_resolvers() {
-    use nacelle::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use nacelle::security::dns_monitor::{DnsConfig, generate_dns_rules};
 
     // Custom config with corporate DNS
     let config = DnsConfig {
@@ -108,7 +108,7 @@ fn test_dns_rule_generation_custom_resolvers() {
 
 #[test]
 fn test_dns_disabled_generates_no_rules() {
-    use nacelle::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use nacelle::security::dns_monitor::{DnsConfig, generate_dns_rules};
 
     let config = DnsConfig {
         enabled: false,
@@ -127,7 +127,7 @@ fn test_dns_disabled_generates_no_rules() {
 
 #[test]
 fn test_dns_and_egress_rule_combination() {
-    use nacelle::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use nacelle::security::dns_monitor::{DnsConfig, generate_dns_rules};
 
     // Generate DNS rules with default config
     let dns_config = DnsConfig::default();
@@ -158,7 +158,7 @@ fn test_dns_and_egress_rule_combination() {
 
 #[test]
 fn test_is_resolver_allowed() {
-    use nacelle::security::dns_monitor::{is_resolver_allowed, DnsConfig};
+    use nacelle::security::dns_monitor::{DnsConfig, is_resolver_allowed};
 
     let config = DnsConfig {
         allowed_resolvers: vec![
@@ -185,7 +185,7 @@ fn test_is_resolver_allowed() {
 
 #[test]
 fn test_dns_rule_format() {
-    use nacelle::security::dns_monitor::{generate_dns_rules, DnsConfig};
+    use nacelle::security::dns_monitor::{DnsConfig, generate_dns_rules};
 
     let config = DnsConfig::default();
     let rules = generate_dns_rules(&config, "TEST_CHAIN");

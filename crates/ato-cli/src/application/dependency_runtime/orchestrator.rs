@@ -50,14 +50,14 @@ use thiserror::Error;
 
 use super::endpoint::{EndpointAllocator, EndpointError};
 use super::orphan::{
-    detect_orphan_state, kill_orphan_provider, sweep_stale_sentinel, write_session_sentinel,
     OrphanCheckOutcome, OrphanError, OrphanProviderKillOutcome, SessionSentinel,
+    detect_orphan_state, kill_orphan_provider, sweep_stale_sentinel, write_session_sentinel,
 };
-use super::ready::{wait_for_ready, ReadyError, ReadyProbeKind};
-use super::teardown::{teardown_reverse_topological, TeardownError, TeardownTarget};
+use super::ready::{ReadyError, ReadyProbeKind, wait_for_ready};
+use super::teardown::{TeardownError, TeardownTarget, teardown_reverse_topological};
 use crate::application::dependency_credentials::{
-    materialize_credential, resolve_credential_template, CredentialError, HostEnv,
-    MaterializationChannel, MaterializedRef, RedactionRegistry,
+    CredentialError, HostEnv, MaterializationChannel, MaterializedRef, RedactionRegistry,
+    materialize_credential, resolve_credential_template,
 };
 
 /// Caller-provided provider materialization. The orchestrator never reads
@@ -745,13 +745,13 @@ fn start_one(
     )?;
     // Register secret runtime_exports with redaction.
     for (key, value) in &runtime_exports {
-        if let Some(spec) = contract.runtime_exports.get(key) {
-            if matches!(
+        if let Some(spec) = contract.runtime_exports.get(key)
+            && matches!(
                 spec,
                 capsule_core::types::RuntimeExportSpec::Detailed(d) if d.secret
-            ) {
-                input.redaction.register(value);
-            }
+            )
+        {
+            input.redaction.register(value);
         }
     }
 
@@ -1316,7 +1316,7 @@ mod tests {
     // ---------- end-to-end mock-provider integration ----------
 
     use crate::application::dependency_credentials::MapHostEnv;
-    use capsule_core::dependency_contracts::{verify_and_lock, DependencyLockInput};
+    use capsule_core::dependency_contracts::{DependencyLockInput, verify_and_lock};
 
     const MOCK_CONSUMER: &str = r#"
 schema_version = "0.3"
@@ -1647,7 +1647,9 @@ version = "1"
 
         // Stage 2: orchestrate against real Postgres.
         if std::env::var("PG_PASSWORD").is_err() {
-            std::env::set_var("PG_PASSWORD", "p7-test-password-change-me");
+            unsafe {
+                std::env::set_var("PG_PASSWORD", "p7-test-password-change-me");
+            }
         }
 
         // Use a fixed ato_home under /tmp so logs survive failure for
@@ -1743,7 +1745,9 @@ version = "1"
         // Stage 3: rotation invariant. Re-build the lock with a different
         // PG_PASSWORD; instance_hash must NOT change (RFC §7.3.1 hard
         // invariant 1 + §9.5).
-        std::env::set_var("PG_PASSWORD", "p7-rotated-different-value");
+        unsafe {
+            std::env::set_var("PG_PASSWORD", "p7-rotated-different-value");
+        }
         let consumer2 = p7_parse_fixture("wasedap2p/capsule.toml");
         let provider2 = p7_parse_fixture("ato-postgres/capsule.toml");
         let mut providers2 = BTreeMap::new();

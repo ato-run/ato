@@ -7,8 +7,8 @@ use capsule_core::CapsuleReporter;
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::pipeline::executor::HourglassPhaseRunner;
 use crate::application::pipeline::hourglass::{
-    self, phase_is_ok, phase_mark_failed, phase_mark_ok, phase_mark_skipped, phase_mut,
-    HourglassPhaseState,
+    self, HourglassPhaseState, phase_is_ok, phase_mark_failed, phase_mark_ok, phase_mark_skipped,
+    phase_mut,
 };
 use crate::application::pipeline::phases::install as install_phase;
 use crate::application::pipeline::phases::publish as publish_phase;
@@ -917,7 +917,7 @@ pub(crate) fn execute_publish_command(
     json: bool,
     reporter: Reporter,
 ) -> Result<()> {
-    if let Some(ref toml_path) = args.toml {
+    if let Some(toml_path) = &args.toml {
         let source = args
             .source
             .as_deref()

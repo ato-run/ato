@@ -7,6 +7,9 @@ homepage = "https://github.com/pocketbase/pocketbase"
 
 default_target = "app"
 
+[source]
+repository = "pocketbase/pocketbase"
+
 [targets.app]
 runtime = "oci"
 # Pin note: proposed pin to ghcr.io/muchobien/pocketbase:0.26.0 — not yet AODD-confirmed

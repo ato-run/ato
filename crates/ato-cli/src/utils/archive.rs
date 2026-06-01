@@ -1,6 +1,6 @@
 use std::io::{Cursor, Read};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub fn extract_payload_tar_from_capsule(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));

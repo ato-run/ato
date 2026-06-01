@@ -314,8 +314,8 @@ pub fn path_contains_workspace_internal_subtree(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ato_path, path_contains_workspace_internal_subtree, path_contains_workspace_state_dir,
-        WORKSPACE_FALLBACK_HOME_DIR,
+        WORKSPACE_FALLBACK_HOME_DIR, ato_path, path_contains_workspace_internal_subtree,
+        path_contains_workspace_state_dir,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -336,7 +336,9 @@ mod tests {
     impl EnvVarGuard {
         fn set_path(key: &'static str, value: &Path) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
@@ -344,9 +346,13 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(value) = &self.previous {
-                std::env::set_var(self.key, value);
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
             } else {
-                std::env::remove_var(self.key);
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }

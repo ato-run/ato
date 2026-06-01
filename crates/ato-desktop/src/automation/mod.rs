@@ -119,11 +119,6 @@ impl AutomationHost {
         }
     }
 
-    /// Returns a clone of this host (cheap — all fields are `Arc`).
-    pub fn clone_host(&self) -> Self {
-        self.clone()
-    }
-
     /// Fail all pending requests targeting a given pane (e.g. when the pane is dropped).
     pub fn fail_requests_for_pane(&self, pane_id: usize) {
         let to_fail: Vec<PendingAutomationRequest> = {
