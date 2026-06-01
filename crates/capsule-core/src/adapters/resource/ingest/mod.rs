@@ -5,4 +5,4 @@
 pub mod fetcher;
 pub mod http;
 
-pub use fetcher::{fetch_resource, FetcherConfig, ResourceFetchRequest, ResourceFetchResult};
+pub use fetcher::{FetcherConfig, ResourceFetchRequest, ResourceFetchResult, fetch_resource};

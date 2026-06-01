@@ -3,8 +3,8 @@
 //! Downloads and installs capsules from the Store.
 //! Primary path: `/v1/capsules/by/:publisher/:slug/distributions` (.capsule contract)
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::stream::{FuturesUnordered, StreamExt};
 use rand::RngCore;
@@ -21,15 +21,15 @@ use tracing::debug;
 
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    path_safe_app_id, AppRecord, ArtifactBuildId, FinalizerInput, InstallInstanceStore,
-    InstallProfileKey, InstallRevisionFinalizer, InstallRevisionId, InstalledAppId, LaunchProfile,
-    ProfileId,
+    AppRecord, ArtifactBuildId, FinalizerInput, InstallInstanceStore, InstallProfileKey,
+    InstallRevisionFinalizer, InstallRevisionId, InstalledAppId, LaunchProfile, ProfileId,
+    path_safe_app_id,
 };
 
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::resource::cas::LocalCasIndex;
-use capsule_core::types::identity::public_key_to_did;
 use capsule_core::types::CapsuleManifest;
+use capsule_core::types::identity::public_key_to_did;
 
 use crate::artifact_hash::{
     compute_blake3_label as compute_blake3, compute_sha256_hex as compute_sha256, equals_hash,
@@ -764,9 +764,9 @@ pub fn parse_github_run_ref(input: &str) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let normalized = normalize_github_repository(raw).with_context(|| {
-        "GitHub repository inputs for `ato run` must use `github.com/owner/repo`"
-    })?;
+    let normalized = normalize_github_repository(raw).with_context(
+        || "GitHub repository inputs for `ato run` must use `github.com/owner/repo`",
+    )?;
     bail!(
         "GitHub repository inputs for `ato run` must use `github.com/owner/repo`. Re-run with: ato run github.com/{}",
         normalized
@@ -1344,26 +1344,22 @@ async fn complete_install_from_bytes(
         keep_progressive_flow_open,
     } = options;
     let computed_blake3 = compute_blake3(&bytes);
-    if let Some(payload_manifest) = extract_payload_payload_manifest_from_capsule(&bytes)? {
-        if let Some(registry_url) = source.registry_url() {
-            match sync_v3_chunks_from_manifest(
-                &reqwest::Client::new(),
-                registry_url,
-                &payload_manifest,
-            )
+    if let Some(payload_manifest) = extract_payload_payload_manifest_from_capsule(&bytes)?
+        && let Some(registry_url) = source.registry_url()
+    {
+        match sync_v3_chunks_from_manifest(&reqwest::Client::new(), registry_url, &payload_manifest)
             .await?
-            {
-                V3SyncOutcome::Synced => {}
-                V3SyncOutcome::SkippedUnsupportedRegistry => {
-                    if !json_output {
-                        eprintln!(
-                            "ℹ️  Registry does not expose v3 chunk sync endpoint; falling back to embedded payload"
-                        );
-                    }
+        {
+            V3SyncOutcome::Synced => {}
+            V3SyncOutcome::SkippedUnsupportedRegistry => {
+                if !json_output {
+                    eprintln!(
+                        "ℹ️  Registry does not expose v3 chunk sync endpoint; falling back to embedded payload"
+                    );
                 }
-                V3SyncOutcome::SkippedDisabledCas(reason) => {
-                    emit_cas_disabled_performance_warning_once(&reason, json_output);
-                }
+            }
+            V3SyncOutcome::SkippedDisabledCas(reason) => {
+                emit_cas_disabled_performance_warning_once(&reason, json_output);
             }
         }
     }

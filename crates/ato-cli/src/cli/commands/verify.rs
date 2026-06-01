@@ -3,14 +3,14 @@
 //! Verifies the signature of a capsule or sync artifact.
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-use capsule_core::types::identity::public_key_to_did;
 use capsule_core::CapsuleReporter;
+use capsule_core::types::identity::public_key_to_did;
 
 #[derive(Debug)]
 pub struct VerifyArgs {
@@ -153,7 +153,7 @@ pub fn execute(
     let signer_fingerprint = format!("...{}", &signer_did[signer_did.len().saturating_sub(8)..]);
 
     // Check if signer matches expected
-    let signer_matches = if let Some(ref expected) = args.signer {
+    let signer_matches = if let Some(expected) = &args.signer {
         // Check both DID and fingerprint formats
         if expected.starts_with("did:key:") {
             expected == &signer_did
@@ -219,7 +219,7 @@ pub fn execute(
 
     if valid {
         futures::executor::block_on(reporter.notify("✅ Signature is valid".to_string()))?;
-    } else if let Some(ref err) = error_msg {
+    } else if let Some(err) = &error_msg {
         futures::executor::block_on(reporter.notify(format!("❌ {}", err)))?;
     }
 
@@ -229,7 +229,7 @@ pub fn execute(
         reporter.notify(format!("   Fingerprint: {}", signer_fingerprint)),
     )?;
 
-    if let Some(ref expected) = args.signer {
+    if let Some(expected) = args.signer {
         if signer_matches {
             futures::executor::block_on(
                 reporter.notify("   ✅ Signer matches expected".to_string()),

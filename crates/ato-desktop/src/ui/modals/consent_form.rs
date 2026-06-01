@@ -33,7 +33,7 @@
 //! is read-only by design; the user's only inputs are Approve / Cancel.
 
 use gpui::prelude::*;
-use gpui::{div, hsla, point, px, AnyElement, BoxShadow, FontWeight, IntoElement, MouseButton};
+use gpui::{AnyElement, BoxShadow, FontWeight, IntoElement, MouseButton, div, hsla, point, px};
 
 use crate::app::{ApproveConsentForm, CancelConsentForm};
 use crate::state::PendingConsentRequest;

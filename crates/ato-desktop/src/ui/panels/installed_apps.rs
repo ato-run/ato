@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, hsla, px, AnyElement, FontWeight, IntoElement, MouseButton, Styled};
+use gpui::{AnyElement, FontWeight, IntoElement, MouseButton, Styled, div, hsla, px};
 
 use super::super::theme::Theme;
 use crate::app::SelectInstalledApp;
@@ -221,8 +221,8 @@ fn render_app_card(
                                     let result = crate::install_lifecycle_dashboard::spawn_launch(
                                         &ato_bin, &ipk,
                                     );
-                                    DashboardCache::refresh();
-                                    let _ = async_cx.update(|app| {
+                                    let _ = DashboardCache::refresh();
+                                    async_cx.update(|app| {
                                         DashboardCache::set_action_status(Some(match result {
                                             Ok(_) => InstalledAppsActionStatus::Success {
                                                 message: format!("Launched {ipk}"),

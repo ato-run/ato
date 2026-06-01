@@ -288,7 +288,7 @@ impl InstallInstanceStore {
             let rev_id = target
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|s| InstallRevisionId::new(s))
+                .map(InstallRevisionId::new)
                 .with_context(|| "extract revision id from symlink target")?;
             Ok(rev_id)
         }
@@ -310,10 +310,10 @@ impl InstallInstanceStore {
             .with_context(|| format!("read instances dir {}", instances_dir.display()))?
         {
             let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    apps.push(InstalledAppId::new(name));
-                }
+            if entry.file_type()?.is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                apps.push(InstalledAppId::new(name));
             }
         }
         Ok(apps)
@@ -389,7 +389,7 @@ impl InstallInstanceStore {
 
     /// List all profile IDs for an installed app.
     // ── GC helpers ─────────────────────────────────────────────────────────
-
+    ///
     /// Path of the per-revision pin marker file.
     pub fn revision_pin_path(&self, rev: &InstallRevisionId) -> PathBuf {
         self.revision_dir(rev).join(".pinned")
@@ -431,10 +431,10 @@ impl InstallInstanceStore {
             fs::read_dir(&revs_dir).with_context(|| format!("read {}", revs_dir.display()))?
         {
             let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    revisions.push(InstallRevisionId::new(name));
-                }
+            if entry.file_type()?.is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                revisions.push(InstallRevisionId::new(name));
             }
         }
         Ok(revisions)
@@ -583,19 +583,19 @@ impl InstallInstanceStore {
                     rev.as_str()
                 )
             })?;
-            if let Some(manifest) = manifest {
-                if let Some(ts) = manifest.get("finalized_at").and_then(|v| v.as_str()) {
-                    let dt = chrono::DateTime::parse_from_rfc3339(ts).with_context(|| {
-                        format!(
-                            "collect_reclaimable_revisions: parse finalized_at '{}' for revision {}",
-                            ts,
-                            rev.as_str()
-                        )
-                    })?;
-                    let age_secs = now.saturating_sub(dt.timestamp().max(0) as u64);
-                    if age_secs < retention_secs {
-                        continue;
-                    }
+            if let Some(manifest) = manifest
+                && let Some(ts) = manifest.get("finalized_at").and_then(|v| v.as_str())
+            {
+                let dt = chrono::DateTime::parse_from_rfc3339(ts).with_context(|| {
+                    format!(
+                        "collect_reclaimable_revisions: parse finalized_at '{}' for revision {}",
+                        ts,
+                        rev.as_str()
+                    )
+                })?;
+                let age_secs = now.saturating_sub(dt.timestamp().max(0) as u64);
+                if age_secs < retention_secs {
+                    continue;
                 }
             }
             reclaimable.push(rev.clone());
@@ -613,10 +613,10 @@ impl InstallInstanceStore {
             .with_context(|| format!("read profiles dir {}", profiles_dir.display()))?
         {
             let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    profiles.push(ProfileId::new(name));
-                }
+            if entry.file_type()?.is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                profiles.push(ProfileId::new(name));
             }
         }
         Ok(profiles)

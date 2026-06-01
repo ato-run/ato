@@ -477,9 +477,10 @@ target = "/var/lib/app"
         let manifest = CapsuleManifest::from_toml(SAMPLE_DOCKER_PERSISTENT_STATE_TOML).unwrap();
         manifest.validate().unwrap();
         let err = manifest.to_run_plan().expect_err("missing bind must fail");
-        assert!(err
-            .to_string()
-            .contains("requires an explicit persistent binding"));
+        assert!(
+            err.to_string()
+                .contains("requires an explicit persistent binding")
+        );
     }
 
     #[test]

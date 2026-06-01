@@ -142,12 +142,11 @@ pub(crate) fn collect_source_files(
             if path_is_within_any_root(relative_path, &ignored_dynamic_roots) {
                 return false;
             }
-            if entry.file_type().is_dir() {
-                if let Some(name) = relative_path.file_name().and_then(|value| value.to_str()) {
-                    if DEFAULT_IGNORED_DIRS.contains(&name) {
-                        return false;
-                    }
-                }
+            if entry.file_type().is_dir()
+                && let Some(name) = relative_path.file_name().and_then(|value| value.to_str())
+                && DEFAULT_IGNORED_DIRS.contains(&name)
+            {
+                return false;
             }
             !path_is_within_outputs(relative_path, outputs)
         });
@@ -182,12 +181,11 @@ pub(crate) fn path_is_within_outputs(path: &Path, outputs: &[OutputSpec]) -> boo
 
 pub(crate) fn dynamic_ignored_roots(working_dir: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir() {
-        if let Ok(relative) = ato_home.strip_prefix(working_dir) {
-            if !relative.as_os_str().is_empty() {
-                roots.push(relative.to_path_buf());
-            }
-        }
+    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir()
+        && let Ok(relative) = ato_home.strip_prefix(working_dir)
+        && !relative.as_os_str().is_empty()
+    {
+        roots.push(relative.to_path_buf());
     }
     roots
 }

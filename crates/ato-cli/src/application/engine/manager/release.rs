@@ -50,10 +50,10 @@ pub(crate) fn fetch_release_sha256(base_url: &str, binary_name: &str) -> Result<
             return Ok(hash);
         }
 
-        if checksum_url.ends_with(".sha256") {
-            if let Some(hash) = extract_first_sha256_hex(&body) {
-                return Ok(hash);
-            }
+        if checksum_url.ends_with(".sha256")
+            && let Some(hash) = extract_first_sha256_hex(&body)
+        {
+            return Ok(hash);
         }
     }
 

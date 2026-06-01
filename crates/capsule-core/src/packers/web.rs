@@ -13,7 +13,7 @@ use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
 use crate::packers::payload::{
     build_distribution_manifest, normalize_relative_utf8_path, reconstruct_from_chunks,
 };
-use crate::packers::sbom::{generate_embedded_sbom, SBOM_PATH};
+use crate::packers::sbom::{SBOM_PATH, generate_embedded_sbom};
 use crate::router::{CompatProjectInput, ManifestData};
 
 #[derive(Debug, Clone)]
@@ -435,11 +435,7 @@ fn metadata_mode(_: &fs::Metadata) -> u32 {
 }
 
 fn normalize_file_mode(mode: u32) -> u32 {
-    if mode & 0o111 != 0 {
-        0o755
-    } else {
-        0o644
-    }
+    if mode & 0o111 != 0 { 0o755 } else { 0o644 }
 }
 
 fn reproducible_mtime_epoch() -> u64 {
@@ -464,7 +460,7 @@ mod tests {
 
     // internal
     use super::{
-        pack, WebPackOptions, CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME, SBOM_PATH,
+        CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME, SBOM_PATH, WebPackOptions, pack,
     };
     use crate::common::hash::sha256_hex;
     use crate::reporter::NoOpReporter;
@@ -518,12 +514,13 @@ run = "dist""#,
         )
         .expect("pack");
         assert_eq!(out, output_path);
-        assert!(!tmp
-            .path()
-            .join(".tmp")
-            .join("compat-manifest-bridge")
-            .join("capsule.toml")
-            .exists());
+        assert!(
+            !tmp.path()
+                .join(".tmp")
+                .join("compat-manifest-bridge")
+                .join("capsule.toml")
+                .exists()
+        );
 
         let mut outer = tar::Archive::new(fs::File::open(&out).expect("open capsule"));
         let mut has_capsule_toml = false;

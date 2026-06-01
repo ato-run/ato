@@ -9,8 +9,8 @@ use globset::{Glob, GlobSet};
 use serde_json::Value;
 use walkdir::{DirEntry, WalkDir};
 
-use capsule_core::router::ManifestData;
 use capsule_core::CapsuleReporter;
+use capsule_core::router::ManifestData;
 
 use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
@@ -349,15 +349,15 @@ fn lifecycle_runtime_tools(
         });
     }
 
-    if let Some(tool_name) = command_name.and_then(runtime_tool_name_for_command) {
-        if seen.insert(tool_name) {
-            let spec = capsule_core::tools::lookup(tool_name)
-                .with_context(|| format!("runtime tool '{tool_name}' is not registered"))?;
-            tools.push(LifecycleRuntimeTool {
-                spec,
-                requested_version: None,
-            });
-        }
+    if let Some(tool_name) = command_name.and_then(runtime_tool_name_for_command)
+        && seen.insert(tool_name)
+    {
+        let spec = capsule_core::tools::lookup(tool_name)
+            .with_context(|| format!("runtime tool '{tool_name}' is not registered"))?;
+        tools.push(LifecycleRuntimeTool {
+            spec,
+            requested_version: None,
+        });
     }
 
     Ok(tools)
@@ -756,7 +756,9 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, value: &Path) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
@@ -764,8 +766,8 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }

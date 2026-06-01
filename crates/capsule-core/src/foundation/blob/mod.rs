@@ -8,5 +8,5 @@
 pub mod manifest;
 pub mod tree_hash;
 
-pub use manifest::{BlobManifest, BLOB_MANIFEST_SCHEMA_VERSION, BLOB_TREE_ALGORITHM};
-pub use tree_hash::{hash_tree, TreeHash, TreeHashError};
+pub use manifest::{BLOB_MANIFEST_SCHEMA_VERSION, BLOB_TREE_ALGORITHM, BlobManifest};
+pub use tree_hash::{TreeHash, TreeHashError, hash_tree};

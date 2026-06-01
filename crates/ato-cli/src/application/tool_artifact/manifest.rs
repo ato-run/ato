@@ -168,16 +168,16 @@ impl ToolArtifactManifest {
                 ),
             });
         }
-        if let Some(inner) = &self.inner_sha256 {
-            if !is_lower_hex(inner) || inner.len() != 64 {
-                return Err(ToolArtifactError::InvalidArtifactManifest {
-                    name: self.name.clone(),
-                    reason: format!(
-                        "inner_sha256 must be 64 lowercase hex characters, got '{}'",
-                        inner
-                    ),
-                });
-            }
+        if let Some(inner) = &self.inner_sha256
+            && (!is_lower_hex(inner) || inner.len() != 64)
+        {
+            return Err(ToolArtifactError::InvalidArtifactManifest {
+                name: self.name.clone(),
+                reason: format!(
+                    "inner_sha256 must be 64 lowercase hex characters, got '{}'",
+                    inner
+                ),
+            });
         }
         if self.url.is_empty() {
             return Err(ToolArtifactError::InvalidArtifactManifest {

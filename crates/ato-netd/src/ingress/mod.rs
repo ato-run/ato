@@ -23,7 +23,7 @@ pub mod allocator;
 pub mod hop_by_hop;
 pub mod proxy;
 
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc};
 
 use allocator::{AllocError, EphemeralAllocator, PortAllocator};
 use anyhow::Context as _;
@@ -31,7 +31,7 @@ use ato_net::control::IngressInfo;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{
     net::TcpListener,
-    sync::{watch, RwLock},
+    sync::{RwLock, watch},
     task::JoinSet,
 };
 use tracing::{debug, warn};
@@ -79,7 +79,7 @@ pub struct IngressManager {
 
 impl IngressManager {
     /// Load the allocator from `ato_home` and return a ready manager.
-    pub async fn new(ato_home: &PathBuf) -> anyhow::Result<Self> {
+    pub async fn new(ato_home: &Path) -> anyhow::Result<Self> {
         let json_path = ato_home.join("state/netd/stable_origin_ports.json");
         let alloc = PortAllocator::load(json_path)
             .await

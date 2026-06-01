@@ -1,5 +1,5 @@
 use crate::ipc::jsonrpc::error_codes;
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 
 pub const GUEST_PROTOCOL_VERSION: &str = "guest.v1";

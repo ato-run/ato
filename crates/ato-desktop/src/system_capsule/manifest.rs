@@ -67,11 +67,6 @@ pub struct SystemCapsuleDescriptor {
     pub allowed_capabilities: &'static [Capability],
 }
 
-/// Backward-compat alias.  Code that was written against the old
-/// `SystemCapsuleManifest` name continues to compile unchanged; new
-/// code should use `SystemCapsuleDescriptor` directly.
-pub type SystemCapsuleManifest = SystemCapsuleDescriptor;
-
 /// Static, exhaustive descriptor table.
 ///
 /// Keyed by `SystemCapsuleId`; the enum is closed so exhaustiveness is
@@ -223,9 +218,10 @@ mod tests {
     fn onboarding_descriptor_grants_onboarding_complete() {
         let d = lookup(SystemCapsuleId::AtoOnboarding);
         assert_eq!(d.canonical_slug, "onboarding");
-        assert!(d
-            .allowed_capabilities
-            .contains(&Capability::OnboardingComplete));
+        assert!(
+            d.allowed_capabilities
+                .contains(&Capability::OnboardingComplete)
+        );
     }
 
     #[test]
