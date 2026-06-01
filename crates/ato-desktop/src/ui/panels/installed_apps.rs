@@ -221,7 +221,7 @@ fn render_app_card(
                                     let result = crate::install_lifecycle_dashboard::spawn_launch(
                                         &ato_bin, &ipk,
                                     );
-                                    DashboardCache::refresh();
+                                    let _ = DashboardCache::refresh();
                                     async_cx.update(|app| {
                                         DashboardCache::set_action_status(Some(match result {
                                             Ok(_) => InstalledAppsActionStatus::Success {

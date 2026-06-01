@@ -199,10 +199,9 @@ impl ResolutionModal {
         for item in &request.secrets {
             for field in &item.fields {
                 let key = input_key(item.target.as_deref(), &field.name);
-                self.inputs.entry(key).or_insert_with(|| {
-                    let entity = make_input(field, window, cx);
-                    entity
-                });
+                self.inputs
+                    .entry(key)
+                    .or_insert_with(|| make_input(field, window, cx));
             }
         }
         // Preserve the user's current step across merges in the

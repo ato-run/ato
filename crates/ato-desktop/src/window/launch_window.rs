@@ -604,7 +604,7 @@ fn build_consent_preview(
             let requirements = data
                 .requirements
                 .into_iter()
-                .filter_map(|env| match env.kind {
+                .map(|env| match env.kind {
                     InteractiveResolutionKind::SecretsRequired { target, schema } => {
                         let fields = schema
                             .into_iter()
@@ -633,12 +633,12 @@ fn build_consent_preview(
                                 }
                             })
                             .collect();
-                        Some(ConsentRequirementItem::Secret {
+                        ConsentRequirementItem::Secret {
                             target,
                             display_message: env.display.message,
                             display_hint: env.display.hint,
                             fields,
-                        })
+                        }
                     }
                     InteractiveResolutionKind::ConsentRequired {
                         scoped_id,
@@ -647,14 +647,14 @@ fn build_consent_preview(
                         policy_segment_hash,
                         provisioning_policy_hash,
                         summary,
-                    } => Some(ConsentRequirementItem::Consent {
+                    } => ConsentRequirementItem::Consent {
                         scoped_id,
                         version,
                         target_label,
                         policy_segment_hash,
                         provisioning_policy_hash,
                         summary,
-                    }),
+                    },
                 })
                 .collect();
 

@@ -211,7 +211,7 @@ pub(crate) fn parse_community_candidates(
     candidates
         .iter()
         .take(5)
-        .filter_map(|c| {
+        .map(|c| {
             let title = c
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -241,12 +241,12 @@ pub(crate) fn parse_community_candidates(
             // capsule:// handler instead of the GitHub Import surface.
             let handle = format!("capsule://{launcher_handle}");
 
-            Some(crate::state::CapsuleSearchResult {
+            crate::state::CapsuleSearchResult {
                 handle,
                 display_name: format!("{title} · Community"),
                 description: Some(description),
                 ctoml_id,
-            })
+            }
         })
         .collect()
 }
