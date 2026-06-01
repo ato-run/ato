@@ -175,13 +175,14 @@ pub(crate) fn normalize_github_source(query: &str) -> Option<(String, String)> {
         r
     } else if let Some(r) = trimmed.strip_prefix("http://github.com/") {
         r
-    } else { trimmed.strip_prefix("github.com/")? };
+    } else {
+        trimmed.strip_prefix("github.com/")?
+    };
 
     // rest must be "owner/repo" (exactly one slash, non-empty on both sides)
     let rest = rest.trim_end_matches('/');
     let (owner, repo) = rest.split_once('/')?;
-    
-    
+
     if owner.is_empty() || repo.is_empty() || repo.contains('/') {
         return None;
     }
@@ -637,10 +638,11 @@ impl DesktopShell {
     /// Poll for capsule search results from the background thread.
     fn poll_capsule_search(&mut self) {
         if let Some(ref rx) = self.capsule_search_rx
-            && let Ok(results) = rx.try_recv() {
-                self.state.capsule_search_results = results;
-                self.capsule_search_rx = None;
-            }
+            && let Ok(results) = rx.try_recv()
+        {
+            self.state.capsule_search_results = results;
+            self.capsule_search_rx = None;
+        }
     }
 
     /// Drain the `ato login` child-process exit signal. On successful
@@ -717,13 +719,14 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         if let crate::state::UpdateCheck::Available { html_url, .. } = &self.state.update_check
-            && let Err(error) = open_external_url(html_url) {
-                self.state.push_activity(
-                    crate::state::ActivityTone::Error,
-                    format!("Failed to open release page: {error}"),
-                );
-                cx.notify();
-            }
+            && let Err(error) = open_external_url(html_url)
+        {
+            self.state.push_activity(
+                crate::state::ActivityTone::Error,
+                format!("Failed to open release page: {error}"),
+            );
+            cx.notify();
+        }
     }
 
     fn on_open_external_link(
@@ -1136,9 +1139,10 @@ impl DesktopShell {
 
     fn on_native_paste(&mut self, _: &NativePaste, _: &mut Window, cx: &mut Context<Self>) {
         if !self.webviews.wants_host_focus(&self.state)
-            && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let _ = self.webviews.delegate_paste(&self.state, &text);
-            }
+            && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+        {
+            let _ = self.webviews.delegate_paste(&self.state, &text);
+        }
         cx.notify();
     }
 
@@ -1212,7 +1216,8 @@ impl DesktopShell {
             let mut cmd = std::process::Command::new(&ato_bin);
             crate::proc_util::CommandNoWindowExt::no_console_window(&mut cmd);
             cmd.arg("login").spawn()
-        }; match res {
+        };
+        match res {
             Ok(mut child) => {
                 self.state.push_activity(
                     crate::state::ActivityTone::Info,
@@ -1722,17 +1727,18 @@ impl DesktopShell {
                     return;
                 }
                 if let ConfigKind::Enum { choices } = &field.kind
-                    && !choices.iter().any(|c| c == &value) {
-                        self.state.push_activity(
-                            ActivityTone::Warning,
-                            format!(
-                                "'{value}' is not a valid choice for {}. Allowed: {}",
-                                field.name,
-                                choices.join(", ")
-                            ),
-                        );
-                        return;
-                    }
+                    && !choices.iter().any(|c| c == &value)
+                {
+                    self.state.push_activity(
+                        ActivityTone::Warning,
+                        format!(
+                            "'{value}' is not a valid choice for {}. Allowed: {}",
+                            field.name,
+                            choices.join(", ")
+                        ),
+                    );
+                    return;
+                }
                 secret_writes.push(PendingSecretWrite {
                     target: item.target.clone(),
                     field_name: field.name.clone(),
@@ -2076,22 +2082,23 @@ impl DesktopShell {
                     if let Some(shell_weak) = cx
                         .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
                         .and_then(|s| s.0.clone())
-                        && let Some(shell) = shell_weak.upgrade() {
-                            let mock = serde_json::json!({
-                                "ok": true,
-                                "candidates": [{
-                                    "title": "mock/candidate",
-                                    "version": "0.1.0",
-                                    "description": "AODD mock candidate (DesktopShell mode)",
-                                    "author": "mock",
-                                    "status": "community",
-                                    "source": "github",
-                                    "toml": "[capsule]\nname = \"mock\"\nversion = \"0.1.0\"\n",
-                                    "repo": "mock/candidate",
-                                }]
-                            });
-                            shell.read(cx).inject_github_candidates(&mock);
-                        }
+                        && let Some(shell) = shell_weak.upgrade()
+                    {
+                        let mock = serde_json::json!({
+                            "ok": true,
+                            "candidates": [{
+                                "title": "mock/candidate",
+                                "version": "0.1.0",
+                                "description": "AODD mock candidate (DesktopShell mode)",
+                                "author": "mock",
+                                "status": "community",
+                                "source": "github",
+                                "toml": "[capsule]\nname = \"mock\"\nversion = \"0.1.0\"\n",
+                                "repo": "mock/candidate",
+                            }]
+                        });
+                        shell.read(cx).inject_github_candidates(&mock);
+                    }
                 }
                 "OpenStoreWindow" => {
                     window.dispatch_action(Box::new(crate::app::OpenStoreWindow), cx);
@@ -4574,13 +4581,15 @@ fn capsule_service_tabs(
         tabs.push(service.to_string());
     }
     if let Some(adapter) = active.adapter.as_deref()
-        && !tabs.iter().any(|tab| tab == adapter) {
-            tabs.push(adapter.to_string());
-        }
+        && !tabs.iter().any(|tab| tab == adapter)
+    {
+        tabs.push(adapter.to_string());
+    }
     if let Some(web) = active_web
-        && !tabs.iter().any(|tab| tab == &web.profile) {
-            tabs.push(web.profile.clone());
-        }
+        && !tabs.iter().any(|tab| tab == &web.profile)
+    {
+        tabs.push(web.profile.clone());
+    }
     tabs
 }
 
@@ -4588,12 +4597,13 @@ fn unique_domain_count(network_logs: &[&crate::state::NetworkLogEntry]) -> usize
     let mut hosts = Vec::new();
     for entry in network_logs {
         if let Ok(url) = url::Url::parse(&entry.url)
-            && let Some(host) = url.host_str() {
-                let host = host.to_string();
-                if !hosts.iter().any(|existing| existing == &host) {
-                    hosts.push(host);
-                }
+            && let Some(host) = url.host_str()
+        {
+            let host = host.to_string();
+            if !hosts.iter().any(|existing| existing == &host) {
+                hosts.push(host);
             }
+        }
     }
     hosts.len()
 }
