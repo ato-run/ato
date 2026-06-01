@@ -492,8 +492,8 @@ fn extract_toml_str(text: &str, key: &str) -> Option<String> {
             && let Some(rest) = line.strip_prefix(key)
         {
             let rest = rest.trim();
-            if rest.starts_with('=') {
-                let value = rest[1..]
+            if let Some(after_eq) = rest.strip_prefix('=') {
+                let value = after_eq
                     .trim()
                     .trim_matches('"')
                     .trim_matches('\'')

@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 
-
 use crate::orchestrator::GuestLaunchSession;
 
 // ── Client identity ─────────────────────────────────────────────────────────
@@ -392,8 +391,6 @@ impl SessionRegistry {
         }
     }
 
-
-
     // ── queries ──────────────────────────────────────────────────────────
 
     /// Return all client IDs attached to a given GPUI window.
@@ -417,8 +414,6 @@ impl SessionRegistry {
             .collect()
     }
 
-
-
     /// Replace the CLI-originated OCI projection without touching Desktop-owned
     /// source sessions or their attached window clients.
     pub fn sync_oci_sessions(&mut self, snapshots: Vec<OciSessionSnapshot>) {
@@ -439,7 +434,6 @@ impl SessionRegistry {
             self.register_session(CapsuleSession::from_oci_snapshot(snapshot));
         }
     }
-
 
     // ── lifecycle actions ──────────────────────────────────────────────
 
@@ -466,17 +460,14 @@ impl SessionRegistry {
     /// The caller SHOULD arrange for the completion event to update the
     /// process state on the UI thread (via `AsyncApp::update()`).
     pub fn stop_session_once(&mut self, session_id: &str) {
-        let needs_stop = match self.sessions.get(session_id) {
+        let needs_stop = matches!(
+            self.sessions.get(session_id),
             Some(s)
                 if !matches!(
                     s.process_state,
                     SessionProcessState::Stopping | SessionProcessState::Stopped
-                ) =>
-            {
-                true
-            }
-            _ => false,
-        };
+                )
+        );
         if !needs_stop {
             return;
         }
@@ -508,7 +499,6 @@ impl SessionRegistry {
             // TODO(D4): post completion to UI thread to update process_state to Stopped
         });
     }
-
 
     /// Stop every session that is still running (Starting or Ready).
     /// Called on app quit so the Focus-mode close path (which lacks
@@ -664,8 +654,6 @@ impl PendingLaunches {
             (request, PendingLaunchState::AwaitingApproval),
         );
     }
-
-
 
     pub fn get(&self, launch_id: LaunchRequestId) -> Option<&CapsuleLaunchRequest> {
         self.launches.get(&launch_id).map(|(r, _)| r)

@@ -1430,7 +1430,7 @@ pub fn run(skip_onboarding: bool) {
                         // surface is open so the launcher has data on first paint.
                         cx.background_executor()
                             .spawn(async move {
-                                crate::install_lifecycle_dashboard::DashboardCache::refresh();
+                                let _ = crate::install_lifecycle_dashboard::DashboardCache::refresh();
                             })
                             .detach();
                     });

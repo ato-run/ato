@@ -1576,10 +1576,6 @@ impl AppState {
         state
     }
 
-
-
-
-
     pub fn toggle_theme(&mut self) {
         self.theme_mode = match self.theme_mode {
             ThemeMode::Light => ThemeMode::Dark,
@@ -1599,7 +1595,6 @@ impl AppState {
             crate::config::ThemeConfig::Dark => ThemeMode::Dark,
         };
     }
-
 
     /// Update a config value and persist to disk.
     pub fn update_config(&mut self, f: impl FnOnce(&mut crate::config::DesktopConfig)) {
@@ -1772,7 +1767,6 @@ impl AppState {
         self.consent_retry_consumed.retain(|(h, _)| h != handle);
     }
 
-
     pub fn grant_secret_to_capsule(
         &mut self,
         capsule_handle: &str,
@@ -1782,7 +1776,6 @@ impl AppState {
         self.rebuild_grant_cache();
         Ok(())
     }
-
 
     pub fn focus_command_bar(&mut self) {
         self.shell_mode = ShellMode::CommandBar;
@@ -2615,7 +2608,6 @@ impl AppState {
         }
     }
 
-
     /// Remove the GPUI DevConsole companion pane if it is present, without opening a new one.
     pub fn dismiss_dev_console(&mut self) {
         if let Some(task) = self.active_task_mut()
@@ -3247,7 +3239,6 @@ impl AppState {
         }
     }
 
-
     pub fn active_capsule_inspector(&self) -> Option<CapsuleInspectorView> {
         let active = self.active_capsule_pane()?;
         self.capsule_inspector_from_active(active)
@@ -3613,7 +3604,6 @@ impl AppState {
             _ => {}
         });
     }
-
 
     /// Open a bare CLI panel in a new tab.
     ///

@@ -164,7 +164,6 @@ impl TerminalSessionManager {
         }
     }
 
-
     /// Update cols/rows after a resize.
     pub fn update_size(&self, session_id: &str, cols: u16, rows: u16) {
         let mut inner = self.inner.lock().unwrap();
@@ -189,7 +188,6 @@ impl TerminalSessionManager {
             false
         }
     }
-
 }
 
 impl TerminalSessionManagerInner {

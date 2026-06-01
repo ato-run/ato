@@ -1217,7 +1217,6 @@ impl CapsulePolicyOverrideStore {
     pub fn override_for_mut(&mut self, handle: &str) -> &mut CapsulePolicyOverride {
         self.overrides.entry(handle.to_string()).or_default()
     }
-
 }
 
 fn capsule_policy_overrides_path() -> Option<PathBuf> {
