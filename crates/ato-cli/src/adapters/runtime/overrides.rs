@@ -38,9 +38,11 @@ pub struct PortOverrideGuard {
 
 impl Drop for PortOverrideGuard {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => std::env::set_var(ENV_OVERRIDE_PORT, value),
-            None => std::env::remove_var(ENV_OVERRIDE_PORT),
+        unsafe {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(ENV_OVERRIDE_PORT, value) },
+                None => unsafe { std::env::remove_var(ENV_OVERRIDE_PORT) },
+            }
         }
     }
 }
@@ -49,7 +51,11 @@ impl Drop for PortOverrideGuard {
 /// (if any) is captured and restored when the returned guard is dropped.
 pub fn scoped_override_port(port: u16) -> PortOverrideGuard {
     let previous = std::env::var(ENV_OVERRIDE_PORT).ok();
-    std::env::set_var(ENV_OVERRIDE_PORT, port.to_string());
+    unsafe {
+        unsafe {
+            std::env::set_var(ENV_OVERRIDE_PORT, port.to_string());
+        }
+    }
     PortOverrideGuard { previous }
 }
 
@@ -108,25 +114,35 @@ mod tests {
     #[test]
     fn override_port_prefers_env_value() {
         let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("ATO_UI_OVERRIDE_PORT", "4010");
+        unsafe {
+            std::env::set_var("ATO_UI_OVERRIDE_PORT", "4010");
+        }
         assert_eq!(override_port(Some(3000)), Some(4010));
-        std::env::remove_var("ATO_UI_OVERRIDE_PORT");
+        unsafe {
+            std::env::remove_var("ATO_UI_OVERRIDE_PORT");
+        }
     }
 
     #[test]
     fn override_env_reads_json_map() {
         let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("ATO_UI_OVERRIDE_ENV_JSON", r#"{"PORT":"4100","DEBUG":"1"}"#);
+        unsafe {
+            std::env::set_var("ATO_UI_OVERRIDE_ENV_JSON", r#"{"PORT":"4100","DEBUG":"1"}"#);
+        }
         let parsed = override_env();
         assert_eq!(parsed.get("PORT").map(String::as_str), Some("4100"));
         assert_eq!(parsed.get("DEBUG").map(String::as_str), Some("1"));
-        std::env::remove_var("ATO_UI_OVERRIDE_ENV_JSON");
+        unsafe {
+            std::env::remove_var("ATO_UI_OVERRIDE_ENV_JSON");
+        }
     }
 
     #[test]
     fn merged_env_overrides_existing_values() {
         let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("ATO_UI_OVERRIDE_ENV_JSON", r#"{"PORT":"4200"}"#);
+        unsafe {
+            std::env::set_var("ATO_UI_OVERRIDE_ENV_JSON", r#"{"PORT":"4200"}"#);
+        }
 
         let mut base = HashMap::new();
         base.insert("PORT".to_string(), "3000".to_string());
@@ -139,14 +155,20 @@ mod tests {
             Some("production")
         );
 
-        std::env::remove_var("ATO_UI_OVERRIDE_ENV_JSON");
+        unsafe {
+            std::env::remove_var("ATO_UI_OVERRIDE_ENV_JSON");
+        }
     }
 
     #[test]
     fn scoped_id_override_reads_env() {
         let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("ATO_UI_SCOPED_ID", "capsules/hello-web");
+        unsafe {
+            std::env::set_var("ATO_UI_SCOPED_ID", "capsules/hello-web");
+        }
         assert_eq!(scoped_id_override().as_deref(), Some("capsules/hello-web"));
-        std::env::remove_var("ATO_UI_SCOPED_ID");
+        unsafe {
+            std::env::remove_var("ATO_UI_SCOPED_ID");
+        }
     }
 }

@@ -5,11 +5,11 @@ use std::process::Command;
 use crate::proc_util::CommandNoWindowExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use capsule_core::capsule::manifest::blake3_digest;
 use capsule_core::common::paths::ato_path;
 use capsule_core::contract::manifest::load_manifest;
-use capsule_core::router::{route_manifest, ExecutionProfile};
+use capsule_core::router::{ExecutionProfile, route_manifest};
 use capsule_core::types::{CapsuleManifest, ValidationMode};
 use serde::Serialize;
 

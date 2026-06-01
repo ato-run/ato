@@ -14,7 +14,7 @@
 //! to-end on a foreign host. That work depends on the registry exposing
 //! source-tree blobs by hash, which is not yet a stable API.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use capsule_core::execution_identity::{
     ExecutionReceiptDocument, ExecutionReceiptV2, TrackingStatus,
 };

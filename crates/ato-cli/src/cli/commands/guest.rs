@@ -1,7 +1,7 @@
 use crate::guest_protocol::{
-    decode_payload_base64, encode_payload_base64, GuestAction, GuestContext, GuestContextRole,
-    GuestError, GuestErrorCode, GuestMode, GuestPermission, GuestRequest, GuestResponse,
-    GUEST_PROTOCOL_VERSION,
+    GUEST_PROTOCOL_VERSION, GuestAction, GuestContext, GuestContextRole, GuestError,
+    GuestErrorCode, GuestMode, GuestPermission, GuestRequest, GuestResponse, decode_payload_base64,
+    encode_payload_base64,
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use wasi_common::pipe::{ReadPipe, WritePipe};
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimitsBuilder};
-use wasmtime_wasi::sync::{ambient_authority, Dir, WasiCtxBuilder};
-use zip::{write::FileOptions, ZipArchive, ZipWriter};
+use wasmtime_wasi::sync::{Dir, WasiCtxBuilder, ambient_authority};
+use zip::{ZipArchive, ZipWriter, write::FileOptions};
 
 struct WasiState {
     wasi: wasmtime_wasi::WasiCtx,
@@ -217,7 +217,7 @@ fn ensure_permissions(
                 return Err(GuestError::new(
                     GuestErrorCode::PermissionDenied,
                     "Owner context required",
-                ))
+                ));
             }
         }
     }
@@ -307,13 +307,13 @@ fn validate_env_context(context: &GuestContext) -> Result<(), GuestError> {
         }
     }
 
-    if let Ok(sync_path) = std::env::var("CAPSULE_IPC_SYNC_PATH") {
-        if sync_path != context.sync_path {
-            return Err(GuestError::new(
-                GuestErrorCode::InvalidRequest,
-                "CAPSULE_IPC_SYNC_PATH mismatch",
-            ));
-        }
+    if let Ok(sync_path) = std::env::var("CAPSULE_IPC_SYNC_PATH")
+        && sync_path != context.sync_path
+    {
+        return Err(GuestError::new(
+            GuestErrorCode::InvalidRequest,
+            "CAPSULE_IPC_SYNC_PATH mismatch",
+        ));
     }
 
     let widget_bounds = std::env::var("CAPSULE_IPC_WIDGET_BOUNDS").ok();

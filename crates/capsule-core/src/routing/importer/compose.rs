@@ -261,12 +261,12 @@ pub fn import_compose(
         }
 
         // Reject host network.
-        if let Some(net_mode) = &raw_svc.network_mode {
-            if net_mode == "host" {
-                return Err(ComposeImportError::HostNetworkRejected {
-                    service: svc_name.clone(),
-                });
-            }
+        if let Some(net_mode) = &raw_svc.network_mode
+            && net_mode == "host"
+        {
+            return Err(ComposeImportError::HostNetworkRejected {
+                service: svc_name.clone(),
+            });
         }
 
         // Reject build-only.
@@ -449,18 +449,16 @@ fn parse_environment(
                     None => ImportedEnvValue::RequiredExternal,
                 };
                 let is_secret_like = is_secret_like_key(key);
-                if is_secret_like {
-                    if let ImportedEnvValue::Literal(v) = &value {
-                        if looks_like_unsafe_default(v) {
-                            output.warnings.push(format!(
-                                "[{svc_name}] env '{key}' looks like an unsafe default value"
-                            ));
-                        } else {
-                            output.warnings.push(format!(
-                                "[{svc_name}] env '{key}' appears to contain a secret; \
+                if is_secret_like && let ImportedEnvValue::Literal(v) = &value {
+                    if looks_like_unsafe_default(v) {
+                        output.warnings.push(format!(
+                            "[{svc_name}] env '{key}' looks like an unsafe default value"
+                        ));
+                    } else {
+                        output.warnings.push(format!(
+                            "[{svc_name}] env '{key}' appears to contain a secret; \
                                  consider using Ato secret generation instead of a literal value"
-                            ));
-                        }
+                        ));
                     }
                 }
                 entries.push(ImportedOciEnvEntry {
@@ -480,18 +478,16 @@ fn parse_environment(
                     (item.clone(), ImportedEnvValue::RequiredExternal)
                 };
                 let is_secret_like = is_secret_like_key(&key);
-                if is_secret_like {
-                    if let ImportedEnvValue::Literal(v) = &value {
-                        if looks_like_unsafe_default(v) {
-                            output.warnings.push(format!(
-                                "[{svc_name}] env '{key}' looks like an unsafe default value"
-                            ));
-                        } else {
-                            output.warnings.push(format!(
-                                "[{svc_name}] env '{key}' appears to contain a secret; \
+                if is_secret_like && let ImportedEnvValue::Literal(v) = &value {
+                    if looks_like_unsafe_default(v) {
+                        output.warnings.push(format!(
+                            "[{svc_name}] env '{key}' looks like an unsafe default value"
+                        ));
+                    } else {
+                        output.warnings.push(format!(
+                            "[{svc_name}] env '{key}' appears to contain a secret; \
                                  consider using Ato secret generation instead of a literal value"
-                            ));
-                        }
+                        ));
                     }
                 }
                 entries.push(ImportedOciEnvEntry {
@@ -906,10 +902,10 @@ fn find_cycle(dep_map: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
     }
 
     for node in dep_map.keys() {
-        if !visited.contains(node) {
-            if let Some(cycle) = dfs(node, dep_map, &mut visited, &mut path) {
-                return Some(cycle);
-            }
+        if !visited.contains(node)
+            && let Some(cycle) = dfs(node, dep_map, &mut visited, &mut path)
+        {
+            return Some(cycle);
         }
     }
     None
@@ -1032,14 +1028,16 @@ volumes:
         assert!(out.services.iter().any(|s| s.name == "blinko"));
         assert!(out.services.iter().any(|s| s.name == "postgres"));
         // State bindings for both named volumes.
-        assert!(out
-            .state_bindings
-            .iter()
-            .any(|b| b.state_name == "blinko-data"));
-        assert!(out
-            .state_bindings
-            .iter()
-            .any(|b| b.state_name == "postgres-data"));
+        assert!(
+            out.state_bindings
+                .iter()
+                .any(|b| b.state_name == "blinko-data")
+        );
+        assert!(
+            out.state_bindings
+                .iter()
+                .any(|b| b.state_name == "postgres-data")
+        );
     }
 
     // ── Test 3: container_name becomes source metadata only ───────────────────
@@ -1140,10 +1138,11 @@ services:
 "#;
         let out = import_compose(&input(compose)).unwrap();
         // A warning must be emitted.
-        assert!(out
-            .warnings
-            .iter()
-            .any(|w| w.contains("relative bind mount")));
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("relative bind mount"))
+        );
         // A ProjectRootBind state binding is created.
         let binding = out.state_bindings.iter().find(|b| {
             matches!(&b.kind, StateBindingKind::ProjectRootBind { host_rel_path } if host_rel_path == "./data")
@@ -1416,18 +1415,21 @@ services:
 "#;
         let out = import_compose(&input(compose)).unwrap();
         // restart, labels, deploy are unsupported.
-        assert!(out
-            .unsupported_features
-            .iter()
-            .any(|f| f.contains("restart")));
-        assert!(out
-            .unsupported_features
-            .iter()
-            .any(|f| f.contains("labels")));
-        assert!(out
-            .unsupported_features
-            .iter()
-            .any(|f| f.contains("deploy")));
+        assert!(
+            out.unsupported_features
+                .iter()
+                .any(|f| f.contains("restart"))
+        );
+        assert!(
+            out.unsupported_features
+                .iter()
+                .any(|f| f.contains("labels"))
+        );
+        assert!(
+            out.unsupported_features
+                .iter()
+                .any(|f| f.contains("deploy"))
+        );
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

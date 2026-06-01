@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 
-use super::{EngineManager, ENGINE_LOCK_DIR};
+use super::{ENGINE_LOCK_DIR, EngineManager};
 
 pub(super) struct EngineInstallLock {
     _file: File,

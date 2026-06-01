@@ -1,8 +1,8 @@
 use std::fs;
 
 use super::{
-    is_kebab_case, is_semver, CapsuleManifest, CapsuleType, ConfigField, ConfigKind, RouteWeight,
-    RuntimeType, StateSharing, ValidationError, ValidationMode,
+    CapsuleManifest, CapsuleType, ConfigField, ConfigKind, RouteWeight, RuntimeType, StateSharing,
+    ValidationError, ValidationMode, is_kebab_case, is_semver,
 };
 
 const VALID_TOML: &str = r#"
@@ -144,9 +144,11 @@ fn test_validate_invalid_schema_version() {
     let toml = VALID_TOML.replace("schema_version = \"0.3\"", "schema_version = \"2.0\"");
     let manifest = CapsuleManifest::from_toml(&toml).unwrap();
     let errors = manifest.validate().unwrap_err();
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::InvalidSchemaVersion(_))));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidSchemaVersion(_)))
+    );
 }
 
 #[test]
@@ -466,9 +468,11 @@ contract = "service@1"
 "#;
 
     let error = CapsuleManifest::from_toml(toml).expect_err("unknown template must fail");
-    assert!(error
-        .to_string()
-        .contains("unsupported template expression"));
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported template expression")
+    );
 }
 
 #[test]
@@ -830,9 +834,11 @@ entrypoint = "server.js"
 "#;
 
     let error = CapsuleManifest::from_toml(toml).expect_err("v0.3 entrypoint must fail");
-    assert!(error
-        .to_string()
-        .contains("must not use legacy field 'entrypoint'"));
+    assert!(
+        error
+            .to_string()
+            .contains("must not use legacy field 'entrypoint'")
+    );
 }
 
 #[test]
@@ -851,9 +857,11 @@ cmd = ["node", "server.js"]
 "#;
 
     let error = CapsuleManifest::from_toml(toml).expect_err("v0.3 cmd on source target must fail");
-    assert!(error
-        .to_string()
-        .contains("must not use legacy field 'cmd'"));
+    assert!(
+        error
+            .to_string()
+            .contains("must not use legacy field 'cmd'")
+    );
 }
 
 #[test]
@@ -932,9 +940,11 @@ entrypoint = "/bin/sh"
 
     let error =
         CapsuleManifest::from_toml(toml).expect_err("entrypoint still rejected for OCI targets");
-    assert!(error
-        .to_string()
-        .contains("must not use legacy field 'entrypoint'"));
+    assert!(
+        error
+            .to_string()
+            .contains("must not use legacy field 'entrypoint'")
+    );
 }
 
 #[test]
@@ -1469,9 +1479,10 @@ run = "python main.py"
     .expect("write manifest");
 
     let err = CapsuleManifest::load_from_file(&manifest_path).expect_err("must reject");
-    assert!(err
-        .to_string()
-        .contains("external_injection key 'model_dir'"));
+    assert!(
+        err.to_string()
+            .contains("external_injection key 'model_dir'")
+    );
 }
 
 #[test]
@@ -1479,9 +1490,10 @@ fn test_validate_invalid_memory_string() {
     let toml = VALID_TOML.replace("vram_min = \"6GB\"", "vram_min = \"6XB\"");
     let manifest = CapsuleManifest::from_toml(&toml).unwrap();
     let errs = manifest.validate().unwrap_err();
-    assert!(errs
-        .iter()
-        .any(|e| matches!(e, ValidationError::InvalidMemoryString { .. })));
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, ValidationError::InvalidMemoryString { .. }))
+    );
 }
 
 #[test]
@@ -1489,9 +1501,11 @@ fn test_validate_invalid_name() {
     let toml = VALID_TOML.replace("name = \"mlx-qwen3-8b\"", "name = \"Invalid Name!\"");
     let manifest = CapsuleManifest::from_toml(&toml).unwrap();
     let errors = manifest.validate().unwrap_err();
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::InvalidName(_))));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidName(_)))
+    );
 }
 
 #[test]
@@ -1510,9 +1524,11 @@ run_command = "server.py"
 "#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::InvalidTargetDriver(_, _))));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidTargetDriver(_, _)))
+    );
 }
 
 #[test]
@@ -1532,9 +1548,11 @@ entrypoint = "server.py"
 "#;
     let manifest = CapsuleManifest::from_toml(toml).unwrap();
     let errors = manifest.validate().unwrap_err();
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::MissingRuntimeVersion(_, _))));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingRuntimeVersion(_, _)))
+    );
 }
 
 #[test]
@@ -2547,9 +2565,11 @@ runtime = "source"
 run = "main.py""#;
 
     let error = CapsuleManifest::from_toml(legacy_manifest).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("legacy [execution] section is not supported in schema_version=0.3"));
+    assert!(
+        error
+            .to_string()
+            .contains("legacy [execution] section is not supported in schema_version=0.3")
+    );
 }
 
 #[test]
@@ -2573,9 +2593,11 @@ fn test_rejects_legacy_execution_section_json() {
 }"#;
 
     let error = CapsuleManifest::from_json(legacy_manifest).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("legacy [execution] section is not supported in schema_version=0.3"));
+    assert!(
+        error
+            .to_string()
+            .contains("legacy [execution] section is not supported in schema_version=0.3")
+    );
 }
 
 #[test]
@@ -3018,9 +3040,11 @@ type = "tool"
     let errors = manifest
         .validate()
         .expect_err("tool without platforms must fail");
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::ToolMissingPlatforms)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ToolMissingPlatforms))
+    );
 }
 
 #[test]
@@ -3084,9 +3108,11 @@ fn test_validate_tool_capsule_rejects_services() {
     let errors = manifest
         .validate()
         .expect_err("tool with services must fail");
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::ToolMustNotDeclareServices)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ToolMustNotDeclareServices))
+    );
 }
 
 #[test]
@@ -3112,9 +3138,11 @@ sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     let errors = manifest
         .validate()
         .expect_err("non-tool with platforms must fail");
-    assert!(errors
-        .iter()
-        .any(|e| matches!(e, ValidationError::PlatformsRequiresToolType)));
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::PlatformsRequiresToolType))
+    );
 }
 
 #[test]

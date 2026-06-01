@@ -436,9 +436,9 @@ mod tests {
     use async_trait::async_trait;
 
     use super::{
-        build_publish_pipeline_plan, select_publish_dry_run_phases, select_publish_phases,
-        should_warn_legacy_full_publish, validate_publish_phase_options, ProducerPipeline,
-        PublishPhaseOptions, PublishPipelineRequest,
+        ProducerPipeline, PublishPhaseOptions, PublishPipelineRequest, build_publish_pipeline_plan,
+        select_publish_dry_run_phases, select_publish_phases, should_warn_legacy_full_publish,
+        validate_publish_phase_options,
     };
     use crate::application::pipeline::cleanup::PipelineAttemptContext;
     use crate::application::pipeline::executor::HourglassPhaseRunner;

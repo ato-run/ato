@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    derive_install_profile_key, InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId,
+    InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
 };
 
 pub(crate) struct RollbackArgs {
@@ -51,7 +51,8 @@ pub(crate) fn execute_rollback_command(args: RollbackArgs) -> Result<()> {
             .list_profile_revisions(&app_id, &profile_id)
             .unwrap_or_default();
         let pos = log.iter().position(|r| r.as_str() == current.as_str());
-        let prev = match pos {
+
+        match pos {
             None => anyhow::bail!(
                 "current revision '{}' is not in the revision log. \
                  The log may be corrupted; use `ato rollback {} <rev>` to specify explicitly.",
@@ -63,8 +64,7 @@ pub(crate) fn execute_rollback_command(args: RollbackArgs) -> Result<()> {
                 current.as_str()
             ),
             Some(i) => log[i - 1].clone(),
-        };
-        prev
+        }
     };
 
     if target_rev.as_str() == current.as_str() {
@@ -108,7 +108,7 @@ fn find_profile_by_key_ids(
 mod tests {
     use super::*;
     use capsule_core::foundation::install_lifecycle::{
-        derive_install_profile_key, AppRecord, LaunchProfile,
+        AppRecord, LaunchProfile, derive_install_profile_key,
     };
     use serial_test::serial;
 
@@ -126,7 +126,7 @@ mod tests {
         capsule_core::foundation::install_lifecycle::InstallProfileKey,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
+        let store = InstallInstanceStore::new(dir.path().join("instances")).unwrap();
         let app_id = InstalledAppId::new("app_test_rb_cmd");
         let profile_id = ProfileId::new("default");
         store
@@ -174,7 +174,7 @@ mod tests {
     #[serial]
     fn rollback_auto_picks_log_predecessor() {
         let dir = tempfile::tempdir().unwrap();
-        let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
+        let store = InstallInstanceStore::new(dir.path().join("instances")).unwrap();
         let app_id = InstalledAppId::new("app_test_rb_auto");
         let profile_id = ProfileId::new("default");
         store
@@ -209,12 +209,18 @@ mod tests {
         }
         // log=[rev1, rev2, rev3], current=rev3 → auto rollback should give rev2.
         let ipk = derive_install_profile_key(&app_id, &profile_id);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            unsafe {
+                std::env::set_var("ATO_HOME", dir.path());
+            }
+        }
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
             revision_id: None,
         });
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
         assert!(result.is_ok(), "rollback auto failed: {:?}", result);
         let after = store.current_revision(&app_id, &profile_id).unwrap();
         assert_eq!(
@@ -231,12 +237,18 @@ mod tests {
     #[serial]
     fn rollback_explicit_unknown_rev_fails() {
         let (dir, _store, _app_id, _profile_id, _rev1, _rev2, _rev3, ipk) = make_store_three_revs();
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            unsafe {
+                std::env::set_var("ATO_HOME", dir.path());
+            }
+        }
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
             revision_id: Some("rev_ffff0000000000000000000000000000".to_owned()),
         });
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
         assert!(
             result.is_err(),
             "expected error for unknown revision, got Ok"
@@ -254,12 +266,18 @@ mod tests {
     #[serial]
     fn rollback_explicit_known_rev_succeeds() {
         let (dir, store, app_id, profile_id, rev1, _rev2, _rev3, ipk) = make_store_three_revs();
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            unsafe {
+                std::env::set_var("ATO_HOME", dir.path());
+            }
+        }
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
             revision_id: Some(rev1.as_str().to_owned()),
         });
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
         assert!(result.is_ok(), "rollback to known rev failed: {:?}", result);
         let after = store.current_revision(&app_id, &profile_id).unwrap();
         assert_eq!(after.as_str(), rev1.as_str());

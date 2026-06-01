@@ -7,10 +7,10 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use capsule_core::AtoError;
 use capsule_core::common::paths::ato_path;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::model::{ConsentKey, ExecutionPlan};
-use capsule_core::AtoError;
 
 use crate::application::graph_views::ExecutionConsentView;
 
@@ -439,8 +439,8 @@ mod tests {
         fn set(key: &'static str, value: Option<&str>) -> Self {
             let previous = std::env::var(key).ok();
             match value {
-                Some(next) => std::env::set_var(key, next),
-                None => std::env::remove_var(key),
+                Some(next) => unsafe { std::env::set_var(key, next) },
+                None => unsafe { std::env::remove_var(key) },
             }
             Self { key, previous }
         }
@@ -449,8 +449,8 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }

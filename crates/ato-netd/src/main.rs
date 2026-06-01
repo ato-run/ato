@@ -68,7 +68,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let exit = runtime.block_on(async move {
+    runtime.block_on(async move {
         if cli.status {
             return run_status_client(cli.socket.clone()).await;
         }
@@ -76,9 +76,7 @@ fn main() -> ExitCode {
             return run_shutdown_client(cli.socket.clone()).await;
         }
         run_daemon(cli.socket.clone()).await
-    });
-
-    exit
+    })
 }
 
 fn init_tracing() {

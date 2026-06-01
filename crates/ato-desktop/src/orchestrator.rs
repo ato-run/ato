@@ -7,17 +7,17 @@ use std::sync::Mutex;
 use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use ato_session_core::{
-    compute_run_config_hash, materialized_launch_record_path, read_materialized_launch_record,
-    read_session_records, session_record_path, session_root as shared_session_root,
-    validate_record_only, RecordValidationOutcome, RecordValidationParams, StoredSessionInfo,
+    RecordValidationOutcome, RecordValidationParams, StoredSessionInfo, compute_run_config_hash,
+    materialized_launch_record_path, read_materialized_launch_record, read_session_records,
+    session_record_path, session_root as shared_session_root, validate_record_only,
 };
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path;
 use capsule_wire::handle::{
-    normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
-    ResolvedSnapshot,
+    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
+    normalize_capsule_handle,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -3130,7 +3130,9 @@ fn detect_dev_server_url(
             }
         }
     }
-    bail!("web dev server did not emit a URL within {timeout:?} and no HTML server found on common ports")
+    bail!(
+        "web dev server did not emit a URL within {timeout:?} and no HTML server found on common ports"
+    )
 }
 
 /// Return true when a quick HTTP HEAD request to `url` receives a `text/html` response.
@@ -3321,10 +3323,10 @@ mod tests {
     use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
 
     use super::{
-        allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
-        detect_package_manager, extract_localhost_url, find_capsule_root, find_dev_script_dir,
-        pop_last_codepoint_width, url_port, which_in_path_entries, DesktopLaunchInput,
-        ResolvePayload, SessionStartInfo,
+        DesktopLaunchInput, ResolvePayload, SessionStartInfo, allows_registry_guest_recovery,
+        build_launch_session, collect_dev_script_dirs, detect_package_manager,
+        extract_localhost_url, find_capsule_root, find_dev_script_dir, pop_last_codepoint_width,
+        url_port, which_in_path_entries,
     };
 
     fn resolved_payload(
@@ -3411,10 +3413,12 @@ mod tests {
 
         assert_eq!(session.adapter.as_deref(), Some("tauri"));
         assert_eq!(session.snapshot_label.as_deref(), Some("version 0.1.0"));
-        assert!(session
-            .notes
-            .iter()
-            .any(|note| note.contains("metadata-only")));
+        assert!(
+            session
+                .notes
+                .iter()
+                .any(|note| note.contains("metadata-only"))
+        );
     }
 
     #[test]
@@ -4095,7 +4099,7 @@ mod tests {
 
 // ── Terminal PTY session management ──────────────────────────────────────────
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// A live terminal session routed through nacelle, owned by `WebViewManager`.
 pub struct TerminalProcess {
@@ -4551,7 +4555,7 @@ pub fn spawn_ato_run_repl(
 ) -> Result<TerminalProcess> {
     use crate::egress_policy::{EgressPolicy, HostPattern};
     use crate::egress_proxy::{DenyEvent, EgressProxy, EgressProxyHandle};
-    use std::sync::{mpsc::channel as std_channel, Arc, Mutex as StdMutex};
+    use std::sync::{Arc, Mutex as StdMutex, mpsc::channel as std_channel};
 
     let ato_bin =
         resolve_ato_binary().context("cannot resolve ato binary for ato://cli (ato run REPL)")?;
@@ -5292,11 +5296,7 @@ fn find_ato_toolchain_binary(name: &str) -> Option<PathBuf> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let path = e.path();
-            if path.is_dir() {
-                Some(path)
-            } else {
-                None
-            }
+            if path.is_dir() { Some(path) } else { None }
         })
         .collect();
 
@@ -5735,19 +5735,27 @@ mod fast_path_tests {
     fn resolve_ato_binary_prefers_ato_desktop_ato_bin() {
         let tmp = tempfile::NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
-        std::env::set_var("ATO_DESKTOP_ATO_BIN", &path);
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_ATO_BIN", &path);
+        }
         let resolved = resolve_ato_binary().expect("resolve");
         assert_eq!(resolved, path);
-        std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+        }
     }
 
     #[test]
     #[serial]
     fn resolve_ato_binary_errors_on_missing_env_path() {
-        std::env::set_var("ATO_DESKTOP_ATO_BIN", "/nonexistent/ato/helper/binary");
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_ATO_BIN", "/nonexistent/ato/helper/binary");
+        }
         let err = resolve_ato_binary().unwrap_err();
         assert!(format!("{err:#}").contains("points to a missing file"));
-        std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+        }
     }
 
     #[test]
@@ -5999,8 +6007,7 @@ mod launch_error_display_tests {
     fn desktop_launch_failure_shows_actionable_error_not_debug_line() {
         // Simulate the exact problem: stderr is only a DEBUG provision line,
         // stdout is empty. The result should be None (not the debug line).
-        let stderr =
-            "  DEBUG ato_cli::commands::run::preflight: Provision command path diagnostics phase=\"run\" runtime=\"oci\" driver=\"docker-compose\"";
+        let stderr = "  DEBUG ato_cli::commands::run::preflight: Provision command path diagnostics phase=\"run\" runtime=\"oci\" driver=\"docker-compose\"";
         let result = extract_user_facing_error(stderr, "");
         assert!(
             result.is_none(),

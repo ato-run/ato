@@ -9,8 +9,8 @@ mod settings;
 
 use gpui::prelude::*;
 use gpui::{
-    div, linear_color_stop, linear_gradient, point, px, AnyElement, BoxShadow, Entity, FontWeight,
-    IntoElement,
+    AnyElement, BoxShadow, Entity, FontWeight, IntoElement, div, linear_color_stop,
+    linear_gradient, point, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::resizable::h_resizable;
@@ -22,8 +22,8 @@ use crate::state::{
     WebSessionState,
 };
 
-use super::theme::{task_hue, Theme};
 use super::STAGE_PADDING;
+use super::theme::{Theme, task_hue};
 use auth_handoff::render_auth_handoff_panel;
 use capsule_runtime::render_capsule_runtime_panel;
 use devtools::render_dev_console_panel;

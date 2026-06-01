@@ -28,15 +28,15 @@ pub mod types;
 pub mod verify;
 
 pub use sign::{
-    generate_keypair, sign_envelope, AttestationKey, AttestationKeyError, StoredAttestationKey,
+    AttestationKey, AttestationKeyError, StoredAttestationKey, generate_keypair, sign_envelope,
 };
 pub use store::{
     blob_attestations_dir, payload_attestations_dir, read_envelope, store_envelope,
     trust_root_path, write_trust_root_pubkey,
 };
 pub use types::{
+    ATTESTATION_ALGORITHM, ATTESTATION_SCHEMA_VERSION, ATTESTATION_SIGNING_PREFIX,
     AttestationEnvelope, AttestationPredicate, AttestationStatement, AttestationSubject,
-    FreezeMetadata, PolicySnapshot, Signature, SourceRef, ATTESTATION_ALGORITHM,
-    ATTESTATION_SCHEMA_VERSION, ATTESTATION_SIGNING_PREFIX,
+    FreezeMetadata, PolicySnapshot, Signature, SourceRef,
 };
-pub use verify::{verify_envelope, AttestationVerifyError, TrustRoot, VerifiedAttestation};
+pub use verify::{AttestationVerifyError, TrustRoot, VerifiedAttestation, verify_envelope};

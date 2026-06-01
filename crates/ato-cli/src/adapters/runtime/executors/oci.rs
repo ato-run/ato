@@ -10,17 +10,19 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use capsule_core::CapsuleReporter;
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{
     BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciPortSpec, OciRuntimeClient,
 };
-use capsule_core::CapsuleReporter;
 
 use super::launch_context::RuntimeLaunchContext;
 use crate::reporters::CliReporter;
 
+#[allow(dead_code)]
 const OCI_STOP_TIMEOUT_SECS: i64 = 5;
 
+#[allow(dead_code)]
 pub async fn execute(
     plan: &ManifestData,
     reporter: Arc<CliReporter>,
@@ -31,6 +33,7 @@ pub async fn execute(
     execute_with_client(plan, reporter, launch_ctx, &client).await
 }
 
+#[allow(dead_code)]
 pub async fn execute_with_client<C: OciRuntimeClient>(
     plan: &ManifestData,
     reporter: Arc<CliReporter>,
@@ -73,13 +76,12 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
     let mut env = plan.targets_oci_env();
     env.extend(launch_ctx.merged_env());
     let mut cmd = plan.targets_oci_cmd();
-    if cmd.is_empty() {
-        if let Some(entrypoint) = plan
+    if cmd.is_empty()
+        && let Some(entrypoint) = plan
             .execution_entrypoint()
             .or_else(|| plan.execution_run_command())
-        {
-            cmd = shell_words::split(&entrypoint).unwrap_or_else(|_| vec![entrypoint]);
-        }
+    {
+        cmd = shell_words::split(&entrypoint).unwrap_or_else(|_| vec![entrypoint]);
     }
 
     client.pull_image(&image).await?;
@@ -148,6 +150,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
     Ok(exit_code as i32)
 }
 
+#[allow(dead_code)]
 fn print_log_chunk(service_name: &str, chunk: &OciLogChunk) -> Result<()> {
     let prefix = format!("[{}] ", service_name);
     if chunk.stderr {
@@ -164,6 +167,7 @@ fn print_log_chunk(service_name: &str, chunk: &OciLogChunk) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn base_labels(
     session_id: &str,
     manifest_name: &str,
@@ -176,6 +180,7 @@ fn base_labels(
     ])
 }
 
+#[allow(dead_code)]
 fn session_id(manifest_name: &str) -> String {
     format!(
         "{}-{}-{}",
@@ -185,11 +190,13 @@ fn session_id(manifest_name: &str) -> String {
     )
 }
 
+#[allow(dead_code)]
 fn session_suffix(value: &str) -> String {
     let hash = blake3::hash(value.as_bytes()).to_hex().to_string();
     hash.chars().take(8).collect()
 }
 
+#[allow(dead_code)]
 fn sanitize_name(value: &str) -> String {
     let sanitized = value
         .chars()

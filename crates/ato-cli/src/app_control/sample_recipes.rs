@@ -204,14 +204,17 @@ pub fn resolve_sample_recipe_for_github(
     }))
 }
 
+#[allow(dead_code)]
 pub fn is_sample_recipe_alias(input: &str) -> bool {
     resolve_for_alias(input).is_some()
 }
 
+#[allow(dead_code)]
 pub fn is_sample_recipe_github(owner: &str, repo: &str) -> bool {
     resolve_for_github(owner, repo).is_some()
 }
 
+#[allow(dead_code)]
 pub fn materialize_all_sample_recipes() -> Result<()> {
     for binding in SAMPLE_RECIPE_CATALOG {
         materialize_recipe(binding)?;
@@ -292,16 +295,20 @@ mod tests {
 
     #[test]
     fn unknown_alias_returns_none() {
-        assert!(resolve_sample_recipe_for_input("unknown-app")
-            .expect("no error")
-            .is_none());
+        assert!(
+            resolve_sample_recipe_for_input("unknown-app")
+                .expect("no error")
+                .is_none()
+        );
     }
 
     #[test]
     fn unknown_github_returns_none() {
-        assert!(resolve_sample_recipe_for_github("unknown", "repo")
-            .expect("no error")
-            .is_none());
+        assert!(
+            resolve_sample_recipe_for_github("unknown", "repo")
+                .expect("no error")
+                .is_none()
+        );
     }
 
     #[test]
@@ -319,19 +326,25 @@ mod tests {
 
     #[test]
     fn case_insensitive_alias() {
-        assert!(resolve_sample_recipe_for_input("Memos")
-            .expect("no error")
-            .is_some());
-        assert!(resolve_sample_recipe_for_input("N8N")
-            .expect("no error")
-            .is_some());
+        assert!(
+            resolve_sample_recipe_for_input("Memos")
+                .expect("no error")
+                .is_some()
+        );
+        assert!(
+            resolve_sample_recipe_for_input("N8N")
+                .expect("no error")
+                .is_some()
+        );
     }
 
     #[test]
     fn case_insensitive_github() {
-        assert!(resolve_sample_recipe_for_github("Usememos", "Memos")
-            .expect("no error")
-            .is_some());
+        assert!(
+            resolve_sample_recipe_for_github("Usememos", "Memos")
+                .expect("no error")
+                .is_some()
+        );
     }
 
     #[test]

@@ -16,33 +16,33 @@ use std::path::Path;
 /// input-resolver and import flows can work with draft locks without being
 /// forced through persisted artifact validation too early.
 pub use canonicalize::{
-    canonical_identity_projection, canonical_projection, is_canonical_identity_section,
-    CanonicalLockProjection, CANONICAL_IDENTITY_EXCLUDED_SECTIONS,
-    CANONICAL_IDENTITY_INCLUDED_SECTIONS,
+    CANONICAL_IDENTITY_EXCLUDED_SECTIONS, CANONICAL_IDENTITY_INCLUDED_SECTIONS,
+    CanonicalLockProjection, canonical_identity_projection, canonical_projection,
+    is_canonical_identity_section,
 };
 pub use closure::{
-    closure_info, compute_closure_digest, normalize_closure_value, normalize_lock_closure,
-    normalize_resolution_closure_entries, validate_closure_value, ClosureInfo,
+    ClosureInfo, closure_info, compute_closure_digest, normalize_closure_value,
+    normalize_lock_closure, normalize_resolution_closure_entries, validate_closure_value,
 };
 pub use hash::{
     canonical_document_bytes, canonical_projection_bytes, canonical_signature_payload_bytes,
     compute_lock_id, recompute_lock_id,
 };
 pub use oci::{
-    construct_resolved_ref_from_sidecar, oci_images_from_main_lock, oci_imports_from_main_lock,
-    parse_platform_str as parse_oci_platform_str, read_oci_lock, upsert_oci_lock_facts,
-    write_oci_facts_to_main_lock, OciImageLockEntry, OciImportEntry, OciLockReadResult,
-    OciLockReadWarning, OciLockSource, OciMainLockError,
+    OciImageLockEntry, OciImportEntry, OciLockReadResult, OciLockReadWarning, OciLockSource,
+    OciMainLockError, construct_resolved_ref_from_sidecar, oci_images_from_main_lock,
+    oci_imports_from_main_lock, parse_platform_str as parse_oci_platform_str, read_oci_lock,
+    upsert_oci_lock_facts, write_oci_facts_to_main_lock,
 };
 pub use schema::{
-    delivery_environment, parse_delivery_environment_value, AtoLock, AttestationsSection,
-    BindingSection, ContractSection, DeliveryBootstrap, DeliveryEnvironment, DeliveryHealthcheck,
-    DeliveryRepair, DeliveryService, FeatureName, KnownFeature, LockFeatures, LockId,
-    LockSignature, PolicySection, ResolutionSection, UnresolvedReason, UnresolvedValue,
-    ATO_LOCK_SCHEMA_VERSION,
+    ATO_LOCK_SCHEMA_VERSION, AtoLock, AttestationsSection, BindingSection, ContractSection,
+    DeliveryBootstrap, DeliveryEnvironment, DeliveryHealthcheck, DeliveryRepair, DeliveryService,
+    FeatureName, KnownFeature, LockFeatures, LockId, LockSignature, PolicySection,
+    ResolutionSection, UnresolvedReason, UnresolvedValue, delivery_environment,
+    parse_delivery_environment_value,
 };
 pub use validate::{
-    validate_persisted, validate_structural, AtoLockValidationError, ValidationMode,
+    AtoLockValidationError, ValidationMode, validate_persisted, validate_structural,
 };
 
 use crate::error::{CapsuleError, Result};
@@ -151,12 +151,12 @@ mod tests {
 
     use super::validate::AtoLockValidationError;
     use super::{
+        ATO_LOCK_SCHEMA_VERSION, AtoLock, CANONICAL_IDENTITY_EXCLUDED_SECTIONS, FeatureName,
+        KnownFeature, LockId, LockSignature, UnresolvedReason, UnresolvedValue,
         canonical_projection_bytes, canonical_signature_payload_bytes, compute_lock_id,
         delivery_environment, is_canonical_identity_section, load_unvalidated_from_path,
         load_unvalidated_from_str, recompute_lock_id, to_pretty_json, validate_persisted_strict,
-        validate_structural_non_strict, validate_structural_strict, write_pretty_to_path, AtoLock,
-        FeatureName, KnownFeature, LockId, LockSignature, UnresolvedReason, UnresolvedValue,
-        ATO_LOCK_SCHEMA_VERSION, CANONICAL_IDENTITY_EXCLUDED_SECTIONS,
+        validate_structural_non_strict, validate_structural_strict, write_pretty_to_path,
     };
 
     fn sample_lock() -> AtoLock {
@@ -365,9 +365,11 @@ mod tests {
         let missing = sample_lock();
         let missing_errors =
             validate_persisted_strict(&missing).expect_err("missing lock_id must fail");
-        assert!(missing_errors
-            .iter()
-            .any(|error| matches!(error, AtoLockValidationError::MissingLockId)));
+        assert!(
+            missing_errors
+                .iter()
+                .any(|error| matches!(error, AtoLockValidationError::MissingLockId))
+        );
 
         let mut malformed = sample_lock();
         malformed.lock_id = Some(LockId::new("sha256:abcd"));
@@ -433,9 +435,11 @@ mod tests {
         }];
         let ambiguity_errors = validate_structural_strict(&ambiguity)
             .expect_err("ambiguity without candidates must fail");
-        assert!(ambiguity_errors
-            .iter()
-            .any(|error| matches!(error, AtoLockValidationError::AmbiguityRequiresCandidates)));
+        assert!(
+            ambiguity_errors
+                .iter()
+                .any(|error| matches!(error, AtoLockValidationError::AmbiguityRequiresCandidates))
+        );
 
         let non_strict_unknown = validate_structural_non_strict(&lock)
             .expect_err("unknown unresolved reason remains structurally invalid");
