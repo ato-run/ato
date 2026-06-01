@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 pub fn normalize_registry_url(raw: &str, label: &str) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

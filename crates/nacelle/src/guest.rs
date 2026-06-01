@@ -1,5 +1,5 @@
 use capsule_sync::{
-    decode_payload_base64, GuestContextRole, GuestMode, GuestSession, WidgetBounds,
+    GuestContextRole, GuestMode, GuestSession, WidgetBounds, decode_payload_base64,
 };
 
 use crate::sync::SyncRuntime;

@@ -270,6 +270,7 @@ pub(crate) struct LaunchEnvelopeFacets {
 }
 
 impl LaunchMaterializationInput {
+    #[allow(dead_code)]
     pub(crate) fn from_bundle(bundle: &LaunchGraphBundle) -> Self {
         // declared/resolved ids are always stamped on the bundle's
         // derived.execution_ids; for declared-only bundles, the two

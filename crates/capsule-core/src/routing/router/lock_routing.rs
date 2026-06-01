@@ -39,10 +39,10 @@ pub(super) fn synthesize_manifest_from_lock(
         toml::Value::String(runtime_model.selected.target_label.clone()),
     );
 
-    if let Some(network) = runtime_model.network.as_ref() {
-        if let Ok(value) = toml::Value::try_from(network.clone()) {
-            manifest.insert("network".to_string(), value);
-        }
+    if let Some(network) = runtime_model.network.as_ref()
+        && let Ok(value) = toml::Value::try_from(network.clone())
+    {
+        manifest.insert("network".to_string(), value);
     }
 
     let mut targets = toml::map::Map::new();
@@ -129,10 +129,10 @@ pub(super) fn synthesize_manifest_from_lock(
                 toml::Value::Table(runtime_tools),
             );
         }
-        if let Some(readiness_probe) = service.readiness_probe.as_ref() {
-            if let Ok(value) = toml::Value::try_from(readiness_probe.clone()) {
-                target.insert("readiness_probe".to_string(), value);
-            }
+        if let Some(readiness_probe) = service.readiness_probe.as_ref()
+            && let Ok(value) = toml::Value::try_from(readiness_probe.clone())
+        {
+            target.insert("readiness_probe".to_string(), value);
         }
         targets.insert(service.target_label.clone(), toml::Value::Table(target));
     }
@@ -163,10 +163,10 @@ pub(super) fn synthesize_manifest_from_lock(
                     ),
                 );
             }
-            if let Some(readiness_probe) = service.readiness_probe.as_ref() {
-                if let Ok(value) = toml::Value::try_from(readiness_probe.clone()) {
-                    service_table.insert("readiness_probe".to_string(), value);
-                }
+            if let Some(readiness_probe) = service.readiness_probe.as_ref()
+                && let Ok(value) = toml::Value::try_from(readiness_probe.clone())
+            {
+                service_table.insert("readiness_probe".to_string(), value);
             }
             let service_name = if !has_main_service
                 && service.target_label == runtime_model.selected.target_label

@@ -72,7 +72,9 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
         return CliDiagnostic::new(
             CliDiagnosticCode::E201,
             message,
-            Some("`ato login`、`ato login --headless`、または `ATO_TOKEN=<token>` を使って再試行してください。"),
+            Some(
+                "`ato login`、`ato login --headless`、または `ATO_TOKEN=<token>` を使って再試行してください。",
+            ),
             None,
             None,
             None,
@@ -98,7 +100,9 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
         return CliDiagnostic::new(
             CliDiagnosticCode::E209,
             message,
-            Some("`ato binding bootstrap-tls --binding <binding-id> [--install-system-trust]` を実行して明示的に TLS をセットアップしてください。"),
+            Some(
+                "`ato binding bootstrap-tls --binding <binding-id> [--install-system-trust]` を実行して明示的に TLS をセットアップしてください。",
+            ),
             None,
             None,
             None,
@@ -114,7 +118,9 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
         return CliDiagnostic::new(
             CliDiagnosticCode::E210,
             message,
-            Some("TLS trust bootstrap は明示的同意が必要です。内容を確認して `ato binding bootstrap-tls --binding <binding-id> --install-system-trust --yes` を再実行してください。"),
+            Some(
+                "TLS trust bootstrap は明示的同意が必要です。内容を確認して `ato binding bootstrap-tls --binding <binding-id> --install-system-trust --yes` を再実行してください。",
+            ),
             None,
             None,
             None,
@@ -156,7 +162,9 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
         return CliDiagnostic::new(
             CliDiagnosticCode::E101,
             message,
-            Some("entrypoint のパスがプロジェクトルートか source/ 配下に存在するか確認してください。"),
+            Some(
+                "entrypoint のパスがプロジェクトルートか source/ 配下に存在するか確認してください。",
+            ),
             None,
             Some("targets.<label>.entrypoint"),
             None,
@@ -170,7 +178,9 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
         return CliDiagnostic::new(
             CliDiagnosticCode::E102,
             message,
-            Some("生成された capsule.toml と必要な環境変数・外部依存を確認し、準備後に再実行してください。"),
+            Some(
+                "生成された capsule.toml と必要な環境変数・外部依存を確認し、準備後に再実行してください。",
+            ),
             None,
             None,
             None,
@@ -301,7 +311,9 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
     CliDiagnostic::new(
         CliDiagnosticCode::E999,
         message,
-        Some("Run with RUST_BACKTRACE=1 for a full trace. If this problem persists, please file a bug."),
+        Some(
+            "Run with RUST_BACKTRACE=1 for a full trace. If this problem persists, please file a bug.",
+        ),
         None,
         None,
         None,
@@ -488,7 +500,9 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
         other => CliDiagnostic::new(
             CliDiagnosticCode::E999,
             other.to_string(),
-            Some("Run with RUST_BACKTRACE=1 for a full trace. If this problem persists, please file a bug."),
+            Some(
+                "Run with RUST_BACKTRACE=1 for a full trace. If this problem persists, please file a bug.",
+            ),
             None,
             None,
             None,

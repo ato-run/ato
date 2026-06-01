@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use capsule_core::blob::{hash_tree, BlobManifest};
+use capsule_core::blob::{BlobManifest, hash_tree};
 use capsule_core::common::store::BlobAddress;
 use serde_json::Value;
 use serial_test::serial;
@@ -783,7 +783,9 @@ struct HomeGuard {
 impl HomeGuard {
     fn set(path: &Path) -> Self {
         let prior = std::env::var_os("HOME");
-        std::env::set_var("HOME", path);
+        unsafe {
+            std::env::set_var("HOME", path);
+        }
         Self { prior }
     }
 }
@@ -791,8 +793,8 @@ impl HomeGuard {
 impl Drop for HomeGuard {
     fn drop(&mut self) {
         match self.prior.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
     }
 }

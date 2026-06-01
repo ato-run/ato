@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use capsule_core::CapsuleError;
 use capsule_core::runtime::oci::{
     BollardOciRuntimeClient, OciContainerInspect, OciContainerRequest, OciLogChunk,
     OciNetworkRequest, OciRuntimeClient,
@@ -9,12 +10,11 @@ use capsule_core::types::{
     OciImageResolution, OciPlatform, OciProviderKind, OciProviderMode, OciProviderSemantics,
     OciProviderSubstrate,
 };
-use capsule_core::CapsuleError;
 use std::process::Command;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::adapters::runtime::podman_machine::{parse_podman_machine_list, PodmanMachineStatus};
+use crate::adapters::runtime::podman_machine::{PodmanMachineStatus, parse_podman_machine_list};
 
 // In tests use zero timeouts so the poll loop exits immediately without sleeping.
 #[cfg(not(test))]
@@ -299,7 +299,7 @@ pub(crate) trait OciProvider: Send + Sync {
     async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError>;
 
     async fn create_network(&self, request: &OciNetworkRequest)
-        -> Result<String, OciProviderError>;
+    -> Result<String, OciProviderError>;
 
     async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError>;
 
@@ -350,6 +350,74 @@ impl OciProviderSelector for DefaultOciProviderSelector {
 
     fn select_provider(&self) -> Self::Provider {
         PodmanProvider::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeOciProviderChoice {
+    Podman,
+    DockerCompatible,
+}
+
+fn choose_runtime_oci_provider(
+    podman_ready: Result<(), OciProviderError>,
+    docker_ready: Result<(), OciProviderError>,
+) -> Result<RuntimeOciProviderChoice, OciProviderError> {
+    match podman_ready {
+        Ok(()) => Ok(RuntimeOciProviderChoice::Podman),
+        Err(podman_error) => match docker_ready {
+            Ok(()) => Ok(RuntimeOciProviderChoice::DockerCompatible),
+            Err(_) => Err(podman_error),
+        },
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum RuntimeOciProvider {
+    Podman(PodmanProvider<SystemCommandRunner>),
+    DockerCompatible(DockerCompatibleOciProvider<BollardOciRuntimeClient>),
+}
+
+pub(crate) async fn select_ready_runtime_oci_provider()
+-> Result<RuntimeOciProvider, OciProviderError> {
+    let podman = PodmanProvider::new();
+    let podman_ready = podman.ensure_ready().await;
+    if podman_ready.is_ok() {
+        tracing::debug!(
+            chosen_runtime = "podman",
+            "selected ready OCI runtime provider"
+        );
+        return Ok(RuntimeOciProvider::Podman(podman));
+    }
+    let podman_error = podman_ready.expect_err("checked podman readiness failure");
+
+    let docker_ready = connect_ready_docker_compatible_provider().await;
+    match choose_runtime_oci_provider(
+        Err(podman_error.clone()),
+        docker_ready.as_ref().map(|_| ()).map_err(Clone::clone),
+    ) {
+        Ok(RuntimeOciProviderChoice::DockerCompatible) => {
+            let docker = docker_ready.expect("checked ready Docker-compatible provider");
+            tracing::info!(
+                chosen_runtime = "docker-compatible",
+                podman_error = %podman_error,
+                "selected Docker-compatible OCI runtime provider after Podman was not ready"
+            );
+            Ok(RuntimeOciProvider::DockerCompatible(docker))
+        }
+        Ok(RuntimeOciProviderChoice::Podman) => unreachable!("podman readiness already failed"),
+        Err(err) => {
+            let docker_error = match docker_ready {
+                Ok(_) => unreachable!("checked Docker-compatible readiness failure"),
+                Err(docker_error) => docker_error,
+            };
+            tracing::warn!(
+                podman_error = %podman_error,
+                docker_error = %docker_error,
+                "no ready Docker-compatible OCI runtime provider found; preserving Podman readiness error"
+            );
+            Err(err)
+        }
     }
 }
 
@@ -666,13 +734,13 @@ where
 
         // Extract digest if already embedded in the ref (e.g. "image@sha256:...").
         let ref_digest = extract_digest_from_ref(declared_ref);
-        if let Some(ref digest) = ref_digest {
-            if let Err(reason) = validate_oci_digest_format(digest) {
-                return Err(OciProviderError::ImageRefMalformed {
-                    declared_ref: declared_ref.clone(),
-                    reason,
-                });
-            }
+        if let Some(digest) = &ref_digest
+            && let Err(reason) = validate_oci_digest_format(digest)
+        {
+            return Err(OciProviderError::ImageRefMalformed {
+                declared_ref: declared_ref.clone(),
+                reason,
+            });
         }
 
         // Always call `podman manifest inspect` to get manifest information.
@@ -745,7 +813,7 @@ where
             })
         } else {
             // Single-arch manifest: only usable when we already have the digest from the ref.
-            if let Some(digest) = ref_digest {
+            if let Some(digest) = &ref_digest {
                 let platform = request.requested_platform.clone().ok_or_else(|| {
                     OciProviderError::ImagePlatformUnsupported {
                         declared_ref: declared_ref.clone(),
@@ -755,7 +823,7 @@ where
                 })?;
                 Ok(OciResolvedImage {
                     declared_ref: declared_ref.clone(),
-                    resolved_digest: digest,
+                    resolved_digest: digest.clone(),
                     platform,
                     media_type: parsed.media_type,
                     provider_semantics: self.semantics.clone(),
@@ -924,7 +992,7 @@ where
     ) -> Result<String, OciProviderError> {
         let mut args: Vec<String> = vec!["create".into(), "--name".into(), request.name.clone()];
         // Pass --platform when creating an emulated (non-native) container.
-        if let Some(ref platform) = request.platform {
+        if let Some(platform) = &request.platform {
             let host = auto_select_platform();
             if platform.architecture != host.architecture {
                 args.push("--platform".into());
@@ -1646,13 +1714,12 @@ fn parse_podman_inspect(json: &str) -> Result<OciContainerInspect, OciProviderEr
             let Ok(container_port) = port_raw.parse::<u16>() else {
                 continue;
             };
-            if let Some(binding) = bindings.as_array().and_then(|arr| arr.first()) {
-                if let Some(hp) = binding["HostPort"]
+            if let Some(binding) = bindings.as_array().and_then(|arr| arr.first())
+                && let Some(hp) = binding["HostPort"]
                     .as_str()
                     .and_then(|s| s.parse::<u16>().ok())
-                {
-                    host_ports.insert(container_port, hp);
-                }
+            {
+                host_ports.insert(container_port, hp);
             }
         }
     }
@@ -1663,6 +1730,7 @@ fn parse_podman_inspect(json: &str) -> Result<OciContainerInspect, OciProviderEr
     })
 }
 
+#[derive(Clone)]
 pub(crate) struct DockerCompatibleOciProvider<C> {
     client: C,
     semantics: OciProviderSemantics,
@@ -1685,6 +1753,57 @@ impl DockerCompatibleOciProvider<BollardOciRuntimeClient> {
             }
         })?;
         Ok(Self { client, semantics })
+    }
+}
+
+async fn connect_ready_docker_compatible_provider()
+-> Result<DockerCompatibleOciProvider<BollardOciRuntimeClient>, OciProviderError> {
+    let provider = DockerCompatibleOciProvider::connect_default(docker_compatible_semantics())?;
+    let version =
+        provider
+            .client
+            .docker()
+            .version()
+            .await
+            .map_err(|err| OciProviderError::ProbeFailed {
+                provider: "docker-compatible",
+                message: format!("docker-compatible engine version probe failed: {err}"),
+            })?;
+
+    let platform_name = version
+        .platform
+        .as_ref()
+        .map(|platform| platform.name.as_str())
+        .unwrap_or_default();
+    let engine_version = version.version.as_deref().unwrap_or_default();
+    let engine_marker = format!("{platform_name} {engine_version}").to_ascii_lowercase();
+    if engine_marker.contains("podman") {
+        let semantics = docker_compatible_semantics();
+        return Err(OciProviderError::NotReady {
+            provider: "docker-compatible",
+            reason:
+                "Docker-compatible endpoint resolves to Podman; use the Podman provider setup path"
+                    .to_string(),
+            inventory: Some(OciProviderInventory {
+                kind: OciProviderKind::DockerCompatible,
+                binary: OciProviderBinaryStatus::Found,
+                version: version.version,
+                mode: semantics.mode,
+                machine: OciProviderMachineStatus::MachineUnknown,
+                semantics,
+            }),
+        });
+    }
+
+    Ok(provider)
+}
+
+fn docker_compatible_semantics() -> OciProviderSemantics {
+    OciProviderSemantics {
+        kind: OciProviderKind::DockerCompatible,
+        mode: OciProviderMode::Unknown,
+        substrate: OciProviderSubstrate::Unknown,
+        policy_profile: "oci-docker-compatible-v1".to_string(),
     }
 }
 
@@ -1803,6 +1922,346 @@ where
             .remove_container(container_id, force)
             .await
             .map_err(|err| OciProviderError::operation("remove_container", err))
+    }
+}
+
+#[async_trait]
+impl<C> OciRuntimeClient for DockerCompatibleOciProvider<C>
+where
+    C: OciRuntimeClient + Send + Sync,
+{
+    async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+        self.client.pull_image(image).await
+    }
+
+    async fn create_network(&self, request: &OciNetworkRequest) -> capsule_core::Result<String> {
+        self.client.create_network(request).await
+    }
+
+    async fn remove_network(&self, network_name: &str) -> capsule_core::Result<()> {
+        self.client.remove_network(network_name).await
+    }
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> capsule_core::Result<String> {
+        self.client.create_container(request).await
+    }
+
+    async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+        self.client.start_container(container_id).await
+    }
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> capsule_core::Result<OciContainerInspect> {
+        self.client.inspect_container(container_id).await
+    }
+
+    async fn logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+    ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+        self.client.logs(container_id, follow).await
+    }
+
+    async fn wait_container(&self, container_id: &str) -> capsule_core::Result<i64> {
+        self.client.wait_container(container_id).await
+    }
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        timeout_secs: i64,
+    ) -> capsule_core::Result<()> {
+        self.client.stop_container(container_id, timeout_secs).await
+    }
+
+    async fn remove_container(&self, container_id: &str, force: bool) -> capsule_core::Result<()> {
+        self.client.remove_container(container_id, force).await
+    }
+
+    async fn exec_container(
+        &self,
+        container_id: &str,
+        cmd: &[String],
+    ) -> capsule_core::Result<i64> {
+        self.client.exec_container(container_id, cmd).await
+    }
+}
+
+#[async_trait]
+impl OciProvider for RuntimeOciProvider {
+    fn semantics(&self) -> &OciProviderSemantics {
+        match self {
+            Self::Podman(provider) => provider.semantics(),
+            Self::DockerCompatible(provider) => provider.semantics(),
+        }
+    }
+
+    async fn probe(&self) -> Result<OciProviderProbe, OciProviderError> {
+        match self {
+            Self::Podman(provider) => provider.probe().await,
+            Self::DockerCompatible(provider) => provider.probe().await,
+        }
+    }
+
+    async fn resolve_image(
+        &self,
+        request: &OciImageResolutionRequest,
+    ) -> Result<OciResolvedImage, OciProviderError> {
+        match self {
+            Self::Podman(provider) => provider.resolve_image(request).await,
+            Self::DockerCompatible(provider) => provider.resolve_image(request).await,
+        }
+    }
+
+    async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::pull_image(provider, image).await,
+            Self::DockerCompatible(provider) => OciProvider::pull_image(provider, image).await,
+        }
+    }
+
+    async fn create_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::create_network(provider, request).await,
+            Self::DockerCompatible(provider) => {
+                OciProvider::create_network(provider, request).await
+            }
+        }
+    }
+
+    async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::remove_network(provider, network_name).await,
+            Self::DockerCompatible(provider) => {
+                OciProvider::remove_network(provider, network_name).await
+            }
+        }
+    }
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> Result<String, OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::create_container(provider, request).await,
+            Self::DockerCompatible(provider) => {
+                OciProvider::create_container(provider, request).await
+            }
+        }
+    }
+
+    async fn start_container(&self, container_id: &str) -> Result<(), OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::start_container(provider, container_id).await,
+            Self::DockerCompatible(provider) => {
+                OciProvider::start_container(provider, container_id).await
+            }
+        }
+    }
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> Result<OciContainerInspect, OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::inspect_container(provider, container_id).await,
+            Self::DockerCompatible(provider) => {
+                OciProvider::inspect_container(provider, container_id).await
+            }
+        }
+    }
+
+    async fn logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::logs(provider, container_id, follow).await,
+            Self::DockerCompatible(provider) => {
+                OciProvider::logs(provider, container_id, follow).await
+            }
+        }
+    }
+
+    async fn wait_container(&self, container_id: &str) -> Result<i64, OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::wait_container(provider, container_id).await,
+            Self::DockerCompatible(provider) => {
+                OciProvider::wait_container(provider, container_id).await
+            }
+        }
+    }
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        timeout_secs: i64,
+    ) -> Result<(), OciProviderError> {
+        match self {
+            Self::Podman(provider) => {
+                OciProvider::stop_container(provider, container_id, timeout_secs).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciProvider::stop_container(provider, container_id, timeout_secs).await
+            }
+        }
+    }
+
+    async fn remove_container(
+        &self,
+        container_id: &str,
+        force: bool,
+    ) -> Result<(), OciProviderError> {
+        match self {
+            Self::Podman(provider) => {
+                OciProvider::remove_container(provider, container_id, force).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciProvider::remove_container(provider, container_id, force).await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl OciRuntimeClient for RuntimeOciProvider {
+    async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+        match self {
+            Self::Podman(provider) => OciRuntimeClient::pull_image(provider, image).await,
+            Self::DockerCompatible(provider) => OciRuntimeClient::pull_image(provider, image).await,
+        }
+    }
+
+    async fn create_network(&self, request: &OciNetworkRequest) -> capsule_core::Result<String> {
+        match self {
+            Self::Podman(provider) => OciRuntimeClient::create_network(provider, request).await,
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::create_network(provider, request).await
+            }
+        }
+    }
+
+    async fn remove_network(&self, network_name: &str) -> capsule_core::Result<()> {
+        match self {
+            Self::Podman(provider) => {
+                OciRuntimeClient::remove_network(provider, network_name).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::remove_network(provider, network_name).await
+            }
+        }
+    }
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> capsule_core::Result<String> {
+        match self {
+            Self::Podman(provider) => OciRuntimeClient::create_container(provider, request).await,
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::create_container(provider, request).await
+            }
+        }
+    }
+
+    async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+        match self {
+            Self::Podman(provider) => {
+                OciRuntimeClient::start_container(provider, container_id).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::start_container(provider, container_id).await
+            }
+        }
+    }
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> capsule_core::Result<OciContainerInspect> {
+        match self {
+            Self::Podman(provider) => {
+                OciRuntimeClient::inspect_container(provider, container_id).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::inspect_container(provider, container_id).await
+            }
+        }
+    }
+
+    async fn logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+    ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+        match self {
+            Self::Podman(provider) => OciRuntimeClient::logs(provider, container_id, follow).await,
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::logs(provider, container_id, follow).await
+            }
+        }
+    }
+
+    async fn wait_container(&self, container_id: &str) -> capsule_core::Result<i64> {
+        match self {
+            Self::Podman(provider) => {
+                OciRuntimeClient::wait_container(provider, container_id).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::wait_container(provider, container_id).await
+            }
+        }
+    }
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        timeout_secs: i64,
+    ) -> capsule_core::Result<()> {
+        match self {
+            Self::Podman(provider) => {
+                OciRuntimeClient::stop_container(provider, container_id, timeout_secs).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::stop_container(provider, container_id, timeout_secs).await
+            }
+        }
+    }
+
+    async fn remove_container(&self, container_id: &str, force: bool) -> capsule_core::Result<()> {
+        match self {
+            Self::Podman(provider) => {
+                OciRuntimeClient::remove_container(provider, container_id, force).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::remove_container(provider, container_id, force).await
+            }
+        }
+    }
+
+    async fn exec_container(
+        &self,
+        container_id: &str,
+        cmd: &[String],
+    ) -> capsule_core::Result<i64> {
+        match self {
+            Self::Podman(provider) => {
+                OciRuntimeClient::exec_container(provider, container_id, cmd).await
+            }
+            Self::DockerCompatible(provider) => {
+                OciRuntimeClient::exec_container(provider, container_id, cmd).await
+            }
+        }
     }
 }
 
@@ -1968,7 +2427,7 @@ impl OciProvider for FakeOciProvider {
             .lock()
             .unwrap()
             .push(format!("resolve:{}", request.declared_ref));
-        if let Some(ref err) = self.resolve_error {
+        if let Some(err) = &self.resolve_error {
             return Err(err.clone());
         }
         Ok(OciResolvedImage {
@@ -2162,6 +2621,39 @@ mod tests {
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
         }
+    }
+
+    #[test]
+    fn runtime_provider_selection_keeps_ready_podman() {
+        let choice =
+            choose_runtime_oci_provider(Ok(()), Ok(())).expect("ready podman should be selected");
+
+        assert_eq!(choice, RuntimeOciProviderChoice::Podman);
+    }
+
+    #[test]
+    fn runtime_provider_selection_prefers_ready_docker_over_unconfigured_podman() {
+        let choice =
+            choose_runtime_oci_provider(Err(OciProviderError::MachineNotConfigured), Ok(()))
+                .expect("ready docker-compatible provider should be selected as fallback");
+
+        assert_eq!(choice, RuntimeOciProviderChoice::DockerCompatible);
+    }
+
+    #[test]
+    fn runtime_provider_selection_preserves_podman_setup_error_without_ready_docker() {
+        let err = choose_runtime_oci_provider(
+            Err(OciProviderError::MachineNotConfigured),
+            Err(OciProviderError::ProbeFailed {
+                provider: "docker-compatible",
+                message: "cannot connect to Docker daemon".to_string(),
+            }),
+        )
+        .expect_err("podman setup error should remain actionable when Docker is not ready");
+
+        assert_eq!(err, OciProviderError::MachineNotConfigured);
+        assert_eq!(err.code(), "oci_machine_not_configured");
+        assert!(err.to_string().contains("podman machine init"));
     }
 
     #[derive(Clone, Default)]
@@ -2394,10 +2886,12 @@ mod tests {
             probe.semantics.substrate,
             OciProviderSubstrate::PodmanMachine
         );
-        assert!(probe
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("not running")));
+        assert!(
+            probe
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("not running"))
+        );
         assert_eq!(
             probe.clone().require_ready().expect_err("not ready").code(),
             "oci_provider_not_ready"
@@ -2525,9 +3019,12 @@ mod tests {
         assert!(probe.ready);
         assert_eq!(probe.semantics.policy_profile, "oci-docker-compatible-v1");
 
-        provider.pull_image(&image()).await.expect("pull");
-        let container_id = provider
-            .create_container(&OciContainerRequest {
+        OciProvider::pull_image(&provider, &image())
+            .await
+            .expect("pull");
+        let container_id = OciProvider::create_container(
+            &provider,
+            &OciContainerRequest {
                 name: "ato-test".to_string(),
                 image: "ghcr.io/acme/app:latest".to_string(),
                 cmd: vec!["serve".to_string()],
@@ -2549,11 +3046,11 @@ mod tests {
                 aliases: Vec::new(),
                 platform: None,
                 extra_hosts: vec![],
-            })
-            .await
-            .expect("create");
-        provider
-            .start_container(&container_id)
+            },
+        )
+        .await
+        .expect("create");
+        OciProvider::start_container(&provider, &container_id)
             .await
             .expect("start");
 

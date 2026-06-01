@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use age::armor::{ArmoredReader, ArmoredWriter, Format};
 use age::secrecy::{ExposeSecret, Secret};
 use age::x25519;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 

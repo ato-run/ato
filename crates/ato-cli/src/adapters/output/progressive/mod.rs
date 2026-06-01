@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::guard::ExecutorKind;
-use cliclack::{confirm, intro, log, note, outro, outro_cancel, spinner, ProgressBar};
+use cliclack::{ProgressBar, confirm, intro, log, note, outro, outro_cancel, spinner};
 use console::style;
 use crossterm::{cursor, terminal};
 

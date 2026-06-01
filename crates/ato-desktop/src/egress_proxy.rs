@@ -196,21 +196,21 @@ fn handle_client(
 
 fn parse_host_port(target: &str, default_port: u16) -> Option<(String, u16)> {
     // For CONNECT: "host:port" (IPv6: "[::1]:443").
-    if let Some(rest) = target.strip_prefix('[') {
-        if let Some(close) = rest.find(']') {
-            let host = &rest[..close];
-            let after = &rest[close + 1..];
-            let port = after
-                .strip_prefix(':')
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(default_port);
-            return Some((host.to_string(), port));
-        }
+    if let Some(rest) = target.strip_prefix('[')
+        && let Some(close) = rest.find(']')
+    {
+        let host = &rest[..close];
+        let after = &rest[close + 1..];
+        let port = after
+            .strip_prefix(':')
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(default_port);
+        return Some((host.to_string(), port));
     }
-    if let Some((h, p)) = target.rsplit_once(':') {
-        if let Ok(port) = p.parse::<u16>() {
-            return Some((h.to_string(), port));
-        }
+    if let Some((h, p)) = target.rsplit_once(':')
+        && let Ok(port) = p.parse::<u16>()
+    {
+        return Some((h.to_string(), port));
     }
     Some((target.to_string(), default_port))
 }
@@ -290,7 +290,7 @@ fn handle_connect(
 #[allow(clippy::too_many_arguments)]
 fn handle_absolute(
     mut client: TcpStream,
-    mut reader: BufReader<TcpStream>,
+    reader: BufReader<TcpStream>,
     method: &str,
     target: &str,
     _version: &str,
@@ -444,8 +444,7 @@ impl ConnectAny for TcpStream {
                 Err(e) => last_err = Some(e),
             }
         }
-        Err(last_err
-            .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "connect failed")))
+        Err(last_err.unwrap_or_else(|| std::io::Error::other("connect failed")))
     }
 }
 

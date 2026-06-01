@@ -154,10 +154,10 @@ pub fn verify_consumer_only(consumer: &CapsuleManifest) -> Result<(), LockError>
         }
         // §9.1 ownership = "shared" is parser-rejected at the manifest layer;
         // double-check here as defense-in-depth.
-        if let Some(state) = dep.state.as_ref() {
-            if !matches!(state.ownership, DependencyStateOwnership::Parent) {
-                return Err(LockError::StateOwnershipShared { dep: alias.clone() });
-            }
+        if let Some(state) = dep.state.as_ref()
+            && !matches!(state.ownership, DependencyStateOwnership::Parent)
+        {
+            return Err(LockError::StateOwnershipShared { dep: alias.clone() });
         }
     }
 
@@ -366,16 +366,16 @@ fn verify_parameters(
     // templates. ParamValue::String can in principle carry an `{{env.X}}`
     // template; we check by re-parsing as TemplatedString.
     for (key, value) in &dep.parameters {
-        if let ParamValue::String(s) = value {
-            if let Ok(tmpl) = TemplatedString::parse(s) {
-                for env_key in collect_env_references(&tmpl) {
-                    if !consumer_required_env.contains(env_key.as_str()) {
-                        return Err(LockError::ParameterEnvKeyOutOfScope {
-                            dep: alias.to_string(),
-                            key: key.clone(),
-                            env_key,
-                        });
-                    }
+        if let ParamValue::String(s) = value
+            && let Ok(tmpl) = TemplatedString::parse(s)
+        {
+            for env_key in collect_env_references(&tmpl) {
+                if !consumer_required_env.contains(env_key.as_str()) {
+                    return Err(LockError::ParameterEnvKeyOutOfScope {
+                        dep: alias.to_string(),
+                        key: key.clone(),
+                        env_key,
+                    });
                 }
             }
         }

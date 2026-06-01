@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::execution_identity::{
     ExecutionReceipt, ExecutionReceiptDocument, ReproducibilityClass, TrackingStatus,
 };
@@ -425,12 +425,16 @@ mod tests {
 
         let warnings = replay_warnings(&receipt);
 
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("dependency output hash")));
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("filesystem view hash")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("dependency output hash"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("filesystem view hash"))
+        );
     }
 
     #[test]

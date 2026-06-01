@@ -3,7 +3,7 @@ use std::path::{Component, PathBuf};
 
 use anyhow::Result;
 use capsule_core::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::application::engine::build::native_delivery::{
     imported_native_artifact_closure, imported_native_artifact_delivery_contract,
@@ -471,10 +471,10 @@ fn import_target_hints(
             "compatible": true,
         }));
 
-        if let Some(driver) = target.driver.as_deref() {
-            if let Some(version) = target.runtime_version.as_deref() {
-                runtime_hints.insert(driver.to_string(), Value::String(version.to_string()));
-            }
+        if let Some(driver) = target.driver.as_deref()
+            && let Some(version) = target.runtime_version.as_deref()
+        {
+            runtime_hints.insert(driver.to_string(), Value::String(version.to_string()));
         }
     }
 

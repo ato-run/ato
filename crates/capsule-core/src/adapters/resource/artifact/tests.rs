@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use axum::{body::Body, response::IntoResponse, routing::get, Router};
+use axum::{Router, body::Body, response::IntoResponse, routing::get};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 

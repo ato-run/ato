@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::healthcheck::http_get_ok;
 use crate::process::{pid_is_alive, process_start_time_unix_ms};
-use crate::record::{StoredSessionInfo, SCHEMA_VERSION_V2};
+use crate::record::{SCHEMA_VERSION_V2, StoredSessionInfo};
 
 /// Inputs to `validate_record_only`. Lets the caller distinguish
 /// "no candidate found" from "found but rejected" without relying on

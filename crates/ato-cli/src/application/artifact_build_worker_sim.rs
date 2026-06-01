@@ -17,19 +17,19 @@ use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
 use crate::application::artifact_build_producer::{
-    artifact_build_request_from_observation, validate_artifact_build_producer_request,
     ArtifactBuildProducerProvenance, ArtifactBuildProducerRequest, ArtifactBuildProducerResponse,
     ArtifactBuildProducerStatus, ArtifactBuildSourceRef, ArtifactPlatformProfile,
+    artifact_build_request_from_observation, validate_artifact_build_producer_request,
 };
 use crate::application::build_materialization::{
-    build_observation_toolchain_fingerprint, observe, BuildObservation,
+    BuildObservation, build_observation_toolchain_fingerprint, observe,
 };
 use crate::application::phase_materializer::{
     build_output_contract_for_observation, capture_build_outputs,
     materialization_key_for_observation, materialization_key_path_component,
 };
 use crate::application::phase_materializer_remote::{
-    export_build_output_layer_to_remote_mirror, RemoteBuildOutputProvenance,
+    RemoteBuildOutputProvenance, export_build_output_layer_to_remote_mirror,
 };
 
 const WORKER_SOURCE_DIR: &str = "source";
@@ -223,11 +223,11 @@ fn observation_matches_request(
     if observation.command != request.build_command_identity {
         return Ok(false);
     }
-    let (output_contract_digest, outputs) = build_output_contract_for_observation(&observation)?;
+    let (output_contract_digest, outputs) = build_output_contract_for_observation(observation)?;
     if output_contract_digest != request.output_contract_digest || outputs != request.outputs {
         return Ok(false);
     }
-    let materialization_key = materialization_key_for_observation(&observation)?;
+    let materialization_key = materialization_key_for_observation(observation)?;
     if materialization_key != request.materialization_key {
         return Ok(false);
     }
@@ -438,7 +438,13 @@ impl ScopedAtoHome {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let prior = std::env::var_os("ATO_HOME");
-        std::env::set_var("ATO_HOME", path);
+        // SAFETY: `ato_home_lock` serializes all `ScopedAtoHome` instances, and
+        // this fixture worker runs the build synchronously on one thread while
+        // holding the guard, so no other thread reads or writes `ATO_HOME`
+        // within the guard's scope.
+        unsafe {
+            std::env::set_var("ATO_HOME", path);
+        }
         Self {
             prior,
             _guard: guard,
@@ -448,9 +454,12 @@ impl ScopedAtoHome {
 
 impl Drop for ScopedAtoHome {
     fn drop(&mut self) {
+        // SAFETY: the lock guard held by this `ScopedAtoHome` is still alive
+        // here, so the restore is serialized against every other instance and
+        // no other thread accesses `ATO_HOME` concurrently.
         match self.prior.take() {
-            Some(value) => std::env::set_var("ATO_HOME", value),
-            None => std::env::remove_var("ATO_HOME"),
+            Some(value) => unsafe { std::env::set_var("ATO_HOME", value) },
+            None => unsafe { std::env::remove_var("ATO_HOME") },
         }
     }
 }
@@ -588,7 +597,9 @@ mod tests {
         let secret_value = "secret-value-must-not-appear-in-build";
 
         // Set secret in host process env.
-        std::env::set_var(secret_key, secret_value);
+        unsafe {
+            std::env::set_var(secret_key, secret_value);
+        }
 
         let temp = TempDir::new().expect("temp");
         let source_root = temp.path().join("src");
@@ -620,7 +631,9 @@ mod tests {
             "host secret leaked into worker build process: {captured}"
         );
 
-        std::env::remove_var(secret_key);
+        unsafe {
+            std::env::remove_var(secret_key);
+        }
     }
 
     fn fixture_request() -> ArtifactBuildProducerRequest {
@@ -655,7 +668,9 @@ mod tests {
     impl ScopedEnv {
         fn set_path(key: &'static str, value: &Path) -> Self {
             let prior = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, prior }
         }
     }
@@ -663,8 +678,8 @@ mod tests {
     impl Drop for ScopedEnv {
         fn drop(&mut self) {
             match self.prior.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }

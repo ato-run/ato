@@ -20,11 +20,11 @@ use std::rc::Rc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, hsla, point, px, rgb, size, svg, transparent_black, AnyElement, AnyWindowHandle,
-    App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase, Entity, FontWeight, IntoElement,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
-    SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions,
+    AnyElement, AnyWindowHandle, App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase,
+    Entity, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent,
+    Pixels, Render, ScrollWheelEvent, SharedString, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowDecorations, WindowKind, WindowOptions, canvas, div, hsla, point, px, rgb,
+    size, svg, transparent_black,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
@@ -34,8 +34,8 @@ use crate::app::{
     OpenContentWindowSettings, OpenDockWindow, OpenStoreWindow, ShowSettings,
     ToggleControlBarInfoPopup, ToggleStarCapsule,
 };
-use crate::config::{load_config, save_config, ControlBarMode};
-use crate::localization::{resolve_locale, tr, LocaleCode};
+use crate::config::{ControlBarMode, load_config, save_config};
+use crate::localization::{LocaleCode, resolve_locale, tr};
 use crate::state::GuestRoute;
 use crate::window::content_windows::OpenContentWindows;
 use crate::window::gestures::{GestureAction, GestureState};
@@ -44,12 +44,6 @@ const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
 const COMPACT_BAR_WIDTH: f32 = 360.0;
 const COMPACT_HEIGHT: f32 = 10.0;
-/// Host NSWindow is sized flush to the pill — the rectangle of the
-/// window and the rectangle of the pill are the same; the only
-/// transparent area is the four rounded-corner cut-outs created by
-/// the pill's `rounded(BAR_HEIGHT / 2)`. Drop shadow is not declared
-/// on `bar_pill` because it would be clipped at the window edge.
-const BAR_GAP_ABOVE_APP: f32 = 12.0;
 
 #[derive(Default)]
 pub struct ControlBarController {
@@ -332,10 +326,10 @@ impl ControlBarShellPlaceholder {
         if self.omnibar_focused {
             return Self::parse_pin_key_from_value(&value);
         }
-        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
-            if let Some(capsule) = &entry.capsule {
-                return Some(format!("capsule://{}", capsule.active_handle()));
-            }
+        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost()
+            && let Some(capsule) = &entry.capsule
+        {
+            return Some(format!("capsule://{}", capsule.active_handle()));
         }
         Self::parse_pin_key_from_value(&value)
     }
@@ -381,9 +375,7 @@ impl ControlBarShellPlaceholder {
                     title: entry
                         .map(|e| e.title.to_string())
                         .unwrap_or_else(|| "No window".to_string()),
-                    url: entry
-                        .map(|e| e.url.to_string())
-                        .unwrap_or_else(|| String::new()),
+                    url: entry.map(|e| e.url.to_string()).unwrap_or_default(),
                 }
             });
         if let Err(err) = open_info_popup(cx, model, self.locale) {
@@ -499,10 +491,10 @@ impl Render for ControlBarShellPlaceholder {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, window, cx| {
-                    if let Some(action) = this.gesture_state.on_mouse_up() {
-                        if matches!(action, GestureAction::OpenCardSwitcher) {
-                            window.dispatch_action(Box::new(OpenCardSwitcher), cx);
-                        }
+                    if let Some(action) = this.gesture_state.on_mouse_up()
+                        && matches!(action, GestureAction::OpenCardSwitcher)
+                    {
+                        window.dispatch_action(Box::new(OpenCardSwitcher), cx);
                     }
                 }),
             )
@@ -522,10 +514,9 @@ impl Render for ControlBarShellPlaceholder {
                     if let Some(action) = this
                         .gesture_state
                         .on_mouse_move(f32::from(event.position.x), f32::from(event.position.y))
+                        && matches!(action, GestureAction::OpenCardSwitcher)
                     {
-                        if matches!(action, GestureAction::OpenCardSwitcher) {
-                            window.dispatch_action(Box::new(OpenCardSwitcher), cx);
-                        }
+                        window.dispatch_action(Box::new(OpenCardSwitcher), cx);
                     }
                 }),
             )
@@ -553,7 +544,7 @@ impl Render for ControlBarShellPlaceholder {
             })
             .child(
                 canvas(|_, _, _| {}, {
-                    move |_, _, window, cx| {
+                    move |_, _, window, _cx| {
                         window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
                             if phase != DispatchPhase::Bubble {
                                 return;
@@ -1019,9 +1010,9 @@ fn info_popup_managed(
             Some(IconName::Globe),
             {
                 let url = local_url.clone();
-                move |_win, cx| {
+                move |_win, _cx| {
                     if let Some(ref url) = url {
-                        let _ = crate::ui::open_external_url(url);
+                        let _ = crate::proc_util::open_external_url(url);
                     }
                 }
             },
@@ -1295,38 +1286,6 @@ fn initial_bar_size(cx: &App) -> (Pixels, Pixels) {
     }
 }
 
-/// Open the bar anchored above a parent app window's bounds.
-pub fn open_control_bar_window_at(
-    cx: &mut App,
-    parent_bounds: Bounds<Pixels>,
-    route: GuestRoute,
-) -> Result<AnyWindowHandle> {
-    let (win_w, win_h) = initial_bar_size(cx);
-    let origin = gpui::Point {
-        x: parent_bounds.origin.x + (parent_bounds.size.width - win_w) / 2.0,
-        y: parent_bounds.origin.y - win_h + px(BAR_GAP_ABOVE_APP),
-    };
-    let bounds = Bounds {
-        origin,
-        size: size(win_w, win_h),
-    };
-    open_control_bar_inner(cx, bounds, route)
-}
-
-/// Standalone bar opener — keeps the legacy code path callable
-/// without parent bounds.
-pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
-    let (win_w, win_h) = initial_bar_size(cx);
-    let bounds = Bounds::centered(None, size(win_w, win_h), cx);
-    open_control_bar_inner(
-        cx,
-        bounds,
-        GuestRoute::ExternalUrl(
-            url::Url::parse("https://ato.run/").expect("https://ato.run/ is a valid URL"),
-        ),
-    )
-}
-
 /// Open the Focus-mode Control Bar as a process-lifetime singleton.
 pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
     if let Some(existing) = cx.global::<ControlBarController>().handle {
@@ -1408,10 +1367,10 @@ fn open_control_bar_inner(
         super::macos::round_window_corners(cx, *handle, (initial_h / 2.0) as f64);
         // #168 — attach the Control Bar as a child of the frontmost content
         // window so macOS orders them correctly and they move together.
-        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
-            if let Err(err) = super::macos::attach_as_child(cx, entry.handle, *handle) {
-                tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
-            }
+        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost()
+            && let Err(err) = super::macos::attach_as_child(cx, entry.handle, *handle)
+        {
+            tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
         }
     }
     #[cfg(target_os = "windows")]

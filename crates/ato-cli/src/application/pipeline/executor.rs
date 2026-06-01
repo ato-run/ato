@@ -235,7 +235,7 @@ pub(crate) trait HourglassPhaseRunner {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use capsule_core::execution_plan::error::{CleanupActionRecord, CleanupActionStatus};
 

@@ -12,5 +12,5 @@ pub use bloom::{
     AtoBloomFilter, AtoBloomWire, DEFAULT_BLOOM_FALSE_POSITIVE_RATE, DEFAULT_BLOOM_SEED,
 };
 pub use chunker::chunk_bytes_fastcdc;
-pub use client::{create_cas_client_from_env, CasClient, HttpCasClient, LocalCasClient};
+pub use client::{CasClient, HttpCasClient, LocalCasClient, create_cas_client_from_env};
 pub use index::LocalCasIndex;

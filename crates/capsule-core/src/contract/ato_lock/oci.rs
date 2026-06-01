@@ -335,8 +335,7 @@ pub fn read_oci_lock(
                 warnings: Vec::new(),
             }),
             Err(err) => {
-                let mut warnings = Vec::new();
-                warnings.push(OciLockReadWarning::SidecarParseFailed(err.to_string()));
+                let warnings = vec![OciLockReadWarning::SidecarParseFailed(err.to_string())];
                 Ok(OciLockReadResult {
                     images: BTreeMap::new(),
                     imports: BTreeMap::new(),
@@ -413,8 +412,8 @@ mod tests {
     use crate::ato_lock::AtoLock;
     use crate::ato_lock::{FeatureName, KnownFeature};
     use crate::oci_compose_lock::{
-        OciComposeLock, OciImageLockEntry as SidecarImageLockEntry, OciImportMeta,
-        OCI_COMPOSE_LOCK_FILE_NAME,
+        OCI_COMPOSE_LOCK_FILE_NAME, OciComposeLock, OciImageLockEntry as SidecarImageLockEntry,
+        OciImportMeta,
     };
 
     fn hex64(c: char) -> String {
@@ -1073,7 +1072,7 @@ mod tests {
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
-        let first = ato_lock::load_unvalidated_from_path(&main_lock_path).expect("first lock");
+        let _first = ato_lock::load_unvalidated_from_path(&main_lock_path).expect("first lock");
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();

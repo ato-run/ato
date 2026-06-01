@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::common::paths::{ato_path_or_workspace_tmp, nacelle_home_dir};
 
 use crate::cli::session::IdentitySessionCommands as SessionCommands;
@@ -154,11 +154,7 @@ fn cmd_status() -> Result<()> {
     // Also check ATO_SESSION_KEY_FILE.
     let active_path = if let Ok(p) = std::env::var("ATO_SESSION_KEY_FILE") {
         let ep = std::path::PathBuf::from(p);
-        if ep.exists() {
-            ep
-        } else {
-            path.clone()
-        }
+        if ep.exists() { ep } else { path.clone() }
     } else {
         path.clone()
     };
@@ -235,26 +231,25 @@ fn cleanup_stale_sessions() {
         if let Some(pid_str) = name
             .strip_prefix("session-")
             .and_then(|s| s.strip_suffix(".key"))
+            && let Ok(pid) = pid_str.parse::<u32>()
         {
-            if let Ok(pid) = pid_str.parse::<u32>() {
-                let meta_path = p.with_extension("key.meta");
-                let expired = if meta_path.exists() {
-                    let raw = std::fs::read_to_string(&meta_path).unwrap_or_default();
-                    let meta: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
-                    let expires_at = meta
-                        .get("expires_at")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(u64::MAX);
-                    expires_at < now
-                } else {
-                    false
-                };
-                // Check if PID is still alive.
-                let process_dead = !pid_is_alive(pid);
-                if expired || process_dead {
-                    std::fs::remove_file(&p).ok();
-                    std::fs::remove_file(&meta_path).ok();
-                }
+            let meta_path = p.with_extension("key.meta");
+            let expired = if meta_path.exists() {
+                let raw = std::fs::read_to_string(&meta_path).unwrap_or_default();
+                let meta: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+                let expires_at = meta
+                    .get("expires_at")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(u64::MAX);
+                expires_at < now
+            } else {
+                false
+            };
+            // Check if PID is still alive.
+            let process_dead = !pid_is_alive(pid);
+            if expired || process_dead {
+                std::fs::remove_file(&p).ok();
+                std::fs::remove_file(&meta_path).ok();
             }
         }
     }

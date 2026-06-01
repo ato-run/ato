@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use axoupdater::AxoUpdater;
 use semver::Version;
 use serde::Deserialize;
@@ -193,24 +193,30 @@ fn fallback_update_via_installer() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_release_tag_to_version, resolve_installer_url, resolve_latest_release_api_url,
         DEFAULT_INSTALLER_URL, INSTALLER_URL_ENV, UPDATE_RELEASE_API_URL_ENV,
+        normalize_release_tag_to_version, resolve_installer_url, resolve_latest_release_api_url,
     };
     use serial_test::serial;
 
     #[test]
     #[serial]
     fn resolve_installer_url_uses_default_when_env_missing() {
-        std::env::remove_var(INSTALLER_URL_ENV);
+        unsafe {
+            std::env::remove_var(INSTALLER_URL_ENV);
+        }
         assert_eq!(resolve_installer_url(), DEFAULT_INSTALLER_URL);
     }
 
     #[test]
     #[serial]
     fn resolve_installer_url_prefers_env_override() {
-        std::env::set_var(INSTALLER_URL_ENV, "https://example.test/install.sh");
+        unsafe {
+            std::env::set_var(INSTALLER_URL_ENV, "https://example.test/install.sh");
+        }
         assert_eq!(resolve_installer_url(), "https://example.test/install.sh");
-        std::env::remove_var(INSTALLER_URL_ENV);
+        unsafe {
+            std::env::remove_var(INSTALLER_URL_ENV);
+        }
     }
 
     #[test]
@@ -222,14 +228,18 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_latest_release_api_url_prefers_env_override() {
-        std::env::set_var(
-            UPDATE_RELEASE_API_URL_ENV,
-            "https://example.test/repos/Koh0920/ato-cli/releases/latest",
-        );
+        unsafe {
+            std::env::set_var(
+                UPDATE_RELEASE_API_URL_ENV,
+                "https://example.test/repos/Koh0920/ato-cli/releases/latest",
+            );
+        }
         assert_eq!(
             resolve_latest_release_api_url().expect("resolve api url"),
             "https://example.test/repos/Koh0920/ato-cli/releases/latest"
         );
-        std::env::remove_var(UPDATE_RELEASE_API_URL_ENV);
+        unsafe {
+            std::env::remove_var(UPDATE_RELEASE_API_URL_ENV);
+        }
     }
 }

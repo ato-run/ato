@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf, split};
 
 #[cfg(unix)]
 type AsyncTransport = tokio::net::UnixStream;
@@ -144,7 +144,9 @@ pub enum Error {
     /// [`NotRunning`](Self::NotRunning) so consumers can present a
     /// `chmod` / wrong-user hint instead of a "start the daemon"
     /// hint.
-    #[error("control socket {path} refused access (daemon may be running as a different user): {source}")]
+    #[error(
+        "control socket {path} refused access (daemon may be running as a different user): {source}"
+    )]
     PermissionDenied {
         path: PathBuf,
         #[source]

@@ -22,7 +22,7 @@ pub mod version;
 
 pub use schema::CcpHeader;
 pub use tolerance::{
-    classify_schema_version, enforce_ccp_compat, CcpCompat, HasSchemaVersion,
-    MalformedSchemaVersion,
+    CcpCompat, HasSchemaVersion, MalformedSchemaVersion, classify_schema_version,
+    enforce_ccp_compat,
 };
 pub use version::SCHEMA_VERSION;

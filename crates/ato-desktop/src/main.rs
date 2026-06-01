@@ -28,7 +28,6 @@ mod state;
 mod surface_timing;
 mod system_capsule;
 mod terminal;
-mod ui;
 mod userland;
 mod webview;
 mod webview_init_guard;

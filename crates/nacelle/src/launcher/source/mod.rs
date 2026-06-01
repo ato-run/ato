@@ -496,8 +496,8 @@ impl SourceRuntime {
         _request: &LaunchRequest<'_>,
         target: &SourceTarget,
     ) -> Result<LaunchResult, RuntimeError> {
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
         use std::io::{BufRead, Read, Write};
         use std::sync::{Arc, Mutex};
 
@@ -648,7 +648,7 @@ impl SourceRuntime {
                     {
                         #[cfg(unix)]
                         if let Some(pid) = child_pid {
-                            use nix::sys::signal::{kill, Signal};
+                            use nix::sys::signal::{Signal, kill};
                             use nix::unistd::Pid;
                             let sig = match signal.as_str() {
                                 "SIGINT" => Some(Signal::SIGINT),
@@ -787,20 +787,20 @@ impl Runtime for SourceRuntime {
         // (validate_shell) instead of validate_binary, because shell paths are
         // absolute by design (e.g. /bin/zsh) while validate_binary blocks
         // absolute paths for capsule command portability.
-        if !target.interactive {
-            if let Some(ref cmd) = target.cmd {
-                info!("Using explicit command (Generic Source Runtime): {:?}", cmd);
+        if !target.interactive
+            && let Some(ref cmd) = target.cmd
+        {
+            info!("Using explicit command (Generic Source Runtime): {:?}", cmd);
 
-                // Validate binary is in allowlist
-                if let Some(binary) = cmd.first() {
-                    validate_binary(binary, target.dev_mode)
-                        .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
-                }
-
-                // Validate command arguments (File-First + Dangerous Flags)
-                validate_cmd(cmd, &target.source_dir, target.dev_mode)
+            // Validate binary is in allowlist
+            if let Some(binary) = cmd.first() {
+                validate_binary(binary, target.dev_mode)
                     .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
             }
+
+            // Validate command arguments (File-First + Dangerous Flags)
+            validate_cmd(cmd, &target.source_dir, target.dev_mode)
+                .map_err(|e| RuntimeError::SecurityViolation(e.to_string()))?;
         }
 
         // Determine execution mode
@@ -842,7 +842,7 @@ impl Runtime for SourceRuntime {
         if let Some(_pid) = _pid {
             #[cfg(unix)]
             {
-                use nix::sys::signal::{kill, Signal};
+                use nix::sys::signal::{Signal, kill};
                 use nix::unistd::Pid;
 
                 if let Err(e) = kill(Pid::from_raw(_pid as i32), Signal::SIGTERM) {
@@ -858,11 +858,7 @@ impl Runtime for SourceRuntime {
 
     fn get_log_path(&self, workload_id: &str) -> Option<PathBuf> {
         let path = self.workload_log_path(workload_id);
-        if path.exists() {
-            Some(path)
-        } else {
-            None
-        }
+        if path.exists() { Some(path) } else { None }
     }
 }
 

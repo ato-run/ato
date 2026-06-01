@@ -1471,9 +1471,11 @@ fn e2e_native_delivery_projection_symlink_lifecycle() -> Result<()> {
     let problems = broken_projection["problems"]
         .as_array()
         .context("broken projection problems missing")?;
-    assert!(problems
-        .iter()
-        .any(|problem| problem.as_str() == Some("derived_app_missing")));
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.as_str() == Some("derived_app_missing"))
+    );
 
     let unproject = run_ato_with_home(
         &ato,

@@ -7,8 +7,8 @@ use capsule_core::common::paths::ato_path;
 use serde::{Deserialize, Serialize};
 
 use super::registry::{
-    self, resolve_serving_root, SeedCopyMode, SystemCapsuleLayout, SOURCE_EXCLUDED_DIRS,
-    SYSTEM_WORKSPACE_FILES,
+    self, SOURCE_EXCLUDED_DIRS, SYSTEM_WORKSPACE_FILES, SeedCopyMode, SystemCapsuleLayout,
+    resolve_serving_root,
 };
 
 const SYSTEM_CAPSULES_HOME: &str = "apps/ato-desktop/system-capsules";
@@ -557,9 +557,9 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
+        SystemCapsuleLayout, SystemCapsuleLookup, SystemCapsuleUnavailableKind,
         bootstrap_from_assets, current_materialized_root, lookup_system_capsule,
-        resolve_system_capsule_root, SystemCapsuleLayout, SystemCapsuleLookup,
-        SystemCapsuleUnavailableKind,
+        resolve_system_capsule_root,
     };
     use std::fs;
     use std::path::Path;
@@ -572,7 +572,9 @@ mod tests {
     impl AtoHomeGuard {
         fn new(path: &Path) -> Self {
             let previous = std::env::var_os("ATO_HOME");
-            std::env::set_var("ATO_HOME", path);
+            unsafe {
+                std::env::set_var("ATO_HOME", path);
+            }
             Self { previous }
         }
     }
@@ -580,9 +582,13 @@ mod tests {
     impl Drop for AtoHomeGuard {
         fn drop(&mut self) {
             if let Some(previous) = self.previous.as_ref() {
-                std::env::set_var("ATO_HOME", previous);
+                unsafe {
+                    std::env::set_var("ATO_HOME", previous);
+                }
             } else {
-                std::env::remove_var("ATO_HOME");
+                unsafe {
+                    std::env::remove_var("ATO_HOME");
+                }
             }
         }
     }
@@ -862,12 +868,13 @@ mod tests {
         assert_eq!(report.degraded[0].capsule, "ato-dock");
         assert_eq!(report.materialized.len(), 1);
         assert_eq!(report.materialized[0].capsule, "ato-store");
-        assert!(home
-            .path()
-            .join("apps")
-            .join("ato-desktop")
-            .join("system-capsules")
-            .join("ato-dock.degraded.json")
-            .is_file());
+        assert!(
+            home.path()
+                .join("apps")
+                .join("ato-desktop")
+                .join("system-capsules")
+                .join("ato-dock.degraded.json")
+                .is_file()
+        );
     }
 }

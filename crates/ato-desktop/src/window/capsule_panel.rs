@@ -1,22 +1,22 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, rgb, size, svg, AnyElement, AnyWindowHandle, App, Bounds, BoxShadow,
-    Context, FontWeight, IntoElement, MouseButton, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowKind, WindowOptions,
+    AnyElement, AnyWindowHandle, App, Bounds, BoxShadow, Context, FontWeight, IntoElement,
+    MouseButton, Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div,
+    hsla, point, px, rgb, size, svg,
 };
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::TitleBar;
+use gpui_component::scroll::ScrollableElement;
 
 use crate::app::{
     OpenContentWindowLogs, OpenContentWindowSettings, OpenStoreWindow, RestartContentWindow,
     StopContentWindow,
 };
+use crate::window::ControlBarController;
 use crate::window::content_windows::{
     CapsuleWindowContext, CapsuleWindowStatus, OpenContentWindows,
 };
-use crate::window::ControlBarController;
 
 const PANEL_W: f32 = 388.0;
 const PANEL_H: f32 = 476.0;
@@ -269,15 +269,15 @@ fn panel_model_from_entry(
 fn panel_bounds(cx: &mut App) -> Bounds<Pixels> {
     let panel_size = size(px(PANEL_W), px(PANEL_H));
     let control_bar = cx.global::<ControlBarController>().handle;
-    if let Some(handle) = control_bar {
-        if let Ok(bounds) = handle.update(cx, |_, window, _| window.bounds()) {
-            let left = bounds.origin.x + (bounds.size.width - panel_size.width) / 2.0;
-            let top = bounds.origin.y + bounds.size.height + px(12.0);
-            return Bounds {
-                origin: point(left, top),
-                size: panel_size,
-            };
-        }
+    if let Some(handle) = control_bar
+        && let Ok(bounds) = handle.update(cx, |_, window, _| window.bounds())
+    {
+        let left = bounds.origin.x + (bounds.size.width - panel_size.width) / 2.0;
+        let top = bounds.origin.y + bounds.size.height + px(12.0);
+        return Bounds {
+            origin: point(left, top),
+            size: panel_size,
+        };
     }
     Bounds::centered(None, panel_size, cx)
 }
@@ -504,12 +504,14 @@ fn render_managed_summary(panel: &ManagedPanel) -> AnyElement {
         ))
         .child(render_summary_section(
             "Permissions",
-            vec![div()
-                .flex()
-                .flex_wrap()
-                .gap(px(8.0))
-                .children(render_capability_chips(&panel.capabilities))
-                .into_any_element()],
+            vec![
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .children(render_capability_chips(&panel.capabilities))
+                    .into_any_element(),
+            ],
         ))
         .child(render_summary_section(
             "Session",
@@ -975,13 +977,15 @@ fn render_inline_kv(label: &str, value: &str) -> AnyElement {
 
 fn render_capability_chips(capabilities: &[String]) -> Vec<AnyElement> {
     if capabilities.is_empty() {
-        return vec![render_meta_chip(
-            "No host capability grants reported",
-            rgb(0xf8fafc),
-            rgb(0x64748b),
-            rgb(0xe2e8f0),
-        )
-        .into_any_element()];
+        return vec![
+            render_meta_chip(
+                "No host capability grants reported",
+                rgb(0xf8fafc),
+                rgb(0x64748b),
+                rgb(0xe2e8f0),
+            )
+            .into_any_element(),
+        ];
     }
     capabilities
         .iter()

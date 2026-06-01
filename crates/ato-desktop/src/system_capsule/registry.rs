@@ -200,7 +200,7 @@ fn sanitize_relative_path(input: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup, resolve_serving_root, SystemCapsuleLayout};
+    use super::{SystemCapsuleLayout, lookup, resolve_serving_root};
     use std::fs;
     use tempfile::TempDir;
 

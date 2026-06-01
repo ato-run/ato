@@ -3,7 +3,7 @@ use std::convert::TryInto;
 use std::fs;
 use std::path::Path;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
@@ -487,10 +487,10 @@ pub fn verify_capsule_artifact_signature(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_signature_matches_manifest, parse_developer_key, read_signature_file,
+        CapsuleArtifactSignature, CapsuleArtifactSignaturePlaceholder, SignatureMetadata,
+        StoredKey, ensure_signature_matches_manifest, parse_developer_key, read_signature_file,
         sign_capsule_artifact, verify_capsule_artifact_signature, verify_signature_file,
-        write_signature_file, CapsuleArtifactSignature, CapsuleArtifactSignaturePlaceholder,
-        SignatureMetadata, StoredKey,
+        write_signature_file,
     };
 
     use chrono::Utc;

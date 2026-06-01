@@ -407,8 +407,8 @@ mod tests {
 
     // internal crates
     use super::{
-        extract_and_verify_embedded_sbom, generate_embedded_sbom,
-        generate_embedded_sbom_from_inputs, sha256_hex, SbomFileInput, SBOM_PATH,
+        SBOM_PATH, SbomFileInput, extract_and_verify_embedded_sbom, generate_embedded_sbom,
+        generate_embedded_sbom_from_inputs, sha256_hex,
     };
 
     #[test]

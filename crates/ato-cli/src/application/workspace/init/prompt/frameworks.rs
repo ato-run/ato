@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use std::fs;
 
 use super::{
-    cargo_dependency_present, has_package_dependency, push_unique, pyproject_dependency_present,
-    text_dependency_present, FrameworkMatch, PromptContext, PromptInputs,
+    FrameworkMatch, PromptContext, PromptInputs, cargo_dependency_present, has_package_dependency,
+    push_unique, pyproject_dependency_present, text_dependency_present,
 };
 
 pub(super) struct PromptRule {
@@ -69,18 +69,19 @@ pub(super) fn detect_node_frameworks(inputs: &PromptInputs) -> Result<Vec<Framew
         });
     }
 
-    if let Some(main) = package_json.get("main").and_then(|value| value.as_str()) {
-        if !main.trim().is_empty() && !frameworks.iter().any(|item| item.name == "Electron") {
-            let looks_like_electron = ["electron", "electron/main", "main.js", "background.js"]
-                .iter()
-                .any(|needle| main.contains(needle));
-            if looks_like_electron {
-                frameworks.push(FrameworkMatch {
-                    name: "Electron",
-                    category: "native-desktop",
-                    confidence: 75,
-                });
-            }
+    if let Some(main) = package_json.get("main").and_then(|value| value.as_str())
+        && !main.trim().is_empty()
+        && !frameworks.iter().any(|item| item.name == "Electron")
+    {
+        let looks_like_electron = ["electron", "electron/main", "main.js", "background.js"]
+            .iter()
+            .any(|needle| main.contains(needle));
+        if looks_like_electron {
+            frameworks.push(FrameworkMatch {
+                name: "Electron",
+                category: "native-desktop",
+                confidence: 75,
+            });
         }
     }
 

@@ -18,7 +18,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use sha2::{Digest, Sha256};
 
 use super::error::ToolArtifactError;

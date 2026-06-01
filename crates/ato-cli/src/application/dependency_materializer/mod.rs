@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use capsule_core::blob::BlobManifest;
 use capsule_core::common::paths::{
-    ato_run_layout, ato_store_attestations_dir, ato_store_blobs_dir, ato_store_refs_dir,
-    ato_trust_policies_dir, ato_trust_roots_dir, AtoRunLayout,
+    AtoRunLayout, ato_run_layout, ato_store_attestations_dir, ato_store_blobs_dir,
+    ato_store_refs_dir, ato_trust_policies_dir, ato_trust_roots_dir,
 };
-use capsule_core::common::store::{ato_store_dep_ref_path, BlobAddress};
+use capsule_core::common::store::{BlobAddress, ato_store_dep_ref_path};
 use capsule_core::launch_spec::derive_launch_spec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -692,10 +692,10 @@ fn runtime_compat_class(runtime_name: &str, runtime_version: Option<&str>) -> St
     let Some(major) = parts.next().filter(|value| !value.is_empty()) else {
         return runtime_name.to_string();
     };
-    if runtime_name == "python" {
-        if let Some(minor) = parts.next().filter(|value| !value.is_empty()) {
-            return format!("{runtime_name}-{major}.{minor}");
-        }
+    if runtime_name == "python"
+        && let Some(minor) = parts.next().filter(|value| !value.is_empty())
+    {
+        return format!("{runtime_name}-{major}.{minor}");
     }
     format!("{runtime_name}-{major}")
 }

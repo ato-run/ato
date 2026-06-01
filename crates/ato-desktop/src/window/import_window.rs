@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render,
-    Size, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render, Size, WeakEntity,
+    Window, WindowBounds, WindowDecorations, WindowOptions, div, rgb, size,
 };
 use gpui_component::TitleBar;
 use wry::dpi::{LogicalPosition, LogicalSize};
@@ -111,10 +111,10 @@ impl ImportWindowShell {
             "typeof window.__atoImportSnapshot==='function'&&window.__atoImportSnapshot({})",
             snapshot_json
         );
-        if let Some(webview) = self._webview.as_ref() {
-            if let Err(error) = webview.evaluate_script(&script) {
-                tracing::warn!(?error, "ato-import: evaluate_script(push_snapshot) failed");
-            }
+        if let Some(webview) = self._webview.as_ref()
+            && let Err(error) = webview.evaluate_script(&script)
+        {
+            tracing::warn!(?error, "ato-import: evaluate_script(push_snapshot) failed");
         }
     }
 }
@@ -149,10 +149,10 @@ pub fn push_current_snapshot(cx: &mut App) {
     let weak = cx
         .try_global::<ImportWindowSlot>()
         .and_then(|s| s.shell.clone());
-    if let Some(weak) = weak {
-        if let Some(shell) = weak.upgrade() {
-            shell.read(cx).push_snapshot(&json);
-        }
+    if let Some(weak) = weak
+        && let Some(shell) = weak.upgrade()
+    {
+        shell.read(cx).push_snapshot(&json);
     }
 }
 
@@ -164,16 +164,16 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
     // somewhere to come from.
     let session = session_arc(cx);
 
-    if let Some(slot) = cx.try_global::<ImportWindowSlot>() {
-        if let Some(handle) = slot.window {
-            // Try to bring the existing window forward. If activation
-            // fails (handle is stale), fall through and reopen.
-            let activate_ok = handle
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok();
-            if activate_ok {
-                return Ok(handle);
-            }
+    if let Some(slot) = cx.try_global::<ImportWindowSlot>()
+        && let Some(handle) = slot.window
+    {
+        // Try to bring the existing window forward. If activation
+        // fails (handle is stale), fall through and reopen.
+        let activate_ok = handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok();
+        if activate_ok {
+            return Ok(handle);
         }
     }
 

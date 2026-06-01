@@ -8,7 +8,7 @@ pub(super) async fn handle_list_local_processes() -> impl IntoResponse {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_manager_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     let mut processes = match pm.list_processes() {
@@ -18,7 +18,7 @@ pub(super) async fn handle_list_local_processes() -> impl IntoResponse {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_list_failed",
                 &err.to_string(),
-            )
+            );
         }
     };
     processes.sort_by_key(|p| std::cmp::Reverse(p.start_time));
@@ -410,7 +410,7 @@ pub(super) async fn handle_local_url_ready(
                 StatusCode::BAD_REQUEST,
                 "invalid_url",
                 &format!("failed to parse url: {}", err),
-            )
+            );
         }
     };
 
@@ -433,7 +433,7 @@ pub(super) async fn handle_local_url_ready(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "url_probe_failed",
                 &format!("failed to create probe client: {}", err),
-            )
+            );
         }
     };
 
@@ -480,7 +480,7 @@ pub(super) async fn handle_stop_local_process(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_manager_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     let process = pm.read_pid(id.trim()).ok();
@@ -491,7 +491,7 @@ pub(super) async fn handle_stop_local_process(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_stop_failed",
                 &err.to_string(),
-            )
+            );
         }
     };
 
@@ -506,7 +506,7 @@ pub(super) async fn handle_stop_local_process(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "service_binding_cleanup_failed",
                     &err.to_string(),
-                )
+                );
             }
         },
         None => Vec::new(),
@@ -542,14 +542,14 @@ pub(super) async fn handle_get_process_logs(
 
 pub(super) async fn handle_clear_process_logs(AxumPath(id): AxumPath<String>) -> impl IntoResponse {
     let path = process_log_path(id.trim());
-    if let Some(parent) = path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "log_clear_failed",
-                &format!("failed to prepare log directory: {}", err),
-            );
-        }
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "log_clear_failed",
+            &format!("failed to prepare log directory: {}", err),
+        );
     }
     if let Err(err) = std::fs::write(&path, "") {
         return json_error(
