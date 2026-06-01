@@ -739,7 +739,6 @@ impl ReceiptResultClass {
     }
 }
 
-
 /// Typed failure envelope for partial receipts.
 ///
 /// Mirrors the diagnostic shape of [`crate::execution_plan::error::AtoExecutionError`]
