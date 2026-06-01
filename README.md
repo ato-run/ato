@@ -16,7 +16,7 @@
     </a>
     <img alt="Local-first" src="https://img.shields.io/badge/local--first-yes-e91e63" />
     <img alt="Source-native" src="https://img.shields.io/badge/source--native-runtime-f97316" />
-    <img alt="Desktop + CLI" src="https://img.shields.io/badge/Desktop%20%2B%20CLI-supported-f59e0b" />
+    <img alt="Desktop + CLI" src="https://img.shields.io/badge/Desktop%20%2B%20CLI-beta-f59e0b" />
     <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-111827" />
   </p>
 
@@ -42,7 +42,7 @@
     </td>
     <td width="25%">
       <h3>Share capsules</h3>
-      <p>Package a runnable project description and let someone else run the same thing.</p>
+      <p>Turn a project into a runnable recipe that someone else can inspect and run.</p>
     </td>
     <td width="25%">
       <h3>Repeatable environments</h3>
@@ -50,54 +50,134 @@
     </td>
     <td width="25%">
       <h3>Desktop + CLI</h3>
-      <p>Use a polished desktop control plane or stay in the terminal.</p>
+      <p>Use the terminal for speed or the desktop app as a visual control plane.</p>
     </td>
   </tr>
 </table>
 
-Ato is a command-line tool and desktop runtime for trying local projects, GitHub repositories, and shared app links in a controlled runtime. It detects what the project needs, prepares missing tools, and runs it without asking you to manually install Python, Node, Rust, or other project-specific dependencies first.
+Ato is a desktop app and command-line runtime for trying local projects, GitHub repositories, and shared app links in a controlled local runtime. It detects what the project needs, prepares missing tools, and runs it without asking you to manually install Python, Node, Rust, or other project-specific dependencies first.
 
 ```bash
 ato run .                      # run the current project
 ato run github.com/owner/repo  # try a GitHub repository
-ato run https://ato.run/s/demo # open a shared Ato app
+ato run https://ato.run/s/demo # open a shared Ato recipe
 ```
 
 Ato is useful when you want to try a repository without reading its setup instructions first, share a runnable project with someone else, run a project with a repeatable setup, or keep the project's runtime separate from your machine as much as possible.
 
 > Ato is still pre-1.0. Some sandboxing and network controls are still being completed. See [Known limitations](crates/ato-cli/docs/known-limitations.md) before using Ato with untrusted code.
 
+## Supported ecosystems
+
+Ato currently focuses on source-native projects and local app recipes.
+
+<p>
+  <img alt="Node.js" src="https://img.shields.io/badge/Node.js-supported-339933" />
+  <img alt="Python" src="https://img.shields.io/badge/Python-supported-3776ab" />
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-supported-b7410e" />
+  <img alt="OCI" src="https://img.shields.io/badge/OCI%20%2F%20Docker-recipes-2496ed" />
+  <img alt="More" src="https://img.shields.io/badge/more-coming%20soon-6b7280" />
+</p>
+
 ## Install
+
+### macOS / Linux
+
+Default install:
 
 ```bash
 curl -fsSL https://ato.run/install.sh | sh
 ```
 
-Homebrew:
+On a graphical macOS or Linux session, the default installer installs **Ato Desktop**. The Desktop bundle includes the private helper binaries it needs: `ato`, `nacelle`, and `ato-netd`. It does not separately install the standalone CLI archive or expose every helper as a user command.
+
+To also make `ato` available in your terminal:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh -s -- --with-cli
+```
+
+`--with-cli` exposes the bundled `ato` helper on `PATH`. It does not download a second copy of `ato-cli`, and it does not expose `nacelle` or `ato-netd` as user-facing commands.
+
+For headless environments, SSH sessions, CI, or CLI-only usage:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh -s -- --cli-only
+```
+
+`--cli-only` installs `ato` plus a private `nacelle` sidecar. It does not install Ato Desktop.
+
+To install a specific version:
+
+```bash
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5 --with-cli
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5 --cli-only
+```
+
+### Windows PowerShell
+
+Default install:
+
+```powershell
+irm https://ato.run/install.ps1 | iex
+```
+
+On normal Windows desktop sessions, this installs the **Ato Desktop MSI**. The Desktop bundle includes private `ato.exe`, `nacelle.exe`, and `ato-netd.exe` helpers.
+
+To also make `ato` available from PowerShell:
+
+```powershell
+irm https://ato.run/install.ps1 | iex -WithCli
+```
+
+For CI, server/headless environments, or CLI-only usage:
+
+```powershell
+irm https://ato.run/install.ps1 | iex -CliOnly
+```
+
+`-CliOnly` installs `ato.exe` plus a private `nacelle.exe` sidecar. It does not install Ato Desktop.
+
+### Homebrew
 
 ```bash
 brew install ato-run/ato/ato-cli
 ```
 
-From source:
+Homebrew installs the CLI, not Ato Desktop.
+
+### From source
 
 ```bash
 cargo build -p ato-cli --release
 ```
 
-Check that it works:
+### Verify installation
+
+If you installed Ato Desktop only, launch **Ato Desktop** from your applications menu.
+
+If you used `--with-cli`, `-WithCli`, `--cli-only`, `-CliOnly`, Homebrew, or a source build, verify the terminal command:
 
 ```bash
 ato --help
 ```
 
-To uninstall an `install.sh` deployment:
+### Uninstall
+
+If `ato` is available on `PATH`:
 
 ```bash
 ato uninstall
+ato uninstall --purge
+ato uninstall --purge --include-config --include-keys --yes
 ```
 
+If you installed Desktop only and did not expose the CLI, remove Ato Desktop through the normal OS app removal flow, or re-run the installer with CLI exposure before using `ato uninstall`.
+
 ## Quick Start
+
+The examples below use the `ato` terminal command. If you installed Desktop only, either run projects from Ato Desktop or reinstall with `--with-cli` / `-WithCli` to expose the CLI on `PATH`.
 
 <table>
   <tr>
@@ -109,7 +189,7 @@ cd my-project
 ato run .
 ```
 
-Ato inspects the project, prepares what it needs, and starts it.
+Ato inspects the project, prepares the required tools, and starts the app or command.
     </td>
     <td width="50%">
       <h3>Run a GitHub repository</h3>
@@ -123,6 +203,23 @@ Useful for examples, demos, small tools, or projects you do not want to install 
   </tr>
 </table>
 
+### What you should see
+
+Ato prints the plan and phase progress as it resolves the project, prepares dependencies, and launches the process.
+
+```text
+$ ato run github.com/owner/repo
+✓ Resolving source
+✓ Detecting project type
+✓ Preparing runtime
+✓ Installing dependencies
+✓ Starting project
+
+Running at http://localhost:5173
+```
+
+For a stronger first impression, add a short terminal recording here, for example an Asciinema or GIF showing `ato run github.com/owner/repo` from command to running app.
+
 ### Create a lock file
 
 ```bash
@@ -134,56 +231,34 @@ A lock file records the resolved runtime setup for the project. Commit it when y
 ### Share a project
 
 ```bash
+# Capture the project into a shareable description
 ato workspace share
-```
 
-`workspace share` captures the project into a shareable description.
-
-```bash
+# Materialize a shared project into a local directory
 ato workspace setup https://ato.run/s/demo --into ./demo
 ```
 
-`workspace setup` materializes a shared project into a local directory.
-
-> Older docs may refer to `ato encap` and `ato decap`. Prefer `ato workspace share` and `ato workspace setup` for new examples.
+A shared Ato project is represented as a recipe: a portable, inspectable description of source, runtime requirements, entrypoints, state expectations, and policy. In local projects, that recipe is usually written in `capsule.toml`. In practice, a recipe lets another machine reconstruct the launch without repeating the setup work by hand.
 
 ## How it works
+
+Ato automates the tedious setup of exploring new codebases through four clear steps.
 
 <div align="center">
 
 ```text
-Discover              Run                         Share
-   │                   │                            │
-   ▼                   ▼                            ▼
-source/project ──▶ execution plan ──▶ controlled runtime ──▶ capsule/share
+[Source Project]
+      │
+      ▼
+(1) Detect & Resolve  ──▶  (2) Lock  ──▶  (3) Controlled Runtime  ──▶  (4) Capsule / Share
 ```
 
 </div>
 
-Ato turns a project into a runnable plan.
-
-```text
-project files
-  |
-  v
-detect what the project needs
-  |
-  v
-resolve tools and runtimes
-  |
-  v
-write a lock file
-  |
-  v
-run in a controlled environment
-```
-
-In practice, Ato tries to answer these questions:
-
-1. What kind of project is this?
-2. What tools or runtimes are needed?
-3. Can the result be recorded so the next run is repeatable?
-4. What access should the running project have to the host machine?
+1. **Detect**: Ato inspects the directory or repository to see what kind of project it is, such as Node.js, Python, or Rust.
+2. **Resolve**: Ato prepares the required tools and runtimes without modifying your global system as much as possible.
+3. **Lock**: Ato records the resolved setup so future runs can be inspected and repeated.
+4. **Run or share**: Ato executes the project in a controlled runtime, or captures a runnable description that others can use.
 
 The main file Ato looks for is:
 
@@ -191,11 +266,13 @@ The main file Ato looks for is:
 capsule.toml
 ```
 
-A `capsule.toml` describes how a project should run. If a project does not have one, Ato can try to infer a basic setup.
+A `capsule.toml` describes how source inputs should be arranged, built, configured, and launched. If a project does not have one, Ato can try to infer a basic recipe.
 
-## What is a capsule?
+## What is a recipe?
 
-A capsule is a portable, inspectable description of how a project should run. It keeps source, runtime requirements, entrypoints, state expectations, and policy close enough together that another machine can reconstruct the launch without repeating the setup work by hand.
+A recipe is the runnable interpretation of a source project. It is not just a package archive and not just a lock file. It ties together enough launch context for Ato to run or reconstruct the project on another machine.
+
+A minimal capsule target can look like this:
 
 ```toml
 [targets.main]
@@ -205,29 +282,35 @@ run = "npm run dev"
 port = 5173
 ```
 
+Recipes are useful when you want to share a demo, local app, internal tool, or reproducible workflow without asking every user to manually rediscover the setup.
+
 ## Examples
 
 ### Python script
 
 ```bash
+# Runs the script with the required Python version and dependencies prepared by Ato
 ato run ./scripts/report.py
 ```
 
 ### Node app
 
 ```bash
+# Detects package.json, prepares Node dependencies in isolation, and boots the app
 ato run ./examples/web
 ```
 
 ### Rust project
 
 ```bash
+# Builds and runs a Rust workspace member through Ato's runtime path
 ato run ./crates/my-tool
 ```
 
-### Shared app
+### Shared recipe
 
 ```bash
+# Opens a shared Ato recipe from a link
 ato run https://ato.run/s/demo
 ```
 
@@ -277,13 +360,15 @@ or inspect the repository first.
 ## Common commands
 
 ```bash
-ato run .                       # run a local project
-ato run github.com/o/r          # run a GitHub repository
+ato run .                       # rehearse a local project in a managed session
+ato run github.com/o/r          # rehearse a GitHub repository
+ato run https://ato.run/s/demo  # run a shared recipe
+ato install publisher/slug      # register a durable local app
 ato lock .                      # generate a lock file
-ato workspace share             # create a shareable project description
-ato workspace setup <share>     # materialize a shared project
-ato ps                          # list running apps
-ato stop --all                  # stop running apps
+ato workspace share             # create a shareable recipe description
+ato workspace setup <share>     # materialize a shared recipe
+ato ps                          # list running sessions
+ato stop --all                  # stop running sessions
 ato logs                        # show logs
 ```
 
@@ -307,7 +392,7 @@ ato/
 └── .github/workflows/    # CI
 ```
 
-Most users only need `ato-cli`.
+Most users should use the installer. Contributors usually work in `crates/ato-cli`, `crates/ato-desktop`, `capsule-core`, and the runtime sidecars.
 
 ## Develop
 
@@ -324,7 +409,12 @@ Desktop bundle examples:
 cd crates/ato-desktop
 cargo xtask bundle darwin-arm64
 cargo xtask bundle windows-x86_64
+cargo xtask bundle linux-x86_64
 ```
+
+## Notes for existing users
+
+Older documentation may refer to `ato encap` and `ato decap`. Prefer `ato workspace share` and `ato workspace setup` for new examples.
 
 ## Contributing
 
