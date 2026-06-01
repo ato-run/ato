@@ -12,8 +12,8 @@ const DEFAULT_TARGET: &str = "darwin-arm64";
 const BUNDLED_SYSTEM_ASSET_EXCLUDED_DIRS: &[&str] =
     &["node_modules", ".vite", ".astro", ".next", "target"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BundleTarget {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BundleTarget {
     DarwinArm64,
     DarwinX86_64,
     WindowsX86_64,
