@@ -357,4 +357,54 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn catalog_manifests_are_publishable_to_community() {
+        for binding in SAMPLE_RECIPE_CATALOG {
+            let manifest: toml::Value = toml::from_str(binding.manifest_content)
+                .unwrap_or_else(|err| panic!("{} manifest parses: {err}", binding.slug));
+
+            let source_repo = manifest
+                .get("source")
+                .and_then(|source| source.get("repository"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or_else(|| panic!("{} has [source].repository", binding.slug));
+            let expected_repo = binding
+                .github
+                .map(|(owner, repo)| format!("{owner}/{repo}"))
+                .expect("catalog entries are public GitHub recipes");
+            assert_eq!(
+                source_repo, expected_repo,
+                "{} source repository",
+                binding.slug
+            );
+
+            assert_valid_schema_ids(binding.slug, &manifest);
+        }
+    }
+
+    fn assert_valid_schema_ids(slug: &str, value: &toml::Value) {
+        match value {
+            toml::Value::String(value) if value.starts_with("sha256:") => {
+                let hash = &value["sha256:".len()..];
+                assert_eq!(hash.len(), 64, "{slug} schema_id length: {value}");
+                assert!(
+                    hash.bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                    "{slug} schema_id must be lowercase hex: {value}"
+                );
+            }
+            toml::Value::Array(values) => {
+                for value in values {
+                    assert_valid_schema_ids(slug, value);
+                }
+            }
+            toml::Value::Table(values) => {
+                for value in values.values() {
+                    assert_valid_schema_ids(slug, value);
+                }
+            }
+            _ => {}
+        }
+    }
 }
