@@ -103,10 +103,10 @@ impl PortAllocator {
         // Build reverse map and validate uniqueness.
         let mut by_port: HashMap<u16, String> = HashMap::new();
         for (key, &port) in &table.ports {
-            if let Some(other_key) = by_port.insert(port, key.clone()) {
-                if other_key != *key {
-                    return Err(AllocError::PersistedPortTaken { port, other_key });
-                }
+            if let Some(other_key) = by_port.insert(port, key.clone())
+                && other_key != *key
+            {
+                return Err(AllocError::PersistedPortTaken { port, other_key });
             }
         }
 
@@ -248,11 +248,13 @@ impl EphemeralAllocator {
     }
 
     /// Return the active port for `session_key`, if any.
+    #[allow(dead_code)]
     pub fn get(&self, session_key: &str) -> Option<u16> {
         self.active_map.get(session_key).copied()
     }
 
     /// Snapshot of all active ephemeral routes: session key → port.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> HashMap<String, u16> {
         self.active_map.clone()
     }

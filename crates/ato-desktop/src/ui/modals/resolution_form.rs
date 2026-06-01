@@ -44,8 +44,8 @@ use std::collections::HashMap;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, AnyElement, BoxShadow, Context, Entity, FontWeight, IntoElement,
-    MouseButton, Window,
+    AnyElement, BoxShadow, Context, Entity, FontWeight, IntoElement, MouseButton, Window, div,
+    hsla, point, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
@@ -56,8 +56,8 @@ use crate::app::{
     CancelResolutionForm, ResolutionFormBack, ResolutionFormNext, SubmitResolutionForm,
 };
 use crate::state::{PendingResolutionRequest, PendingSecretsItem};
-use crate::ui::theme::Theme;
 use crate::ui::DesktopShell;
+use crate::ui::theme::Theme;
 
 /// Two-step navigation for the unified resolution modal.
 ///
@@ -199,10 +199,9 @@ impl ResolutionModal {
         for item in &request.secrets {
             for field in &item.fields {
                 let key = input_key(item.target.as_deref(), &field.name);
-                if !self.inputs.contains_key(&key) {
-                    let entity = make_input(field, window, cx);
-                    self.inputs.insert(key, entity);
-                }
+                self.inputs
+                    .entry(key)
+                    .or_insert_with(|| make_input(field, window, cx));
             }
         }
         // Preserve the user's current step across merges in the
@@ -573,14 +572,6 @@ fn format_summary_line(secret_count: usize, consent_count: usize) -> String {
     }
 }
 
-fn render_section_header(label: &'static str, theme: &Theme) -> impl IntoElement {
-    div()
-        .text_size(px(11.5))
-        .font_weight(FontWeight(600.0))
-        .text_color(theme.text_tertiary)
-        .child(label)
-}
-
 fn render_secrets_section(
     modal: &ResolutionModal,
     item: &PendingSecretsItem,
@@ -699,15 +690,15 @@ fn render_field_row(
             ),
     );
 
-    if let Some(description) = &field.description {
-        if !description.is_empty() {
-            row = row.child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_secondary)
-                    .child(description.clone()),
-            );
-        }
+    if let Some(description) = &field.description
+        && !description.is_empty()
+    {
+        row = row.child(
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.text_secondary)
+                .child(description.clone()),
+        );
     }
 
     let style_input = |i: Input| {

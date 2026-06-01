@@ -213,10 +213,10 @@ fn selected_target_label(
     }
 
     let targets = resolved_targets(lock)?;
-    if targets.len() == 1 {
-        if let Some(label) = targets[0].get("label").and_then(Value::as_str) {
-            return Ok(label.to_string());
-        }
+    if targets.len() == 1
+        && let Some(label) = targets[0].get("label").and_then(Value::as_str)
+    {
+        return Ok(label.to_string());
     }
 
     Err(AtoExecutionError::execution_contract_invalid(

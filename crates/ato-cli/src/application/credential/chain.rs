@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use super::backend::{BackendEntry, CredentialBackend, CredentialKey};
 
@@ -177,9 +177,13 @@ mod tests {
 
         // env overrides
         let v = env_var("secrets/default", "CHAIN_PRIO_TEST");
-        std::env::set_var(&v, "env-val");
+        unsafe {
+            std::env::set_var(&v, "env-val");
+        }
         let got = chain.get(&key).unwrap();
-        std::env::remove_var(&v);
+        unsafe {
+            std::env::remove_var(&v);
+        }
         assert_eq!(got, Some("env-val".into()));
     }
 

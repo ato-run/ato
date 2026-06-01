@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,33 +21,32 @@ use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
 #[cfg(target_os = "macos")]
-use objc2::{msg_send, sel, ClassType};
+use objc2::{ClassType, msg_send, sel};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSView;
 #[cfg(target_os = "macos")]
 use objc2_foundation::MainThreadMarker;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use wry::http::{Request, Response};
 #[cfg(target_os = "macos")]
 use wry::WebViewBuilderExtDarwin;
 #[cfg(target_os = "macos")]
 use wry::WebViewExtMacOS;
+use wry::http::{Request, Response};
 use wry::{
     NewWindowResponse, PageLoadEvent, Rect, RequestAsyncResponder, WebContext, WebView,
     WebViewBuilder,
 };
 
-use crate::automation::command::{AutomationCommand, PendingAutomationRequest};
 use crate::automation::AutomationHost;
+use crate::automation::command::{AutomationCommand, PendingAutomationRequest};
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::config::SecretEntry;
 use crate::logging::TARGET_FAVICON;
 use crate::orchestrator::{
-    resolve_and_start_guest, resolve_and_start_guest_with_input, spawn_cli_session,
-    spawn_log_tail_session, spawn_terminal, stop_guest_session, take_pending_cli_command,
-    take_pending_share_terminal, CommunityTomlInput, DesktopLaunchInput, GuestLaunchSession,
-    LaunchError, SpawnKind, SpawnSpec,
+    CommunityTomlInput, DesktopLaunchInput, GuestLaunchSession, LaunchError, SpawnKind, SpawnSpec,
+    resolve_and_start_guest_with_input, spawn_cli_session, spawn_log_tail_session, spawn_terminal,
+    stop_guest_session, take_pending_cli_command, take_pending_share_terminal,
 };
 
 /// Local helpers to construct `DesktopLaunchInput` from `ensure_pending_local_launch`
@@ -68,12 +67,12 @@ mod resolve_and_start_guest_with_input_fn {
 }
 use crate::proc_util::CommandNoWindowExt;
 use crate::state::{
-    session::SessionRegistry, ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry,
-    AuthSessionStatus, BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId,
-    PendingConfigRequest, PendingConsentRequest, ShellMode, WebSessionState,
+    ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
+    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId, PendingConfigRequest,
+    PendingConsentRequest, ShellMode, WebSessionState, session::SessionRegistry,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
-use crate::ui::share::{resolve_share_icon, ShareIconSource};
+use crate::ui::share::{ShareIconSource, resolve_share_icon};
 use capsule_wire::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
 
@@ -264,10 +263,6 @@ pub(crate) struct AuthStatusResponse {
 }
 
 impl ManagedWebView {
-    fn bound_pane_id(&self) -> usize {
-        self.pane_binding.load(Ordering::Relaxed)
-    }
-
     fn rebind_pane_id(&mut self, pane_id: usize) {
         self.pane_binding.store(pane_id, Ordering::Relaxed);
         self.pane_id = pane_id;
@@ -772,22 +767,22 @@ impl WebViewManager {
                     },
                 }
             }
-        } else if matches!(reuse_action, WebViewReuseAction::Navigate) {
-            if let Some(existing) = self.views.get_mut(&active.pane_id) {
-                if let Err(error) = existing.webview.load_url(&route_key) {
-                    state.push_activity(
-                        ActivityTone::Error,
-                        format!("Failed to navigate child webview: {error}"),
-                    );
-                    // load_url failed: don't force-promote to Mounted below —
-                    // the new navigation never happened and the user should
-                    // see something other than a confidently-mounted stale
-                    // page.
-                    navigate_load_url_failed = true;
-                } else {
-                    existing.route = active.route.clone();
-                    existing.route_key = route_key.clone();
-                }
+        } else if matches!(reuse_action, WebViewReuseAction::Navigate)
+            && let Some(existing) = self.views.get_mut(&active.pane_id)
+        {
+            if let Err(error) = existing.webview.load_url(&route_key) {
+                state.push_activity(
+                    ActivityTone::Error,
+                    format!("Failed to navigate child webview: {error}"),
+                );
+                // load_url failed: don't force-promote to Mounted below —
+                // the new navigation never happened and the user should
+                // see something other than a confidently-mounted stale
+                // page.
+                navigate_load_url_failed = true;
+            } else {
+                existing.route = active.route.clone();
+                existing.route_key = route_key.clone();
             }
         }
 
@@ -928,41 +923,41 @@ impl WebViewManager {
 
             // Drain PTY output and push to xterm.js via evaluate_script.
             // Guard on page_loaded so xterm.js is fully initialised before we write.
-            if self.automation.is_page_loaded(active.pane_id) {
-                if let Some(view) = self.views.get_mut(&active.pane_id) {
-                    if let Some(proc) = self.terminal_sessions.get(&session_id) {
-                        let mut disconnected = false;
-                        loop {
-                            match proc.try_recv_output() {
-                                TryRecvOutput::Data(b64) => {
-                                    let json = serde_json::to_string(&b64).unwrap_or_default();
-                                    let script = format!("window.__ato_write_terminal({json});");
-                                    if let Err(e) = view.webview.evaluate_script(&script) {
-                                        warn!(error = %e, "evaluate_script for terminal output failed");
-                                    }
-                                }
-                                TryRecvOutput::Empty => break,
-                                TryRecvOutput::Disconnected => {
-                                    let _ = view
-                                        .webview
-                                        .evaluate_script("window.__ato_terminal_exit(0);");
-                                    disconnected = true;
-                                    break;
+            if self.automation.is_page_loaded(active.pane_id)
+                && let Some(view) = self.views.get_mut(&active.pane_id)
+            {
+                if let Some(proc) = self.terminal_sessions.get(&session_id) {
+                    let mut disconnected = false;
+                    loop {
+                        match proc.try_recv_output() {
+                            TryRecvOutput::Data(b64) => {
+                                let json = serde_json::to_string(&b64).unwrap_or_default();
+                                let script = format!("window.__ato_write_terminal({json});");
+                                if let Err(e) = view.webview.evaluate_script(&script) {
+                                    warn!(error = %e, "evaluate_script for terminal output failed");
                                 }
                             }
-                        }
-                        if disconnected {
-                            self.terminal_sessions.remove(&session_id);
-                            self.completed_terminal_sessions.insert(session_id.clone());
+                            TryRecvOutput::Empty => break,
+                            TryRecvOutput::Disconnected => {
+                                let _ = view
+                                    .webview
+                                    .evaluate_script("window.__ato_terminal_exit(0);");
+                                disconnected = true;
+                                break;
+                            }
                         }
                     }
+                    if disconnected {
+                        self.terminal_sessions.remove(&session_id);
+                        self.completed_terminal_sessions.insert(session_id.clone());
+                    }
+                }
 
-                    if let Some(error_message) = self.pending_terminal_errors.remove(&session_id) {
-                        let json = serde_json::to_string(&error_message).unwrap_or_default();
-                        let script = format!("window.__ato_terminal_error({json});");
-                        if let Err(e) = view.webview.evaluate_script(&script) {
-                            warn!(session_id = %session_id, error = %e, "failed to report terminal startup error");
-                        }
+                if let Some(error_message) = self.pending_terminal_errors.remove(&session_id) {
+                    let json = serde_json::to_string(&error_message).unwrap_or_default();
+                    let script = format!("window.__ato_terminal_error({json});");
+                    if let Err(e) = view.webview.evaluate_script(&script) {
+                        warn!(session_id = %session_id, error = %e, "failed to report terminal startup error");
                     }
                 }
             }
@@ -1023,8 +1018,8 @@ impl WebViewManager {
     ///
     /// Called at end of every `sync_from_state` cycle.
     fn dispatch_automation_requests(&mut self, state: &mut AppState) {
-        use std::time::Instant;
         use AutomationCommand::*;
+        use std::time::Instant;
 
         let requests = self.automation.drain_requests();
         if requests.is_empty() {
@@ -1216,7 +1211,7 @@ impl WebViewManager {
             );
 
             if needs_loaded && !self.automation.is_page_loaded(pane_id) {
-                if req.wait_deadline.map_or(false, |d| Instant::now() < d) {
+                if req.wait_deadline.is_some_and(|d| Instant::now() < d) {
                     requeue.push(req);
                 } else {
                     req.send(Err(page_not_loaded_message(state, pane_id)));
@@ -1245,7 +1240,6 @@ impl WebViewManager {
         state: &mut AppState,
         dock_view: Option<&WebView>,
     ) {
-        use std::time::Instant;
         use AutomationCommand::*;
 
         // Separate dock-targeted requests from everything else.
@@ -1436,11 +1430,11 @@ impl WebViewManager {
         for event in events {
             match event {
                 ShellEvent::UrlChanged { pane_id, url } => {
-                    if let Some(view) = self.views.get_mut(pane_id) {
-                        if let Ok(parsed) = url.parse() {
-                            view.route = GuestRoute::ExternalUrl(parsed);
-                            view.route_key = url.clone();
-                        }
+                    if let Some(view) = self.views.get_mut(pane_id)
+                        && let Ok(parsed) = url.parse()
+                    {
+                        view.route = GuestRoute::ExternalUrl(parsed);
+                        view.route_key = url.clone();
                     }
                 }
                 ShellEvent::TerminalInput {
@@ -1498,10 +1492,10 @@ impl WebViewManager {
                             "window.__ATO_HOST__ && window.__ATO_HOST__.resolveSecrets({}, {});",
                             request_id, payload_json
                         );
-                        if let Some(view) = self.views.get_mut(pid) {
-                            if let Err(e) = view.webview.evaluate_script(&script) {
-                                warn!(pane_id = pid, error = %e, "failed to deliver GetSecrets response");
-                            }
+                        if let Some(view) = self.views.get_mut(pid)
+                            && let Err(e) = view.webview.evaluate_script(&script)
+                        {
+                            warn!(pane_id = pid, error = %e, "failed to deliver GetSecrets response");
                         }
                     }
                 }
@@ -1622,7 +1616,10 @@ impl WebViewManager {
                                     }
                                 }
                                 None => {
-                                    error!(pane_id, "terminal_stream session has no log_path and no pending share terminal");
+                                    error!(
+                                        pane_id,
+                                        "terminal_stream session has no log_path and no pending share terminal"
+                                    );
                                     false
                                 }
                             }
@@ -1660,7 +1657,7 @@ impl WebViewManager {
                                 served_by: None,
                                 install_profile_key: None,
                                 auth_flow: false,
-                                bounds: active.bounds.clone(),
+                                bounds: active.bounds,
                             };
                             match self.build_webview(
                                 window,
@@ -1972,10 +1969,10 @@ impl WebViewManager {
         // re-queue — this is the gate that breaks the infinite retry loop.
         // navigate_to_url() always sets Launching, so the user can explicitly retry by
         // re-entering the URL in the omnibar.
-        if let Some(active) = state.active_web_pane() {
-            if active.session == WebSessionState::LaunchFailed {
-                return;
-            }
+        if let Some(active) = state.active_web_pane()
+            && active.session == WebSessionState::LaunchFailed
+        {
+            return;
         }
 
         // Second gate: if a config modal is open for THIS handle, the
@@ -1984,20 +1981,20 @@ impl WebViewManager {
         // cursor. The Save handler clears `pending_config`, which
         // collapses this guard on the next render and re-arms the
         // launch with the freshly stored secrets.
-        if let Some(pending) = &state.pending_config {
-            if pending.handle == handle {
-                return;
-            }
+        if let Some(pending) = &state.pending_config
+            && pending.handle == handle
+        {
+            return;
         }
 
         // Same gate, mirror for E302 consent: if the consent modal is
         // open for THIS handle, the user is mid-decision. The Approve
         // handler clears `pending_consent` and marks the retry budget;
         // both branches collapse this guard on the next render.
-        if let Some(pending) = &state.pending_consent {
-            if pending.handle == handle {
-                return;
-            }
+        if let Some(pending) = &state.pending_consent
+            && pending.handle == handle
+        {
+            return;
         }
 
         // #117 — same gate for the unified resolution modal. Without
@@ -2011,10 +2008,10 @@ impl WebViewManager {
         // Submit/Cancel handlers clear `pending_resolution`, which
         // collapses this guard on the next render so the freshly-
         // resolved retry can fire exactly once.
-        if let Some(pending) = &state.pending_resolution {
-            if pending.handle == handle {
-                return;
-            }
+        if let Some(pending) = &state.pending_resolution
+            && pending.handle == handle
+        {
+            return;
         }
 
         info!(pane_id, handle, "queuing guest session launch");
@@ -2103,10 +2100,10 @@ impl WebViewManager {
                 info!(handle = %handle, route_key = %result.route_key, "guest session launched");
             }
 
-            if let Err(error) = sender.send(result) {
-                if let Ok(session) = error.0.session {
-                    let _ = stop_guest_session(&session.session_id);
-                }
+            if let Err(error) = sender.send(result)
+                && let Ok(session) = error.0.session
+            {
+                let _ = stop_guest_session(&session.session_id);
             }
         });
 
@@ -2430,7 +2427,7 @@ impl WebViewManager {
         // so ato.run server can render Desktop-specific UX (Launch
         // buttons, no "Download Desktop" promo, etc.) without
         // round-tripping through JS detection.
-        builder = builder.with_user_agent(&format!(
+        builder = builder.with_user_agent(format!(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
              (KHTML, like Gecko) Version/17.0 Safari/605.1.15 AtoDesktop/{}",
             env!("CARGO_PKG_VERSION")
@@ -2685,10 +2682,10 @@ impl WebViewManager {
                 // those URLs off to the system browser.
                 if auth_policy.classify(&uri) == AuthMode::BrowserRequired && !auth_flow {
                     let pane_id = pane_binding.load(Ordering::Relaxed);
-                    if let Ok(mut q) = signals.lock() {
-                        if !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
-                            q.push(AuthHandoffSignal { pane_id, url: uri });
-                        }
+                    if let Ok(mut q) = signals.lock()
+                        && !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id)
+                    {
+                        q.push(AuthHandoffSignal { pane_id, url: uri });
                     }
                     false // block navigation inside WebView
                 } else {
@@ -3258,18 +3255,18 @@ impl WebViewManager {
             pane_id, cached, visible
         ));
 
-        if let Some(view) = self.views.get_mut(&pane_id) {
-            if let Err(error) = view.set_visible(visible) {
-                state.push_activity(
-                    ActivityTone::Error,
-                    format!("Failed to update child webview visibility: {error}"),
-                );
-                log_devtools(format!(
-                    "visibility change failed pane={} to={} error={error}",
-                    pane_id, visible
-                ));
-                return;
-            }
+        if let Some(view) = self.views.get_mut(&pane_id)
+            && let Err(error) = view.set_visible(visible)
+        {
+            state.push_activity(
+                ActivityTone::Error,
+                format!("Failed to update child webview visibility: {error}"),
+            );
+            log_devtools(format!(
+                "visibility change failed pane={} to={} error={error}",
+                pane_id, visible
+            ));
+            return;
         }
 
         self.visibility_cache.insert(pane_id, visible);
@@ -4208,32 +4205,6 @@ fn rect_to_bounds(rect: Rect) -> PaneBounds {
     }
 }
 
-fn resolve_icon_source_for_payload(raw: &str) -> Option<String> {
-    if raw.starts_with("http://")
-        || raw.starts_with("https://")
-        || raw.starts_with("data:")
-        || raw.starts_with("file://")
-    {
-        return Some(raw.to_string());
-    }
-    let bytes = std::fs::read(raw).ok()?;
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let ext = std::path::Path::new(raw)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png");
-    let mime = match ext.to_lowercase().as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        _ => "image/png",
-    };
-    Some(format!("data:{mime};base64,{encoded}"))
-}
-
 fn page_not_loaded_message(state: &AppState, pane_id: PaneId) -> String {
     let Some(inspector) = state.capsule_inspector_by_pane_id(pane_id) else {
         return "page not yet loaded".to_string();
@@ -4326,13 +4297,6 @@ fn web_session_state_label(state: crate::state::WebSessionState) -> &'static str
     }
 }
 
-fn activity_tone_label(tone: crate::state::ActivityTone) -> &'static str {
-    match tone {
-        crate::state::ActivityTone::Info => "info",
-        crate::state::ActivityTone::Warning => "warning",
-        crate::state::ActivityTone::Error => "error",
-    }
-}
 #[cfg(target_os = "macos")]
 fn install_macos_frame_host(webview: &WebView) -> Result<Retained<NSView>> {
     let mtm =
@@ -4960,8 +4924,6 @@ fn mime_for_path(path: &Path) -> &'static str {
     }
 }
 
-/// Decode a standard base64 string into bytes.
-
 // ── Apply helpers (shared between UI handlers and MCP tool dispatch) ─────────
 
 /// Approve the pending ExecutionPlan consent for `handle`: invoke
@@ -5138,8 +5100,8 @@ pub(crate) fn dispatch_automation_command(
     pane_id: usize,
     host: &AutomationHost,
 ) {
-    use std::time::{Duration, Instant};
     use AutomationCommand::*;
+    use std::time::{Duration, Instant};
 
     // Helper: call JS via evaluate_script_with_callback and route result to req.
     macro_rules! js_call {
@@ -5174,7 +5136,8 @@ pub(crate) fn dispatch_automation_command(
         ClickAt { x, y } => {
             js_call!(
                 format!(
-                    "(function(){{var el=document.elementFromPoint({x},{y});if(!el)return JSON.stringify({{ok:false,error:'no element at ({x},{y})'}});el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}}));return JSON.stringify({{ok:true}});}})()"),
+                    "(function(){{var el=document.elementFromPoint({x},{y});if(!el)return JSON.stringify({{ok:false,error:'no element at ({x},{y})'}});el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}}));return JSON.stringify({{ok:true}});}})()"
+                ),
                 req
             );
         }
@@ -5299,37 +5262,37 @@ pub(crate) fn dispatch_automation_command(
                     .unwrap_or(false);
 
                 if found {
-                    if let Ok(mut guard) = tx.lock() {
-                        if let Some(sender) = guard.take() {
-                            let _ = sender.send(Ok(serde_json::json!({ "found": true })));
-                        }
+                    if let Ok(mut guard) = tx.lock()
+                        && let Some(sender) = guard.take()
+                    {
+                        let _ = sender.send(Ok(serde_json::json!({ "found": true })));
                     }
-                } else if deadline.map_or(false, |d| Instant::now() < d) {
+                } else if deadline.is_some_and(|d| Instant::now() < d) {
                     // Re-queue for retry; the foreground polling task retries within 50ms.
                     let remaining_ms = deadline
                         .map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u64)
                         .unwrap_or(0);
-                    if let Ok(mut guard) = tx.lock() {
-                        if let Some(original_tx) = guard.take() {
-                            let new_req = PendingAutomationRequest::new(
-                                pane_id,
-                                WaitFor {
-                                    selector: selector_clone.clone(),
-                                    timeout_ms: remaining_ms,
-                                },
-                                original_tx,
-                            );
-                            host_clone.requeue(vec![new_req]);
-                            host_clone
-                                .has_pending
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
+                    if let Ok(mut guard) = tx.lock()
+                        && let Some(original_tx) = guard.take()
+                    {
+                        let new_req = PendingAutomationRequest::new(
+                            pane_id,
+                            WaitFor {
+                                selector: selector_clone.clone(),
+                                timeout_ms: remaining_ms,
+                            },
+                            original_tx,
+                        );
+                        host_clone.requeue(vec![new_req]);
+                        host_clone
+                            .has_pending
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 } else {
-                    if let Ok(mut guard) = tx.lock() {
-                        if let Some(sender) = guard.take() {
-                            let _ = sender.send(Err("wait_for timed out".into()));
-                        }
+                    if let Ok(mut guard) = tx.lock()
+                        && let Some(sender) = guard.take()
+                    {
+                        let _ = sender.send(Err("wait_for timed out".into()));
                     }
                 }
             }) {
@@ -5343,24 +5306,24 @@ pub(crate) fn dispatch_automation_command(
             std::thread::spawn(
                 move || match inner_rx.recv_timeout(Duration::from_secs(10)) {
                     Ok(Ok(v)) => {
-                        if let Ok(mut guard) = req_tx.lock() {
-                            if let Some(sender) = guard.take() {
-                                let _ = sender.send(Ok(v));
-                            }
+                        if let Ok(mut guard) = req_tx.lock()
+                            && let Some(sender) = guard.take()
+                        {
+                            let _ = sender.send(Ok(v));
                         }
                     }
                     Ok(Err(e)) => {
-                        if let Ok(mut guard) = req_tx.lock() {
-                            if let Some(sender) = guard.take() {
-                                let _ = sender.send(Err(e));
-                            }
+                        if let Ok(mut guard) = req_tx.lock()
+                            && let Some(sender) = guard.take()
+                        {
+                            let _ = sender.send(Err(e));
                         }
                     }
                     Err(_) => {
-                        if let Ok(mut guard) = req_tx.lock() {
-                            if let Some(sender) = guard.take() {
-                                let _ = sender.send(Err("screenshot timed out".into()));
-                            }
+                        if let Ok(mut guard) = req_tx.lock()
+                            && let Some(sender) = guard.take()
+                        {
+                            let _ = sender.send(Err("screenshot timed out".into()));
                         }
                     }
                 },
@@ -6099,7 +6062,9 @@ mod tests {
         impl EnvVarGuard {
             fn set_path(key: &'static str, value: &std::path::Path) -> Self {
                 let previous = std::env::var_os(key);
-                std::env::set_var(key, value);
+                unsafe {
+                    std::env::set_var(key, value);
+                }
                 Self { key, previous }
             }
         }
@@ -6107,9 +6072,13 @@ mod tests {
         impl Drop for EnvVarGuard {
             fn drop(&mut self) {
                 if let Some(value) = &self.previous {
-                    std::env::set_var(self.key, value);
+                    unsafe {
+                        std::env::set_var(self.key, value);
+                    }
                 } else {
-                    std::env::remove_var(self.key);
+                    unsafe {
+                        std::env::remove_var(self.key);
+                    }
                 }
             }
         }

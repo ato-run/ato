@@ -22,8 +22,8 @@ use std::fs;
 use std::path::Path;
 
 use capsule_core::ccp::{
-    classify_schema_version, enforce_ccp_compat, CcpCompat, CcpHeader, HasSchemaVersion,
-    SCHEMA_VERSION,
+    CcpCompat, CcpHeader, HasSchemaVersion, SCHEMA_VERSION, classify_schema_version,
+    enforce_ccp_compat,
 };
 
 const FIXTURE_NAMES: &[&str] = &["bootstrap", "status", "repair"];

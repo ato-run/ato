@@ -34,10 +34,14 @@ use zeroize::Zeroize;
 
 #[derive(Debug, Error)]
 pub enum CredentialError {
-    #[error("credential template references {{{{env.{key}}}}} but '{key}' is not in manifest top-level required_env")]
+    #[error(
+        "credential template references {{{{env.{key}}}}} but '{key}' is not in manifest top-level required_env"
+    )]
     EnvKeyOutOfScope { key: String },
 
-    #[error("credential template references {{{{env.{key}}}}} but the host environment does not set '{key}'")]
+    #[error(
+        "credential template references {{{{env.{key}}}}} but the host environment does not set '{key}'"
+    )]
     EnvKeyMissing { key: String },
 
     #[error(

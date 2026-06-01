@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    derive_install_profile_key, InstallInstanceStore, InstalledAppId, ProfileId,
+    InstallInstanceStore, InstalledAppId, ProfileId, derive_install_profile_key,
 };
 
 use crate::app_control::session::ScopedInstallLifecycleGuard;
@@ -166,7 +166,7 @@ pub(crate) fn execute_launch_command(
 /// Returns `None` if the directory cannot be read or contains no `.capsule` file
 /// (caller falls back to the directory and lets the pipeline surface the error).
 fn find_capsule_in_revision_output(output_dir: &std::path::Path) -> Option<PathBuf> {
-    let entry = std::fs::read_dir(output_dir).ok()?.find_map(|entry| {
+    std::fs::read_dir(output_dir).ok()?.find_map(|entry| {
         let path = entry.ok()?.path();
         if path
             .extension()
@@ -177,8 +177,7 @@ fn find_capsule_in_revision_output(output_dir: &std::path::Path) -> Option<PathB
         } else {
             None
         }
-    });
-    entry
+    })
 }
 
 /// Scan all installed apps and profiles to find the one matching `profile_key`.

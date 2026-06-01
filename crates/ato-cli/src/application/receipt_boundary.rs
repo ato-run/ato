@@ -206,35 +206,35 @@ where
 {
     let sink_for_future = ctx.graph_id_sink.clone();
     let outcome = inner(sink_for_future).await;
-    if let Err(error) = outcome.as_ref() {
-        if let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx) {
-            match write_receipt_document_atomic(&ExecutionReceiptDocument::V2(receipt.clone())) {
-                Ok(path) => {
-                    eprintln!(
-                        "Execution receipt (v2-experimental, {}): {} ({})",
-                        receipt_result_label(receipt.result),
-                        receipt.execution_id,
-                        path.display()
-                    );
-                    // Stable machine-readable line for non-TTY callers (CI, scripts, MCP).
-                    eprintln!("RECEIPT: {}", path.display());
-                }
-                Err(write_err) => {
-                    eprintln!(
-                        "ATO-WARN failed to write partial execution receipt for {} boundary: {write_err}",
-                        ctx.boundary
-                    );
-                }
+    if let Err(error) = outcome.as_ref()
+        && let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx)
+    {
+        match write_receipt_document_atomic(&ExecutionReceiptDocument::V2(receipt.clone())) {
+            Ok(path) => {
+                eprintln!(
+                    "Execution receipt (v2-experimental, {}): {} ({})",
+                    receipt_result_label(receipt.result),
+                    receipt.execution_id,
+                    path.display()
+                );
+                // Stable machine-readable line for non-TTY callers (CI, scripts, MCP).
+                eprintln!("RECEIPT: {}", path.display());
+            }
+            Err(write_err) => {
+                eprintln!(
+                    "ATO-WARN failed to write partial execution receipt for {} boundary: {write_err}",
+                    ctx.boundary
+                );
             }
         }
-        // No envelope means we couldn't classify the error (e.g. plain
-        // string, `anyhow::anyhow!`-only). We deliberately do NOT emit
-        // a partial receipt in that case: there's no typed envelope to
-        // record, and a receipt with only `result: aborted` and no
-        // diagnostic is worse than no receipt because consumers would
-        // think it was emitted by the runtime rather than by the
-        // wrapper.
     }
+    // No envelope means we couldn't classify the error (e.g. plain
+    // string, `anyhow::anyhow!`-only). We deliberately do NOT emit
+    // a partial receipt in that case: there's no typed envelope to
+    // record, and a receipt with only `result: aborted` and no
+    // diagnostic is worse than no receipt because consumers would
+    // think it was emitted by the runtime rather than by the
+    // wrapper.
     outcome
 }
 
@@ -278,6 +278,7 @@ where
 /// callers that don't have access to a `ReceiptEmissionContext` (e.g.
 /// crate-internal tests). Production paths should use the with_ctx
 /// variant so graph-derived declared/resolved ids flow through.
+#[allow(dead_code)]
 pub(crate) fn partial_receipt_for_error(error: &anyhow::Error) -> Option<ExecutionReceiptV2> {
     partial_receipt_for_error_with_ctx(error, &ReceiptEmissionContext::default())
 }

@@ -148,7 +148,7 @@ impl OpenContentWindows {
     /// by the Card Switcher to render its row at overlay spawn time.
     pub fn mru_order(&self) -> Vec<ContentWindowEntry> {
         let mut entries: Vec<ContentWindowEntry> = self.windows.values().cloned().collect();
-        entries.sort_by(|a, b| b.last_focused_at.cmp(&a.last_focused_at));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.last_focused_at));
         entries
     }
     /// The most-recently-focused entry, if any. Used by the capsule

@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 use sha2::{Digest, Sha256};
 use tar::{Builder, EntryType, Header};
@@ -21,11 +21,11 @@ use crate::packers::payload::{
     build_distribution_manifest, manifest_hash, normalize_relative_utf8_path,
     reconstruct_from_chunks,
 };
-use crate::packers::sbom::{generate_embedded_sbom_from_inputs_async, SbomFileInput, SBOM_PATH};
+use crate::packers::sbom::{SBOM_PATH, SbomFileInput, generate_embedded_sbom_from_inputs_async};
 use crate::router::CompatProjectInput;
 use crate::runtime_config;
 use crate::types::signing::{
-    sign_capsule_artifact, CapsuleArtifactSignaturePlaceholder, SignatureJsonContent, StoredKey,
+    CapsuleArtifactSignaturePlaceholder, SignatureJsonContent, StoredKey, sign_capsule_artifact,
 };
 
 const README_CANDIDATES: [&str; 4] = ["README.md", "README.mdx", "README.txt", "README"];
@@ -264,7 +264,7 @@ pub async fn pack(
         (Err(producer_err), Err(writer_err)) => {
             return Err(CapsuleError::Pack(format!(
                 "Payload stream failed: {producer_err}; writer failed: {writer_err}"
-            )))
+            )));
         }
     };
 
@@ -743,11 +743,7 @@ fn append_regular_file_normalized<W: std::io::Write>(
 }
 
 fn normalize_file_mode(mode: u32) -> u32 {
-    if mode & 0o111 != 0 {
-        0o755
-    } else {
-        0o644
-    }
+    if mode & 0o111 != 0 { 0o755 } else { 0o644 }
 }
 
 fn reproducible_mtime_epoch() -> u64 {
@@ -1098,7 +1094,7 @@ fn experimental_v3_pack_enabled() -> CapsuleResult<bool> {
             return Err(CapsuleError::Config(format!(
                 "Failed to read ATO_EXPERIMENTAL_V3_PACK: {}",
                 err
-            )))
+            )));
         }
     };
 
@@ -1126,7 +1122,7 @@ mod tests {
     use tempfile;
     use toml;
 
-    use crate::capsule::{verify_artifact_hash, PayloadManifest};
+    use crate::capsule::{PayloadManifest, verify_artifact_hash};
     use crate::common::hash::sha256_hex;
     use crate::packers::pack_filter::{PackFilter, PublishProfile};
     use crate::packers::payload::reconstruct_from_chunks;
@@ -1136,11 +1132,11 @@ mod tests {
     use crate::types::CapsuleManifest;
 
     use super::{
+        CapsulePackOptions, CasStore, FastCdcWriterConfig, PayloadEntry, PayloadFileEntry,
         build_payload_payload_manifest_bytes_with_cas, collect_payload_entries,
         driver_token_from_runtime, find_nearest_readme_candidate, pack, parse_bool_env,
         required_markers_for_driver, select_payload_roots, select_payload_source_root,
-        validate_payload_contains_project_marker, CapsulePackOptions, CasStore,
-        FastCdcWriterConfig, PayloadEntry, PayloadFileEntry,
+        validate_payload_contains_project_marker,
     };
 
     #[test]
@@ -1269,9 +1265,10 @@ run = "source/main.sh""#,
                 .expect("route manifest");
         let err = select_payload_roots(&decision.plan, &internal_root)
             .expect_err("internal workspace state root must fail");
-        assert!(err
-            .to_string()
-            .contains("refusing to package from workspace internal state root"));
+        assert!(
+            err.to_string()
+                .contains("refusing to package from workspace internal state root")
+        );
     }
 
     #[test]
@@ -1727,15 +1724,21 @@ run = "node server.js"
 
     #[test]
     fn required_markers_for_known_drivers_cover_supported_runtimes() {
-        assert!(required_markers_for_driver("node")
-            .unwrap()
-            .contains(&"package.json"));
-        assert!(required_markers_for_driver("python")
-            .unwrap()
-            .contains(&"pyproject.toml"));
-        assert!(required_markers_for_driver("rust")
-            .unwrap()
-            .contains(&"Cargo.toml"));
+        assert!(
+            required_markers_for_driver("node")
+                .unwrap()
+                .contains(&"package.json")
+        );
+        assert!(
+            required_markers_for_driver("python")
+                .unwrap()
+                .contains(&"pyproject.toml")
+        );
+        assert!(
+            required_markers_for_driver("rust")
+                .unwrap()
+                .contains(&"Cargo.toml")
+        );
         assert!(required_markers_for_driver("native").is_none());
     }
 

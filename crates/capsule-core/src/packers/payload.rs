@@ -70,7 +70,7 @@ pub fn normalize_relative_utf8_path(path: &Path) -> Result<String> {
                 return Err(CapsuleError::Pack(format!(
                     "unsafe relative path in payload: {}",
                     path.display()
-                )))
+                )));
             }
         }
     }

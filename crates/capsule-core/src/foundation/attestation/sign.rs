@@ -6,7 +6,7 @@
 //! shape as `security::signing::sign::StoredKeyRef` so existing keys can
 //! be reused.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::types::{
-    AttestationEnvelope, AttestationStatement, Signature, ATTESTATION_SCHEMA_VERSION,
+    ATTESTATION_SCHEMA_VERSION, AttestationEnvelope, AttestationStatement, Signature,
 };
 
 #[derive(Debug, Error)]

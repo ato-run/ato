@@ -77,11 +77,7 @@ fn show_log(log_path: &PathBuf, tail: Option<usize>) -> Result<()> {
     let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
 
     let start = if let Some(n) = tail {
-        if n >= lines.len() {
-            0
-        } else {
-            lines.len() - n
-        }
+        if n >= lines.len() { 0 } else { lines.len() - n }
     } else {
         0
     };
@@ -112,11 +108,7 @@ fn follow_log(log_path: &PathBuf, tail: Option<usize>, reporter: Arc<CliReporter
         let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
 
         let start = if let Some(n) = tail {
-            if n >= lines.len() {
-                0
-            } else {
-                lines.len() - n
-            }
+            if n >= lines.len() { 0 } else { lines.len() - n }
         } else {
             0
         };
@@ -163,15 +155,17 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &'static str, val: &std::path::Path) -> Self {
             let original = std::env::var_os(key);
-            std::env::set_var(key, val);
+            unsafe {
+                std::env::set_var(key, val);
+            }
             Self { key, original }
         }
     }
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match self.original.take() {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }

@@ -20,10 +20,10 @@
 //! gpui-html's static-lowering scope).
 
 use gpui::prelude::*;
-use gpui::{div, px, IntoElement};
+use gpui::{IntoElement, div, px};
 
 #[cfg(not(target_os = "macos"))]
-use gpui::{point, BoxShadow, Div, Hsla, Stateful, WindowControlArea};
+use gpui::{BoxShadow, Div, Hsla, Stateful, WindowControlArea, point};
 
 use super::super::theme::Theme;
 
@@ -67,10 +67,10 @@ pub(super) fn render_window_controls(
 ) -> impl IntoElement {
     #[cfg(target_os = "macos")]
     {
-        return div()
+        div()
             .w(px(MACOS_TRAFFIC_LIGHT_SPACER_WIDTH))
             .h(px(12.0))
-            .flex_none();
+            .flex_none()
     }
 
     #[cfg(not(target_os = "macos"))]

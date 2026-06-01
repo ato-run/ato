@@ -312,15 +312,14 @@ pub fn run_capsule_smoke(
         });
     }
 
-    if let Some(port) = required_port {
-        if let Err(mut report) =
+    if let Some(port) = required_port
+        && let Err(mut report) =
             wait_for_required_port_with_retry(&mut child, port, PORT_RETRY_TIMEOUT, &stderr_capture)
-        {
-            let _ = kill_child(&mut child);
-            report.stderr_tail =
-                combine_stderr(report.stderr_tail, finish_capture(&mut stderr_capture));
-            return Err(report);
-        }
+    {
+        let _ = kill_child(&mut child);
+        report.stderr_tail =
+            combine_stderr(report.stderr_tail, finish_capture(&mut stderr_capture));
+        return Err(report);
     }
 
     if let Err(mut report) =
@@ -680,13 +679,13 @@ fn prepare_smoke_working_directory(
         let npmrc_path = cwd_path.join(".npmrc");
         if !npmrc_path.exists() {
             let _ = std::fs::write(&npmrc_path, "manage-package-manager-versions=false\n");
-        } else if let Ok(existing) = std::fs::read_to_string(&npmrc_path) {
-            if !existing.contains("manage-package-manager-versions") {
-                let _ = std::fs::write(
-                    &npmrc_path,
-                    format!("{existing}\nmanage-package-manager-versions=false\n"),
-                );
-            }
+        } else if let Ok(existing) = std::fs::read_to_string(&npmrc_path)
+            && !existing.contains("manage-package-manager-versions")
+        {
+            let _ = std::fs::write(
+                &npmrc_path,
+                format!("{existing}\nmanage-package-manager-versions=false\n"),
+            );
         }
         Some(("pnpm", vec!["install"]))
     } else if cwd_path.join("package-lock.json").exists()
@@ -740,13 +739,13 @@ fn prepare_smoke_working_directory(
     }
     // Use the bundled pnpm content-addressable store (fetched during build) so the
     // smoke install resolves from cache rather than downloading from the network.
-    if program == "pnpm" {
-        if let Some(bundled_store) = resolve_bundled_pnpm_store_dir(root) {
-            command.env("pnpm_config_store_dir", &bundled_store);
-            command.arg("--store-dir");
-            command.arg(&bundled_store);
-            command.arg("--prefer-offline");
-        }
+    if program == "pnpm"
+        && let Some(bundled_store) = resolve_bundled_pnpm_store_dir(root)
+    {
+        command.env("pnpm_config_store_dir", &bundled_store);
+        command.arg("--store-dir");
+        command.arg(&bundled_store);
+        command.arg("--prefer-offline");
     }
 
     let output = command.output().map_err(|err| {
@@ -1041,10 +1040,10 @@ fn resolve_path(root: &Path, raw: &str) -> PathBuf {
     if trimmed.starts_with('/') {
         return PathBuf::from(trimmed);
     }
-    if !trimmed.contains('/') {
-        if let Ok(found) = which::which(trimmed) {
-            return found;
-        }
+    if !trimmed.contains('/')
+        && let Ok(found) = which::which(trimmed)
+    {
+        return found;
     }
     root.join(trimmed)
 }
@@ -1241,7 +1240,9 @@ startup_timeout_ms = 0
             health_port: None,
         };
 
-        std::env::set_var("SECRET_HOST_TOKEN", "do-not-leak");
+        unsafe {
+            std::env::set_var("SECRET_HOST_TOKEN", "do-not-leak");
+        }
         let isolated_env = prepare_isolated_host_environment(temp.path()).expect("isolated env");
 
         prepare_smoke_working_directory(temp.path(), &service, &isolated_env)
@@ -1285,7 +1286,9 @@ startup_timeout_ms = 0
         assert!(captured.contains("SECRET_HOST_TOKEN="));
         assert!(!captured.contains("do-not-leak"));
 
-        std::env::remove_var("SECRET_HOST_TOKEN");
+        unsafe {
+            std::env::remove_var("SECRET_HOST_TOKEN");
+        }
     }
 
     #[test]

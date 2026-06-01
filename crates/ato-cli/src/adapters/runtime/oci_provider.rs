@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use capsule_core::CapsuleError;
 use capsule_core::runtime::oci::{
     BollardOciRuntimeClient, OciContainerInspect, OciContainerRequest, OciLogChunk,
     OciNetworkRequest, OciRuntimeClient,
@@ -9,12 +10,11 @@ use capsule_core::types::{
     OciImageResolution, OciPlatform, OciProviderKind, OciProviderMode, OciProviderSemantics,
     OciProviderSubstrate,
 };
-use capsule_core::CapsuleError;
 use std::process::Command;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::adapters::runtime::podman_machine::{parse_podman_machine_list, PodmanMachineStatus};
+use crate::adapters::runtime::podman_machine::{PodmanMachineStatus, parse_podman_machine_list};
 
 // In tests use zero timeouts so the poll loop exits immediately without sleeping.
 #[cfg(not(test))]
@@ -299,7 +299,7 @@ pub(crate) trait OciProvider: Send + Sync {
     async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError>;
 
     async fn create_network(&self, request: &OciNetworkRequest)
-        -> Result<String, OciProviderError>;
+    -> Result<String, OciProviderError>;
 
     async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError>;
 
@@ -378,8 +378,8 @@ pub(crate) enum RuntimeOciProvider {
     DockerCompatible(DockerCompatibleOciProvider<BollardOciRuntimeClient>),
 }
 
-pub(crate) async fn select_ready_runtime_oci_provider(
-) -> Result<RuntimeOciProvider, OciProviderError> {
+pub(crate) async fn select_ready_runtime_oci_provider()
+-> Result<RuntimeOciProvider, OciProviderError> {
     let podman = PodmanProvider::new();
     let podman_ready = podman.ensure_ready().await;
     if podman_ready.is_ok() {
@@ -734,13 +734,13 @@ where
 
         // Extract digest if already embedded in the ref (e.g. "image@sha256:...").
         let ref_digest = extract_digest_from_ref(declared_ref);
-        if let Some(ref digest) = ref_digest {
-            if let Err(reason) = validate_oci_digest_format(digest) {
-                return Err(OciProviderError::ImageRefMalformed {
-                    declared_ref: declared_ref.clone(),
-                    reason,
-                });
-            }
+        if let Some(digest) = &ref_digest
+            && let Err(reason) = validate_oci_digest_format(digest)
+        {
+            return Err(OciProviderError::ImageRefMalformed {
+                declared_ref: declared_ref.clone(),
+                reason,
+            });
         }
 
         // Always call `podman manifest inspect` to get manifest information.
@@ -813,7 +813,7 @@ where
             })
         } else {
             // Single-arch manifest: only usable when we already have the digest from the ref.
-            if let Some(digest) = ref_digest {
+            if let Some(digest) = &ref_digest {
                 let platform = request.requested_platform.clone().ok_or_else(|| {
                     OciProviderError::ImagePlatformUnsupported {
                         declared_ref: declared_ref.clone(),
@@ -823,7 +823,7 @@ where
                 })?;
                 Ok(OciResolvedImage {
                     declared_ref: declared_ref.clone(),
-                    resolved_digest: digest,
+                    resolved_digest: digest.clone(),
                     platform,
                     media_type: parsed.media_type,
                     provider_semantics: self.semantics.clone(),
@@ -992,7 +992,7 @@ where
     ) -> Result<String, OciProviderError> {
         let mut args: Vec<String> = vec!["create".into(), "--name".into(), request.name.clone()];
         // Pass --platform when creating an emulated (non-native) container.
-        if let Some(ref platform) = request.platform {
+        if let Some(platform) = &request.platform {
             let host = auto_select_platform();
             if platform.architecture != host.architecture {
                 args.push("--platform".into());
@@ -1714,13 +1714,12 @@ fn parse_podman_inspect(json: &str) -> Result<OciContainerInspect, OciProviderEr
             let Ok(container_port) = port_raw.parse::<u16>() else {
                 continue;
             };
-            if let Some(binding) = bindings.as_array().and_then(|arr| arr.first()) {
-                if let Some(hp) = binding["HostPort"]
+            if let Some(binding) = bindings.as_array().and_then(|arr| arr.first())
+                && let Some(hp) = binding["HostPort"]
                     .as_str()
                     .and_then(|s| s.parse::<u16>().ok())
-                {
-                    host_ports.insert(container_port, hp);
-                }
+            {
+                host_ports.insert(container_port, hp);
             }
         }
     }
@@ -1757,8 +1756,8 @@ impl DockerCompatibleOciProvider<BollardOciRuntimeClient> {
     }
 }
 
-async fn connect_ready_docker_compatible_provider(
-) -> Result<DockerCompatibleOciProvider<BollardOciRuntimeClient>, OciProviderError> {
+async fn connect_ready_docker_compatible_provider()
+-> Result<DockerCompatibleOciProvider<BollardOciRuntimeClient>, OciProviderError> {
     let provider = DockerCompatibleOciProvider::connect_default(docker_compatible_semantics())?;
     let version =
         provider
@@ -2428,7 +2427,7 @@ impl OciProvider for FakeOciProvider {
             .lock()
             .unwrap()
             .push(format!("resolve:{}", request.declared_ref));
-        if let Some(ref err) = self.resolve_error {
+        if let Some(err) = &self.resolve_error {
             return Err(err.clone());
         }
         Ok(OciResolvedImage {
@@ -2887,10 +2886,12 @@ mod tests {
             probe.semantics.substrate,
             OciProviderSubstrate::PodmanMachine
         );
-        assert!(probe
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("not running")));
+        assert!(
+            probe
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("not running"))
+        );
         assert_eq!(
             probe.clone().require_ready().expect_err("not ready").code(),
             "oci_provider_not_ready"

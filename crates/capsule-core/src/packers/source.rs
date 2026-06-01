@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::engine;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile;
-use crate::packers::bundle::{build_bundle, PackBundleArgs};
+use crate::packers::bundle::{PackBundleArgs, build_bundle};
 use crate::packers::capsule as capsule_packer;
 use crate::packers::pack_filter::PublishProfile;
 use crate::resource::cas::create_cas_client_from_env;

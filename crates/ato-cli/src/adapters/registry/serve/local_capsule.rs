@@ -112,10 +112,10 @@ pub(super) async fn handle_run_local_capsule(
     }
     env_overrides.extend(requested_env_overrides);
 
-    if !env_overrides.contains_key("ATO_CONTROL_PLANE_PORT") {
-        if let Some(port) = allocate_loopback_port() {
-            env_overrides.insert("ATO_CONTROL_PLANE_PORT".to_string(), port.to_string());
-        }
+    if !env_overrides.contains_key("ATO_CONTROL_PLANE_PORT")
+        && let Some(port) = allocate_loopback_port()
+    {
+        env_overrides.insert("ATO_CONTROL_PLANE_PORT".to_string(), port.to_string());
     }
     drop(_guard);
     let Some(local_artifact) = local_artifact else {
@@ -221,14 +221,14 @@ pub(super) async fn handle_run_local_capsule(
         }
     };
     let _ = consent_manifest_tmpdir.as_ref();
-    if let Some(compiled) = compiled {
-        if let Err(err) = crate::consent_store::seed_consent(&compiled.execution_plan) {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "run_consent_seed_failed",
-                &format!("failed to seed execution consent: {}", err),
-            );
-        }
+    if let Some(compiled) = compiled
+        && let Err(err) = crate::consent_store::seed_consent(&compiled.execution_plan)
+    {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "run_consent_seed_failed",
+            &format!("failed to seed execution consent: {}", err),
+        );
     }
     let mut cmd = std::process::Command::new(ato_path);
     cmd.arg("run")
@@ -274,14 +274,14 @@ pub(super) async fn handle_run_local_capsule(
         .unwrap_or_else(|| now.timestamp_millis() * 1_000_000);
     let process_id = format!("capsule-{}-{}", nonce, std::process::id());
     let log_path = process_log_path(&process_id);
-    if let Some(parent) = log_path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "run_spawn_failed",
-                &format!("failed to prepare log directory: {}", err),
-            );
-        }
+    if let Some(parent) = log_path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "run_spawn_failed",
+            &format!("failed to prepare log directory: {}", err),
+        );
     }
     let log_file = match std::fs::OpenOptions::new()
         .create(true)
@@ -475,10 +475,10 @@ pub(super) async fn handle_delete_local_capsule(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
-    if let Some(version) = delete_version.as_deref() {
-        if let Err(err) = validate_version(version) {
-            return json_error(StatusCode::BAD_REQUEST, "invalid_version", &err.to_string());
-        }
+    if let Some(version) = delete_version.as_deref()
+        && let Err(err) = validate_version(version)
+    {
+        return json_error(StatusCode::BAD_REQUEST, "invalid_version", &err.to_string());
     }
 
     let scoped_id = format!("{}/{}", publisher, slug);
@@ -489,7 +489,7 @@ pub(super) async fn handle_delete_local_capsule(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_manager_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     let processes = match process_manager.list_processes() {
@@ -499,7 +499,7 @@ pub(super) async fn handle_delete_local_capsule(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_list_failed",
                 &err.to_string(),
-            )
+            );
         }
     };
     if processes.iter().any(|process| {

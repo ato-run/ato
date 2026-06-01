@@ -103,7 +103,7 @@ pub(crate) fn looks_like_source_project(dir: &Path) -> bool {
 mod tests {
     use super::*;
     use capsule_core::router::{
-        execution_descriptor_from_manifest_parts, ExecutionProfile, ManifestData,
+        ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts,
     };
     use std::collections::HashMap;
     use std::fs;

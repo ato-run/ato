@@ -139,27 +139,26 @@ mod tests {
             return true;
         }
 
-        if let Some(domain) = pattern.strip_prefix("*.") {
-            if addr.ends_with(domain) {
-                let base_with_dot = format!(".{}", domain);
-                if addr.contains(&base_with_dot) {
-                    return true;
-                }
+        if let Some(domain) = pattern.strip_prefix("*.")
+            && addr.ends_with(domain)
+        {
+            let base_with_dot = format!(".{}", domain);
+            if addr.contains(&base_with_dot) {
+                return true;
             }
         }
 
         if pattern.contains('/') {
             let parts: Vec<&str> = pattern.split('/').collect();
-            if parts.len() == 2 {
-                if let (Ok(ip), Ok(mask)) = (
+            if parts.len() == 2
+                && let (Ok(ip), Ok(mask)) = (
                     parts[0].parse::<std::net::Ipv4Addr>(),
                     parts[1].parse::<u8>(),
-                ) {
-                    if let Ok(addr_ip) = addr.parse::<std::net::Ipv4Addr>() {
-                        let host_mask = !0u32 << (32 - mask);
-                        return (addr_ip.to_bits() & host_mask) == (ip.to_bits() & host_mask);
-                    }
-                }
+                )
+                && let Ok(addr_ip) = addr.parse::<std::net::Ipv4Addr>()
+            {
+                let host_mask = !0u32 << (32 - mask);
+                return (addr_ip.to_bits() & host_mask) == (ip.to_bits() & host_mask);
             }
         }
 

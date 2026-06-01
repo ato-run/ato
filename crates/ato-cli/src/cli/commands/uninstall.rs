@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::common::paths::nacelle_home_dir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,13 +377,13 @@ fn desktop_integration_targets(home: &Path) -> Vec<PathBuf> {
 }
 
 fn display_path(path: &Path, home: &Option<PathBuf>) -> String {
-    if let Some(home_dir) = home {
-        if let Ok(relative) = path.strip_prefix(home_dir) {
-            if relative.as_os_str().is_empty() {
-                return "~".to_string();
-            }
-            return format!("~/{}", relative.display());
+    if let Some(home_dir) = home
+        && let Ok(relative) = path.strip_prefix(home_dir)
+    {
+        if relative.as_os_str().is_empty() {
+            return "~".to_string();
         }
+        return format!("~/{}", relative.display());
     }
     path.display().to_string()
 }
@@ -591,8 +591,8 @@ fn detect_workspace_build(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_removal_plan, detect_homebrew_install, detect_workspace_build,
-        remove_ato_home_if_empty, UninstallOptions,
+        UninstallOptions, build_removal_plan, detect_homebrew_install, detect_workspace_build,
+        remove_ato_home_if_empty,
     };
     use serial_test::serial;
     use std::fs;
@@ -678,22 +678,34 @@ mod tests {
 
         let old_home = std::env::var_os("HOME");
         let old_ato_home = std::env::var_os("ATO_HOME");
-        std::env::set_var("HOME", &home_dir);
-        std::env::set_var("ATO_HOME", &ato_home);
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+        unsafe {
+            std::env::set_var("ATO_HOME", &ato_home);
+        }
 
         let mut purge_options = options();
         purge_options.purge = true;
         let plan = build_removal_plan(&install_dir, purge_options);
 
         if let Some(old_home) = old_home {
-            std::env::set_var("HOME", old_home);
+            unsafe {
+                std::env::set_var("HOME", old_home);
+            }
         } else {
-            std::env::remove_var("HOME");
+            unsafe {
+                std::env::remove_var("HOME");
+            }
         }
         if let Some(old_ato_home) = old_ato_home {
-            std::env::set_var("ATO_HOME", old_ato_home);
+            unsafe {
+                std::env::set_var("ATO_HOME", old_ato_home);
+            }
         } else {
-            std::env::remove_var("ATO_HOME");
+            unsafe {
+                std::env::remove_var("ATO_HOME");
+            }
         }
 
         let planned = plan

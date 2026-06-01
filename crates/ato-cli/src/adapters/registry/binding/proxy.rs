@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, Response, StatusCode};
+use axum::http::{HeaderMap, Response, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::any;
-use axum::Router;
 use chrono::Utc;
 use rcgen::generate_simple_self_signed;
 use reqwest::redirect::Policy;
@@ -389,12 +389,12 @@ fn install_system_trust_for_cert(cert_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_tls_in_dir, build_proxy_router, load_tls_bootstrap_from_dir, ProxyState,
+        ProxyState, bootstrap_tls_in_dir, build_proxy_router, load_tls_bootstrap_from_dir,
     };
-    use axum::body::{to_bytes, Body};
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use tower::util::ServiceExt;
 
     #[test]

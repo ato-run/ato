@@ -176,11 +176,10 @@ impl OciSessionStore {
         })? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                match self.read_record_from_path(&path) {
-                    Ok(record) => records.push(record),
-                    Err(_) => {} // Skip unparseable records
-                }
+            if path.extension().is_some_and(|e| e == "json")
+                && let Ok(record) = self.read_record_from_path(&path)
+            {
+                records.push(record);
             }
         }
         Ok(records)
@@ -212,6 +211,7 @@ impl OciSessionStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn mark_stopped(&self, session_id: &str) -> Result<()> {
         self.set_status(session_id, OciSessionStatus::Stopped)
     }
@@ -427,7 +427,7 @@ impl RunningContainerGuard {
 }
 
 pub fn podman_machine_status() -> PodmanMachineStatus {
-    podman_machine_status_with(|args| run_podman_machine_command(args))
+    podman_machine_status_with(run_podman_machine_command)
 }
 
 fn podman_machine_status_with<F>(mut run: F) -> PodmanMachineStatus
@@ -447,9 +447,9 @@ where
 pub fn stop_podman_machines_if_idle(store: &OciSessionStore) -> PodmanMachineStopResult {
     stop_podman_machines_if_idle_with(
         store,
-        |args| run_podman_machine_command(args),
-        |args| run_podman_machine_command(args),
-        |args| run_podman_machine_command(args),
+        run_podman_machine_command,
+        run_podman_machine_command,
+        run_podman_machine_command,
     )
 }
 
@@ -701,7 +701,7 @@ fn unix_to_ymdhms(mut secs: u64) -> (u64, u64, u64, u64, u64, u64) {
 }
 
 fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -722,17 +722,22 @@ mod tests {
         fn set(key: &str, value: &str) -> Self {
             let previous = std::env::var_os(key);
             #[allow(deprecated)]
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self {
                 key: key.to_string(),
                 previous,
             }
         }
 
+        #[allow(dead_code)]
         fn remove(key: &str) -> Self {
             let previous = std::env::var_os(key);
             #[allow(deprecated)]
-            std::env::remove_var(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
             Self {
                 key: key.to_string(),
                 previous,
@@ -744,9 +749,13 @@ mod tests {
         fn drop(&mut self) {
             match self.previous.as_ref() {
                 #[allow(deprecated)]
-                Some(v) => std::env::set_var(&self.key, v),
+                Some(v) => unsafe {
+                    std::env::set_var(&self.key, v);
+                },
                 #[allow(deprecated)]
-                None => std::env::remove_var(&self.key),
+                None => unsafe {
+                    std::env::remove_var(&self.key);
+                },
             }
         }
     }

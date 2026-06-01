@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    derive_install_profile_key, InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId,
+    InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
 };
 use serde::Serialize;
 
@@ -119,7 +119,7 @@ fn find_profile_revisions(
 mod tests {
     use super::*;
     use capsule_core::foundation::install_lifecycle::{
-        derive_install_profile_key, AppRecord, LaunchProfile,
+        AppRecord, LaunchProfile, derive_install_profile_key,
     };
     use serial_test::serial;
 
@@ -217,7 +217,7 @@ mod tests {
     #[serial]
     fn revisions_command_succeeds_for_valid_profile() {
         let dir = tempfile::tempdir().unwrap();
-        let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
+        let store = InstallInstanceStore::new(dir.path().join("instances")).unwrap();
         let app_id = InstalledAppId::new("app_test_rvcmd");
         let profile_id = ProfileId::new("default");
         store
@@ -259,12 +259,16 @@ mod tests {
             .unwrap();
 
         let ipk = derive_install_profile_key(&app_id, &profile_id);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let result = execute_revisions_command(RevisionsArgs {
             install_profile_key: ipk.as_str().to_owned(),
             json: false,
         });
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
         assert!(result.is_ok(), "revisions command failed: {:?}", result);
     }
 

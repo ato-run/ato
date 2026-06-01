@@ -11,17 +11,17 @@ use tracing::debug;
 
 use crate::error::{CapsuleError, Result};
 use crate::importer::{
-    probe_required_deno_lockfile, probe_required_node_lockfile, probe_required_python_lockfile,
-    ImporterId, ProbeResult,
+    ImporterId, ProbeResult, probe_required_deno_lockfile, probe_required_node_lockfile,
+    probe_required_python_lockfile,
 };
 use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
 
 use super::lockfile_support::{cached_sha256, ensure_node, ensure_uv, metadata_cache_path};
 use super::{
-    artifact_root, read_dependencies_path, read_target_entrypoint, reset_dir, sha256_dir,
-    ArtifactEntry, RuntimeArtifact, RuntimeEntry, RuntimePlatform, ToolArtifact, ToolTargets,
-    BUN_VERSION, PNPM_VERSION, UV_VERSION, YARN_CLASSIC_VERSION,
+    ArtifactEntry, BUN_VERSION, PNPM_VERSION, RuntimeArtifact, RuntimeEntry, RuntimePlatform,
+    ToolArtifact, ToolTargets, UV_VERSION, YARN_CLASSIC_VERSION, artifact_root,
+    read_dependencies_path, read_target_entrypoint, reset_dir, sha256_dir,
 };
 use crate::common::hash::sha256_hex;
 
@@ -321,7 +321,7 @@ pub(super) async fn prepare_node_artifacts(
         return Ok(Vec::new());
     }
 
-    use crate::contract::tools::{ensure_runtime_tool, ToolDeps, PNPM};
+    use crate::contract::tools::{PNPM, ToolDeps, ensure_runtime_tool};
     let node_path = ensure_node(node_version, reporter.clone()).await?;
     let pnpm_handle = ensure_runtime_tool(
         &PNPM,
@@ -665,7 +665,7 @@ pub(super) fn deno_artifact_filename(os: &str, arch: &str) -> Result<String> {
             return Err(CapsuleError::Pack(format!(
                 "Unsupported Deno platform: {} {}",
                 os, arch
-            )))
+            )));
         }
     };
     Ok(format!("deno-{}.zip", target))

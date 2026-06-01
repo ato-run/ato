@@ -3,14 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{self, closure_info, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue, closure_info};
 use capsule_core::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::application::source_inference::{
-    write_sidecar, MaterializationMode, SourceInferenceInputKind, SourceInferenceProvenance,
-    SourceInferenceProvenanceKind, SourceInferenceResult, WorkspaceMaterialization,
+    MaterializationMode, SourceInferenceInputKind, SourceInferenceProvenance,
+    SourceInferenceProvenanceKind, SourceInferenceResult, WorkspaceMaterialization, write_sidecar,
 };
 use crate::application::workspace::state;
 
@@ -363,10 +363,10 @@ fn build_field_index(provenance: &[SourceInferenceProvenance]) -> Vec<CachedFiel
             if !existing.kinds.contains(&record.kind) {
                 existing.kinds.push(record.kind);
             }
-            if let Some(note) = record.note.as_ref() {
-                if !existing.notes.contains(note) {
-                    existing.notes.push(note.clone());
-                }
+            if let Some(note) = record.note.as_ref()
+                && !existing.notes.contains(note)
+            {
+                existing.notes.push(note.clone());
             }
             continue;
         }
@@ -555,9 +555,11 @@ mod tests {
 
         let error = validate_durable_workspace_lock(&lock)
             .expect_err("missing process without unresolved marker must fail");
-        assert!(error
-            .to_string()
-            .contains("either resolve contract.process or emit an inspectable unresolved marker"));
+        assert!(
+            error.to_string().contains(
+                "either resolve contract.process or emit an inspectable unresolved marker"
+            )
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 [package]
 name = "ato-net"
 version = "0.5.2"
-edition = "2021"
-rust-version = "1.82"
+edition = "2024"
+rust-version = "1.96"
 license = "MPL-2.0"
 description = "ato network plane: shared types + control-plane client for ato-netd. Per #294 / #296, this crate hosts the API surface; module placeholders for resolver / policy / proxy_core / receipt / stable_origin are filled in by follow-up slices (B–G)."
 repository = "https://github.com/ato-run/ato"

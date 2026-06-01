@@ -35,8 +35,8 @@ use std::collections::HashMap;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, AnyElement, BoxShadow, Context, Entity, FontWeight, IntoElement,
-    MouseButton, Window,
+    AnyElement, BoxShadow, Context, Entity, FontWeight, IntoElement, MouseButton, Window, div,
+    hsla, point, px,
 };
 use gpui_component::input::{Input, InputState};
 
@@ -44,8 +44,8 @@ use capsule_wire::config::{ConfigField, ConfigKind};
 
 use crate::app::{CancelConfigForm, SaveConfigForm};
 use crate::state::PendingConfigRequest;
-use crate::ui::theme::Theme;
 use crate::ui::DesktopShell;
+use crate::ui::theme::Theme;
 
 /// Per-modal view state. One instance lives in `DesktopShell` for as
 /// long as `AppState::pending_config` is `Some`.
@@ -258,15 +258,15 @@ fn render_field_row(
             ),
     );
 
-    if let Some(description) = &field.description {
-        if !description.is_empty() {
-            row = row.child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_secondary)
-                    .child(description.clone()),
-            );
-        }
+    if let Some(description) = &field.description
+        && !description.is_empty()
+    {
+        row = row.child(
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.text_secondary)
+                .child(description.clone()),
+        );
     }
 
     // The Input widget inherits its text color from `gpui_component`'s

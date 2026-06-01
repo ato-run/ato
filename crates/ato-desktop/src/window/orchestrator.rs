@@ -10,9 +10,9 @@ use std::rc::Rc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, linear_color_stop, linear_gradient, px, rgb, size, AnyWindowHandle, App, Bounds,
-    Context, Entity, FontWeight, IntoElement, Render, SharedString, WindowBounds,
-    WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, Entity, FontWeight, IntoElement, Render, SharedString,
+    WindowBounds, WindowDecorations, WindowOptions, div, hsla, linear_color_stop, linear_gradient,
+    px, rgb, size,
 };
 use gpui_component::{Icon, IconName, TitleBar};
 
@@ -37,10 +37,6 @@ impl AppWindowShell {
             title: SharedString::from(short_title_from_route(route)),
             route_label: SharedString::from(route.label()),
         }
-    }
-
-    pub fn route_label(&self) -> SharedString {
-        self.route_label.clone()
     }
 }
 
@@ -640,19 +636,6 @@ fn start_capsule_input_for_route(
     }
 }
 
-pub fn open_app_window_from_materialized_record(
-    cx: &mut App,
-    route: GuestRoute,
-    record_path: PathBuf,
-) -> Result<AnyWindowHandle> {
-    let launch_configs: Vec<(String, String)> = cx
-        .try_global::<crate::window::launch_window::PendingLaunchConfigs>()
-        .map(|g| g.0.clone())
-        .unwrap_or_default();
-    cx.set_global(crate::window::launch_window::PendingLaunchConfigs(vec![]));
-    open_app_window_from_materialized_record_with_configs(cx, route, record_path, launch_configs)
-}
-
 pub fn open_app_window_from_materialized_record_with_configs(
     cx: &mut App,
     route: GuestRoute,
@@ -810,7 +793,7 @@ fn open_app_window_with_capsule_input(
             // registry doesn't accumulate stale entries.
             cx.global_mut::<crate::state::AppWindowRegistry>()
                 .close(app_window_id);
-            return Err(err.into());
+            return Err(err);
         }
     };
 
@@ -826,7 +809,7 @@ fn open_app_window_with_capsule_input(
         "open_app_window_with_capsule_input: AppWindow created"
     );
     if let Some(shell) = capsule_shell_slot.borrow().clone() {
-        let _ = shell.update(cx, |shell, _cx| shell.set_content_window_id(gpui_window_id));
+        shell.update(cx, |shell, _cx| shell.set_content_window_id(gpui_window_id));
         // Register this real `AppCapsuleShell` as a Focus-mode guest
         // automation pane (#370) so MCP `browser_tabs` lists it and
         // `browser_snapshot` / `browser_take_screenshot` can target its

@@ -84,7 +84,7 @@ pub struct RuntimeSettings {
 }
 
 /// Backend engine selection for the three capsule execution categories.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct BackendEngineSettings {
     /// Engine for source-execution capsules (e.g. nacelle).
     #[serde(default)]
@@ -95,16 +95,6 @@ pub struct BackendEngineSettings {
     /// Engine for Wasm capsules (e.g. wasmtime).
     #[serde(default)]
     pub wasm: WasmBackendEngine,
-}
-
-impl Default for BackendEngineSettings {
-    fn default() -> Self {
-        Self {
-            source: SourceBackendEngine::default(),
-            oci: OciBackendEngine::default(),
-            wasm: WasmBackendEngine::default(),
-        }
-    }
 }
 
 /// Source execution engine.
@@ -287,7 +277,7 @@ pub struct DesktopSettings {
     pub pinned_capsules: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct OnboardingSettings {
     #[serde(default)]
     pub completed: bool,
@@ -295,16 +285,6 @@ pub struct OnboardingSettings {
     pub skipped: bool,
     #[serde(default)]
     pub version: u16,
-}
-
-impl Default for OnboardingSettings {
-    fn default() -> Self {
-        Self {
-            completed: false,
-            skipped: false,
-            version: 0,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -872,7 +852,7 @@ pub struct SecretStore {
 pub(crate) use crate::secret_bridge::BridgeError;
 
 impl SecretStore {
-    pub fn canonicalize_handle<'a>(handle: &'a str) -> &'a str {
+    pub fn canonicalize_handle(handle: &str) -> &str {
         let last_sep = handle.rfind('/');
         let search_start = last_sep.map_or(0, |p| p + 1);
         if let Some(pos) = handle[search_start..].find('@') {
@@ -951,8 +931,8 @@ impl SecretStore {
 
     /// Rebuild `secret_grant_keys_by_handle` cache from the bridge.
     /// Inverts per-key allow lists into per-handle key lists.
-    pub fn build_grant_keys_cache(
-    ) -> Result<std::collections::HashMap<String, Vec<String>>, BridgeError> {
+    pub fn build_grant_keys_cache()
+    -> Result<std::collections::HashMap<String, Vec<String>>, BridgeError> {
         let entries = crate::secret_bridge::CliSecretBridge::list()?;
         let mut cache: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
@@ -970,10 +950,10 @@ impl SecretStore {
 /// Return a display path for the age-based credential store.
 pub fn secrets_path_display() -> Option<String> {
     let ato_home = ato_path("credentials/secrets/default.age").ok()?;
-    if let Ok(home) = home_dir_path() {
-        if let Ok(rel) = ato_home.strip_prefix(&home) {
-            return Some(format!("~/{}", rel.display()));
-        }
+    if let Ok(home) = home_dir_path()
+        && let Ok(rel) = ato_home.strip_prefix(&home)
+    {
+        return Some(format!("~/{}", rel.display()));
     }
     Some(ato_home.display().to_string())
 }
@@ -1001,9 +981,6 @@ pub fn load_secrets() -> SecretStore {
         }
     }
 }
-
-/// No-op kept for API compat — the bridge persists on every mutation.
-pub fn save_secrets(_store: &SecretStore) {}
 
 /// Migrate legacy `secrets.json` entries into the age store.
 ///
@@ -1240,10 +1217,6 @@ impl CapsulePolicyOverrideStore {
     pub fn override_for_mut(&mut self, handle: &str) -> &mut CapsulePolicyOverride {
         self.overrides.entry(handle.to_string()).or_default()
     }
-
-    pub fn reset(&mut self, handle: &str) {
-        self.overrides.remove(handle);
-    }
 }
 
 fn capsule_policy_overrides_path() -> Option<PathBuf> {
@@ -1267,28 +1240,6 @@ pub fn load_capsule_policy_overrides() -> CapsulePolicyOverrideStore {
             }
         },
         Err(_) => CapsulePolicyOverrideStore::default(),
-    }
-}
-
-pub fn save_capsule_policy_overrides(store: &CapsulePolicyOverrideStore) {
-    let Some(path) = capsule_policy_overrides_path() else {
-        warn!("Cannot determine home directory, capsule policy overrides not saved");
-        return;
-    };
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    match serde_json::to_string_pretty(store) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                warn!(path = %path.display(), error = %e, "Failed to write capsule policy override store");
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "Failed to serialize capsule policy override store");
-        }
     }
 }
 

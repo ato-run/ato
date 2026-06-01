@@ -13,18 +13,18 @@ use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use capsule_core::CapsuleReporter;
 use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{OciContainerRequest, OciLogChunk, OciPortSpec};
-use capsule_core::CapsuleReporter;
 
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::oci_provider::{
-    build_digest_pull_ref, DefaultOciProviderSelector, OciProvider, OciProviderError,
-    OciProviderSelector, SystemCommandRunner,
+    DefaultOciProviderSelector, OciProvider, OciProviderError, OciProviderSelector,
+    build_digest_pull_ref,
 };
 use crate::application::preflight::{
-    preflight_oci_provider_readiness, OciProviderReadinessMode, OciProviderReadinessRequirements,
+    OciProviderReadinessMode, OciProviderReadinessRequirements, preflight_oci_provider_readiness,
 };
 use crate::reporters::CliReporter;
 
@@ -110,13 +110,12 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
 
     // Cmd: prefer targets_oci_cmd, fall back to entrypoint/run command.
     let mut cmd = plan.targets_oci_cmd();
-    if cmd.is_empty() {
-        if let Some(entrypoint) = plan
+    if cmd.is_empty()
+        && let Some(entrypoint) = plan
             .execution_entrypoint()
             .or_else(|| plan.execution_run_command())
-        {
-            cmd = shell_words::split(&entrypoint).unwrap_or_else(|_| vec![entrypoint]);
-        }
+    {
+        cmd = shell_words::split(&entrypoint).unwrap_or_else(|_| vec![entrypoint]);
     }
 
     // Port: use None for host_port so podman auto-allocates from the ephemeral range.
@@ -429,7 +428,7 @@ mod tests {
 
     #[test]
     fn digest_ref_passes_through_unchanged() {
-        let image = make_resolved_image("postgres@sha256:aabbcc");
+        let _image = make_resolved_image("postgres@sha256:aabbcc");
         // image.declared_ref already contains '@'
         let result = build_digest_pull_ref(&OciImageResolution {
             declared_ref: "postgres@sha256:aabbcc".to_string(),
@@ -576,7 +575,7 @@ mod tests {
     #[test]
     fn default_provider_selector_returns_podman_not_bollard() {
         use crate::adapters::runtime::oci_provider::{
-            DefaultOciProviderSelector, OciProviderSelector, PodmanProvider,
+            DefaultOciProviderSelector, OciProviderSelector, PodmanProvider, SystemCommandRunner,
         };
         let selector = DefaultOciProviderSelector;
         let _: PodmanProvider<SystemCommandRunner> = selector.select_provider();
