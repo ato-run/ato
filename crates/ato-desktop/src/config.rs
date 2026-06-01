@@ -247,10 +247,6 @@ pub struct DeveloperSettings {
 /// change after the config section is introduced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DesktopSettings {
-    /// Whether the Focus View (multi-window) mode is enabled.
-    /// Set to `false` to use the legacy single-window DesktopShell.
-    #[serde(default = "default_focus_view_enabled")]
-    pub focus_view_enabled: bool,
     /// Which surface is shown after the app starts.
     #[serde(default)]
     pub startup_surface: StartupSurface,
@@ -392,9 +388,6 @@ pub enum ControlBarPosition {
     Bottom,
 }
 
-fn default_focus_view_enabled() -> bool {
-    true
-}
 fn default_control_bar_always_on_top() -> bool {
     true
 }
@@ -405,7 +398,6 @@ fn default_control_bar_visible_on_startup() -> bool {
 impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
-            focus_view_enabled: default_focus_view_enabled(),
             startup_surface: StartupSurface::Start,
             content_window_default_presentation: ContentWindowPresentation::Windowed,
             capsule_open_mode: CapsuleOpenMode::Window,
@@ -1356,10 +1348,6 @@ mod tests {
     fn desktop_settings_default_values() {
         let config = DesktopConfig::default();
         let d = &config.desktop;
-        assert!(
-            d.focus_view_enabled,
-            "focus_view_enabled default must be true"
-        );
         assert_eq!(d.startup_surface, StartupSurface::Start);
         assert_eq!(
             d.content_window_default_presentation,
@@ -1445,10 +1433,6 @@ mod tests {
         let json = r#"{"general": {"theme": "light"}}"#;
         let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.general.theme, ThemeConfig::Light);
-        assert!(
-            parsed.desktop.focus_view_enabled,
-            "missing desktop section must default to focus_view_enabled=true"
-        );
         assert_eq!(parsed.desktop.startup_surface, StartupSurface::Start);
         assert!(parsed.desktop.control_bar.always_on_top);
         assert!(!parsed.desktop.onboarding.completed);
@@ -1465,8 +1449,7 @@ mod tests {
     fn desktop_section_without_onboarding_migrates_with_defaults() {
         let json = r#"{
             "desktop": {
-                "startup_surface": "store",
-                "focus_view_enabled": true
+                "startup_surface": "store"
             }
         }"#;
         let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
