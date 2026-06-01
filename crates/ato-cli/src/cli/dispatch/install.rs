@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::GitHubAutoFixMode;
 use crate::install;
 use crate::install::support::can_prompt_interactively;
-use crate::GitHubAutoFixMode;
 
 /// Short curated names users can type instead of the fully scoped capsule id
 /// (e.g. `ato install ato-desktop` ≈ `ato install ato/ato-desktop`). The

@@ -2,7 +2,7 @@
 //!
 //! Migrated from nacelle/src/verification/signing.rs
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -104,14 +104,12 @@ pub(crate) fn read_key_bytes(path: &Path) -> Result<Vec<u8>> {
     };
 
     // Try to parse as JSON (StoredKey format)
-    if let Ok(text) = std::str::from_utf8(&bytes) {
-        if let Ok(stored) = serde_json::from_str::<StoredKeyRef>(text) {
-            if stored.key_type == "ed25519" {
-                if let Ok(secret_bytes) = BASE64.decode(&stored.secret_key) {
-                    return Ok(secret_bytes);
-                }
-            }
-        }
+    if let Ok(text) = std::str::from_utf8(&bytes)
+        && let Ok(stored) = serde_json::from_str::<StoredKeyRef>(text)
+        && stored.key_type == "ed25519"
+        && let Ok(secret_bytes) = BASE64.decode(&stored.secret_key)
+    {
+        return Ok(secret_bytes);
     }
 
     // Otherwise, return raw bytes

@@ -268,6 +268,6 @@ impl ArtifactManager {
 
 fn random_suffix() -> String {
     let mut rng = rand::thread_rng();
-    let value: u64 = rng.gen();
+    let value: u64 = rng.r#gen();
     format!("{:016x}", value)
 }

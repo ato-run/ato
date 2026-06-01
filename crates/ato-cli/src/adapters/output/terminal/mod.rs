@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self as crossterm_event, Event};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 mod app;
@@ -132,19 +132,19 @@ pub fn run_search_tui(args: SearchTuiArgs) -> Result<Option<String>> {
             }
         }
 
-        if app.show_manifest {
-            if let Some(scoped_id) = app.selected_scoped_id() {
-                let already_loaded = app.manifest_cache.contains_key(&scoped_id)
-                    || app.manifest_errors.contains_key(&scoped_id);
-                if !already_loaded && !app.manifest_inflight.contains(&scoped_id) {
-                    app.manifest_inflight.insert(scoped_id.clone());
-                    network::spawn_manifest_fetch(
-                        rt.handle(),
-                        tx.clone(),
-                        scoped_id,
-                        request_base.registry.clone(),
-                    );
-                }
+        if app.show_manifest
+            && let Some(scoped_id) = app.selected_scoped_id()
+        {
+            let already_loaded = app.manifest_cache.contains_key(&scoped_id)
+                || app.manifest_errors.contains_key(&scoped_id);
+            if !already_loaded && !app.manifest_inflight.contains(&scoped_id) {
+                app.manifest_inflight.insert(scoped_id.clone());
+                network::spawn_manifest_fetch(
+                    rt.handle(),
+                    tx.clone(),
+                    scoped_id,
+                    request_base.registry.clone(),
+                );
             }
         }
 

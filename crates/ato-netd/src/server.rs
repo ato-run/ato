@@ -11,11 +11,11 @@ use ato_net::control::{
     ErrorPayload, ListenerInfo, Request, Response, ResponseResult, StatusReport,
 };
 use ato_net::resolver::SystemResolver;
-use tokio::io::{split, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-#[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, split};
 #[cfg(unix)]
 use tokio::net::UnixListener;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tracing::{debug, info, warn};
 
 use crate::state::DaemonState;
@@ -72,13 +72,13 @@ impl Daemon {
                         return Err(StartError::AlreadyRunning {
                             pid,
                             path: socket_path.clone(),
-                        })
+                        });
                     }
                     None => {
-                        if let Err(err) = tokio::fs::remove_file(&socket_path).await {
-                            if err.kind() != std::io::ErrorKind::NotFound {
-                                return Err(StartError::Io(err));
-                            }
+                        if let Err(err) = tokio::fs::remove_file(&socket_path).await
+                            && err.kind() != std::io::ErrorKind::NotFound
+                        {
+                            return Err(StartError::Io(err));
                         }
                     }
                 }
@@ -230,7 +230,7 @@ where
             Ok(s) => s,
             Err(err) => {
                 warn!(error = %err, "ato-netd: failed to serialize response");
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, err));
+                return Err(std::io::Error::other(err));
             }
         };
         writer.write_all(serialized.as_bytes()).await?;

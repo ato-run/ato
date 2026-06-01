@@ -11,7 +11,9 @@ pub struct EnvVarGuard {
 impl EnvVarGuard {
     pub fn set<V: AsRef<OsStr>>(key: &'static str, value: V) -> Self {
         let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
+        unsafe {
+            std::env::set_var(key, value);
+        }
         Self { key, previous }
     }
 
@@ -23,8 +25,8 @@ impl EnvVarGuard {
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
         }
     }
 }
@@ -60,6 +62,7 @@ impl IsolatedAto {
         }
     }
 
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         self.root.path()
     }

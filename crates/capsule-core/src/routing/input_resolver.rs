@@ -498,10 +498,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ResolvedInputKind,
-        ResolverAdvisoryCode, SingleScriptLanguage, ATO_LOCK_FILE_NAME,
+        ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, ResolvedInputKind,
+        ResolverAdvisoryCode, SingleScriptLanguage, resolve_authoritative_input,
     };
-    use crate::ato_lock::{recompute_lock_id, AtoLock};
+    use crate::ato_lock::{AtoLock, recompute_lock_id};
 
     fn write_manifest(dir: &Path, name: &str) {
         fs::write(
@@ -563,11 +563,10 @@ run = "dist""#
             resolved.provenance().selected_kind,
             ResolvedInputKind::CanonicalLock
         );
-        assert!(resolved
-            .advisories()
-            .iter()
-            .any(|advisory| advisory.code
-                == ResolverAdvisoryCode::CanonicalCoexistsWithCompatibility));
+        assert!(
+            resolved.advisories().iter().any(|advisory| advisory.code
+                == ResolverAdvisoryCode::CanonicalCoexistsWithCompatibility)
+        );
         assert!(
             resolved
                 .advisories()
@@ -619,10 +618,12 @@ run = "dist""#
             .expect("resolve source only");
 
         assert_eq!(resolved.kind(), ResolvedInputKind::SourceOnly);
-        assert!(resolved
-            .advisories()
-            .iter()
-            .any(|advisory| advisory.code == ResolverAdvisoryCode::SourceOnlyBootstrap));
+        assert!(
+            resolved
+                .advisories()
+                .iter()
+                .any(|advisory| advisory.code == ResolverAdvisoryCode::SourceOnlyBootstrap)
+        );
     }
 
     #[test]
@@ -632,9 +633,10 @@ run = "dist""#
 
         let err = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
             .expect_err("legacy lock without manifest must fail");
-        assert!(err
-            .to_string()
-            .contains("is not an authoritative command-entry input without capsule.toml"));
+        assert!(
+            err.to_string()
+                .contains("is not an authoritative command-entry input without capsule.toml")
+        );
     }
 
     #[test]
@@ -647,9 +649,10 @@ run = "dist""#
 
         let err = resolve_authoritative_input(&script_path, ResolveInputOptions::default())
             .expect_err("internal workspace state path must fail");
-        assert!(err
-            .to_string()
-            .contains("Workspace-local internal state path is not an authoritative input"));
+        assert!(
+            err.to_string()
+                .contains("Workspace-local internal state path is not an authoritative input")
+        );
     }
 
     #[test]
@@ -675,9 +678,10 @@ run = "dist""#
 
         let err = resolve_authoritative_input(&legacy_path, ResolveInputOptions::default())
             .expect_err("legacy lock path must fail");
-        assert!(err
-            .to_string()
-            .contains("is not an authoritative command-entry input without capsule.toml"));
+        assert!(
+            err.to_string()
+                .contains("is not an authoritative command-entry input without capsule.toml")
+        );
     }
 
     #[test]

@@ -52,8 +52,8 @@
 
 #![cfg(target_os = "macos")]
 
-use objc2::rc::Retained;
 use objc2::MainThreadOnly;
+use objc2::rc::Retained;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor,
     NSFloatingWindowLevel, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,

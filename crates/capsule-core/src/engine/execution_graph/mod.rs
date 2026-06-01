@@ -34,11 +34,11 @@ mod tests;
 mod types;
 
 pub use builder::{
-    identity_labels, ExecutionGraphBuildInput, ExecutionGraphBuilder, GraphDependencyInput,
-    GraphHostInput, GraphPolicyInput, GraphSourceInput, GraphTargetInput,
+    ExecutionGraphBuildInput, ExecutionGraphBuilder, GraphDependencyInput, GraphHostInput,
+    GraphPolicyInput, GraphSourceInput, GraphTargetInput, identity_labels,
 };
 pub use canonical::{
-    CanonicalGraphDomain, CanonicalizableGraph, GraphCanonicalForm, CANONICAL_FORM_VERSION,
+    CANONICAL_FORM_VERSION, CanonicalGraphDomain, CanonicalizableGraph, GraphCanonicalForm,
 };
 pub use launch_bundle::{
     DerivedConsentView, DerivedDependencyContracts, DerivedDependencyProvider, DerivedExecutionIds,

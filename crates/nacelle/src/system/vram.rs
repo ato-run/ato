@@ -234,10 +234,10 @@ mod tests {
         fn zero_chunk(&self, _bytes: usize) -> Result<()> {
             let mut guard = self.calls.lock().unwrap();
             *guard += 1;
-            if let Some(limit) = self.fail_after {
-                if *guard > limit {
-                    return Err(anyhow::anyhow!("mock failure"));
-                }
+            if let Some(limit) = self.fail_after
+                && *guard > limit
+            {
+                return Err(anyhow::anyhow!("mock failure"));
             }
             Ok(())
         }
@@ -309,11 +309,13 @@ mod tests {
 
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].gpu_index, 0);
-        assert!(stats[0]
-            .message
-            .as_ref()
-            .unwrap()
-            .contains("factory failure"));
+        assert!(
+            stats[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .contains("factory failure")
+        );
         assert_eq!(stats[0].bytes_scrubbed, 0);
     }
 }

@@ -3,7 +3,7 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::get, Json, Router};
+use axum::{Json, Router, routing::get};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -17,16 +17,16 @@ use super::lockfile_support::{
     capsule_error_pack, create_atomic_temp_file, write_atomic_bytes_with_os_lock,
 };
 use super::{
-    ensure_lockfile, ensure_lockfile_for_compat_input, generate_lockfile,
+    CAPSULE_LOCK_FILE_NAME, CapsuleLock, ENV_STORE_API_URL, LOCKFILE_INPUT_SNAPSHOT_NAME, LockMeta,
+    LockedCapsuleDependency, LockedToolCapsule, LockedToolExports, RuntimeArtifact, RuntimeEntry,
+    RuntimeSection, SUPPORTED_RUNTIME_PLATFORMS, ToolArtifact, ToolSection, ToolTargets,
+    UV_VERSION, ensure_lockfile, ensure_lockfile_for_compat_input, generate_lockfile,
     lockfile_has_required_platform_coverage, lockfile_inputs_snapshot_path, lockfile_output_path,
     lockfile_runtime_platforms, lockfile_runtime_target_labels,
     orchestration_service_target_labels, read_lockfile, read_runtime_tools,
     required_runtime_version, resolve_external_capsule_dependencies,
     semantic_manifest_hash_from_text, tool_capsule_env_bindings, verify_lockfile_against_contracts,
-    verify_lockfile_external_dependencies, verify_lockfile_manifest, CapsuleLock, LockMeta,
-    LockedCapsuleDependency, LockedToolCapsule, LockedToolExports, RuntimeArtifact, RuntimeEntry,
-    RuntimeSection, ToolArtifact, ToolSection, ToolTargets, CAPSULE_LOCK_FILE_NAME,
-    ENV_STORE_API_URL, LOCKFILE_INPUT_SNAPSHOT_NAME, SUPPORTED_RUNTIME_PLATFORMS, UV_VERSION,
+    verify_lockfile_external_dependencies, verify_lockfile_manifest,
 };
 
 struct EnvGuard {
@@ -37,7 +37,9 @@ struct EnvGuard {
 impl EnvGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
+        unsafe {
+            std::env::set_var(key, value);
+        }
         Self { key, previous }
     }
 }
@@ -45,9 +47,13 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {
-            std::env::set_var(self.key, previous);
+            unsafe {
+                std::env::set_var(self.key, previous);
+            }
         } else {
-            std::env::remove_var(self.key);
+            unsafe {
+                std::env::remove_var(self.key);
+            }
         }
     }
 }
@@ -833,12 +839,16 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
 fn uv_artifact_url_uses_zip_for_windows_x64_and_skips_windows_arm64() {
     assert_eq!(
         uv_artifact_url("x86_64-pc-windows-msvc").as_deref(),
-        Some("https://github.com/astral-sh/uv/releases/download/0.4.19/uv-x86_64-pc-windows-msvc.zip")
+        Some(
+            "https://github.com/astral-sh/uv/releases/download/0.4.19/uv-x86_64-pc-windows-msvc.zip"
+        )
     );
     assert!(uv_artifact_url("aarch64-pc-windows-msvc").is_none());
     assert_eq!(
         uv_artifact_url("x86_64-unknown-linux-gnu").as_deref(),
-        Some("https://github.com/astral-sh/uv/releases/download/0.4.19/uv-x86_64-unknown-linux-gnu.tar.gz")
+        Some(
+            "https://github.com/astral-sh/uv/releases/download/0.4.19/uv-x86_64-unknown-linux-gnu.tar.gz"
+        )
     );
 }
 
@@ -984,12 +994,14 @@ run = "main.sh""#;
     assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
     assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
     assert!(!temp.path().join("capsule.toml").exists());
-    assert!(!temp
-        .path()
-        .join(".tmp")
-        .join("compat-manifest-bridge")
-        .join("capsule.toml")
-        .exists());
+    assert!(
+        !temp
+            .path()
+            .join(".tmp")
+            .join("compat-manifest-bridge")
+            .join("capsule.toml")
+            .exists()
+    );
 }
 
 #[test]
@@ -1165,9 +1177,10 @@ run = "main.sh""#;
 async fn run_command_inner_rejects_relative_program() {
     let cmd = std::process::Command::new("echo");
     let err = run_command_inner(cmd).await.expect_err("must fail closed");
-    assert!(err
-        .to_string()
-        .contains("Refusing to execute non-absolute command path"));
+    assert!(
+        err.to_string()
+            .contains("Refusing to execute non-absolute command path")
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────

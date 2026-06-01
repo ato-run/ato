@@ -70,14 +70,14 @@ pub(super) fn spawn_registry_gc_worker(data_dir: PathBuf) {
             }
 
             ticks = ticks.saturating_add(1);
-            if ticks.is_multiple_of(60) {
-                if let Err(err) = store.checkpoint_wal_truncate() {
-                    tracing::warn!(
-                        "registry gc checkpoint failed path={} error={}",
-                        data_dir.display(),
-                        err
-                    );
-                }
+            if ticks.is_multiple_of(60)
+                && let Err(err) = store.checkpoint_wal_truncate()
+            {
+                tracing::warn!(
+                    "registry gc checkpoint failed path={} error={}",
+                    data_dir.display(),
+                    err
+                );
             }
         }
     });

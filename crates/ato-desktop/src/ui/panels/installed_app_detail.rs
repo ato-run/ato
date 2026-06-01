@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, AnyElement, ClipboardItem, FontWeight, IntoElement, MouseButton, Styled,
+    AnyElement, ClipboardItem, FontWeight, IntoElement, MouseButton, Styled, div, hsla, px,
 };
 
 use super::super::theme::Theme;
