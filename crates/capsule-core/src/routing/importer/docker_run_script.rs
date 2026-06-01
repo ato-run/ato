@@ -690,14 +690,16 @@ fn rewrite_database_url_aliases(
         }
         // Infer dependency: if DATABASE_URL mentions a logical label, depend on it.
         for label in name_to_label.values() {
-            if label != &raw.label && value.contains(format!("@{label}:").as_str())
-                && !raw.depends_on.contains(label) {
-                    raw.depends_on.push(label.clone());
-                    output.warnings.push(format!(
-                        "[{}] inferred depends_on '{}' from DATABASE_URL",
-                        raw.label, label
-                    ));
-                }
+            if label != &raw.label
+                && value.contains(format!("@{label}:").as_str())
+                && !raw.depends_on.contains(label)
+            {
+                raw.depends_on.push(label.clone());
+                output.warnings.push(format!(
+                    "[{}] inferred depends_on '{}' from DATABASE_URL",
+                    raw.label, label
+                ));
+            }
         }
         if *value != original {
             output.warnings.push(format!(
@@ -822,14 +824,14 @@ fn resolve_env_value(
     }
 
     // DATABASE_URL is always secret-like if it contains a URL with credentials.
-    if key.to_uppercase() == "DATABASE_URL" && raw_value.contains("://")
-        && raw_value.contains(':') {
-            // Has credentials embedded.
-            output.warnings.push(format!(
-                "[{svc_label}] DATABASE_URL contains embedded credentials; \
+    if key.to_uppercase() == "DATABASE_URL" && raw_value.contains("://") && raw_value.contains(':')
+    {
+        // Has credentials embedded.
+        output.warnings.push(format!(
+            "[{svc_label}] DATABASE_URL contains embedded credentials; \
                  value redacted from receipt — use Ato secret references"
-            ));
-        }
+        ));
+    }
 
     ImportedEnvValue::Literal(raw_value.to_string())
 }
