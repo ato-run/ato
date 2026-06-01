@@ -52,14 +52,15 @@ pub trait WebViewPasteShell: Sized + 'static {
     fn on_native_paste(&mut self, _: &NativePaste, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard()
             && let Some(text) = item.text()
-                && let Some(webview) = self.active_paste_target() {
-                    // Give WKWebView macOS first-responder so document.activeElement
-                    // is accurate by the time the script runs.
-                    #[cfg(target_os = "macos")]
-                    let _ = webview.focus();
-                    let script = paste_script(&text);
-                    let _ = webview.evaluate_script(&script);
-                }
+            && let Some(webview) = self.active_paste_target()
+        {
+            // Give WKWebView macOS first-responder so document.activeElement
+            // is accurate by the time the script runs.
+            #[cfg(target_os = "macos")]
+            let _ = webview.focus();
+            let script = paste_script(&text);
+            let _ = webview.evaluate_script(&script);
+        }
     }
 
     fn on_native_copy(&mut self, _: &NativeCopy, _: &mut Window, _cx: &mut Context<Self>) {

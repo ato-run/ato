@@ -87,9 +87,10 @@ impl CardSwitcherShell {
             "window.__ATO_SWITCHER_SCREENSHOT__ && window.__ATO_SWITCHER_SCREENSHOT__({window_id}, '{escaped}');"
         );
         if let Some(webview) = self._webview.as_ref()
-            && let Err(e) = webview.evaluate_script(&script) {
-                tracing::debug!(window_id, ?e, "switcher: screenshot push failed");
-            }
+            && let Err(e) = webview.evaluate_script(&script)
+        {
+            tracing::debug!(window_id, ?e, "switcher: screenshot push failed");
+        }
     }
 
     fn push_session_snapshot(&self, sessions_json: &str) {
@@ -97,9 +98,10 @@ impl CardSwitcherShell {
             "window.__ATO_SESSIONS_REFRESH__ && window.__ATO_SESSIONS_REFRESH__({sessions_json});"
         );
         if let Some(webview) = self._webview.as_ref()
-            && let Err(error) = webview.evaluate_script(&script) {
-                tracing::debug!(?error, "switcher: session snapshot push failed");
-            }
+            && let Err(error) = webview.evaluate_script(&script)
+        {
+            tracing::debug!(?error, "switcher: session snapshot push failed");
+        }
     }
 
     fn sync_webview_bounds(&mut self, window: &mut gpui::Window) {
@@ -373,11 +375,11 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
                                         && let Some(entity) = cx
                                             .try_global::<CardSwitcherEntitySlot>()
                                             .and_then(|slot| slot.0.clone())
-                                        {
-                                            entity.update(cx, |shell, _cx| {
-                                                shell.push_screenshot(window_id, &data_url);
-                                            });
-                                        }
+                                    {
+                                        entity.update(cx, |shell, _cx| {
+                                            shell.push_screenshot(window_id, &data_url);
+                                        });
+                                    }
                                 });
                                 break;
                             }
