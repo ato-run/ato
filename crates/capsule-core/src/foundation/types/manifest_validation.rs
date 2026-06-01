@@ -503,18 +503,19 @@ impl CapsuleManifest {
                     .unwrap_or(false);
                 let has_exec = probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                 // port is required for HTTP/TCP probes; exec probes do not need it.
-                if (has_http_get || has_tcp_connect) && !has_exec
+                if (has_http_get || has_tcp_connect)
+                    && !has_exec
                     && probe
                         .port
                         .as_deref()
                         .map(|s| s.trim().is_empty())
                         .unwrap_or(true)
-                    {
-                        errors.push(ValidationError::InvalidTarget(format!(
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
                             "target '{}': readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes",
                             label
                         )));
-                    }
+                }
                 if !has_http_get && !has_tcp_connect && !has_exec {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "target '{}': readiness_probe must define http_get, tcp_connect, or exec",
@@ -744,19 +745,20 @@ impl CapsuleManifest {
                         let has_exec_svc =
                             probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                         // port is required for HTTP/TCP probes; exec probes do not need it.
-                        if (has_http_get || has_tcp_connect) && !has_exec_svc
+                        if (has_http_get || has_tcp_connect)
+                            && !has_exec_svc
                             && probe
                                 .port
                                 .as_deref()
                                 .map(|s| s.trim().is_empty())
                                 .unwrap_or(true)
-                            {
-                                errors.push(ValidationError::InvalidService(
+                        {
+                            errors.push(ValidationError::InvalidService(
                                     name.to_string(),
                                     "readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes"
                                         .to_string(),
                                 ));
-                            }
+                        }
                         if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
                                 name.to_string(),
@@ -904,19 +906,20 @@ impl CapsuleManifest {
                         let has_exec_svc =
                             probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                         // port is required for HTTP/TCP probes; exec probes do not need it.
-                        if (has_http_get || has_tcp_connect) && !has_exec_svc
+                        if (has_http_get || has_tcp_connect)
+                            && !has_exec_svc
                             && probe
                                 .port
                                 .as_deref()
                                 .map(|s| s.trim().is_empty())
                                 .unwrap_or(true)
-                            {
-                                errors.push(ValidationError::InvalidService(
+                        {
+                            errors.push(ValidationError::InvalidService(
                                     name.to_string(),
                                     "readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes"
                                         .to_string(),
                                 ));
-                            }
+                        }
                         if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
                                 name.to_string(),
