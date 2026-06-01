@@ -520,27 +520,29 @@ mod tests {
     fn spawn_fake_postgres(response: Vec<u8>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
-        std::thread::spawn(move || loop {
-            let (mut stream, _) = match listener.accept() {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            let response = response.clone();
-            std::thread::spawn(move || {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                let mut len_buf = [0u8; 4];
-                if stream.read_exact(&mut len_buf).is_err() {
-                    return;
-                }
-                let length = i32::from_be_bytes(len_buf);
-                if length >= 4 {
-                    let mut rest = vec![0u8; (length - 4) as usize];
-                    let _ = stream.read_exact(&mut rest);
-                }
-                let _ = stream.write_all(&response);
-                let _ = stream.flush();
-                std::thread::sleep(Duration::from_millis(50));
-            });
+        std::thread::spawn(move || {
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let response = response.clone();
+                std::thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut len_buf = [0u8; 4];
+                    if stream.read_exact(&mut len_buf).is_err() {
+                        return;
+                    }
+                    let length = i32::from_be_bytes(len_buf);
+                    if length >= 4 {
+                        let mut rest = vec![0u8; (length - 4) as usize];
+                        let _ = stream.read_exact(&mut rest);
+                    }
+                    let _ = stream.write_all(&response);
+                    let _ = stream.flush();
+                    std::thread::sleep(Duration::from_millis(50));
+                });
+            }
         });
         port
     }

@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 
 use super::download::sha256_of_file;
 use super::error::ToolArtifactError;

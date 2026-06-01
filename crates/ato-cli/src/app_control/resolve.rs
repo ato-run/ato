@@ -5,21 +5,21 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use capsule_core::handle::{
-    classify_surface_input, CanonicalHandle, HandleInput, InputSurface, LaunchPlan,
-    LocalTrustDecisionRecord, PermissionRequestPolicy, ResolvedMetadataCacheEntry,
-    ResolvedSnapshot, SurfaceInput, TrustState,
+    CanonicalHandle, HandleInput, InputSurface, LaunchPlan, LocalTrustDecisionRecord,
+    PermissionRequestPolicy, ResolvedMetadataCacheEntry, ResolvedSnapshot, SurfaceInput,
+    TrustState, classify_surface_input,
 };
 use capsule_core::handle_store::{
     load_metadata_cache, metadata_cache_is_fresh, metadata_cache_ttl_seconds, resolve_trust_state,
     store_local_trust_decision, store_metadata_cache,
 };
-use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
+use capsule_core::launch_spec::{LaunchSpecSource, derive_launch_spec};
 use capsule_core::router::{
-    execution_descriptor_from_manifest_parts, route_manifest_with_state_overrides,
-    ExecutionProfile, ManifestData,
+    ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts,
+    route_manifest_with_state_overrides,
 };
 
-use super::guest_contract::{parse_guest_contract, preview_guest_contract, GuestContract};
+use super::guest_contract::{GuestContract, parse_guest_contract, preview_guest_contract};
 use super::sample_recipes::{resolve_sample_recipe_for_github, resolve_sample_recipe_for_input};
 use crate::install::{
     download_github_repository_at_ref, fetch_capsule_detail, fetch_capsule_manifest_toml,
@@ -55,7 +55,7 @@ struct ResolveEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(super) struct HandleResolution {
+pub(crate) struct HandleResolution {
     pub(super) input: String,
     pub(super) normalized_handle: String,
     pub(super) kind: HandleKind,
@@ -785,6 +785,7 @@ pub(super) fn input_is_existing_local_path(input: &str) -> bool {
     input_path.exists() || input_path.join("capsule.toml").exists()
 }
 
+#[allow(dead_code)]
 pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
     normalize_handle_with_options(raw, true)
 }
@@ -816,22 +817,20 @@ fn normalize_handle_with_options(raw: &str, use_sample_recipes: bool) -> Result<
         && !input.starts_with("capsule://")
         && !input.starts_with("github.com/")
         && !input.contains('/')
+        && !input_is_existing_local_path(&input)
+        && let Some(resolved) = resolve_sample_recipe_for_input(&input)?
     {
-        if !input_is_existing_local_path(&input) {
-            if let Some(resolved) = resolve_sample_recipe_for_input(&input)? {
-                return Ok(NormalizedHandle {
-                    input,
-                    normalized_handle: resolved
-                        .canonical_handle
-                        .clone()
-                        .unwrap_or_else(|| format!("sample-recipe://{}", resolved.slug)),
-                    kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
-                    canonical: None,
-                    cli_ref: None,
-                    sample_recipe_slug: Some(resolved.slug),
-                });
-            }
-        }
+        return Ok(NormalizedHandle {
+            input,
+            normalized_handle: resolved
+                .canonical_handle
+                .clone()
+                .unwrap_or_else(|| format!("sample-recipe://{}", resolved.slug)),
+            kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
+            canonical: None,
+            cli_ref: None,
+            sample_recipe_slug: Some(resolved.slug),
+        });
     }
 
     match classify_surface_input(HandleInput {
@@ -844,19 +843,18 @@ fn normalize_handle_with_options(raw: &str, use_sample_recipes: bool) -> Result<
             let normalized_handle = canonical.display_string();
             let cli_ref = canonical.to_cli_ref();
 
-            if use_sample_recipes {
-                if let CanonicalHandle::GithubRepo { owner, repo, .. } = &canonical {
-                    if let Some(resolved) = resolve_sample_recipe_for_github(owner, repo)? {
-                        return Ok(NormalizedHandle {
-                            input,
-                            normalized_handle,
-                            kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
-                            canonical: Some(canonical),
-                            cli_ref,
-                            sample_recipe_slug: Some(resolved.slug),
-                        });
-                    }
-                }
+            if use_sample_recipes
+                && let CanonicalHandle::GithubRepo { owner, repo, .. } = &canonical
+                && let Some(resolved) = resolve_sample_recipe_for_github(owner, repo)?
+            {
+                return Ok(NormalizedHandle {
+                    input,
+                    normalized_handle,
+                    kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
+                    canonical: Some(canonical),
+                    cli_ref,
+                    sample_recipe_slug: Some(resolved.slug),
+                });
             }
 
             let kind = match &canonical {
@@ -1254,10 +1252,12 @@ runtime = "oci""#,
         assert_eq!(target.target_label, "app");
         assert_eq!(target.runtime.as_deref(), Some("oci"));
         assert_eq!(target.port, Some(5230));
-        assert!(resolution
-            .notes
-            .iter()
-            .any(|n| n.contains("bundled sample recipe")));
+        assert!(
+            resolution
+                .notes
+                .iter()
+                .any(|n| n.contains("bundled sample recipe"))
+        );
     }
 
     #[test]

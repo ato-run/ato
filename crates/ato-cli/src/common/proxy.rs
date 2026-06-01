@@ -1,9 +1,33 @@
 #[cfg(test)]
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result};
 
 const ENV_SOCKS_PORT: &str = "ATO_TSNET_SOCKS_PORT";
+
+/// SOCKS port resolved by the in-process sidecar (`maybe_start_sidecar`).
+///
+/// The sidecar may be asked to bind port `0` (OS-assigned); the *resolved*
+/// port is only known after it reports ready. This used to be published back
+/// through `std::env::set_var(ATO_TSNET_SOCKS_PORT, ..)`, but that ran while
+/// the sidecar's Tokio runtime worker threads were still alive — undefined
+/// behaviour under the Rust 2024 `set_var` contract. The value is consumed
+/// purely in-process (by `proxy_env_from_env`), so a thread-safe process
+/// global is the correct channel and no environment mutation is needed.
+static RESOLVED_SOCKS_PORT: AtomicU32 = AtomicU32::new(0);
+
+/// Publish the SOCKS port resolved by the in-process sidecar. `0` means unset.
+pub fn set_resolved_socks_port(port: u16) {
+    RESOLVED_SOCKS_PORT.store(u32::from(port), Ordering::Relaxed);
+}
+
+fn resolved_socks_port() -> Option<u16> {
+    match RESOLVED_SOCKS_PORT.load(Ordering::Relaxed) {
+        0 => None,
+        port => u16::try_from(port).ok(),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ProxyEnv {
@@ -48,6 +72,12 @@ pub fn proxy_env_for_socks5(port: u16, extra_no_proxy: &[String]) -> ProxyEnv {
 }
 
 pub fn proxy_env_from_env(extra_no_proxy: &[String]) -> Result<Option<ProxyEnv>> {
+    // Prefer the port resolved by the in-process sidecar. Fall back to an
+    // inherited ATO_TSNET_SOCKS_PORT for child processes that received a
+    // pre-resolved port from their parent's environment.
+    if let Some(port) = resolved_socks_port() {
+        return Ok(Some(proxy_env_for_socks5(port, extra_no_proxy)));
+    }
     let raw = match std::env::var(ENV_SOCKS_PORT) {
         Ok(value) => value,
         Err(_) => return Ok(None),
@@ -207,17 +237,39 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            std::env::remove_var(self.0);
+            unsafe {
+                std::env::remove_var(self.0);
+            }
             if !self.1.is_empty() {
-                std::env::set_var(self.0, &self.1);
+                unsafe {
+                    std::env::set_var(self.0, &self.1);
+                }
             }
         }
     }
 
     fn env_guard(key: &'static str, value: &str) -> EnvGuard {
         let original = std::env::var(key).ok();
-        std::env::set_var(key, value);
+        unsafe {
+            std::env::set_var(key, value);
+        }
         EnvGuard(key, original.unwrap_or_default())
+    }
+
+    #[test]
+    fn resolved_socks_port_drives_proxy_env_without_env_var() {
+        // The in-process sidecar publishes its resolved port through the
+        // thread-safe global rather than `std::env::set_var`; the proxy
+        // injection path must read it from there. This takes precedence over
+        // any inherited ATO_TSNET_SOCKS_PORT.
+        set_resolved_socks_port(1085);
+        let env = proxy_env_from_env(&[])
+            .expect("proxy_env_from_env should not error")
+            .expect("a resolved socks port must yield proxy env");
+        assert_eq!(env.http_proxy, "socks5h://127.0.0.1:1085");
+        assert_eq!(env.all_proxy, "socks5h://127.0.0.1:1085");
+        // Reset so the process-global does not leak into sibling tests.
+        set_resolved_socks_port(0);
     }
 
     #[test]

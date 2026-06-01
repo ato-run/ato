@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::path::Path;
 
 use super::contract::{
-    derive_service_upstream_locator, normalize_endpoint_locator, SERVICE_BINDING_KIND_INGRESS,
-    SERVICE_BINDING_TLS_MODE_EXPLICIT,
+    SERVICE_BINDING_KIND_INGRESS, SERVICE_BINDING_TLS_MODE_EXPLICIT,
+    derive_service_upstream_locator, normalize_endpoint_locator,
 };
 use super::manifest::load_manifest;
 use super::parse_binding_reference;

@@ -6,13 +6,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rand::Rng;
 
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
-};
-use capsule_core::smoke::SmokeFailureClass;
 use capsule_core::AtoError;
 use capsule_core::CapsuleReporter;
+use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::input_resolver::{
+    ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
+};
+use capsule_core::smoke::SmokeFailureClass;
 use tracing::debug;
 
 use crate::application::ports::OutputPort;
@@ -25,8 +25,8 @@ use crate::reporters;
 use crate::runtime::tree as runtime_tree;
 use crate::tui;
 use crate::{
-    CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderToolchain,
-    DEFAULT_RUN_REGISTRY_URL,
+    CompatibilityFallbackBackend, DEFAULT_RUN_REGISTRY_URL, EnforcementMode, GitHubAutoFixMode,
+    ProviderToolchain,
 };
 
 use super::github_archive::{
@@ -576,13 +576,13 @@ fn print_permission_summary(permissions: Option<&install::CapsulePermissions>) {
         }
     }
 
-    if let Some(isolation) = permissions.isolation.as_ref() {
-        if !isolation.allow_env.is_empty() {
-            printed_any = true;
-            println!("  🔑 Isolation env allowlist:");
-            for env in &isolation.allow_env {
-                println!("    - {}", env);
-            }
+    if let Some(isolation) = permissions.isolation.as_ref()
+        && !isolation.allow_env.is_empty()
+    {
+        printed_any = true;
+        println!("  🔑 Isolation env allowlist:");
+        for env in &isolation.allow_env {
+            println!("    - {}", env);
         }
     }
 
@@ -825,26 +825,26 @@ pub(crate) async fn resolve_run_target_or_install(
     // Guard: reject paths that point into the Ato home directory.  These are
     // Ato's own internal state (store, runs, tmp …) and running them directly
     // would fail with a confusing E999.  Emit a helpful typed error instead.
-    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir() {
-        if expanded_local.starts_with(&ato_home) {
-            let capsule_name = expanded_local
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "my-capsule".to_string());
-            return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
-                AtoError::EntrypointInvalid {
-                    message: format!(
-                        "'{}' is inside Ato's internal state directory and cannot be used as a run target",
-                        raw
-                    ),
-                    hint: Some(format!(
-                        "Copy the capsule to a local directory first:\n  cp -r {} ./{}\n  ato run ./{}",
-                        raw, capsule_name, capsule_name
-                    )),
-                    field: None,
-                },
-            )));
-        }
+    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir()
+        && expanded_local.starts_with(&ato_home)
+    {
+        let capsule_name = expanded_local
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "my-capsule".to_string());
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::EntrypointInvalid {
+                message: format!(
+                    "'{}' is inside Ato's internal state directory and cannot be used as a run target",
+                    raw
+                ),
+                hint: Some(format!(
+                    "Copy the capsule to a local directory first:\n  cp -r {} ./{}\n  ato run ./{}",
+                    raw, capsule_name, capsule_name
+                )),
+                field: None,
+            },
+        )));
     }
     match install::provider_target::classify_run_target(&raw, &expanded_local)? {
         install::provider_target::ParsedRunTarget::LocalPath(local_path) => {
@@ -979,7 +979,9 @@ pub(crate) async fn resolve_run_target_or_install(
                                 match validation {
                                     crate::community::SourceValidationOutcome::Match => {}
                                     crate::community::SourceValidationOutcome::MissingSource => {
-                                        unreachable!("validate_capsule_toml_source_with_provenance never returns MissingSource")
+                                        unreachable!(
+                                            "validate_capsule_toml_source_with_provenance never returns MissingSource"
+                                        )
                                     }
                                     crate::community::SourceValidationOutcome::Mismatch {
                                         toml_source,
@@ -1022,91 +1024,92 @@ pub(crate) async fn resolve_run_target_or_install(
 
             let community_selected = selected_community_toml.is_some();
 
-            let (resolved_existing_toml, local_t_path) =
-                if let Some(toml_input) = use_existing_toml.as_deref() {
-                    if toml_input.starts_with("http://") || toml_input.starts_with("https://") {
-                        let content = crate::community::fetch_toml_from_url(toml_input).await?;
-                        let validation =
-                            crate::community::validate_capsule_toml_source_matches_run_target(
-                                &content,
-                                &repository,
-                            );
-                        match validation {
-                            crate::community::SourceValidationOutcome::Match => {}
-                            crate::community::SourceValidationOutcome::MissingSource => {
-                                anyhow::bail!(
-                                    "Remote capsule.toml from {toml_input} does not contain \
+            let (resolved_existing_toml, local_t_path) = if let Some(toml_input) =
+                use_existing_toml.as_deref()
+            {
+                if toml_input.starts_with("http://") || toml_input.starts_with("https://") {
+                    let content = crate::community::fetch_toml_from_url(toml_input).await?;
+                    let validation =
+                        crate::community::validate_capsule_toml_source_matches_run_target(
+                            &content,
+                            &repository,
+                        );
+                    match validation {
+                        crate::community::SourceValidationOutcome::Match => {}
+                        crate::community::SourceValidationOutcome::MissingSource => {
+                            anyhow::bail!(
+                                "Remote capsule.toml from {toml_input} does not contain \
                                  source.repository or metadata.repository. A remote TOML \
                                  must declare its source identity."
-                                );
-                            }
-                            crate::community::SourceValidationOutcome::Mismatch {
-                                toml_source,
-                                expected_source: _,
-                            } => {
-                                anyhow::bail!(
-                                    "Remote capsule.toml from {toml_input} source mismatch: \
-                                 TOML declares '{toml_source}', expected '{repository}'."
-                                );
-                            }
-                        }
-                        (Some(content), None)
-                    } else {
-                        let expanded = crate::local_input::expand_local_path(toml_input);
-                        let content = std::fs::read_to_string(&expanded).with_context(|| {
-                            format!("Failed to read TOML file: {}", expanded.display())
-                        })?;
-                        let validation =
-                            crate::community::validate_capsule_toml_source_matches_run_target(
-                                &content,
-                                &repository,
                             );
-                        match validation {
-                            crate::community::SourceValidationOutcome::Match => {}
-                            crate::community::SourceValidationOutcome::Mismatch {
-                                toml_source,
-                                expected_source: _,
-                            } => {
-                                anyhow::bail!(
-                                    "Source identity mismatch: the capsule.toml at '{}' \
+                        }
+                        crate::community::SourceValidationOutcome::Mismatch {
+                            toml_source,
+                            expected_source: _,
+                        } => {
+                            anyhow::bail!(
+                                "Remote capsule.toml from {toml_input} source mismatch: \
+                                 TOML declares '{toml_source}', expected '{repository}'."
+                            );
+                        }
+                    }
+                    (Some(content), None)
+                } else {
+                    let expanded = crate::local_input::expand_local_path(toml_input);
+                    let content = std::fs::read_to_string(&expanded).with_context(|| {
+                        format!("Failed to read TOML file: {}", expanded.display())
+                    })?;
+                    let validation =
+                        crate::community::validate_capsule_toml_source_matches_run_target(
+                            &content,
+                            &repository,
+                        );
+                    match validation {
+                        crate::community::SourceValidationOutcome::Match => {}
+                        crate::community::SourceValidationOutcome::Mismatch {
+                            toml_source,
+                            expected_source: _,
+                        } => {
+                            anyhow::bail!(
+                                "Source identity mismatch: the capsule.toml at '{}' \
                                  declares '{toml_source}', but run target is '{repository}'.",
-                                    expanded.display(),
-                                );
-                            }
-                            crate::community::SourceValidationOutcome::MissingSource => {
-                                if is_tty {
-                                    if !progressive_ui::confirm_with_fallback(
-                                        &format!(
-                                            "WARNING: The capsule.toml at '{}' does not declare \
+                                expanded.display(),
+                            );
+                        }
+                        crate::community::SourceValidationOutcome::MissingSource => {
+                            if is_tty {
+                                if !progressive_ui::confirm_with_fallback(
+                                    &format!(
+                                        "WARNING: The capsule.toml at '{}' does not declare \
                                          a source.repository. Continue anyway? [y/N] ",
-                                            expanded.display()
-                                        ),
-                                        false,
-                                        progressive_ui::can_use_progressive_ui(json_mode),
-                                    )? {
-                                        anyhow::bail!("Aborted due to missing source identity.")
-                                    }
-                                } else if yes {
-                                    futures::executor::block_on(reporter.warn(format!(
-                                        "WARNING: capsule.toml at '{}' has no source.repository; \
-                                     continuing because --yes is set.",
                                         expanded.display()
-                                    )))?;
-                                } else {
-                                    anyhow::bail!(
+                                    ),
+                                    false,
+                                    progressive_ui::can_use_progressive_ui(json_mode),
+                                )? {
+                                    anyhow::bail!("Aborted due to missing source identity.")
+                                }
+                            } else if yes {
+                                futures::executor::block_on(reporter.warn(format!(
+                                    "WARNING: capsule.toml at '{}' has no source.repository; \
+                                     continuing because --yes is set.",
+                                    expanded.display()
+                                )))?;
+                            } else {
+                                anyhow::bail!(
                                     "capsule.toml at '{}' does not declare a source.repository. \
                                      Re-run with -y/--yes to continue anyway, or add \
                                      [source.repository] to the TOML.",
                                     expanded.display()
                                 );
-                                }
                             }
                         }
-                        (Some(content), Some(expanded))
                     }
-                } else {
-                    (None, None)
-                };
+                    (Some(content), Some(expanded))
+                }
+            } else {
+                (None, None)
+            };
 
             let effective_toml = selected_community_toml.or(resolved_existing_toml);
 
@@ -1137,14 +1140,14 @@ pub(crate) async fn resolve_run_target_or_install(
                 let preserved_toml_path = preserved_root.join("capsule.toml");
                 let context = if community_selected {
                     None
-                } else if let Some(original_local_path) = local_t_path {
-                    Some(crate::community::CommunitySubmitPromptContext {
-                        source: repository.clone(),
-                        capsule_toml_path: preserved_toml_path,
-                        origin: crate::community::CommunitySubmitOrigin::LocalOverride,
-                    })
                 } else {
-                    None
+                    local_t_path.map(|_original_local_path| {
+                        crate::community::CommunitySubmitPromptContext {
+                            source: repository.clone(),
+                            capsule_toml_path: preserved_toml_path,
+                            origin: crate::community::CommunitySubmitOrigin::LocalOverride,
+                        }
+                    })
                 };
                 return Ok(ResolvedRunTarget {
                     path: preserved_root.clone(),
@@ -1276,7 +1279,8 @@ pub(crate) async fn resolve_run_target_or_install(
                             .join("\n");
                         anyhow::bail!(
                             "scoped_id_required: '{}' is installed under multiple publishers.\n\nLocal matches:\n{}\n\nRe-run with the publisher/slug form.",
-                            raw, list
+                            raw,
+                            list
                         );
                     }
                     _ => {
@@ -1313,32 +1317,31 @@ pub(crate) async fn resolve_run_target_or_install(
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
 
-                if let Some(version) = registry_installable_version.as_deref() {
-                    if let Some(installed_capsule) =
+                if let Some(version) = registry_installable_version.as_deref()
+                    && let Some(installed_capsule) =
                         resolve_installed_capsule_archive(&scoped_ref, registry, Some(version))
                             .await?
-                    {
-                        debug!(
-                            capsule = %installed_capsule.display(),
-                            version = version,
-                            "Using installed capsule matching registry current version"
-                        );
-                        return Ok(ResolvedRunTarget {
-                            desktop_open_path: detect_desktop_open_path_for_installed_capsule(
-                                &installed_capsule,
-                            ),
-                            path: installed_capsule.clone(),
-                            agent_local_root: None,
-                            export_request: resolve_cli_export_request(
-                                export_invocation,
-                                &scoped_ref,
-                                &installed_capsule,
-                            )?,
-                            provider_workspace: None,
-                            transient_workspace_root: None,
-                            community_submit_context: None,
-                        });
-                    }
+                {
+                    debug!(
+                        capsule = %installed_capsule.display(),
+                        version = version,
+                        "Using installed capsule matching registry current version"
+                    );
+                    return Ok(ResolvedRunTarget {
+                        desktop_open_path: detect_desktop_open_path_for_installed_capsule(
+                            &installed_capsule,
+                        ),
+                        path: installed_capsule.clone(),
+                        agent_local_root: None,
+                        export_request: resolve_cli_export_request(
+                            export_invocation,
+                            &scoped_ref,
+                            &installed_capsule,
+                        )?,
+                        provider_workspace: None,
+                        transient_workspace_root: None,
+                        community_submit_context: None,
+                    });
                 }
 
                 registry_detail = Some(detail);
@@ -1483,7 +1486,7 @@ fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
     let destination = transient_root.join(format!(
         "{checkout_name}-{}-{}",
         std::process::id(),
-        rand::thread_rng().gen::<u32>()
+        rand::thread_rng().r#gen::<u32>()
     ));
     if destination.exists() {
         std::fs::remove_dir_all(&destination).with_context(|| {
@@ -1628,11 +1631,13 @@ fn load_export_manifest(capsule_path: &Path) -> Result<capsule_core::types::Caps
     manifest
         .validate_for_mode(capsule_core::types::ValidationMode::Strict)
         .map_err(|errors| {
-            anyhow::anyhow!(errors
-                .into_iter()
-                .map(|error| error.to_string())
-                .collect::<Vec<_>>()
-                .join("; "))
+            anyhow::anyhow!(
+                errors
+                    .into_iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
         })?;
     Ok(manifest)
 }
@@ -2024,15 +2029,15 @@ pub(crate) async fn install_github_repository(
             return Err(error);
         }
     };
-    if let Some(warning) = preview_preparation.draft_fetch_warning.as_deref() {
-        if !json {
-            eprintln!("⚠️  {warning}");
-        }
+    if let Some(warning) = preview_preparation.draft_fetch_warning.as_deref()
+        && !json
+    {
+        eprintln!("⚠️  {warning}");
     }
-    if let Some(warning) = preview_preparation.session_persist_warning.as_deref() {
-        if !json {
-            eprintln!("⚠️  {warning}");
-        }
+    if let Some(warning) = preview_preparation.session_persist_warning.as_deref()
+        && !json
+    {
+        eprintln!("⚠️  {warning}");
     }
     let mut checkout = preview_preparation.checkout;
     let mut install_draft = preview_preparation.install_draft;
@@ -2059,11 +2064,11 @@ pub(crate) async fn install_github_repository(
         }
         preview_session.update_from_install_draft(draft);
     }
-    if install_draft.is_some() {
-        if let Err(error) = show_github_draft_preview(&preview_session, json) {
-            maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
-            return Err(error);
-        }
+    if install_draft.is_some()
+        && let Err(error) = show_github_draft_preview(&preview_session, json)
+    {
+        maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+        return Err(error);
     }
     let inference_attempt = if let Some(draft) = install_draft.as_ref() {
         crate::inference_feedback::submit_attempt(repository, draft)
@@ -2078,10 +2083,10 @@ pub(crate) async fn install_github_repository(
             .as_ref()
             .map(|value| value.attempt_id.as_str()),
     );
-    if let Some(warning) = crate::preview::persist_session_with_warning(&preview_session) {
-        if !json {
-            eprintln!("⚠️  {warning}");
-        }
+    if let Some(warning) = crate::preview::persist_session_with_warning(&preview_session)
+        && !json
+    {
+        eprintln!("⚠️  {warning}");
     }
     if !json {
         if crate::progressive_ui::can_use_progressive_ui(false) {
@@ -2156,39 +2161,39 @@ pub(crate) async fn install_github_repository(
             }
         }
     }
-    if let Some(draft) = install_draft.as_ref() {
-        if crate::preview::draft_requires_manual_review(draft) {
-            if crate::progressive_ui::can_use_progressive_ui(false) {
-                let warnings = draft
-                    .capsule_hint
-                    .as_ref()
-                    .map(|hint| hint.warnings.clone())
-                    .unwrap_or_default();
-                crate::progressive_ui::render_manual_review_required(
-                    &preview_session.manifest_path,
-                    &crate::preview::github_draft_manual_review_reason(draft),
-                    &warnings,
-                )?;
-                crate::progressive_ui::show_cancel(
-                    "Manual review is required before fail-closed provisioning can continue.",
-                )?;
-            }
-            preview_session.record_manual_intervention_required(
-                &crate::preview::github_draft_manual_review_reason(draft),
-            );
-            if let Some(warning) = crate::preview::persist_session_with_warning(&preview_session) {
-                if !json {
-                    eprintln!("⚠️  {warning}");
-                }
-            }
-            maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
-            return Err(build_github_manual_intervention_error(
+    if let Some(draft) = install_draft.as_ref()
+        && crate::preview::draft_requires_manual_review(draft)
+    {
+        if crate::progressive_ui::can_use_progressive_ui(false) {
+            let warnings = draft
+                .capsule_hint
+                .as_ref()
+                .map(|hint| hint.warnings.clone())
+                .unwrap_or_default();
+            crate::progressive_ui::render_manual_review_required(
                 &preview_session.manifest_path,
-                repository,
-                draft,
                 &crate::preview::github_draft_manual_review_reason(draft),
-            )?);
+                &warnings,
+            )?;
+            crate::progressive_ui::show_cancel(
+                "Manual review is required before fail-closed provisioning can continue.",
+            )?;
         }
+        preview_session.record_manual_intervention_required(
+            &crate::preview::github_draft_manual_review_reason(draft),
+        );
+        if let Some(warning) = crate::preview::persist_session_with_warning(&preview_session)
+            && !json
+        {
+            eprintln!("⚠️  {warning}");
+        }
+        maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+        return Err(build_github_manual_intervention_error(
+            &preview_session.manifest_path,
+            repository,
+            draft,
+            &crate::preview::github_draft_manual_review_reason(draft),
+        )?);
     }
     if can_prompt && !yes {
         let approved = crate::progressive_ui::confirm_with_fallback(
@@ -2216,16 +2221,16 @@ pub(crate) async fn install_github_repository(
         Ok(result) => result,
         Err(error) => {
             let mut last_error = error;
-            if let Some(draft) = install_draft.as_ref() {
-                if github_build_error_requires_manual_intervention(&last_error) {
-                    maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
-                    return Err(build_github_manual_intervention_error(
-                        &preview_session.manifest_path,
-                        repository,
-                        draft,
-                        &github_build_error_manual_review_reason(&last_error),
-                    )?);
-                }
+            if let Some(draft) = install_draft.as_ref()
+                && github_build_error_requires_manual_intervention(&last_error)
+            {
+                maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+                return Err(build_github_manual_intervention_error(
+                    &preview_session.manifest_path,
+                    repository,
+                    draft,
+                    &github_build_error_manual_review_reason(&last_error),
+                )?);
             }
             let smoke_report = last_error
                 .downcast_ref::<crate::commands::build::InferredManifestSmokeFailure>()
@@ -2240,10 +2245,9 @@ pub(crate) async fn install_github_repository(
                 preview_session.record_smoke_failure(report);
                 if let Some(warning) =
                     crate::preview::persist_session_with_warning(&preview_session)
+                    && !json
                 {
-                    if !json {
-                        eprintln!("⚠️  {warning}");
-                    }
+                    eprintln!("⚠️  {warning}");
                 }
             }
 
@@ -2256,10 +2260,9 @@ pub(crate) async fn install_github_repository(
                     preview_session.record_manual_intervention_required(&report.message);
                     if let Some(warning) =
                         crate::preview::persist_session_with_warning(&preview_session)
+                        && !json
                     {
-                        if !json {
-                            eprintln!("⚠️  {warning}");
-                        }
+                        eprintln!("⚠️  {warning}");
                     }
                     maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(build_github_manual_intervention_error(
@@ -2286,10 +2289,9 @@ pub(crate) async fn install_github_repository(
                     preview_session.update_from_install_draft(&port_retry_draft);
                     if let Some(warning) =
                         crate::preview::persist_session_with_warning(&preview_session)
+                        && !json
                     {
-                        if !json {
-                            eprintln!("⚠️  {warning}");
-                        }
+                        eprintln!("⚠️  {warning}");
                     }
 
                     if !json {
@@ -2364,10 +2366,9 @@ pub(crate) async fn install_github_repository(
                     preview_session.record_retry_draft(&next_draft, retry_ordinal);
                     if let Some(warning) =
                         crate::preview::persist_session_with_warning(&preview_session)
+                        && !json
                     {
-                        if !json {
-                            eprintln!("⚠️  {warning}");
-                        }
+                        eprintln!("⚠️  {warning}");
                     }
                     current_draft = next_draft;
 
@@ -2428,10 +2429,9 @@ pub(crate) async fn install_github_repository(
                             preview_session.record_smoke_failure(&retry_report);
                             if let Some(warning) =
                                 crate::preview::persist_session_with_warning(&preview_session)
+                                && !json
                             {
-                                if !json {
-                                    eprintln!("⚠️  {warning}");
-                                }
+                                eprintln!("⚠️  {warning}");
                             }
                             if let Some(attempt) = inference_attempt.as_ref() {
                                 let _ = crate::inference_feedback::submit_smoke_failed(
@@ -2452,10 +2452,9 @@ pub(crate) async fn install_github_repository(
                     preview_session.record_manual_intervention_required(&current_report.message);
                     if let Some(warning) =
                         crate::preview::persist_session_with_warning(&preview_session)
+                        && !json
                     {
-                        if !json {
-                            eprintln!("⚠️  {warning}");
-                        }
+                        eprintln!("⚠️  {warning}");
                     }
                     maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
                     return Err(build_github_manual_intervention_error(
@@ -2930,13 +2929,17 @@ mod tests {
     impl EnvVarGuard {
         fn set_path(key: &'static str, value: &Path) -> Self {
             let previous = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
 
         fn set_value(key: &'static str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
@@ -2944,9 +2947,13 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
             } else {
-                std::env::remove_var(self.key);
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }
@@ -2989,7 +2996,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial_test::serial]
     async fn resolve_run_target_or_install_sweeps_stale_github_run_checkouts_before_download() {
-        use filetime::{set_file_mtime, FileTime};
+        use filetime::{FileTime, set_file_mtime};
 
         let temp = tempfile::tempdir().expect("tempdir");
         let ato_home = temp.path().join(".ato");
@@ -3307,7 +3314,7 @@ target = "app"
 
         let msg = format!(
             "{}\n{}",
-            err.to_string(),
+            err,
             err.chain()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()

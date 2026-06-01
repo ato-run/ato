@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::blob::{hash_tree, BlobManifest};
+use capsule_core::blob::{BlobManifest, hash_tree};
 use capsule_core::common::store::BlobAddress;
 use serde::{Deserialize, Serialize};
 
@@ -16,8 +16,9 @@ use crate::application::build_materialization::{
     BuildObservation, BuildSpecSource, LoadOutcome, MaterializationRecord,
 };
 use crate::application::phase_materializer::{
-    materialization_key_for_observation, materialization_key_path_component,
-    validate_build_output_layer_metadata, verify_local_build_output_blob, BuildOutputLayerRecord,
+    BuildOutputLayerRecord, materialization_key_for_observation,
+    materialization_key_path_component, validate_build_output_layer_metadata,
+    verify_local_build_output_blob,
 };
 use crate::application::projection::project_payload;
 

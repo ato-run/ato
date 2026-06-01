@@ -8,7 +8,7 @@ use tar::{Builder, EntryType, Header};
 use super::runtime_fetcher::RuntimeFetcher;
 use crate::common::paths::workspace_artifacts_dir;
 use crate::error::{CapsuleError, Result};
-use crate::lockfile::{resolve_existing_lockfile_path, CAPSULE_LOCK_FILE_NAME};
+use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, resolve_existing_lockfile_path};
 use crate::packers::pack_filter::load_pack_filter_from_path;
 use crate::router::CompatProjectInput;
 use crate::runtime_config::resolve_existing_config_path;
@@ -124,7 +124,7 @@ pub async fn build_bundle(
                 return Err(CapsuleError::Pack(format!(
                     "Unsupported runtime language for bundling: {}",
                     other
-                )))
+                )));
             }
         }
     } else {
@@ -354,12 +354,12 @@ fn manifest_entrypoint_from_manifest(
     manifest: &CapsuleManifest,
     source_target: Option<&SourceTargetHint>,
 ) -> Option<String> {
-    if let Some(target) = source_target {
-        if let Some(entrypoint) = &target.entrypoint {
-            let trimmed = entrypoint.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
+    if let Some(target) = source_target
+        && let Some(entrypoint) = &target.entrypoint
+    {
+        let trimmed = entrypoint.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
         }
     }
 
@@ -440,12 +440,11 @@ fn read_manifest_entrypoint(
     manifest_path: &Path,
     source_target: Option<&SourceTargetHint>,
 ) -> Result<Option<String>> {
-    if let Some(target) = source_target {
-        if let Some(entrypoint) = &target.entrypoint {
-            if !entrypoint.trim().is_empty() {
-                return Ok(Some(entrypoint.trim().to_string()));
-            }
-        }
+    if let Some(target) = source_target
+        && let Some(entrypoint) = &target.entrypoint
+        && !entrypoint.trim().is_empty()
+    {
+        return Ok(Some(entrypoint.trim().to_string()));
     }
 
     let raw = fs::read_to_string(manifest_path).map_err(|e| {
@@ -648,16 +647,15 @@ fn append_dir(
             continue;
         }
 
-        if let Some(ignore) = ignore {
-            if ignore
+        if let Some(ignore) = ignore
+            && ignore
                 .matched_path_or_any_parents(
                     path,
                     entry.file_type().map(|t| t.is_dir()).unwrap_or(false),
                 )
                 .is_ignore()
-            {
-                continue;
-            }
+        {
+            continue;
         }
 
         if let Some(filter) = filter {
@@ -841,10 +839,10 @@ fn compress_with_zstd(data: &[u8], level: i32) -> Result<Vec<u8>> {
 }
 
 fn find_nacelle_binary(explicit_path: Option<&PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit_path {
-        if path.exists() {
-            return Ok(path.clone());
-        }
+    if let Some(path) = explicit_path
+        && path.exists()
+    {
+        return Ok(path.clone());
     }
 
     if let Ok(env_path) = std::env::var("NACELLE_PATH") {
@@ -895,7 +893,7 @@ fn find_nacelle_binary(explicit_path: Option<&PathBuf>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_bundle, create_bundle_archive, PackBundleArgs};
+    use super::{PackBundleArgs, build_bundle, create_bundle_archive};
     use std::collections::BTreeSet;
     use tar::Archive;
 

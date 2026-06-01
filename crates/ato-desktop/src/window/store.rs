@@ -3,11 +3,11 @@ use std::borrow::Cow;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Pixels, Render, Size,
-    WindowBounds, WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, IntoElement, Pixels, Render, Size, WindowBounds,
+    WindowDecorations, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::Response;
 use wry::{Rect, WebView, WebViewBuilder};

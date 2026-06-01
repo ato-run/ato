@@ -398,7 +398,7 @@ fn which_in_path(binary: &str) -> Option<PathBuf> {
         names
     };
     #[cfg(not(windows))]
-    let binary_names = vec![binary.to_string()];
+    let binary_names = [binary.to_string()];
 
     std::env::split_paths(&path_var)
         .flat_map(|entry| binary_names.iter().map(move |name| entry.join(name)))

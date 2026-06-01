@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_executions_dir;
 use capsule_core::execution_identity::{
-    ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2, GraphReceipt,
     EXECUTION_IDENTITY_SCHEMA_VERSION, EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
+    ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2, GraphReceipt,
 };
 
 const RECEIPT_FILE_NAME: &str = "receipt.json";

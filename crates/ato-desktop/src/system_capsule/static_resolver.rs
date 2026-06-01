@@ -8,8 +8,8 @@ use percent_encoding::percent_decode_str;
 use wry::http::Response;
 
 use super::materializer::{
-    lookup_system_capsule, SystemCapsuleLookup, SystemCapsuleRoot, SystemCapsuleUnavailable,
-    SystemCapsuleUnavailableKind,
+    SystemCapsuleLookup, SystemCapsuleRoot, SystemCapsuleUnavailable, SystemCapsuleUnavailableKind,
+    lookup_system_capsule,
 };
 
 const INDEX_FILE: &str = "index.html";
@@ -287,7 +287,9 @@ mod tests {
     impl AtoHomeGuard {
         fn new(path: &Path) -> Self {
             let previous = std::env::var_os("ATO_HOME");
-            std::env::set_var("ATO_HOME", path);
+            unsafe {
+                std::env::set_var("ATO_HOME", path);
+            }
             Self { previous }
         }
     }
@@ -295,9 +297,13 @@ mod tests {
     impl Drop for AtoHomeGuard {
         fn drop(&mut self) {
             if let Some(previous) = self.previous.as_ref() {
-                std::env::set_var("ATO_HOME", previous);
+                unsafe {
+                    std::env::set_var("ATO_HOME", previous);
+                }
             } else {
-                std::env::remove_var("ATO_HOME");
+                unsafe {
+                    std::env::remove_var("ATO_HOME");
+                }
             }
         }
     }

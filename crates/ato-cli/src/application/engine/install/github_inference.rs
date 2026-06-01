@@ -137,13 +137,13 @@ pub(super) fn normalize_github_install_preview_toml(
                 _ => None,
             };
 
-            if let Some(driver) = driver {
-                if let Some(version) = infer_github_install_runtime_version(checkout_dir, driver) {
-                    parsed
-                        .as_table_mut()
-                        .expect("normalized GitHub install draft must stay a table")
-                        .insert("runtime_version".to_string(), toml::Value::String(version));
-                }
+            if let Some(driver) = driver
+                && let Some(version) = infer_github_install_runtime_version(checkout_dir, driver)
+            {
+                parsed
+                    .as_table_mut()
+                    .expect("normalized GitHub install draft must stay a table")
+                    .insert("runtime_version".to_string(), toml::Value::String(version));
             }
         }
 
@@ -170,13 +170,11 @@ pub(super) fn normalize_github_install_preview_toml(
     let schema_is_v03 = incoming_schema == "0.3";
 
     // Upgrade schema_version 0.2 → 0.3 for multi-target manifests too.
-    if schema_is_v02 {
-        if let Some(table) = parsed.as_table_mut() {
-            table.insert(
-                "schema_version".to_string(),
-                toml::Value::String("0.3".to_string()),
-            );
-        }
+    if schema_is_v02 && let Some(table) = parsed.as_table_mut() {
+        table.insert(
+            "schema_version".to_string(),
+            toml::Value::String("0.3".to_string()),
+        );
     }
 
     let Some(targets) = parsed
@@ -242,13 +240,11 @@ pub(super) fn normalize_github_install_preview_toml(
                 .and_then(toml::Value::as_str)
                 .map(|value| value.trim().is_empty())
                 .unwrap_or(true)
-        {
-            if let Some(version) =
+            && let Some(version) =
                 infer_github_install_runtime_version(checkout_dir, normalized_driver.as_str())
-            {
-                target.insert("runtime_version".to_string(), toml::Value::String(version));
-                changed = true;
-            }
+        {
+            target.insert("runtime_version".to_string(), toml::Value::String(version));
+            changed = true;
         }
     }
 
@@ -480,15 +476,15 @@ fn extract_port_from_script_cmd(script_cmd: &str) -> Option<u16> {
     let parts: Vec<&str> = script_cmd.split_whitespace().collect();
     for (i, part) in parts.iter().enumerate() {
         if *part == "--port" {
-            if let Some(next) = parts.get(i + 1) {
-                if let Ok(port) = next.parse::<u16>() {
-                    return Some(port);
-                }
-            }
-        } else if let Some(val) = part.strip_prefix("--port=") {
-            if let Ok(port) = val.parse::<u16>() {
+            if let Some(next) = parts.get(i + 1)
+                && let Ok(port) = next.parse::<u16>()
+            {
                 return Some(port);
             }
+        } else if let Some(val) = part.strip_prefix("--port=")
+            && let Ok(port) = val.parse::<u16>()
+        {
+            return Some(port);
         }
     }
     None
@@ -781,10 +777,9 @@ fn recover_flat_source_node_preview_from_checkout(
         .and_then(toml::Value::as_str)
         .map(|value| value.trim().is_empty())
         .unwrap_or(true)
+        && let Some(version) = infer_github_install_runtime_version(checkout_dir, "node")
     {
-        if let Some(version) = infer_github_install_runtime_version(checkout_dir, "node") {
-            table.insert("runtime_version".to_string(), toml::Value::String(version));
-        }
+        table.insert("runtime_version".to_string(), toml::Value::String(version));
     }
 
     Ok(())
@@ -1106,42 +1101,40 @@ fn resolve_canonical_node_lockfile_by_package_manager<'a>(
     working_dir: &Path,
 ) -> Option<&'a (&'static str, PathBuf, bool)> {
     // First try the explicit `packageManager` field (Corepack convention).
-    if let Some(pkg_json) = read_package_json(working_dir) {
-        if let Some(declared_pm) = pkg_json
+    if let Some(pkg_json) = read_package_json(working_dir)
+        && let Some(declared_pm) = pkg_json
             .get("packageManager")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            let pm_lower = declared_pm.to_ascii_lowercase();
-            let canonical_name: &str = if pm_lower.starts_with("pnpm@") {
-                "pnpm-lock.yaml"
-            } else if pm_lower.starts_with("yarn@") {
-                "yarn.lock"
-            } else if pm_lower.starts_with("bun@") {
-                "bun.lock"
-            } else if pm_lower.starts_with("npm@") {
-                "package-lock.json"
-            } else {
-                ""
-            };
+    {
+        let pm_lower = declared_pm.to_ascii_lowercase();
+        let canonical_name: &str = if pm_lower.starts_with("pnpm@") {
+            "pnpm-lock.yaml"
+        } else if pm_lower.starts_with("yarn@") {
+            "yarn.lock"
+        } else if pm_lower.starts_with("bun@") {
+            "bun.lock"
+        } else if pm_lower.starts_with("npm@") {
+            "package-lock.json"
+        } else {
+            ""
+        };
 
-            if !canonical_name.is_empty() {
-                if let Some(found) = existing_lockfiles
+        if !canonical_name.is_empty() {
+            if let Some(found) = existing_lockfiles
+                .iter()
+                .find(|(name, _, _)| *name == canonical_name)
+            {
+                return Some(found);
+            }
+            // bun fallback: bun.lock declared but only bun.lockb present
+            if canonical_name == "bun.lock"
+                && let Some(found) = existing_lockfiles
                     .iter()
-                    .find(|(name, _, _)| *name == canonical_name)
-                {
-                    return Some(found);
-                }
-                // bun fallback: bun.lock declared but only bun.lockb present
-                if canonical_name == "bun.lock" {
-                    if let Some(found) = existing_lockfiles
-                        .iter()
-                        .find(|(name, _, _)| *name == "bun.lockb")
-                    {
-                        return Some(found);
-                    }
-                }
+                    .find(|(name, _, _)| *name == "bun.lockb")
+            {
+                return Some(found);
             }
         }
     }
@@ -1676,15 +1669,13 @@ fn minimum_node_version_for_checkout(checkout_dir: &Path) -> (u64, u64) {
         };
 
         // Vite ≥ 8.0.0 requires Node.js ≥ 20.19.0.
-        if let Some(vite_range) = deps.get("vite").and_then(serde_json::Value::as_str) {
-            if let Some(major) = first_numeric_version_component(vite_range)
+        if let Some(vite_range) = deps.get("vite").and_then(serde_json::Value::as_str)
+            && let Some(major) = first_numeric_version_component(vite_range)
                 .as_deref()
                 .and_then(|s| s.parse::<u64>().ok())
-            {
-                if major >= 8 {
-                    return (20, 19);
-                }
-            }
+            && major >= 8
+        {
+            return (20, 19);
         }
     }
 
@@ -1763,32 +1754,30 @@ fn infer_python_runtime_version_for_github_install(checkout_dir: &Path) -> Strin
 }
 
 fn extract_pyproject_requires_python(raw: &str) -> Option<String> {
-    if let Ok(parsed) = toml::from_str::<toml::Value>(raw) {
-        if let Some(value) = parsed
+    if let Ok(parsed) = toml::from_str::<toml::Value>(raw)
+        && let Some(value) = parsed
             .get("project")
             .and_then(|section| section.get("requires-python"))
             .and_then(toml::Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
-            return Some(value.to_string());
-        }
+    {
+        return Some(value.to_string());
     }
 
     extract_toml_string_value(raw, "project", "requires-python")
 }
 
 fn extract_uv_lock_requires_python(raw: &str) -> Option<String> {
-    if let Ok(parsed) = toml::from_str::<toml::Value>(raw) {
-        if let Some(value) = parsed
+    if let Ok(parsed) = toml::from_str::<toml::Value>(raw)
+        && let Some(value) = parsed
             .get("options")
             .and_then(|section| section.get("requires-python"))
             .and_then(toml::Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
-            return Some(value.to_string());
-        }
+    {
+        return Some(value.to_string());
     }
 
     extract_toml_string_value(raw, "options", "requires-python")

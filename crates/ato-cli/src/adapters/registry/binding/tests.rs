@@ -3,9 +3,9 @@ use std::fs;
 use capsule_core::types::CapsuleManifest;
 
 use super::contract::{
-    auto_bindable_service_names, derive_service_endpoint_locator, derive_service_upstream_locator,
-    ingress_binding_contract, local_service_binding_contract, normalize_endpoint_locator,
-    normalize_local_service_locator, SERVICE_BINDING_KIND_SERVICE,
+    SERVICE_BINDING_KIND_SERVICE, auto_bindable_service_names, derive_service_endpoint_locator,
+    derive_service_upstream_locator, ingress_binding_contract, local_service_binding_contract,
+    normalize_endpoint_locator, normalize_local_service_locator,
 };
 use super::manifest::load_manifest;
 use super::parse_binding_reference;

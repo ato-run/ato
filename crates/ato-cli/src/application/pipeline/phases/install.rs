@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::adapters::install::source::local::LocalArtifactSource;
-use crate::adapters::install::target::test_temp::{publish_test_sandbox_spec, TestSandboxTarget};
+use crate::adapters::install::target::test_temp::{TestSandboxTarget, publish_test_sandbox_spec};
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::pipeline::producer::PublishInstallResult;
 use crate::application::ports::install::{

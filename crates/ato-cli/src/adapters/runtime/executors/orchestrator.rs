@@ -4,9 +4,9 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{
+    Arc, Mutex as StdMutex,
     atomic::{AtomicBool, Ordering},
     mpsc::{Receiver, TryRecvError},
-    Arc, Mutex as StdMutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use capsule_core::CapsuleReporter;
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::router::ManifestData;
@@ -25,7 +26,6 @@ use capsule_core::runtime::oci::{
 use capsule_core::types::{
     OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceRuntime,
 };
-use capsule_core::CapsuleReporter;
 
 use super::launch_context::RuntimeLaunchContext;
 use super::source::ExecuteMode;
@@ -543,15 +543,14 @@ where
         )
         .await?;
 
-        if let Some(pid) = running_service.local_pid() {
-            if let Some(scope) = self
+        if let Some(pid) = running_service.local_pid()
+            && let Some(scope) = self
                 .startup_cleanup
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .as_mut()
-            {
-                scope.register_kill_child_process(pid, service.name.clone());
-            }
+        {
+            scope.register_kill_child_process(pid, service.name.clone());
         }
 
         self.state
@@ -890,10 +889,10 @@ fn build_service_env(
         env.insert(connection.port_env.clone(), port.to_string());
     }
 
-    if service.name == "main" {
-        if let Some(scoped_id) = runtime_overrides::scoped_id_override() {
-            env.insert("ATO_SCOPED_ID".to_string(), scoped_id);
-        }
+    if service.name == "main"
+        && let Some(scoped_id) = runtime_overrides::scoped_id_override()
+    {
+        env.insert("ATO_SCOPED_ID".to_string(), scoped_id);
     }
 
     if let Some(path) = plan.manifest_path.to_str() {
@@ -1016,11 +1015,10 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                     if exec_readiness_probe_ok(client, &container_id, cmd).await? {
                         return Ok(());
                     }
-                } else if let Some(port) = resolve_probe_port(&service, &probe)? {
-                    if readiness_probe_ok(&probe, port)? {
+                } else if let Some(port) = resolve_probe_port(&service, &probe)?
+                    && readiness_probe_ok(&probe, port)? {
                         return Ok(());
                     }
-                }
             }
 
             if Instant::now() >= deadline {
@@ -2054,18 +2052,26 @@ target = "db"
         assert_eq!(exit, 0);
 
         let events = client.events.lock().unwrap().clone();
-        assert!(events
-            .iter()
-            .any(|event| event.starts_with("network:create:")));
-        assert!(events
-            .iter()
-            .any(|event| event.contains("container:create:db")));
-        assert!(events
-            .iter()
-            .any(|event| event.contains("container:create:main")));
-        assert!(events
-            .iter()
-            .any(|event| event.starts_with("network:remove:")));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.starts_with("network:create:"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("container:create:db"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("container:create:main"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.starts_with("network:remove:"))
+        );
         let stop_db = events
             .iter()
             .position(|event| event.contains("container:stop:") && event.contains("db"))

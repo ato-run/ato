@@ -1,4 +1,5 @@
 //! Manifest validation rules and state/service helper logic.
+#![allow(clippy::items_after_test_module)]
 
 use super::*;
 
@@ -70,29 +71,29 @@ impl CapsuleManifest {
             }
         }
 
-        if let Some(v) = &self.requirements.vram_min {
-            if parse_memory_string(v).is_err() {
-                errors.push(ValidationError::InvalidMemoryString {
-                    field: "requirements.vram_min",
-                    value: v.clone(),
-                });
-            }
+        if let Some(v) = &self.requirements.vram_min
+            && parse_memory_string(v).is_err()
+        {
+            errors.push(ValidationError::InvalidMemoryString {
+                field: "requirements.vram_min",
+                value: v.clone(),
+            });
         }
-        if let Some(v) = &self.requirements.vram_recommended {
-            if parse_memory_string(v).is_err() {
-                errors.push(ValidationError::InvalidMemoryString {
-                    field: "requirements.vram_recommended",
-                    value: v.clone(),
-                });
-            }
+        if let Some(v) = &self.requirements.vram_recommended
+            && parse_memory_string(v).is_err()
+        {
+            errors.push(ValidationError::InvalidMemoryString {
+                field: "requirements.vram_recommended",
+                value: v.clone(),
+            });
         }
-        if let Some(v) = &self.requirements.disk {
-            if parse_memory_string(v).is_err() {
-                errors.push(ValidationError::InvalidMemoryString {
-                    field: "requirements.disk",
-                    value: v.clone(),
-                });
-            }
+        if let Some(v) = &self.requirements.disk
+            && parse_memory_string(v).is_err()
+        {
+            errors.push(ValidationError::InvalidMemoryString {
+                field: "requirements.disk",
+                value: v.clone(),
+            });
         }
 
         if self.capsule_type == CapsuleType::Inference && self.capabilities.is_none() {
@@ -503,18 +504,18 @@ impl CapsuleManifest {
                     .unwrap_or(false);
                 let has_exec = probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                 // port is required for HTTP/TCP probes; exec probes do not need it.
-                if (has_http_get || has_tcp_connect) && !has_exec {
-                    if probe
+                if (has_http_get || has_tcp_connect)
+                    && !has_exec
+                    && probe
                         .port
                         .as_deref()
                         .map(|s| s.trim().is_empty())
                         .unwrap_or(true)
-                    {
-                        errors.push(ValidationError::InvalidTarget(format!(
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
                             "target '{}': readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes",
                             label
                         )));
-                    }
                 }
                 if !has_http_get && !has_tcp_connect && !has_exec {
                     errors.push(ValidationError::InvalidTarget(format!(
@@ -745,19 +746,19 @@ impl CapsuleManifest {
                         let has_exec_svc =
                             probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                         // port is required for HTTP/TCP probes; exec probes do not need it.
-                        if (has_http_get || has_tcp_connect) && !has_exec_svc {
-                            if probe
+                        if (has_http_get || has_tcp_connect)
+                            && !has_exec_svc
+                            && probe
                                 .port
                                 .as_deref()
                                 .map(|s| s.trim().is_empty())
                                 .unwrap_or(true)
-                            {
-                                errors.push(ValidationError::InvalidService(
+                        {
+                            errors.push(ValidationError::InvalidService(
                                     name.to_string(),
                                     "readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes"
                                         .to_string(),
                                 ));
-                            }
                         }
                         if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
@@ -835,18 +836,16 @@ impl CapsuleManifest {
                         }
                         if let Some(network) =
                             services.get(&dep).and_then(|svc| svc.network.as_ref())
+                            && !network.allow_from.is_empty()
+                            && !network.allow_from.iter().any(|value| value == name)
                         {
-                            if !network.allow_from.is_empty()
-                                && !network.allow_from.iter().any(|value| value == name)
-                            {
-                                errors.push(ValidationError::InvalidService(
-                                    name.to_string(),
-                                    format!(
-                                        "service '{}' is not allowed to connect to '{}'",
-                                        name, dep
-                                    ),
-                                ));
-                            }
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                format!(
+                                    "service '{}' is not allowed to connect to '{}'",
+                                    name, dep
+                                ),
+                            ));
                         }
                     }
                 }
@@ -906,19 +905,19 @@ impl CapsuleManifest {
                         let has_exec_svc =
                             probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
                         // port is required for HTTP/TCP probes; exec probes do not need it.
-                        if (has_http_get || has_tcp_connect) && !has_exec_svc {
-                            if probe
+                        if (has_http_get || has_tcp_connect)
+                            && !has_exec_svc
+                            && probe
                                 .port
                                 .as_deref()
                                 .map(|s| s.trim().is_empty())
                                 .unwrap_or(true)
-                            {
-                                errors.push(ValidationError::InvalidService(
+                        {
+                            errors.push(ValidationError::InvalidService(
                                     name.to_string(),
                                     "readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes"
                                         .to_string(),
                                 ));
-                            }
                         }
                         if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
@@ -1096,16 +1095,16 @@ impl CapsuleManifest {
                         continue;
                     };
 
-                    if let Some(target) = named_targets.get(target_label) {
-                        if !target.runtime.eq_ignore_ascii_case("oci") {
-                            errors.push(ValidationError::InvalidStateBinding(
+                    if let Some(target) = named_targets.get(target_label)
+                        && !target.runtime.eq_ignore_ascii_case("oci")
+                    {
+                        errors.push(ValidationError::InvalidStateBinding(
                                 service_name.clone(),
                                 format!(
                                     "state_bindings are only supported for OCI targets in this PoC (target '{}')",
                                     target_label
                                 ),
                             ));
-                        }
                     }
 
                     let mut bound_states = std::collections::HashSet::new();
@@ -1129,39 +1128,36 @@ impl CapsuleManifest {
 
                             if let Some(previous_service) = shared_state_bindings
                                 .insert(state_name.to_string(), service_name.clone())
+                                && previous_service != *service_name
                             {
-                                if previous_service != *service_name {
-                                    let state_requirement = self.state.get(state_name);
-                                    match state_requirement {
-                                        Some(req) if req.sharing == StateSharing::SameCapsule => {
-                                            if req
-                                                .schema_id
-                                                .as_deref()
-                                                .map(str::trim)
-                                                .filter(|v| !v.is_empty())
-                                                .is_none()
-                                            {
-                                                errors.push(
-                                                    ValidationError::StateSharedRequiresSchemaId(
-                                                        state_name.to_string(),
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                        Some(_) => {
+                                let state_requirement = self.state.get(state_name);
+                                match state_requirement {
+                                    Some(req) if req.sharing == StateSharing::SameCapsule => {
+                                        if req
+                                            .schema_id
+                                            .as_deref()
+                                            .map(str::trim)
+                                            .filter(|v| !v.is_empty())
+                                            .is_none()
+                                        {
                                             errors.push(
-                                                ValidationError::StateSharedRequiresPolicy {
-                                                    state: state_name.to_string(),
-                                                    first_service: previous_service,
-                                                    second_service: service_name.clone(),
-                                                },
+                                                ValidationError::StateSharedRequiresSchemaId(
+                                                    state_name.to_string(),
+                                                ),
                                             );
                                         }
-                                        None => {
-                                            errors.push(ValidationError::StateKeyUndeclared(
-                                                state_name.to_string(),
-                                            ));
-                                        }
+                                    }
+                                    Some(_) => {
+                                        errors.push(ValidationError::StateSharedRequiresPolicy {
+                                            state: state_name.to_string(),
+                                            first_service: previous_service,
+                                            second_service: service_name.clone(),
+                                        });
+                                    }
+                                    None => {
+                                        errors.push(ValidationError::StateKeyUndeclared(
+                                            state_name.to_string(),
+                                        ));
                                     }
                                 }
                             }
@@ -1537,7 +1533,7 @@ fn is_valid_ingress_alias(alias: &str) -> bool {
     if lower.contains("%2f") || lower.contains("%5c") {
         return false;
     }
-    if alias.as_bytes().iter().any(|b| *b == b'%') {
+    if alias.as_bytes().contains(&b'%') {
         return false;
     }
     alias
@@ -1660,13 +1656,12 @@ fn validate_dependency_contracts(
             .state
             .as_ref()
             .and_then(|state| state.mount.as_deref())
+            && !is_valid_mount_path(state)
         {
-            if !is_valid_mount_path(state) {
-                errors.push(ValidationError::InvalidTarget(format!(
-                    "contracts.{}.state.mount must be an absolute mount path",
-                    contract_id
-                )));
-            }
+            errors.push(ValidationError::InvalidTarget(format!(
+                "contracts.{}.state.mount must be an absolute mount path",
+                contract_id
+            )));
         }
     }
 }
@@ -1699,7 +1694,9 @@ pub enum ValidationError {
     DefaultTargetNotFound(String),
     #[error("Invalid target: {0}")]
     InvalidTarget(String),
-    #[error("Invalid target '{0}': unsupported driver '{1}' (allowed: static|deno|node|python|wasmtime|native)")]
+    #[error(
+        "Invalid target '{0}': unsupported driver '{1}' (allowed: static|deno|node|python|wasmtime|native)"
+    )]
     InvalidTargetDriver(String, String),
     #[error("Invalid target '{0}': runtime_version is required for runtime=source driver='{1}'")]
     MissingRuntimeVersion(String, String),
@@ -1711,7 +1708,9 @@ pub enum ValidationError {
     InvalidState(String, String),
     #[error("Invalid state binding for service '{0}': {1}")]
     InvalidStateBinding(String, String),
-    #[error("State '{state}' is bound by both service '{first_service}' and '{second_service}'; shared mutable state requires sharing=\"same-capsule\" on the state declaration")]
+    #[error(
+        "State '{state}' is bound by both service '{first_service}' and '{second_service}'; shared mutable state requires sharing=\"same-capsule\" on the state declaration"
+    )]
     StateSharedRequiresPolicy {
         state: String,
         first_service: String,
@@ -1737,7 +1736,9 @@ pub enum ValidationError {
     ToolMissingArtifact(String),
     #[error("platforms.{0}.sha256 must be 64 hex characters")]
     ToolInvalidArtifactSha256(String),
-    #[error("exports.{kind}.{alias} = '{path}' must be a relative path under the tool root (no '/', no '..')")]
+    #[error(
+        "exports.{kind}.{alias} = '{path}' must be a relative path under the tool root (no '/', no '..')"
+    )]
     ToolExportPathInvalid {
         kind: &'static str,
         alias: String,
@@ -1745,11 +1746,15 @@ pub enum ValidationError {
     },
     #[error("type='tool' capsule must not declare [services]")]
     ToolMustNotDeclareServices,
-    #[error("type='tool' capsule must not declare [dependencies] (use [tool_dependencies] for nested tool capsules)")]
+    #[error(
+        "type='tool' capsule must not declare [dependencies] (use [tool_dependencies] for nested tool capsules)"
+    )]
     ToolMustNotDeclareServiceDependencies,
     #[error("[platforms] is only valid on type='tool' capsules")]
     PlatformsRequiresToolType,
-    #[error("tool_dependencies.{alias}.bind_env.{export} = '{env_name}' is not a valid POSIX env-var name")]
+    #[error(
+        "tool_dependencies.{alias}.bind_env.{export} = '{env_name}' is not a valid POSIX env-var name"
+    )]
     ToolDependencyInvalidEnvVar {
         alias: String,
         export: String,
@@ -1924,12 +1929,12 @@ fn detect_service_cycle(services: &HashMap<String, ServiceSpec>) -> Result<(), S
 
         visiting.insert(current.to_string());
         stack.push(current.to_string());
-        if let Some(spec) = services.get(current) {
-            if let Some(deps) = spec.depends_on.as_ref() {
-                for dep in deps {
-                    if services.contains_key(dep) {
-                        visit(dep, services, visiting, visited, stack)?;
-                    }
+        if let Some(spec) = services.get(current)
+            && let Some(deps) = spec.depends_on.as_ref()
+        {
+            for dep in deps {
+                if services.contains_key(dep) {
+                    visit(dep, services, visiting, visited, stack)?;
                 }
             }
         }
@@ -1961,7 +1966,7 @@ fn validate_upstream_prefix_segments(prefix: &str) -> Option<String> {
     if lower.contains("%2f") || lower.contains("%5c") {
         return Some("must not contain percent-encoded slash or backslash".to_string());
     }
-    if prefix.as_bytes().iter().any(|b| *b == b'%') {
+    if prefix.as_bytes().contains(&b'%') {
         return Some("must not contain percent-encoded characters".to_string());
     }
     None

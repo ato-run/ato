@@ -7,8 +7,8 @@ use ato_cli::dependency_materializer::{
     PlatformTriple, RuntimeSelection, SessionDependencyMaterializer, SourceResolutionRecord,
     StoreRefRecord,
 };
-use capsule_core::blob::{BlobManifest, BLOB_MANIFEST_SCHEMA_VERSION, BLOB_TREE_ALGORITHM};
-use capsule_core::common::store::{ato_store_dep_ref_path, BlobAddress};
+use capsule_core::blob::{BLOB_MANIFEST_SCHEMA_VERSION, BLOB_TREE_ALGORITHM, BlobManifest};
+use capsule_core::common::store::{BlobAddress, ato_store_dep_ref_path};
 use serial_test::serial;
 
 mod support;
@@ -239,8 +239,12 @@ fn plan_with_derivation_strategy_attempts_lookup_without_safety_env() {
     // cache_strategy is the sole source of truth. With DerivationCache and
     // an empty store the lookup must report Miss (not Disabled).
     let _env = IsolatedAto::new();
-    std::env::remove_var("ATO_DEP_CACHE");
-    std::env::remove_var("ATO_CACHE_STRATEGY");
+    unsafe {
+        std::env::remove_var("ATO_DEP_CACHE");
+    }
+    unsafe {
+        std::env::remove_var("ATO_CACHE_STRATEGY");
+    }
 
     let plan = SessionDependencyMaterializer::new()
         .plan(&cached_request())

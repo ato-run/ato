@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -117,6 +117,7 @@ struct RecipeResolution {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResolveBindingResponse {
     binding: Option<ResolveBindingItem>,
     recipe: Option<ResolveRecipeItem>,
@@ -134,6 +135,7 @@ struct ResolveBindingItem {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResolveRecipeItem {
     origin: String,
     trust_level: String,
@@ -329,10 +331,10 @@ fn process_current_working_dir_with_lsof(pid: i32) -> Result<Option<PathBuf>> {
     }
 
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(path) = line.strip_prefix('n') {
-            if !path.is_empty() {
-                return Ok(Some(PathBuf::from(path)));
-            }
+        if let Some(path) = line.strip_prefix('n')
+            && !path.is_empty()
+        {
+            return Ok(Some(PathBuf::from(path)));
         }
     }
 
@@ -851,11 +853,11 @@ fn run_shadow_workspace_readiness_only(
     let mut ready = false;
     while std::time::Instant::now() < deadline {
         cleanup.observe();
-        if let Ok(resp) = client.get(&ready_url).send() {
-            if resp.status().is_success() {
-                ready = true;
-                break;
-            }
+        if let Ok(resp) = client.get(&ready_url).send()
+            && resp.status().is_success()
+        {
+            ready = true;
+            break;
         }
         if let Ok(Some(status)) = cleanup.child_mut().try_wait() {
             // Short-lived commands can complete before readiness. Treat a
@@ -1064,11 +1066,11 @@ fn run_shadow_workspace_keep_alive(
     let mut readiness_state = "pending".to_string();
     while std::time::Instant::now() < deadline {
         observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
-        if let Ok(resp) = client.get(&primary_url).send() {
-            if resp.status().is_success() {
-                readiness_state = "ready".to_string();
-                break;
-            }
+        if let Ok(resp) = client.get(&primary_url).send()
+            && resp.status().is_success()
+        {
+            readiness_state = "ready".to_string();
+            break;
         }
         if let Ok(Some(status)) = child.try_wait() {
             let combined = read_error_excerpt_from_log(&log_path);
@@ -1560,18 +1562,20 @@ fn signal_process_group(pgid: i32, signal: libc::c_int) {
 fn infer_port(recipe_toml: &str) -> Option<u16> {
     let parsed = recipe_toml.parse::<toml::Value>().ok()?;
     // Check top-level port
-    if let Some(p) = parsed.get("port").and_then(|v| v.as_integer()) {
-        if p > 0 && p <= u16::MAX as i64 {
-            return Some(p as u16);
-        }
+    if let Some(p) = parsed.get("port").and_then(|v| v.as_integer())
+        && p > 0
+        && p <= u16::MAX as i64
+    {
+        return Some(p as u16);
     }
     // Check target-level port
     let targets = parsed.get("targets").and_then(|v| v.as_table())?;
     for (_label, target) in targets {
-        if let Some(p) = target.get("port").and_then(|v| v.as_integer()) {
-            if p > 0 && p <= u16::MAX as i64 {
-                return Some(p as u16);
-            }
+        if let Some(p) = target.get("port").and_then(|v| v.as_integer())
+            && p > 0
+            && p <= u16::MAX as i64
+        {
+            return Some(p as u16);
         }
     }
     None
@@ -2150,7 +2154,7 @@ mod tests {
 
     #[test]
     fn unknown_provider_failure_falls_through_to_unknown() {
-        let (phase, class) = classify_run_failure(
+        let (_phase, class) = classify_run_failure(
             "some completely unfamiliar error text that does not match any known pattern",
         );
         assert_eq!(class, "unknown");
@@ -2158,7 +2162,7 @@ mod tests {
 
     #[test]
     fn prisma_query_engine_not_found_classified() {
-        let (phase, class) = classify_run_failure(
+        let (_phase, class) = classify_run_failure(
             "prisma:error Invalid `prisma.config.findFirst()` Prisma Client could not locate the Query Engine for runtime \"darwin-arm64\".",
         );
         assert_eq!(class, "prisma_query_engine_not_found");
@@ -2166,21 +2170,21 @@ mod tests {
 
     #[test]
     fn prisma_database_url_missing_classified() {
-        let (phase, class) =
+        let (_phase, class) =
             classify_run_failure("prisma:error Environment variable not found: DATABASE_URL");
         assert_eq!(class, "prisma_database_url_missing");
     }
 
     #[test]
     fn prisma_database_connection_failed_classified() {
-        let (phase, class) =
+        let (_phase, class) =
             classify_run_failure("prisma:error Can't reach database server at `localhost:5432`");
         assert_eq!(class, "prisma_database_connection_failed");
     }
 
     #[test]
     fn prisma_failed_migration_state_classified() {
-        let (phase, class) = classify_run_failure(
+        let (_phase, class) = classify_run_failure(
             "prisma P3009: found failed migrations in the target database, new migrations cannot be applied",
         );
         assert_eq!(class, "prisma_failed_migration_state");
@@ -2188,14 +2192,14 @@ mod tests {
 
     #[test]
     fn prisma_schema_not_found_classified() {
-        let (phase, class) =
+        let (_phase, class) =
             classify_run_failure("Prisma schema file prisma/schema.prisma not found");
         assert_eq!(class, "prisma_schema_not_found");
     }
 
     #[test]
     fn prisma_migration_sql_still_caught_as_fallback() {
-        let (phase, class) = classify_run_failure(
+        let (_phase, class) = classify_run_failure(
             "prisma error: migration 20251231140909_add_fonts_table failed to apply",
         );
         assert_eq!(class, "prisma_migration_sql_failed");

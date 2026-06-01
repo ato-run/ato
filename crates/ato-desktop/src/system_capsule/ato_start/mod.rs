@@ -28,7 +28,7 @@ use anyhow::Result;
 use gpui::{AnyWindowHandle, App};
 use serde::{Deserialize, Serialize};
 
-use crate::localization::{tr, LocaleCode};
+use crate::localization::{LocaleCode, tr};
 use crate::state::GuestRoute;
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::content_windows::OpenContentWindows;
@@ -98,7 +98,7 @@ pub enum QueryIntent {
 /// - `capsule://...` or `github.com/...` → `CapsuleHandle`
 /// - `http://...` or `https://...` → `ExternalUrl`
 /// - `~/...` or an absolute `/...` path → `LocalPath`
-/// - known featured sample aliases → `CapsuleHandle`
+/// - known featured sample aliases → canonical GitHub `CapsuleHandle`
 /// - Anything else → `Invalid`
 pub fn classify_query(value: &str) -> QueryIntent {
     let v = value.trim();
@@ -108,15 +108,23 @@ pub fn classify_query(value: &str) -> QueryIntent {
         QueryIntent::ExternalUrl(v.to_string())
     } else if v.starts_with("~/") || v.starts_with('/') {
         QueryIntent::LocalPath(v.to_string())
-    } else if is_featured_sample_alias(v) {
-        QueryIntent::CapsuleHandle(v.to_string())
+    } else if let Some(handle) = featured_sample_alias_to_github(v) {
+        QueryIntent::CapsuleHandle(handle.to_string())
     } else {
-        QueryIntent::Invalid(format!("'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。", v))
+        QueryIntent::Invalid(format!(
+            "'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。",
+            v
+        ))
     }
 }
 
-fn is_featured_sample_alias(value: &str) -> bool {
-    matches!(value, "affine" | "open-webui" | "excalidraw")
+fn featured_sample_alias_to_github(value: &str) -> Option<&'static str> {
+    match value {
+        "affine" => Some("github.com/toeverything/AFFiNE"),
+        "open-webui" => Some("github.com/open-webui/open-webui"),
+        "excalidraw" => Some("github.com/excalidraw/excalidraw"),
+        _ => None,
+    }
 }
 
 // ─── StartPageHistoryStore ───────────────────────────────────────────────────
@@ -188,7 +196,7 @@ impl StartPageHistoryStore {
             });
         }
         self.entries
-            .sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at));
+            .sort_by_key(|e| std::cmp::Reverse(e.last_opened_at));
         self.entries.truncate(MAX_HISTORY);
     }
 }
@@ -213,11 +221,11 @@ const MAX_SCAN_DEPTH: usize = 3;
 /// `MAX_LOCAL_APPS` results.
 pub fn scan_local_apps(root: &Path) -> Vec<LocalAppInfo> {
     let mut results = Vec::new();
-    scan_dir(root, root, 0, &mut results);
+    scan_dir(root, 0, &mut results);
     results
 }
 
-fn scan_dir(root: &Path, dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) {
+fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) {
     if depth >= MAX_SCAN_DEPTH || out.len() >= MAX_LOCAL_APPS {
         return;
     }
@@ -254,7 +262,7 @@ fn scan_dir(root: &Path, dir: &Path, depth: usize, out: &mut Vec<LocalAppInfo>) 
                 name,
             });
         } else {
-            scan_dir(root, &path, depth + 1, out);
+            scan_dir(&path, depth + 1, out);
         }
     }
 }
@@ -341,10 +349,10 @@ pub fn build_start_snapshot(
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
@@ -352,7 +360,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
     vec![
         FeaturedApp {
-            handle: "affine".to_string(),
+            handle: "github.com/toeverything/AFFiNE".to_string(),
             label: "AFFiNE".to_string(),
             description: tr(locale, "start.featured.affine_desc"),
             icon: "△".to_string(),
@@ -366,7 +374,7 @@ fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
             installed: false,
         },
         FeaturedApp {
-            handle: "open-webui".to_string(),
+            handle: "github.com/open-webui/open-webui".to_string(),
             label: "Open WebUI".to_string(),
             description: tr(locale, "start.featured.open_webui_desc"),
             icon: "OI".to_string(),
@@ -380,7 +388,7 @@ fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
             installed: false,
         },
         FeaturedApp {
-            handle: "capsule://github.com/excalidraw/excalidraw".to_string(),
+            handle: "github.com/excalidraw/excalidraw".to_string(),
             label: "Excalidraw".to_string(),
             description: tr(locale, "start.featured.excalidraw_desc"),
             icon: "✏️".to_string(),
@@ -568,12 +576,10 @@ pub fn dispatch(
             // as GPUI tears the windows down.
             crate::window::begin_shutdown();
             crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
-                if crate::window::is_multi_window_enabled() {
-                    let count = cx
-                        .global_mut::<crate::state::session::SessionRegistry>()
-                        .stop_all_running();
-                    tracing::info!(count, "ato_start: quit — stopped running sessions");
-                }
+                let count = cx
+                    .global_mut::<crate::state::session::SessionRegistry>()
+                    .stop_all_running();
+                tracing::info!(count, "ato_start: quit — stopped running sessions");
                 tracing::info!("ato_start: quit requested from Start page — quitting app");
                 cx.quit();
             });
@@ -688,15 +694,32 @@ mod tests {
     fn classify_featured_sample_aliases() {
         assert_eq!(
             classify_query("affine"),
-            QueryIntent::CapsuleHandle("affine".to_string())
+            QueryIntent::CapsuleHandle("github.com/toeverything/AFFiNE".to_string())
         );
         assert_eq!(
             classify_query("open-webui"),
-            QueryIntent::CapsuleHandle("open-webui".to_string())
+            QueryIntent::CapsuleHandle("github.com/open-webui/open-webui".to_string())
         );
         assert_eq!(
             classify_query("excalidraw"),
-            QueryIntent::CapsuleHandle("excalidraw".to_string())
+            QueryIntent::CapsuleHandle("github.com/excalidraw/excalidraw".to_string())
+        );
+    }
+
+    #[test]
+    fn static_featured_apps_use_github_handles() {
+        let handles: Vec<_> = static_featured_apps(LocaleCode::En)
+            .into_iter()
+            .map(|app| app.handle)
+            .collect();
+
+        assert_eq!(
+            handles,
+            vec![
+                "github.com/toeverything/AFFiNE".to_string(),
+                "github.com/open-webui/open-webui".to_string(),
+                "github.com/excalidraw/excalidraw".to_string(),
+            ]
         );
     }
 

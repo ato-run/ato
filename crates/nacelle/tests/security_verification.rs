@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
 
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use nacelle::capnp_to_manifest::manifest_to_capnp_bytes;
     use nacelle::capsule_types::capsule_v1::{
@@ -138,10 +138,11 @@ mod tests {
         // Should fail because signer is not trusted
         let res = verifier.verify_manifest(&manifest, &sig_bytes, "");
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("is not the trusted signer"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("is not the trusted signer")
+        );
     }
 
     #[test]
@@ -183,10 +184,11 @@ mod tests {
         // Should fail because content was tampered
         let res = verifier.verify_manifest(&tampered_manifest, &sig_bytes, "");
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Cryptographic verification failed"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Cryptographic verification failed")
+        );
     }
 
     #[test]

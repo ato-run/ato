@@ -1,11 +1,11 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::bootstrap::BootstrapBoundary;
 use capsule_core::common::paths::workspace_tmp_dir;
 use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
 use chrono::{SecondsFormat, Utc};
 use goblin::Object;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -22,7 +22,7 @@ mod filesystem;
 #[cfg(windows)]
 use mslnk::ShellLink;
 #[cfg(unix)]
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 #[cfg(windows)]
 use std::os::windows::fs::symlink_dir;
 
@@ -495,10 +495,8 @@ pub(crate) fn detect_build_strategy_from_descriptor(
     // Only enforce canonical defaults when no explicit inline config was provided.
     // If the user supplies [artifact] + [finalize] in their manifest, those settings
     // take precedence over auto-inferred defaults.
-    if !has_explicit_delivery_config {
-        if let Some(canonical) = &canonical_config {
-            ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
-        }
+    if !has_explicit_delivery_config && let Some(canonical) = &canonical_config {
+        ensure_delivery_config_matches_context(&config, canonical, &source_label)?;
     }
 
     let input_relative = PathBuf::from(config.artifact.input.trim());
@@ -1967,7 +1965,7 @@ fn materialize_fetch_cache(
                         temp_dir.display(),
                         final_dir.display()
                     )
-                })
+                });
             }
         }
 

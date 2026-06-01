@@ -224,17 +224,17 @@ pub(crate) fn observe_dependencies_v2(
 fn build_observation_lockfile_digests(plan: &ManifestData) -> BTreeMap<String, String> {
     let mut digests = BTreeMap::new();
     let lock_path = plan.lock_path.clone();
-    if lock_path.is_file() {
-        if let Ok(bytes) = std::fs::read(&lock_path) {
-            digests.insert(
-                lock_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("ato.lock.json")
-                    .to_string(),
-                format!("blake3:{}", blake3::hash(&bytes).to_hex()),
-            );
-        }
+    if lock_path.is_file()
+        && let Ok(bytes) = std::fs::read(&lock_path)
+    {
+        digests.insert(
+            lock_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("ato.lock.json")
+                .to_string(),
+            format!("blake3:{}", blake3::hash(&bytes).to_hex()),
+        );
     }
     digests
 }
@@ -375,10 +375,10 @@ fn build_runtime_resolved_ref(
     if let Some(declared) = declared.filter(|value| !value.is_empty() && !value.contains('/')) {
         return Tracked::known(declared.to_string());
     }
-    if let Some(path) = resolved_path {
-        if let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) {
-            return Tracked::known(file_name.to_string());
-        }
+    if let Some(path) = resolved_path
+        && let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str())
+    {
+        return Tracked::known(file_name.to_string());
     }
     Tracked::untracked("runtime resolved_ref observer cannot derive a portable identifier")
 }
@@ -437,28 +437,28 @@ pub(crate) fn observe_environment_v2(
     // keys that drive locale/time/runtime semantics and EnvironmentMode
     // cannot reach Closed.
     for key in &intrinsic_keys {
-        if !env.contains_key(key) {
-            if let Ok(value) = std::env::var(key) {
-                env.insert(
-                    key.clone(),
-                    ObservedEnvValue {
-                        value,
-                        origin: EnvOrigin::Host,
-                    },
-                );
-            }
+        if !env.contains_key(key)
+            && let Ok(value) = std::env::var(key)
+        {
+            env.insert(
+                key.clone(),
+                ObservedEnvValue {
+                    value,
+                    origin: EnvOrigin::Host,
+                },
+            );
         }
     }
 
     let manifest_keys: Vec<String> = plan.execution_env().keys().cloned().collect();
     for key in plan.execution_required_envs() {
-        if let std::collections::btree_map::Entry::Vacant(entry) = env.entry(key.clone()) {
-            if let Ok(value) = std::env::var(&key) {
-                entry.insert(ObservedEnvValue {
-                    value,
-                    origin: EnvOrigin::ManifestRequiredEnv,
-                });
-            }
+        if let std::collections::btree_map::Entry::Vacant(entry) = env.entry(key.clone())
+            && let Ok(value) = std::env::var(&key)
+        {
+            entry.insert(ObservedEnvValue {
+                value,
+                origin: EnvOrigin::ManifestRequiredEnv,
+            });
         }
     }
     let injected_keys: Vec<String> = launch_ctx.injected_env().keys().cloned().collect();
@@ -724,11 +724,11 @@ pub(crate) fn observe_filesystem_v2(
         (Tracked::known(view_digest), None)
     } else {
         (
-                Tracked::untracked(
-                    "filesystem view hash is partial: one of (semantics, mount source identities, state bindings) not fully observed",
-                ),
-                Some(view_digest),
-            )
+            Tracked::untracked(
+                "filesystem view hash is partial: one of (semantics, mount source identities, state bindings) not fully observed",
+            ),
+            Some(view_digest),
+        )
     };
 
     Ok(FilesystemIdentityV2 {
@@ -879,12 +879,12 @@ fn classify_entry_point(
         };
     }
     if !command.contains('/') && !command.contains(std::path::MAIN_SEPARATOR) {
-        if let Some(resolved_ref) = runtime.resolved_ref.value.as_deref() {
-            if resolved_ref == command {
-                return LaunchEntryPoint::RuntimeManaged {
-                    resolved_ref: resolved_ref.to_string(),
-                };
-            }
+        if let Some(resolved_ref) = runtime.resolved_ref.value.as_deref()
+            && resolved_ref == command
+        {
+            return LaunchEntryPoint::RuntimeManaged {
+                resolved_ref: resolved_ref.to_string(),
+            };
         }
         return LaunchEntryPoint::Command {
             name: command.to_string(),
@@ -892,12 +892,12 @@ fn classify_entry_point(
     }
     let path = PathBuf::from(command);
     if path.is_absolute() {
-        if path.starts_with(&ctx.ato_runtimes) {
-            if let Some(resolved_ref) = runtime.resolved_ref.value.as_deref() {
-                return LaunchEntryPoint::RuntimeManaged {
-                    resolved_ref: resolved_ref.to_string(),
-                };
-            }
+        if path.starts_with(&ctx.ato_runtimes)
+            && let Some(resolved_ref) = runtime.resolved_ref.value.as_deref()
+        {
+            return LaunchEntryPoint::RuntimeManaged {
+                resolved_ref: resolved_ref.to_string(),
+            };
         }
         if let Some(role) = workspace_role(&path, ctx) {
             return LaunchEntryPoint::WorkspaceRelative { path: role };
@@ -1154,13 +1154,17 @@ mod tests {
         );
 
         let environment = observe_environment_v2(&plan, &launch_ctx, &ctx).expect("observe env");
-        assert!(environment
-            .entries
-            .iter()
-            .all(|entry| entry.key != "DATABASE_URL"));
-        assert!(environment
-            .ambient_untracked_keys
-            .contains(&"DATABASE_URL".to_string()));
+        assert!(
+            environment
+                .entries
+                .iter()
+                .all(|entry| entry.key != "DATABASE_URL")
+        );
+        assert!(
+            environment
+                .ambient_untracked_keys
+                .contains(&"DATABASE_URL".to_string())
+        );
     }
 
     #[test]
@@ -1193,10 +1197,12 @@ env_allowlist = ["DATABASE_URL"]
         );
 
         let environment = observe_environment_v2(&plan, &launch_ctx, &ctx).expect("observe env");
-        assert!(environment
-            .entries
-            .iter()
-            .all(|entry| entry.key != "DATABASE_URL"));
+        assert!(
+            environment
+                .entries
+                .iter()
+                .all(|entry| entry.key != "DATABASE_URL")
+        );
         assert!(environment.ambient_untracked_keys.is_empty());
     }
 

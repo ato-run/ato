@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::adapters::runtime::oci_session_store::{
-    apply_stop_result, stop_oci_session, stop_oci_session_by_id, stop_podman_machines_if_idle,
-    OciSessionStore, PodmanMachineStopResult, StopByIdAttempt,
+    OciSessionStore, PodmanMachineStopResult, StopByIdAttempt, apply_stop_result, stop_oci_session,
+    stop_oci_session_by_id, stop_podman_machines_if_idle,
 };
 use crate::reporters::CliReporter;
 use crate::runtime::process::{ImportPreviewStopResult, ImportPreviewStopStatus, ProcessManager};
