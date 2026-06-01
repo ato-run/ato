@@ -127,9 +127,10 @@ fn main() -> Result<()> {
             // codesign xattrs that hdiutil/.dmg lose; .dmg is also
             // quarantine-tainted when downloaded via Safari, so the
             // zip path is now the canonical install.sh delivery.
-            match target.as_str() {
+            match target {
                 BundleTarget::DarwinArm64 | BundleTarget::DarwinX86_64 => {
-                    let bundle = bundle_macos_app(target, &helper_source)?;
+                    let target_str = target.as_str();
+                    let bundle = bundle_macos_app(target_str, &helper_source)?;
                     if sign {
                         codesign_bundle(&bundle)?;
                     }
@@ -137,28 +138,29 @@ fn main() -> Result<()> {
                         notarize_bundle(&bundle)?;
                     }
                     if do_zip {
-                        package_macos_zip(&bundle, target)?;
+                        package_macos_zip(&bundle, target_str)?;
                     }
                     Ok(())
                 }
                 BundleTarget::WindowsX86_64 => {
-                    let staging = bundle_windows_app(target, &helper_source)?;
+                    let target_str = target.as_str();
+                    let staging = bundle_windows_app(target_str, &helper_source)?;
                     if do_msi {
-                        package_msi(&staging, &target)?;
+                        package_msi(&staging, target_str)?;
                     }
                     if do_zip {
-                        package_windows_zip(&staging, target)?;
+                        package_windows_zip(&staging, target_str)?;
                     }
                     Ok(())
                 }
                 BundleTarget::LinuxX86_64 | BundleTarget::LinuxArm64 => {
-                    let staging = bundle_linux_app(target, &helper_source)?;
+                    let target_str = target.as_str();
+                    let staging = bundle_linux_app(target_str, &helper_source)?;
                     if do_appimage {
-                        package_appimage(&staging, target)?;
+                        package_appimage(&staging, target_str)?;
                     }
                     Ok(())
                 }
-                other => bail!("unsupported bundle target: {}", other),
             }
         }
         "notarize" => {
