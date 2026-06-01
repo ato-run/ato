@@ -2469,11 +2469,9 @@ volumes:
 
             // Restore env var ASAP so a later test panic on the assertion below
             // doesn't leave the variable set.
-            unsafe {
-                match prev {
-                    Some(v) => unsafe { std::env::set_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS", v) },
-                    None => unsafe { std::env::remove_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS") },
-                }
+            match prev {
+                Some(v) => unsafe { std::env::set_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS", v) },
+                None => unsafe { std::env::remove_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS") },
             }
 
             result

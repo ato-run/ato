@@ -1236,11 +1236,9 @@ run = "node lib.js fixtures/db.json --port 3000"
             .expect("PATH must be set on the command");
 
         // restore before asserting so a panic doesn't poison env
-        unsafe {
-            match original_path {
-                Some(v) => unsafe { std::env::set_var("PATH", v) },
-                None => unsafe { std::env::remove_var("PATH") },
-            }
+        match original_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
         }
 
         let managed_dir = node_bin.parent().unwrap().display().to_string();
