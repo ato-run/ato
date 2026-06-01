@@ -2510,10 +2510,7 @@ fn read_session_record(path: &Path) -> Option<StoredSessionInfo> {
             return None;
         }
     };
-    match serde_json::from_slice::<StoredSessionInfo>(&bytes) {
-        Ok(record) => Some(record),
-        Err(_) => None,
-    }
+    serde_json::from_slice::<StoredSessionInfo>(&bytes).ok()
 }
 
 /// Tear down the `[services]` graph subset persisted on the session record

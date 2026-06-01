@@ -121,9 +121,7 @@ fn rewrite_uri(upstream_base: &Url, original: &Uri) -> Result<Uri, http::Error> 
         None => upstream_base.host_str().unwrap_or("127.0.0.1").to_string(),
     };
     parts.authority = Some(host_and_port.parse().map_err(|_| {
-        http::Error::from(http::status::InvalidStatusCode::from(
-            "invalid authority".parse::<StatusCode>().unwrap_err(),
-        ))
+        http::Error::from("invalid authority".parse::<StatusCode>().unwrap_err())
     })?);
 
     let pq = original
@@ -131,9 +129,7 @@ fn rewrite_uri(upstream_base: &Url, original: &Uri) -> Result<Uri, http::Error> 
         .map(|pq| pq.as_str())
         .unwrap_or("/");
     parts.path_and_query = Some(pq.parse().map_err(|_| {
-        http::Error::from(http::status::InvalidStatusCode::from(
-            "invalid pq".parse::<StatusCode>().unwrap_err(),
-        ))
+        http::Error::from("invalid pq".parse::<StatusCode>().unwrap_err())
     })?);
 
     Uri::from_parts(parts).map_err(Into::into)

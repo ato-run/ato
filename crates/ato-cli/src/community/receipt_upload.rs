@@ -120,7 +120,7 @@ fn contains_private_key_marker(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=')
-        && value.len() % 4 == 0
+        && value.len().is_multiple_of(4)
     {
         return true;
     }

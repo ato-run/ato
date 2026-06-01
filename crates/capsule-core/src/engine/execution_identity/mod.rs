@@ -725,7 +725,9 @@ pub struct EdgeReceipt {
 /// (`skip_serializing_if = "is_passed"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum ReceiptResultClass {
+    #[default]
     Passed,
     RecoverableFailure,
     Aborted,
@@ -737,11 +739,6 @@ impl ReceiptResultClass {
     }
 }
 
-impl Default for ReceiptResultClass {
-    fn default() -> Self {
-        Self::Passed
-    }
-}
 
 /// Typed failure envelope for partial receipts.
 ///

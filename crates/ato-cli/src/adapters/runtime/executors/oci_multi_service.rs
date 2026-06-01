@@ -671,7 +671,7 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
                 // Ingress init failed after services started. Clean up
                 // containers/network so we don't orphan them.
                 cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
-                return Err(e.into());
+                return Err(e);
             }
         }
     } else {

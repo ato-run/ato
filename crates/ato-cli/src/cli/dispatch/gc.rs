@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{InstallInstanceStore, InstallRevisionId};
+use capsule_core::foundation::install_lifecycle::InstallInstanceStore;
 use serde::Serialize;
 
 pub(crate) struct GcArgs {

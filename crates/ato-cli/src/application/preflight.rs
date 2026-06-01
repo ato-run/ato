@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::runtime::oci_provider::{
-    OciImageResolutionMode, OciImageResolutionRequest, OciPlatformPolicy, OciProvider,
+    OciImageResolutionMode, OciImageResolutionRequest, OciProvider,
     OciProviderError, OciProviderProbe, OciProviderSelector, OciResolvedImage,
 };
 use capsule_core::execution_plan::derive::compile_execution_plan;

@@ -816,8 +816,7 @@ fn normalize_handle_with_options(raw: &str, use_sample_recipes: bool) -> Result<
         && !input.starts_with("capsule://")
         && !input.starts_with("github.com/")
         && !input.contains('/')
-    {
-        if !input_is_existing_local_path(&input) {
+        && !input_is_existing_local_path(&input) {
             if let Some(resolved) = resolve_sample_recipe_for_input(&input)? {
                 return Ok(NormalizedHandle {
                     input,
@@ -832,7 +831,6 @@ fn normalize_handle_with_options(raw: &str, use_sample_recipes: bool) -> Result<
                 });
             }
         }
-    }
 
     match classify_surface_input(HandleInput {
         raw: input.clone(),

@@ -645,7 +645,7 @@ fn parse_volumes(
                  this is allowed but may not survive capsule moves. \
                  Consider converting to a named volume."
             ));
-            let state_name = sanitize_state_name(&raw_source.trim_start_matches("./").to_string());
+            let state_name = sanitize_state_name(raw_source.trim_start_matches("./"));
             if !output
                 .state_bindings
                 .iter()
