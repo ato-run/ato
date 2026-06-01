@@ -144,7 +144,7 @@ fn has_env_prefix(s: &str) -> bool {
 
     loop {
         // Skip leading whitespace between assignments
-        while chars.peek().map_or(false, |c| c.is_whitespace()) {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
             chars.next();
         }
         let mut word = String::new();
@@ -166,7 +166,7 @@ fn has_env_prefix(s: &str) -> bool {
         if has_eq {
             seen_assignment = true;
             // Consume trailing whitespace
-            while chars.peek().map_or(false, |c| c.is_whitespace()) {
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
                 chars.next();
             }
             // If there's more text after the assignment, it's a command

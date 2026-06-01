@@ -1137,15 +1137,11 @@ pub(crate) async fn resolve_run_target_or_install(
                 let preserved_toml_path = preserved_root.join("capsule.toml");
                 let context = if community_selected {
                     None
-                } else if let Some(original_local_path) = local_t_path {
-                    Some(crate::community::CommunitySubmitPromptContext {
+                } else { local_t_path.map(|original_local_path| crate::community::CommunitySubmitPromptContext {
                         source: repository.clone(),
                         capsule_toml_path: preserved_toml_path,
                         origin: crate::community::CommunitySubmitOrigin::LocalOverride,
-                    })
-                } else {
-                    None
-                };
+                    }) };
                 return Ok(ResolvedRunTarget {
                     path: preserved_root.clone(),
                     agent_local_root: Some(preserved_root.clone()),
