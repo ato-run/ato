@@ -982,9 +982,6 @@ pub fn load_secrets() -> SecretStore {
     }
 }
 
-/// No-op kept for API compat — the bridge persists on every mutation.
-pub fn save_secrets(_store: &SecretStore) {}
-
 /// Migrate legacy `secrets.json` entries into the age store.
 ///
 /// Reads old-style secrets + grants map, calls the bridge to store
@@ -1247,28 +1244,6 @@ pub fn load_capsule_policy_overrides() -> CapsulePolicyOverrideStore {
             }
         },
         Err(_) => CapsulePolicyOverrideStore::default(),
-    }
-}
-
-pub fn save_capsule_policy_overrides(store: &CapsulePolicyOverrideStore) {
-    let Some(path) = capsule_policy_overrides_path() else {
-        warn!("Cannot determine home directory, capsule policy overrides not saved");
-        return;
-    };
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    match serde_json::to_string_pretty(store) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                warn!(path = %path.display(), error = %e, "Failed to write capsule policy override store");
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "Failed to serialize capsule policy override store");
-        }
     }
 }
 

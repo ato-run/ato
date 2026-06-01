@@ -158,11 +158,6 @@ impl SurfaceStageTimer {
         }
     }
 
-    pub fn with_extras(mut self, extras: SurfaceExtras) -> Self {
-        self.extras = extras;
-        self
-    }
-
     pub fn finish_ok(mut self) {
         self.finished = true;
         let elapsed_ms = self.started.elapsed().as_millis() as u64;

@@ -382,13 +382,7 @@ pub enum LaunchError {
     Other(String),
 }
 
-impl LaunchError {
-    /// Wrap any `Display` value (typically `anyhow::Error`,
-    /// `io::Error`, or `&str`) as the opaque variant.
-    pub fn other<E: std::fmt::Display>(err: E) -> Self {
-        Self::Other(err.to_string())
-    }
-}
+impl LaunchError {}
 
 impl std::fmt::Display for LaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -611,22 +605,6 @@ fn filter_already_provided_secrets(
             }
         })
         .collect()
-}
-
-/// Shell out to `ato internal preflight <handle> --json` and parse
-/// the aggregate envelope. Returns the list of pending
-/// `InteractiveResolutionEnvelope` items — empty list means the
-/// launch can proceed without further interaction.
-///
-/// Errors from this helper are non-fatal: the caller falls through
-/// to the legacy launch loop. We intentionally do NOT bubble them up
-/// as `LaunchError::Other` because that would short-circuit the
-/// existing fallback story and confuse users whose capsule simply
-/// hasn't been cached yet.
-fn collect_preflight_requirements(
-    handle: &str,
-) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
-    collect_preflight_requirements_with_input(&DesktopLaunchInput::from_handle(handle.to_string()))
 }
 
 fn collect_preflight_requirements_with_input(
@@ -2184,11 +2162,6 @@ fn dev_workspace_binary(name: &str) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-fn which_in_path(binary: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    which_in_path_entries(binary, std::env::split_paths(&path_var))
-}
-
 fn which_in_path_entries(
     binary: &str,
     entries: impl IntoIterator<Item = PathBuf>,
@@ -3196,27 +3169,6 @@ fn share_tmp_dir(share_url: &str) -> Result<PathBuf> {
         .context("failed to resolve ato home for shared run temp dir")
 }
 
-/// Materializes a share URL into a local directory by calling `ato decap`.
-fn decap_share(share_url: &str, into: &Path) -> Result<()> {
-    fs::create_dir_all(into)
-        .with_context(|| format!("failed to create share tmp dir {}", into.display()))?;
-    let ato_bin = resolve_ato_binary()?;
-    info!(share_url, dest = %into.display(), "running ato decap");
-    let output = Command::new(&ato_bin)
-        .no_console_window()
-        .args(["decap", share_url, "--into"])
-        .arg(into)
-        .output()
-        .with_context(|| format!("failed to spawn ato decap for {share_url}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        error!(share_url, stderr = %stderr, "ato decap failed");
-        bail!("ato decap failed for {share_url}: {stderr}");
-    }
-    info!(share_url, dest = %into.display(), "ato decap completed");
-    Ok(())
-}
-
 /// Resolve and start a capsule from a share URL by materializing it locally first.
 fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession> {
     info!(
@@ -4109,10 +4061,6 @@ pub struct TerminalProcess {
 }
 
 impl TerminalCore for TerminalProcess {
-    fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
     fn send_input(&self, data: Vec<u8>) -> bool {
         self.input_tx.send(data).is_ok()
     }

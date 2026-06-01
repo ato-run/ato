@@ -23,7 +23,6 @@ pub mod dock;
 pub mod focus_dispatcher;
 pub mod focus_guest_panes;
 pub mod gestures;
-pub mod identity_window;
 pub mod import_window;
 pub mod launch_window;
 pub mod webview_paste;

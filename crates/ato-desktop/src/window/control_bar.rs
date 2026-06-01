@@ -44,12 +44,6 @@ const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
 const COMPACT_BAR_WIDTH: f32 = 360.0;
 const COMPACT_HEIGHT: f32 = 10.0;
-/// Host NSWindow is sized flush to the pill — the rectangle of the
-/// window and the rectangle of the pill are the same; the only
-/// transparent area is the four rounded-corner cut-outs created by
-/// the pill's `rounded(BAR_HEIGHT / 2)`. Drop shadow is not declared
-/// on `bar_pill` because it would be clipped at the window edge.
-const BAR_GAP_ABOVE_APP: f32 = 12.0;
 
 #[derive(Default)]
 pub struct ControlBarController {
@@ -1290,38 +1284,6 @@ fn initial_bar_size(cx: &App) -> (Pixels, Pixels) {
     } else {
         (px(COMPACT_BAR_WIDTH), px(COMPACT_HEIGHT))
     }
-}
-
-/// Open the bar anchored above a parent app window's bounds.
-pub fn open_control_bar_window_at(
-    cx: &mut App,
-    parent_bounds: Bounds<Pixels>,
-    route: GuestRoute,
-) -> Result<AnyWindowHandle> {
-    let (win_w, win_h) = initial_bar_size(cx);
-    let origin = gpui::Point {
-        x: parent_bounds.origin.x + (parent_bounds.size.width - win_w) / 2.0,
-        y: parent_bounds.origin.y - win_h + px(BAR_GAP_ABOVE_APP),
-    };
-    let bounds = Bounds {
-        origin,
-        size: size(win_w, win_h),
-    };
-    open_control_bar_inner(cx, bounds, route)
-}
-
-/// Standalone bar opener — keeps the legacy code path callable
-/// without parent bounds.
-pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
-    let (win_w, win_h) = initial_bar_size(cx);
-    let bounds = Bounds::centered(None, size(win_w, win_h), cx);
-    open_control_bar_inner(
-        cx,
-        bounds,
-        GuestRoute::ExternalUrl(
-            url::Url::parse("https://ato.run/").expect("https://ato.run/ is a valid URL"),
-        ),
-    )
 }
 
 /// Open the Focus-mode Control Bar as a process-lifetime singleton.

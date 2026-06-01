@@ -14,11 +14,7 @@ pub(crate) struct BridgeError {
     pub message: String,
 }
 
-impl BridgeError {
-    pub fn is_identity_not_loaded(&self) -> bool {
-        self.code == "identity_not_loaded"
-    }
-}
+impl BridgeError {}
 
 impl fmt::Display for BridgeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -173,14 +169,6 @@ impl CliSecretBridge {
                 message: format!("failed to parse bridge {label} response: {e}"),
             }),
             BridgeResponse::Error { code, message } => Err(BridgeError { code, message }),
-        }
-    }
-
-    pub(crate) fn status() -> BridgeResult<bool> {
-        let resp = Self::call(&BridgeRequest::Status)?;
-        match resp {
-            BridgeResponse::Ok { data } => Ok(data["identity_loaded"].as_bool().unwrap_or(false)),
-            BridgeResponse::Error { .. } => Ok(false),
         }
     }
 
