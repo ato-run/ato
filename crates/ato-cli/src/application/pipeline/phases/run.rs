@@ -3156,27 +3156,27 @@ where
 
     let run_scoped_id = runtime_overrides::scoped_id_override();
 
-    // Auto-assign a unique port if none specified via manifest or override
-    if runtime_overrides::override_port(decision.plan.execution_port()).is_none() {
-        let identity = build_port_identity(
-            &decision.plan.manifest_path,
-            decision.plan.selected_target_label(),
-            run_scoped_id.as_deref(),
-        );
-        if let Ok(mgr) = crate::runtime::port_manager::PortManager::new()
-            && let Ok(port) = mgr.resolve_port(&identity)
-        {
-            // SAFETY: runs on the main thread of the synchronous run pipeline,
-            // before the workload child is spawned. The sidecar's Tokio runtime
-            // was already dropped above, and no other thread reads or writes the
-            // process environment at this point. The override port is consumed
-            // in-process by `runtime_overrides::override_port` and inherited by
-            // the workload child at spawn time.
-            unsafe {
-                std::env::set_var("ATO_UI_OVERRIDE_PORT", port.to_string());
-            }
-        }
-    }
+    // Auto-assign a unique port when none was specified via manifest or
+    // override. The override is installed through a restore-on-drop guard
+    // bound to this function's scope: it stays visible to the synchronous
+    // `runtime_overrides::override_port` reads in the executor path (and is
+    // inherited by the workload child at spawn time), then is restored when
+    // this run returns so it cannot leak into a subsequent run in the same
+    // process. See `scoped_override_port` for the env-safety rationale.
+    let _auto_port_guard: Option<runtime_overrides::PortOverrideGuard> =
+        if runtime_overrides::override_port(decision.plan.execution_port()).is_none() {
+            let identity = build_port_identity(
+                &decision.plan.manifest_path,
+                decision.plan.selected_target_label(),
+                run_scoped_id.as_deref(),
+            );
+            crate::runtime::port_manager::PortManager::new()
+                .ok()
+                .and_then(|mgr| mgr.resolve_port(&identity).ok())
+                .map(runtime_overrides::scoped_override_port)
+        } else {
+            None
+        };
 
     if request.background
         && let Some(scoped_id) = run_scoped_id.as_deref()
