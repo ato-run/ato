@@ -151,7 +151,6 @@ fn desktop_settings_resolved(config: &DesktopConfig) -> Value {
     let d = &config.desktop;
     let cb = &d.control_bar;
     json!({
-        "focusViewEnabled": setting(d.focus_view_enabled, SettingSource::Global, false, None, SafetyClass::Immediate),
         "startupSurface": setting(d.startup_surface, SettingSource::Global, false, None, SafetyClass::Immediate),
         "contentWindowDefaultPresentation": setting(d.content_window_default_presentation, SettingSource::Global, false, None, SafetyClass::Immediate),
         "capsuleOpenMode": setting(d.capsule_open_mode, SettingSource::Global, false, None, SafetyClass::Immediate),
@@ -321,10 +320,6 @@ fn apply_desktop_patch_immediate(
     patch: &Value,
     changed: &mut Vec<String>,
 ) {
-    if let Some(v) = patch.get("focusViewEnabled").and_then(Value::as_bool) {
-        config.desktop.focus_view_enabled = v;
-        changed.push("focusViewEnabled".to_string());
-    }
     if let Some(v) = patch.get("startupSurface").and_then(Value::as_str)
         && let Some(s) = parse_startup_surface(v)
     {
