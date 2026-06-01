@@ -537,12 +537,10 @@ mod tests {
         .unwrap();
 
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
-            unsafe {
-                std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
-            }
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
         }
         let result = execute_gc_command(GcArgs {
             dry_run: false,
@@ -551,12 +549,10 @@ mod tests {
             json: false,
         });
         unsafe {
-            unsafe {
-                std::env::remove_var("ATO_HOME");
-            }
-            unsafe {
-                std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
-            }
+            std::env::remove_var("ATO_HOME");
+        }
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
         }
         assert!(result.is_ok(), "gc failed: {:?}", result);
 
@@ -589,12 +585,10 @@ mod tests {
         std::fs::write(session_root.join("broken.json"), b"{ not valid json").unwrap();
 
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
-            unsafe {
-                std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
-            }
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
         }
         let result = execute_gc_command(GcArgs {
             dry_run: false,
@@ -603,12 +597,10 @@ mod tests {
             json: false,
         });
         unsafe {
-            unsafe {
-                std::env::remove_var("ATO_HOME");
-            }
-            unsafe {
-                std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
-            }
+            std::env::remove_var("ATO_HOME");
+        }
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
         }
 
         assert!(
@@ -638,9 +630,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, _app_id, _profile_id, revs) = make_store_with_revs(&dir, 4);
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
+            std::env::set_var("ATO_HOME", dir.path());
         }
         let result = execute_gc_command(GcArgs {
             dry_run: true,
@@ -665,9 +655,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, _app_id, _profile_id, _revs) = make_store_with_revs(&dir, 4);
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
+            std::env::set_var("ATO_HOME", dir.path());
         }
         let result = execute_gc_command(GcArgs {
             dry_run: false,

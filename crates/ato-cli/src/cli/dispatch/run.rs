@@ -489,6 +489,9 @@ impl ScopedEnv {
             if self.previous.iter().all(|(existing, _)| existing != &key) {
                 self.previous.push((key.clone(), std::env::var(&key).ok()));
             }
+            // SAFETY: see the note on `Drop`. Applied on the main thread
+            // between synchronous `run_once` invocations, with no concurrent
+            // environment reader or writer.
             unsafe {
                 std::env::set_var(key, value);
             }
@@ -498,17 +501,17 @@ impl ScopedEnv {
 
 impl Drop for ScopedEnv {
     fn drop(&mut self) {
+        // SAFETY: `ScopedEnv` is mutated only on the main thread of
+        // `execute_standard_run_with_env_assistance`, and only at points where
+        // no run is in flight — values are applied before a `run_once` call and
+        // restored here after it returns (the run pipeline joins its worker
+        // threads before returning). The workload reads these vars only while a
+        // run is executing, i.e. while no `ScopedEnv` mutation occurs, so there
+        // is never a concurrent environment access.
         for (key, previous) in self.previous.drain(..).rev() {
-            unsafe {
-                if let Some(previous) = previous {
-                    unsafe {
-                        std::env::set_var(key, previous);
-                    }
-                } else {
-                    unsafe {
-                        std::env::remove_var(key);
-                    }
-                }
+            match previous {
+                Some(previous) => unsafe { std::env::set_var(key, previous) },
+                None => unsafe { std::env::remove_var(key) },
             }
         }
     }
