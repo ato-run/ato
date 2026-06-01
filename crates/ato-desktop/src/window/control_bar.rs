@@ -375,7 +375,7 @@ impl ControlBarShellPlaceholder {
                     title: entry
                         .map(|e| e.title.to_string())
                         .unwrap_or_else(|| "No window".to_string()),
-                    url: entry.map(|e| e.url.to_string()).unwrap_or_else(String::new),
+                    url: entry.map(|e| e.url.to_string()).unwrap_or_default(),
                 }
             });
         if let Err(err) = open_info_popup(cx, model, self.locale) {

@@ -4924,8 +4924,6 @@ fn mime_for_path(path: &Path) -> &'static str {
     }
 }
 
-/// Decode a standard base64 string into bytes.
-
 // ── Apply helpers (shared between UI handlers and MCP tool dispatch) ─────────
 
 /// Approve the pending ExecutionPlan consent for `handle`: invoke
