@@ -193,9 +193,10 @@ fn rollback_fails_when_chunk_missing() {
     let err = store
         .rollback_to_manifest("koh0920/sample", &first.pointer.manifest_hash)
         .expect_err("rollback must fail");
-    assert!(err
-        .to_string()
-        .contains(crate::error_codes::ATO_ERR_INTEGRITY_FAILURE));
+    assert!(
+        err.to_string()
+            .contains(crate::error_codes::ATO_ERR_INTEGRITY_FAILURE)
+    );
 }
 
 #[test]
@@ -372,9 +373,10 @@ fn negotiate_rejects_unknown_manifest_history() {
             max_bytes: None,
         })
         .expect_err("unknown manifest must fail");
-    assert!(err
-        .to_string()
-        .contains("target manifest is not part of scoped capsule history"));
+    assert!(
+        err.to_string()
+            .contains("target manifest is not part of scoped capsule history")
+    );
 }
 
 #[test]
@@ -477,10 +479,12 @@ fn gc_tick_keeps_chunks_when_live_manifest_or_lease_exists() {
         .gc_tick(&chrono::Utc::now().to_rfc3339(), 8)
         .expect("gc tick");
     assert!(tick.deferred >= 1);
-    assert!(store
-        .load_chunk_bytes(&chunk_hash)
-        .expect("load chunk")
-        .is_some());
+    assert!(
+        store
+            .load_chunk_bytes(&chunk_hash)
+            .expect("load chunk")
+            .is_some()
+    );
 }
 
 #[test]
@@ -542,10 +546,12 @@ fn gc_tick_keeps_retention_pinned_release_chunks() {
         .gc_tick(&chrono::Utc::now().to_rfc3339(), 8)
         .expect("gc tick");
     assert!(tick.deferred >= 1);
-    assert!(store
-        .load_chunk_bytes(&chunk_hash)
-        .expect("load chunk")
-        .is_some());
+    assert!(
+        store
+            .load_chunk_bytes(&chunk_hash)
+            .expect("load chunk")
+            .is_some()
+    );
 }
 
 #[test]
@@ -668,10 +674,12 @@ fn gc_tick_unlinks_and_reflects_db_for_eligible_chunks() {
         .gc_tick(&chrono::Utc::now().to_rfc3339(), 8)
         .expect("gc tick");
     assert!(tick.deleted >= 1);
-    assert!(store
-        .load_chunk_bytes(&chunk_hash)
-        .expect("load chunk")
-        .is_none());
+    assert!(
+        store
+            .load_chunk_bytes(&chunk_hash)
+            .expect("load chunk")
+            .is_none()
+    );
 
     let remaining_chunks: i64 = conn
         .query_row(
@@ -899,9 +907,11 @@ fn service_binding_resolution_enforces_allowed_callers() {
     let missing_caller = store
         .resolve_service_binding("demo-app", "api", "service", None)
         .expect_err("caller is required for restricted bindings");
-    assert!(missing_caller
-        .to_string()
-        .contains("requires caller_service"));
+    assert!(
+        missing_caller
+            .to_string()
+            .contains("requires caller_service")
+    );
 
     let denied = store
         .resolve_service_binding("demo-app", "api", "service", Some("worker"))

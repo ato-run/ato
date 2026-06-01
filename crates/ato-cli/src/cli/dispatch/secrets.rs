@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::common::paths::nacelle_home_dir;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 
@@ -175,11 +175,7 @@ fn cmd_init(no_passphrase: bool, ssh_key: Option<std::path::PathBuf>) -> Result<
     } else {
         let pp = rpassword::prompt_password("Passphrase for identity.key (leave empty to skip): ")
             .context("failed to read passphrase")?;
-        if pp.is_empty() {
-            None
-        } else {
-            Some(pp)
-        }
+        if pp.is_empty() { None } else { Some(pp) }
     };
 
     let identity = age.init_identity(passphrase.as_deref())?;
@@ -209,7 +205,7 @@ fn cmd_rotate_identity(new_identity_path: Option<std::path::PathBuf>) -> Result<
     })?;
 
     // Generate or load the new identity.
-    let new_id_secret = if let Some(ref path) = new_identity_path {
+    let new_id_secret = if let Some(path) = &new_identity_path {
         let raw =
             std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         // Load passphrase if needed.
@@ -590,7 +586,7 @@ fn bridge_resolve_for_capsule(capsule_handle: String) -> BridgeResponse {
                 return normalize_bridge_error(
                     "resolve_failed",
                     &format!("failed to load '{}': {}", entry.key, e),
-                )
+                );
             }
         };
         resolved.push(serde_json::json!({"key": entry.key, "value": allowed}));

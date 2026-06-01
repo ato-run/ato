@@ -23,11 +23,7 @@ pub(crate) fn read_order(ato_home: &Path) -> Option<Vec<String>> {
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_ascii_lowercase()))
         .collect::<Vec<_>>();
-    if order.is_empty() {
-        None
-    } else {
-        Some(order)
-    }
+    if order.is_empty() { None } else { Some(order) }
 }
 
 #[cfg(test)]

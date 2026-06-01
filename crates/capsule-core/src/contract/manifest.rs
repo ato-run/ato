@@ -47,10 +47,10 @@ pub fn load_manifest_with_validation_mode(
         ));
     }
 
-    if let Some(targets) = model.targets.as_ref() {
-        if let Err(err) = targets.validate_source_digest() {
-            return Err(CapsuleError::Manifest(path.to_path_buf(), err.to_string()));
-        }
+    if let Some(targets) = model.targets.as_ref()
+        && let Err(err) = targets.validate_source_digest()
+    {
+        return Err(CapsuleError::Manifest(path.to_path_buf(), err.to_string()));
     }
 
     // Ensure schema_version is set for downstream consumers.

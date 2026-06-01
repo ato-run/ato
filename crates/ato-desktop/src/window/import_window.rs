@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render,
-    Size, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render, Size, WeakEntity,
+    Window, WindowBounds, WindowDecorations, WindowOptions, div, rgb, size,
 };
 use gpui_component::TitleBar;
 use wry::dpi::{LogicalPosition, LogicalSize};

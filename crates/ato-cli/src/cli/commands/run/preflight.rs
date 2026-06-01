@@ -1,15 +1,15 @@
 use super::*;
 
 use crate::adapters::runtime::provisioning::{
-    build_lifecycle_path_plan, dependency_root, materialize_lifecycle_toolchains,
-    LifecyclePathPlan, LifecyclePhase,
+    LifecyclePathPlan, LifecyclePhase, build_lifecycle_path_plan, dependency_root,
+    materialize_lifecycle_toolchains,
 };
 use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
 use crate::executors::target_runner;
 use capsule_core::importer::{
-    probe_required_cargo_lockfile, probe_required_node_lockfile, probe_required_python_lockfile,
-    ImportedEvidence, ImporterId, ProbeResult,
+    ImportedEvidence, ImporterId, ProbeResult, probe_required_cargo_lockfile,
+    probe_required_node_lockfile, probe_required_python_lockfile,
 };
 use capsule_core::lockfile::parse_lockfile_text;
 
@@ -742,7 +742,7 @@ fn node_install_command_from_evidence(evidence: &ImportedEvidence) -> Result<Str
             return Err(anyhow::anyhow!(
                 "unsupported node importer '{}' for provision command",
                 other.as_str()
-            ))
+            ));
         }
     };
     Ok(command.to_string())
@@ -885,7 +885,7 @@ fn preflight_python_uv_lock_for_source_driver(
         ProbeResult::Ambiguous(ambiguity) => {
             return Err(
                 AtoExecutionError::lock_incomplete(ambiguity.message, Some("uv.lock")).into(),
-            )
+            );
         }
     }
 
@@ -1014,14 +1014,13 @@ fn detect_required_glibc_from_lock(lock_path: &Path) -> Result<Option<String>> {
     let raw = fs::read_to_string(lock_path)
         .with_context(|| format!("Failed to read {}", lock_path.display()))?;
     let typed = parse_lockfile_text(&raw, lock_path);
-    if let Ok(lockfile) = typed.as_ref() {
-        if let Some(required) = lockfile
+    if let Ok(lockfile) = typed.as_ref()
+        && let Some(required) = lockfile
             .targets
             .values()
             .find_map(|target| target.constraints.as_ref().and_then(|c| c.glibc.clone()))
-        {
-            return Ok(Some(required));
-        }
+    {
+        return Ok(Some(required));
     }
 
     if let Some(required) = extract_glibc_constraint_from_lock_text(&raw) {
@@ -1212,10 +1211,10 @@ fn detect_required_macos_from_entrypoint(
                 let Ok(entry) = entry else {
                     continue;
                 };
-                if let SingleArch::MachO(binary) = entry {
-                    if let Some(ver) = extract_min_macos_from_macho(&binary) {
-                        update_best(ver);
-                    }
+                if let SingleArch::MachO(binary) = entry
+                    && let Some(ver) = extract_min_macos_from_macho(&binary)
+                {
+                    update_best(ver);
                 }
             }
         }
@@ -1294,11 +1293,7 @@ fn normalize_version(value: &str) -> Option<Vec<u32>> {
         out.push(parsed);
     }
 
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn compare_versions(left: &[u32], right: &[u32]) -> i32 {
@@ -1506,9 +1501,10 @@ run_command = "pnpm worker"
                 .expect("lifecycle targets");
         let err = build_root_install_plan(&targets).expect_err("conflicting install should fail");
 
-        assert!(err
-            .to_string()
-            .contains("conflicting install lifecycle commands"));
+        assert!(
+            err.to_string()
+                .contains("conflicting install lifecycle commands")
+        );
     }
 
     /// `install` and `install_command` are TOML-level aliases for the same
@@ -1764,9 +1760,10 @@ entrypoint = "main.py"
         )
         .expect_err("missing anchored layout should fail closed");
 
-        assert!(err
-            .to_string()
-            .contains("requires an anchored source entrypoint layout"));
+        assert!(
+            err.to_string()
+                .contains("requires an anchored source entrypoint layout")
+        );
     }
 
     #[test]

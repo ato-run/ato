@@ -51,7 +51,7 @@
 //!   prefix on the locator inside the observer)
 
 use super::{ExecutionIdentityInputV2, FilesystemIdentityV2, Tracked};
-use crate::engine::execution_graph::{identity_labels, ExecutionGraph};
+use crate::engine::execution_graph::{ExecutionGraph, identity_labels};
 
 /// Typed entry point for producing a [`FilesystemIdentityV2`].
 ///

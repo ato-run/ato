@@ -19,15 +19,15 @@ use crate::app::{
     OpenDockWindow, OpenGithubRunWindow, OpenStartWindow, OpenStoreWindow, ShowControlBar,
     ShowSettings, ToggleControlBar,
 };
-use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
-use crate::state::session::SessionRegistry;
+use crate::automation::command::AutomationCommand;
 use crate::state::GuestRoute;
-use crate::system_capsule::ato_onboarding::{OnboardingCommand, ONBOARDING_VERSION};
-use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
+use crate::state::session::SessionRegistry;
+use crate::system_capsule::ato_onboarding::{ONBOARDING_VERSION, OnboardingCommand};
+use crate::webview::{DOCK_AUTOMATION_PANE_ID, dispatch_automation_command};
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::dock::DockEntitySlot;
-use crate::window::focus_guest_panes::{is_focus_guest_pane_id, FocusGuestPaneRegistry};
+use crate::window::focus_guest_panes::{FocusGuestPaneRegistry, is_focus_guest_pane_id};
 
 /// Start the Focus-mode automation dispatcher. Spawns the socket
 /// listener (`AutomationHost::start`) plus a foreground polling task

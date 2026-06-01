@@ -20,7 +20,7 @@
 //! the legacy `guest.v1` envelope for tests and existing integrations.
 
 use crate::guest_protocol::{GuestAction, GuestContext, GuestError, GuestErrorCode};
-use crate::ipc::jsonrpc::{error_codes, JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::ipc::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, error_codes};
 use anyhow::Result;
 use serde_json::Value;
 use std::io::Write;

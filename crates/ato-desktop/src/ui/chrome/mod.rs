@@ -2,8 +2,8 @@ mod window_controls;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, svg, BoxShadow, Entity, FontWeight, IntoElement, MouseButton,
-    SharedString, Window,
+    BoxShadow, Entity, FontWeight, IntoElement, MouseButton, SharedString, Window, div, hsla,
+    point, px, svg,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, IconName};
@@ -17,8 +17,8 @@ use crate::state::{
 };
 
 use self::window_controls::{default_window_control_buttons, render_window_controls};
-use super::theme::Theme;
 use super::CHROME_HEIGHT;
+use super::theme::Theme;
 
 pub(super) fn render_command_chrome(
     _window: &mut Window,
@@ -437,7 +437,7 @@ fn render_omnibar_suggestion(
                     handle,
                     community_toml_id,
                 } => {
-                    let url = if let Some(ref cid) = community_toml_id {
+                    let url = if let Some(cid) = community_toml_id {
                         format!("{}?ctoml={}", handle, cid)
                     } else {
                         handle.clone()

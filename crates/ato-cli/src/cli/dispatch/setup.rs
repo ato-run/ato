@@ -818,9 +818,11 @@ privacy_mode = "strict"
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].program, "cargo");
         assert_eq!(steps[1].program, "pnpm");
-        assert!(steps[1]
-            .args
-            .iter()
-            .any(|value| value == "--frozen-lockfile"));
+        assert!(
+            steps[1]
+                .args
+                .iter()
+                .any(|value| value == "--frozen-lockfile")
+        );
     }
 }

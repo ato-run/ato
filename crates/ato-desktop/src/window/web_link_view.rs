@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, svg, AnyElement, Context, Entity, IntoElement, MouseButton, Pixels, Render,
-    SharedString, Size,
+    AnyElement, Context, Entity, IntoElement, MouseButton, Pixels, Render, SharedString, Size, div,
+    hsla, px, rgb, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};

@@ -34,8 +34,8 @@ use anyhow::Result;
 use capsule_wire::config::ConfigKind;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render,
-    Size, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render, Size, WeakEntity,
+    Window, WindowBounds, WindowDecorations, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
 use serde::Serialize;
@@ -548,7 +548,7 @@ pub fn open_consent_window_for_route_with_client(
         route: route.clone(),
         requested_client,
     };
-    let mut launches = cx.global_mut::<PendingLaunches>();
+    let launches = cx.global_mut::<PendingLaunches>();
     launches.0.insert(preview_id.clone(), stashed);
 
     // Inject loading-state preview so the wizard renders immediately.
@@ -1142,7 +1142,7 @@ pub fn start_boot_launch(
                                         if let Some(ref url) = session.local_url {
                                             let _ = crate::ui::open_external_url(url);
                                         }
-                                        let mut registry = cx
+                                        let registry = cx
                                             .global_mut::<crate::state::session::SessionRegistry>();
                                         use crate::state::session::{
                                             CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession,

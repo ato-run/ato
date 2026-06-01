@@ -4,7 +4,7 @@
 //! must screen them before any registry lookup so their existence is never
 //! revealed to untrusted callers.
 
-use super::{spec, IpcCommandSpec};
+use super::{IpcCommandSpec, spec};
 use crate::ipc::policy::IpcVisibility::InternalOnly;
 
 pub fn specs() -> Vec<IpcCommandSpec> {

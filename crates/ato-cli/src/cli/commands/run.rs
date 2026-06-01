@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use cliclack::ProgressBar;
 use ctrlc;
-use goblin::elf::dynamic::DT_VERNEED;
 use goblin::elf::Elf;
+use goblin::elf::dynamic::DT_VERNEED;
 use goblin::mach::load_command::CommandVariant;
 use goblin::mach::{Mach, SingleArch};
 use regex::Regex;
@@ -12,14 +12,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::debug;
 
-use crate::application::pipeline::cleanup::{run_sigint_cleanup, PipelineAttemptContext};
+use crate::application::pipeline::cleanup::{PipelineAttemptContext, run_sigint_cleanup};
 use crate::application::pipeline::consumer::ConsumerRunPipeline;
 use crate::application::pipeline::executor::{HourglassPhaseRunner, PhaseAnnotation};
 use crate::application::pipeline::hourglass;
@@ -40,12 +40,12 @@ use capsule_core::execution_plan::error::AtoExecutionError;
 #[cfg(test)]
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
+    ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
 use capsule_core::types::CapsuleManifest;
-use capsule_core::{router, CapsuleReporter};
+use capsule_core::{CapsuleReporter, router};
 
 mod background;
 pub(crate) mod preflight;
@@ -114,6 +114,7 @@ pub struct RunArgs {
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
     pub plan_only: bool,
+    #[allow(dead_code)]
     pub install_lifecycle_context: Option<InstallLifecycleContext>,
     pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
@@ -1133,10 +1134,10 @@ async fn execute_normal_mode(
     let result = pipeline.run(&mut runner).await;
     if result.is_ok() {
         let maybe_prompt_error = try_post_success_community_submit_prompt(&args, &runner).await;
-        if !args.background {
-            if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {
-                let _ = fs::remove_dir_all(transient_workspace_root);
-            }
+        if !args.background
+            && let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref()
+        {
+            let _ = fs::remove_dir_all(transient_workspace_root);
         }
         if let Err(err) = maybe_prompt_error {
             tracing::warn!(
@@ -1144,19 +1145,19 @@ async fn execute_normal_mode(
                 "community submit prompt failed, preserving original run success"
             );
         }
-    } else if args.keep_failed_artifacts {
-        if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {
-            if runner.provider_backed_target {
-                crate::install::provider_target::maybe_report_kept_failed_provider_workspace(
-                    transient_workspace_root,
-                    args.reporter.is_json(),
-                );
-            } else if !args.reporter.is_json() {
-                eprintln!(
-                    "⚠️  Kept transient run workspace for debugging: {}",
-                    transient_workspace_root.display()
-                );
-            }
+    } else if args.keep_failed_artifacts
+        && let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref()
+    {
+        if runner.provider_backed_target {
+            crate::install::provider_target::maybe_report_kept_failed_provider_workspace(
+                transient_workspace_root,
+                args.reporter.is_json(),
+            );
+        } else if !args.reporter.is_json() {
+            eprintln!(
+                "⚠️  Kept transient run workspace for debugging: {}",
+                transient_workspace_root.display()
+            );
         }
     }
     result
@@ -1226,13 +1227,12 @@ async fn normalize_run_target_after_install(
     resolved_target: &crate::install::support::ResolvedRunTarget,
     mut attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<NormalizedRunTarget> {
-    if let Some(transient_workspace_root) = resolved_target.transient_workspace_root.as_ref() {
-        if !args.keep_failed_artifacts {
-            if let Some(attempt) = attempt.as_mut() {
-                let mut scope = (*attempt).cleanup_scope();
-                scope.register_remove_dir(transient_workspace_root.clone());
-            }
-        }
+    if let Some(transient_workspace_root) = resolved_target.transient_workspace_root.as_ref()
+        && !args.keep_failed_artifacts
+        && let Some(attempt) = attempt.as_mut()
+    {
+        let mut scope = (*attempt).cleanup_scope();
+        scope.register_remove_dir(transient_workspace_root.clone());
     }
 
     let target_path = resolved_target.path.as_path();
@@ -1614,12 +1614,13 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        background_ready_message, foreground_native_event_messages,
-        initial_foreground_native_messages, normalize_run_target_after_install,
-        plan_v03_provision_command, preflight_required_environment_variables,
-        process_runtime_label, reroute_auto_provisioned_execution, resolve_compatibility_host_mode,
+        CompatibilityHostMode, ForegroundEventMessage, RunArgs, background_ready_message,
+        foreground_native_event_messages, initial_foreground_native_messages,
+        normalize_run_target_after_install, plan_v03_provision_command,
+        preflight_required_environment_variables, process_runtime_label,
+        reroute_auto_provisioned_execution, resolve_compatibility_host_mode,
         resolve_python_dependency_lock_path, resolve_state_source_overrides_with_store,
-        run_phase_detail, CompatibilityHostMode, ForegroundEventMessage, RunArgs,
+        run_phase_detail,
     };
     use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
     use crate::registry::store::RegistryStore;
@@ -1629,7 +1630,7 @@ mod tests {
     use capsule_core::lifecycle::LifecycleEvent;
     use capsule_core::router::{self, ExecutionProfile, ManifestData};
     use capsule_core::types::CapsuleManifest;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1748,8 +1749,14 @@ mod tests {
     fn preflight_required_env_fails_when_missing_or_empty() {
         let key_missing = "ATO_TEST_REQUIRED_ENV_MISSING";
         let key_empty = "ATO_TEST_REQUIRED_ENV_EMPTY";
-        std::env::remove_var(key_missing);
-        std::env::set_var(key_empty, "");
+        unsafe {
+            unsafe {
+                std::env::remove_var(key_missing);
+            }
+            unsafe {
+                std::env::set_var(key_empty, "");
+            }
+        }
 
         let plan = manifest_with_required_env(vec![key_missing, key_empty]);
         let err = preflight_required_environment_variables(&plan).expect_err("must fail-closed");
@@ -1757,29 +1764,41 @@ mod tests {
         assert!(msg.contains(key_missing), "msg={msg}");
         assert!(msg.contains(key_empty), "msg={msg}");
 
-        std::env::remove_var(key_empty);
+        unsafe {
+            std::env::remove_var(key_empty);
+        }
     }
 
     #[test]
     fn preflight_required_env_passes_when_set() {
         let key = "ATO_TEST_REQUIRED_ENV_SET";
-        std::env::set_var(key, "ok");
+        unsafe {
+            std::env::set_var(key, "ok");
+        }
 
         let plan = manifest_with_required_env(vec![key]);
         assert!(preflight_required_environment_variables(&plan).is_ok());
 
-        std::env::remove_var(key);
+        unsafe {
+            std::env::remove_var(key);
+        }
     }
 
     #[test]
     fn preflight_required_env_passes_with_runtime_override() {
         let key = "ATO_TEST_REQUIRED_ENV_FROM_OVERRIDE";
-        std::env::set_var("ATO_UI_OVERRIDE_ENV_JSON", format!(r#"{{"{}":"ok"}}"#, key));
+        unsafe {
+            unsafe {
+                std::env::set_var("ATO_UI_OVERRIDE_ENV_JSON", format!(r#"{{"{}":"ok"}}"#, key));
+            }
+        }
 
         let plan = manifest_with_required_env(vec![key]);
         assert!(preflight_required_environment_variables(&plan).is_ok());
 
-        std::env::remove_var("ATO_UI_OVERRIDE_ENV_JSON");
+        unsafe {
+            std::env::remove_var("ATO_UI_OVERRIDE_ENV_JSON");
+        }
     }
 
     #[test]
@@ -2472,11 +2491,12 @@ target = "/var/lib/app"
             overrides.get("data").map(|value| value.as_str()),
             Some(bind_dir.canonicalize().unwrap().to_string_lossy().as_ref())
         );
-        assert!(tmp
-            .path()
-            .join("state-store")
-            .join("registry.sqlite3")
-            .exists());
+        assert!(
+            tmp.path()
+                .join("state-store")
+                .join("registry.sqlite3")
+                .exists()
+        );
     }
 
     #[test]
@@ -2604,9 +2624,10 @@ target = "/var/lib/app"
             Some(&store),
         )
         .expect_err("incompatible bind must fail");
-        assert!(err
-            .to_string()
-            .contains("producer/purpose/schema_id must match exactly"));
+        assert!(
+            err.to_string()
+                .contains("producer/purpose/schema_id must match exactly")
+        );
     }
 
     fn manifest_with_required_env(keys: Vec<&str>) -> ManifestData {

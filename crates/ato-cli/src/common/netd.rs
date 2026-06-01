@@ -31,6 +31,7 @@ const NETD_BIN_ENV: &str = "ATO_NETD_BIN";
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum EgressProxyError {
     #[error("ato-netd binary was not found; install ato-netd or set {NETD_BIN_ENV}")]
     BinaryNotFound,
@@ -170,12 +171,12 @@ fn resolve_netd_binary() -> Result<PathBuf, EgressProxyError> {
     }
 
     // 2. Same directory as the current executable.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("ato-netd");
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("ato-netd");
+        if candidate.is_file() {
+            return Ok(candidate);
         }
     }
 
@@ -218,9 +219,13 @@ mod tests {
         // Point ATO_NETD_BIN at a path that doesn't exist so resolution
         // fails predictably without relying on PATH state.
         let absent = "/nonexistent/path/to/ato-netd-slice-f-test";
-        std::env::set_var(NETD_BIN_ENV, absent);
+        unsafe {
+            std::env::set_var(NETD_BIN_ENV, absent);
+        }
         let result = resolve_netd_binary();
-        std::env::remove_var(NETD_BIN_ENV);
+        unsafe {
+            std::env::remove_var(NETD_BIN_ENV);
+        }
         assert!(
             matches!(result, Err(EgressProxyError::BinaryNotFound)),
             "expected BinaryNotFound, got {result:?}"

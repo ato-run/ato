@@ -1,6 +1,6 @@
 //! `shell.*` commands — browser-like surface, public or system-only.
 
-use super::{spec, IpcCommandSpec};
+use super::{IpcCommandSpec, spec};
 use crate::ipc::policy::IpcVisibility;
 use crate::system_capsule::broker::Capability;
 

@@ -2,7 +2,7 @@ use crate::env::read_env;
 use crate::reporters::CliReporter;
 use anyhow::{Context, Result};
 use capsule_core::CapsuleReporter;
-use notify::{event::Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher, event::Event};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

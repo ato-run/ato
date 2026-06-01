@@ -4,9 +4,7 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub(crate) enum ProjectCommands {
-    #[command(
-        about = "List experimental projection state and detect broken projections read-only"
-    )]
+    #[command(about = "List experimental projection state and detect broken projections read-only")]
     Ls {
         #[arg(long)]
         json: bool,

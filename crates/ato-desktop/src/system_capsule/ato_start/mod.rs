@@ -28,7 +28,7 @@ use anyhow::Result;
 use gpui::{AnyWindowHandle, App};
 use serde::{Deserialize, Serialize};
 
-use crate::localization::{tr, LocaleCode};
+use crate::localization::{LocaleCode, tr};
 use crate::state::GuestRoute;
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::content_windows::OpenContentWindows;
@@ -111,7 +111,10 @@ pub fn classify_query(value: &str) -> QueryIntent {
     } else if is_featured_sample_alias(v) {
         QueryIntent::CapsuleHandle(v.to_string())
     } else {
-        QueryIntent::Invalid(format!("'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。", v))
+        QueryIntent::Invalid(format!(
+            "'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。",
+            v
+        ))
     }
 }
 

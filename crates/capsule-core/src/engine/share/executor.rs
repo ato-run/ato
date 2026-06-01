@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 type ResizeTx = Sender<(u16, u16)>;
 type ResizeRx = Receiver<(u16, u16)>;
@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::error::{CapsuleError, Result};
 
-use super::types::{ShareEntrySpec, ShareSpec, WorkspaceShareState, SHARE_STATE_FILE};
+use super::types::{SHARE_STATE_FILE, ShareEntrySpec, ShareSpec, WorkspaceShareState};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -162,13 +162,13 @@ fn decap_into(ato_bin: &Path, input: &str, workspace: &Path) -> Result<()> {
     // Check if already materialized (state.json exists and sources are ok)
     let state_path = workspace.join(".ato").join("share").join(SHARE_STATE_FILE);
     if state_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&state_path) {
-            if let Ok(state) = serde_json::from_str::<WorkspaceShareState>(&raw) {
-                let all_ok = state.sources.iter().all(|s| s.status == "ok");
-                if all_ok && !state.sources.is_empty() {
-                    info!(input, "reusing cached decap workspace");
-                    return Ok(());
-                }
+        if let Ok(raw) = std::fs::read_to_string(&state_path)
+            && let Ok(state) = serde_json::from_str::<WorkspaceShareState>(&raw)
+        {
+            let all_ok = state.sources.iter().all(|s| s.status == "ok");
+            if all_ok && !state.sources.is_empty() {
+                info!(input, "reusing cached decap workspace");
+                return Ok(());
             }
         }
         // Stale or broken — clear and re-decap
@@ -265,10 +265,10 @@ fn resolve_ato_binary(override_path: Option<&Path>) -> Result<PathBuf> {
             path.display()
         )));
     }
-    if let Some(path) = std::env::var_os("ATO_DESKTOP_ATO_BIN").map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
+    if let Some(path) = std::env::var_os("ATO_DESKTOP_ATO_BIN").map(PathBuf::from)
+        && path.is_file()
+    {
+        return Ok(path);
     }
     // Search PATH
     let path_var = std::env::var_os("PATH").unwrap_or_default();
@@ -294,10 +294,10 @@ fn resolve_nacelle_binary(override_path: Option<&Path>) -> Result<PathBuf> {
             path.display()
         )));
     }
-    if let Some(path) = std::env::var_os("NACELLE_PATH").map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
+    if let Some(path) = std::env::var_os("NACELLE_PATH").map(PathBuf::from)
+        && path.is_file()
+    {
+        return Ok(path);
     }
     // Try capsule-core engine discovery
     match crate::engine::discover_nacelle(crate::engine::EngineRequest {
@@ -470,10 +470,9 @@ fn spawn_nacelle_piped(
                     if let Some(b64) = value["TerminalData"]
                         .get("data_b64")
                         .and_then(|d| d.as_str())
+                        && output_tx.send(b64.to_string()).is_err()
                     {
-                        if output_tx.send(b64.to_string()).is_err() {
-                            break;
-                        }
+                        break;
                     }
                 }
                 Some("TerminalExited") => {
@@ -486,10 +485,10 @@ fn spawn_nacelle_piped(
                 // Legacy flat format: {"event":"terminal_data","data_b64":"..."}
                 _ => match value.get("event").and_then(|e| e.as_str()) {
                     Some("terminal_data") => {
-                        if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str()) {
-                            if output_tx.send(b64.to_string()).is_err() {
-                                break;
-                            }
+                        if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str())
+                            && output_tx.send(b64.to_string()).is_err()
+                        {
+                            break;
                         }
                     }
                     Some("terminal_exited") => {
@@ -508,8 +507,8 @@ fn spawn_nacelle_piped(
 
     // Thread: input_rx + resize_rx → nacelle stdin
     std::thread::spawn(move || {
-        use base64::engine::general_purpose::STANDARD;
         use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
 
         loop {
             while let Ok(data) = input_rx.try_recv() {

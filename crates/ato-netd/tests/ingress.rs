@@ -14,7 +14,7 @@
 
 use std::{
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::Duration,
 };
@@ -64,7 +64,7 @@ fn spawn_daemon(ato_home: &TempDir) -> (Child, PathBuf) {
     (child, socket_path)
 }
 
-async fn wait_for_daemon(socket_path: &PathBuf, timeout_ms: u64) -> Client {
+async fn wait_for_daemon(socket_path: &Path, timeout_ms: u64) -> Client {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         match Client::connect(socket_path).await {

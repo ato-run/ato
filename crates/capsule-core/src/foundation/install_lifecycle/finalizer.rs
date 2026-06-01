@@ -21,8 +21,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::ids::{
-    derive_install_profile_key, revision_id_for_build, ArtifactBuildId, InstallProfileKey,
-    InstallRevisionId, InstalledAppId, ProfileId,
+    ArtifactBuildId, InstallProfileKey, InstallRevisionId, InstalledAppId, ProfileId,
+    derive_install_profile_key, revision_id_for_build,
 };
 use super::store::InstallInstanceStore;
 
@@ -464,11 +464,13 @@ mod tests {
 
         assert!(result.revision_dir.join("output").join("index.js").exists());
         assert!(result.revision_dir.join("artifact_manifest.json").exists());
-        assert!(result
-            .revision_dir
-            .join("source_provenance")
-            .join("provenance.json")
-            .exists());
+        assert!(
+            result
+                .revision_dir
+                .join("source_provenance")
+                .join("provenance.json")
+                .exists()
+        );
     }
 
     // ── safe_copy_output_tree ─────────────────────────────────────────────

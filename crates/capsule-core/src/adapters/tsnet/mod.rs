@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 
 use crate::error::{CapsuleError, Result};
 
@@ -33,7 +33,7 @@ pub enum TsnetState {
 
 pub use client::TsnetClient;
 pub use sidecar::{
-    discover_sidecar, spawn_sidecar, SidecarBaseConfig, SidecarRequest, SidecarSpawnConfig,
+    SidecarBaseConfig, SidecarRequest, SidecarSpawnConfig, discover_sidecar, spawn_sidecar,
 };
 
 #[derive(Debug, Clone)]

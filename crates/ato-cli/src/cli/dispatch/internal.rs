@@ -1,6 +1,6 @@
 //! Dispatch for `ato internal *` plumbing commands.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use capsule_core::router::ExecutionProfile;
 
@@ -49,7 +49,7 @@ fn execute_preflight_command(
     // write it to a temp file, and run preflight against that path so the
     // consent UI reflects the selected recipe's targets / secrets / policy.
     let _temp_dir_guard;
-    let effective_target = if let Some(ref ctoml_id) = community_toml_id {
+    let effective_target = if let Some(ctoml_id) = &community_toml_id {
         let toml_content =
             crate::community::fetch_and_validate_community_toml(ctoml_id, &target)
                 .map_err(|err| anyhow!("preflight: community TOML fetch/validate failed: {err}"))?;

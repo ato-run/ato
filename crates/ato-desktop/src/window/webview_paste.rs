@@ -21,9 +21,6 @@
 use gpui::{Context, FocusHandle, Window};
 use wry::WebView;
 
-#[cfg(target_os = "macos")]
-use wry::WebViewExtMacOS;
-
 use crate::app::{NativeCopy, NativeCut, NativePaste, NativeSelectAll};
 
 /// The GPUI key-context string shared by every WebView-hosting shell.

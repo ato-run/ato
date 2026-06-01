@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::Builder;
 
-use crate::capsule::manifest::{parse_blake3_digest, PayloadManifest};
+use crate::capsule::manifest::{PayloadManifest, parse_blake3_digest};
 use crate::error::{CapsuleError, Result};
 
 const DEFAULT_CAS_DIR: &str = ".capsule/cas";
@@ -238,13 +238,13 @@ impl CasStore {
                     e
                 ))
             })?;
-            if let Some(hint) = chunk.zstd_size_hint {
-                if zstd_size != hint as u64 {
-                    report.warnings.push(format!(
-                        "chunk[{index}] zstd_size_hint mismatch: hint={} actual={} ({})",
-                        hint, zstd_size, chunk.raw_hash
-                    ));
-                }
+            if let Some(hint) = chunk.zstd_size_hint
+                && zstd_size != hint as u64
+            {
+                report.warnings.push(format!(
+                    "chunk[{index}] zstd_size_hint mismatch: hint={} actual={} ({})",
+                    hint, zstd_size, chunk.raw_hash
+                ));
             }
 
             let verify = verify_chunk_content(&path, chunk.raw_size, &chunk.raw_hash);
@@ -344,10 +344,10 @@ fn verify_chunk_content(
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
@@ -385,15 +385,15 @@ fn sync_parent_directory(parent: &Path) -> Result<()> {
 mod tests {
     use std::fs;
     use std::io::{Read, Write};
-    use std::path::PathBuf;
+
     use std::sync::{Arc, Barrier};
     use std::thread;
 
     use tempfile;
     use zstd;
 
-    use super::{sync_parent_directory, CasStore};
-    use crate::capsule::manifest::{blake3_digest, CdcParams, ChunkMeta, PayloadManifest};
+    use super::{CasStore, sync_parent_directory};
+    use crate::capsule::manifest::{CdcParams, ChunkMeta, PayloadManifest, blake3_digest};
 
     fn compress(data: &[u8]) -> Vec<u8> {
         let mut encoder = zstd::Encoder::new(Vec::new(), 3).unwrap();
@@ -690,12 +690,14 @@ mod tests {
     fn from_env_uses_ato_cas_root() {
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var_os("ATO_CAS_ROOT");
-        std::env::set_var("ATO_CAS_ROOT", dir.path());
+        unsafe {
+            std::env::set_var("ATO_CAS_ROOT", dir.path());
+        }
         let store = CasStore::from_env().unwrap();
         assert_eq!(store.root(), dir.path());
         match old {
-            Some(v) => std::env::set_var("ATO_CAS_ROOT", v),
-            None => std::env::remove_var("ATO_CAS_ROOT"),
+            Some(v) => unsafe { std::env::set_var("ATO_CAS_ROOT", v) },
+            None => unsafe { std::env::remove_var("ATO_CAS_ROOT") },
         }
     }
 

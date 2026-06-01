@@ -3,15 +3,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::ato_lock::AtoLock;
 use capsule_core::router::ManifestData;
 use sha2::Digest;
 
 use crate::application::dependency_materializer::{
-    digest_file, AttestationStrategy, CacheStrategy, DependencyMaterializationRequest,
-    DependencyMaterializer, InstallPolicies, ManifestInputs, PlatformTriple, RuntimeSelection,
-    SessionDependencyMaterializer,
+    AttestationStrategy, CacheStrategy, DependencyMaterializationRequest, DependencyMaterializer,
+    InstallPolicies, ManifestInputs, PlatformTriple, RuntimeSelection,
+    SessionDependencyMaterializer, digest_file,
 };
 use crate::runtime::manager;
 

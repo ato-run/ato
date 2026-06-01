@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use capsule_core::AtoError;
 use capsule_core::execution_plan::error::{AtoErrorClassification, AtoExecutionError};
 use capsule_core::types::{CapsuleManifest, StateAttach, StateDurability};
-use capsule_core::AtoError;
 
 use crate::state::ensure_registered_state_binding;
 
@@ -218,8 +218,9 @@ attach = "explicit"
 
         let err = require_explicit_persistent_state_bindings(&manifest)
             .expect_err("explicit persistent state should require binding");
-        assert!(err
-            .to_string()
-            .contains("--attach-state data:/path/to/data"));
+        assert!(
+            err.to_string()
+                .contains("--attach-state data:/path/to/data")
+        );
     }
 }

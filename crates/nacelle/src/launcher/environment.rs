@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::internal_api::ExportedArtifact;
-use crate::launcher::source::SourceRuntimeConfig;
 use crate::launcher::InjectedMount;
+use crate::launcher::source::SourceRuntimeConfig;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OverlayMountSpec {
@@ -613,7 +613,7 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
-            return Err(err).with_context(|| format!("Failed to inspect path: {}", path.display()))
+            return Err(err).with_context(|| format!("Failed to inspect path: {}", path.display()));
         }
     };
 
@@ -801,7 +801,7 @@ fn collect_output_path_artifacts(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
             return Err(err)
-                .with_context(|| format!("Failed to read output metadata: {}", path.display()))
+                .with_context(|| format!("Failed to read output metadata: {}", path.display()));
         }
     };
 
@@ -975,11 +975,13 @@ sandbox = false
             fs::read_link(workspace.source_dir.join(".derived")).unwrap(),
             derived_root
         );
-        assert!(workspace
-            .requested_cwd
-            .as_ref()
-            .unwrap()
-            .starts_with(&workspace.source_dir));
+        assert!(
+            workspace
+                .requested_cwd
+                .as_ref()
+                .unwrap()
+                .starts_with(&workspace.source_dir)
+        );
         workspace.cleanup();
     }
 
@@ -1020,17 +1022,21 @@ sandbox = false
         .unwrap();
 
         assert_eq!(workspace.cleanup_policy(), CleanupPolicyApplied::Preserve);
-        assert!(workspace
-            .injected_mounts
-            .iter()
-            .any(|mount| mount.source == overlay_file
-                && mount.target == Path::new("/app/config/settings.json")));
-        assert!(workspace
-            .injected_mounts
-            .iter()
-            .any(|mount| mount.source == derived_root
-                && mount.target == Path::new("/app/.derived")
-                && !mount.readonly));
+        assert!(
+            workspace
+                .injected_mounts
+                .iter()
+                .any(|mount| mount.source == overlay_file
+                    && mount.target == Path::new("/app/config/settings.json"))
+        );
+        assert!(
+            workspace
+                .injected_mounts
+                .iter()
+                .any(|mount| mount.source == derived_root
+                    && mount.target == Path::new("/app/.derived")
+                    && !mount.readonly)
+        );
         assert_eq!(workspace.requested_cwd, Some(PathBuf::from("/app/src")));
         workspace.cleanup();
     }
@@ -1071,19 +1077,25 @@ sandbox = false
         })
         .unwrap();
 
-        assert!(workspace
-            .env
-            .iter()
-            .any(|(key, value)| key == "NACELLE_WORKSPACE_WRITABLE" && value == "1"));
-        assert!(workspace
-            .source_dir
-            .join("config")
-            .join("settings.json")
-            .exists());
-        assert!(workspace.derived_outputs.iter().any(|output| output
-            .staged_path
-            .as_ref()
-            .is_some_and(|path| path.ends_with(".derived"))));
+        assert!(
+            workspace
+                .env
+                .iter()
+                .any(|(key, value)| key == "NACELLE_WORKSPACE_WRITABLE" && value == "1")
+        );
+        assert!(
+            workspace
+                .source_dir
+                .join("config")
+                .join("settings.json")
+                .exists()
+        );
+        assert!(workspace.derived_outputs.iter().any(|output| {
+            output
+                .staged_path
+                .as_ref()
+                .is_some_and(|path| path.ends_with(".derived"))
+        }));
         workspace.cleanup();
     }
 }

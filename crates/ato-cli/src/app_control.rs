@@ -36,7 +36,7 @@ pub use session::{start_session, stop_session, watch_parent_and_stop_session};
 // flipping the entire `session` module to public. The session-record
 // schema itself now lives in `ato-session-core` (RFC §3.2 PR 4A.0);
 // `session::StoredSessionInfo` is a re-export of that shared type.
-pub(crate) use session::{http_get_ok, session_root, StoredSessionInfo};
+pub(crate) use session::{StoredSessionInfo, http_get_ok, session_root};
 
 /// Canonical package identifier for the ato-desktop control-plane envelope.
 /// Renamed from the legacy `DESKY_PACKAGE_ID` (= "ato/desky") in line with the
@@ -771,10 +771,10 @@ fn evaluate_service_status(
 }
 
 fn evaluate_materialized_service_status(record: &MaterializedServiceRecord) -> String {
-    if let Some(pid) = record.pid {
-        if !process_is_running(pid) {
-            return "missing".to_string();
-        }
+    if let Some(pid) = record.pid
+        && !process_is_running(pid)
+    {
+        return "missing".to_string();
     }
 
     if let Some(url) = record.healthcheck_url.as_deref() {
@@ -1044,10 +1044,10 @@ impl ServicePhaseRuntime for ManagedServiceRuntime {
             else {
                 return Ok(());
             };
-            if let Some(pid) = record.pid {
-                if !process_is_running(pid) {
-                    record.pid = None;
-                }
+            if let Some(pid) = record.pid
+                && !process_is_running(pid)
+            {
+                record.pid = None;
             }
             record.status = evaluate_materialized_service_status(&record);
             record.checked_at = now_iso();
@@ -1074,7 +1074,7 @@ fn emit_managed_service_receipt(
 ) -> Result<()> {
     use crate::application::execution_receipts;
     use crate::application::managed_service_receipt::{
-        synthesize_managed_service_receipt, ManagedServiceReceiptInput,
+        ManagedServiceReceiptInput, synthesize_managed_service_receipt,
     };
 
     let input = ManagedServiceReceiptInput {
@@ -1200,10 +1200,11 @@ fn load_state_from_path(path: &Path) -> Result<StoredBootstrapState> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // Try the pre-rename path so users who upgraded mid-session keep
             // their personalization / health snapshot.
-            if let Some(legacy) = legacy_bootstrap_state_path() {
-                if legacy != path && legacy.exists() {
-                    return load_state_from_path(&legacy);
-                }
+            if let Some(legacy) = legacy_bootstrap_state_path()
+                && legacy != path
+                && legacy.exists()
+            {
+                return load_state_from_path(&legacy);
             }
             Ok(default_state())
         }
@@ -1325,7 +1326,6 @@ fn default_state() -> StoredBootstrapState {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
 
     use super::*;
 
@@ -1337,9 +1337,11 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &str, value: Option<&str>) -> Self {
             let previous = std::env::var_os(key);
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+            unsafe {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
             }
             Self {
                 key: key.to_string(),
@@ -1351,8 +1353,12 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match self.previous.as_ref() {
-                Some(value) => std::env::set_var(&self.key, value),
-                None => std::env::remove_var(&self.key),
+                Some(value) => unsafe {
+                    std::env::set_var(&self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(&self.key);
+                },
             }
         }
     }

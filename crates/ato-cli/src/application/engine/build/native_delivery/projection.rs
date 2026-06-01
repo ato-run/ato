@@ -133,19 +133,18 @@ fn project_with_derived_plan(
         if let (Some(existing_command_path), Some(projected_command_path)) = (
             record.metadata.projected_command_path.as_ref(),
             projected_command_path.as_ref(),
-        ) {
-            if paths_match(existing_command_path, projected_command_path)? {
+        )
+            && paths_match(existing_command_path, projected_command_path)? {
                 bail!(
                     "Projection command conflict: '{}' is already managed by projection {}",
                     projected_command_path.display(),
                     record.metadata.projection_id
                 );
             }
-        }
     }
 
-    if source.projection_kind == ProjectionKind::Symlink {
-        if let Some(existing_path) =
+    if source.projection_kind == ProjectionKind::Symlink
+        && let Some(existing_path) =
             find_existing_projection_path(&projected_path, &source.derived_app_path)?
         {
             let projection_id = build_projection_id(
@@ -170,7 +169,6 @@ fn project_with_derived_plan(
                 schema_version: DELIVERY_SCHEMA_VERSION.to_string(),
             });
         }
-    }
 
     if let Some(conflict_path) = first_existing_projection_candidate(&projected_path)? {
         bail!(
@@ -301,11 +299,10 @@ fn project_with_derived_plan(
         if let Some(path) = created_projected_path.as_ref() {
             let _ = remove_projected_path(path, source_projection_kind.as_str());
         }
-        if created_command_path {
-            if let Some(projected_command_path) = projected_command_path.as_ref() {
+        if created_command_path
+            && let Some(projected_command_path) = projected_command_path.as_ref() {
                 let _ = remove_projection_path(projected_command_path);
             }
-        }
         if let Some(metadata_path) = written_metadata_path.as_ref() {
             let _ = fs::remove_file(metadata_path);
         }
@@ -598,14 +595,13 @@ fn find_projection_record(reference: &str, metadata_root: &Path) -> Result<Store
             matches.push(record);
             continue;
         }
-        if let Some(reference_abs) = reference_abs.as_ref() {
-            if paths_match(reference_abs, &record.metadata.projected_path)?
+        if let Some(reference_abs) = reference_abs.as_ref()
+            && (paths_match(reference_abs, &record.metadata.projected_path)?
                 || paths_match(reference_abs, &record.metadata.derived_app_path)?
-                || paths_match(reference_abs, &record.metadata_path)?
+                || paths_match(reference_abs, &record.metadata_path)?)
             {
                 matches.push(record);
             }
-        }
     }
 
     match matches.len() {

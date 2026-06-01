@@ -55,35 +55,35 @@ async fn resolve_executable_and_args(
     target: &SourceTarget,
 ) -> Result<(PathBuf, Vec<String>), RuntimeError> {
     // Case 1: Explicit cmd provided (Generic Source Runtime)
-    if let Some(ref explicit_cmd) = target.cmd {
-        if let Some((binary, args)) = explicit_cmd.split_first() {
-            // Check if the binary needs JIT provisioning (python, node, etc.)
-            let executable = resolve_binary(runtime, target, binary).await?;
+    if let Some(ref explicit_cmd) = target.cmd
+        && let Some((binary, args)) = explicit_cmd.split_first()
+    {
+        // Check if the binary needs JIT provisioning (python, node, etc.)
+        let executable = resolve_binary(runtime, target, binary).await?;
 
-            // Prepare arguments
-            let mut final_args: Vec<String> = Vec::new();
+        // Prepare arguments
+        let mut final_args: Vec<String> = Vec::new();
 
-            // Add -B (disable bytecode caching) only for the Python interpreter itself,
-            // not for Python ecosystem tools like uv, pip, etc.
-            if target.language == "python"
-                && is_python_interpreter(binary)
-                && !args.iter().any(|a| a == "-B")
-            {
-                final_args.push("-B".to_string());
-            }
-
-            let mut entrypoint_rewritten = false;
-            for arg in args {
-                if !entrypoint_rewritten && arg == &target.entrypoint {
-                    final_args.push(source_entrypoint_host_path(target).display().to_string());
-                    entrypoint_rewritten = true;
-                } else {
-                    final_args.push(arg.clone());
-                }
-            }
-
-            return Ok((executable, final_args));
+        // Add -B (disable bytecode caching) only for the Python interpreter itself,
+        // not for Python ecosystem tools like uv, pip, etc.
+        if target.language == "python"
+            && is_python_interpreter(binary)
+            && !args.iter().any(|a| a == "-B")
+        {
+            final_args.push("-B".to_string());
         }
+
+        let mut entrypoint_rewritten = false;
+        for arg in args {
+            if !entrypoint_rewritten && arg == &target.entrypoint {
+                final_args.push(source_entrypoint_host_path(target).display().to_string());
+                entrypoint_rewritten = true;
+            } else {
+                final_args.push(arg.clone());
+            }
+        }
+
+        return Ok((executable, final_args));
     }
 
     // Case 2: No explicit cmd, use language + entrypoint

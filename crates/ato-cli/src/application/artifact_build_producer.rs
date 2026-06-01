@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::build_materialization::BuildObservation;
 use crate::application::phase_materializer::{
-    build_output_contract_for_observation, materialization_key_for_observation,
     BuildOutputLayerRecord, MATERIALIZER_SCHEMA_VERSION, PROJECTION_ALGORITHM_VERSION,
+    build_output_contract_for_observation, materialization_key_for_observation,
 };
 
 const PRODUCER_REQUEST_SCHEMA_VERSION: &str = "ato-artifact-build-producer-request-v0";
@@ -209,6 +209,7 @@ pub(crate) fn artifact_build_request_from_observation(
     Ok(request)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn artifact_build_id_for_observation(
     observation: &BuildObservation,
     source_tree_hash: &str,

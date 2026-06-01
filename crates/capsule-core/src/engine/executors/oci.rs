@@ -1,6 +1,6 @@
 use crate::error::{CapsuleError, Result};
 use bollard::container::InspectContainerOptions;
-use bollard::{Docker, API_DEFAULT_VERSION};
+use bollard::{API_DEFAULT_VERSION, Docker};
 use rand::Rng;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -28,7 +28,7 @@ pub fn execute(plan: &ManifestData) -> Result<i32> {
     let mut cmd = Command::new(engine_binary(&engine));
     cmd.arg("run").arg("--rm");
 
-    let name = format!("capsule-{}", rand::thread_rng().gen::<u32>());
+    let name = format!("capsule-{}", rand::thread_rng().r#gen::<u32>());
     cmd.arg("--name").arg(&name);
 
     if let Some(port) = plan.execution_port() {
@@ -67,15 +67,13 @@ pub fn execute(plan: &ManifestData) -> Result<i32> {
     cmd.arg(&image);
 
     let mut args = plan.targets_oci_cmd();
-    if args.is_empty() {
-        if let Some(entrypoint) = plan
+    if args.is_empty()
+        && let Some(entrypoint) = plan
             .execution_entrypoint()
             .or_else(|| plan.execution_run_command())
-        {
-            if let Ok(parsed) = shell_words::split(&entrypoint) {
-                args = parsed;
-            }
-        }
+        && let Ok(parsed) = shell_words::split(&entrypoint)
+    {
+        args = parsed;
     }
 
     if !args.is_empty() {
@@ -116,7 +114,7 @@ async fn run_oci_with_metrics(container_id: String, image_hash: String) -> Resul
 
     wait_for_container(&docker, &container_id, Duration::from_secs(10)).await?;
 
-    let session_id = format!("oci-{}", rand::thread_rng().gen::<u64>());
+    let session_id = format!("oci-{}", rand::thread_rng().r#gen::<u64>());
     let handle = OciHandle::new(session_id, container_id.clone(), image_hash, docker.clone());
     let reporter = NoOpReporter;
     let config = SessionRunnerConfig {
@@ -241,12 +239,11 @@ fn resolve_image(plan: &ManifestData) -> Result<String> {
         return Ok(image);
     }
 
-    if let Some(runtime) = plan.execution_runtime() {
-        if runtime.eq_ignore_ascii_case("oci") || runtime.eq_ignore_ascii_case("docker") {
-            if let Some(entrypoint) = plan.execution_entrypoint() {
-                return Ok(entrypoint);
-            }
-        }
+    if let Some(runtime) = plan.execution_runtime()
+        && (runtime.eq_ignore_ascii_case("oci") || runtime.eq_ignore_ascii_case("docker"))
+        && let Some(entrypoint) = plan.execution_entrypoint()
+    {
+        return Ok(entrypoint);
     }
 
     Err(CapsuleError::Config(

@@ -223,9 +223,10 @@ mod tests {
     fn onboarding_descriptor_grants_onboarding_complete() {
         let d = lookup(SystemCapsuleId::AtoOnboarding);
         assert_eq!(d.canonical_slug, "onboarding");
-        assert!(d
-            .allowed_capabilities
-            .contains(&Capability::OnboardingComplete));
+        assert!(
+            d.allowed_capabilities
+                .contains(&Capability::OnboardingComplete)
+        );
     }
 
     #[test]

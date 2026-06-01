@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -97,13 +97,11 @@ fn scan_value_for_secrets(value: &serde_json::Value, path: &str, warnings: &mut 
                 scan_value_for_secrets(child, &child_path, warnings);
             }
         }
-        serde_json::Value::String(s) => {
-            if contains_private_key_marker(s) {
-                warnings.push(format!(
-                    "Value at '{}' looks like a private key or base64-encoded secret",
-                    path
-                ));
-            }
+        serde_json::Value::String(s) if contains_private_key_marker(s) => {
+            warnings.push(format!(
+                "Value at '{}' looks like a private key or base64-encoded secret",
+                path
+            ));
         }
         _ => {}
     }

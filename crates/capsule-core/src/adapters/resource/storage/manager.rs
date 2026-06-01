@@ -72,13 +72,13 @@ impl StorageManager {
     /// Create a new StorageManager with the given configuration
     pub fn new(config: StorageConfig) -> Self {
         // Ensure base directory exists
-        if config.enabled {
-            if let Err(e) = std::fs::create_dir_all(&config.storage_base) {
-                warn!(
-                    "Failed to create storage base directory {:?}: {}",
-                    config.storage_base, e
-                );
-            }
+        if config.enabled
+            && let Err(e) = std::fs::create_dir_all(&config.storage_base)
+        {
+            warn!(
+                "Failed to create storage base directory {:?}: {}",
+                config.storage_base, e
+            );
         }
         Self { config }
     }

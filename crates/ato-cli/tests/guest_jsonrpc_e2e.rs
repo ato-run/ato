@@ -7,13 +7,13 @@
 //! envelope auto-detection rules.
 
 use assert_cmd::Command;
-use base64::{engine::general_purpose, Engine as _};
-use serde_json::{json, Value};
+use base64::{Engine as _, engine::general_purpose};
+use serde_json::{Value, json};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use zip::{write::FileOptions, ZipWriter};
+use zip::{ZipWriter, write::FileOptions};
 
 fn encode_b64(payload: &[u8]) -> String {
     general_purpose::STANDARD.encode(payload)

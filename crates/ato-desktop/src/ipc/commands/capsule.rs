@@ -1,6 +1,6 @@
 //! `capsule.*` commands — minimal public surface available to any WebView.
 
-use super::{spec, IpcCommandSpec};
+use super::{IpcCommandSpec, spec};
 use crate::ipc::policy::IpcVisibility;
 
 pub fn specs() -> Vec<IpcCommandSpec> {

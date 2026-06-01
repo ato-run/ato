@@ -51,26 +51,26 @@ pub(crate) fn stop_orchestration_service_record(
 ) -> Result<bool> {
     let mut signalled = false;
 
-    if let Some(container_id) = service.container_id.as_deref() {
-        if !container_id.is_empty() {
-            // OCI services: stop + remove via bollard. Build a local
-            // tokio runtime + client for this call. The runtime is
-            // cheap (current-thread) and only constructed when a
-            // container_id is actually present.
-            match stop_container_via_provider_cli(container_id, &service.name, grace) {
-                Ok(true) => signalled = true,
-                Ok(false) => {}
-                Err(err) => {
-                    eprintln!(
-                        "ATO-WARN failed to stop OCI container {} for service '{}': {}",
-                        container_id, service.name, err
-                    );
-                }
+    if let Some(container_id) = service.container_id.as_deref()
+        && !container_id.is_empty()
+    {
+        // OCI services: stop + remove via bollard. Build a local
+        // tokio runtime + client for this call. The runtime is
+        // cheap (current-thread) and only constructed when a
+        // container_id is actually present.
+        match stop_container_via_provider_cli(container_id, &service.name, grace) {
+            Ok(true) => signalled = true,
+            Ok(false) => {}
+            Err(err) => {
+                eprintln!(
+                    "ATO-WARN failed to stop OCI container {} for service '{}': {}",
+                    container_id, service.name, err
+                );
             }
-            // OCI path: container_id-bearing services don't carry a
-            // local pid, so skip the pid/listener fallbacks below.
-            return Ok(signalled);
         }
+        // OCI path: container_id-bearing services don't carry a
+        // local pid, so skip the pid/listener fallbacks below.
+        return Ok(signalled);
     }
 
     if let Some(pid) = service.local_pid {
@@ -194,10 +194,10 @@ pub(crate) fn stop_orchestration_service_record(
             // signal anything that's still bound to `published_port`.
             // Idempotent (returns false when the port is already free
             // or the resolved pid matches what we just signaled).
-            if let Some(port) = service.published_port {
-                if kill_listeners_on_published_port(port, pid, grace, &service.name) {
-                    signalled = true;
-                }
+            if let Some(port) = service.published_port
+                && kill_listeners_on_published_port(port, pid, grace, &service.name)
+            {
+                signalled = true;
             }
         }
         #[cfg(not(unix))]
@@ -473,15 +473,15 @@ fn stop_container_via_provider_cli(
                 let rm_out = Command::new(cli)
                     .args(["rm", "--force", container_id])
                     .output();
-                if let Ok(rm) = rm_out {
-                    if !rm.status.success() {
-                        let rm_err = String::from_utf8_lossy(&rm.stderr);
-                        eprintln!(
-                            "ATO-WARN {cli} rm({container_id}) for service \
+                if let Ok(rm) = rm_out
+                    && !rm.status.success()
+                {
+                    let rm_err = String::from_utf8_lossy(&rm.stderr);
+                    eprintln!(
+                        "ATO-WARN {cli} rm({container_id}) for service \
                              '{service_name}' failed: {}",
-                            rm_err.trim()
-                        );
-                    }
+                        rm_err.trim()
+                    );
                 }
                 return Ok(true);
             }
@@ -735,7 +735,9 @@ mod tests {
     impl EnvGuard {
         fn set(key: &str, value: &str) -> Self {
             let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self {
                 key: key.to_string(),
                 prev,
@@ -743,7 +745,9 @@ mod tests {
         }
         fn remove(key: &str) -> Self {
             let prev = std::env::var(key).ok();
-            std::env::remove_var(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
             Self {
                 key: key.to_string(),
                 prev,
@@ -753,8 +757,8 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.prev {
-                Some(v) => std::env::set_var(&self.key, v),
-                None => std::env::remove_var(&self.key),
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
             }
         }
     }
