@@ -25,12 +25,21 @@ pub fn override_port(default: Option<u16>) -> Option<u16> {
 
 /// RAII guard that installs `ATO_UI_OVERRIDE_PORT=<port>` for its scope,
 /// then restores the previous environment value on drop. Used by the
-/// warm-launch fast path in `app_control::session` to make the freshly
-/// chosen port visible to the child runtime through the same env channel
-/// the cold-launch path uses (`override_port`).
+/// warm-launch fast path in `app_control::session` and by the run pipeline's
+/// execute phase to make the chosen port visible to the in-process
+/// `override_port` reads (and inherited by the child at spawn) without leaking
+/// the value past the launch it belongs to.
 ///
 /// The previous value is captured at construction time and restored
 /// verbatim — empty / missing / non-numeric strings all round-trip.
+///
+/// Env-safety: `ATO_UI_OVERRIDE_PORT` is mutated *only* through these guards,
+/// and the CLI performs at most one launch at a time within a process, so the
+/// only writers run at guard construction / drop and every other access is a
+/// read. Restoring on drop guarantees one run's port never bleeds into the
+/// next. (Threading the port through `RuntimeLaunchContext` instead of process
+/// env — removing the global channel entirely — is the preferred long-term
+/// fix but touches every `override_port` reader.)
 #[must_use = "PortOverrideGuard restores the env var when dropped; bind it to keep the override active"]
 pub struct PortOverrideGuard {
     previous: Option<String>,
@@ -38,10 +47,9 @@ pub struct PortOverrideGuard {
 
 impl Drop for PortOverrideGuard {
     fn drop(&mut self) {
-        // SAFETY: the guard is constructed and dropped on the main thread of
-        // the synchronous warm-launch path, around a single child spawn. No
-        // other thread reads or writes the process environment within the
-        // guard's scope, so restoring `ATO_UI_OVERRIDE_PORT` here is sound.
+        // SAFETY: see the type-level note — `ATO_UI_OVERRIDE_PORT` is written
+        // only by these guards and only one launch runs at a time, so there is
+        // no concurrent writer racing this restore.
         match self.previous.take() {
             Some(value) => unsafe { std::env::set_var(ENV_OVERRIDE_PORT, value) },
             None => unsafe { std::env::remove_var(ENV_OVERRIDE_PORT) },
@@ -53,9 +61,9 @@ impl Drop for PortOverrideGuard {
 /// (if any) is captured and restored when the returned guard is dropped.
 pub fn scoped_override_port(port: u16) -> PortOverrideGuard {
     let previous = std::env::var(ENV_OVERRIDE_PORT).ok();
-    // SAFETY: called on the main thread of the synchronous warm-launch path
-    // before the child runtime is spawned; no other thread accesses the
-    // process environment within the returned guard's scope.
+    // SAFETY: see `PortOverrideGuard` — the override is written only through
+    // these guards and the CLI runs one launch at a time, so no other thread
+    // is writing `ATO_UI_OVERRIDE_PORT` concurrently.
     unsafe {
         std::env::set_var(ENV_OVERRIDE_PORT, port.to_string());
     }
@@ -105,13 +113,35 @@ pub fn scoped_id_override() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{merged_env, override_env, override_port, scoped_id_override};
+    use super::{
+        merged_env, override_env, override_port, scoped_id_override, scoped_override_port,
+    };
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn scoped_override_port_restores_and_does_not_leak_between_runs() {
+        let _guard = env_lock().lock().expect("env lock");
+        // Clean slate so the assertions are deterministic.
+        unsafe {
+            std::env::remove_var("ATO_UI_OVERRIDE_PORT");
+        }
+        assert_eq!(override_port(None), None);
+
+        // First run installs an auto-assigned port through the guard.
+        {
+            let _port_guard = scoped_override_port(4321);
+            assert_eq!(override_port(None), Some(4321));
+        }
+
+        // After the guard drops (the run completed) the override must be gone,
+        // so a second sequential run in the same process does not inherit it.
+        assert_eq!(override_port(None), None);
     }
 
     #[test]
