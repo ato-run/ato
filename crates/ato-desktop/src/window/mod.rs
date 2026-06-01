@@ -113,14 +113,6 @@ pub fn open_configured_startup_surface(
     }
 }
 
-/// Returns true if Focus View (multi-window) mode is active.
-/// Reads `desktop.focus_view_enabled` from the config file (default: true).
-/// The `ATO_DESKTOP_MULTI_WINDOW` env var is no longer honored; use the
-/// config key to opt out of Focus View.
-pub fn is_multi_window_enabled() -> bool {
-    crate::config::load_config().desktop.focus_view_enabled
-}
-
 /// Window caption shown in the OS taskbar / window list. GPUI creates its
 /// windows with an empty title unless `TitlebarOptions::title` is set (it
 /// is `None` in `TitleBar::title_bar_options()`), so on Windows the taskbar

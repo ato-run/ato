@@ -576,12 +576,10 @@ pub fn dispatch(
             // as GPUI tears the windows down.
             crate::window::begin_shutdown();
             crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
-                if crate::window::is_multi_window_enabled() {
-                    let count = cx
-                        .global_mut::<crate::state::session::SessionRegistry>()
-                        .stop_all_running();
-                    tracing::info!(count, "ato_start: quit — stopped running sessions");
-                }
+                let count = cx
+                    .global_mut::<crate::state::session::SessionRegistry>()
+                    .stop_all_running();
+                tracing::info!(count, "ato_start: quit — stopped running sessions");
                 tracing::info!("ato_start: quit requested from Start page — quitting app");
                 cx.quit();
             });
