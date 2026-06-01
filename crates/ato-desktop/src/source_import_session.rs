@@ -509,17 +509,7 @@ impl GitHubImportSession {
         self.base_recipe_hash.as_deref()
     }
 
-    /// Origin tag captured at inference time ("registry" / "inference").
-    /// Restored onto `recipe.origin` after a same-hash run.
-    pub(crate) fn base_recipe_origin(&self) -> Option<&str> {
-        self.base_recipe_origin.as_deref()
-    }
 
-    /// `RecipeResolution` captured at inference time. `None` when the CLI
-    /// did not emit one (older CLI, or `--no-remote-recipe` skipped lookup).
-    pub(crate) fn base_recipe_resolution(&self) -> Option<&RecipeResolution> {
-        self.base_recipe_resolution.as_ref()
-    }
 
     /// True when the editable TOML's blake3 hash diverges from
     /// `base_recipe_hash`. The Submit payload uses this to mark the row
