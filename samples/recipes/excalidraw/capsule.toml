@@ -11,6 +11,9 @@ homepage = "https://github.com/excalidraw/excalidraw"
 
 default_target = "app"
 
+[source]
+repository = "excalidraw/excalidraw"
+
 [targets.app]
 runtime = "oci"
 # `excalidraw/excalidraw` does not publish semver-tagged images on Docker Hub —
