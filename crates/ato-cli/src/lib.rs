@@ -226,6 +226,10 @@ pub fn main_entry() {
     // captured stderr that a single user repro is enough to fix it.
     // The user can still override via the env var explicitly.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
+        // SAFETY: this runs at the very top of `main_entry` on the main thread.
+        // `init_subscriber` above installs a synchronous stderr subscriber (no
+        // background worker), and no other thread has been spawned yet, so
+        // there is no concurrent reader or writer of the environment.
         unsafe {
             std::env::set_var("RUST_BACKTRACE", "1");
         }

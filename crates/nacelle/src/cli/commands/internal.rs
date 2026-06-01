@@ -372,7 +372,7 @@ enum ReadinessOutcome {
 pub async fn execute(args: InternalArgs) -> Result<()> {
     // Internal interface must keep stdout machine-clean (JSON only).
     // Mark internal mode so shared helpers can route progress/logs to stderr.
-    unsafe { std::env::set_var("NACELLE_INTERNAL", "1") };
+    nacelle::common::set_internal_mode();
 
     let raw = read_input(&args.input)?;
     let spec_version =
