@@ -279,7 +279,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     if let Some(handle) = existing {
         #[cfg(target_os = "macos")]
         if let Some(nswindow) = crate::window::macos::ns_window_for(cx, handle) {
-            unsafe { nswindow.makeKeyAndOrderFront(None) };
+            nswindow.makeKeyAndOrderFront(None);
         }
         let result = handle.update(cx, |_, window, _| window.activate_window());
         match result {

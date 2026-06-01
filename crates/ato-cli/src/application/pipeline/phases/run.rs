@@ -3166,10 +3166,14 @@ where
         if let Ok(mgr) = crate::runtime::port_manager::PortManager::new()
             && let Ok(port) = mgr.resolve_port(&identity)
         {
+            // SAFETY: runs on the main thread of the synchronous run pipeline,
+            // before the workload child is spawned. The sidecar's Tokio runtime
+            // was already dropped above, and no other thread reads or writes the
+            // process environment at this point. The override port is consumed
+            // in-process by `runtime_overrides::override_port` and inherited by
+            // the workload child at spawn time.
             unsafe {
-                unsafe {
-                    std::env::set_var("ATO_UI_OVERRIDE_PORT", port.to_string());
-                }
+                std::env::set_var("ATO_UI_OVERRIDE_PORT", port.to_string());
             }
         }
     }

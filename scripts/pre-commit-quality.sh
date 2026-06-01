@@ -12,7 +12,6 @@ cargo check --workspace --all-targets
 
 echo "==> [root] cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings \
-    -A unused_unsafe \
     -A clippy::await_holding_lock \
     -A clippy::collapsible_if
 
@@ -29,8 +28,11 @@ cargo clippy --workspace --all-targets -- -D warnings \
 #                                     exercised only by `#[cfg(test)]` reads as
 #                                     dead here but is live elsewhere. Genuinely
 #                                     dead modules/functions were already deleted.
-#   unused_unsafe / await_holding_lock / collapsible_if
+#   await_holding_lock / collapsible_if
 #                                   — same allowances as the root workspace.
+#                                     (unused_unsafe is intentionally NOT
+#                                     allowed, so the gate catches nested or
+#                                     redundant `unsafe` blocks.)
 #   result_large_err / large_enum_variant
 #                                   — fixing means boxing error/enum payloads
 #                                     (a behavioral/perf change), out of scope.
@@ -48,7 +50,6 @@ echo "==> [ato-desktop] cargo fmt --all -- --check"
 echo "==> [ato-desktop] cargo clippy --bin ato-desktop -- -D warnings"
 ( cd crates/ato-desktop && cargo clippy --bin ato-desktop -- -D warnings \
     -A dead_code \
-    -A unused_unsafe \
     -A clippy::await_holding_lock \
     -A clippy::collapsible_if \
     -A clippy::result_large_err \

@@ -210,9 +210,7 @@ mod tests {
         // log=[rev1, rev2, rev3], current=rev3 → auto rollback should give rev2.
         let ipk = derive_install_profile_key(&app_id, &profile_id);
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
+            std::env::set_var("ATO_HOME", dir.path());
         }
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
@@ -238,9 +236,7 @@ mod tests {
     fn rollback_explicit_unknown_rev_fails() {
         let (dir, _store, _app_id, _profile_id, _rev1, _rev2, _rev3, ipk) = make_store_three_revs();
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
+            std::env::set_var("ATO_HOME", dir.path());
         }
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
@@ -267,9 +263,7 @@ mod tests {
     fn rollback_explicit_known_rev_succeeds() {
         let (dir, store, app_id, profile_id, rev1, _rev2, _rev3, ipk) = make_store_three_revs();
         unsafe {
-            unsafe {
-                std::env::set_var("ATO_HOME", dir.path());
-            }
+            std::env::set_var("ATO_HOME", dir.path());
         }
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
