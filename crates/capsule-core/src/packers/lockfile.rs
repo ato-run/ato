@@ -164,8 +164,7 @@ pub fn write_lockfile(
         let mut targets = HashMap::new();
         let python_url = format!(
             "https://github.com/astral-sh/python-build-standalone/releases/download/20241002/cpython-{}+20241002-{}-install_only.tar.gz",
-            DEFAULT_PYTHON_VERSION,
-            triple
+            DEFAULT_PYTHON_VERSION, triple
         );
         targets.insert(
             triple.to_string(),
@@ -225,7 +224,7 @@ pub fn write_lockfile(
                 return Err(CapsuleError::Pack(format!(
                     "Unsupported Deno platform: {} {}",
                     os, arch
-                )))
+                )));
             }
         };
         let deno_url = format!(
@@ -381,7 +380,7 @@ fn target_triple(os: &str, arch: &str) -> Result<String> {
             return Err(CapsuleError::Pack(format!(
                 "Unsupported platform: {} {}",
                 os, arch
-            )))
+            )));
         }
     };
     Ok(triple.to_string())
@@ -453,11 +452,7 @@ fn read_allowlist(manifest: &toml::Value) -> Option<Vec<String>> {
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
         .collect::<Vec<_>>();
-    if list.is_empty() {
-        None
-    } else {
-        Some(list)
-    }
+    if list.is_empty() { None } else { Some(list) }
 }
 
 fn warn_on_allowlist(
@@ -488,20 +483,20 @@ fn collect_urls(lockfile: &CapsuleLock) -> Vec<String> {
         }
     }
     if let Some(runtimes) = &lockfile.runtimes {
-        if let Some(py) = &runtimes.python {
-            if let Some(targets) = &py.targets {
-                out.extend(targets.values().map(|t| t.url.clone()));
-            }
+        if let Some(py) = &runtimes.python
+            && let Some(targets) = &py.targets
+        {
+            out.extend(targets.values().map(|t| t.url.clone()));
         }
-        if let Some(node) = &runtimes.node {
-            if let Some(targets) = &node.targets {
-                out.extend(targets.values().map(|t| t.url.clone()));
-            }
+        if let Some(node) = &runtimes.node
+            && let Some(targets) = &node.targets
+        {
+            out.extend(targets.values().map(|t| t.url.clone()));
         }
-        if let Some(deno) = &runtimes.deno {
-            if let Some(targets) = &deno.targets {
-                out.extend(targets.values().map(|t| t.url.clone()));
-            }
+        if let Some(deno) = &runtimes.deno
+            && let Some(targets) = &deno.targets
+        {
+            out.extend(targets.values().map(|t| t.url.clone()));
         }
     }
     out
@@ -529,10 +524,10 @@ fn is_allowed(url: &str, allowlist: &[String]) -> bool {
             }
             continue;
         }
-        if let Some(host) = &host {
-            if host == entry || host.ends_with(&format!(".{}", entry)) {
-                return true;
-            }
+        if let Some(host) = &host
+            && (host == entry || host.ends_with(&format!(".{}", entry)))
+        {
+            return true;
         }
     }
     false

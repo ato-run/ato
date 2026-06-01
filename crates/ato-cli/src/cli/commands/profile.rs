@@ -3,7 +3,7 @@
 //! Creates and shows profile.sync capsules.
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use blake3::Hasher;
 use ed25519_dalek::Signer;
 use serde::Serialize;
@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+use capsule_core::CapsuleReporter;
 use capsule_core::types::profile::{
     ProfileInfo, ProfileManifest, ProfileMeta, ProfilePermissions, ProfilePolicy, ProfileSignature,
     ProfileSync,
 };
 use capsule_core::types::signing::StoredKey;
-use capsule_core::CapsuleReporter;
 
 #[derive(Debug)]
 pub struct CreateArgs {
@@ -61,13 +61,13 @@ pub fn execute_create(
     // Build profile manifest
     let now = chrono::Utc::now();
     let mut links = HashMap::new();
-    if let Some(ref w) = args.website {
+    if let Some(w) = args.website {
         links.insert("website".to_string(), w.clone());
     }
-    if let Some(ref g) = args.github {
+    if let Some(g) = args.github {
         links.insert("github".to_string(), format!("https://github.com/{}", g));
     }
-    if let Some(ref t) = args.twitter {
+    if let Some(t) = args.twitter {
         links.insert("twitter".to_string(), format!("https://twitter.com/{}", t));
     }
 
@@ -100,7 +100,7 @@ pub fn execute_create(
     let bundle_dir = temp_dir.path();
 
     // Copy avatar if provided
-    if let Some(ref avatar_path) = args.avatar {
+    if let Some(avatar_path) = &args.avatar {
         let avatar_data = std::fs::read(avatar_path)
             .with_context(|| format!("Failed to read avatar: {}", avatar_path.display()))?;
 
@@ -153,7 +153,7 @@ pub fn execute_create(
     };
 
     // Create signing payload
-    let signing_payload = if let Some(ref ph) = payload_hash {
+    let signing_payload = if let Some(ph) = &payload_hash {
         format!("{}|{}", manifest_hash_hex, ph)
     } else {
         manifest_hash_hex.clone()
@@ -187,7 +187,7 @@ pub fn execute_create(
     )?;
     futures::executor::block_on(reporter.notify(format!("   DID:          {}", did)))?;
     futures::executor::block_on(reporter.notify(format!("   Display Name: {}", args.name)))?;
-    if let Some(ref bio) = args.bio {
+    if let Some(bio) = &args.bio {
         futures::executor::block_on(reporter.notify(format!("   Bio:          {}", bio)))?;
     }
     if args.avatar.is_some() {
@@ -228,13 +228,13 @@ pub fn execute_show(
         "   Display Name: {}",
         manifest.profile.display_name
     )))?;
-    if let Some(ref bio) = manifest.profile.bio {
+    if let Some(bio) = &manifest.profile.bio {
         futures::executor::block_on(reporter.notify(format!("   Bio:          {}", bio)))?;
     }
     if manifest.profile.avatar_hash.is_some() {
         futures::executor::block_on(reporter.notify("   Avatar:       ✓".to_string()))?;
     }
-    if let Some(ref links) = manifest.profile.links {
+    if let Some(links) = &manifest.profile.links {
         futures::executor::block_on(reporter.notify("   Links:".to_string()))?;
         for (k, v) in links {
             futures::executor::block_on(reporter.notify(format!("     {}: {}", k, v)))?;

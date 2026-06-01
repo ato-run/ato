@@ -6,15 +6,15 @@ use crate::error::{CapsuleError, Result};
 
 use crate::common::hash::sha256_hex;
 use crate::lock_runtime::{LockCompilerOverlay, LockServiceUnit};
-use crate::policy::egress_resolver::{resolve_egress_policy, EgressRule};
+use crate::policy::egress_resolver::{EgressRule, resolve_egress_policy};
 use crate::python_runtime::extend_python_selector_env;
 use crate::router::{self, CompatProjectInput, ExecutionProfile};
 use crate::types::{ResolvedService, ResolvedServiceRuntime, ResolvedTargetRuntime};
 
 use super::{
-    ConfigJson, EgressConfig, EgressRuleEntry, FilesystemConfig, HealthCheck, MetadataConfig,
-    NetworkConfig, SandboxConfig, ServiceSpec, SidecarConfig, SignalsConfig, TsnetSidecarConfig,
-    CONFIG_VERSION,
+    CONFIG_VERSION, ConfigJson, EgressConfig, EgressRuleEntry, FilesystemConfig, HealthCheck,
+    MetadataConfig, NetworkConfig, SandboxConfig, ServiceSpec, SidecarConfig, SignalsConfig,
+    TsnetSidecarConfig,
 };
 
 type CommandResolution = (
@@ -246,8 +246,7 @@ fn build_target_service_spec(service: &ResolvedService, standalone: bool) -> Res
         ResolvedServiceRuntime::Oci(runtime) => {
             return Err(CapsuleError::Config(format!(
                 "target-based config.json generation does not yet support runtime=oci services (service='{}', target='{}')",
-                service.name,
-                runtime.target
+                service.name, runtime.target
             )));
         }
     };
@@ -360,13 +359,13 @@ pub(super) fn build_lock_egress(
             }
         }
         for rule in resolved.rules {
-            if let EgressRule::Cidr { value } = rule {
-                if seen_cidrs.insert(value.clone()) {
-                    rules.push(EgressRuleEntry {
-                        rule_type: "cidr".to_string(),
-                        value,
-                    });
-                }
+            if let EgressRule::Cidr { value } = rule
+                && seen_cidrs.insert(value.clone())
+            {
+                rules.push(EgressRuleEntry {
+                    rule_type: "cidr".to_string(),
+                    value,
+                });
             }
         }
     }
@@ -418,11 +417,11 @@ pub(super) fn build_lock_sidecar_config(
 fn command_tokens(entrypoint: &str, command: Option<&str>) -> (String, Vec<String>) {
     let mut tokens =
         shell_words::split(entrypoint).unwrap_or_else(|_| vec![entrypoint.to_string()]);
-    if let Some(command) = command {
-        if !command.trim().is_empty() {
-            let extra = shell_words::split(command).unwrap_or_else(|_| vec![command.to_string()]);
-            tokens.extend(extra);
-        }
+    if let Some(command) = command
+        && !command.trim().is_empty()
+    {
+        let extra = shell_words::split(command).unwrap_or_else(|_| vec![command.to_string()]);
+        tokens.extend(extra);
     }
     let program = tokens
         .first()
@@ -577,10 +576,10 @@ fn target_run_command_should_be_entrypoint(command: &str, runtime: &ResolvedTarg
     if run_command_requires_shell(trimmed) {
         return false;
     }
-    if let Some(first_token) = trimmed.split_whitespace().next() {
-        if detect_language_from_program(first_token).is_some() {
-            return true;
-        }
+    if let Some(first_token) = trimmed.split_whitespace().next()
+        && detect_language_from_program(first_token).is_some()
+    {
+        return true;
     }
     if trimmed.contains(char::is_whitespace) {
         return false;
@@ -608,18 +607,18 @@ fn resolve_target_command(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    if let Some(run_command) = run_command {
-        if !target_run_command_should_be_entrypoint(run_command, runtime) {
-            return (
-                "sh".to_string(),
-                vec!["-c".to_string(), run_command.to_string()],
-                if runtime.env.is_empty() {
-                    None
-                } else {
-                    Some(runtime.env.clone())
-                },
-            );
-        }
+    if let Some(run_command) = run_command
+        && !target_run_command_should_be_entrypoint(run_command, runtime)
+    {
+        return (
+            "sh".to_string(),
+            vec!["-c".to_string(), run_command.to_string()],
+            if runtime.env.is_empty() {
+                None
+            } else {
+                Some(runtime.env.clone())
+            },
+        );
     }
 
     // For target-based services we treat run_command as the synthetic
@@ -841,18 +840,18 @@ fn run_command_should_be_entrypoint(command: &str, manifest: &toml::Value) -> bo
     if run_command_requires_shell(trimmed) {
         return false;
     }
-    if let Some(first_token) = trimmed.split_whitespace().next() {
-        if detect_language_from_program(first_token).is_some() {
-            return true;
-        }
+    if let Some(first_token) = trimmed.split_whitespace().next()
+        && detect_language_from_program(first_token).is_some()
+    {
+        return true;
     }
     if trimmed.contains(char::is_whitespace) {
         return false;
     }
-    if let Some(language) = read_language(manifest) {
-        if matches!(language.as_str(), "python" | "node" | "deno" | "bun") {
-            return true;
-        }
+    if let Some(language) = read_language(manifest)
+        && matches!(language.as_str(), "python" | "node" | "deno" | "bun")
+    {
+        return true;
     }
     if detect_language_from_entrypoint(trimmed).is_some() {
         return true;
@@ -887,12 +886,12 @@ fn is_shell_env_assignment(token: &str) -> bool {
 
 fn uses_package_manager_script(command: &str) -> bool {
     let mut tokens = command.split_whitespace();
-    match (tokens.next(), tokens.next()) {
-        (Some("bunx" | "npx"), _) => true,
-        (Some("bun" | "npm"), Some("run")) => true,
-        (Some("pnpm" | "yarn"), Some(_)) => true,
-        _ => false,
-    }
+    matches!(
+        (tokens.next(), tokens.next()),
+        (Some("bunx" | "npx"), _)
+            | (Some("bun" | "npm"), Some("run"))
+            | (Some("pnpm" | "yarn"), Some(_))
+    )
 }
 
 fn resolve_shell_command(command: &str, manifest: &toml::Value) -> CommandResolution {
@@ -1042,13 +1041,13 @@ fn build_egress(manifest: &toml::Value) -> Result<(Option<EgressConfig>, Vec<Str
         }
 
         for rule in resolved.rules {
-            if let EgressRule::Cidr { value } = rule {
-                if seen_cidrs.insert(value.clone()) {
-                    rules.push(EgressRuleEntry {
-                        rule_type: "cidr".to_string(),
-                        value,
-                    });
-                }
+            if let EgressRule::Cidr { value } = rule
+                && seen_cidrs.insert(value.clone())
+            {
+                rules.push(EgressRuleEntry {
+                    rule_type: "cidr".to_string(),
+                    value,
+                });
             }
         }
     }
@@ -1395,11 +1394,7 @@ fn merge_envs(
     if let Some(extra) = extra {
         out.extend(extra);
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 pub(super) fn validate_services_dag(services: &HashMap<String, ServiceSpec>) -> Result<()> {

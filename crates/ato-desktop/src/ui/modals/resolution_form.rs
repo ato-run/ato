@@ -44,8 +44,8 @@ use std::collections::HashMap;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, AnyElement, BoxShadow, Context, Entity, FontWeight, IntoElement,
-    MouseButton, Window,
+    AnyElement, BoxShadow, Context, Entity, FontWeight, IntoElement, MouseButton, Window, div,
+    hsla, point, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
@@ -56,8 +56,8 @@ use crate::app::{
     CancelResolutionForm, ResolutionFormBack, ResolutionFormNext, SubmitResolutionForm,
 };
 use crate::state::{PendingResolutionRequest, PendingSecretsItem};
-use crate::ui::theme::Theme;
 use crate::ui::DesktopShell;
+use crate::ui::theme::Theme;
 
 /// Two-step navigation for the unified resolution modal.
 ///

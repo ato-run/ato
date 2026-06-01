@@ -450,7 +450,7 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
         }
     }
 
-    viable.sort_by(|a, b| b.score.cmp(&a.score));
+    viable.sort_by_key(|b| std::cmp::Reverse(b.score));
     let beam_len = viable.len().min(BEAM_SIZE);
     let beam: Vec<LaunchGraphCandidate> = viable.into_iter().take(BEAM_SIZE).collect();
 
@@ -546,36 +546,32 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
     if matches!(
         &decision,
         LeipDecision::AutoAccept { .. } | LeipDecision::NeedsSelection { .. }
-    ) {
-        if let Some(top) = beam.first() {
-            if let Some(primary_node) = top
-                .graph
-                .nodes
-                .iter()
-                .find(|n| n.id == top.graph.primary_node_id)
-            {
-                if let Some(envelope) = &primary_node.envelope {
-                    if !envelope.required_env.is_empty() {
-                        diagnostics.push(LeipDiagnostic {
-                            severity: LeipDiagnosticSeverity::Warning,
-                            message: format!(
-                                "Required environment variables (no default): {}. \
-                                 Set these before launching.",
-                                envelope.required_env.join(", ")
-                            ),
-                        });
-                    }
-                    if !envelope.egress_hints.is_empty() {
-                        diagnostics.push(LeipDiagnostic {
-                            severity: LeipDiagnosticSeverity::Info,
-                            message: format!(
-                                "Outbound network access likely required: {}.",
-                                envelope.egress_hints.join(", ")
-                            ),
-                        });
-                    }
-                }
-            }
+    ) && let Some(top) = beam.first()
+        && let Some(primary_node) = top
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.id == top.graph.primary_node_id)
+        && let Some(envelope) = &primary_node.envelope
+    {
+        if !envelope.required_env.is_empty() {
+            diagnostics.push(LeipDiagnostic {
+                severity: LeipDiagnosticSeverity::Warning,
+                message: format!(
+                    "Required environment variables (no default): {}. \
+                     Set these before launching.",
+                    envelope.required_env.join(", ")
+                ),
+            });
+        }
+        if !envelope.egress_hints.is_empty() {
+            diagnostics.push(LeipDiagnostic {
+                severity: LeipDiagnosticSeverity::Info,
+                message: format!(
+                    "Outbound network access likely required: {}.",
+                    envelope.egress_hints.join(", ")
+                ),
+            });
         }
     }
 
@@ -939,16 +935,16 @@ fn extract_evidence(input: &LeipInput) -> Vec<Evidence> {
                 EvidenceSource::TargetHint,
             ));
         }
-        if let Some(run_cmd) = &hint.run_command {
-            if !run_cmd.is_empty() {
-                ev.push(make_evidence(
-                    EvidenceKind::ManifestHint,
-                    "target_hint",
-                    "run_command",
-                    run_cmd,
-                    EvidenceSource::TargetHint,
-                ));
-            }
+        if let Some(run_cmd) = &hint.run_command
+            && !run_cmd.is_empty()
+        {
+            ev.push(make_evidence(
+                EvidenceKind::ManifestHint,
+                "target_hint",
+                "run_command",
+                run_cmd,
+                EvidenceSource::TargetHint,
+            ));
         }
         if !hint.cmd.is_empty() {
             ev.push(make_evidence(
@@ -959,16 +955,16 @@ fn extract_evidence(input: &LeipInput) -> Vec<Evidence> {
                 EvidenceSource::TargetHint,
             ));
         }
-        if let Some(ep) = &hint.entrypoint {
-            if !ep.is_empty() {
-                ev.push(make_evidence(
-                    EvidenceKind::ManifestHint,
-                    "target_hint",
-                    "entrypoint",
-                    ep,
-                    EvidenceSource::TargetHint,
-                ));
-            }
+        if let Some(ep) = &hint.entrypoint
+            && !ep.is_empty()
+        {
+            ev.push(make_evidence(
+                EvidenceKind::ManifestHint,
+                "target_hint",
+                "entrypoint",
+                ep,
+                EvidenceSource::TargetHint,
+            ));
         }
     }
 
@@ -1030,16 +1026,16 @@ fn extract_package_json_evidence(text: &str, ev: &mut Vec<Evidence>) {
     }
 
     // main field as entrypoint
-    if let Some(main) = v.get("main").and_then(|m| m.as_str()) {
-        if !main.is_empty() {
-            ev.push(make_evidence(
-                EvidenceKind::EntrypointFile,
-                "package.json",
-                "main",
-                main,
-                EvidenceSource::FileTextMap,
-            ));
-        }
+    if let Some(main) = v.get("main").and_then(|m| m.as_str())
+        && !main.is_empty()
+    {
+        ev.push(make_evidence(
+            EvidenceKind::EntrypointFile,
+            "package.json",
+            "main",
+            main,
+            EvidenceSource::FileTextMap,
+        ));
     }
 
     // Framework markers from dependencies
@@ -1097,18 +1093,18 @@ fn extract_pyproject_evidence(text: &str, ev: &mut Vec<Evidence>) {
         &["project", "scripts"][..],
         &["tool", "poetry", "scripts"][..],
     ] {
-        if let Some(scripts) = get_toml_nested(&v, section_path) {
-            if let Some(table) = scripts.as_table() {
-                for (name, value) in table {
-                    if let Some(cmd_str) = value.as_str() {
-                        ev.push(make_evidence(
-                            EvidenceKind::PackageScriptCommand,
-                            "pyproject.toml",
-                            &format!("scripts.{}", name),
-                            cmd_str,
-                            EvidenceSource::FileTextMap,
-                        ));
-                    }
+        if let Some(scripts) = get_toml_nested(&v, section_path)
+            && let Some(table) = scripts.as_table()
+        {
+            for (name, value) in table {
+                if let Some(cmd_str) = value.as_str() {
+                    ev.push(make_evidence(
+                        EvidenceKind::PackageScriptCommand,
+                        "pyproject.toml",
+                        &format!("scripts.{}", name),
+                        cmd_str,
+                        EvidenceSource::FileTextMap,
+                    ));
                 }
             }
         }
@@ -1400,17 +1396,17 @@ fn select_node_launch_cmd(
             }
             return (hint.cmd.clone(), used, None);
         }
-        if let Some(run_cmd) = &hint.run_command {
-            if !run_cmd.is_empty() {
-                let e = evidence
-                    .iter()
-                    .find(|e| e.kind == EvidenceKind::ManifestHint && e.key == "run_command");
-                if let Some(e) = e {
-                    used.push(e.id.clone());
-                    *launch_score = (*launch_score).max(W_MANIFEST_HINT_RUN);
-                }
-                return (shell_words_split(run_cmd), used, Some(run_cmd.clone()));
+        if let Some(run_cmd) = &hint.run_command
+            && !run_cmd.is_empty()
+        {
+            let e = evidence
+                .iter()
+                .find(|e| e.kind == EvidenceKind::ManifestHint && e.key == "run_command");
+            if let Some(e) = e {
+                used.push(e.id.clone());
+                *launch_score = (*launch_score).max(W_MANIFEST_HINT_RUN);
             }
+            return (shell_words_split(run_cmd), used, Some(run_cmd.clone()));
         }
     }
 
@@ -1667,30 +1663,30 @@ fn python_dep_hints(
             }
         }
     }
-    if let Some(text) = pyproject_text {
-        if let Ok(v) = toml::from_str::<toml::Value>(text) {
-            // [project].dependencies = ["openai>=1.0", ...]
-            let project_deps = v
-                .get("project")
-                .and_then(|p| p.get("dependencies"))
-                .and_then(|d| d.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|i| i.as_str())
-                        .map(|s| {
-                            s.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-                                .next()
-                                .unwrap_or("")
-                                .to_lowercase()
-                        })
-                        .filter(|n| !n.is_empty())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            for name in project_deps {
-                if !dep_names.contains(&name) {
-                    dep_names.push(name);
-                }
+    if let Some(text) = pyproject_text
+        && let Ok(v) = toml::from_str::<toml::Value>(text)
+    {
+        // [project].dependencies = ["openai>=1.0", ...]
+        let project_deps = v
+            .get("project")
+            .and_then(|p| p.get("dependencies"))
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|i| i.as_str())
+                    .map(|s| {
+                        s.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                            .next()
+                            .unwrap_or("")
+                            .to_lowercase()
+                    })
+                    .filter(|n| !n.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for name in project_deps {
+            if !dep_names.contains(&name) {
+                dep_names.push(name);
             }
         }
     }
@@ -2051,17 +2047,17 @@ fn select_python_launch_cmd(
             }
             return (hint.cmd.clone(), used);
         }
-        if let Some(run_cmd) = &hint.run_command {
-            if !run_cmd.is_empty() {
-                let e = evidence
-                    .iter()
-                    .find(|e| e.kind == EvidenceKind::ManifestHint && e.key == "run_command");
-                if let Some(e) = e {
-                    used.push(e.id.clone());
-                    *launch_score = (*launch_score).max(W_MANIFEST_HINT_RUN);
-                }
-                return (shell_words_split(run_cmd), used);
+        if let Some(run_cmd) = &hint.run_command
+            && !run_cmd.is_empty()
+        {
+            let e = evidence
+                .iter()
+                .find(|e| e.kind == EvidenceKind::ManifestHint && e.key == "run_command");
+            if let Some(e) = e {
+                used.push(e.id.clone());
+                *launch_score = (*launch_score).max(W_MANIFEST_HINT_RUN);
             }
+            return (shell_words_split(run_cmd), used);
         }
     }
 
@@ -2207,13 +2203,11 @@ fn find_python_entrypoint(evidence: &[Evidence]) -> Option<&str> {
 
 fn python_module_from_path(path: &str) -> &str {
     // "src/main.py" → "main", "app.py" → "app"
-    let name = path
-        .rsplit('/')
+    path.rsplit('/')
         .next()
         .unwrap_or(path)
         .strip_suffix(".py")
-        .unwrap_or(path);
-    name
+        .unwrap_or(path)
 }
 
 fn build_python_envelope(
@@ -2490,11 +2484,7 @@ fn shell_words_split(s: &str) -> Vec<String> {
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
+    if s.len() <= max { s } else { &s[..max] }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -3228,10 +3218,12 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             envelope.required_env
         );
         // No required_env diagnostic
-        assert!(!result
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("Required environment")));
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("Required environment"))
+        );
     }
 
     #[test]

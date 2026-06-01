@@ -1935,8 +1935,8 @@ mod tests {
     #[test]
     fn resolve_helper_source_release_requires_artifact_dir() {
         // Ensure the env fallback is not set so the missing-dir path is hit.
-        std::env::remove_var(HELPER_ARTIFACT_DIR_ENV);
-        std::env::remove_var(HELPER_SOURCE_ENV);
+        unsafe { std::env::remove_var(HELPER_ARTIFACT_DIR_ENV); }
+        unsafe { std::env::remove_var(HELPER_SOURCE_ENV); }
         let err = resolve_helper_source(Some("release".to_string()), None)
             .expect_err("release without an artifact dir must error");
         let msg = format!("{err:#}");

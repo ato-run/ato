@@ -45,4 +45,4 @@ pub mod registry;
 pub mod static_resolver;
 pub mod window_registry;
 
-pub use broker::{BrokerError, Capability, CapabilityBroker, SystemCapsuleId, SystemCommand};
+pub use broker::{CapabilityBroker, SystemCapsuleId, SystemCommand};

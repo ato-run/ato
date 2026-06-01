@@ -249,17 +249,17 @@ impl RegistryStore {
 
             let normalized = normalize_blake3_hash(&chunk_hash);
             let chunk_path = self.chunk_path(&normalized);
-            if chunk_path.exists() {
-                if let Err(err) = std::fs::remove_file(&chunk_path) {
-                    conn.execute(
-                        "UPDATE gc_queue
+            if chunk_path.exists()
+                && let Err(err) = std::fs::remove_file(&chunk_path)
+            {
+                conn.execute(
+                    "UPDATE gc_queue
                          SET state='failed', attempts=attempts + 1, updated_at=?2, reason=?3
                          WHERE chunk_hash=?1",
-                        params![chunk_hash, now, format!("unlink_failed:{err}")],
-                    )?;
-                    result.failed += 1;
-                    continue;
-                }
+                    params![chunk_hash, now, format!("unlink_failed:{err}")],
+                )?;
+                result.failed += 1;
+                continue;
             }
 
             let tx = conn.transaction()?;
@@ -444,14 +444,14 @@ impl RegistryStore {
         tx.commit()?;
 
         let mut active_key_rotated_to = None;
-        if let Some(active_key_id) = self.active_key_id()? {
-            if active_key_id == key_id {
-                let active_signing_key = self.load_signing_key_by_id(&active_key_id)?;
-                let active_did = public_key_to_did(&active_signing_key.verifying_key().to_bytes());
-                if target_dids.iter().any(|target| target == &active_did) {
-                    let rotated = self.rotate_signing_key(0)?;
-                    active_key_rotated_to = Some(rotated.key_id);
-                }
+        if let Some(active_key_id) = self.active_key_id()?
+            && active_key_id == key_id
+        {
+            let active_signing_key = self.load_signing_key_by_id(&active_key_id)?;
+            let active_did = public_key_to_did(&active_signing_key.verifying_key().to_bytes());
+            if target_dids.iter().any(|target| target == &active_did) {
+                let rotated = self.rotate_signing_key(0)?;
+                active_key_rotated_to = Some(rotated.key_id);
             }
         }
 

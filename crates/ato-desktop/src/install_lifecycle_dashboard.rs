@@ -25,7 +25,7 @@ use crate::proc_util::CommandNoWindowExt;
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    self, ids::InstallRevisionId, InstallInstanceStore, InstalledAppId, ProfileId,
+    self, InstallInstanceStore, InstalledAppId, ProfileId, ids::InstallRevisionId,
 };
 use serde::Serialize;
 
@@ -395,11 +395,7 @@ fn session_record_is_alive(record: &ato_session_core::record::StoredSessionInfo)
 
 #[cfg(unix)]
 fn nix_pid(raw: i32) -> Option<u32> {
-    if raw <= 0 {
-        None
-    } else {
-        Some(raw as u32)
-    }
+    if raw <= 0 { None } else { Some(raw as u32) }
 }
 
 // ── Internal builders (Blocker 3 fix: no silent .ok().flatten()) ────────────
@@ -553,7 +549,7 @@ fn build_profile_item(
 mod tests {
     use super::*;
     use capsule_core::foundation::install_lifecycle::{
-        ids::InstallRevisionId, AppRecord, LaunchProfile,
+        AppRecord, LaunchProfile, ids::InstallRevisionId,
     };
     use serial_test::serial;
 
@@ -622,10 +618,14 @@ mod tests {
     fn empty_store_returns_empty_vec() {
         let dir = tempfile::tempdir().unwrap();
         let _store = make_store(&dir);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let apps = list_installed_apps_dashboard().unwrap();
         assert!(apps.is_empty());
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 
     #[test]
@@ -633,9 +633,13 @@ mod tests {
     fn single_app_returns_correct_item() {
         let dir = tempfile::tempdir().unwrap();
         let (app_id, _profile_id, ipk) = scaffold_one(&dir, 2);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let apps = list_installed_apps_dashboard().unwrap();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
 
         assert_eq!(apps.len(), 1);
         let app = &apps[0];
@@ -658,9 +662,13 @@ mod tests {
     fn get_app_detail_returns_full_detail() {
         let dir = tempfile::tempdir().unwrap();
         let (app_id, _profile_id, _ipk) = scaffold_one(&dir, 3);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let detail = get_app_detail(app_id.as_str()).unwrap();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
 
         assert_eq!(detail.installed_app_id, app_id.as_str());
         assert_eq!(detail.profiles.len(), 1);
@@ -672,9 +680,13 @@ mod tests {
     fn list_revisions_returns_correct_count_and_current_marker() {
         let dir = tempfile::tempdir().unwrap();
         let (app_id, profile_id, _ipk) = scaffold_one(&dir, 2);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let revisions = list_app_revisions(app_id.as_str(), profile_id.as_str()).unwrap();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
 
         assert_eq!(revisions.len(), 2);
         assert!(!revisions[0].is_current);
@@ -695,9 +707,13 @@ mod tests {
             .write_profile(&app_id, &make_default_profile(&profile_id))
             .unwrap();
 
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let apps = list_installed_apps_dashboard().unwrap();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
 
         assert_eq!(apps.len(), 1);
         let profile = &apps[0].profiles[0];
@@ -717,9 +733,13 @@ mod tests {
             .join("revision_log.json");
         std::fs::write(&log_path, b"garbage {{{").unwrap();
 
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let result = list_app_revisions(app_id.as_str(), profile_id.as_str());
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
         assert!(
@@ -746,9 +766,13 @@ mod tests {
             std::os::unix::fs::symlink(std::path::Path::new("/"), &link).unwrap();
         }
 
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
         let result = list_installed_apps_dashboard();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
 
         #[cfg(unix)]
         {
@@ -774,7 +798,9 @@ mod tests {
         DashboardCache::reset_for_test();
         let dir = tempfile::tempdir().unwrap();
         let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 2);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
 
         let initial = DashboardCache::get().unwrap();
         assert!(initial.is_empty());
@@ -784,7 +810,9 @@ mod tests {
         assert_eq!(after.len(), 1);
 
         DashboardCache::reset_for_test();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 
     #[test]
@@ -793,7 +821,9 @@ mod tests {
         DashboardCache::reset_for_test();
         let dir = tempfile::tempdir().unwrap();
         let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 1);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
 
         let mut items = list_installed_apps_dashboard().unwrap();
         assert_eq!(items.len(), 1);
@@ -802,7 +832,9 @@ mod tests {
         let _ = attach_running_sessions(&mut items);
 
         DashboardCache::reset_for_test();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 
     #[test]
@@ -867,13 +899,17 @@ mod tests {
         DashboardCache::reset_for_test();
         let dir = tempfile::tempdir().unwrap();
         let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 1);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
 
         let result = DashboardCache::refresh();
         assert!(result.is_ok());
 
         DashboardCache::reset_for_test();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 
     #[test]
@@ -881,7 +917,9 @@ mod tests {
     fn dashboard_cache_refresh_returns_err_on_corrupt_store() {
         DashboardCache::reset_for_test();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
 
         // Create a file where instances/ should be, so list_installed_apps fails
         std::fs::write(dir.path().join("instances"), "not a directory").unwrap();
@@ -890,7 +928,9 @@ mod tests {
         assert!(result.is_err(), "expected Err, got Ok: {result:?}");
 
         DashboardCache::reset_for_test();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 
     #[test]
@@ -899,7 +939,9 @@ mod tests {
         DashboardCache::reset_for_test();
         DashboardCache::clear_action_status();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
 
         // Create a file where instances/ should be, so list_installed_apps fails
         std::fs::write(dir.path().join("instances"), "not a directory").unwrap();
@@ -934,7 +976,9 @@ mod tests {
         }
 
         DashboardCache::reset_for_test();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 
     #[test]
@@ -944,7 +988,9 @@ mod tests {
         DashboardCache::clear_action_status();
         let dir = tempfile::tempdir().unwrap();
         let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 1);
-        std::env::set_var("ATO_HOME", dir.path());
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
 
         // Set a pending status
         DashboardCache::set_action_status(Some(super::InstalledAppsActionStatus::Refreshing));
@@ -959,6 +1005,8 @@ mod tests {
         );
 
         DashboardCache::reset_for_test();
-        std::env::remove_var("ATO_HOME");
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
     }
 }

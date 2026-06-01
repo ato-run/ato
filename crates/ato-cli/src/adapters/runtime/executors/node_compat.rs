@@ -895,7 +895,7 @@ fn map_deno_permission_error(stderr: &[u8]) -> Option<AtoExecutionError> {
     }
 
     let target = extract_deno_net_target(&text);
-    let message = if let Some(ref host) = target {
+    let message = if let Some(host) = &target {
         format!("network policy violation: blocked egress to {}", host)
     } else {
         "network policy violation: blocked egress".to_string()
@@ -954,10 +954,10 @@ fn collect_runtime_secrets(execution_plan: &ExecutionPlan) -> BTreeMap<String, S
 
     let mut secrets = BTreeMap::new();
     for key in keys {
-        if let Ok(value) = std::env::var(&key) {
-            if !value.is_empty() {
-                secrets.insert(key, value);
-            }
+        if let Ok(value) = std::env::var(&key)
+            && !value.is_empty()
+        {
+            secrets.insert(key, value);
         }
     }
 
@@ -1044,9 +1044,9 @@ mod tests {
         prepend_managed_node_to_path, provider_resolution_metadata_path,
     };
 
-    use capsule_core::launch_spec::{derive_launch_spec, LaunchSpecSource};
+    use capsule_core::launch_spec::{LaunchSpecSource, derive_launch_spec};
     use capsule_core::router::{
-        execution_descriptor_from_manifest_parts, ExecutionProfile, ManifestData,
+        ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts,
     };
     use std::collections::HashMap;
 
@@ -1238,8 +1238,8 @@ run = "node lib.js fixtures/db.json --port 3000"
         // restore before asserting so a panic doesn't poison env
         unsafe {
             match original_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
+                Some(v) => unsafe { std::env::set_var("PATH", v) },
+                None => unsafe { std::env::remove_var("PATH") },
             }
         }
 

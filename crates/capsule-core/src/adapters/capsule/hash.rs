@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::capsule::manifest::{validate_blake3_digest, CdcParams, PayloadManifest};
+use crate::capsule::manifest::{CdcParams, PayloadManifest, validate_blake3_digest};
 use crate::error::{CapsuleError, Result};
 
 #[derive(Serialize)]
@@ -66,8 +66,8 @@ fn build_hash_core(manifest: &PayloadManifest) -> PayloadManifestHashCore<'_> {
 #[cfg(test)]
 mod tests {
     use super::{compute_artifact_hash_jcs_blake3, set_artifact_hash, verify_artifact_hash};
-    use crate::capsule::manifest::{blake3_digest, CdcParams, ChunkMeta};
     use crate::capsule::PayloadManifest;
+    use crate::capsule::manifest::{CdcParams, ChunkMeta, blake3_digest};
 
     fn sample_manifest() -> PayloadManifest {
         PayloadManifest {

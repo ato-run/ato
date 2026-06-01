@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, linear_color_stop, linear_gradient, point, px, AnyElement, AsyncWindowContext,
-    BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image,
-    ImageFormat, IntoElement, MouseButton, Render, WeakEntity, Window,
+    AnyElement, AsyncWindowContext, BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle,
+    Focusable, FontWeight, Image, ImageFormat, IntoElement, MouseButton, Render, WeakEntity,
+    Window, div, hsla, linear_color_stop, linear_gradient, point, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
@@ -24,7 +24,7 @@ use gpui_component::scroll::ScrollableElement;
 use self::chrome::render_command_chrome;
 use self::panels::render_stage;
 use self::sidebar::{
-    favicon_candidate_urls, parse_link_icon_candidates, render_task_rail, FaviconState,
+    FaviconState, favicon_candidate_urls, parse_link_icon_candidates, render_task_rail,
 };
 use crate::logging::TARGET_FAVICON;
 
@@ -329,7 +329,7 @@ fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
         Err(error) => {
             return crate::state::UpdateCheck::Failed {
                 message: format!("network error: {error}"),
-            }
+            };
         }
     };
     let body = match response.into_string() {
@@ -337,7 +337,7 @@ fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
         Err(error) => {
             return crate::state::UpdateCheck::Failed {
                 message: format!("read error: {error}"),
-            }
+            };
         }
     };
     let json: serde_json::Value = match serde_json::from_str(&body) {
@@ -345,7 +345,7 @@ fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
         Err(error) => {
             return crate::state::UpdateCheck::Failed {
                 message: format!("parse error: {error}"),
-            }
+            };
         }
     };
     let tag = json
@@ -926,7 +926,10 @@ impl DesktopShell {
             f32::from(size.width),
             f32::from(size.height),
             format_bounds(stage_bounds),
-            active.as_ref().map(|pane| pane.pane_id.to_string()).unwrap_or_else(|| "<none>".to_string()),
+            active
+                .as_ref()
+                .map(|pane| pane.pane_id.to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
             active
                 .as_ref()
                 .map(|pane| pane.route.to_string())
@@ -3880,11 +3883,13 @@ fn render_capsule_permissions_page(
         .child(render_capsule_section(
             "Environment",
             if granted_envs.is_empty() {
-                vec![render_capsule_empty(
-                    "No explicit env grants recorded for this capsule.",
-                    theme,
-                )
-                .into_any_element()]
+                vec![
+                    render_capsule_empty(
+                        "No explicit env grants recorded for this capsule.",
+                        theme,
+                    )
+                    .into_any_element(),
+                ]
             } else {
                 granted_envs
                     .iter()
@@ -3904,11 +3909,13 @@ fn render_capsule_permissions_page(
         .child(render_capsule_section(
             "Role / Capabilities",
             if capabilities.is_empty() {
-                vec![render_capsule_empty(
-                    "No capability grants surfaced for the active pane.",
-                    theme,
-                )
-                .into_any_element()]
+                vec![
+                    render_capsule_empty(
+                        "No capability grants surfaced for the active pane.",
+                        theme,
+                    )
+                    .into_any_element(),
+                ]
             } else {
                 capabilities
                     .iter()
@@ -4144,11 +4151,13 @@ fn render_capsule_api_page(
         .child(render_capsule_section(
             "Inbound",
             if inbound_rows.is_empty() {
-                vec![render_capsule_empty(
-                    "No inbound endpoints are exposed for this capsule.",
-                    theme,
-                )
-                .into_any_element()]
+                vec![
+                    render_capsule_empty(
+                        "No inbound endpoints are exposed for this capsule.",
+                        theme,
+                    )
+                    .into_any_element(),
+                ]
             } else {
                 inbound_rows
             },
@@ -4157,11 +4166,13 @@ fn render_capsule_api_page(
         .child(render_capsule_section(
             "Outbound",
             if granted_envs.is_empty() {
-                vec![render_capsule_empty(
-                    "No outbound credentials are bound to this capsule.",
-                    theme,
-                )
-                .into_any_element()]
+                vec![
+                    render_capsule_empty(
+                        "No outbound credentials are bound to this capsule.",
+                        theme,
+                    )
+                    .into_any_element(),
+                ]
             } else {
                 granted_envs
                     .iter()
@@ -4180,13 +4191,15 @@ fn render_capsule_api_page(
         ))
         .child(render_capsule_section(
             "Schema registry",
-            vec![render_capsule_detail_row(
-                "Resolved runtime",
-                active.runtime_label.as_deref().unwrap_or("unknown"),
-                "std.* alias resolution and schema hash materialize in this block.",
-                theme,
-            )
-            .into_any_element()],
+            vec![
+                render_capsule_detail_row(
+                    "Resolved runtime",
+                    active.runtime_label.as_deref().unwrap_or("unknown"),
+                    "std.* alias resolution and schema hash materialize in this block.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
             theme,
         ))
         .child(render_capsule_section(
@@ -4729,8 +4742,8 @@ fn render_permission_button<A: gpui::Action + Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::{
-        determine_image_format, fetch_image_from_url_with_headers, transcode_ico_to_png,
-        ImageFormat,
+        ImageFormat, determine_image_format, fetch_image_from_url_with_headers,
+        transcode_ico_to_png,
     };
 
     /// Real PNG header (8-byte magic + an IHDR chunk for a 1×1 image).

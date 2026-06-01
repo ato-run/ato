@@ -10,7 +10,7 @@
 //! been validated against the upstream artifact (see #120 Phase 1).
 //! Adding or bumping an entry is a deliberate code change.
 
-use super::manifest::{host_platform, ArchiveFormat, ArtifactLayout, ToolArtifactManifest};
+use super::manifest::{ArchiveFormat, ArtifactLayout, ToolArtifactManifest, host_platform};
 
 /// Look up a pinned manifest by stable tool ID + the current host
 /// platform. Returns `None` when:

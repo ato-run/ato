@@ -161,7 +161,7 @@ impl ProfileManifest {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{ProfileManifest, PROFILE_CONTENT_TYPE};
+    use super::{PROFILE_CONTENT_TYPE, ProfileManifest};
 
     #[test]
     fn test_profile_manifest_creation() {

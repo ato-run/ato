@@ -35,14 +35,14 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use hickory_resolver::{
+    TokioAsyncResolver,
     config::{ResolverConfig, ResolverOpts},
     error::{ResolveError, ResolveErrorKind},
     proto::rr::{RData, RecordType},
-    TokioAsyncResolver,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 

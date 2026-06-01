@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use super::endpoint::EndpointAllocator;
-use super::ready::{wait_for_ready, ReadyOutcome, ReadyProbeKind};
+use super::ready::{ReadyOutcome, ReadyProbeKind, wait_for_ready};
 
 #[test]
 fn allocated_port_is_immediately_ready_after_bind() {

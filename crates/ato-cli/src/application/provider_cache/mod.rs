@@ -28,13 +28,13 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use capsule_core::common::store::BlobAddress;
 
-use crate::application::dependency_materializer::freeze::{freeze_dep_tree, FreezeOutcome};
+use crate::application::dependency_materializer::freeze::{FreezeOutcome, freeze_dep_tree};
 use crate::application::dependency_materializer::{
     CacheStrategy, DepDerivationKeyV1, DependencyMaterializationRequest, DependencyMaterializer,
     InstallPolicies, ManifestInputs, PlatformTriple, RuntimeSelection,
     SessionDependencyMaterializer,
 };
-use crate::application::projection::{project_payload, ProjectionOutcome};
+use crate::application::projection::{ProjectionOutcome, project_payload};
 use crate::cli::shared::CacheStrategyArg;
 
 /// Inputs needed to compute a derivation hash for a provider workspace.
@@ -343,15 +343,17 @@ mod tests {
     impl EnvGuard {
         fn set<V: AsRef<OsStr>>(key: &'static str, value: V) -> Self {
             let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }
@@ -407,7 +409,9 @@ mod tests {
     fn check_returns_miss_when_no_blob_exists_yet() {
         let tmp = TempDir::new().unwrap();
         let _home = EnvGuard::set("ATO_HOME", tmp.path());
-        std::env::remove_var("ATO_CACHE_STRATEGY");
+        unsafe {
+            std::env::remove_var("ATO_CACHE_STRATEGY");
+        }
 
         let workspace = tmp.path().join("ws");
         fs::create_dir_all(&workspace).unwrap();
@@ -435,7 +439,9 @@ mod tests {
     fn freeze_then_check_yields_hit_and_projects() {
         let tmp = TempDir::new().unwrap();
         let _home = EnvGuard::set("ATO_HOME", tmp.path());
-        std::env::remove_var("ATO_CACHE_STRATEGY");
+        unsafe {
+            std::env::remove_var("ATO_CACHE_STRATEGY");
+        }
 
         let workspace = tmp.path().join("ws");
         fs::create_dir_all(&workspace).unwrap();

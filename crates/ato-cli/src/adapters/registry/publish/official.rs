@@ -10,7 +10,7 @@ use capsule_core::lock_runtime::LockCompilerOverlay;
 use serde::Serialize;
 
 use crate::application::producer_input::{
-    resolve_producer_authoritative_input, ProducerAuthoritativeInput,
+    ProducerAuthoritativeInput, resolve_producer_authoritative_input,
 };
 use crate::publish_preflight::{self, CI_WORKFLOW_REL_PATH};
 
@@ -371,12 +371,12 @@ fn infer_git_fix_action(message: String, manifest_repo: Option<&str>) -> Option<
         }
         return Some("git remote add origin git@github.com:<owner>/<repo>.git".to_string());
     }
-    if lower.contains("repository mismatch") {
-        if let Some(repo) = manifest_repo {
-            return Some(format!(
-                "git remote set-url origin git@github.com:{repo}.git"
-            ));
-        }
+    if lower.contains("repository mismatch")
+        && let Some(repo) = manifest_repo
+    {
+        return Some(format!(
+            "git remote set-url origin git@github.com:{repo}.git"
+        ));
     }
     None
 }
