@@ -37,7 +37,7 @@ pub use session::{start_session, stop_session, watch_parent_and_stop_session};
 // schema itself now lives in `ato-session-core` (RFC §3.2 PR 4A.0);
 // `session::StoredSessionInfo` is a re-export of that shared type.
 pub(crate) use session::{
-    http_get_ok, session_root, ExecutionReceiptSessionMetadata, StoredSessionInfo,
+    http_get_ok, session_root, StoredSessionInfo,
 };
 
 /// Canonical package identifier for the ato-desktop control-plane envelope.

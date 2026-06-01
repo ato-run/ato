@@ -2179,7 +2179,7 @@ fn select_python_launch_cmd(
     (Vec::new(), used)
 }
 
-fn find_python_entrypoint_evidence<'a>(evidence: &'a [Evidence]) -> Option<&'a Evidence> {
+fn find_python_entrypoint_evidence(evidence: &[Evidence]) -> Option<&Evidence> {
     let priority = [
         "main.py",
         "app.py",
@@ -2201,7 +2201,7 @@ fn find_python_entrypoint_evidence<'a>(evidence: &'a [Evidence]) -> Option<&'a E
         .find(|e| e.kind == EvidenceKind::EntrypointFile && e.normalized_value == "python")
 }
 
-fn find_python_entrypoint<'a>(evidence: &'a [Evidence]) -> Option<&'a str> {
+fn find_python_entrypoint(evidence: &[Evidence]) -> Option<&str> {
     find_python_entrypoint_evidence(evidence).map(|e| e.path.as_str())
 }
 
@@ -2365,10 +2365,10 @@ fn check_cmd_hard_constraints(cmd: &[String], script_content: Option<&str>) -> V
     if let Some(content) = script_content {
         for op in SHELL_OPERATORS {
             if content.contains(op)
-                && cmd.get(0).map(|s| s.as_str()) != Some("npm")
-                && cmd.get(0).map(|s| s.as_str()) != Some("yarn")
-                && cmd.get(0).map(|s| s.as_str()) != Some("pnpm")
-                && cmd.get(0).map(|s| s.as_str()) != Some("bun")
+                && cmd.first().map(|s| s.as_str()) != Some("npm")
+                && cmd.first().map(|s| s.as_str()) != Some("yarn")
+                && cmd.first().map(|s| s.as_str()) != Some("pnpm")
+                && cmd.first().map(|s| s.as_str()) != Some("bun")
             {
                 failures.push(format!(
                     "run_command contains shell operator '{}': use structured commands only",

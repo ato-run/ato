@@ -223,11 +223,11 @@ fn observation_matches_request(
     if observation.command != request.build_command_identity {
         return Ok(false);
     }
-    let (output_contract_digest, outputs) = build_output_contract_for_observation(&observation)?;
+    let (output_contract_digest, outputs) = build_output_contract_for_observation(observation)?;
     if output_contract_digest != request.output_contract_digest || outputs != request.outputs {
         return Ok(false);
     }
-    let materialization_key = materialization_key_for_observation(&observation)?;
+    let materialization_key = materialization_key_for_observation(observation)?;
     if materialization_key != request.materialization_key {
         return Ok(false);
     }
