@@ -573,14 +573,6 @@ fn format_summary_line(secret_count: usize, consent_count: usize) -> String {
     }
 }
 
-fn render_section_header(label: &'static str, theme: &Theme) -> impl IntoElement {
-    div()
-        .text_size(px(11.5))
-        .font_weight(FontWeight(600.0))
-        .text_color(theme.text_tertiary)
-        .child(label)
-}
-
 fn render_secrets_section(
     modal: &ResolutionModal,
     item: &PendingSecretsItem,

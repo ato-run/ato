@@ -67,11 +67,6 @@ pub struct SystemCapsuleDescriptor {
     pub allowed_capabilities: &'static [Capability],
 }
 
-/// Backward-compat alias.  Code that was written against the old
-/// `SystemCapsuleManifest` name continues to compile unchanged; new
-/// code should use `SystemCapsuleDescriptor` directly.
-pub type SystemCapsuleManifest = SystemCapsuleDescriptor;
-
 /// Static, exhaustive descriptor table.
 ///
 /// Keyed by `SystemCapsuleId`; the enum is closed so exhaustiveness is
