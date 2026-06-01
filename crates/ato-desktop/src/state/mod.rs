@@ -15,16 +15,16 @@ use std::process::Command;
 
 use capsule_wire::config::ConfigField;
 use capsule_wire::handle::{
-    classify_surface_input, normalize_capsule_handle, parse_host_route, HandleInput,
-    InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
+    HandleInput, InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
+    classify_surface_input, normalize_capsule_handle, parse_host_route,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
-use url::{form_urlencoded, Url};
+use url::{Url, form_urlencoded};
 
 use crate::bridge::ShellEvent;
 use crate::config::SecretEntry;
-use crate::orchestrator::{register_pending_cli_command, CliLaunchSpec};
+use crate::orchestrator::{CliLaunchSpec, register_pending_cli_command};
 use crate::proc_util::CommandNoWindowExt;
 use crate::ui::share::web_favicon_origin;
 
@@ -4707,10 +4707,12 @@ mod tests {
         assert_eq!(prompt.capability, "read-file");
         assert_eq!(prompt.command.as_deref(), Some("fs.read"));
         let inspector = state.active_capsule_inspector().expect("inspector");
-        assert!(inspector
-            .logs
-            .iter()
-            .any(|entry| entry.stage == CapsuleLogStage::Permission));
+        assert!(
+            inspector
+                .logs
+                .iter()
+                .any(|entry| entry.stage == CapsuleLogStage::Permission)
+        );
     }
 
     #[test]
@@ -4983,9 +4985,11 @@ mod tests {
 
         let suggestions = state.omnibar_suggestions("ato");
 
-        assert!(suggestions
-            .iter()
-            .any(|item| matches!(item.action, OmnibarSuggestionAction::Navigate { .. })));
+        assert!(
+            suggestions
+                .iter()
+                .any(|item| matches!(item.action, OmnibarSuggestionAction::Navigate { .. }))
+        );
         assert!(suggestions.iter().any(|item| matches!(
             item.action,
             OmnibarSuggestionAction::SelectTask { task_id: 3 }
@@ -4998,9 +5002,11 @@ mod tests {
 
         let suggestions = state.omnibar_suggestions("");
 
-        assert!(suggestions
-            .iter()
-            .any(|item| matches!(item.action, OmnibarSuggestionAction::ShowSettings)));
+        assert!(
+            suggestions
+                .iter()
+                .any(|item| matches!(item.action, OmnibarSuggestionAction::ShowSettings))
+        );
     }
 
     #[test]
@@ -5325,10 +5331,12 @@ mod tests {
             crate::orchestrator::CliLaunchSpec::AtoRunRepl { .. }
         ));
 
-        assert!(state
-            .activity
-            .iter()
-            .any(|e| e.message.contains("ato://cli")));
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|e| e.message.contains("ato://cli"))
+        );
     }
 
     #[test]

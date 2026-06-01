@@ -137,43 +137,43 @@ pub fn validate_manifest_for_build_with_mode(
 
         let runtime_tools = read_runtime_tools_map(manifest_path, target_label, target)?;
         if web_services_mode {
-            if let Some(entrypoint) = entrypoint {
-                if is_deprecated_ato_entrypoint(entrypoint) {
-                    return Err(manifest_err(
-                        manifest_path,
-                        format!(
-                            "targets.{target_label}.entrypoint='ato-entry.ts' is deprecated. Define top-level [services] and remove ato-entry.ts orchestrator."
-                        ),
-                    ));
-                }
+            if let Some(entrypoint) = entrypoint
+                && is_deprecated_ato_entrypoint(entrypoint)
+            {
+                return Err(manifest_err(
+                    manifest_path,
+                    format!(
+                        "targets.{target_label}.entrypoint='ato-entry.ts' is deprecated. Define top-level [services] and remove ato-entry.ts orchestrator."
+                    ),
+                ));
             }
 
             validate_web_services_mode(manifest_path, target_label, &raw, &runtime_tools)?;
         } else {
-            if let Some(rc) = run_command {
-                if matches!(driver.as_str(), "node" | "deno" | "python") {
-                    // Apply the same diagnostic checks that the entrypoint
-                    // path uses, but on the run_command shorthand. Multi-token
-                    // shell commands are rejected because the build pipeline
-                    // expects a script file path it can introspect.
-                    if rc.split_whitespace().count() > 1 {
-                        return Err(manifest_err(
-                            manifest_path,
-                            format!(
-                                "targets.{target_label}.entrypoint must be a script file path (shell command strings are not allowed)"
-                            ),
-                        ));
-                    }
-                    if driver == "deno" && is_deprecated_ato_entrypoint(rc) {
-                        return Err(manifest_err(
-                            manifest_path,
-                            format!(
-                                "targets.{target_label}.entrypoint='ato-entry.ts' is deprecated. Use top-level [services] mode instead."
-                            ),
-                        ));
-                    }
-                    return Ok(());
+            if let Some(rc) = run_command
+                && matches!(driver.as_str(), "node" | "deno" | "python")
+            {
+                // Apply the same diagnostic checks that the entrypoint
+                // path uses, but on the run_command shorthand. Multi-token
+                // shell commands are rejected because the build pipeline
+                // expects a script file path it can introspect.
+                if rc.split_whitespace().count() > 1 {
+                    return Err(manifest_err(
+                        manifest_path,
+                        format!(
+                            "targets.{target_label}.entrypoint must be a script file path (shell command strings are not allowed)"
+                        ),
+                    ));
                 }
+                if driver == "deno" && is_deprecated_ato_entrypoint(rc) {
+                    return Err(manifest_err(
+                        manifest_path,
+                        format!(
+                            "targets.{target_label}.entrypoint='ato-entry.ts' is deprecated. Use top-level [services] mode instead."
+                        ),
+                    ));
+                }
+                return Ok(());
             }
             let entrypoint = entrypoint.ok_or_else(|| {
                 manifest_err(
@@ -266,14 +266,14 @@ pub fn validate_manifest_for_build_with_mode(
                 let path_in_source = target_manifest_dir.join("source").join(clean_entrypoint);
                 if !path_in_root.exists() && !path_in_source.exists() {
                     return Err(manifest_err(
-                    manifest_path,
-                    format!(
-                        "entrypoint not found: targets.{target_label}.entrypoint='{}'. Checked '{}' and '{}'",
-                        entrypoint,
-                        path_in_root.display(),
-                        path_in_source.display()
-                    ),
-                ));
+                        manifest_path,
+                        format!(
+                            "entrypoint not found: targets.{target_label}.entrypoint='{}'. Checked '{}' and '{}'",
+                            entrypoint,
+                            path_in_root.display(),
+                            path_in_source.display()
+                        ),
+                    ));
                 }
             }
         }
@@ -464,26 +464,28 @@ fn validate_web_services_mode(
             if !has_http_get && !has_tcp_connect && !has_exec {
                 return Err(manifest_err(
                     manifest_path,
-                    format!("services.{name}.readiness_probe must define http_get, tcp_connect, or exec"),
+                    format!(
+                        "services.{name}.readiness_probe must define http_get, tcp_connect, or exec"
+                    ),
                 ));
             }
 
             // Validate timing fields if present.
-            if let Some(timeout) = probe.get("timeout_seconds").and_then(|v| v.as_integer()) {
-                if timeout <= 0 {
-                    return Err(manifest_err(
-                        manifest_path,
-                        format!("services.{name}.readiness_probe.timeout_seconds must be > 0"),
-                    ));
-                }
+            if let Some(timeout) = probe.get("timeout_seconds").and_then(|v| v.as_integer())
+                && timeout <= 0
+            {
+                return Err(manifest_err(
+                    manifest_path,
+                    format!("services.{name}.readiness_probe.timeout_seconds must be > 0"),
+                ));
             }
-            if let Some(interval) = probe.get("interval_seconds").and_then(|v| v.as_integer()) {
-                if interval <= 0 {
-                    return Err(manifest_err(
-                        manifest_path,
-                        format!("services.{name}.readiness_probe.interval_seconds must be > 0"),
-                    ));
-                }
+            if let Some(interval) = probe.get("interval_seconds").and_then(|v| v.as_integer())
+                && interval <= 0
+            {
+                return Err(manifest_err(
+                    manifest_path,
+                    format!("services.{name}.readiness_probe.interval_seconds must be > 0"),
+                ));
             }
             let initial_delay = probe
                 .get("initial_delay_seconds")
@@ -534,10 +536,9 @@ fn validate_web_services_mode(
                 manifest_path,
                 format!("services.{name}.entrypoint is invalid: {err}"),
             )
-        })? {
-            if matches!(head.as_str(), "node" | "python" | "uv") {
-                referenced_tools.insert(head);
-            }
+        })? && matches!(head.as_str(), "node" | "python" | "uv")
+        {
+            referenced_tools.insert(head);
         }
 
         parsed.insert(name.to_string(), ServiceDiagnosticSpec { depends_on });
@@ -755,9 +756,10 @@ run = "dist""#,
         .unwrap();
 
         let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("must be an existing directory under project root"));
+        assert!(
+            err.to_string()
+                .contains("must be an existing directory under project root")
+        );
 
         std::fs::create_dir_all(dir.path().join("dist")).unwrap();
         assert!(validate_manifest_for_build(&manifest_path, "app").is_ok());
@@ -827,9 +829,10 @@ run = "npm run start""#,
         .unwrap();
 
         let err = validate_manifest_for_build(&manifest_path, "app").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("entrypoint must be a script file path"));
+        assert!(
+            err.to_string()
+                .contains("entrypoint must be a script file path")
+        );
     }
 
     #[test]

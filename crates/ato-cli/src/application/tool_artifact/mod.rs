@@ -44,7 +44,7 @@ pub use download::{Downloader, ReqwestDownloader};
 #[allow(unused_imports)]
 pub use error::ToolArtifactError;
 #[allow(unused_imports)]
-pub use manifest::{host_platform, ToolArtifactManifest};
+pub use manifest::{ToolArtifactManifest, host_platform};
 #[allow(unused_imports)]
 pub use registry::{known_tool_ids, well_known_tool_artifact};
 

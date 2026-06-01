@@ -21,25 +21,25 @@ pub(crate) mod utils;
 
 pub mod projection {
     pub use crate::application::projection::{
-        project_payload, ProjectionError, ProjectionOutcome, ProjectionStrategy,
+        ProjectionError, ProjectionOutcome, ProjectionStrategy, project_payload,
     };
 }
 
 pub mod provider_cache {
     pub use crate::application::provider_cache::{
-        cache_enabled, check_and_project, compute_derivation_hash, freeze_after_install,
-        ProviderCacheAction, ProviderCacheInputs, ProviderCachePlan,
+        ProviderCacheAction, ProviderCacheInputs, ProviderCachePlan, cache_enabled,
+        check_and_project, compute_derivation_hash, freeze_after_install,
     };
 }
 
 pub mod attestation {
-    pub use crate::application::attestation::{issue_freeze_attestation, AttestationContext};
+    pub use crate::application::attestation::{AttestationContext, issue_freeze_attestation};
 }
 
 pub mod cache_admin {
     pub use crate::application::cache_admin::{
-        clear_all, clear_derivation, collect_cache_stats, BlobSummary, CacheClearOutcome,
-        CacheStats,
+        BlobSummary, CacheClearOutcome, CacheStats, clear_all, clear_derivation,
+        collect_cache_stats,
     };
 }
 
@@ -70,7 +70,7 @@ pub mod dependency_materializer {
 
     pub mod freeze {
         pub use crate::application::dependency_materializer::freeze::{
-            atomic_write_json, freeze_dep_tree, DerivationLock, FreezeOutcome,
+            DerivationLock, FreezeOutcome, atomic_write_json, freeze_dep_tree,
         };
     }
 }
@@ -226,7 +226,9 @@ pub fn main_entry() {
     // captured stderr that a single user repro is enough to fix it.
     // The user can still override via the env var explicitly.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
-        std::env::set_var("RUST_BACKTRACE", "1");
+        unsafe {
+            std::env::set_var("RUST_BACKTRACE", "1");
+        }
     }
 
     let args: Vec<String> = std::env::args().collect();

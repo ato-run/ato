@@ -20,11 +20,11 @@ use std::rc::Rc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, hsla, point, px, rgb, size, svg, transparent_black, AnyElement, AnyWindowHandle,
-    App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase, Entity, FontWeight, IntoElement,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
-    SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions,
+    AnyElement, AnyWindowHandle, App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase,
+    Entity, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent,
+    Pixels, Render, ScrollWheelEvent, SharedString, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowDecorations, WindowKind, WindowOptions, canvas, div, hsla, point, px, rgb,
+    size, svg, transparent_black,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
@@ -34,8 +34,8 @@ use crate::app::{
     OpenContentWindowSettings, OpenDockWindow, OpenStoreWindow, ShowSettings,
     ToggleControlBarInfoPopup, ToggleStarCapsule,
 };
-use crate::config::{load_config, save_config, ControlBarMode};
-use crate::localization::{resolve_locale, tr, LocaleCode};
+use crate::config::{ControlBarMode, load_config, save_config};
+use crate::localization::{LocaleCode, resolve_locale, tr};
 use crate::state::GuestRoute;
 use crate::window::content_windows::OpenContentWindows;
 use crate::window::gestures::{GestureAction, GestureState};
@@ -553,7 +553,7 @@ impl Render for ControlBarShellPlaceholder {
             })
             .child(
                 canvas(|_, _, _| {}, {
-                    move |_, _, window, cx| {
+                    move |_, _, window, _cx| {
                         window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
                             if phase != DispatchPhase::Bubble {
                                 return;
@@ -1019,7 +1019,7 @@ fn info_popup_managed(
             Some(IconName::Globe),
             {
                 let url = local_url.clone();
-                move |_win, cx| {
+                move |_win, _cx| {
                     if let Some(ref url) = url {
                         let _ = crate::ui::open_external_url(url);
                     }

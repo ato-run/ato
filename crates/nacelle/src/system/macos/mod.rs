@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use std::process::Command;
 
-use crate::system::common::{IsolationRule, SystemError};
 use crate::system::NetworkSandbox;
+use crate::system::common::{IsolationRule, SystemError};
 
 pub mod pf;
 pub mod user_group;

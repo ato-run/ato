@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 
 use crate::install::{self, GitHubInstallDraftResponse};
 
+use super::ENV_TELEMETRY;
 use super::format::{build_smoke_excerpt, generate_event_id};
 use super::payloads::{
     AttemptPayload, AttemptPlatformPayload, AttemptRepoPayload, AttemptResolvedRefPayload,
     AttemptResponse, InferenceAttemptHandle, SmokeFailedPayload, VerifiedFixPayload,
 };
-use super::ENV_TELEMETRY;
 
 pub fn telemetry_enabled() -> bool {
     match std::env::var(ENV_TELEMETRY) {

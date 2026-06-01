@@ -180,8 +180,8 @@ mod tests {
 
     use crate::executors::launch_context::RuntimeLaunchContext;
 
-    use super::collect_issues;
     use super::ProvisioningIssue;
+    use super::collect_issues;
 
     fn manifest_data(target: toml::map::Map<String, toml::Value>) -> ManifestData {
         let mut manifest = toml::map::Map::new();

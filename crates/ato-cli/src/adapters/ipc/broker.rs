@@ -141,7 +141,7 @@ impl IpcBroker {
             (format!("CAPSULE_IPC_{}_TOKEN", upper), token.to_string()),
         ];
 
-        if let IpcTransport::UnixSocket(ref path) = info.endpoint {
+        if let IpcTransport::UnixSocket(path) = &info.endpoint {
             env.push((
                 format!("CAPSULE_IPC_{}_SOCKET", upper),
                 path.display().to_string(),
@@ -182,31 +182,27 @@ impl IpcBroker {
 /// Detect the runtime kind by examining the capsule directory.
 fn detect_runtime_kind(capsule_root: &std::path::Path) -> IpcRuntimeKind {
     let manifest_path = resolve_manifest_path(capsule_root);
-    if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-        if let Ok(raw) = content.parse::<toml::Value>() {
-            if let Some(default_target) = raw
-                .get("default_target")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-            {
-                if let Some(runtime) = raw
-                    .get("targets")
-                    .and_then(|v| v.as_table())
-                    .and_then(|targets| targets.get(default_target))
-                    .and_then(|v| v.get("runtime"))
-                    .and_then(|v| v.as_str())
-                {
-                    if runtime.eq_ignore_ascii_case("oci") {
-                        return IpcRuntimeKind::Oci;
-                    }
-                    if runtime.eq_ignore_ascii_case("wasm") {
-                        return IpcRuntimeKind::Wasm;
-                    }
-                    return IpcRuntimeKind::Source;
-                }
-            }
+    if let Ok(content) = std::fs::read_to_string(&manifest_path)
+        && let Ok(raw) = content.parse::<toml::Value>()
+        && let Some(default_target) = raw
+            .get("default_target")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        && let Some(runtime) = raw
+            .get("targets")
+            .and_then(|v| v.as_table())
+            .and_then(|targets| targets.get(default_target))
+            .and_then(|v| v.get("runtime"))
+            .and_then(|v| v.as_str())
+    {
+        if runtime.eq_ignore_ascii_case("oci") {
+            return IpcRuntimeKind::Oci;
         }
+        if runtime.eq_ignore_ascii_case("wasm") {
+            return IpcRuntimeKind::Wasm;
+        }
+        return IpcRuntimeKind::Source;
     }
     IpcRuntimeKind::Source
 }
@@ -217,23 +213,19 @@ fn load_local_service_metadata(capsule_root: &Path) -> LocalServiceMetadata {
     let mut capabilities = Vec::new();
     let mut sharing_mode = SharingMode::default();
 
-    if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-        if let Ok(raw) = content.parse::<toml::Value>() {
-            if let Some(ipc_table) = raw.get("ipc") {
-                if let Ok(ipc_str) = toml::to_string(ipc_table) {
-                    if let Ok(config) = toml::from_str::<IpcConfig>(&ipc_str) {
-                        if let Some(exports) = config.exports {
-                            capabilities = exports
-                                .methods
-                                .into_iter()
-                                .map(|method| method.name)
-                                .collect();
-                            sharing_mode = exports.sharing.mode;
-                        }
-                    }
-                }
-            }
-        }
+    if let Ok(content) = std::fs::read_to_string(&manifest_path)
+        && let Ok(raw) = content.parse::<toml::Value>()
+        && let Some(ipc_table) = raw.get("ipc")
+        && let Ok(ipc_str) = toml::to_string(ipc_table)
+        && let Ok(config) = toml::from_str::<IpcConfig>(&ipc_str)
+        && let Some(exports) = config.exports
+    {
+        capabilities = exports
+            .methods
+            .into_iter()
+            .map(|method| method.name)
+            .collect();
+        sharing_mode = exports.sharing.mode;
     }
 
     LocalServiceMetadata {
@@ -340,12 +332,14 @@ mod tests {
         let env = broker.generate_ipc_env("llm-service", &info, "token123");
         assert_eq!(env.len(), 3); // URL, TOKEN, SOCKET
         assert!(env.iter().any(|(k, _)| k == "CAPSULE_IPC_LLM_SERVICE_URL"));
-        assert!(env
-            .iter()
-            .any(|(k, v)| k == "CAPSULE_IPC_LLM_SERVICE_TOKEN" && v == "token123"));
-        assert!(env
-            .iter()
-            .any(|(k, _)| k == "CAPSULE_IPC_LLM_SERVICE_SOCKET"));
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "CAPSULE_IPC_LLM_SERVICE_TOKEN" && v == "token123")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, _)| k == "CAPSULE_IPC_LLM_SERVICE_SOCKET")
+        );
     }
 
     #[test]
@@ -359,20 +353,22 @@ mod tests {
     fn test_local_store_path_simple() {
         let broker = test_broker();
         let path = broker.local_store_path("greeter-service");
-        assert!(path
-            .to_str()
-            .unwrap()
-            .contains(".ato/store/greeter-service"));
+        assert!(
+            path.to_str()
+                .unwrap()
+                .contains(".ato/store/greeter-service")
+        );
     }
 
     #[test]
     fn test_local_store_path_scoped() {
         let broker = test_broker();
         let path = broker.local_store_path("@ato/llm-service:1.0");
-        assert!(path
-            .to_str()
-            .unwrap()
-            .contains(".ato/store/@ato/llm-service"));
+        assert!(
+            path.to_str()
+                .unwrap()
+                .contains(".ato/store/@ato/llm-service")
+        );
     }
 
     #[test]

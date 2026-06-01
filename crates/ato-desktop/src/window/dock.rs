@@ -22,12 +22,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Pixels, Render, Size,
-    Window, WindowBounds, WindowDecorations, WindowOptions,
+    AnyWindowHandle, App, Bounds, Context, IntoElement, Pixels, Render, Size, Window, WindowBounds,
+    WindowDecorations, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use url::Url;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::Response;

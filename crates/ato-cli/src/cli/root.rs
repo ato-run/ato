@@ -14,8 +14,8 @@ use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
 use super::registry::RegistryCommands;
 use super::shared::{
-    cli_styles, CacheStrategyArg, CompatibilityFallbackBackend, EnforcementMode, GitMode,
-    ProviderToolchain, RunAgentMode, ShareToolRuntime,
+    CacheStrategyArg, CompatibilityFallbackBackend, EnforcementMode, GitMode, ProviderToolchain,
+    RunAgentMode, ShareToolRuntime, cli_styles,
 };
 use super::source::SourceCommands;
 use super::state::StateCommands;

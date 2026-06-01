@@ -60,7 +60,7 @@ use crate::app_control::sample_recipes::{
     resolve_sample_recipe_for_github, resolve_sample_recipe_for_input,
 };
 use crate::application::auth::consent_store::{consent_summary, has_consent};
-use crate::application::graph_views::{build_declared_only_bundle, PreflightView};
+use crate::application::graph_views::{PreflightView, build_declared_only_bundle};
 
 /// Top-level result emitted by the collector.
 ///
@@ -840,8 +840,7 @@ fn config_field_for_env(name: &str, description: &str) -> ConfigField {
 mod tests {
     use super::*;
     use crate::runtime::oci_provider::{
-        CommandOutput, OciCommandRunner, OciProviderMachineStatus, PodmanProbePlatform,
-        PodmanProvider,
+        CommandOutput, OciCommandRunner, OciPlatformPolicy, PodmanProbePlatform, PodmanProvider,
     };
     use std::collections::HashMap;
     use std::fs;
@@ -1332,7 +1331,7 @@ egress_allow = ["smtp.gmail.com"]
             "expected at least two app entries (secrets + consent); got kinds={kinds:?}"
         );
         assert!(
-            kinds.iter().any(|k| *k == "web"),
+            kinds.contains(&"web"),
             "expected web consent entry; got kinds={kinds:?}"
         );
     }
@@ -1433,7 +1432,7 @@ run = "python -m app"
     #[test]
     #[serial_test::serial]
     fn bundle_dependency_aliases_carry_raw_manifest_dependencies() {
-        use crate::application::graph_views::{build_declared_only_bundle, PreflightView};
+        use crate::application::graph_views::{PreflightView, build_declared_only_bundle};
         use capsule_core::lockfile::manifest_external_capsule_dependencies;
 
         let home = TempDir::new().expect("home");
@@ -1511,18 +1510,22 @@ contract = "service@1"
 
     fn scoped_env(key: &'static str, value: Option<&str>) -> EnvGuard {
         let previous = std::env::var_os(key);
-        match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+        unsafe {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
         EnvGuard { key, previous }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.previous {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+            unsafe {
+                match &self.previous {
+                    Some(v) => unsafe { std::env::set_var(self.key, v) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
             }
         }
     }

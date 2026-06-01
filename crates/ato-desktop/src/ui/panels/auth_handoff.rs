@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, px, FontWeight, MouseButton};
+use gpui::{FontWeight, MouseButton, div, px};
 
 use super::super::theme::Theme;
 use crate::app::{CancelAuthHandoff, OpenAuthInBrowser, ResumeAfterAuth};
@@ -12,9 +12,7 @@ pub(super) fn render_auth_handoff_panel(session: &AuthSession, theme: &Theme) ->
         (true, AuthSessionStatus::OpenedInBrowser) => {
             "ato.run sign-in is continuing in your browser. Desktop will resume automatically when the callback returns."
         }
-        (false, AuthSessionStatus::OpenedInBrowser) => {
-            "Sign in is continuing in your browser."
-        }
+        (false, AuthSessionStatus::OpenedInBrowser) => "Sign in is continuing in your browser.",
         (_, AuthSessionStatus::Completed) => "Sign-in complete. Click Done to return.",
         (_, AuthSessionStatus::Failed) => {
             "Automatic return did not complete. Finish sign-in in the browser, then use Done to continue."

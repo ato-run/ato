@@ -427,14 +427,11 @@ impl ProcessManager {
             if path
                 .extension()
                 .is_some_and(|ext| ext == PID_FILE_EXT.trim_start_matches('.'))
+                && let Some(filename) = path.file_stem()
+                && let Some(id) = filename.to_str()
+                && let Ok(info) = self.read_pid(id)
             {
-                if let Some(filename) = path.file_stem() {
-                    if let Some(id) = filename.to_str() {
-                        if let Ok(info) = self.read_pid(id) {
-                            processes.push(info);
-                        }
-                    }
-                }
+                processes.push(info);
             }
         }
 
@@ -657,11 +654,12 @@ impl ProcessManager {
             wait_for_process_exit(info.pid, 10)?;
             stopped = true;
         }
-        if let Some(workload_pid) = info.workload_pid {
-            if is_process_alive(workload_pid) && terminate_process(workload_pid, force)? {
-                wait_for_process_exit(workload_pid, 10)?;
-                stopped = true;
-            }
+        if let Some(workload_pid) = info.workload_pid
+            && is_process_alive(workload_pid)
+            && terminate_process(workload_pid, force)?
+        {
+            wait_for_process_exit(workload_pid, 10)?;
+            stopped = true;
         }
         Ok(stopped)
     }
@@ -842,20 +840,15 @@ impl ProcessManager {
             if path
                 .extension()
                 .is_some_and(|ext| ext == PID_FILE_EXT.trim_start_matches('.'))
+                && let Some(filename) = path.file_stem()
+                && let Some(id) = filename.to_str()
+                && let Ok(info) = self.read_pid(id)
+                && (!info.status.is_active()
+                    || (info.status.is_active() && !process_info_is_alive(&info)))
+                && self.stop_dependency_session(id, false).is_ok()
             {
-                if let Some(filename) = path.file_stem() {
-                    if let Some(id) = filename.to_str() {
-                        if let Ok(info) = self.read_pid(id) {
-                            if (!info.status.is_active()
-                                || (info.status.is_active() && !process_info_is_alive(&info)))
-                                && self.stop_dependency_session(id, false).is_ok()
-                            {
-                                let _ = self.delete_pid(id);
-                                cleaned.push(info);
-                            }
-                        }
-                    }
-                }
+                let _ = self.delete_pid(id);
+                cleaned.push(info);
             }
         }
         // Clean stale port allocations for dead processes
@@ -1004,10 +997,10 @@ fn process_start_time_matches(pid: i32, expected_start_time_unix_ms: Option<u64>
 }
 
 fn import_preview_session_is_stale(session: &ImportPreviewSession) -> bool {
-    if let Some(expires_at) = session.expires_at_unix_ms {
-        if now_unix_ms_lossy().is_some_and(|now| now >= expires_at) {
-            return true;
-        }
+    if let Some(expires_at) = session.expires_at_unix_ms
+        && now_unix_ms_lossy().is_some_and(|now| now >= expires_at)
+    {
+        return true;
     }
     if !session.shadow_dir.exists() {
         return true;
@@ -1053,7 +1046,7 @@ fn stop_import_preview_session_record(
 
     let mut stopped = false;
     let mut errors = Vec::new();
-    let mut live_unverified_pgids = Vec::new();
+    let mut _live_unverified_pgids = Vec::new();
     let grace = if force {
         Duration::from_millis(0)
     } else {
@@ -1091,7 +1084,7 @@ fn stop_import_preview_session_record(
         let processes = unix_ps_processes();
         let verified_pgids =
             verified_import_preview_process_groups(session, ato_run_owned, &processes);
-        live_unverified_pgids =
+        _live_unverified_pgids =
             live_unverified_import_preview_process_groups(session, &verified_pgids, &processes);
     }
 
@@ -1103,7 +1096,7 @@ fn stop_import_preview_session_record(
         };
     }
 
-    import_preview_stop_outcome(session, stopped, &live_unverified_pgids)
+    import_preview_stop_outcome(session, stopped, &_live_unverified_pgids)
 }
 
 fn import_preview_stop_outcome(
@@ -1190,11 +1183,7 @@ fn read_process_commandline(pid: i32) -> Option<String> {
             return None;
         }
         let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if cmd.is_empty() {
-            None
-        } else {
-            Some(cmd)
-        }
+        if cmd.is_empty() { None } else { Some(cmd) }
     }
 
     #[cfg(windows)]
@@ -1408,10 +1397,10 @@ fn process_current_working_dir(pid: i32) -> Option<PathBuf> {
             return None;
         }
         for line in String::from_utf8_lossy(&output.stdout).lines() {
-            if let Some(path) = line.strip_prefix('n') {
-                if !path.is_empty() {
-                    return Some(PathBuf::from(path));
-                }
+            if let Some(path) = line.strip_prefix('n')
+                && !path.is_empty()
+            {
+                return Some(PathBuf::from(path));
             }
         }
         None
@@ -1825,10 +1814,11 @@ mod tests {
         let report = pm.sweep_import_preview_sessions(false).expect("sweep");
 
         assert_eq!(report.stale_sessions_already_gone, 1);
-        assert!(pm
-            .read_import_preview_session("preview-stale")
-            .expect("read")
-            .is_none());
+        assert!(
+            pm.read_import_preview_session("preview-stale")
+                .expect("read")
+                .is_none()
+        );
         let _ = fs::remove_dir_all(
             std::env::current_dir()
                 .expect("cwd")
@@ -1853,10 +1843,11 @@ mod tests {
         let report = pm.sweep_import_preview_sessions(false).expect("sweep");
 
         assert_eq!(report.active_sessions_kept, 1);
-        assert!(pm
-            .read_import_preview_session("preview-live")
-            .expect("read")
-            .is_some());
+        assert!(
+            pm.read_import_preview_session("preview-live")
+                .expect("read")
+                .is_some()
+        );
         let workspace = std::env::current_dir()
             .expect("cwd")
             .join(".tmp")
@@ -2244,10 +2235,11 @@ mod tests {
 
         pm.delete_pid("capsule-123")
             .expect("delete pid also removes session");
-        assert!(pm
-            .read_dependency_session_snapshot("capsule-123")
-            .expect("read after delete")
-            .is_none());
+        assert!(
+            pm.read_dependency_session_snapshot("capsule-123")
+                .expect("read after delete")
+                .is_none()
+        );
     }
 
     #[cfg(unix)]
@@ -2278,14 +2270,16 @@ mod tests {
         pm.write_dependency_session_snapshot("capsule-no-pid", &snapshot)
             .expect("write dependency session snapshot");
 
-        assert!(pm
-            .stop_process("capsule-no-pid", true)
-            .expect("stop process"));
+        assert!(
+            pm.stop_process("capsule-no-pid", true)
+                .expect("stop process")
+        );
         assert!(provider.try_wait().expect("provider wait").is_some());
-        assert!(pm
-            .read_dependency_session_snapshot("capsule-no-pid")
-            .expect("read after stop")
-            .is_none());
+        assert!(
+            pm.read_dependency_session_snapshot("capsule-no-pid")
+                .expect("read after stop")
+                .is_none()
+        );
     }
 
     #[test]

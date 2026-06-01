@@ -10,13 +10,13 @@ use std::net::IpAddr;
 use crate::config::{EgressRuleEntry, MAX_EGRESS_RULES};
 
 #[cfg(target_os = "linux")]
+use aya::Pod;
+#[cfg(target_os = "linux")]
 use aya::maps::lpm_trie::{Key as LpmKey, LpmTrie};
 #[cfg(target_os = "linux")]
 use aya::programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType};
 #[cfg(target_os = "linux")]
-use aya::Pod;
-#[cfg(target_os = "linux")]
-use aya::{include_bytes_aligned, Ebpf};
+use aya::{Ebpf, include_bytes_aligned};
 #[cfg(target_os = "linux")]
 const EMBEDDED_EBPF_OBJECT: &[u8] =
     include_bytes_aligned!(concat!(env!("OUT_DIR"), "/nacelle-ebpf"));

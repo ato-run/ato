@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,33 +21,32 @@ use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
 #[cfg(target_os = "macos")]
-use objc2::{msg_send, sel, ClassType};
+use objc2::{ClassType, msg_send, sel};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSView;
 #[cfg(target_os = "macos")]
 use objc2_foundation::MainThreadMarker;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use wry::http::{Request, Response};
 #[cfg(target_os = "macos")]
 use wry::WebViewBuilderExtDarwin;
 #[cfg(target_os = "macos")]
 use wry::WebViewExtMacOS;
+use wry::http::{Request, Response};
 use wry::{
     NewWindowResponse, PageLoadEvent, Rect, RequestAsyncResponder, WebContext, WebView,
     WebViewBuilder,
 };
 
-use crate::automation::command::{AutomationCommand, PendingAutomationRequest};
 use crate::automation::AutomationHost;
+use crate::automation::command::{AutomationCommand, PendingAutomationRequest};
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::config::SecretEntry;
 use crate::logging::TARGET_FAVICON;
 use crate::orchestrator::{
-    resolve_and_start_guest, resolve_and_start_guest_with_input, spawn_cli_session,
-    spawn_log_tail_session, spawn_terminal, stop_guest_session, take_pending_cli_command,
-    take_pending_share_terminal, CommunityTomlInput, DesktopLaunchInput, GuestLaunchSession,
-    LaunchError, SpawnKind, SpawnSpec,
+    CommunityTomlInput, DesktopLaunchInput, GuestLaunchSession, LaunchError, SpawnKind, SpawnSpec,
+    resolve_and_start_guest_with_input, spawn_cli_session, spawn_log_tail_session, spawn_terminal,
+    stop_guest_session, take_pending_cli_command, take_pending_share_terminal,
 };
 
 /// Local helpers to construct `DesktopLaunchInput` from `ensure_pending_local_launch`
@@ -68,12 +67,12 @@ mod resolve_and_start_guest_with_input_fn {
 }
 use crate::proc_util::CommandNoWindowExt;
 use crate::state::{
-    session::SessionRegistry, ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry,
-    AuthSessionStatus, BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId,
-    PendingConfigRequest, PendingConsentRequest, ShellMode, WebSessionState,
+    ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
+    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId, PendingConfigRequest,
+    PendingConsentRequest, ShellMode, WebSessionState, session::SessionRegistry,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
-use crate::ui::share::{resolve_share_icon, ShareIconSource};
+use crate::ui::share::{ShareIconSource, resolve_share_icon};
 use capsule_wire::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
 
@@ -1023,8 +1022,8 @@ impl WebViewManager {
     ///
     /// Called at end of every `sync_from_state` cycle.
     fn dispatch_automation_requests(&mut self, state: &mut AppState) {
-        use std::time::Instant;
         use AutomationCommand::*;
+        use std::time::Instant;
 
         let requests = self.automation.drain_requests();
         if requests.is_empty() {
@@ -1245,7 +1244,6 @@ impl WebViewManager {
         state: &mut AppState,
         dock_view: Option<&WebView>,
     ) {
-        use std::time::Instant;
         use AutomationCommand::*;
 
         // Separate dock-targeted requests from everything else.
@@ -1622,7 +1620,10 @@ impl WebViewManager {
                                     }
                                 }
                                 None => {
-                                    error!(pane_id, "terminal_stream session has no log_path and no pending share terminal");
+                                    error!(
+                                        pane_id,
+                                        "terminal_stream session has no log_path and no pending share terminal"
+                                    );
                                     false
                                 }
                             }
@@ -5138,8 +5139,8 @@ pub(crate) fn dispatch_automation_command(
     pane_id: usize,
     host: &AutomationHost,
 ) {
-    use std::time::{Duration, Instant};
     use AutomationCommand::*;
+    use std::time::{Duration, Instant};
 
     // Helper: call JS via evaluate_script_with_callback and route result to req.
     macro_rules! js_call {
@@ -5174,7 +5175,8 @@ pub(crate) fn dispatch_automation_command(
         ClickAt { x, y } => {
             js_call!(
                 format!(
-                    "(function(){{var el=document.elementFromPoint({x},{y});if(!el)return JSON.stringify({{ok:false,error:'no element at ({x},{y})'}});el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}}));return JSON.stringify({{ok:true}});}})()"),
+                    "(function(){{var el=document.elementFromPoint({x},{y});if(!el)return JSON.stringify({{ok:false,error:'no element at ({x},{y})'}});el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}}));return JSON.stringify({{ok:true}});}})()"
+                ),
                 req
             );
         }
@@ -6099,7 +6101,9 @@ mod tests {
         impl EnvVarGuard {
             fn set_path(key: &'static str, value: &std::path::Path) -> Self {
                 let previous = std::env::var_os(key);
-                std::env::set_var(key, value);
+                unsafe {
+                    std::env::set_var(key, value);
+                }
                 Self { key, previous }
             }
         }
@@ -6107,9 +6111,13 @@ mod tests {
         impl Drop for EnvVarGuard {
             fn drop(&mut self) {
                 if let Some(value) = &self.previous {
-                    std::env::set_var(self.key, value);
+                    unsafe {
+                        std::env::set_var(self.key, value);
+                    }
                 } else {
-                    std::env::remove_var(self.key);
+                    unsafe {
+                        std::env::remove_var(self.key);
+                    }
                 }
             }
         }

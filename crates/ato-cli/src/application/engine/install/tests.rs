@@ -8,12 +8,12 @@ use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::publish_ci::build_capsule_artifact as build_publish_capsule_artifact;
 #[cfg(target_os = "macos")]
 use crate::reporters::CliReporter;
-use filetime::{set_file_mtime, FileTime};
+use filetime::{FileTime, set_file_mtime};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use axum::extract::{Path as AxumPath, State};
-use axum::http::{header::HOST, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header::HOST};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -56,9 +56,11 @@ struct EnvVarGuard {
 impl EnvVarGuard {
     fn set(key: &str, value: Option<&str>) -> Self {
         let previous = std::env::var(key).ok();
-        match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+        unsafe {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
         Self {
             key: key.to_string(),
@@ -69,10 +71,16 @@ impl EnvVarGuard {
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        if let Some(value) = &self.previous {
-            std::env::set_var(&self.key, value);
-        } else {
-            std::env::remove_var(&self.key);
+        unsafe {
+            if let Some(value) = &self.previous {
+                unsafe {
+                    std::env::set_var(&self.key, value);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(&self.key);
+                }
+            }
         }
     }
 }
@@ -620,8 +628,8 @@ include = ["apps/web/package.json", "apps/web/src/**"]
 }
 
 #[test]
-fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority_when_no_package_manager_field(
-) {
+fn normalize_github_install_preview_toml_resolves_multiple_lockfiles_by_priority_when_no_package_manager_field()
+ {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         tmp.path().join("package-lock.json"),
@@ -1142,16 +1150,20 @@ async fn native_install_materializes_ato_managed_environment_bootstrap_state() {
     assert_eq!(managed.bootstrap_phase, "shell_projected");
     assert!(managed.services.iter().any(|service| service == "opencode"));
     assert!(managed.materialized_root.exists());
-    assert!(managed
-        .materialized_root
-        .join("ollama")
-        .join("service.json")
-        .exists());
-    assert!(managed
-        .materialized_root
-        .join("opencode")
-        .join("run.sh")
-        .exists());
+    assert!(
+        managed
+            .materialized_root
+            .join("ollama")
+            .join("service.json")
+            .exists()
+    );
+    assert!(
+        managed
+            .materialized_root
+            .join("opencode")
+            .join("run.sh")
+            .exists()
+    );
 
     let raw = std::fs::read_to_string(&state_path).expect("read bootstrap state");
     let state: crate::app_control::StoredBootstrapState =
@@ -1936,9 +1948,11 @@ fn test_parse_github_run_ref_accepts_canonical_github_dot_com_input() {
 #[test]
 fn test_parse_github_run_ref_rejects_noncanonical_github_url_input() {
     let error = parse_github_run_ref("https://github.com/Koh0920/ato-cli").unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("ato run github.com/Koh0920/ato-cli"));
+    assert!(
+        error
+            .to_string()
+            .contains("ato run github.com/Koh0920/ato-cli")
+    );
 }
 
 #[test]
@@ -1956,11 +1970,15 @@ fn test_normalize_install_segment_slugifies_github_owner() {
 fn test_github_api_base_url_uses_env_override() {
     let key = "ATO_GITHUB_API_BASE_URL";
     let previous = std::env::var(key).ok();
-    std::env::set_var(key, "http://127.0.0.1:3000/");
+    unsafe {
+        std::env::set_var(key, "http://127.0.0.1:3000/");
+    }
     assert_eq!(github_api_base_url(), "http://127.0.0.1:3000");
-    match previous {
-        Some(value) => std::env::set_var(key, value),
-        None => std::env::remove_var(key),
+    unsafe {
+        match previous {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
     }
 }
 
@@ -2107,11 +2125,11 @@ fn test_unpack_github_tarball_rejects_path_traversal_entries() {
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn download_github_repository_at_ref_maps_private_repo_404_to_auth_message() {
+    use axum::Router;
     use axum::extract::Query;
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::get;
-    use axum::Router;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -2146,46 +2164,48 @@ async fn download_github_repository_at_ref_maps_private_repo_404_to_auth_message
         )
     }
 
-    let _env_lock = acquire_test_env_lock().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind mock github/store server");
-    let addr = listener.local_addr().expect("local addr");
-    let app = Router::new()
-        .route(
-            "/repos/octocat/private-repo/tarball/main",
-            get(github_tarball),
-        )
-        .route(
-            "/v1/github/repos/octocat/private-repo/authed/archive",
-            get(store_archive),
-        );
-    let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock github/store server");
+        let addr = listener.local_addr().expect("local addr");
+        let app = Router::new()
+            .route(
+                "/repos/octocat/private-repo/tarball/main",
+                get(github_tarball),
+            )
+            .route(
+                "/v1/github/repos/octocat/private-repo/authed/archive",
+                get(store_archive),
+            );
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
 
-    let base_url = format!("http://{}", addr);
-    let _github_guard = EnvVarGuard::set("ATO_GITHUB_API_BASE_URL", Some(base_url.as_str()));
-    let _store_guard = EnvVarGuard::set("ATO_STORE_API_URL", Some(base_url.as_str()));
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("session-token-private"));
+        let base_url = format!("http://{}", addr);
+        let _github_guard = EnvVarGuard::set("ATO_GITHUB_API_BASE_URL", Some(base_url.as_str()));
+        let _store_guard = EnvVarGuard::set("ATO_STORE_API_URL", Some(base_url.as_str()));
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("session-token-private"));
 
-    let err = download_github_repository_at_ref("octocat/private-repo", Some("main"))
-        .await
-        .expect_err("private repo archive should surface auth guidance");
-    let rendered = format!("{:#}", err);
-    assert!(rendered.contains("GitHub App"));
-    assert!(rendered.contains("private repositories"));
+        let err = download_github_repository_at_ref("octocat/private-repo", Some("main"))
+            .await
+            .expect_err("private repo archive should surface auth guidance");
+        let rendered = format!("{:#}", err);
+        assert!(rendered.contains("GitHub App"));
+        assert!(rendered.contains("private repositories"));
 
-    server.abort();
+        server.abort();
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn download_github_repository_at_ref_uses_github_token_for_public_archive_fetch() {
+    use axum::Router;
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::get;
-    use axum::Router;
 
     async fn github_tarball(headers: HeaderMap) -> impl IntoResponse {
         assert_eq!(
@@ -2225,29 +2245,31 @@ async fn download_github_repository_at_ref_uses_github_token_for_public_archive_
         )
     }
 
-    let _env_lock = acquire_test_env_lock().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind mock github server");
-    let addr = listener.local_addr().expect("local addr");
-    let app = Router::new().route(
-        "/repos/octocat/public-repo/tarball/main",
-        get(github_tarball),
-    );
-    let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock github server");
+        let addr = listener.local_addr().expect("local addr");
+        let app = Router::new().route(
+            "/repos/octocat/public-repo/tarball/main",
+            get(github_tarball),
+        );
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
 
-    let base_url = format!("http://{}", addr);
-    let _github_guard = EnvVarGuard::set("ATO_GITHUB_API_BASE_URL", Some(base_url.as_str()));
-    let _gh_token_guard = EnvVarGuard::set("GH_TOKEN", Some("gh-token-public"));
+        let base_url = format!("http://{}", addr);
+        let _github_guard = EnvVarGuard::set("ATO_GITHUB_API_BASE_URL", Some(base_url.as_str()));
+        let _gh_token_guard = EnvVarGuard::set("GH_TOKEN", Some("gh-token-public"));
 
-    let checkout = download_github_repository_at_ref("octocat/public-repo", Some("main"))
-        .await
-        .expect("public repo archive should download");
-    assert!(checkout.checkout_dir.join("index.js").exists());
+        let checkout = download_github_repository_at_ref("octocat/public-repo", Some("main"))
+            .await
+            .expect("public repo archive should download");
+        assert!(checkout.checkout_dir.join("index.js").exists());
 
-    server.abort();
+        server.abort();
+    }
 }
 
 #[test]
@@ -2492,485 +2514,518 @@ run = "main.py""#,
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_delta_install_false_positive_recovers_with_reuse_lease_id() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
 
-    let fixture = build_mock_fixture(
-        TEST_SCOPED_ID,
-        TEST_VERSION,
-        vec![b"chunk-alpha".to_vec(), b"chunk-beta".to_vec()],
-    );
-    let server = spawn_mock_registry(MockScenario::FalsePositiveRecovery, fixture.clone()).await;
-    let client = reqwest::Client::new();
-    let scoped_ref = test_scoped_ref();
-    let result =
-        install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
-            .await
-            .expect("delta install should succeed after retry");
-    let artifact = match result {
-        DeltaInstallResult::Artifact(artifact) => artifact,
-        other => panic!("expected reconstructed artifact result, got {:?}", other),
-    };
-    let reconstructed_payload =
-        extract_payload_tar_from_capsule(&artifact).expect("extract reconstructed payload");
-    assert_eq!(reconstructed_payload, fixture.payload_tar);
+        let fixture = build_mock_fixture(
+            TEST_SCOPED_ID,
+            TEST_VERSION,
+            vec![b"chunk-alpha".to_vec(), b"chunk-beta".to_vec()],
+        );
+        let server =
+            spawn_mock_registry(MockScenario::FalsePositiveRecovery, fixture.clone()).await;
+        let client = reqwest::Client::new();
+        let scoped_ref = test_scoped_ref();
+        let result =
+            install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
+                .await
+                .expect("delta install should succeed after retry");
+        let artifact = match result {
+            DeltaInstallResult::Artifact(artifact) => artifact,
+            other => panic!("expected reconstructed artifact result, got {:?}", other),
+        };
+        let reconstructed_payload =
+            extract_payload_tar_from_capsule(&artifact).expect("extract reconstructed payload");
+        assert_eq!(reconstructed_payload, fixture.payload_tar);
 
-    let observations = server.observations().await;
-    assert_eq!(observations.negotiate_calls.len(), 2);
-    assert!(observations.negotiate_calls[0].has_bloom);
-    assert!(!observations.negotiate_calls[1].has_bloom);
-    assert_eq!(observations.negotiate_calls[1].have_chunks_len, 1);
-    assert_eq!(
-        observations.negotiate_calls[1].reuse_lease_id.as_deref(),
-        Some(TEST_LEASE_ID)
-    );
-    assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
+        let observations = server.observations().await;
+        assert_eq!(observations.negotiate_calls.len(), 2);
+        assert!(observations.negotiate_calls[0].has_bloom);
+        assert!(!observations.negotiate_calls[1].has_bloom);
+        assert_eq!(observations.negotiate_calls[1].have_chunks_len, 1);
+        assert_eq!(
+            observations.negotiate_calls[1].reuse_lease_id.as_deref(),
+            Some(TEST_LEASE_ID)
+        );
+        assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_install_app_uses_version_resolve_for_explicit_time_travel() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let output_root = tempfile::tempdir().expect("output root");
-    let runtime_root = tempfile::tempdir().expect("runtime root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _runtime_guard = EnvVarGuard::set(
-        "ATO_RUNTIME_ROOT",
-        Some(runtime_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let output_root = tempfile::tempdir().expect("output root");
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _runtime_guard = EnvVarGuard::set(
+            "ATO_RUNTIME_ROOT",
+            Some(runtime_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
 
-    let payload_tar = build_payload_tar_with_source("main.py", b"print('time travel')\n");
-    let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![payload_tar]);
-    let server = spawn_mock_registry(MockScenario::FalsePositiveRecovery, fixture).await;
-    let result = install_app(
-        "koh0920/sample@1.0.0",
-        Some(server.base_url()),
-        None,
-        Some(output_root.path().to_path_buf()),
-        false,
-        false,
-        ProjectionPreference::Skip,
-        false,
-        false,
-        true,
-        false,
-    )
-    .await
-    .expect("explicit version install should succeed");
-    assert_eq!(result.version, TEST_VERSION);
+        let payload_tar = build_payload_tar_with_source("main.py", b"print('time travel')\n");
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![payload_tar]);
+        let server = spawn_mock_registry(MockScenario::FalsePositiveRecovery, fixture).await;
+        let result = install_app(
+            "koh0920/sample@1.0.0",
+            Some(server.base_url()),
+            None,
+            Some(output_root.path().to_path_buf()),
+            false,
+            false,
+            ProjectionPreference::Skip,
+            false,
+            false,
+            true,
+            false,
+        )
+        .await
+        .expect("explicit version install should succeed");
+        assert_eq!(result.version, TEST_VERSION);
 
-    let observations = server.observations().await;
-    assert_eq!(observations.version_resolve_calls, 2);
-    assert_eq!(observations.epoch_calls, 0);
+        let observations = server.observations().await;
+        assert_eq!(observations.version_resolve_calls, 2);
+        assert_eq!(observations.epoch_calls, 0);
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn repository_ato_desktop_capsule_installs_via_native_local_derivation() {
-    let _env_lock = acquire_test_env_lock().await;
-    let home_root = tempfile::tempdir().expect("home root");
-    let output_root = tempfile::tempdir().expect("output root");
-    let _home_guard = EnvVarGuard::set("HOME", Some(home_root.path().to_string_lossy().as_ref()));
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let home_root = tempfile::tempdir().expect("home root");
+        let output_root = tempfile::tempdir().expect("output root");
+        let _home_guard =
+            EnvVarGuard::set("HOME", Some(home_root.path().to_string_lossy().as_ref()));
 
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("repo root");
-    let desktop_root = repo_root.join("crates").join("ato-desktop");
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repo root");
+        let desktop_root = repo_root.join("crates").join("ato-desktop");
 
-    let macos_dir = desktop_root
-        .join("dist")
-        .join("darwin-arm64")
-        .join("Ato Desktop.app")
-        .join("Contents")
-        .join("MacOS");
-    let has_executable = std::fs::read_dir(&macos_dir)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .any(|entry| entry.file_type().map(|ty| ty.is_file()).unwrap_or(false))
-        })
-        .unwrap_or(false);
-    if !has_executable {
-        eprintln!(
-            "skipping repository_ato_desktop_capsule_installs_via_native_local_derivation: \
-             Ato Desktop.app/Contents/MacOS/ has no executable; \
-             build the desktop bundle first to exercise this test"
+        let macos_dir = desktop_root
+            .join("dist")
+            .join("darwin-arm64")
+            .join("Ato Desktop.app")
+            .join("Contents")
+            .join("MacOS");
+        let has_executable = std::fs::read_dir(&macos_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.file_type().map(|ty| ty.is_file()).unwrap_or(false))
+            })
+            .unwrap_or(false);
+        if !has_executable {
+            eprintln!(
+                "skipping repository_ato_desktop_capsule_installs_via_native_local_derivation: \
+                 Ato Desktop.app/Contents/MacOS/ has no executable; \
+                 build the desktop bundle first to exercise this test"
+            );
+            return;
+        }
+
+        let authoritative_input = resolve_producer_authoritative_input(
+            &desktop_root,
+            std::sync::Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .expect("authoritative input");
+        let artifact_path = build_publish_capsule_artifact(
+            "ato-desktop",
+            "0.1.0",
+            Some(&authoritative_input),
+            None,
+        )
+        .expect("artifact build");
+        let bytes = std::fs::read(&artifact_path).expect("artifact bytes");
+        let scoped_ref = parse_capsule_ref("koh0920/ato-desktop").expect("scoped ref");
+
+        let result = complete_install_from_bytes(
+            "local:ato-desktop".to_string(),
+            scoped_ref,
+            "ato-desktop".to_string(),
+            "0.1.0".to_string(),
+            bytes,
+            "ato-desktop-0.1.0.capsule".to_string(),
+            InstallExecutionOptions {
+                output_dir: Some(output_root.path().to_path_buf()),
+                yes: true,
+                projection_preference: ProjectionPreference::Skip,
+                json_output: true,
+                can_prompt_interactively: false,
+                promotion_source: None,
+                keep_progressive_flow_open: false,
+            },
+            InstallSource::Local("test://ato-desktop".to_string()),
+        )
+        .await
+        .expect("native install should succeed");
+
+        assert!(matches!(
+            result.install_kind,
+            InstallKind::NativeRequiresLocalDerivation
+        ));
+        assert!(
+            result.path.is_file(),
+            "installed capsule archive must exist"
         );
-        return;
+        let derived_app_path = result
+            .local_derivation
+            .as_ref()
+            .and_then(|info| info.derived_app_path.as_ref())
+            .expect("derived app path");
+        assert!(derived_app_path.is_dir(), "derived app bundle must exist");
+        assert!(matches!(
+            result.launchable,
+            Some(LaunchableTarget::DerivedApp { .. })
+        ));
+        assert!(
+            result
+                .projection
+                .as_ref()
+                .is_some_and(|projection| !projection.performed)
+        );
     }
-
-    let authoritative_input = resolve_producer_authoritative_input(
-        &desktop_root,
-        std::sync::Arc::new(CliReporter::new(false)),
-        false,
-    )
-    .expect("authoritative input");
-    let artifact_path =
-        build_publish_capsule_artifact("ato-desktop", "0.1.0", Some(&authoritative_input), None)
-            .expect("artifact build");
-    let bytes = std::fs::read(&artifact_path).expect("artifact bytes");
-    let scoped_ref = parse_capsule_ref("koh0920/ato-desktop").expect("scoped ref");
-
-    let result = complete_install_from_bytes(
-        "local:ato-desktop".to_string(),
-        scoped_ref,
-        "ato-desktop".to_string(),
-        "0.1.0".to_string(),
-        bytes,
-        "ato-desktop-0.1.0.capsule".to_string(),
-        InstallExecutionOptions {
-            output_dir: Some(output_root.path().to_path_buf()),
-            yes: true,
-            projection_preference: ProjectionPreference::Skip,
-            json_output: true,
-            can_prompt_interactively: false,
-            promotion_source: None,
-            keep_progressive_flow_open: false,
-        },
-        InstallSource::Local("test://ato-desktop".to_string()),
-    )
-    .await
-    .expect("native install should succeed");
-
-    assert!(matches!(
-        result.install_kind,
-        InstallKind::NativeRequiresLocalDerivation
-    ));
-    assert!(
-        result.path.is_file(),
-        "installed capsule archive must exist"
-    );
-    let derived_app_path = result
-        .local_derivation
-        .as_ref()
-        .and_then(|info| info.derived_app_path.as_ref())
-        .expect("derived app path");
-    assert!(derived_app_path.is_dir(), "derived app bundle must exist");
-    assert!(matches!(
-        result.launchable,
-        Some(LaunchableTarget::DerivedApp { .. })
-    ));
-    assert!(result
-        .projection
-        .as_ref()
-        .is_some_and(|projection| !projection.performed));
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_install_app_fails_closed_on_negotiate_501() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let output_root = tempfile::tempdir().expect("output root");
-    let runtime_root = tempfile::tempdir().expect("runtime root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _runtime_guard = EnvVarGuard::set(
-        "ATO_RUNTIME_ROOT",
-        Some(runtime_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let output_root = tempfile::tempdir().expect("output root");
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _runtime_guard = EnvVarGuard::set(
+            "ATO_RUNTIME_ROOT",
+            Some(runtime_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
 
-    let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
-    let server = spawn_mock_registry(MockScenario::FallbackNotImplemented, fixture).await;
-    let err = install_app(
-        TEST_SCOPED_ID,
-        Some(server.base_url()),
-        Some(TEST_VERSION),
-        Some(output_root.path().to_path_buf()),
-        false,
-        false,
-        ProjectionPreference::Skip,
-        true,
-        false,
-        true,
-        false,
-    )
-    .await
-    .expect_err("install should fail closed when negotiate is unavailable");
-    assert!(err
-        .to_string()
-        .contains("Registry does not support the manifest negotiate API"));
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
+        let server = spawn_mock_registry(MockScenario::FallbackNotImplemented, fixture).await;
+        let err = install_app(
+            TEST_SCOPED_ID,
+            Some(server.base_url()),
+            Some(TEST_VERSION),
+            Some(output_root.path().to_path_buf()),
+            false,
+            false,
+            ProjectionPreference::Skip,
+            true,
+            false,
+            true,
+            false,
+        )
+        .await
+        .expect_err("install should fail closed when negotiate is unavailable");
+        assert!(
+            err.to_string()
+                .contains("Registry does not support the manifest negotiate API")
+        );
 
-    let observations = server.observations().await;
-    assert_eq!(observations.negotiate_calls.len(), 1);
-    assert_eq!(observations.distribution_calls, 0);
-    assert_eq!(observations.artifact_calls, 0);
-    assert!(observations.release_calls.is_empty());
+        let observations = server.observations().await;
+        assert_eq!(observations.negotiate_calls.len(), 1);
+        assert_eq!(observations.distribution_calls, 0);
+        assert_eq!(observations.artifact_calls, 0);
+        assert!(observations.release_calls.is_empty());
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_install_app_unauthorized_manifest_fails_closed_without_fallback() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let output_root = tempfile::tempdir().expect("output root");
-    let runtime_root = tempfile::tempdir().expect("runtime root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _runtime_guard = EnvVarGuard::set(
-        "ATO_RUNTIME_ROOT",
-        Some(runtime_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let output_root = tempfile::tempdir().expect("output root");
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _runtime_guard = EnvVarGuard::set(
+            "ATO_RUNTIME_ROOT",
+            Some(runtime_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
 
-    let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
-    let server = spawn_mock_registry(MockScenario::UnauthorizedManifest, fixture).await;
-    let err = install_app(
-        TEST_SCOPED_ID,
-        Some(server.base_url()),
-        Some(TEST_VERSION),
-        Some(output_root.path().to_path_buf()),
-        false,
-        false,
-        ProjectionPreference::Skip,
-        false,
-        false,
-        true,
-        false,
-    )
-    .await
-    .expect_err("install should fail closed on unauthorized manifest read");
-    let rendered = format!("{:#}", err);
-    assert!(
-        rendered.contains(crate::error_codes::ATO_ERR_AUTH_REQUIRED)
-            || rendered.contains("status=401 Unauthorized")
-    );
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
+        let server = spawn_mock_registry(MockScenario::UnauthorizedManifest, fixture).await;
+        let err = install_app(
+            TEST_SCOPED_ID,
+            Some(server.base_url()),
+            Some(TEST_VERSION),
+            Some(output_root.path().to_path_buf()),
+            false,
+            false,
+            ProjectionPreference::Skip,
+            false,
+            false,
+            true,
+            false,
+        )
+        .await
+        .expect_err("install should fail closed on unauthorized manifest read");
+        let rendered = format!("{:#}", err);
+        assert!(
+            rendered.contains(crate::error_codes::ATO_ERR_AUTH_REQUIRED)
+                || rendered.contains("status=401 Unauthorized")
+        );
 
-    let observations = server.observations().await;
-    assert_eq!(observations.distribution_calls, 0);
-    assert_eq!(observations.artifact_calls, 0);
+        let observations = server.observations().await;
+        assert_eq!(observations.distribution_calls, 0);
+        assert_eq!(observations.artifact_calls, 0);
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_manifest_api_404_falls_back_to_distribution_download() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
 
-    let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
-    let expected_artifact = fixture.artifact_bytes.clone();
-    let expected_file_name = format!("sample-{}.capsule", TEST_VERSION);
-    let server = spawn_mock_registry(MockScenario::ManifestApiNotFound, fixture).await;
-    let client = reqwest::Client::new();
-    let scoped_ref = test_scoped_ref();
-    let result = install_manifest_delta_path(
-        &client,
-        server.base_url(),
-        &scoped_ref,
-        Some(TEST_VERSION),
-        None,
-        None,
-    )
-    .await
-    .expect("404 manifest endpoint should fall back to direct distribution download");
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
+        let expected_artifact = fixture.artifact_bytes.clone();
+        let expected_file_name = format!("sample-{}.capsule", TEST_VERSION);
+        let server = spawn_mock_registry(MockScenario::ManifestApiNotFound, fixture).await;
+        let client = reqwest::Client::new();
+        let scoped_ref = test_scoped_ref();
+        let result = install_manifest_delta_path(
+            &client,
+            server.base_url(),
+            &scoped_ref,
+            Some(TEST_VERSION),
+            None,
+            None,
+        )
+        .await
+        .expect("404 manifest endpoint should fall back to direct distribution download");
 
-    match result {
-        DeltaInstallResult::DownloadedArtifact { bytes, file_name } => {
-            assert_eq!(bytes, expected_artifact);
-            assert_eq!(file_name, expected_file_name);
+        match result {
+            DeltaInstallResult::DownloadedArtifact { bytes, file_name } => {
+                assert_eq!(bytes, expected_artifact);
+                assert_eq!(file_name, expected_file_name);
+            }
+            other => panic!("expected downloaded artifact fallback, got {:?}", other),
         }
-        other => panic!("expected downloaded artifact fallback, got {:?}", other),
-    }
 
-    let observations = server.observations().await;
-    assert_eq!(observations.version_resolve_calls, 1);
-    assert_eq!(observations.manifest_calls, 0);
-    assert!(observations.negotiate_calls.is_empty());
-    assert_eq!(observations.distribution_calls, 1);
-    assert_eq!(observations.artifact_calls, 1);
-    assert!(observations.release_calls.is_empty());
+        let observations = server.observations().await;
+        assert_eq!(observations.version_resolve_calls, 1);
+        assert_eq!(observations.manifest_calls, 0);
+        assert!(observations.negotiate_calls.is_empty());
+        assert_eq!(observations.distribution_calls, 1);
+        assert_eq!(observations.artifact_calls, 1);
+        assert!(observations.release_calls.is_empty());
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_distribution_artifact_fallback_does_not_send_auth_to_presigned_url() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
 
-    let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
-    let expected_artifact = fixture.artifact_bytes.clone();
-    let server = spawn_mock_registry(MockScenario::ArtifactRejectsAuthorization, fixture).await;
-    let client = reqwest::Client::new();
-    let scoped_ref = test_scoped_ref();
-    let result = install_manifest_delta_path(
-        &client,
-        server.base_url(),
-        &scoped_ref,
-        Some(TEST_VERSION),
-        None,
-        None,
-    )
-    .await
-    .expect("artifact fallback should omit bearer auth for presigned URLs");
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"payload".to_vec()]);
+        let expected_artifact = fixture.artifact_bytes.clone();
+        let server = spawn_mock_registry(MockScenario::ArtifactRejectsAuthorization, fixture).await;
+        let client = reqwest::Client::new();
+        let scoped_ref = test_scoped_ref();
+        let result = install_manifest_delta_path(
+            &client,
+            server.base_url(),
+            &scoped_ref,
+            Some(TEST_VERSION),
+            None,
+            None,
+        )
+        .await
+        .expect("artifact fallback should omit bearer auth for presigned URLs");
 
-    match result {
-        DeltaInstallResult::DownloadedArtifact { bytes, .. } => {
-            assert_eq!(bytes, expected_artifact);
+        match result {
+            DeltaInstallResult::DownloadedArtifact { bytes, .. } => {
+                assert_eq!(bytes, expected_artifact);
+            }
+            other => panic!("expected downloaded artifact fallback, got {:?}", other),
         }
-        other => panic!("expected downloaded artifact fallback, got {:?}", other),
-    }
 
-    let observations = server.observations().await;
-    assert_eq!(observations.distribution_calls, 1);
-    assert_eq!(observations.artifact_calls, 1);
+        let observations = server.observations().await;
+        assert_eq!(observations.distribution_calls, 1);
+        assert_eq!(observations.artifact_calls, 1);
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_missing_chunks_after_retry_falls_back_to_distribution_download() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", Some("test-token"));
 
-    let fixture = build_mock_fixture(
-        TEST_SCOPED_ID,
-        TEST_VERSION,
-        vec![b"chunk-a".to_vec(), b"chunk-b".to_vec()],
-    );
-    let expected_artifact = fixture.artifact_bytes.clone();
-    let expected_file_name = format!("sample-{}.capsule", TEST_VERSION);
-    let server = spawn_mock_registry(MockScenario::MissingChunksAfterRetryFallback, fixture).await;
-    let client = reqwest::Client::new();
-    let scoped_ref = test_scoped_ref();
-    let result =
-        install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
-            .await
-            .expect("missing chunks after retry should fall back to direct artifact download");
+        let fixture = build_mock_fixture(
+            TEST_SCOPED_ID,
+            TEST_VERSION,
+            vec![b"chunk-a".to_vec(), b"chunk-b".to_vec()],
+        );
+        let expected_artifact = fixture.artifact_bytes.clone();
+        let expected_file_name = format!("sample-{}.capsule", TEST_VERSION);
+        let server =
+            spawn_mock_registry(MockScenario::MissingChunksAfterRetryFallback, fixture).await;
+        let client = reqwest::Client::new();
+        let scoped_ref = test_scoped_ref();
+        let result =
+            install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
+                .await
+                .expect("missing chunks after retry should fall back to direct artifact download");
 
-    match result {
-        DeltaInstallResult::DownloadedArtifact { bytes, file_name } => {
-            assert_eq!(bytes, expected_artifact);
-            assert_eq!(file_name, expected_file_name);
+        match result {
+            DeltaInstallResult::DownloadedArtifact { bytes, file_name } => {
+                assert_eq!(bytes, expected_artifact);
+                assert_eq!(file_name, expected_file_name);
+            }
+            other => panic!("expected downloaded artifact fallback, got {:?}", other),
         }
-        other => panic!("expected downloaded artifact fallback, got {:?}", other),
-    }
 
-    let observations = server.observations().await;
-    assert_eq!(observations.negotiate_calls.len(), 2);
-    assert_eq!(observations.distribution_calls, 1);
-    assert_eq!(observations.artifact_calls, 1);
-    assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
+        let observations = server.observations().await;
+        assert_eq!(observations.negotiate_calls.len(), 2);
+        assert_eq!(observations.distribution_calls, 1);
+        assert_eq!(observations.artifact_calls, 1);
+        assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_delta_install_releases_lease_when_chunk_download_fails() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
 
-    let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"chunk".to_vec()]);
-    let server = spawn_mock_registry(MockScenario::LeaseReleaseOnFailure, fixture).await;
-    let client = reqwest::Client::new();
-    let scoped_ref = test_scoped_ref();
-    let err =
-        install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
-            .await
-            .expect_err("chunk failure should abort delta install");
-    assert!(err
-        .to_string()
-        .contains(crate::error_codes::ATO_ERR_INTEGRITY_FAILURE));
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"chunk".to_vec()]);
+        let server = spawn_mock_registry(MockScenario::LeaseReleaseOnFailure, fixture).await;
+        let client = reqwest::Client::new();
+        let scoped_ref = test_scoped_ref();
+        let err =
+            install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
+                .await
+                .expect_err("chunk failure should abort delta install");
+        assert!(
+            err.to_string()
+                .contains(crate::error_codes::ATO_ERR_INTEGRITY_FAILURE)
+        );
 
-    let observations = server.observations().await;
-    assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
+        let observations = server.observations().await;
+        assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_negotiate_yanked_fails_closed() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
 
-    let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"chunk".to_vec()]);
-    let server = spawn_mock_registry(MockScenario::YankedNegotiate, fixture).await;
-    let client = reqwest::Client::new();
-    let scoped_ref = test_scoped_ref();
-    let err =
-        install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
-            .await
-            .expect_err("yanked negotiate must fail closed");
-    let message = err.to_string();
-    assert!(message.contains(crate::error_codes::ATO_ERR_INTEGRITY_FAILURE));
-    assert!(message.to_ascii_lowercase().contains("yanked"));
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"chunk".to_vec()]);
+        let server = spawn_mock_registry(MockScenario::YankedNegotiate, fixture).await;
+        let client = reqwest::Client::new();
+        let scoped_ref = test_scoped_ref();
+        let err =
+            install_manifest_delta_path(&client, server.base_url(), &scoped_ref, None, None, None)
+                .await
+                .expect_err("yanked negotiate must fail closed");
+        let message = err.to_string();
+        assert!(message.contains(crate::error_codes::ATO_ERR_INTEGRITY_FAILURE));
+        assert!(message.to_ascii_lowercase().contains("yanked"));
+    }
 }
 
 #[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_manifest_yanked_fails_closed_even_with_allow_unverified() {
-    let _env_lock = acquire_test_env_lock().await;
-    let cas_root = tempfile::tempdir().expect("cas root");
-    let output_root = tempfile::tempdir().expect("output root");
-    let runtime_root = tempfile::tempdir().expect("runtime root");
-    let _cas_guard = EnvVarGuard::set(
-        "ATO_CAS_ROOT",
-        Some(cas_root.path().to_string_lossy().as_ref()),
-    );
-    let _runtime_guard = EnvVarGuard::set(
-        "ATO_RUNTIME_ROOT",
-        Some(runtime_root.path().to_string_lossy().as_ref()),
-    );
-    let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
+    {
+        let _env_lock = acquire_test_env_lock().await;
+        let cas_root = tempfile::tempdir().expect("cas root");
+        let output_root = tempfile::tempdir().expect("output root");
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _cas_guard = EnvVarGuard::set(
+            "ATO_CAS_ROOT",
+            Some(cas_root.path().to_string_lossy().as_ref()),
+        );
+        let _runtime_guard = EnvVarGuard::set(
+            "ATO_RUNTIME_ROOT",
+            Some(runtime_root.path().to_string_lossy().as_ref()),
+        );
+        let _token_guard = EnvVarGuard::set("ATO_TOKEN", None);
 
-    let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"chunk".to_vec()]);
-    let server = spawn_mock_registry(MockScenario::YankedManifest, fixture).await;
-    let err = install_app(
-        TEST_SCOPED_ID,
-        Some(server.base_url()),
-        Some(TEST_VERSION),
-        Some(output_root.path().to_path_buf()),
-        false,
-        false,
-        ProjectionPreference::Skip,
-        true,
-        false,
-        true,
-        false,
-    )
-    .await
-    .expect_err("yanked manifest must fail closed");
-    let message = err.to_string();
-    assert!(message.contains(crate::error_codes::ATO_ERR_INTEGRITY_FAILURE));
-    assert!(message.to_ascii_lowercase().contains("yanked"));
+        let fixture = build_mock_fixture(TEST_SCOPED_ID, TEST_VERSION, vec![b"chunk".to_vec()]);
+        let server = spawn_mock_registry(MockScenario::YankedManifest, fixture).await;
+        let err = install_app(
+            TEST_SCOPED_ID,
+            Some(server.base_url()),
+            Some(TEST_VERSION),
+            Some(output_root.path().to_path_buf()),
+            false,
+            false,
+            ProjectionPreference::Skip,
+            true,
+            false,
+            true,
+            false,
+        )
+        .await
+        .expect_err("yanked manifest must fail closed");
+        let message = err.to_string();
+        assert!(message.contains(crate::error_codes::ATO_ERR_INTEGRITY_FAILURE));
+        assert!(message.to_ascii_lowercase().contains("yanked"));
+    }
 }
 
 #[test]
@@ -3012,7 +3067,11 @@ fn try_register_lifecycle_returns_some_when_given_valid_blake3_hash() {
 
     let ato_home = tempfile::tempdir().expect("tempdir");
     // Point ATO_HOME to our isolated temp dir so instances are written there.
-    std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+    unsafe {
+        unsafe {
+            std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+        }
+    }
 
     // Build a fake "installed" output directory with a regular file.
     let installed_dir = ato_home.path().join("fake_install");
@@ -3027,7 +3086,9 @@ fn try_register_lifecycle_returns_some_when_given_valid_blake3_hash() {
 
     let result = try_register_lifecycle("testpub/testslug", "0.1.0", &fake_hash, &installed_path);
 
-    std::env::remove_var("ATO_HOME");
+    unsafe {
+        std::env::remove_var("ATO_HOME");
+    }
 
     assert!(
         result.is_some(),
@@ -3064,7 +3125,11 @@ fn install_lifecycle_all_required_fields_are_populated() {
     use std::io::Write as _;
 
     let ato_home = tempfile::tempdir().expect("tempdir");
-    std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+    unsafe {
+        unsafe {
+            std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+        }
+    }
 
     let installed_dir = ato_home.path().join("fake_install2");
     std::fs::create_dir_all(&installed_dir).unwrap();
@@ -3076,7 +3141,9 @@ fn install_lifecycle_all_required_fields_are_populated() {
     let fake_hash = format!("blake3:{}", "deadbeefcafe1234".repeat(4));
     let result = try_register_lifecycle("mypub/myslug", "2.0.0", &fake_hash, &installed_path);
 
-    std::env::remove_var("ATO_HOME");
+    unsafe {
+        std::env::remove_var("ATO_HOME");
+    }
 
     let info = result.expect("install_lifecycle must be Some for valid inputs");
 
@@ -3142,7 +3209,11 @@ fn install_profile_key_is_stable_across_reinstalls() {
     use std::io::Write as _;
 
     let ato_home = tempfile::tempdir().expect("tempdir");
-    std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+    unsafe {
+        unsafe {
+            std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+        }
+    }
 
     let make_fake_install = |ato_home: &std::path::Path, subdir: &str, hash_char: char| {
         let installed_dir = ato_home.join(subdir);
@@ -3161,7 +3232,9 @@ fn install_profile_key_is_stable_across_reinstalls() {
     let info_v2 = try_register_lifecycle("stable/app", "2.0.0", &hash_v2, &path_v2)
         .expect("second install must succeed");
 
-    std::env::remove_var("ATO_HOME");
+    unsafe {
+        std::env::remove_var("ATO_HOME");
+    }
 
     assert_eq!(
         info_v1.install_profile_key, info_v2.install_profile_key,

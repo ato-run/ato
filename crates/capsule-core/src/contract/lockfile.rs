@@ -8,9 +8,9 @@ use std::time::{Instant, UNIX_EPOCH};
 use chrono::Utc;
 
 use lock_draft_engine::{
-    evaluate_lock_draft, LockDraft, LockDraftInput, LockDraftReadiness,
+    LockDraft, LockDraftInput, LockDraftReadiness,
     LockDraftRuntimePlatform as DraftRuntimePlatform, ManifestSource as DraftManifestSource,
-    RepoFileEntry as DraftRepoFileEntry, RepoFileKind as DraftRepoFileKind,
+    RepoFileEntry as DraftRepoFileEntry, RepoFileKind as DraftRepoFileKind, evaluate_lock_draft,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -798,13 +798,11 @@ fn lockfile_has_required_platform_coverage(
         .as_ref()
         .and_then(|tools| tools.pnpm.as_ref())
         .map(|entry| &entry.targets)
-    {
-        if required_platforms
+        && required_platforms
             .iter()
             .any(|platform| !targets.contains_key(platform.target_triple))
-        {
-            return Ok(false);
-        }
+    {
+        return Ok(false);
     }
 
     // yarn: same as pnpm — JS bundle distributed via npm, platform-agnostic.
@@ -813,13 +811,11 @@ fn lockfile_has_required_platform_coverage(
         .as_ref()
         .and_then(|tools| tools.yarn.as_ref())
         .map(|entry| &entry.targets)
-    {
-        if required_platforms
+        && required_platforms
             .iter()
             .any(|platform| !targets.contains_key(platform.target_triple))
-        {
-            return Ok(false);
-        }
+    {
+        return Ok(false);
     }
 
     // bun: requires all platforms. Bun publishes native binaries for all major targets.
@@ -828,13 +824,11 @@ fn lockfile_has_required_platform_coverage(
         .as_ref()
         .and_then(|tools| tools.bun.as_ref())
         .map(|entry| &entry.targets)
-    {
-        if required_platforms
+        && required_platforms
             .iter()
             .any(|platform| !targets.contains_key(platform.target_triple))
-        {
-            return Ok(false);
-        }
+    {
+        return Ok(false);
     }
 
     Ok(true)
@@ -2238,10 +2232,10 @@ fn semantic_manifest_hash_from_text(text: &str) -> Result<String> {
     // captured via `targets.<x>.dependencies` after that normalizer runs in the lock pipeline.
     let mut value: toml::Value = toml::from_str(text)
         .map_err(|e| CapsuleError::Config(format!("Failed to parse manifest schema: {}", e)))?;
-    if let Some(table) = value.as_table_mut() {
-        if matches!(table.get("dependencies"), Some(v) if v.is_str()) {
-            table.remove("dependencies");
-        }
+    if let Some(table) = value.as_table_mut()
+        && matches!(table.get("dependencies"), Some(v) if v.is_str())
+    {
+        table.remove("dependencies");
     }
     let manifest: CapsuleManifest = value.try_into().map_err(|e: toml::de::Error| {
         CapsuleError::Config(format!("Failed to parse manifest schema: {}", e))
@@ -2396,10 +2390,10 @@ fn orchestration_service_target_labels(manifest: &toml::Value) -> Vec<String> {
                     .flatten()
             });
 
-        if let Some(target) = target {
-            if !labels.iter().any(|existing| existing == &target) {
-                labels.push(target);
-            }
+        if let Some(target) = target
+            && !labels.iter().any(|existing| existing == &target)
+        {
+            labels.push(target);
         }
     }
 
@@ -2565,7 +2559,7 @@ fn platform_triple() -> Result<String> {
             return Err(CapsuleError::Pack(format!(
                 "Unsupported platform: {} {}",
                 os, arch
-            )))
+            )));
         }
     };
 

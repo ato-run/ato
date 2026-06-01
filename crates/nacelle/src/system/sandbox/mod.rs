@@ -434,10 +434,10 @@ pub fn validate_shell(shell: &str) -> Result<()> {
 /// Return the default shell from `$SHELL`, validated against the allowlist.
 /// Falls back to `/bin/sh` if `$SHELL` is unset or not in the allowlist.
 pub fn default_shell() -> String {
-    if let Ok(shell) = std::env::var("SHELL") {
-        if validate_shell(&shell).is_ok() {
-            return shell;
-        }
+    if let Ok(shell) = std::env::var("SHELL")
+        && validate_shell(&shell).is_ok()
+    {
+        return shell;
     }
     "/bin/sh".to_string()
 }
@@ -881,12 +881,16 @@ mod tests {
             .allow_read_write([PathBuf::from("/app")]);
 
         assert_eq!(policy.ipc_socket_paths.len(), 2);
-        assert!(policy
-            .ipc_socket_paths
-            .contains(&PathBuf::from("/tmp/capsule-ipc/llm-service.sock")));
-        assert!(policy
-            .ipc_socket_paths
-            .contains(&PathBuf::from("/tmp/capsule-ipc/db-service.sock")));
+        assert!(
+            policy
+                .ipc_socket_paths
+                .contains(&PathBuf::from("/tmp/capsule-ipc/llm-service.sock"))
+        );
+        assert!(
+            policy
+                .ipc_socket_paths
+                .contains(&PathBuf::from("/tmp/capsule-ipc/db-service.sock"))
+        );
         // Regular paths are separate
         assert_eq!(policy.read_write_paths.len(), 1);
     }
@@ -899,9 +903,11 @@ mod tests {
             .with_ipc_socket_paths([PathBuf::from("/tmp/capsule-ipc/test.sock")])
             .allow_read_write([PathBuf::from("/app")]);
 
-        assert!(!policy
-            .read_write_paths
-            .contains(&PathBuf::from("/tmp/capsule-ipc/test.sock")));
+        assert!(
+            !policy
+                .read_write_paths
+                .contains(&PathBuf::from("/tmp/capsule-ipc/test.sock"))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::{
     CapsuleOpenMode, CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode,
@@ -9,7 +9,7 @@ use crate::config::{
     OciBackendEngine, SecretStore, SourceBackendEngine, StartupSurface, ThemeConfig, UpdateChannel,
     WasmBackendEngine, WindowCloseBehavior,
 };
-use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
+use crate::state::{ActivityTone, AppState, GuestRoute, PaneId, PaneSurface};
 use crate::ui::share::web_favicon_origin;
 
 #[derive(Clone, Copy)]
@@ -603,7 +603,7 @@ fn apply_confirmed_global_patch(
                 return Err(SettingsError::Validation {
                     field: "defaultEgressPolicy".to_string(),
                     message: "Expected deny-all, allowlist, or proxy-only.".to_string(),
-                })
+                });
             }
         };
         changed.push("defaultEgressPolicy".to_string());
@@ -637,7 +637,7 @@ fn apply_backend_engine_patch(
                 return Err(SettingsError::Validation {
                     field: "sourceEngine".to_string(),
                     message: "Expected nacelle or host.".to_string(),
-                })
+                });
             }
         };
         changed.push("sourceEngine".to_string());
@@ -650,7 +650,7 @@ fn apply_backend_engine_patch(
                 return Err(SettingsError::Validation {
                     field: "ociEngine".to_string(),
                     message: "Expected podman. Docker and Youki are not yet supported.".to_string(),
-                })
+                });
             }
         };
         changed.push("ociEngine".to_string());
@@ -663,7 +663,7 @@ fn apply_backend_engine_patch(
                 return Err(SettingsError::Validation {
                     field: "wasmEngine".to_string(),
                     message: "Expected wasmtime.".to_string(),
-                })
+                });
             }
         };
         changed.push("wasmEngine".to_string());

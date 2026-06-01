@@ -55,10 +55,11 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
 
     let mut config = nacelle::config::load_config(&config_path)?;
 
-    if let Some(main_svc) = config.services.get_mut("main") {
-        if main_svc.cwd == Some("source".to_string()) && !temp_dir_path.join("source").is_dir() {
-            main_svc.cwd = Some(".".to_string());
-        }
+    if let Some(main_svc) = config.services.get_mut("main")
+        && main_svc.cwd == Some("source".to_string())
+        && !temp_dir_path.join("source").is_dir()
+    {
+        main_svc.cwd = Some(".".to_string());
     }
 
     let network_enabled = config.sandbox.network.enabled;
@@ -104,10 +105,10 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
     }
 
     let mut allow_rules = Vec::new();
-    if let Some(egress) = &config.sandbox.network.egress {
-        if let Some(rules) = &egress.rules {
-            allow_rules.extend(rules.iter().cloned());
-        }
+    if let Some(egress) = &config.sandbox.network.egress
+        && let Some(rules) = &egress.rules
+    {
+        allow_rules.extend(rules.iter().cloned());
     }
     if !allow_rules.is_empty() {
         nacelle::config::validate_egress_rules(&allow_rules)?;
@@ -118,12 +119,12 @@ async fn bootstrap_bundled_runtime() -> anyhow::Result<()> {
             dns_rules: dns_rules.clone(),
             job_id: job_id.clone(),
         };
-        if !allow_rules.is_empty() || egress_mode == "deny_all" {
-            if let Err(e) = sandbox.update_rules(update_rule).await {
-                eprintln!("⚠️  Sandbox rule update failed: {}", e);
-                if strict_enforcement {
-                    return Err(anyhow::anyhow!(e));
-                }
+        if (!allow_rules.is_empty() || egress_mode == "deny_all")
+            && let Err(e) = sandbox.update_rules(update_rule).await
+        {
+            eprintln!("⚠️  Sandbox rule update failed: {}", e);
+            if strict_enforcement {
+                return Err(anyhow::anyhow!(e));
             }
         }
     }

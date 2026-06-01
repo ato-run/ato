@@ -20,10 +20,10 @@
 //! gpui-html's static-lowering scope).
 
 use gpui::prelude::*;
-use gpui::{div, px, IntoElement};
+use gpui::{IntoElement, div, px};
 
 #[cfg(not(target_os = "macos"))]
-use gpui::{point, BoxShadow, Div, Hsla, Stateful, WindowControlArea};
+use gpui::{BoxShadow, Div, Hsla, Stateful, WindowControlArea, point};
 
 use super::super::theme::Theme;
 

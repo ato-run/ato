@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capsule_core::capsule::manifest::blake3_digest;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -1174,13 +1174,17 @@ mod tests {
     #[test]
     fn record_inference_failure_rejected_outside_inferring_state() {
         let mut session = GitHubImportSession::default();
-        assert!(session
-            .record_inference_failure("x".to_string(), "y".to_string())
-            .is_err());
+        assert!(
+            session
+                .record_inference_failure("x".to_string(), "y".to_string())
+                .is_err()
+        );
         session.begin_resolve("owner/repo").expect("resolve");
-        assert!(session
-            .record_inference_failure("x".to_string(), "y".to_string())
-            .is_err());
+        assert!(
+            session
+                .record_inference_failure("x".to_string(), "y".to_string())
+                .is_err()
+        );
     }
 
     #[test]

@@ -319,9 +319,10 @@ mod tests {
         let path = ato_store_dep_ref_path("npm", "sha256:abc123");
         let last = path.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(last, "sha256-abc123.json");
-        assert!(path
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy() == "deps"));
+        assert!(
+            path.components()
+                .any(|c| c.as_os_str().to_string_lossy() == "deps")
+        );
     }
 
     #[test]

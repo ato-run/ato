@@ -951,8 +951,8 @@ impl SecretStore {
 
     /// Rebuild `secret_grant_keys_by_handle` cache from the bridge.
     /// Inverts per-key allow lists into per-handle key lists.
-    pub fn build_grant_keys_cache(
-    ) -> Result<std::collections::HashMap<String, Vec<String>>, BridgeError> {
+    pub fn build_grant_keys_cache()
+    -> Result<std::collections::HashMap<String, Vec<String>>, BridgeError> {
         let entries = crate::secret_bridge::CliSecretBridge::list()?;
         let mut cache: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();

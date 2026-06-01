@@ -1,5 +1,5 @@
 use super::locks::env_lock;
-use super::policy::{resolve_auto_bootstrap_policy, AutoBootstrapMode};
+use super::policy::{AutoBootstrapMode, resolve_auto_bootstrap_policy};
 use super::*;
 use capsule_core::bootstrap::{BootstrapAuthorityKind, BootstrapCacheScope};
 
@@ -192,13 +192,21 @@ fn auto_bootstrap_policy_maps_to_engine_boundary() {
 #[test]
 fn auto_bootstrap_policy_reads_env_overrides() {
     let _guard = env_lock().lock().expect("env lock");
-    std::env::set_var(AUTO_BOOTSTRAP_ENV, "true");
-    std::env::set_var(NACELLE_VERSION_ENV, "v9.9.9");
-    std::env::set_var(
-        NACELLE_RELEASE_BASE_URL_ENV,
-        "https://mirror.example.com/nacelle/",
-    );
-    std::env::set_var("CI", "true");
+    unsafe {
+        std::env::set_var(AUTO_BOOTSTRAP_ENV, "true");
+    }
+    unsafe {
+        std::env::set_var(NACELLE_VERSION_ENV, "v9.9.9");
+    }
+    unsafe {
+        std::env::set_var(
+            NACELLE_RELEASE_BASE_URL_ENV,
+            "https://mirror.example.com/nacelle/",
+        );
+    }
+    unsafe {
+        std::env::set_var("CI", "true");
+    }
 
     let policy = resolve_auto_bootstrap_policy_from_env();
     assert!(policy.network_allowed);
@@ -208,8 +216,16 @@ fn auto_bootstrap_policy_reads_env_overrides() {
         "https://mirror.example.com/nacelle"
     );
 
-    std::env::remove_var(AUTO_BOOTSTRAP_ENV);
-    std::env::remove_var(NACELLE_VERSION_ENV);
-    std::env::remove_var(NACELLE_RELEASE_BASE_URL_ENV);
-    std::env::remove_var("CI");
+    unsafe {
+        std::env::remove_var(AUTO_BOOTSTRAP_ENV);
+    }
+    unsafe {
+        std::env::remove_var(NACELLE_VERSION_ENV);
+    }
+    unsafe {
+        std::env::remove_var(NACELLE_RELEASE_BASE_URL_ENV);
+    }
+    unsafe {
+        std::env::remove_var("CI");
+    }
 }

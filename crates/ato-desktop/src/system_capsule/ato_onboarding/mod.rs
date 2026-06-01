@@ -1,7 +1,7 @@
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
-use crate::config::{load_config, save_config, DesktopConfig};
+use crate::config::{DesktopConfig, load_config, save_config};
 use crate::system_capsule::broker::{BrokerError, Capability};
 
 pub const ONBOARDING_VERSION: u16 = 1;

@@ -16,7 +16,7 @@ use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::config::{load_config, load_secrets, save_config, save_secrets, SecretStore};
+use crate::config::{SecretStore, load_config, load_secrets, save_config};
 use crate::settings::{
     patch_config_for_capsule, secrets_snapshot_from_store, settings_snapshot_from_config,
 };

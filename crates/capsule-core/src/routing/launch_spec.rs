@@ -44,32 +44,27 @@ pub fn derive_launch_spec(plan: &ManifestData) -> Result<LaunchSpec> {
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 
-    if !has_run_command {
-        if let Some(entrypoint) = plan
+    if !has_run_command
+        && let Some(entrypoint) = plan
             .execution_entrypoint()
             .filter(|value| !value.trim().is_empty())
-        {
-            let working_dir = resolve_launch_working_dir(plan, &entrypoint);
-            let required_lockfile = resolve_required_lockfile(
-                plan,
-                &working_dir,
-                language.as_deref(),
-                driver.as_deref(),
-            );
+    {
+        let working_dir = resolve_launch_working_dir(plan, &entrypoint);
+        let required_lockfile =
+            resolve_required_lockfile(plan, &working_dir, language.as_deref(), driver.as_deref());
 
-            return Ok(LaunchSpec {
-                working_dir,
-                command: entrypoint,
-                args: plan.targets_oci_cmd(),
-                env_vars,
-                required_lockfile,
-                runtime,
-                driver,
-                language,
-                port,
-                source: LaunchSpecSource::Entrypoint,
-            });
-        }
+        return Ok(LaunchSpec {
+            working_dir,
+            command: entrypoint,
+            args: plan.targets_oci_cmd(),
+            env_vars,
+            required_lockfile,
+            runtime,
+            driver,
+            language,
+            port,
+            source: LaunchSpecSource::Entrypoint,
+        });
     }
 
     // OCI containers with no explicit entrypoint/run_command use the image's
@@ -413,7 +408,7 @@ fn first_existing_path<const N: usize>(candidates: [PathBuf; N]) -> Option<PathB
 mod tests {
     use super::*;
 
-    use crate::router::{execution_descriptor_from_manifest_parts, ExecutionProfile, ManifestData};
+    use crate::router::{ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts};
 
     fn plan_from_manifest(tmp: &tempfile::TempDir, manifest: &str) -> ManifestData {
         let manifest_path = tmp.path().join("capsule.toml");

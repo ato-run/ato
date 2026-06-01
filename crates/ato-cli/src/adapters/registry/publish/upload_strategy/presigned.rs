@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -653,9 +653,15 @@ mod tests {
         let previous_home = std::env::var("HOME").ok();
         let previous_ato_home = std::env::var("ATO_HOME").ok();
         let previous_token = std::env::var("ATO_TOKEN").ok();
-        std::env::set_var("HOME", home.path());
-        std::env::set_var("ATO_HOME", &ato_home);
-        std::env::set_var("ATO_TOKEN", "test-session-token");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+        unsafe {
+            std::env::set_var("ATO_HOME", &ato_home);
+        }
+        unsafe {
+            std::env::set_var("ATO_TOKEN", "test-session-token");
+        }
 
         let key = write_test_signing_key(home.path());
         let did = key.did().expect("did");
@@ -720,19 +726,31 @@ mod tests {
         drop(runtime);
 
         if let Some(value) = previous_home {
-            std::env::set_var("HOME", value);
+            unsafe {
+                std::env::set_var("HOME", value);
+            }
         } else {
-            std::env::remove_var("HOME");
+            unsafe {
+                std::env::remove_var("HOME");
+            }
         }
         if let Some(value) = previous_token {
-            std::env::set_var("ATO_TOKEN", value);
+            unsafe {
+                std::env::set_var("ATO_TOKEN", value);
+            }
         } else {
-            std::env::remove_var("ATO_TOKEN");
+            unsafe {
+                std::env::remove_var("ATO_TOKEN");
+            }
         }
         if let Some(value) = previous_ato_home {
-            std::env::set_var("ATO_HOME", value);
+            unsafe {
+                std::env::set_var("ATO_HOME", value);
+            }
         } else {
-            std::env::remove_var("ATO_HOME");
+            unsafe {
+                std::env::remove_var("ATO_HOME");
+            }
         }
     }
 
@@ -745,9 +763,15 @@ mod tests {
         let previous_home = std::env::var("HOME").ok();
         let previous_ato_home = std::env::var("ATO_HOME").ok();
         let previous_token = std::env::var("ATO_TOKEN").ok();
-        std::env::set_var("HOME", home.path());
-        std::env::set_var("ATO_HOME", &ato_home);
-        std::env::set_var("ATO_TOKEN", "test-session-token");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+        unsafe {
+            std::env::set_var("ATO_HOME", &ato_home);
+        }
+        unsafe {
+            std::env::set_var("ATO_TOKEN", "test-session-token");
+        }
 
         let key = write_test_signing_key(home.path());
         let did = key.did().expect("did");
@@ -808,19 +832,31 @@ mod tests {
         drop(runtime);
 
         if let Some(value) = previous_home {
-            std::env::set_var("HOME", value);
+            unsafe {
+                std::env::set_var("HOME", value);
+            }
         } else {
-            std::env::remove_var("HOME");
+            unsafe {
+                std::env::remove_var("HOME");
+            }
         }
         if let Some(value) = previous_token {
-            std::env::set_var("ATO_TOKEN", value);
+            unsafe {
+                std::env::set_var("ATO_TOKEN", value);
+            }
         } else {
-            std::env::remove_var("ATO_TOKEN");
+            unsafe {
+                std::env::remove_var("ATO_TOKEN");
+            }
         }
         if let Some(value) = previous_ato_home {
-            std::env::set_var("ATO_HOME", value);
+            unsafe {
+                std::env::set_var("ATO_HOME", value);
+            }
         } else {
-            std::env::remove_var("ATO_HOME");
+            unsafe {
+                std::env::remove_var("ATO_HOME");
+            }
         }
     }
 }

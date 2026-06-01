@@ -4,8 +4,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use capsule_core::lockfile::{
-    parse_lockfile_text, resolve_existing_lockfile_path, verify_lockfile_manifest,
-    LockedInjectedData,
+    LockedInjectedData, parse_lockfile_text, resolve_existing_lockfile_path,
+    verify_lockfile_manifest,
 };
 
 pub(super) fn persist_lockfile_injected_data(

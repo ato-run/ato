@@ -407,79 +407,79 @@ fn external_capsule_dependencies(
     input: &LockDraftInput,
     manifest: Option<&ManifestView>,
 ) -> Result<Vec<LockDraftExternalDependency>, LockDraftError> {
-    if let Some(manifest) = manifest {
-        if let Some(targets) = manifest.raw.get("targets").and_then(toml::Value::as_table) {
-            let mut collected = Vec::new();
-            let mut seen = BTreeMap::<String, String>::new();
-            for (target_label, raw_target) in targets {
-                let Some(external_dependencies) = raw_target
-                    .get("external_dependencies")
-                    .and_then(toml::Value::as_array)
+    if let Some(manifest) = manifest
+        && let Some(targets) = manifest.raw.get("targets").and_then(toml::Value::as_table)
+    {
+        let mut collected = Vec::new();
+        let mut seen = BTreeMap::<String, String>::new();
+        for (target_label, raw_target) in targets {
+            let Some(external_dependencies) = raw_target
+                .get("external_dependencies")
+                .and_then(toml::Value::as_array)
+            else {
+                continue;
+            };
+
+            for raw_dependency in external_dependencies {
+                let Some(table) = raw_dependency.as_table() else {
+                    continue;
+                };
+                let Some(alias) = table
+                    .get("alias")
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
                 else {
                     continue;
                 };
-
-                for raw_dependency in external_dependencies {
-                    let Some(table) = raw_dependency.as_table() else {
-                        continue;
-                    };
-                    let Some(alias) = table
-                        .get("alias")
-                        .and_then(toml::Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    else {
-                        continue;
-                    };
-                    let Some(source) = table
-                        .get("source")
-                        .and_then(toml::Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    else {
-                        continue;
-                    };
-                    let source_type = table
-                        .get("source_type")
-                        .and_then(toml::Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("store");
-                    if let Some(existing) = seen.get(alias) {
-                        if existing != source {
-                            return Err(LockDraftError::ManifestParse(format!(
-                                "external dependency alias '{}' maps to multiple sources in target '{}'",
-                                alias, target_label
-                            )));
-                        }
-                        continue;
+                let Some(source) = table
+                    .get("source")
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
+                let source_type = table
+                    .get("source_type")
+                    .and_then(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("store");
+                if let Some(existing) = seen.get(alias) {
+                    if existing != source {
+                        return Err(LockDraftError::ManifestParse(format!(
+                            "external dependency alias '{}' maps to multiple sources in target '{}'",
+                            alias, target_label
+                        )));
                     }
-                    let injection_bindings = table
-                        .get("injection_bindings")
-                        .and_then(toml::Value::as_table)
-                        .map(|bindings| {
-                            bindings
-                                .iter()
-                                .filter_map(|(key, value)| {
-                                    value
-                                        .as_str()
-                                        .map(|value| (key.to_string(), value.trim().to_string()))
-                                })
-                                .collect::<BTreeMap<_, _>>()
-                        })
-                        .unwrap_or_default();
-                    seen.insert(alias.to_string(), source.to_string());
-                    collected.push(LockDraftExternalDependency {
-                        name: alias.to_string(),
-                        source: source.to_string(),
-                        source_type: source_type.to_string(),
-                        injection_bindings,
-                    });
+                    continue;
                 }
+                let injection_bindings = table
+                    .get("injection_bindings")
+                    .and_then(toml::Value::as_table)
+                    .map(|bindings| {
+                        bindings
+                            .iter()
+                            .filter_map(|(key, value)| {
+                                value
+                                    .as_str()
+                                    .map(|value| (key.to_string(), value.trim().to_string()))
+                            })
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                seen.insert(alias.to_string(), source.to_string());
+                collected.push(LockDraftExternalDependency {
+                    name: alias.to_string(),
+                    source: source.to_string(),
+                    source_type: source_type.to_string(),
+                    injection_bindings,
+                });
             }
-            collected.sort_by(|left, right| left.name.cmp(&right.name));
-            return Ok(collected);
         }
+        collected.sort_by(|left, right| left.name.cmp(&right.name));
+        return Ok(collected);
     }
 
     let mut dependencies = input.external_dependency_hints.clone();
@@ -688,13 +688,13 @@ fn parse_runtime_selector(
 ) -> (Option<String>, Option<String>) {
     let runtime = normalize_scalar(runtime);
     let driver = normalize_scalar(driver);
-    if let Some(runtime_value) = runtime.as_deref() {
-        if let Some((base_runtime, inferred_driver)) = runtime_value.split_once('/') {
-            return (
-                normalize_scalar(Some(base_runtime.to_string())),
-                driver.or_else(|| normalize_scalar(Some(inferred_driver.to_string()))),
-            );
-        }
+    if let Some(runtime_value) = runtime.as_deref()
+        && let Some((base_runtime, inferred_driver)) = runtime_value.split_once('/')
+    {
+        return (
+            normalize_scalar(Some(base_runtime.to_string())),
+            driver.or_else(|| normalize_scalar(Some(inferred_driver.to_string()))),
+        );
     }
     (runtime, driver)
 }
@@ -1177,10 +1177,12 @@ mod tests {
             draft.required_runtime_version.as_deref(),
             Some(DEFAULT_NODE_RUNTIME_VERSION)
         );
-        assert!(draft
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("runtime_version was inferred")));
+        assert!(
+            draft
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("runtime_version was inferred"))
+        );
     }
 
     #[test]

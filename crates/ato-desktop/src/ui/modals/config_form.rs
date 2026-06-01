@@ -35,8 +35,8 @@ use std::collections::HashMap;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, AnyElement, BoxShadow, Context, Entity, FontWeight, IntoElement,
-    MouseButton, Window,
+    AnyElement, BoxShadow, Context, Entity, FontWeight, IntoElement, MouseButton, Window, div,
+    hsla, point, px,
 };
 use gpui_component::input::{Input, InputState};
 
@@ -44,8 +44,8 @@ use capsule_wire::config::{ConfigField, ConfigKind};
 
 use crate::app::{CancelConfigForm, SaveConfigForm};
 use crate::state::PendingConfigRequest;
-use crate::ui::theme::Theme;
 use crate::ui::DesktopShell;
+use crate::ui::theme::Theme;
 
 /// Per-modal view state. One instance lives in `DesktopShell` for as
 /// long as `AppState::pending_config` is `Some`.

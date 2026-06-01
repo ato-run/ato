@@ -7,7 +7,7 @@ use capsule_core::execution_plan::error::{
     CleanupActionStatus, CleanupStatus, ManifestSuggestion,
 };
 
-use super::{from_anyhow, CliDiagnosticCode, CommandContext, JsonErrorEnvelopeV1};
+use super::{CliDiagnosticCode, CommandContext, JsonErrorEnvelopeV1, from_anyhow};
 
 fn assert_json_envelope_snapshot(name: &str, envelope: &JsonErrorEnvelopeV1) {
     let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -89,11 +89,13 @@ fn maps_managed_store_large_payload_override_policy_to_e212() {
     );
     let diagnostic = from_anyhow(&err, CommandContext::Publish);
     assert_eq!(diagnostic.code, CliDiagnosticCode::E212);
-    assert!(diagnostic
-        .hint
-        .as_deref()
-        .unwrap_or_default()
-        .contains("large payload override"));
+    assert!(
+        diagnostic
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("large payload override")
+    );
 }
 
 #[test]
@@ -131,21 +133,27 @@ fn maps_missing_distributable_artifact_to_e102_with_specific_message() {
     let diagnostic = from_anyhow(&err, CommandContext::Publish);
 
     assert_eq!(diagnostic.code, CliDiagnosticCode::E102);
-    assert!(diagnostic
-        .message
-        .contains("Native delivery build input is not a .app directory"));
-    assert!(diagnostic
-        .message
-        .contains("dist/mac-arm64/sample-project.app"));
+    assert!(
+        diagnostic
+            .message
+            .contains("Native delivery build input is not a .app directory")
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("dist/mac-arm64/sample-project.app")
+    );
     assert_eq!(
         diagnostic.field.as_deref(),
         Some("contract.delivery.artifact.path")
     );
-    assert!(diagnostic
-        .hint
-        .as_deref()
-        .unwrap_or_default()
-        .contains("配布可能な成果物が見つかりません"));
+    assert!(
+        diagnostic
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("配布可能な成果物が見つかりません")
+    );
 }
 
 #[test]
@@ -286,7 +294,8 @@ fn maps_missing_required_env_error_to_e103_with_schema() {
     });
 
     assert_eq!(
-        actual, expected,
+        actual,
+        expected,
         "E103 envelope wire contract drifted — desktop dynamic-config UI depends on this exact shape.\nactual: {}\nexpected: {}",
         serde_json::to_string_pretty(&actual).unwrap(),
         serde_json::to_string_pretty(&expected).unwrap()
@@ -329,36 +338,40 @@ fn maps_ingress_tls_bootstrap_required_to_e209() {
     );
     let diagnostic = from_anyhow(&err, CommandContext::Run);
     assert_eq!(diagnostic.code, CliDiagnosticCode::E209);
-    assert!(diagnostic
-        .hint
-        .as_deref()
-        .unwrap_or_default()
-        .contains("bootstrap-tls"));
+    assert!(
+        diagnostic
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bootstrap-tls")
+    );
 }
 
 #[test]
 fn preserves_execution_error_cleanup_and_manifest_metadata() {
-    let err = anyhow!(AtoExecutionError::execution_contract_invalid(
-        "services.main is required",
-        Some("services.main"),
-        Some("main"),
-    )
-    .with_classification(AtoErrorClassification::Manifest)
-    .with_cleanup(
-        CleanupStatus::Partial,
-        vec![CleanupActionRecord {
-            action: "remove_temp_dir".to_string(),
-            status: CleanupActionStatus::Failed,
-            detail: Some("permission denied".to_string()),
-        }],
-    )
-    .with_manifest_suggestion(ManifestSuggestion {
-        kind: "create_table".to_string(),
-        path: "services.main".to_string(),
-        operation: "create_table".to_string(),
-        value: None,
-        message: "Add a [services.main] table".to_string(),
-    }));
+    let err = anyhow!(
+        AtoExecutionError::execution_contract_invalid(
+            "services.main is required",
+            Some("services.main"),
+            Some("main"),
+        )
+        .with_classification(AtoErrorClassification::Manifest)
+        .with_cleanup(
+            CleanupStatus::Partial,
+            vec![CleanupActionRecord {
+                action: "remove_temp_dir".to_string(),
+                status: CleanupActionStatus::Failed,
+                detail: Some("permission denied".to_string()),
+            }],
+        )
+        .with_manifest_suggestion(ManifestSuggestion {
+            kind: "create_table".to_string(),
+            path: "services.main".to_string(),
+            operation: "create_table".to_string(),
+            value: None,
+            message: "Add a [services.main] table".to_string(),
+        })
+    );
 
     let diagnostic = from_anyhow(&err, CommandContext::Run);
     assert_eq!(diagnostic.classification, AtoErrorClassification::Manifest);
@@ -401,27 +414,29 @@ fn json_envelope_snapshot_provisioning_engine_missing() {
 
 #[test]
 fn json_envelope_snapshot_manifest_cleanup_enriched() {
-    let err = anyhow!(AtoExecutionError::execution_contract_invalid(
-        "services.main is required",
-        Some("services.main"),
-        Some("main"),
-    )
-    .with_classification(AtoErrorClassification::Manifest)
-    .with_cleanup(
-        CleanupStatus::Partial,
-        vec![CleanupActionRecord {
-            action: "remove_temp_dir".to_string(),
-            status: CleanupActionStatus::Failed,
-            detail: Some("permission denied".to_string()),
-        }],
-    )
-    .with_manifest_suggestion(ManifestSuggestion {
-        kind: "create_table".to_string(),
-        path: "services.main".to_string(),
-        operation: "create_table".to_string(),
-        value: None,
-        message: "Add a [services.main] table".to_string(),
-    }));
+    let err = anyhow!(
+        AtoExecutionError::execution_contract_invalid(
+            "services.main is required",
+            Some("services.main"),
+            Some("main"),
+        )
+        .with_classification(AtoErrorClassification::Manifest)
+        .with_cleanup(
+            CleanupStatus::Partial,
+            vec![CleanupActionRecord {
+                action: "remove_temp_dir".to_string(),
+                status: CleanupActionStatus::Failed,
+                detail: Some("permission denied".to_string()),
+            }],
+        )
+        .with_manifest_suggestion(ManifestSuggestion {
+            kind: "create_table".to_string(),
+            path: "services.main".to_string(),
+            operation: "create_table".to_string(),
+            value: None,
+            message: "Add a [services.main] table".to_string(),
+        })
+    );
     let diagnostic = from_anyhow(&err, CommandContext::Run);
     assert_json_envelope_snapshot("manifest_cleanup_enriched", &diagnostic.to_json_envelope());
 }
@@ -444,7 +459,9 @@ fn maps_unsafe_gate_missing_env_to_e301_not_e999() {
         "--dangerously-skip-permissions requires CAPSULE_ALLOW_UNSAFE=1",
         None,
         None,
-        Some("Set CAPSULE_ALLOW_UNSAFE=1 only if you intentionally want to bypass Ato permission and sandbox checks."),
+        Some(
+            "Set CAPSULE_ALLOW_UNSAFE=1 only if you intentionally want to bypass Ato permission and sandbox checks."
+        ),
     ));
     let diagnostic = from_anyhow(&err, CommandContext::Run);
     assert_eq!(

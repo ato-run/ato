@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::application::source_inference::{
-    execute_shared_engine, MaterializationMode, SourceEvidenceInput, SourceInferenceInput,
-    SourceInferenceResult,
+    MaterializationMode, SourceEvidenceInput, SourceInferenceInput, SourceInferenceResult,
+    execute_shared_engine,
 };
 use crate::application::workspace::init::{
     detect::detect_project,
-    recipe::{generate_manifest, project_info_from_detection, ManifestMeta},
+    recipe::{ManifestMeta, generate_manifest, project_info_from_detection},
 };
 use crate::build::native_delivery;
 use crate::cli::ProjectCommands;
@@ -345,16 +345,16 @@ fn selected_resolved_target(result: &SourceInferenceResult) -> Option<&Value> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if let Some(default_target) = default_target {
-        if let Some(target) = targets.iter().find(|target| {
+    if let Some(default_target) = default_target
+        && let Some(target) = targets.iter().find(|target| {
             target
                 .get("label")
                 .and_then(Value::as_str)
                 .map(|label| label == default_target)
                 .unwrap_or(false)
-        }) {
-            return Some(target);
-        }
+        })
+    {
+        return Some(target);
     }
     if targets.len() == 1 {
         targets.first()

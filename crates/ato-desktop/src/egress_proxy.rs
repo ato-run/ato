@@ -290,7 +290,7 @@ fn handle_connect(
 #[allow(clippy::too_many_arguments)]
 fn handle_absolute(
     mut client: TcpStream,
-    mut reader: BufReader<TcpStream>,
+    reader: BufReader<TcpStream>,
     method: &str,
     target: &str,
     _version: &str,

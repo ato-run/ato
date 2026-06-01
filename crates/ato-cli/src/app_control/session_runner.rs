@@ -23,8 +23,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ato_session_core::{
-    validate_materialized_launch_record, MaterializedLaunchRecord,
-    MaterializedLaunchValidationOutcome,
+    MaterializedLaunchRecord, MaterializedLaunchValidationOutcome,
+    validate_materialized_launch_record,
 };
 use capsule_core::launch_spec::LaunchSpec;
 use capsule_core::router::ManifestData;
@@ -45,9 +45,10 @@ use crate::reporters::CliReporter;
 use super::guest_contract::parse_guest_contract;
 use super::resolve::HandleResolution;
 use super::session::{
-    redirect_stdout_to_stderr, resolve_local_plan_for_session_start, resolve_session_launch_plan,
-    restore_stdout, start_guest_session, start_orchestration_session_in_process,
-    start_orchestration_session_supervisor, start_runtime_session, SessionInfo,
+    SessionInfo, redirect_stdout_to_stderr, resolve_local_plan_for_session_start,
+    resolve_session_launch_plan, restore_stdout, start_guest_session,
+    start_orchestration_session_in_process, start_orchestration_session_supervisor,
+    start_runtime_session,
 };
 
 /// Env var fence for the legacy opaque orchestration supervisor (#73 PR-C).
@@ -104,6 +105,7 @@ fn try_remote_build_output_projection(
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 enum SessionStartSource {
     Handle,
     MaterializedRecord(MaterializedLaunchRecord),
@@ -516,17 +518,18 @@ impl SessionStartPhaseRunner {
             return self.install_from_toml_path();
         }
 
-        if matches!(self.start_source, SessionStartSource::Handle) && self.attach_state.is_empty() {
-            if let Some(hit) = crate::application::warm_launch::try_registry_live_reuse_fast_path(
+        if matches!(self.start_source, SessionStartSource::Handle)
+            && self.attach_state.is_empty()
+            && let Some(hit) = crate::application::warm_launch::try_registry_live_reuse_fast_path(
                 &self.handle,
                 self.target_label.as_deref(),
-            )? {
-                self.install_reused = true;
-                self.pre_projection_spec = Some(hit.pre_projection_spec);
-                self._launch_lock = hit.launch_lock;
-                self.session_info = Some(super::session::session_info_from_stored(*hit.record));
-                return Ok(());
-            }
+            )?
+        {
+            self.install_reused = true;
+            self.pre_projection_spec = Some(hit.pre_projection_spec);
+            self._launch_lock = hit.launch_lock;
+            self.session_info = Some(super::session::session_info_from_stored(*hit.record));
+            return Ok(());
         }
 
         let resolution = super::resolve::build_resolution_for_session_start(
@@ -1132,28 +1135,24 @@ impl SessionStartPhaseRunner {
             }
         }
 
-        if fresh_spawn {
-            if let Some(run_config_hash) = self.expected_run_config_hash.as_deref() {
-                let materialized_record = info.to_materialized_launch_record(
-                    resolution,
-                    &plan.workspace_root,
-                    &launch_key,
-                    &launch_digest,
-                    run_config_hash,
+        if fresh_spawn && let Some(run_config_hash) = self.expected_run_config_hash.as_deref() {
+            let materialized_record = info.to_materialized_launch_record(
+                resolution,
+                &plan.workspace_root,
+                &launch_key,
+                &launch_digest,
+                run_config_hash,
+            );
+            if let Err(err) = crate::app_control::session::launch_cache_root().and_then(|root| {
+                crate::app_control::session::write_materialized_launch_record_atomic(
+                    &root,
+                    &materialized_record,
+                )
+            }) {
+                eprintln!(
+                    "ATO-WARN failed to persist materialized launch record for {}: {}",
+                    materialized_record.launch_key, err
                 );
-                if let Err(err) =
-                    crate::app_control::session::launch_cache_root().and_then(|root| {
-                        crate::app_control::session::write_materialized_launch_record_atomic(
-                            &root,
-                            &materialized_record,
-                        )
-                    })
-                {
-                    eprintln!(
-                        "ATO-WARN failed to persist materialized launch record for {}: {}",
-                        materialized_record.launch_key, err
-                    );
-                }
             }
         }
 

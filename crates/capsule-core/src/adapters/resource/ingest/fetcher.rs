@@ -123,15 +123,15 @@ fn normalize_hex(value: &str) -> String {
 mod tests {
     use std::fs;
     use std::net::SocketAddr;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use std::sync::Arc;
 
-    use axum::routing::get;
     use axum::Router;
+    use axum::routing::get;
     use tokio::net::TcpListener;
 
-    use super::{fetch_resource, FetcherConfig, ResourceFetchRequest};
+    use super::{FetcherConfig, ResourceFetchRequest, fetch_resource};
 
     async fn start_bytes_server(
         body: &'static [u8],

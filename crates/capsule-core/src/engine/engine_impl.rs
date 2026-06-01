@@ -25,48 +25,48 @@ pub fn discover_nacelle(req: EngineRequest) -> Result<PathBuf> {
     }
 
     // 2) Environment override
-    if let Ok(env_path) = std::env::var("NACELLE_PATH") {
-        if !env_path.trim().is_empty() {
-            return validate_engine_path(PathBuf::from(env_path));
-        }
+    if let Ok(env_path) = std::env::var("NACELLE_PATH")
+        && !env_path.trim().is_empty()
+    {
+        return validate_engine_path(PathBuf::from(env_path));
     }
 
     // 3) Project manifest (capsule.toml)
-    if let Some(compat_input) = req.compat_input {
-        if let Some(path) = resolve_from_compat_input(&compat_input)? {
-            return validate_engine_path(path);
-        }
+    if let Some(compat_input) = req.compat_input
+        && let Some(path) = resolve_from_compat_input(&compat_input)?
+    {
+        return validate_engine_path(path);
     }
 
     // 4) Project manifest (capsule.toml)
-    if let Some(manifest_path) = req.manifest_path {
-        if let Some(path) = resolve_from_manifest(&manifest_path)? {
-            return validate_engine_path(path);
-        }
+    if let Some(manifest_path) = req.manifest_path
+        && let Some(path) = resolve_from_manifest(&manifest_path)?
+    {
+        return validate_engine_path(path);
     }
 
     // 5) User registry (~/.ato/config.toml)
     {
         let cfg = config::load_config().map_err(|e| CapsuleError::Config(e.to_string()))?;
-        if let Some(default_name) = cfg.default_engine.as_deref() {
-            if let Some(entry) = cfg.engines.get(default_name) {
-                return validate_engine_path(PathBuf::from(&entry.path)).map_err(|e| {
-                    CapsuleError::Config(format!(
-                        "Default engine '{}' is not usable (path={}): {}",
-                        default_name, entry.path, e
-                    ))
-                });
-            }
+        if let Some(default_name) = cfg.default_engine.as_deref()
+            && let Some(entry) = cfg.engines.get(default_name)
+        {
+            return validate_engine_path(PathBuf::from(&entry.path)).map_err(|e| {
+                CapsuleError::Config(format!(
+                    "Default engine '{}' is not usable (path={}): {}",
+                    default_name, entry.path, e
+                ))
+            });
         }
     }
 
     // 6) Portable mode: look next to capsule binary
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("nacelle");
-            if candidate.exists() {
-                return validate_engine_path(candidate);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("nacelle");
+        if candidate.exists() {
+            return validate_engine_path(candidate);
         }
     }
 
@@ -312,10 +312,10 @@ pub fn run_internal_streaming(engine: &Path, subcommand: &str, payload: &Value) 
     ctrlc::set_handler(move || {
         #[cfg(unix)]
         {
-            if let Ok(mut guard) = child_slot_for_handler.lock() {
-                if let Some(ref mut c) = *guard {
-                    let _ = unsafe { libc::kill(c.id() as i32, libc::SIGINT) };
-                }
+            if let Ok(mut guard) = child_slot_for_handler.lock()
+                && let Some(ref mut c) = *guard
+            {
+                let _ = unsafe { libc::kill(c.id() as i32, libc::SIGINT) };
             }
         }
     })
@@ -351,7 +351,9 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            unsafe {
+                std::env::set_var(key, value);
+            }
             Self { key, previous }
         }
     }
@@ -359,9 +361,13 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
             } else {
-                std::env::remove_var(self.key);
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
             }
         }
     }

@@ -261,16 +261,15 @@ pub async fn ensure_runtime_tool(
     deps: &ToolDeps,
     reporter: Arc<dyn CapsuleReporter + 'static>,
 ) -> Result<ToolHandle> {
-    if should_probe_host_runtime_tool(version_override) {
-        if let Ok(found) = which::which(spec.name) {
-            if let Some(dir) = found.parent() {
-                return Ok(ToolHandle {
-                    bin_dir: dir.to_path_buf(),
-                    version: String::new(),
-                    binary_sha256: String::new(),
-                });
-            }
-        }
+    if should_probe_host_runtime_tool(version_override)
+        && let Ok(found) = which::which(spec.name)
+        && let Some(dir) = found.parent()
+    {
+        return Ok(ToolHandle {
+            bin_dir: dir.to_path_buf(),
+            version: String::new(),
+            binary_sha256: String::new(),
+        });
     }
 
     let version = version_override.unwrap_or(spec.default_version).to_string();
@@ -598,7 +597,7 @@ fn host_triple(style: TripleStyle) -> Result<String> {
                 _ => {
                     return Err(CapsuleError::Pack(
                         "Unsupported platform for Rust triple".to_string(),
-                    ))
+                    ));
                 }
             };
             Ok(triple.to_string())
@@ -619,7 +618,7 @@ fn host_triple(style: TripleStyle) -> Result<String> {
                 _ => {
                     return Err(CapsuleError::Pack(
                         "Unsupported platform for Bun triple".to_string(),
-                    ))
+                    ));
                 }
             };
             Ok(triple.to_string())
@@ -748,8 +747,8 @@ mod tests {
     fn scoped_env(key: &'static str, value: Option<&str>) -> EnvGuard {
         let previous = std::env::var_os(key);
         match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
         }
         EnvGuard { key, previous }
     }
@@ -757,8 +756,8 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }
@@ -998,17 +997,21 @@ mod tests {
             &build_npm_tgz("package/bin/pnpm.cjs"),
         )
         .expect("install pnpm");
-        assert!(pnpm_handle
-            .bin_dir
-            .join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" })
-            .exists());
-        assert!(ato_home
-            .path()
-            .join("toolchains/tools/pnpm")
-            .join(&pnpm_version)
-            .join("extracted")
-            .join("package/bin/pnpm.cjs")
-            .is_file());
+        assert!(
+            pnpm_handle
+                .bin_dir
+                .join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" })
+                .exists()
+        );
+        assert!(
+            ato_home
+                .path()
+                .join("toolchains/tools/pnpm")
+                .join(&pnpm_version)
+                .join("extracted")
+                .join("package/bin/pnpm.cjs")
+                .is_file()
+        );
 
         let yarn_version = unique_version("yarn");
         let yarn_handle = install_runtime_tool_archive(
@@ -1020,17 +1023,21 @@ mod tests {
             &build_npm_tgz("package/bin/yarn.js"),
         )
         .expect("install yarn");
-        assert!(yarn_handle
-            .bin_dir
-            .join(if cfg!(windows) { "yarn.cmd" } else { "yarn" })
-            .exists());
-        assert!(ato_home
-            .path()
-            .join("toolchains/tools/yarn")
-            .join(&yarn_version)
-            .join("extracted")
-            .join("package/bin/yarn.js")
-            .is_file());
+        assert!(
+            yarn_handle
+                .bin_dir
+                .join(if cfg!(windows) { "yarn.cmd" } else { "yarn" })
+                .exists()
+        );
+        assert!(
+            ato_home
+                .path()
+                .join("toolchains/tools/yarn")
+                .join(&yarn_version)
+                .join("extracted")
+                .join("package/bin/yarn.js")
+                .is_file()
+        );
 
         let bun_version = unique_version("bun");
         let bun_handle = install_runtime_tool_archive(
@@ -1040,33 +1047,41 @@ mod tests {
             &build_bun_zip(),
         )
         .expect("install bun");
-        assert!(bun_handle
-            .bin_dir
-            .join(if cfg!(windows) { "bun.cmd" } else { "bun" })
-            .exists());
-        assert!(ato_home
-            .path()
-            .join("toolchains/tools/bun")
-            .join(&bun_version)
-            .join("extracted")
-            .join(resolved_layout_path(&BUN).unwrap())
-            .is_file());
+        assert!(
+            bun_handle
+                .bin_dir
+                .join(if cfg!(windows) { "bun.cmd" } else { "bun" })
+                .exists()
+        );
+        assert!(
+            ato_home
+                .path()
+                .join("toolchains/tools/bun")
+                .join(&bun_version)
+                .join("extracted")
+                .join(resolved_layout_path(&BUN).unwrap())
+                .is_file()
+        );
 
         let uv_version = unique_version("uv");
         let uv_handle =
             install_runtime_tool_archive(&UV, &uv_version, &ToolDeps::default(), &build_uv_tgz())
                 .expect("install uv");
-        assert!(uv_handle
-            .bin_dir
-            .join(if cfg!(windows) { "uv.cmd" } else { "uv" })
-            .exists());
-        assert!(ato_home
-            .path()
-            .join("toolchains/tools/uv")
-            .join(&uv_version)
-            .join("extracted")
-            .join("uv")
-            .is_file());
+        assert!(
+            uv_handle
+                .bin_dir
+                .join(if cfg!(windows) { "uv.cmd" } else { "uv" })
+                .exists()
+        );
+        assert!(
+            ato_home
+                .path()
+                .join("toolchains/tools/uv")
+                .join(&uv_version)
+                .join("extracted")
+                .join("uv")
+                .is_file()
+        );
     }
 
     #[test]

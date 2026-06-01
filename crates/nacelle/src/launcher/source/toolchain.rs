@@ -68,10 +68,10 @@ impl ToolchainManager {
         {
             let cache = self.cache.lock().unwrap();
             if let Some(cached) = cache.get(language) {
-                if let Some(ref info) = cached {
-                    if self.version_matches(&info.version, version_constraint) {
-                        return Some(info.clone());
-                    }
+                if let Some(info) = cached
+                    && self.version_matches(&info.version, version_constraint)
+                {
+                    return Some(info.clone());
                 }
                 // Cached as not found
                 if cached.is_none() {
@@ -123,17 +123,17 @@ impl ToolchainManager {
         for binary in binaries {
             if let Ok(path) = which::which(binary) {
                 // Try to get version
-                if let Ok(output) = Command::new(&path).args(&version_args).output() {
-                    if output.status.success() {
-                        let version_output = String::from_utf8_lossy(&output.stdout);
-                        if let Some(version) = self.parse_version(language, &version_output) {
-                            debug!("Found {} {} at {:?}", language, version, path);
-                            return Some(ToolchainInfo {
-                                language: language.to_string(),
-                                version,
-                                path,
-                            });
-                        }
+                if let Ok(output) = Command::new(&path).args(&version_args).output()
+                    && output.status.success()
+                {
+                    let version_output = String::from_utf8_lossy(&output.stdout);
+                    if let Some(version) = self.parse_version(language, &version_output) {
+                        debug!("Found {} {} at {:?}", language, version, path);
+                        return Some(ToolchainInfo {
+                            language: language.to_string(),
+                            version,
+                            path,
+                        });
                     }
                 }
             }
@@ -744,12 +744,12 @@ impl RuntimeFetcher {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Some(name) = out_path.file_name().and_then(|s| s.to_str()) {
-                    if name == "node" || name == "deno" || name == "bun" {
-                        let mut perms = fs::metadata(&out_path)?.permissions();
-                        perms.set_mode(0o755);
-                        fs::set_permissions(&out_path, perms)?;
-                    }
+                if let Some(name) = out_path.file_name().and_then(|s| s.to_str())
+                    && (name == "node" || name == "deno" || name == "bun")
+                {
+                    let mut perms = fs::metadata(&out_path)?.permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&out_path, perms)?;
                 }
             }
         }
@@ -775,10 +775,10 @@ impl RuntimeFetcher {
                     }
                     continue;
                 }
-                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                    if candidates.iter().any(|c| c.eq_ignore_ascii_case(name)) {
-                        return Ok(Some(path));
-                    }
+                if let Some(name) = path.file_name().and_then(|s| s.to_str())
+                    && candidates.iter().any(|c| c.eq_ignore_ascii_case(name))
+                {
+                    return Ok(Some(path));
                 }
             }
             Ok(None)

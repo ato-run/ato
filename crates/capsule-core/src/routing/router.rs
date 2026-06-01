@@ -908,6 +908,7 @@ impl ExecutionDescriptor {
 
     /// Resolve a command value from a target-level field, handling both
     /// string and object (table) forms.
+    #[allow(dead_code)]
     fn resolve_target_field(&self, field: &str) -> Option<String> {
         let target = self.manifest.get("targets")?.get(&self.selected_target)?;
         let value = target.get(field)?;
@@ -936,6 +937,7 @@ impl ExecutionDescriptor {
 
     /// Resolve a command value from the manifest TOML, handling both
     /// string and object (table) forms.
+    #[allow(dead_code)]
     fn resolve_command_string(&self, path: &[&str]) -> Option<String> {
         let mut current = &self.manifest;
         for key in path {
@@ -983,17 +985,13 @@ impl ExecutionDescriptor {
 
         let mut out = Vec::new();
         for value in pref {
-            if let Some(name) = value.as_str() {
-                if let Some(kind) = parse_runtime_kind(name) {
-                    out.push(kind);
-                }
+            if let Some(name) = value.as_str()
+                && let Some(kind) = parse_runtime_kind(name)
+            {
+                out.push(kind);
             }
         }
-        if out.is_empty() {
-            None
-        } else {
-            Some(out)
-        }
+        if out.is_empty() { None } else { Some(out) }
     }
 
     pub fn targets_oci_image(&self) -> Option<String> {
@@ -1133,10 +1131,10 @@ impl ExecutionDescriptor {
     }
 
     pub fn target_cmd(&self, target_label: &str) -> Vec<String> {
-        if let Some(runtime) = self.runtime_for_target(target_label) {
-            if !runtime.cmd.is_empty() {
-                return runtime.cmd.clone();
-            }
+        if let Some(runtime) = self.runtime_for_target(target_label)
+            && !runtime.cmd.is_empty()
+        {
+            return runtime.cmd.clone();
         }
         if let Some(values) = self.compat_array(&["targets", target_label, "cmd"]) {
             return array_to_vec(&values);
@@ -1146,14 +1144,13 @@ impl ExecutionDescriptor {
             .target_runtime(target_label)
             .map(|runtime| runtime.eq_ignore_ascii_case("oci"))
             .unwrap_or(false);
-        if is_oci {
-            if let Some(run_command) = self
+        if is_oci
+            && let Some(run_command) = self
                 .target_run_command(target_label)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
-            {
-                return vec!["sh".to_string(), "-lc".to_string(), run_command];
-            }
+        {
+            return vec!["sh".to_string(), "-lc".to_string(), run_command];
         }
 
         Vec::new()
@@ -1171,10 +1168,10 @@ impl ExecutionDescriptor {
     }
 
     pub fn target_required_envs(&self, target_label: &str) -> Vec<String> {
-        if let Some(runtime) = self.runtime_for_target(target_label) {
-            if !runtime.required_env.is_empty() {
-                return runtime.required_env.clone();
-            }
+        if let Some(runtime) = self.runtime_for_target(target_label)
+            && !runtime.required_env.is_empty()
+        {
+            return runtime.required_env.clone();
         }
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
@@ -1411,7 +1408,7 @@ fn array_to_vec(values: &[toml::Value]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        route_manifest, route_manifest_with_state_overrides, CompatManifestBridge, ExecutionProfile,
+        CompatManifestBridge, ExecutionProfile, route_manifest, route_manifest_with_state_overrides,
     };
     use crate::ato_lock::AtoLock;
     use crate::lock_runtime::resolve_lock_runtime_model;
@@ -1783,9 +1780,10 @@ target = "/var/lib/app"
             .plan
             .resolve_services()
             .expect_err("missing bind must fail");
-        assert!(err
-            .to_string()
-            .contains("requires an explicit persistent binding"));
+        assert!(
+            err.to_string()
+                .contains("requires an explicit persistent binding")
+        );
     }
 
     #[test]

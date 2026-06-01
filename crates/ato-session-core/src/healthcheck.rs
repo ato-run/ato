@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Returns `Ok(true)` when `url` answers HTTP 200 within `timeout`.
 ///

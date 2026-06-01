@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, hsla, px, Div, FontWeight};
+use gpui::{Div, FontWeight, div, hsla, px};
 use gpui_component::scroll::ScrollableElement;
 
 use crate::state::{AppState, ConsoleLevel, ConsoleLogEntry, NetworkLogEntry};
@@ -94,8 +94,10 @@ fn render_console_section(state: &AppState, theme: &Theme) -> Div {
                 .flex_col()
                 .gap_1()
                 .children(if logs.is_empty() {
-                    vec![render_empty_placeholder("No console output yet.", theme)
-                        .into_any_element()]
+                    vec![
+                        render_empty_placeholder("No console output yet.", theme)
+                            .into_any_element(),
+                    ]
                 } else {
                     logs.iter()
                         .rev()
@@ -218,8 +220,10 @@ fn render_network_section(state: &AppState, theme: &Theme) -> Div {
                 .flex_col()
                 .gap_1()
                 .children(if logs.is_empty() {
-                    vec![render_empty_placeholder("No network requests yet.", theme)
-                        .into_any_element()]
+                    vec![
+                        render_empty_placeholder("No network requests yet.", theme)
+                            .into_any_element(),
+                    ]
                 } else {
                     logs.iter()
                         .rev()
@@ -378,11 +382,13 @@ fn render_application_section(state: &AppState, theme: &Theme) -> Div {
                             .into_any_element(),
                     ]
                 } else {
-                    vec![render_empty_placeholder(
-                        "Focus a capsule tab to see application info.",
-                        theme,
-                    )
-                    .into_any_element()]
+                    vec![
+                        render_empty_placeholder(
+                            "Focus a capsule tab to see application info.",
+                            theme,
+                        )
+                        .into_any_element(),
+                    ]
                 }),
         )
 }

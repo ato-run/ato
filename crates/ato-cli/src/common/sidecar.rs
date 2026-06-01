@@ -5,9 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use capsule_core::{
-    discover_sidecar, spawn_sidecar, wait_for_ready, SidecarBaseConfig, SidecarRequest,
-    SidecarSpawnConfig, TsnetClient, TsnetConfig, TsnetEndpoint, TsnetHandle, TsnetState,
-    TsnetWaitConfig,
+    SidecarBaseConfig, SidecarRequest, SidecarSpawnConfig, TsnetClient, TsnetConfig, TsnetEndpoint,
+    TsnetHandle, TsnetState, TsnetWaitConfig, discover_sidecar, spawn_sidecar, wait_for_ready,
 };
 
 const ENV_CONTROL_URL: &str = "ATO_TSNET_CONTROL_URL";
@@ -70,7 +69,11 @@ pub fn maybe_start_sidecar() -> Result<Option<SidecarHandle>> {
         anyhow::bail!("sidecar started without socks_port");
     }
 
-    std::env::set_var(ENV_SOCKS_PORT, resolved_port.to_string());
+    unsafe {
+        unsafe {
+            std::env::set_var(ENV_SOCKS_PORT, resolved_port.to_string());
+        }
+    }
 
     Ok(Some(SidecarHandle {
         endpoint,
@@ -90,10 +93,10 @@ impl SidecarHandle {
         let runtime = tokio::runtime::Runtime::new()?;
         let _ = runtime.block_on(client.stop());
 
-        if let Some(child) = self.child.as_mut() {
-            if child.try_wait()?.is_none() {
-                let _ = child.kill();
-            }
+        if let Some(child) = self.child.as_mut()
+            && child.try_wait()?.is_none()
+        {
+            let _ = child.kill();
         }
         Ok(())
     }
@@ -152,7 +155,9 @@ fn resolve_endpoint() -> Result<TsnetEndpoint> {
             _ => {
                 let path =
                     std::env::temp_dir().join(format!("ato-tsnetd-{}.sock", std::process::id()));
-                std::env::set_var(ENV_GRPC_SOCKET, &path);
+                unsafe {
+                    std::env::set_var(ENV_GRPC_SOCKET, &path);
+                }
                 path
             }
         };
@@ -165,7 +170,9 @@ fn resolve_endpoint() -> Result<TsnetEndpoint> {
             Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
             _ => {
                 let pipe = format!("\\\\.\\pipe\\ato-tsnetd-{}", std::process::id());
-                std::env::set_var(ENV_GRPC_PIPE, &pipe);
+                unsafe {
+                    std::env::set_var(ENV_GRPC_PIPE, &pipe);
+                }
                 pipe
             }
         };

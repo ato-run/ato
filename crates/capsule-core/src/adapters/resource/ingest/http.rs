@@ -1,7 +1,7 @@
 use crate::error::{CapsuleError, Result};
 use crate::security;
-use reqwest::redirect::Policy;
 use reqwest::StatusCode;
+use reqwest::redirect::Policy;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;

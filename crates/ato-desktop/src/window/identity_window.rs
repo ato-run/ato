@@ -23,11 +23,11 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, App, Bounds, Context, IntoElement, Pixels, Render, Size, WindowBounds,
-    WindowDecorations, WindowOptions,
+    App, Bounds, Context, IntoElement, Pixels, Render, Size, WindowBounds, WindowDecorations,
+    WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 

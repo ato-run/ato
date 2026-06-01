@@ -6,14 +6,14 @@
 //! They test permission enforcement, payload read/write, context operations, and WASM execution.
 
 use assert_cmd::Command;
-use base64::{engine::general_purpose, Engine as _};
-use serde_json::{json, Value};
+use base64::{Engine as _, engine::general_purpose};
+use serde_json::{Value, json};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use wat::parse_str as wat_parse;
-use zip::{write::FileOptions, ZipArchive, ZipWriter};
+use zip::{ZipArchive, ZipWriter, write::FileOptions};
 
 const GUEST_PROTOCOL_VERSION: &str = "guest.v1";
 

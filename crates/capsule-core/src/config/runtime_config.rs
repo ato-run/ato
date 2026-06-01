@@ -318,7 +318,7 @@ fn sort_json_object_keys(value: &mut serde_json::Value) {
 mod tests {
     use super::*;
     use crate::ato_lock::AtoLock;
-    use crate::lock_runtime::{resolve_lock_runtime_model, LockCompilerOverlay};
+    use crate::lock_runtime::{LockCompilerOverlay, resolve_lock_runtime_model};
     use serde_json::json;
     use std::collections::HashMap;
     use tempfile::tempdir;

@@ -375,22 +375,20 @@ fn apply_v03_readiness_probe(target_table: &mut Table, readiness_probe: toml::Va
                 .and_then(toml::Value::as_str)
                 .map(|value| value.eq_ignore_ascii_case("http"))
                 .unwrap_or(false)
-            {
-                if let Some(target) = probe_table
+                && let Some(target) = probe_table
                     .get("target")
                     .and_then(toml::Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                {
-                    normalized_probe.insert(
-                        "http_get".to_string(),
-                        toml::Value::String(target.to_string()),
-                    );
-                    target_table.insert(
-                        "health_check".to_string(),
-                        toml::Value::String(target.to_string()),
-                    );
-                }
+            {
+                normalized_probe.insert(
+                    "http_get".to_string(),
+                    toml::Value::String(target.to_string()),
+                );
+                target_table.insert(
+                    "health_check".to_string(),
+                    toml::Value::String(target.to_string()),
+                );
             }
             if let Some(tcp_connect) = probe_table
                 .get("tcp_connect")
@@ -918,18 +916,16 @@ fn build_v03_workspace_context(
         context
             .package_dirs_by_label
             .insert(label.clone(), package_dir.clone());
-        if !relative.is_empty() {
-            if let Some(existing) = context
+        if !relative.is_empty()
+            && let Some(existing) = context
                 .labels_by_relative_path
                 .insert(relative.clone(), label.clone())
-            {
-                if existing != *label {
-                    return Err(CapsuleError::ParseError(format!(
-                        "schema_version=0.3 workspace path '{}' maps to both '{}' and '{}'",
-                        relative, existing, label
-                    )));
-                }
-            }
+            && existing != *label
+        {
+            return Err(CapsuleError::ParseError(format!(
+                "schema_version=0.3 workspace path '{}' maps to both '{}' and '{}'",
+                relative, existing, label
+            )));
         }
     }
 
