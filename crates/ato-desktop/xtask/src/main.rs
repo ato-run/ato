@@ -224,7 +224,7 @@ fn print_help() {
            msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
            appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
          Targets:\n  \
-            darwin-arm64 (default), darwin-x86_64, windows-x86_64, linux-x86_64, linux-arm64\n\n\
+            {targets} (default: {default})\n\n\
          Helper source (bundled private `ato` + `nacelle`):\n  \
             - local   (default) build ato + nacelle from the workspace\n  \
             - release           consume prebuilt cargo-dist artifacts from\n                     \
@@ -237,7 +237,9 @@ fn print_help() {
          macOS code-signing modes (resolved at runtime):\n  \
             - if MAC_DEVELOPER_ID_NAME is set: real Developer ID (hardened runtime + entitlements)\n  \
             - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n\n\
-         Windows: signtool integration is scaffolded but env-gated; v0.5 ships unsigned (L10).\n"
+         Windows: signtool integration is scaffolded but env-gated; v0.5 ships unsigned (L10).\n",
+        targets = BundleTarget::help_list(),
+        default = BundleTarget::DEFAULT.as_str(),
     );
 }
 
