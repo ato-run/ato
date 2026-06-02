@@ -1,18 +1,18 @@
 import React from 'react'
-import { ShieldCheck, Box, Cpu } from 'lucide-react'
+import { ShieldCheck, Box, Hexagon, FileCode, Container } from 'lucide-react'
 
-// Runtime safety: two default-on, opt-out toggles. Both stay enabled unless
-// the user explicitly unchecks them. State is owned by App so the keyboard
-// "finish" path and the button submit the same values.
+// Runtime Setup (issue #420 revision): instead of scanning host devices, Ato
+// checks the *runtime tools* recipes need and installs Ato-managed language
+// runtimes when required. These toggles are default-on, opt-out preferences.
+// State is owned by App so the keyboard "finish" path and the button submit the
+// same values.
 function ToggleCard({ checked, onToggle, icon: Icon, title, children }) {
   return (
     <button
       type="button"
       onClick={onToggle}
       className={`w-full text-left rounded-[20px] border p-4 flex gap-3 items-start transition-all ${
-        checked
-          ? 'bg-[#F5F3FF] border-[#DDD6FE]'
-          : 'bg-white border-slate-200'
+        checked ? 'bg-[#F5F3FF] border-[#DDD6FE]' : 'bg-white border-slate-200'
       }`}
     >
       <span
@@ -42,8 +42,12 @@ export default function Step5({
   onFinish,
   podmanEnabled,
   setPodmanEnabled,
-  hostDetectionEnabled,
-  setHostDetectionEnabled,
+  nodeInstallEnabled,
+  setNodeInstallEnabled,
+  uvInstallEnabled,
+  setUvInstallEnabled,
+  pythonInstallEnabled,
+  setPythonInstallEnabled,
 }) {
   return (
     <div className="flex flex-col h-full p-8">
@@ -53,35 +57,64 @@ export default function Step5({
         <div className="flex items-center gap-2 mb-2">
           <ShieldCheck className="text-[#8B5CF6]" size={28} strokeWidth={2} />
           <h1 className="text-[36px] leading-tight font-extrabold text-[#0F172A] tracking-tight">
-            Runtime safety
+            Runtime Setup
           </h1>
         </div>
 
-        <p className="text-[16px] text-slate-500 mb-6 pr-4 leading-relaxed">
-          Ato can check your local machine before launching recipes.
-          These are on by default — you can change them later in Settings.
+        <p className="text-[15px] text-slate-500 mb-5 pr-4 leading-relaxed">
+          Ato checks the tools a recipe needs to run on this machine, and can
+          install its own managed copies of the language runtimes so launches are
+          reproducible. These are on by default — change them later in Settings.
         </p>
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3">
+        <p className="text-[12px] font-bold tracking-widest text-slate-400 uppercase">
+          Container runtime
+        </p>
         <ToggleCard
           checked={podmanEnabled}
           onToggle={() => setPodmanEnabled((v) => !v)}
-          icon={Box}
-          title="Podman をコンテナ実行に使用する"
+          icon={Container}
+          title="Use Podman for containers"
         >
-          OCI recipe が Podman を必要とする場合に利用します。後から Settings で無効化できます。
+          Lets Ato use Podman as a container engine when a recipe needs one. Ato
+          does not install Podman or Docker Desktop automatically — if neither is
+          available, Ato shows setup instructions. Turn this off to keep Ato away
+          from Podman entirely.
+        </ToggleCard>
+
+        <p className="mt-2 text-[12px] font-bold tracking-widest text-slate-400 uppercase">
+          Ato-managed language runtimes
+        </p>
+        <ToggleCard
+          checked={nodeInstallEnabled}
+          onToggle={() => setNodeInstallEnabled((v) => !v)}
+          icon={Hexagon}
+          title="Install Ato-managed Node.js when needed"
+        >
+          Installs an Ato-supported Node.js into Ato's toolchain cache, instead of
+          relying on a system Node, so recipes run the same on every machine.
         </ToggleCard>
 
         <ToggleCard
-          checked={hostDetectionEnabled}
-          onToggle={() => setHostDetectionEnabled((v) => !v)}
-          icon={Cpu}
-          title="ホストデバイス検出を許可する"
+          checked={uvInstallEnabled}
+          onToggle={() => setUvInstallEnabled((v) => !v)}
+          icon={Box}
+          title="Install Ato-managed uv when needed"
         >
-          GPU など追加のホストデバイスをローカルで検出し、起動前の互換性チェックに使います。
-          OS / architecture など実行に必須の情報は、この設定に関わらず常に検出します。
-          検出結果は明示的な同意なしに外部送信しません。
+          Installs an Ato-supported uv into Ato's toolchain cache for Python
+          recipes that build with uv.
+        </ToggleCard>
+
+        <ToggleCard
+          checked={pythonInstallEnabled}
+          onToggle={() => setPythonInstallEnabled((v) => !v)}
+          icon={FileCode}
+          title="Install Ato-managed Python when needed"
+        >
+          Installs an Ato-supported Python into Ato's toolchain cache for recipes
+          that need it.
         </ToggleCard>
       </div>
 
