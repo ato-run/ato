@@ -827,6 +827,7 @@ pub(crate) async fn resolve_run_target_or_install(
     // would fail with a confusing E999.  Emit a helpful typed error instead.
     if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir()
         && expanded_local.starts_with(&ato_home)
+        && !is_import_preview_run_target(&expanded_local, &ato_home)
     {
         let capsule_name = expanded_local
             .file_name()
@@ -1464,6 +1465,12 @@ pub(crate) async fn resolve_run_target_or_install(
         transient_workspace_root: None,
         community_submit_context: None,
     })
+}
+
+fn is_import_preview_run_target(path: &Path, ato_home: &Path) -> bool {
+    let has_import_marker = std::env::var_os("ATO_IMPORT_PROBE_ID").is_some()
+        || std::env::var_os("ATO_IMPORT_SESSION_ID").is_some();
+    has_import_marker && path.starts_with(ato_home.join("tmp").join("import"))
 }
 
 fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
@@ -3334,5 +3341,44 @@ target = "app"
             "hint should suggest cp workaround: {:?}",
             exe_err.hint
         );
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn resolve_run_target_allows_import_preview_workspace_under_ato_home() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let import_shadow = ato_home
+            .path()
+            .join("tmp")
+            .join("import")
+            .join("demo")
+            .join("shadow");
+        std::fs::create_dir_all(&import_shadow).expect("create import shadow path");
+        std::fs::write(
+            import_shadow.join("capsule.toml"),
+            "schema_version = \"0.3\"\nname = \"demo\"\nversion = \"0.1.0\"\ntype = \"app\"\n",
+        )
+        .expect("write manifest");
+
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", ato_home.path());
+        let _import_guard = EnvVarGuard::set_value("ATO_IMPORT_PROBE_ID", "probe-demo");
+
+        let reporter = Arc::new(reporters::CliReporter::new(false));
+        let resolved = resolve_run_target_or_install(
+            import_shadow.clone(),
+            true,
+            ProviderToolchain::Auto,
+            None,
+            None,
+            false,
+            None,
+            false,
+            None,
+            reporter,
+        )
+        .await
+        .expect("import preview workspace under ATO_HOME/tmp/import must be runnable");
+
+        assert_eq!(resolved.path, import_shadow);
     }
 }
