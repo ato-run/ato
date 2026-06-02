@@ -294,12 +294,27 @@ pub async fn ensure_runtime_tool(
     let shim_path = shim_dir.join(&shim_filename);
 
     if shim_path.exists() {
-        let cached_sha = fs::read_to_string(&sha_path).unwrap_or_default();
-        return Ok(ToolHandle {
-            bin_dir: shim_dir,
-            version,
-            binary_sha256: cached_sha.trim().to_string(),
-        });
+        match resolve_tool_target(spec, &extracted_dir) {
+            Ok(_) => {
+                let cached_sha = fs::read_to_string(&sha_path).unwrap_or_default();
+                return Ok(ToolHandle {
+                    bin_dir: shim_dir,
+                    version,
+                    binary_sha256: cached_sha.trim().to_string(),
+                });
+            }
+            Err(err) => {
+                fs::remove_dir_all(&extracted_dir).ok();
+                fs::remove_dir_all(&shim_dir).ok();
+                fs::remove_file(&sha_path).ok();
+                tracing::warn!(
+                    tool = spec.name,
+                    version = %version,
+                    error = %err,
+                    "discarding incomplete cached runtime tool"
+                );
+            }
+        }
     }
 
     fs::create_dir_all(&tools_root).map_err(|e| {
@@ -309,6 +324,24 @@ pub async fn ensure_runtime_tool(
             e
         ))
     })?;
+    if extracted_dir.exists() {
+        fs::remove_dir_all(&extracted_dir).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to reset tool extract dir {}: {}",
+                extracted_dir.display(),
+                e
+            ))
+        })?;
+    }
+    if shim_dir.exists() {
+        fs::remove_dir_all(&shim_dir).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to reset tool shim dir {}: {}",
+                shim_dir.display(),
+                e
+            ))
+        })?;
+    }
     fs::create_dir_all(&extracted_dir).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to create tool extract dir {}: {}",
@@ -538,14 +571,7 @@ fn install_runtime_tool_archive(
     })?;
     extract_archive(&archive_path, &extracted_dir)?;
 
-    let target_path = extracted_dir.join(resolved_layout_path(spec)?);
-    if !target_path.is_file() {
-        return Err(CapsuleError::Pack(format!(
-            "{} archive missing expected file {}",
-            spec.name,
-            target_path.display()
-        )));
-    }
+    let target_path = resolve_tool_target(spec, &extracted_dir)?;
 
     write_shim(spec, deps, &target_path, &shim_path)?;
 
@@ -562,6 +588,159 @@ fn install_runtime_tool_archive(
         version: version.to_string(),
         binary_sha256: archive_sha256,
     })
+}
+
+fn resolve_tool_target(spec: &RuntimeToolSpec, extracted_dir: &Path) -> Result<PathBuf> {
+    let layout_path = resolved_layout_path(spec)?;
+    let target_path = extracted_dir.join(&layout_path);
+    let mut searched = vec![target_path.clone()];
+
+    if target_path.is_file() {
+        validate_tool_target(spec, &target_path)?;
+        return Ok(target_path);
+    }
+
+    if matches!(spec.layout, ToolLayout::NativeBinary { .. }) {
+        let file_name = Path::new(&layout_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                CapsuleError::Pack(format!("{} has invalid binary layout path", spec.name))
+            })?;
+        let platform_dir_candidate = find_single_top_level_binary(extracted_dir, file_name)?;
+        if let Some(candidate) = platform_dir_candidate {
+            searched.push(candidate.clone());
+            validate_tool_target(spec, &candidate)?;
+            copy_tool_target_to_canonical(&candidate, &target_path)?;
+            validate_tool_target(spec, &target_path)?;
+            return Ok(target_path);
+        }
+    }
+
+    Err(CapsuleError::Pack(format!(
+        "{} archive missing expected file {}; searched: {}",
+        spec.name,
+        target_path.display(),
+        searched
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+fn find_single_top_level_binary(extracted_dir: &Path, file_name: &str) -> Result<Option<PathBuf>> {
+    let entries = match fs::read_dir(extracted_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(CapsuleError::Pack(format!(
+                "Failed to inspect tool extract dir {}: {}",
+                extracted_dir.display(),
+                e
+            )))
+        }
+    };
+
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to inspect tool extract dir {}: {}",
+                extracted_dir.display(),
+                e
+            ))
+        })?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let candidate = path.join(file_name);
+        if candidate.is_file() {
+            matches.push(candidate);
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err(CapsuleError::Pack(format!(
+            "ambiguous native tool binary layout under {}: {}",
+            extracted_dir.display(),
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+fn copy_tool_target_to_canonical(source: &Path, target: &Path) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            CapsuleError::Pack(format!("Failed to create {}: {}", parent.display(), e))
+        })?;
+    }
+    fs::copy(source, target).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to normalize tool binary {} -> {}: {}",
+            source.display(),
+            target.display(),
+            e
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        let perms = fs::metadata(source)
+            .map_err(|e| {
+                CapsuleError::Pack(format!("Failed to stat {}: {}", source.display(), e))
+            })?
+            .permissions();
+        fs::set_permissions(target, perms).map_err(|e| {
+            CapsuleError::Pack(format!("Failed to chmod {}: {}", target.display(), e))
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_tool_target(spec: &RuntimeToolSpec, path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Err(CapsuleError::Pack(format!(
+            "{} archive missing expected file {}",
+            spec.name,
+            path.display()
+        )));
+    }
+
+    if matches!(spec.layout, ToolLayout::NativeBinary { .. }) {
+        validate_native_executable(spec.name, path)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_native_executable(tool_name: &str, path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = fs::metadata(path)
+        .map_err(|e| CapsuleError::Pack(format!("Failed to stat {}: {}", path.display(), e)))?
+        .permissions()
+        .mode();
+    if mode & 0o111 == 0 {
+        return Err(CapsuleError::Pack(format!(
+            "{} archive file is not executable: {}",
+            tool_name,
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_native_executable(_tool_name: &str, _path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn resolved_layout_path(spec: &RuntimeToolSpec) -> Result<String> {
@@ -799,24 +978,24 @@ mod tests {
         cursor.into_inner()
     }
 
-    fn build_uv_tgz() -> Vec<u8> {
+    fn build_uv_tgz_at(rel_path: &str, mode: u32) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
         let payload = b"#!/bin/sh\necho uv\n";
         let mut header = tar::Header::new_gnu();
         header.set_size(payload.len() as u64);
-        header.set_mode(0o755);
+        header.set_mode(mode);
         header.set_cksum();
         builder
-            .append_data(
-                &mut header,
-                resolved_layout_path(&UV).expect("uv layout"),
-                Cursor::new(payload),
-            )
+            .append_data(&mut header, rel_path, Cursor::new(payload))
             .expect("append uv");
         let tar = builder.into_inner().expect("finish uv tar");
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gz.write_all(&tar).expect("write uv tgz");
         gz.finish().expect("finish uv tgz")
+    }
+
+    fn build_uv_tgz() -> Vec<u8> {
+        build_uv_tgz_at(&resolved_layout_path(&UV).expect("uv layout"), 0o755)
     }
 
     fn write_zip_archive(path: &Path, entries: &[(&str, &[u8], Option<u32>)]) {
@@ -1096,6 +1275,71 @@ mod tests {
             message.contains("escapes destination"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn install_uv_archive_normalizes_single_platform_directory() {
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let version = unique_version("uv-nested");
+        let triple = host_triple(TripleStyle::Rust).expect("host triple");
+        let handle = install_runtime_tool_archive(
+            &UV,
+            &version,
+            &ToolDeps::default(),
+            &build_uv_tgz_at(&format!("uv-{triple}/uv"), 0o755),
+        )
+        .expect("install nested uv");
+
+        let canonical_uv = ato_home
+            .path()
+            .join("toolchains/tools/uv")
+            .join(&version)
+            .join("extracted")
+            .join(resolved_layout_path(&UV).expect("uv layout"));
+        assert!(
+            canonical_uv.is_file(),
+            "expected uv binary at canonical path {canonical_uv:?}"
+        );
+        assert!(
+            handle.bin_dir.join("uv").is_file()
+            || handle.bin_dir.join("uv.cmd").is_file(),
+            "shim must exist in bin_dir {:?}", handle.bin_dir
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn corrupt_cache_is_discarded_and_redownloaded_by_install() {
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let version = unique_version("uv-corrupt");
+        let tools_root = ato_home
+            .path()
+            .join("toolchains/tools/uv")
+            .join(&version);
+        let extracted_dir = tools_root.join("extracted");
+        let shim_dir = tools_root.join("shim");
+
+        // Plant a corrupt cache: shim exists but extracted dir is empty
+        fs::create_dir_all(&shim_dir).expect("shim_dir");
+        let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
+        fs::write(shim_dir.join(shim_name), b"stub").expect("stub shim");
+        fs::create_dir_all(&extracted_dir).expect("extracted_dir");
+
+        // resolve_tool_target should fail on the empty extracted dir
+        assert!(
+            resolve_tool_target(&UV, &extracted_dir).is_err(),
+            "empty extracted_dir should fail validation"
+        );
+
+        // Verify cleanup: stale dirs removed
+        fs::remove_dir_all(&extracted_dir).ok();
+        fs::remove_dir_all(&shim_dir).ok();
+        assert!(!shim_dir.join(shim_name).exists(), "shim must be gone after cleanup");
     }
 
     #[test]
