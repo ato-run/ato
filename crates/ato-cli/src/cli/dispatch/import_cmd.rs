@@ -13,7 +13,8 @@ use capsule_core::foundation::types::command_spec::contains_shell_operators;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = "ato-cli-source-import";
-const IMPORT_ROOT_DIR: &str = ".tmp/ato-import";
+const IMPORT_ROOT_DIR: &str = "tmp/import";
+const IMPORT_LOG_DIR: &str = "tmp/import-logs";
 const CAPSULE_TOML: &str = "capsule.toml";
 const MAX_ERROR_EXCERPT_BYTES: usize = 4000;
 const LOCAL_SOURCE_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_SOURCE_OVERRIDE";
@@ -577,12 +578,13 @@ fn import_workspace_root(input: &NormalizedGitHubInput) -> Result<PathBuf> {
         .duration_since(UNIX_EPOCH)
         .context("system time before UNIX_EPOCH")?
         .as_nanos();
-    let root = std::env::current_dir()?.join(IMPORT_ROOT_DIR).join(format!(
-        "{}-{}-{}-{now}",
-        input.owner,
-        input.repo,
-        std::process::id()
-    ));
+    let root =
+        capsule_core::common::paths::ato_path_or_workspace_tmp(IMPORT_ROOT_DIR).join(format!(
+            "{}-{}-{}-{now}",
+            input.owner,
+            input.repo,
+            std::process::id()
+        ));
     fs::create_dir_all(&root)?;
     Ok(root)
 }
@@ -785,7 +787,8 @@ fn run_shadow_workspace(materialized: &MaterializedSource, recipe_toml: &str) ->
     fs::write(&shadow_manifest, recipe_toml)
         .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
 
-    let output = run_ato_shadow(&materialized.shadow_dir)?;
+    let import_probe_id = new_import_run_id("probe", &materialized.source)?;
+    let output = run_ato_shadow(&materialized.shadow_dir, &import_probe_id)?;
     Ok(import_run_from_output(&output))
 }
 
@@ -1380,10 +1383,10 @@ fn new_import_run_id(prefix: &str, source: &ImportSource) -> Result<String> {
 }
 
 fn import_run_log_path(run_id: &str) -> Result<PathBuf> {
-    Ok(std::env::current_dir()?
-        .join(".tmp")
-        .join("ato-import-logs")
-        .join(format!("{run_id}.log")))
+    Ok(
+        capsule_core::common::paths::ato_path_or_workspace_tmp(IMPORT_LOG_DIR)
+            .join(format!("{run_id}.log")),
+    )
 }
 
 fn read_error_excerpt_from_log(log_path: &Path) -> String {
@@ -1581,13 +1584,14 @@ fn infer_port(recipe_toml: &str) -> Option<u16> {
     None
 }
 
-fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
+fn run_ato_shadow(shadow_dir: &Path, import_probe_id: &str) -> Result<Output> {
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("run")
         .arg(shadow_dir)
         .arg("--yes")
         .current_dir(shadow_dir)
+        .env(IMPORT_PROBE_ID_ENV, import_probe_id)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

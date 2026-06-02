@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::ato_lock::{
     self, AtoLock, AtoLockValidationError, ValidationMode as CanonicalValidationMode,
@@ -212,7 +212,9 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
         ))
     })?;
 
-    if path_contains_workspace_internal_subtree(&requested_path) {
+    if path_contains_workspace_internal_subtree(&requested_path)
+        && !is_import_preview_workspace(&requested_path)
+    {
         let name = requested_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -285,6 +287,26 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
         project_root,
         discovered,
     })
+}
+
+fn is_import_preview_workspace(path: &Path) -> bool {
+    let has_import_marker = std::env::var_os("ATO_IMPORT_PROBE_ID").is_some()
+        || std::env::var_os("ATO_IMPORT_SESSION_ID").is_some();
+    if !has_import_marker {
+        return false;
+    }
+
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    components
+        .windows(3)
+        .any(|window| window[0] == ".ato" && window[1] == "tmp" && window[2] == "import")
 }
 
 fn classify_discovery(
@@ -503,6 +525,35 @@ mod tests {
     };
     use crate::ato_lock::{AtoLock, recompute_lock_id};
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set_value(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                unsafe {
+                    std::env::set_var(self.key, previous);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
     fn write_manifest(dir: &Path, name: &str) {
         fs::write(
             dir.join("capsule.toml"),
@@ -653,6 +704,27 @@ run = "dist""#
             err.to_string()
                 .contains("Workspace-local internal state path is not an authoritative input")
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn import_preview_workspace_under_internal_tmp_is_allowed_with_marker() {
+        let dir = tempdir().expect("tempdir");
+        let shadow_dir = dir
+            .path()
+            .join(".ato")
+            .join("tmp")
+            .join("import")
+            .join("demo")
+            .join("shadow");
+        fs::create_dir_all(&shadow_dir).expect("create import shadow dir");
+        write_manifest(&shadow_dir, "demo");
+        let _guard = EnvVarGuard::set_value("ATO_IMPORT_PROBE_ID", "probe-demo");
+
+        let resolved = resolve_authoritative_input(&shadow_dir, ResolveInputOptions::default())
+            .expect("import preview workspace should resolve");
+
+        assert_eq!(resolved.kind(), ResolvedInputKind::CompatibilityProject);
     }
 
     #[test]
