@@ -13,7 +13,7 @@ const BUNDLED_SYSTEM_ASSET_EXCLUDED_DIRS: &[&str] =
     &["node_modules", ".vite", ".astro", ".next", "target"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BudleTarget {
+enum BundleTarget {
     DarwinArm64,
     DarwinX86_64,
     WindowsX86_64,
@@ -21,8 +21,8 @@ struct BudleTarget {
     LinuxArm64,
 }
 
-impl BudleTarget {
-    const DEFAULT_TARGET: Self = Self::DarwinArm64;
+impl BundleTarget {
+    const DEFAULT: Self = Self::DarwinArm64;
 
     const ALL: &'static [Self] = &[Self::DarwinArm64, Self::DarwinX86_64, Self::WindowsX86_64, Self::LinuxX86_64, Self::LinuxArm64];
 
@@ -43,7 +43,7 @@ impl BudleTarget {
             "windows-x86_64" => Ok(Self::WindowsX86_64),
             "linux-x86_64" => Ok(Self::LinuxX86_64),
             "linux-arm64" => Ok(Self::LinuxArm64),
-            other => bail("unsupported target: {}", other)
+            other => bail!("unsupported target: {}", other),
         }
     }
 
@@ -127,9 +127,9 @@ fn main() -> Result<()> {
             // codesign xattrs that hdiutil/.dmg lose; .dmg is also
             // quarantine-tainted when downloaded via Safari, so the
             // zip path is now the canonical install.sh delivery.
-            match target.as_str() {
+            match target {
                 BundleTarget::DarwinArm64 | BundleTarget::DarwinX86_64 => {
-                    let bundle = bundle_macos_app(target, &helper_source)?;
+                    let bundle = bundle_macos_app(target.as_str(), &helper_source)?;
                     if sign {
                         codesign_bundle(&bundle)?;
                     }
@@ -137,28 +137,27 @@ fn main() -> Result<()> {
                         notarize_bundle(&bundle)?;
                     }
                     if do_zip {
-                        package_macos_zip(&bundle, target)?;
+                        package_macos_zip(&bundle, target.as_str())?;
                     }
                     Ok(())
                 }
                 BundleTarget::WindowsX86_64 => {
-                    let staging = bundle_windows_app(target, &helper_source)?;
+                    let staging = bundle_windows_app(target.as_str(), &helper_source)?;
                     if do_msi {
-                        package_msi(&staging, &target)?;
+                        package_msi(&staging, target.as_str())?;
                     }
                     if do_zip {
-                        package_windows_zip(&staging, target)?;
+                        package_windows_zip(&staging, target.as_str())?;
                     }
                     Ok(())
                 }
                 BundleTarget::LinuxX86_64 | BundleTarget::LinuxArm64 => {
-                    let staging = bundle_linux_app(target, &helper_source)?;
+                    let staging = bundle_linux_app(target.as_str(), &helper_source)?;
                     if do_appimage {
-                        package_appimage(&staging, target)?;
+                        package_appimage(&staging, target.as_str())?;
                     }
                     Ok(())
                 }
-                other => bail!("unsupported bundle target: {}", other),
             }
         }
         "notarize" => {
@@ -222,7 +221,7 @@ fn print_help() {
            msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
            appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
          Targets:\n  \
-            darwin-arm64 (default), darwin-x86_64, windows-x86_64, linux-x86_64, linux-arm64\n\n\
+            {targets} (default: {default})\n\n\
          Helper source (bundled private `ato` + `nacelle`):\n  \
             - local   (default) build ato + nacelle from the workspace\n  \
             - release           consume prebuilt cargo-dist artifacts from\n                     \
@@ -235,7 +234,9 @@ fn print_help() {
          macOS code-signing modes (resolved at runtime):\n  \
             - if MAC_DEVELOPER_ID_NAME is set: real Developer ID (hardened runtime + entitlements)\n  \
             - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n\n\
-         Windows: signtool integration is scaffolded but env-gated; v0.5 ships unsigned (L10).\n"
+         Windows: signtool integration is scaffolded but env-gated; v0.5 ships unsigned (L10).\n",
+        targets = BundleTarget::help_list(),
+        default = BundleTarget::DEFAULT.as_str(),
     );
 }
 
