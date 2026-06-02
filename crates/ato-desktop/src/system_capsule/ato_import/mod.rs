@@ -45,6 +45,20 @@ pub enum ImportCommand {
     /// (e.g. source/native runtime). After setting the session
     /// flag, re-dispatches Run.
     ConfirmUnsafeExecution,
+    /// Community Import surface: user picked a published community
+    /// recipe. Closes this window and opens the launch consent flow
+    /// with the pre-selected `ctoml_id` threaded through, so the CLI
+    /// resolves the community recipe instead of inferring.
+    LaunchCommunityToml {
+        handle: String,
+        ctoml_id: String,
+        label: String,
+    },
+    /// Community Import surface: explicit "Import from GitHub instead"
+    /// secondary action shown when no community recipe matches. Closes
+    /// this window and opens the GitHub Import (infer) surface for the
+    /// same source. Never reached automatically — only on user click.
+    ImportFromGithubSource { source: String },
     /// User dismissed the window. Closes the host window.
     Close,
 }
@@ -60,6 +74,10 @@ impl ImportCommand {
             ImportCommand::SubmitIntent => Capability::WebviewCreate,
             ImportCommand::RetryInference => Capability::WebviewCreate,
             ImportCommand::ConfirmUnsafeExecution => Capability::WebviewCreate,
+            // Both community actions tear down this window and spawn a new
+            // one (consent flow / GitHub import surface).
+            ImportCommand::LaunchCommunityToml { .. } => Capability::WebviewCreate,
+            ImportCommand::ImportFromGithubSource { .. } => Capability::WebviewCreate,
             ImportCommand::Close => Capability::WindowsClose,
         }
     }
@@ -77,12 +95,49 @@ pub fn dispatch(
         ImportCommand::SubmitIntent => handle_submit_intent(cx),
         ImportCommand::RetryInference => handle_retry_inference(cx),
         ImportCommand::ConfirmUnsafeExecution => handle_confirm_unsafe(cx),
+        ImportCommand::LaunchCommunityToml {
+            handle,
+            ctoml_id,
+            label,
+        } => handle_launch_community_toml(cx, host, handle, ctoml_id, label),
+        ImportCommand::ImportFromGithubSource { source } => {
+            // Tear down the community review window, then hand off to the
+            // GitHub Import (infer) surface for the same source.
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+            if let Err(error) = crate::window::import_window::open_with_url(cx, source) {
+                tracing::error!(
+                    ?error,
+                    "ato-import: community → GitHub import fallback failed"
+                );
+            }
+        }
         ImportCommand::Close => {
             stop_active_import_preview(cx, "window_close");
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
     }
     Ok(())
+}
+
+/// Community Import → user picked a published recipe. Close the review
+/// window and open the launch consent flow carrying the selected
+/// `ctoml_id` so the CLI resolves the community recipe directly.
+fn handle_launch_community_toml(
+    cx: &mut App,
+    host: AnyWindowHandle,
+    handle: String,
+    ctoml_id: String,
+    label: String,
+) {
+    let route = crate::state::GuestRoute::CapsuleHandle {
+        handle,
+        label,
+        community_toml_id: Some(ctoml_id),
+    };
+    let _ = host.update(cx, |_, window, _| window.remove_window());
+    if let Err(error) = crate::window::launch_window::open_consent_window_for_route(cx, route) {
+        tracing::error!(?error, "ato-import: community launch consent open failed");
+    }
 }
 
 fn current_creds(cx: &App) -> Option<ApiCreds> {
@@ -600,5 +655,65 @@ fn empty_recipe_for_failure() -> crate::source_import_session::ImportRecipe {
         platform_arch: String::new(),
         recipe_toml: String::new(),
         recipe_hash: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod community_command_tests {
+    use super::*;
+
+    #[test]
+    fn launch_community_toml_envelope_parses() {
+        // Posted by community.html when the user picks a published recipe.
+        let cmd: ImportCommand = serde_json::from_str(
+            r#"{"kind":"launch_community_toml","handle":"github.com/excalidraw/excalidraw","ctoml_id":"ctoml_01ksza4np2yrs1mqe7jz10ep1g","label":"Excalidraw"}"#,
+        )
+        .expect("launch_community_toml must parse");
+        match cmd {
+            ImportCommand::LaunchCommunityToml {
+                handle,
+                ctoml_id,
+                label,
+            } => {
+                assert_eq!(handle, "github.com/excalidraw/excalidraw");
+                assert_eq!(ctoml_id, "ctoml_01ksza4np2yrs1mqe7jz10ep1g");
+                assert_eq!(label, "Excalidraw");
+            }
+            other => panic!("expected LaunchCommunityToml, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_from_github_source_envelope_parses() {
+        let cmd: ImportCommand = serde_json::from_str(
+            r#"{"kind":"import_from_github_source","source":"github.com/foo/bar"}"#,
+        )
+        .expect("import_from_github_source must parse");
+        match cmd {
+            ImportCommand::ImportFromGithubSource { source } => {
+                assert_eq!(source, "github.com/foo/bar");
+            }
+            other => panic!("expected ImportFromGithubSource, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn community_actions_require_webview_create() {
+        assert_eq!(
+            ImportCommand::LaunchCommunityToml {
+                handle: String::new(),
+                ctoml_id: String::new(),
+                label: String::new(),
+            }
+            .required_capability(),
+            Capability::WebviewCreate
+        );
+        assert_eq!(
+            ImportCommand::ImportFromGithubSource {
+                source: String::new(),
+            }
+            .required_capability(),
+            Capability::WebviewCreate
+        );
     }
 }
