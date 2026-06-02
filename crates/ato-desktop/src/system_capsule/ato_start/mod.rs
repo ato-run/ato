@@ -58,6 +58,15 @@ pub enum AtoStartCommand {
     OpenLocalPath { path: String },
     /// Open the GitHub Run wizard (`Run from GitHub`). Requires `WebviewCreate`.
     OpenGithubRun,
+    /// Open the Community Import review surface for a Featured App. Queries
+    /// the community registry for published recipes matching `source` and
+    /// lets the user pick one — instead of routing the GitHub handle to the
+    /// infer surface. Requires `WebviewCreate`.
+    OpenCommunityImport {
+        source: String,
+        #[serde(default)]
+        label: Option<String>,
+    },
     /// Close the start window. Requires `WindowsClose`.
     Close,
     /// Quit the whole desktop application. Requires `AppQuit`. This is the
@@ -77,6 +86,7 @@ impl AtoStartCommand {
             AtoStartCommand::OpenSettings => Capability::LaunchSystemCapsule,
             AtoStartCommand::OpenLocalPath { .. } => Capability::WebviewCreate,
             AtoStartCommand::OpenGithubRun => Capability::WebviewCreate,
+            AtoStartCommand::OpenCommunityImport { .. } => Capability::WebviewCreate,
             AtoStartCommand::Close => Capability::WindowsClose,
             AtoStartCommand::Quit => Capability::AppQuit,
         }
@@ -116,6 +126,19 @@ pub fn classify_query(value: &str) -> QueryIntent {
             v
         ))
     }
+}
+
+/// Derive a human-readable label for the Community Import window title
+/// from a source handle (`github.com/excalidraw/excalidraw` → `excalidraw`).
+/// Falls back to the whole trimmed string when there is no `/`.
+fn community_label_from_source(source: &str) -> String {
+    source
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(source)
+        .to_string()
 }
 
 fn featured_sample_alias_to_github(value: &str) -> Option<&'static str> {
@@ -564,6 +587,18 @@ pub fn dispatch(
             });
         }
 
+        AtoStartCommand::OpenCommunityImport { source, label } => {
+            let label = label.unwrap_or_else(|| community_label_from_source(&source));
+            crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+                if let Err(err) =
+                    crate::window::community_import_window::open_for_source(cx, source, label)
+                {
+                    tracing::error!(error = %err, "ato_start: open_community_import failed");
+                }
+            });
+        }
+
         AtoStartCommand::Close => {
             crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
                 let _ = host.update(cx, |_, window, _| window.remove_window());
@@ -737,6 +772,62 @@ mod tests {
             classify_query("  github.com/owner/repo  "),
             QueryIntent::CapsuleHandle("github.com/owner/repo".to_string())
         );
+    }
+
+    // ─ Community Import routing ──────────────────────────────────────────────
+
+    #[test]
+    fn community_label_derives_repo_name_from_source() {
+        assert_eq!(
+            community_label_from_source("github.com/excalidraw/excalidraw"),
+            "excalidraw"
+        );
+        assert_eq!(
+            community_label_from_source("github.com/toeverything/AFFiNE"),
+            "AFFiNE"
+        );
+        // Trailing slash and bare strings.
+        assert_eq!(community_label_from_source("owner/repo/"), "repo");
+        assert_eq!(community_label_from_source("solo"), "solo");
+    }
+
+    #[test]
+    fn featured_card_envelope_parses_to_open_community_import() {
+        // This mirrors the IPC envelope the ato-start Featured Apps cards
+        // now post: `{ kind: 'open_community_import', source, label }`.
+        // Regression guard: Featured Apps must NOT post `open_query`
+        // (which reroutes github.com handles to the GitHub infer surface).
+        let cmd: AtoStartCommand = serde_json::from_str(
+            r#"{"kind":"open_community_import","source":"github.com/excalidraw/excalidraw","label":"Excalidraw"}"#,
+        )
+        .expect("featured-card envelope must parse");
+        match cmd {
+            AtoStartCommand::OpenCommunityImport { source, label } => {
+                assert_eq!(source, "github.com/excalidraw/excalidraw");
+                assert_eq!(label.as_deref(), Some("Excalidraw"));
+            }
+            other => panic!("expected OpenCommunityImport, got {other:?}"),
+        }
+        assert_eq!(
+            AtoStartCommand::OpenCommunityImport {
+                source: String::new(),
+                label: None
+            }
+            .required_capability(),
+            Capability::WebviewCreate
+        );
+    }
+
+    #[test]
+    fn open_community_import_label_is_optional() {
+        let cmd: AtoStartCommand = serde_json::from_str(
+            r#"{"kind":"open_community_import","source":"github.com/open-webui/open-webui"}"#,
+        )
+        .expect("envelope without label must parse");
+        match cmd {
+            AtoStartCommand::OpenCommunityImport { label, .. } => assert!(label.is_none()),
+            other => panic!("expected OpenCommunityImport, got {other:?}"),
+        }
     }
 
     // ─ StartPageHistoryStore ─────────────────────────────────────────────────
