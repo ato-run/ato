@@ -5,7 +5,7 @@ export default function Step4({ onNext }) {
   return (
     <div className="flex flex-col h-full p-8">
       <div className="shrink-0">
-        <div className="text-[#F43F5E] font-bold tracking-widest text-sm mb-4 mt-2">4 / 4</div>
+        <div className="text-[#F43F5E] font-bold tracking-widest text-sm mb-4 mt-2">4 / 5</div>
 
         <div className="relative mb-2 inline-block w-fit">
           <h1 className="text-[40px] leading-tight font-extrabold text-[#0F172A] tracking-tight">Share your apps</h1>
@@ -68,7 +68,7 @@ export default function Step4({ onNext }) {
         onClick={onNext}
         className="w-full py-4 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white rounded-2xl font-bold text-[17px] shadow-lg shadow-rose-500/25 hover:opacity-90 transition-opacity shrink-0 mt-6 flex justify-center items-center gap-2"
       >
-        Get started <span className="text-xl">🎉</span>
+        Next <span className="text-xl">→</span>
       </button>
     </div>
   )

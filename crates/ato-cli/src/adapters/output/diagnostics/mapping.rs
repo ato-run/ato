@@ -53,6 +53,29 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
     }
 
     let message = err.to_string();
+    // OCI recipe needs a container engine but the user disabled Podman in
+    // settings. Surface an actionable engine-missing diagnostic (E205) with
+    // the clean message from `OciProviderError::PodmanDisabled` rather than
+    // letting the wrapped error fall through to the generic E999 fallback.
+    if err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("Podman is disabled in Ato settings")
+    }) {
+        return CliDiagnostic::new(
+            CliDiagnosticCode::E205,
+            "This recipe needs a container runtime, but Podman is disabled in Ato settings. \
+             Enable Podman in Settings, then try again."
+                .to_string(),
+            Some("Ato の Settings で Podman を有効化してから、もう一度実行してください。"),
+            None,
+            None,
+            None,
+            false,
+            true,
+            causes,
+        );
+    }
     if let Some(artifact_message) = distributable_artifact_missing_message(err) {
         return CliDiagnostic::new(
             CliDiagnosticCode::E102,
@@ -510,5 +533,36 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
             false,
             causes,
         ),
+    }
+}
+
+#[cfg(test)]
+mod podman_disabled_tests {
+    use super::{CliDiagnosticCode, CommandContext, from_anyhow};
+
+    #[test]
+    fn podman_disabled_maps_to_engine_missing_not_internal() {
+        // Mirrors the real wrapping: the session-start path adds the
+        // "OCI provider not ready before session start" context on top of the
+        // `OciProviderError::PodmanDisabled` Display string.
+        let err = anyhow::anyhow!(
+            "This recipe needs a container runtime, but Podman is disabled in Ato settings. \
+             Enable Podman in Settings, then try again."
+        )
+        .context("OCI provider not ready before session start");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E205,
+            "Podman-disabled must map to engine_missing (E205), not the E999 fallback"
+        );
+        assert!(
+            diagnostic
+                .message
+                .contains("Podman is disabled in Ato settings"),
+            "diagnostic must carry the actionable message, got: {}",
+            diagnostic.message
+        );
     }
 }
