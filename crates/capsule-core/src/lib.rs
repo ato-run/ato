@@ -36,6 +36,7 @@ pub use foundation::hardware;
 pub use foundation::interactive_resolution;
 pub use foundation::metrics;
 pub use foundation::reporter;
+pub use foundation::runtime_setup;
 pub use foundation::types;
 
 // ── Layer 2: Contract ─────────────────────────────────────────────────────
