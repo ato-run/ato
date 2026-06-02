@@ -3568,8 +3568,11 @@ mod tests {
         );
     }
 
-    /// `ATO_PODMAN_ENABLED` is process-global; this is the only test that
-    /// mutates it, so set → assert → restore within one test to avoid races.
+    /// `ATO_PODMAN_ENABLED` is process-global. `#[serial]` keeps this off the
+    /// parallel test scheduler so it can't perturb other tests that exercise
+    /// `select_ready_runtime_oci_provider()`; the test also restores the prior
+    /// value on the way out.
+    #[serial_test::serial]
     #[test]
     fn podman_enabled_reads_env_opt_out() {
         let previous = std::env::var_os("ATO_PODMAN_ENABLED");
