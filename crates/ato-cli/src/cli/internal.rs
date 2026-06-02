@@ -63,6 +63,24 @@ pub(crate) enum InternalCommands {
         json: bool,
     },
 
+    /// #420 — host runtime-setup plumbing. Reports whether the runtime tools
+    /// a recipe needs (Podman, Docker Desktop, Node, uv, Python, the bundled
+    /// ato helper, nacelle) are installed and usable, and installs Ato-managed
+    /// copies of the language runtimes (Node/uv/Python) on request. The
+    /// desktop onboarding/settings UI shells out to these instead of probing
+    /// the host directly.
+    ///
+    /// Replaces the earlier "host device detection" / GPU-scan path: nothing
+    /// here scans CPU/GPU/hardware capabilities.
+    #[command(
+        hide = true,
+        about = "Host runtime-setup status & managed install (plumbing)"
+    )]
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeInternalCommands,
+    },
+
     /// Sweep stale import preview sessions left behind by a crashed
     /// Desktop/CLI owner.
     #[command(hide = true, about = "Sweep stale import preview sessions")]
@@ -71,6 +89,36 @@ pub(crate) enum InternalCommands {
         #[arg(long, default_value_t = false)]
         force: bool,
         /// Emit machine-readable JSON output on stdout.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RuntimeInternalCommands {
+    /// Probe the host and emit a `RuntimeSetupStatus` describing each runtime
+    /// tool's readiness. Always exits `Ok`; the caller decides what to do based
+    /// on the per-tool `action` field.
+    #[command(hide = true, about = "Report host runtime-setup status (plumbing)")]
+    SetupStatus {
+        /// Emit machine-readable JSON (`RuntimeSetupStatus`) on stdout.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Install Ato-managed copies of the requested language runtimes, streaming
+    /// one `InstallProgress` event per phase. Only `node`, `uv` and `python`
+    /// are installable; any other tool name is rejected before work starts.
+    #[command(
+        hide = true,
+        about = "Install Ato-managed runtime tools (node|uv|python) (plumbing)"
+    )]
+    Install {
+        /// Comma-separated tool list, e.g. `--tools node,uv`. Accepts the
+        /// `nodejs` alias for node.
+        #[arg(long = "tools", value_delimiter = ',', required = true)]
+        tools: Vec<String>,
+        /// Emit machine-readable JSON progress lines on stdout.
         #[arg(long, default_value_t = false)]
         json: bool,
     },
