@@ -54,6 +54,10 @@ pub enum ImportCommand {
         ctoml_id: String,
         label: String,
     },
+    /// Community Import surface: re-run community discovery in place after
+    /// a transient fetch error. Does NOT close the window — it re-fetches
+    /// candidates and pushes a fresh snapshot into the same page.
+    RetryCommunity { source: String, label: String },
     /// Community Import surface: explicit "Import from GitHub instead"
     /// secondary action shown when no community recipe matches. Closes
     /// this window and opens the GitHub Import (infer) surface for the
@@ -77,6 +81,7 @@ impl ImportCommand {
             // Both community actions tear down this window and spawn a new
             // one (consent flow / GitHub import surface).
             ImportCommand::LaunchCommunityToml { .. } => Capability::WebviewCreate,
+            ImportCommand::RetryCommunity { .. } => Capability::WebviewCreate,
             ImportCommand::ImportFromGithubSource { .. } => Capability::WebviewCreate,
             ImportCommand::Close => Capability::WindowsClose,
         }
@@ -100,6 +105,10 @@ pub fn dispatch(
             ctoml_id,
             label,
         } => handle_launch_community_toml(cx, host, handle, ctoml_id, label),
+        ImportCommand::RetryCommunity { source, label } => {
+            // Re-fetch in place; the page already reset itself to loading.
+            crate::window::community_import_window::refetch(cx, source, label);
+        }
         ImportCommand::ImportFromGithubSource { source } => {
             // Tear down the community review window, then hand off to the
             // GitHub Import (infer) surface for the same source.
@@ -681,6 +690,29 @@ mod community_command_tests {
             }
             other => panic!("expected LaunchCommunityToml, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn retry_community_envelope_parses() {
+        let cmd: ImportCommand = serde_json::from_str(
+            r#"{"kind":"retry_community","source":"github.com/excalidraw/excalidraw","label":"Excalidraw"}"#,
+        )
+        .expect("retry_community must parse");
+        match cmd {
+            ImportCommand::RetryCommunity { source, label } => {
+                assert_eq!(source, "github.com/excalidraw/excalidraw");
+                assert_eq!(label, "Excalidraw");
+            }
+            other => panic!("expected RetryCommunity, got {other:?}"),
+        }
+        assert_eq!(
+            ImportCommand::RetryCommunity {
+                source: String::new(),
+                label: String::new(),
+            }
+            .required_capability(),
+            Capability::WebviewCreate
+        );
     }
 
     #[test]
