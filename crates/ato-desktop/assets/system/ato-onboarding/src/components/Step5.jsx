@@ -1,11 +1,68 @@
-import React from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { ShieldCheck, Box, Hexagon, FileCode, Container, Wrench, ShipWheel } from 'lucide-react'
+import { BRIDGE } from '../bridge'
 
 const pillTones = {
   violet: 'bg-violet-100 text-violet-700 border-violet-200',
   amber: 'bg-amber-100 text-amber-700 border-amber-200',
   emerald: 'bg-emerald-100 text-emerald-700 border-emerald-200',
   slate: 'bg-slate-100 text-slate-600 border-slate-200',
+  rose: 'bg-rose-100 text-rose-700 border-rose-200',
+}
+
+const installActionKinds = new Set(['install_managed', 'upgrade_managed'])
+const progressLabels = {
+  queued: 'Queued',
+  downloading: 'Downloading',
+  verifying: 'Verifying',
+  installing: 'Installing',
+  ready: 'Ready',
+  failed: 'Failed',
+}
+
+let requestCounter = 0
+function nextRequestId() {
+  requestCounter += 1
+  return `runtime-setup-${requestCounter}`
+}
+
+function statusByKind(status) {
+  return Object.fromEntries((status?.tools || []).map((tool) => [tool.kind, tool]))
+}
+
+function isInstallNeeded(tool) {
+  return tool && !tool.ready && installActionKinds.has(tool.action)
+}
+
+function runtimeStatusPill({ checked, tool, progress, fallback = 'Will install when needed' }) {
+  if (!checked) return { label: 'Disabled', tone: 'slate' }
+  if (progress?.phase) {
+    return {
+      label: progressLabels[progress.phase] || progress.phase,
+      tone: progress.phase === 'failed' ? 'rose' : progress.phase === 'ready' ? 'emerald' : 'amber',
+    }
+  }
+  if (!tool) return { label: 'Checking', tone: 'slate' }
+  if (tool.ready) return { label: 'Ready', tone: 'emerald' }
+  if (isInstallNeeded(tool)) return { label: fallback, tone: 'violet' }
+  if (tool.installed && !tool.supported) return { label: 'Unsupported', tone: 'rose' }
+  return { label: 'Missing', tone: 'amber' }
+}
+
+function detectionStatusPill({ checked = true, tool }) {
+  if (!checked) return { label: 'Disabled', tone: 'slate' }
+  if (!tool) return { label: 'Checking', tone: 'slate' }
+  if (tool.ready) return { label: 'Ready', tone: 'emerald' }
+  if (tool.installed && tool.action === 'start_service') return { label: 'Not running', tone: 'amber' }
+  if (tool.installed && !tool.supported) return { label: 'Unsupported', tone: 'rose' }
+  return { label: 'Missing', tone: 'amber' }
+}
+
+function bundledStatusPill(tool) {
+  if (!tool) return { label: 'Checking', tone: 'slate' }
+  if (tool.ready && tool.source === 'bundled') return { label: 'Bundled', tone: 'emerald' }
+  if (tool.ready) return { label: 'Ready', tone: 'emerald' }
+  return { label: 'Missing', tone: 'rose' }
 }
 
 function StatusPill({ children, tone = 'violet', className = '' }) {
@@ -60,6 +117,7 @@ function CardControl({ checked, kind }) {
 function ToggleCard({
   checked,
   onToggle,
+  disabled = false,
   icon: Icon,
   title,
   status,
@@ -72,9 +130,10 @@ function ToggleCard({
     <button
       type="button"
       onClick={onToggle}
+      disabled={disabled}
       className={`w-full text-left rounded-[20px] border p-4 flex gap-3 items-start transition-all ${
         checked ? 'bg-[#F5F3FF] border-[#DDD6FE]' : 'bg-white border-slate-200'
-      }`}
+      } ${disabled ? 'cursor-not-allowed opacity-75' : ''}`}
     >
       <CardControl checked={checked} kind={control} />
       <span className="min-w-0 flex-1">
@@ -88,7 +147,7 @@ function ToggleCard({
           </StatusPill>
         </span>
         <span className="block text-[13px] text-slate-500 leading-snug">{children}</span>
-        {footer && <span className="mt-3 block">{footer}</span>}
+        {footer && <div className="mt-3">{footer}</div>}
       </span>
     </button>
   )
@@ -118,8 +177,147 @@ export default function Step5({
   pythonInstallEnabled,
   setPythonInstallEnabled,
 }) {
-  const selectedManagedTools = [nodeInstallEnabled, uvInstallEnabled, pythonInstallEnabled].filter(Boolean).length
-  const ctaLabel = selectedManagedTools > 0 ? 'Install selected tools' : 'Continue'
+  const [checking, setChecking] = useState(true)
+  const [runtimeStatus, setRuntimeStatus] = useState(null)
+  const [runtimeError, setRuntimeError] = useState(null)
+  const [installing, setInstalling] = useState(false)
+  const [installError, setInstallError] = useState(null)
+  const [progressByTool, setProgressByTool] = useState({})
+
+  useEffect(() => {
+    const previousHydrate = window.__ATO_ONBOARDING_HYDRATE__
+    window.__ATO_ONBOARDING_HYDRATE__ = (payload) => {
+      window.dispatchEvent(new CustomEvent('ato-onboarding-runtime-setup', { detail: payload }))
+    }
+
+    const onHydrate = (event) => {
+      const payload = event.detail || {}
+      if (payload.runtimeSetupStatus) {
+        setRuntimeStatus(payload.runtimeSetupStatus)
+        setRuntimeError(null)
+        setChecking(false)
+      }
+      if (payload.runtimeInstallStarted) {
+        const queued = Object.fromEntries((payload.runtimeInstallStarted.tools || []).map((tool) => [
+          tool,
+          { phase: 'queued', message: 'Queued' },
+        ]))
+        setProgressByTool(queued)
+        setInstalling(true)
+        setInstallError(null)
+      }
+      if (payload.runtimeInstallProgress) {
+        const event = payload.runtimeInstallProgress
+        if (event.tool) {
+          setProgressByTool((current) => ({
+            ...current,
+            [event.tool]: { phase: event.phase, message: event.message },
+          }))
+        }
+      }
+      if (payload.runtimeInstallComplete) {
+        const complete = payload.runtimeInstallComplete
+        setInstalling(false)
+        if (complete.status) {
+          setRuntimeStatus(complete.status)
+        }
+        setInstallError(complete.success ? null : complete.error || 'Runtime install failed')
+      }
+      if (payload.runtimeInstallCancelled) {
+        setInstallError('Cancelling runtime install...')
+      }
+      if (payload.error && !payload.runtimeInstallComplete) {
+        setChecking(false)
+        setInstalling(false)
+        const message = payload.error.message || 'Runtime setup failed'
+        if (payload.runtimeInstallStarted || payload.runtimeInstallProgress) {
+          setInstallError(message)
+        } else {
+          setRuntimeError(message)
+        }
+      }
+    }
+
+    window.addEventListener('ato-onboarding-runtime-setup', onHydrate)
+    BRIDGE({ kind: 'load_runtime_setup_status', request_id: nextRequestId() })
+    return () => {
+      window.removeEventListener('ato-onboarding-runtime-setup', onHydrate)
+      window.__ATO_ONBOARDING_HYDRATE__ = previousHydrate
+    }
+  }, [])
+
+  const tools = useMemo(() => statusByKind(runtimeStatus), [runtimeStatus])
+  const languageCards = [
+    {
+      kind: 'node',
+      checked: nodeInstallEnabled,
+      setChecked: setNodeInstallEnabled,
+      icon: Hexagon,
+      title: 'Install Ato-managed Node.js when needed',
+      body: "Uses Ato's toolchain cache instead of relying on a system Node.js, so JavaScript recipes run the same on every machine.",
+    },
+    {
+      kind: 'uv',
+      checked: uvInstallEnabled,
+      setChecked: setUvInstallEnabled,
+      icon: Box,
+      title: 'Install Ato-managed uv when needed',
+      body: 'Uses an Ato-supported uv from the toolchain cache for Python recipes that build with uv.',
+    },
+    {
+      kind: 'python',
+      checked: pythonInstallEnabled,
+      setChecked: setPythonInstallEnabled,
+      icon: FileCode,
+      title: 'Install Ato-managed Python when needed',
+      body: 'Uses Ato-supported Python 3.12 from the toolchain cache for recipes that need Python.',
+    },
+  ]
+  const selectedInstallTools = languageCards
+    .filter((card) => card.checked && isInstallNeeded(tools[card.kind]))
+    .map((card) => card.kind)
+  const hasInstallTargets = selectedInstallTools.length > 0
+  const failedInstall = Object.values(progressByTool).some((progress) => progress.phase === 'failed')
+  const primaryLabel = installing
+    ? 'Installing selected tools...'
+    : checking
+      ? 'Checking tools...'
+      : hasInstallTargets
+        ? failedInstall
+          ? 'Retry selected tools'
+          : 'Install selected tools'
+        : 'Continue'
+  const primaryDisabled = installing || checking
+
+  const startInstall = () => {
+    if (!hasInstallTargets) return
+    setInstalling(true)
+    setInstallError(null)
+    setProgressByTool(Object.fromEntries(selectedInstallTools.map((tool) => [
+      tool,
+      { phase: 'queued', message: 'Queued' },
+    ])))
+    BRIDGE({
+      kind: 'install_runtime_tools',
+      request_id: nextRequestId(),
+      tools: selectedInstallTools,
+    })
+  }
+
+  const cancelInstall = () => {
+    setInstallError('Cancelling runtime install...')
+    BRIDGE({ kind: 'cancel_runtime_install', request_id: nextRequestId() })
+  }
+
+  const handlePrimary = () => {
+    if (hasInstallTargets) startInstall()
+    else onFinish()
+  }
+
+  const podmanPill = detectionStatusPill({ checked: podmanEnabled, tool: tools.podman })
+  const helperPill = bundledStatusPill(tools.ato_helper)
+  const nacellePill = bundledStatusPill(tools.nacelle)
+  const dockerPill = detectionStatusPill({ tool: tools.docker_desktop })
 
   return (
     <div className="flex flex-col h-full p-8">
@@ -147,12 +345,23 @@ export default function Step5({
         <ToggleCard
           checked={podmanEnabled}
           onToggle={() => setPodmanEnabled((v) => !v)}
+          disabled={installing}
           icon={Container}
-          title="Use existing Podman when available"
-          status={podmanEnabled ? 'Detection only' : 'Disabled'}
-          statusTone={podmanEnabled ? 'amber' : 'slate'}
+          title="Use existing Podman for containers"
+          status={podmanPill.label}
+          statusTone={podmanPill.tone}
           control="switch"
-          footer={<StatusPill tone="slate">Ato will not install Podman automatically</StatusPill>}
+          footer={
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap gap-2">
+                <StatusPill tone="amber">Detection only</StatusPill>
+                <StatusPill tone="slate">Ato will not install Podman automatically</StatusPill>
+              </div>
+              {tools.podman?.message && (
+                <p className="text-[12px] leading-snug text-slate-500">{tools.podman.message}</p>
+              )}
+            </div>
+          }
         >
           Lets Ato use Podman as a container engine when a recipe needs one. If
           Podman or Docker Desktop is missing, Ato shows setup instructions
@@ -162,41 +371,37 @@ export default function Step5({
         <p className="mt-2 text-[12px] font-bold tracking-widest text-slate-400 uppercase">
           Ato-managed language runtimes
         </p>
-        <ToggleCard
-          checked={nodeInstallEnabled}
-          onToggle={() => setNodeInstallEnabled((v) => !v)}
-          icon={Hexagon}
-          title="Install Ato-managed Node.js"
-          status={nodeInstallEnabled ? 'Will install when needed' : 'Disabled'}
-          statusTone={nodeInstallEnabled ? 'violet' : 'slate'}
-        >
-          Uses Ato's toolchain cache instead of relying on a system Node.js, so
-          JavaScript recipes run the same on every machine.
-        </ToggleCard>
-
-        <ToggleCard
-          checked={uvInstallEnabled}
-          onToggle={() => setUvInstallEnabled((v) => !v)}
-          icon={Box}
-          title="Install Ato-managed uv"
-          status={uvInstallEnabled ? 'Will install when needed' : 'Disabled'}
-          statusTone={uvInstallEnabled ? 'violet' : 'slate'}
-        >
-          Uses an Ato-supported uv from the toolchain cache for Python recipes
-          that build with uv.
-        </ToggleCard>
-
-        <ToggleCard
-          checked={pythonInstallEnabled}
-          onToggle={() => setPythonInstallEnabled((v) => !v)}
-          icon={FileCode}
-          title="Install Ato-managed Python"
-          status={pythonInstallEnabled ? 'Will install when needed' : 'Disabled'}
-          statusTone={pythonInstallEnabled ? 'violet' : 'slate'}
-        >
-          Uses an Ato-supported Python from the toolchain cache for recipes that
-          need Python.
-        </ToggleCard>
+        {languageCards.map((card) => {
+          const pill = runtimeStatusPill({
+            checked: card.checked,
+            tool: tools[card.kind],
+            progress: progressByTool[card.kind],
+          })
+          return (
+            <ToggleCard
+              key={card.kind}
+              checked={card.checked}
+              onToggle={() => card.setChecked((v) => !v)}
+              disabled={installing}
+              icon={card.icon}
+              title={card.title}
+              status={pill.label}
+              statusTone={pill.tone}
+              footer={
+                <div className="flex flex-col gap-2">
+                  {progressByTool[card.kind]?.message && (
+                    <p className="text-[12px] leading-snug text-slate-500">{progressByTool[card.kind].message}</p>
+                  )}
+                  {!progressByTool[card.kind]?.message && tools[card.kind]?.message && (
+                    <p className="text-[12px] leading-snug text-slate-500">{tools[card.kind].message}</p>
+                  )}
+                </div>
+              }
+            >
+              {card.body}
+            </ToggleCard>
+          )
+        })}
 
         <div className="mt-2">
           <p className="mb-2 text-[12px] font-bold tracking-widest text-slate-400 uppercase">
@@ -206,34 +411,53 @@ export default function Step5({
             <SystemCheck
               icon={Wrench}
               label="Ato helper"
-              status="Bundled"
-              tone="emerald"
-              detail="Ships with Desktop."
+              status={helperPill.label}
+              tone={helperPill.tone}
+              detail={tools.ato_helper?.message || 'Ships with Desktop.'}
             />
             <SystemCheck
               icon={ShipWheel}
               label="Nacelle"
-              status="Bundled"
-              tone="emerald"
-              detail="Source runtime included."
+              status={nacellePill.label}
+              tone={nacellePill.tone}
+              detail={tools.nacelle?.message || 'Source runtime included.'}
             />
             <SystemCheck
               icon={Container}
               label="Docker Desktop"
-              status="Detection only"
-              tone="amber"
-              detail="Ato checks it, but never installs it."
+              status={dockerPill.label}
+              tone={dockerPill.tone}
+              detail={tools.docker_desktop?.message || 'Ato checks it, but never installs it.'}
             />
           </div>
         </div>
+
+        {(runtimeError || installError) && (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-[12px] leading-snug text-amber-800">
+            {installError || runtimeError}
+          </div>
+        )}
       </div>
 
-      <button
-        onClick={onFinish}
-        className="w-full py-4 bg-gradient-to-r from-[#A78BFA] to-[#8B5CF6] text-white rounded-2xl font-bold text-[17px] shadow-lg shadow-violet-500/25 hover:opacity-90 transition-opacity shrink-0 mt-6 flex justify-center items-center gap-2"
-      >
-        {ctaLabel} <span className="text-xl">→</span>
-      </button>
+      <div className={`shrink-0 mt-6 grid gap-3 ${installing || hasInstallTargets ? 'grid-cols-[0.75fr_1.25fr]' : 'grid-cols-1'}`}>
+        {(installing || hasInstallTargets) && (
+          <button
+            onClick={installing ? cancelInstall : onFinish}
+            className="w-full py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold text-[15px] hover:bg-slate-50 transition-colors flex justify-center items-center"
+          >
+            {installing ? 'Cancel install' : 'Skip for now'}
+          </button>
+        )}
+        <button
+          onClick={handlePrimary}
+          disabled={primaryDisabled}
+          className={`w-full py-4 bg-gradient-to-r from-[#A78BFA] to-[#8B5CF6] text-white rounded-2xl font-bold text-[17px] shadow-lg shadow-violet-500/25 transition-opacity flex justify-center items-center gap-2 ${
+            primaryDisabled ? 'opacity-60 cursor-not-allowed' : 'hover:opacity-90'
+          }`}
+        >
+          {primaryLabel} <span className="text-xl">→</span>
+        </button>
+      </div>
     </div>
   )
 }
