@@ -294,13 +294,12 @@ pub async fn ensure_runtime_tool(
     let shim_path = shim_dir.join(&shim_filename);
 
     if shim_path.exists() {
-        match resolve_tool_target(spec, &extracted_dir) {
-            Ok(_) => {
-                let cached_sha = fs::read_to_string(&sha_path).unwrap_or_default();
+        match validate_tool_cache(spec, &shim_path, &extracted_dir, &sha_path) {
+            Ok(sha) => {
                 return Ok(ToolHandle {
                     bin_dir: shim_dir,
                     version,
-                    binary_sha256: cached_sha.trim().to_string(),
+                    binary_sha256: sha,
                 });
             }
             Err(err) => {
@@ -588,6 +587,70 @@ fn install_runtime_tool_archive(
         version: version.to_string(),
         binary_sha256: archive_sha256,
     })
+}
+
+/// Validates all cache integrity conditions for a managed runtime tool.
+/// Returns the validated sha256 string on success.
+///
+/// Checks:
+/// 1. shim file is present and executable (Unix)
+/// 2. extracted target is present and executable for NativeBinary (via resolve_tool_target)
+/// 3. binary.sha256 is present, non-empty, and a valid 64-char hex string
+fn validate_tool_cache(
+    spec: &RuntimeToolSpec,
+    shim_path: &Path,
+    extracted_dir: &Path,
+    sha_path: &Path,
+) -> Result<String> {
+    validate_cached_shim(spec, shim_path)?;
+    resolve_tool_target(spec, extracted_dir)?;
+    validate_cached_sha(sha_path)
+}
+
+fn validate_cached_shim(spec: &RuntimeToolSpec, shim_path: &Path) -> Result<()> {
+    if !shim_path.is_file() {
+        return Err(CapsuleError::Pack(format!(
+            "{} cached shim is missing: {}",
+            spec.name,
+            shim_path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(shim_path)
+            .map_err(|e| {
+                CapsuleError::Pack(format!("Failed to stat shim {}: {}", shim_path.display(), e))
+            })?
+            .permissions()
+            .mode();
+        if mode & 0o111 == 0 {
+            return Err(CapsuleError::Pack(format!(
+                "{} cached shim is not executable: {}",
+                spec.name,
+                shim_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cached_sha(sha_path: &Path) -> Result<String> {
+    let raw = fs::read_to_string(sha_path).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "binary.sha256 missing or unreadable {}: {}",
+            sha_path.display(),
+            e
+        ))
+    })?;
+    let sha = raw.trim().to_string();
+    if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(CapsuleError::Pack(format!(
+            "binary.sha256 is not a valid SHA-256 hex string (got {:?})",
+            if sha.len() > 20 { format!("{}…", &sha[..20]) } else { sha.clone() }
+        )));
+    }
+    Ok(sha)
 }
 
 fn resolve_tool_target(spec: &RuntimeToolSpec, extracted_dir: &Path) -> Result<PathBuf> {
@@ -1310,36 +1373,201 @@ mod tests {
         );
     }
 
+    // ── validate_tool_cache unit tests ───────────────────────────────────
+    // These test the helper directly; ensure_runtime_tool calls the same helper
+    // for the cache hit branch.
+
+    struct FakeCacheDir {
+        root: tempfile::TempDir,
+        extracted_dir: PathBuf,
+        shim_dir: PathBuf,
+        sha_path: PathBuf,
+        shim_path: PathBuf,
+    }
+
+    impl FakeCacheDir {
+        fn new(tag: &str) -> Self {
+            let root = tempfile::tempdir().expect("tempdir");
+            let version = unique_version(tag);
+            let tools_root = root.path().join("toolchains/tools/uv").join(version);
+            let extracted_dir = tools_root.join("extracted");
+            let shim_dir = tools_root.join("shim");
+            let sha_path = tools_root.join("binary.sha256");
+            let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
+            let shim_path = shim_dir.join(shim_name);
+            FakeCacheDir { root, extracted_dir, shim_dir, sha_path, shim_path }
+        }
+
+        fn write_shim(&self, mode: u32) {
+            fs::create_dir_all(&self.shim_dir).expect("shim_dir");
+            fs::write(&self.shim_path, b"#!/bin/sh\nexec uv \"$@\"\n").expect("shim");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&self.shim_path, fs::Permissions::from_mode(mode))
+                    .expect("chmod shim");
+            }
+            let _ = mode;
+        }
+
+        fn write_target(&self, mode: u32) {
+            let layout = resolved_layout_path(&UV).expect("uv layout");
+            let target = self.extracted_dir.join(&layout);
+            fs::create_dir_all(target.parent().unwrap()).expect("extracted_dir");
+            fs::write(&target, b"#!/bin/sh\necho uv\n").expect("target");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&target, fs::Permissions::from_mode(mode))
+                    .expect("chmod target");
+            }
+            let _ = mode;
+        }
+
+        fn write_sha(&self, content: &str) {
+            fs::create_dir_all(self.sha_path.parent().unwrap()).expect("sha parent");
+            fs::write(&self.sha_path, content).expect("sha file");
+        }
+
+        fn validate(&self) -> Result<String> {
+            validate_tool_cache(&UV, &self.shim_path, &self.extracted_dir, &self.sha_path)
+        }
+    }
+
+    #[test]
+    fn cache_validation_succeeds_on_complete_install() {
+        let cache = FakeCacheDir::new("valid");
+        cache.write_shim(0o755);
+        cache.write_target(0o755);
+        cache.write_sha(&"a".repeat(64));
+        assert!(cache.validate().is_ok(), "complete cache should be valid");
+    }
+
+    #[test]
+    fn cache_validation_rejects_missing_shim() {
+        let cache = FakeCacheDir::new("no-shim");
+        cache.write_target(0o755);
+        cache.write_sha(&"a".repeat(64));
+        // shim_path doesn't exist
+        let err = cache.validate().expect_err("missing shim must fail");
+        assert!(err.to_string().contains("shim"), "error: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_validation_rejects_non_executable_shim() {
+        let cache = FakeCacheDir::new("shim-noexec");
+        cache.write_shim(0o644); // not executable
+        cache.write_target(0o755);
+        cache.write_sha(&"a".repeat(64));
+        let err = cache.validate().expect_err("non-executable shim must fail");
+        assert!(err.to_string().contains("executable"), "error: {err}");
+    }
+
+    #[test]
+    fn cache_validation_rejects_missing_target() {
+        let cache = FakeCacheDir::new("no-target");
+        cache.write_shim(0o755);
+        // extracted_dir exists but is empty (no target binary)
+        fs::create_dir_all(&cache.extracted_dir).expect("extracted_dir");
+        cache.write_sha(&"a".repeat(64));
+        let err = cache.validate().expect_err("missing target must fail");
+        assert!(
+            err.to_string().contains("missing") || err.to_string().contains("searched"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn cache_validation_rejects_missing_sha() {
+        let cache = FakeCacheDir::new("no-sha");
+        cache.write_shim(0o755);
+        cache.write_target(0o755);
+        // sha_path not created
+        let err = cache.validate().expect_err("missing sha must fail");
+        assert!(
+            err.to_string().contains("sha256") || err.to_string().contains("unreadable"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn cache_validation_rejects_empty_sha() {
+        let cache = FakeCacheDir::new("empty-sha");
+        cache.write_shim(0o755);
+        cache.write_target(0o755);
+        cache.write_sha("");
+        let err = cache.validate().expect_err("empty sha must fail");
+        assert!(err.to_string().contains("sha256"), "error: {err}");
+    }
+
+    #[test]
+    fn cache_validation_rejects_invalid_sha() {
+        let cache = FakeCacheDir::new("bad-sha");
+        cache.write_shim(0o755);
+        cache.write_target(0o755);
+        cache.write_sha("not-a-hex-string");
+        let err = cache.validate().expect_err("invalid sha must fail");
+        assert!(err.to_string().contains("sha256"), "error: {err}");
+    }
+
     #[test]
     #[serial_test::serial]
-    fn corrupt_cache_is_discarded_and_redownloaded_by_install() {
+    fn corrupt_cache_is_discarded_by_reinstall() {
+        // Verifies the reinstall path: install → corrupt sha → reinstall via archive.
+        // (The re-download leg of ensure_runtime_tool requires HTTP; this test covers
+        // the cache-discard + archive-install path exercised after discard.)
         let ato_home = tempfile::tempdir().expect("ato_home");
         let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
 
-        let version = unique_version("uv-corrupt");
+        let version = unique_version("uv-reinstall");
+
+        // First install: valid
+        let handle1 = install_runtime_tool_archive(
+            &UV,
+            &version,
+            &ToolDeps::default(),
+            &build_uv_tgz(),
+        )
+        .expect("first install");
+
         let tools_root = ato_home
             .path()
             .join("toolchains/tools/uv")
             .join(&version);
-        let extracted_dir = tools_root.join("extracted");
-        let shim_dir = tools_root.join("shim");
-
-        // Plant a corrupt cache: shim exists but extracted dir is empty
-        fs::create_dir_all(&shim_dir).expect("shim_dir");
+        let sha_path = tools_root.join("binary.sha256");
         let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
-        fs::write(shim_dir.join(shim_name), b"stub").expect("stub shim");
-        fs::create_dir_all(&extracted_dir).expect("extracted_dir");
+        let shim_path = handle1.bin_dir.join(shim_name);
 
-        // resolve_tool_target should fail on the empty extracted dir
+        // Corrupt: truncate sha file
+        fs::write(&sha_path, b"bad").expect("corrupt sha");
+
+        // validate_tool_cache must now fail
         assert!(
-            resolve_tool_target(&UV, &extracted_dir).is_err(),
-            "empty extracted_dir should fail validation"
+            validate_tool_cache(&UV, &shim_path, &tools_root.join("extracted"), &sha_path)
+                .is_err(),
+            "corrupted cache must fail validation"
         );
 
-        // Verify cleanup: stale dirs removed
-        fs::remove_dir_all(&extracted_dir).ok();
-        fs::remove_dir_all(&shim_dir).ok();
-        assert!(!shim_dir.join(shim_name).exists(), "shim must be gone after cleanup");
+        // Discard stale state (mirrors ensure_runtime_tool's Err branch)
+        fs::remove_dir_all(tools_root.join("extracted")).ok();
+        fs::remove_dir_all(tools_root.join("shim")).ok();
+        fs::remove_file(&sha_path).ok();
+        assert!(!shim_path.exists(), "shim must be gone after discard");
+
+        // Reinstall via archive (the download-then-install leg)
+        let handle2 = install_runtime_tool_archive(
+            &UV,
+            &version,
+            &ToolDeps::default(),
+            &build_uv_tgz(),
+        )
+        .expect("reinstall after discard");
+        assert_eq!(handle2.version, handle1.version);
+        assert!(
+            handle2.bin_dir.join(shim_name).is_file(),
+            "shim must be restored after reinstall"
+        );
     }
 
     #[test]
