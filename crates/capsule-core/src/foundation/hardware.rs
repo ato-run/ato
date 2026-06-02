@@ -34,11 +34,31 @@ pub fn requires_gpu(manifest: &toml::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns `false` when host device detection has been disabled by the user
+/// (`ATO_HOST_DEVICE_DETECTION=0`, set by the desktop from the onboarding
+/// opt-out toggle). Any other value — including unset — leaves detection on,
+/// preserving the default-enabled (opt-out) behavior.
+pub fn host_device_detection_enabled() -> bool {
+    !matches!(
+        std::env::var("ATO_HOST_DEVICE_DETECTION").ok().as_deref(),
+        Some("0")
+    )
+}
+
 /// Queries `nvidia-smi` for available GPU count and average VRAM (MiB).
 ///
 /// Returns `Ok(None)` when `nvidia-smi` is not on `PATH` or reports no GPUs.
 /// Returns `Err` only on unexpected process I/O failures.
+///
+/// This is an *optional* host capability scan: when the user has opted out of
+/// host device detection (`ATO_HOST_DEVICE_DETECTION=0`) it short-circuits to
+/// `Ok(None)` without probing, so no device inventory is gathered. Essential
+/// OS/architecture detection lives elsewhere and is not gated here.
 pub fn detect_nvidia_gpus() -> Result<Option<GpuReport>> {
+    if !host_device_detection_enabled() {
+        return Ok(None);
+    }
+
     if which::which("nvidia-smi").is_err() {
         return Ok(None);
     }
@@ -73,10 +93,41 @@ pub fn detect_nvidia_gpus() -> Result<Option<GpuReport>> {
 
 #[cfg(test)]
 mod tests {
-    use super::requires_gpu;
+    use super::{detect_nvidia_gpus, host_device_detection_enabled, requires_gpu};
 
     fn toml(s: &str) -> toml::Value {
         toml::from_str(s).unwrap()
+    }
+
+    /// `ATO_HOST_DEVICE_DETECTION` is a process-global env var; this is the
+    /// only test that mutates it, so serialize the set → assert → restore
+    /// within one test to avoid cross-test races.
+    #[test]
+    fn host_device_detection_opt_out_skips_gpu_scan() {
+        let previous = std::env::var_os("ATO_HOST_DEVICE_DETECTION");
+
+        // Disabled → detection reports off and the optional scan short-circuits.
+        unsafe { std::env::set_var("ATO_HOST_DEVICE_DETECTION", "0") };
+        assert!(!host_device_detection_enabled());
+        assert!(
+            detect_nvidia_gpus().unwrap().is_none(),
+            "GPU scan must be skipped when host device detection is disabled"
+        );
+
+        // Any non-"0" value (and unset) leaves detection on (opt-out default).
+        unsafe { std::env::set_var("ATO_HOST_DEVICE_DETECTION", "1") };
+        assert!(host_device_detection_enabled());
+
+        unsafe { std::env::remove_var("ATO_HOST_DEVICE_DETECTION") };
+        assert!(
+            host_device_detection_enabled(),
+            "unset must default to enabled"
+        );
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("ATO_HOST_DEVICE_DETECTION", value) },
+            None => unsafe { std::env::remove_var("ATO_HOST_DEVICE_DETECTION") },
+        }
     }
 
     #[test]
