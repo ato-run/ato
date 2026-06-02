@@ -195,12 +195,41 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn base_url_honours_env_override() {
+        // Mutating a process-global env var: snapshot and restore so this
+        // test can't pollute others. `#[serial]` keeps it off other tests
+        // that touch the same var.
+        let original = std::env::var(ENV_COMMUNITY_API_URL).ok();
+
         // Default when unset.
         unsafe {
             std::env::remove_var(ENV_COMMUNITY_API_URL);
         }
         assert_eq!(resolve_community_api_base_url(), DEFAULT_COMMUNITY_API_URL);
+
+        // Honours the override, trimming whitespace and trailing slashes.
+        unsafe {
+            std::env::set_var(ENV_COMMUNITY_API_URL, "  https://staging.example/api/  ");
+        }
+        assert_eq!(
+            resolve_community_api_base_url(),
+            "https://staging.example/api"
+        );
+
+        // A blank override falls back to the default.
+        unsafe {
+            std::env::set_var(ENV_COMMUNITY_API_URL, "   ");
+        }
+        assert_eq!(resolve_community_api_base_url(), DEFAULT_COMMUNITY_API_URL);
+
+        // Restore the pre-test environment.
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var(ENV_COMMUNITY_API_URL, v),
+                None => std::env::remove_var(ENV_COMMUNITY_API_URL),
+            }
+        }
     }
 
     #[test]
