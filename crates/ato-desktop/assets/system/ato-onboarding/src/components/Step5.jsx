@@ -79,7 +79,8 @@ export default function Step5({
           icon={Cpu}
           title="ホストデバイス検出を許可する"
         >
-          CPU / OS / architecture / GPU presence などをローカルで検出し、起動前の互換性チェックに使います。
+          GPU など追加のホストデバイスをローカルで検出し、起動前の互換性チェックに使います。
+          OS / architecture など実行に必須の情報は、この設定に関わらず常に検出します。
           検出結果は明示的な同意なしに外部送信しません。
         </ToggleCard>
       </div>
