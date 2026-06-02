@@ -4,7 +4,7 @@ export default function Step1({ onNext }) {
   return (
     <div className="flex flex-col h-full p-8 relative">
       <div className="shrink-0 relative z-10">
-        <div className="text-blue-600 font-bold tracking-widest text-sm mb-6 mt-4">1 / 4</div>
+        <div className="text-blue-600 font-bold tracking-widest text-sm mb-6 mt-4">1 / 5</div>
         <h1 className="text-[40px] leading-tight font-extrabold text-[#0F172A] mb-3 tracking-tight">Welcome to Ato</h1>
         <p className="text-lg text-slate-500">Run apps without manual setup.</p>
       </div>
