@@ -1,10 +1,11 @@
 use std::borrow::Cow;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, IntoElement, Pixels, Render, Size, WindowBounds, WindowDecorations,
-    WindowOptions, div, px, rgb, size,
+    App, Bounds, Context, IntoElement, Pixels, Render, Size, WeakEntity, WindowBounds,
+    WindowDecorations, WindowOptions, div, px, rgb, size,
 };
 use gpui_component::TitleBar;
 use include_dir::{Dir, include_dir};
@@ -23,7 +24,7 @@ const ONBOARDING_DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/system/ato
 const ONBOARDING_SCHEME: &str = "capsule-onboarding";
 
 pub struct OnboardingWindowShell {
-    _webview: Option<WebView>,
+    pub(crate) _webview: Option<WebView>,
     window_size: Size<Pixels>,
     paste: WebViewPasteSupport,
 }
@@ -48,6 +49,17 @@ impl Render for OnboardingWindowShell {
 }
 
 impl OnboardingWindowShell {
+    /// Push a runtime-setup payload to the React app.
+    pub fn hydrate(&self, payload_json: &str) {
+        let script = format!(
+            "typeof window.__ATO_ONBOARDING_HYDRATE__==='function'&&window.__ATO_ONBOARDING_HYDRATE__({})",
+            payload_json
+        );
+        if let Some(webview) = self._webview.as_ref() {
+            let _ = webview.evaluate_script(&script);
+        }
+    }
+
     fn sync_webview_bounds(&mut self, window: &mut gpui::Window) {
         let current = window.bounds().size;
         if current == self.window_size {
@@ -67,6 +79,12 @@ impl OnboardingWindowShell {
     }
 }
 
+/// Weak reference to the currently open onboarding shell so system-capsule IPC
+/// can push foreground runtime-setup status/progress into the WebView.
+pub struct ActiveOnboardingShell(pub Option<WeakEntity<OnboardingWindowShell>>);
+
+impl gpui::Global for ActiveOnboardingShell {}
+
 pub fn open_onboarding_window(cx: &mut App) -> Result<()> {
     let config = crate::config::load_config();
     let locale = resolve_locale(config.general.language);
@@ -84,6 +102,9 @@ pub fn open_onboarding_window(cx: &mut App) -> Result<()> {
 
     let queue = system_ipc::new_queue();
     let drain_queue = queue.clone();
+    let shell_slot: Arc<Mutex<Option<WeakEntity<OnboardingWindowShell>>>> =
+        Arc::new(Mutex::new(None));
+    let shell_slot_inner = Arc::clone(&shell_slot);
 
     let handle = cx.open_window(options, move |window, cx| {
         window.set_window_title(crate::window::WINDOW_TITLE);
@@ -151,8 +172,15 @@ pub fn open_onboarding_window(cx: &mut App) -> Result<()> {
             paste: WebViewPasteSupport::new(cx),
         });
         window.focus(&onboarding.read(cx).paste.focus_handle.clone(), cx);
+        if let Ok(mut slot) = shell_slot_inner.lock() {
+            *slot = Some(onboarding.downgrade());
+        }
         cx.new(|cx| gpui_component::Root::new(onboarding, window, cx))
     })?;
+
+    if let Ok(slot) = shell_slot.lock() {
+        cx.set_global(ActiveOnboardingShell(slot.clone()));
+    }
 
     cx.global_mut::<OpenContentWindows>().insert(
         handle.window_id().as_u64(),
