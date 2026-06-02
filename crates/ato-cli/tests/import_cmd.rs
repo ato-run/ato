@@ -73,6 +73,129 @@ run = "true"
 }
 
 #[test]
+#[cfg(unix)]
+fn import_emit_json_uses_ato_home_when_cwd_is_root() -> Result<()> {
+    let root = test_root("cwd-root")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    let home = root.join("home");
+    let ato_home = home.join(".ato");
+    fs::create_dir_all(&source)?;
+    fs::create_dir_all(&ato_home)?;
+    fs::write(source.join("README.md"), "# cwd root import\n")?;
+    fs::write(
+        &recipe,
+        r#"schema_version = "0.3"
+name = "cwd-root-import"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "true"
+"#,
+    )?;
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin("ato"))
+        .arg("import")
+        .arg("github.com/ato-run/shadow-import")
+        .arg("--emit-json")
+        .arg("--recipe")
+        .arg(&recipe)
+        .env("ATO_IMPORT_LOCAL_SOURCE_OVERRIDE", &source)
+        .env(
+            "ATO_IMPORT_LOCAL_REVISION_ID",
+            "1111111111111111111111111111111111111111",
+        )
+        .env("ATO_IMPORT_LOCAL_TREE_HASH", "blake3:test-tree")
+        .env("ATO_IMPORT_KEEP_WORKSPACE", "1")
+        .env("ATO_HOME", &ato_home)
+        .env("HOME", &home)
+        .current_dir(Path::new("/"))
+        .output()
+        .context("failed to run ato import from /")?;
+    assert!(
+        output.status.success(),
+        "ato import failed from /\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(parsed["run"]["status"].as_str(), Some("not_run"));
+    assert_eq!(parsed["recipe"]["origin"].as_str(), Some("manual"));
+
+    let import_root = ato_home.join("tmp").join("import");
+    let workspace_count = fs::read_dir(&import_root)
+        .with_context(|| format!("missing import root {}", import_root.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .count();
+    assert!(
+        workspace_count > 0,
+        "import workspace must be created under ATO_HOME, not the process cwd"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn import_run_uses_ato_home_when_cwd_is_root() -> Result<()> {
+    let root = test_root("cwd-root-run")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    let home = root.join("home");
+    let ato_home = home.join(".ato");
+    fs::create_dir_all(&source)?;
+    fs::create_dir_all(&ato_home)?;
+    fs::write(source.join("README.md"), "# cwd root run import\n")?;
+    fs::write(
+        &recipe,
+        r#"schema_version = "0.3"
+name = "cwd-root-run-import"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "true"
+"#,
+    )?;
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin("ato"))
+        .arg("import")
+        .arg("github.com/ato-run/shadow-import")
+        .arg("--run")
+        .arg("--emit-json")
+        .arg("--recipe")
+        .arg(&recipe)
+        .env("ATO_IMPORT_LOCAL_SOURCE_OVERRIDE", &source)
+        .env(
+            "ATO_IMPORT_LOCAL_REVISION_ID",
+            "1111111111111111111111111111111111111111",
+        )
+        .env("ATO_IMPORT_LOCAL_TREE_HASH", "blake3:test-tree")
+        .env("ATO_HOME", &ato_home)
+        .env("HOME", &home)
+        .env("CAPSULE_ALLOW_UNSAFE", "1")
+        .current_dir(Path::new("/"))
+        .output()
+        .context("failed to run ato import --run from /")?;
+    assert!(
+        output.status.success(),
+        "ato import --run failed from /\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(parsed["run"]["status"].as_str(), Some("passed"));
+
+    let import_root = ato_home.join("tmp").join("import");
+    assert!(
+        import_root.exists(),
+        "import root must be created under ATO_HOME, not the process cwd"
+    );
+    Ok(())
+}
+
+#[test]
 fn import_run_emit_json_tears_down_ready_server() -> Result<()> {
     if !python3_available() {
         return Ok(());
