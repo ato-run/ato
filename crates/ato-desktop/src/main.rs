@@ -6,6 +6,7 @@ mod bridge;
 mod bundle_paths;
 mod cli_envelope;
 mod cli_install;
+mod community_api;
 mod config;
 mod crash;
 mod egress_policy;

@@ -180,16 +180,19 @@ import FeaturedApps from "../components/FeaturedApps.astro";
       });
 
       document.querySelectorAll('.featured-card').forEach(function (card) {
-        card.addEventListener('click', function () {
-          var query = this.dataset.query;
-          if (query) ipc({ kind: 'open_query', value: query });
-        });
+        function openCommunityImport() {
+          var source = card.dataset.source || card.dataset.query;
+          if (!source) return;
+          var command = { kind: 'open_community_import', source: source };
+          if (card.dataset.label) command.label = card.dataset.label;
+          ipc(command);
+        }
+        card.addEventListener('click', openCommunityImport);
         var launchBtn = card.querySelector('.featured-launch');
         if (launchBtn) {
           launchBtn.addEventListener('click', function (e) {
             e.stopPropagation();
-            var query = card.dataset.query;
-            if (query) ipc({ kind: 'open_query', value: query });
+            openCommunityImport();
           });
         }
       });
