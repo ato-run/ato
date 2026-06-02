@@ -160,7 +160,23 @@ pub fn open_for_source(cx: &mut App, source: String, label: String) -> Result<An
 
     let locale = resolve_locale(crate::config::load_config().general.language);
     let initial = CommunitySnapshot::loading(&source, &label);
-    let init_payload = format!("window.__ATO_COMMUNITY_IMPORT__={};", initial.to_json());
+    // Define an early queuing bridge in the initialization script (runs
+    // before the page's own scripts). Without this, a fast background
+    // fetch can `evaluate_script(__atoCommunityImport(..))` before
+    // community.html has defined that function — the snapshot would be
+    // dropped and the window would hang on "loading". The stub buffers the
+    // latest snapshot into `__ATO_COMMUNITY_IMPORT_PENDING__`; the page's
+    // inline script consumes it and replaces the stub with the real
+    // renderer (atomically, on the single JS thread).
+    let init_payload = format!(
+        "window.__ATO_COMMUNITY_IMPORT__={};\
+         window.__ATO_COMMUNITY_IMPORT_PENDING__=null;\
+         window.__atoCommunityImport=function(next){{\
+           window.__ATO_COMMUNITY_IMPORT__=next;\
+           window.__ATO_COMMUNITY_IMPORT_PENDING__=next;\
+         }};",
+        initial.to_json()
+    );
     let composed = compose_init_script(locale, Some(&init_payload));
 
     let queue = system_ipc::new_queue();
@@ -218,6 +234,18 @@ pub fn open_for_source(cx: &mut App, source: String, label: String) -> Result<An
 
     spawn_candidate_fetch(cx, source, label);
     Ok(*handle)
+}
+
+/// Re-run candidate discovery for an already-open community-import window
+/// (the Retry action after a transient fetch error). The page has already
+/// reset itself to the loading state; this just kicks off a fresh fetch
+/// whose result is pushed into the existing window.
+pub fn refetch(cx: &mut App, source: String, label: String) {
+    if !cx.has_global::<CommunityImportWindowSlot>() {
+        tracing::warn!("community-import: refetch with no open window — ignoring");
+        return;
+    }
+    spawn_candidate_fetch(cx, source, label);
 }
 
 /// Fetch community candidates on the background executor, then push the
