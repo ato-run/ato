@@ -21,7 +21,7 @@ export default function Step3({ onNext }) {
   return (
     <div className="flex flex-col h-full p-8 pb-6">
       <div className="shrink-0">
-        <div className="text-[#F43F5E] font-bold tracking-widest text-sm mb-4 mt-2">3 / 4</div>
+        <div className="text-[#F43F5E] font-bold tracking-widest text-sm mb-4 mt-2">3 / 5</div>
         <h1 className="text-[40px] leading-tight font-extrabold text-[#0F172A] mb-2 tracking-tight">Run it locally</h1>
         <p className="text-[17px] text-slate-500 mb-6 leading-relaxed">
           Ato detects the setup, prepares the environment,<br/>and opens a live preview.
