@@ -72,6 +72,7 @@
       border-top: 1px solid var(--line); padding: 12px 24px;
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
     }
+    .footer-actions { display: flex; align-items: center; gap: 12px; }
     .link {
       background: none; border: none; cursor: pointer; color: var(--muted);
       font-size: 12px; font-weight: 600; text-decoration: underline; padding: 6px 0;
@@ -115,7 +116,10 @@
 
     <footer>
       <button class="link" id="closeBtn">Cancel</button>
-      <button class="btn-secondary hidden" id="githubBtn">Import from GitHub instead</button>
+      <div class="footer-actions">
+        <button class="link hidden" id="githubBtn">Import from GitHub instead</button>
+        <button class="btn-secondary hidden" id="retryBtn">Retry</button>
+      </div>
     </footer>
   </div>
 
@@ -128,9 +132,13 @@
         : () => {};
       const SEND = (command) => POST({ capsule: 'import', command });
 
-      let snap = window.__ATO_COMMUNITY_IMPORT__ || {
+      // Prefer a snapshot the backend may have already pushed into the
+      // early queuing stub (see community_import_window.rs) over the
+      // initial loading snapshot — this is what closes the fast-fetch race.
+      let snap = window.__ATO_COMMUNITY_IMPORT_PENDING__ || window.__ATO_COMMUNITY_IMPORT__ || {
         source: '', label: '', status: 'loading', candidates: [], error: null,
       };
+      window.__ATO_COMMUNITY_IMPORT_PENDING__ = null;
 
       const el = (id) => document.getElementById(id);
       const show = (node, on) => node.classList.toggle('hidden', !on);
@@ -232,8 +240,19 @@
         const list = el('list');
         const hasList = status === 'ready' && Array.isArray(snap.candidates) && snap.candidates.length > 0;
         show(list, hasList);
-        // The GitHub fallback is offered whenever there is no recipe to launch.
-        show(el('githubBtn'), status === 'empty' || status === 'error');
+
+        const isError = status === 'error';
+        const isEmpty = status === 'empty';
+        // Retry only makes sense for a transient error.
+        show(el('retryBtn'), isError);
+        // GitHub Import is the legitimate primary action when there is
+        // genuinely no community recipe (empty). On a transient error it is
+        // only a de-emphasised escape hatch — don't funnel a user who wanted
+        // a community recipe into recipe inference.
+        const gh = el('githubBtn');
+        gh.classList.remove('btn-secondary', 'link');
+        gh.classList.add(isError ? 'link' : 'btn-secondary');
+        show(gh, isEmpty || isError);
 
         if (status === 'error') {
           el('errorText').textContent = snap.error
@@ -257,6 +276,13 @@
       el('closeBtn').addEventListener('click', function () { SEND({ kind: 'close' }); });
       el('githubBtn').addEventListener('click', function () {
         SEND({ kind: 'import_from_github_source', source: snap.source });
+      });
+      el('retryBtn').addEventListener('click', function () {
+        // Re-run community discovery in place; reset to loading immediately
+        // so the button can't be double-fired before the push arrives.
+        snap = { source: snap.source, label: snap.label, status: 'loading', candidates: [], error: null };
+        render();
+        SEND({ kind: 'retry_community', source: snap.source, label: snap.label });
       });
       document.addEventListener('keydown', function (e) {
         if (e.key === 'Escape') SEND({ kind: 'close' });
