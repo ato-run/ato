@@ -99,9 +99,10 @@ mod tests {
         toml::from_str(s).unwrap()
     }
 
-    /// `ATO_HOST_DEVICE_DETECTION` is a process-global env var; this is the
-    /// only test that mutates it, so serialize the set → assert → restore
-    /// within one test to avoid cross-test races.
+    /// `ATO_HOST_DEVICE_DETECTION` is a process-global env var. `#[serial]`
+    /// keeps this off the parallel scheduler so it can't perturb other tests
+    /// that call `detect_nvidia_gpus()`; it also restores the prior value.
+    #[serial_test::serial]
     #[test]
     fn host_device_detection_opt_out_skips_gpu_scan() {
         let previous = std::env::var_os("ATO_HOST_DEVICE_DETECTION");
