@@ -5,7 +5,7 @@ export default function Step2({ onNext }) {
   return (
     <div className="flex flex-col h-full p-8">
       <div className="shrink-0">
-        <div className="text-[#F43F5E] font-bold tracking-widest text-sm mb-4 mt-2">2 / 4</div>
+        <div className="text-[#F43F5E] font-bold tracking-widest text-sm mb-4 mt-2">2 / 5</div>
         <h1 className="text-[40px] leading-tight font-extrabold text-[#0F172A] mb-2 tracking-tight">Choose what to run</h1>
         <p className="text-[17px] text-slate-500 mb-6 leading-relaxed">
           Start from a featured app, a GitHub repo,<br/>or a local folder.
