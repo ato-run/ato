@@ -17,6 +17,8 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub runtime: RuntimeSettings,
     #[serde(default)]
+    pub privacy: PrivacySettings,
+    #[serde(default)]
     pub sandbox: SandboxSettings,
     #[serde(default)]
     pub trust: TrustSettings,
@@ -81,6 +83,31 @@ pub struct RuntimeSettings {
     /// fetched on-demand when a recipe/lock explicitly requires it.
     #[serde(default)]
     pub backend_engines: BackendEngineSettings,
+    /// Whether Podman may be used as an OCI runtime provider. Default on
+    /// (opt-out). When false, launch/preflight must not probe Podman,
+    /// auto-start a Podman machine, or select Podman as the OCI provider;
+    /// an OCI recipe that can only run on Podman surfaces an actionable
+    /// "Podman disabled" error instead. Carried to the CLI via the
+    /// `ATO_PODMAN_ENABLED` env var (interim Desktop → CLI carrier).
+    #[serde(default = "default_podman_enabled")]
+    pub podman_enabled: bool,
+}
+
+/// Privacy-related opt-out controls.
+///
+/// Kept as its own config section (rather than folded into `runtime`) so the
+/// distinction between "what Ato executes" and "what Ato inspects about the
+/// host" stays legible, and so future privacy toggles have an obvious home.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrivacySettings {
+    /// Whether Ato may run optional host device / capability scans (e.g. GPU
+    /// presence) before launching a recipe. Default on (opt-out). When
+    /// false, those optional scans are skipped and device-dependent
+    /// recommendations are suppressed. Essential OS / architecture detection
+    /// needed to decide runnability is NOT gated by this flag. Carried to the
+    /// CLI via the `ATO_HOST_DEVICE_DETECTION` env var (interim carrier).
+    #[serde(default = "default_host_device_detection_enabled")]
+    pub host_device_detection_enabled: bool,
 }
 
 /// Backend engine selection for the three capsule execution categories.
@@ -522,6 +549,14 @@ pub enum RegistryTrustMode {
     Pinned,
 }
 
+fn default_podman_enabled() -> bool {
+    true
+}
+
+fn default_host_device_detection_enabled() -> bool {
+    true
+}
+
 fn default_terminal_font_size() -> u16 {
     14
 }
@@ -597,6 +632,7 @@ impl Default for DesktopConfig {
             general: GeneralSettings::default(),
             updates: UpdateSettings::default(),
             runtime: RuntimeSettings::default(),
+            privacy: PrivacySettings::default(),
             sandbox: SandboxSettings::default(),
             trust: TrustSettings::default(),
             registry: RegistrySettings::default(),
@@ -641,6 +677,15 @@ impl Default for RuntimeSettings {
             terminal_font_size: default_terminal_font_size(),
             terminal_max_sessions: default_terminal_max_sessions(),
             backend_engines: BackendEngineSettings::default(),
+            podman_enabled: default_podman_enabled(),
+        }
+    }
+}
+
+impl Default for PrivacySettings {
+    fn default() -> Self {
+        Self {
+            host_device_detection_enabled: default_host_device_detection_enabled(),
         }
     }
 }
@@ -712,6 +757,8 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             #[serde(default)]
             runtime: RuntimeSettings,
             #[serde(default)]
+            privacy: PrivacySettings,
+            #[serde(default)]
             sandbox: SandboxSettings,
             #[serde(default)]
             trust: TrustSettings,
@@ -740,6 +787,7 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             general: helper.general,
             updates: helper.updates,
             runtime: helper.runtime,
+            privacy: helper.privacy,
             sandbox: helper.sandbox,
             trust: helper.trust,
             registry: helper.registry,
@@ -1248,6 +1296,39 @@ mod tests {
         assert_eq!(parsed.runtime.terminal_max_sessions, 4);
         assert!(!parsed.developer.auto_open_devtools);
         assert_eq!(parsed.general.theme, ThemeConfig::Dark);
+    }
+
+    #[test]
+    fn runtime_optout_defaults_are_enabled() {
+        let config = DesktopConfig::default();
+        assert!(
+            config.runtime.podman_enabled,
+            "podman must default to enabled (opt-out)"
+        );
+        assert!(
+            config.privacy.host_device_detection_enabled,
+            "host device detection must default to enabled (opt-out)"
+        );
+    }
+
+    #[test]
+    fn runtime_optout_roundtrips_disabled() {
+        let mut config = DesktopConfig::default();
+        config.runtime.podman_enabled = false;
+        config.privacy.host_device_detection_enabled = false;
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.runtime.podman_enabled);
+        assert!(!parsed.privacy.host_device_detection_enabled);
+    }
+
+    #[test]
+    fn runtime_optout_missing_fields_default_to_enabled() {
+        // Pre-existing configs without the new fields must load with both on.
+        let json = r#"{"general": {"theme": "dark"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.runtime.podman_enabled);
+        assert!(parsed.privacy.host_device_detection_enabled);
     }
 
     #[test]
