@@ -5,5 +5,6 @@ pub mod diagnostics;
 pub mod python_runtime;
 pub mod runtime_config;
 pub mod schema_registry;
+pub mod shell_support;
 pub mod smoke;
 pub use config_impl::*;
