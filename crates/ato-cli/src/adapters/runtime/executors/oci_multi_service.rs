@@ -34,7 +34,6 @@ use capsule_core::types::{
     IngressConfig, OciImageResolution, OrchestrationPlan, ResolvedService, ResolvedServiceRuntime,
     StateDurability,
 };
-use tokio::task::JoinSet;
 
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::ingress_router;
@@ -615,7 +614,9 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
             });
         }
 
-        if let Err(err) = await_layer_readiness(&layer, orch_plan, &started, reporter).await {
+        if let Err(err) =
+            await_layer_readiness(&layer, orch_plan, &started, reporter, provider).await
+        {
             graph_error = Some(err);
             break 'start_loop;
         }
@@ -949,13 +950,16 @@ fn service_start_layers(orch_plan: &OrchestrationPlan) -> Result<Vec<Vec<String>
     Ok(layers)
 }
 
-async fn await_layer_readiness(
+async fn await_layer_readiness<P: OciProvider>(
     layer: &[String],
     orch_plan: &OrchestrationPlan,
     started: &[ServiceStartRecord],
     reporter: &Arc<CliReporter>,
+    provider: &P,
 ) -> Result<()> {
-    let mut tasks = JoinSet::new();
+    use futures::stream::{FuturesUnordered, StreamExt};
+
+    let mut probes = FuturesUnordered::new();
     for service_name in layer {
         let Some(service) = orch_plan.services.iter().find(|s| &s.name == service_name) else {
             anyhow::bail!(
@@ -966,7 +970,7 @@ async fn await_layer_readiness(
         if service.run_once {
             continue;
         }
-        let Some(probe) = service.readiness_probe.clone() else {
+        let Some(probe) = service.readiness_probe.as_ref() else {
             continue;
         };
         let Some(start_record) = started.iter().find(|r| r.service_name == *service_name) else {
@@ -980,45 +984,155 @@ async fn await_layer_readiness(
             .notify(format!("⏳ [{}] Waiting for readiness", service_name))
             .await?;
 
-        let service_name = service_name.clone();
-        let host_port = start_record.host_port;
-        let container_name = start_record.container_name.clone();
-        tasks.spawn(async move {
-            let ready = run_readiness_probe(
-                &probe,
-                host_port,
-                Some(container_name.as_str()),
-                &service_name,
-            )
-            .await;
+        // The futures borrow `provider`/`probe`/`start_record`; they are driven
+        // to completion inside this function (no `tokio::spawn`), so a `'static`
+        // bound is not required and we avoid cloning the probe/container ids.
+        probes.push(await_service_readiness(
+            provider,
+            probe,
+            start_record.host_port,
+            &start_record.container_id,
+            &start_record.container_name,
+            service_name,
+        ));
+    }
+
+    // Return the first failure; dropping `probes` cancels the remaining waits.
+    while let Some(result) = probes.next().await {
+        result?;
+    }
+    Ok(())
+}
+
+/// Maximum number of trailing container-log lines attached to an
+/// `oci_container_exited_before_ready` diagnostic.
+const OCI_EXIT_LOG_TAIL_LINES: usize = 20;
+
+/// Interval between container-liveness polls while waiting for readiness.
+const OCI_EXIT_WATCH_POLL: Duration = Duration::from_millis(500);
+
+/// Wait for a single service to become ready, racing the readiness probe against
+/// container liveness.
+///
+/// Three outcomes:
+/// * probe succeeds → `Ok(())`
+/// * container exits before the probe succeeds → typed
+///   `oci_container_exited_before_ready` carrying the exit code + a log tail
+/// * probe exhausts its own timeout while the container is still running →
+///   `oci_healthcheck_timeout` (unchanged behavior for genuinely slow services)
+async fn await_service_readiness<P: OciProvider>(
+    provider: &P,
+    probe: &capsule_core::types::ReadinessProbe,
+    host_port: Option<u16>,
+    container_id: &str,
+    container_name: &str,
+    service_name: &str,
+) -> Result<()> {
+    let probe_fut = run_readiness_probe(probe, host_port, Some(container_name), service_name);
+    tokio::pin!(probe_fut);
+
+    tokio::select! {
+        // Prefer reporting an exit over a marginal probe result.
+        biased;
+
+        exit_code = watch_container_exit(provider, container_id) => {
+            let tail = collect_log_tail(provider, container_id, OCI_EXIT_LOG_TAIL_LINES).await;
+            Err(exited_before_ready_error(service_name, exit_code, &tail))
+        }
+
+        ready = &mut probe_fut => {
             if ready {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!(
+                return Ok(());
+            }
+            // The probe gave up. If the container has since exited, surface the
+            // more specific exited-before-ready error; otherwise it is a genuine
+            // readiness timeout (container still running, just not ready yet).
+            match provider.inspect_container(container_id).await {
+                Ok(inspect) if !inspect.running => {
+                    let tail =
+                        collect_log_tail(provider, container_id, OCI_EXIT_LOG_TAIL_LINES).await;
+                    Err(exited_before_ready_error(service_name, inspect.exit_code, &tail))
+                }
+                _ => Err(anyhow::anyhow!(
                     "oci_healthcheck_timeout: service '{}' did not become ready within {}s",
                     service_name,
                     probe.timeout_seconds,
-                ))
-            }
-        });
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                return Err(err);
-            }
-            Err(err) => {
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                return Err(err.into());
+                )),
             }
         }
     }
-    Ok(())
+}
+
+/// Poll the container until it is no longer running, returning its exit code.
+///
+/// Loops indefinitely on the `OCI_EXIT_WATCH_POLL` interval; it is meant to be
+/// raced via `select!` against the readiness probe, which provides the timeout
+/// bound. Transient inspect errors are ignored (keep polling).
+async fn watch_container_exit<P: OciProvider>(provider: &P, container_id: &str) -> Option<i64> {
+    loop {
+        if let Ok(inspect) = provider.inspect_container(container_id).await
+            && !inspect.running
+        {
+            return inspect.exit_code;
+        }
+        tokio::time::sleep(OCI_EXIT_WATCH_POLL).await;
+    }
+}
+
+/// Collect a bounded tail of a container's logs for diagnostics. Best-effort:
+/// a missing or unreadable log stream yields an empty tail.
+async fn collect_log_tail<P: OciProvider>(
+    provider: &P,
+    container_id: &str,
+    max_lines: usize,
+) -> Vec<String> {
+    let mut buf = String::new();
+    if let Ok(mut rx) = provider.logs(container_id, false).await {
+        while let Ok(Some(chunk)) =
+            tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+        {
+            if let Ok(chunk) = chunk {
+                buf.push_str(&String::from_utf8_lossy(&chunk.message));
+            }
+        }
+    }
+    let mut lines: Vec<String> = buf
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() > max_lines {
+        let start = lines.len() - max_lines;
+        lines = lines.split_off(start);
+    }
+    lines
+}
+
+/// Build the typed `oci_container_exited_before_ready` error.
+fn exited_before_ready_error(
+    service_name: &str,
+    exit_code: Option<i64>,
+    log_tail: &[String],
+) -> anyhow::Error {
+    let code = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let logs = if log_tail.is_empty() {
+        "    (no container logs captured)".to_string()
+    } else {
+        log_tail
+            .iter()
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    anyhow::anyhow!(
+        "oci_container_exited_before_ready: service '{service_name}' exited with status {code} \
+         before it became ready\n  last logs:\n{logs}\n  hint: the container started but exited \
+         before passing its readiness probe. Check the logs above; a permission error on a \
+         mounted volume usually means the container user lacks write/execute access to the bind \
+         target."
+    )
 }
 
 /// Build the env map for a service container.
@@ -2957,5 +3071,145 @@ volumes:
                 req.name
             );
         }
+    }
+
+    // ── Exit-before-ready readiness tests (#429) ───────────────────────────────
+
+    fn tcp_probe(addr: &str, timeout_seconds: u32) -> capsule_core::types::ReadinessProbe {
+        capsule_core::types::ReadinessProbe {
+            http_get: None,
+            tcp_connect: Some(addr.to_string()),
+            exec: None,
+            port: None,
+            initial_delay_seconds: 0,
+            timeout_seconds,
+            interval_seconds: 1,
+        }
+    }
+
+    /// A probe with no recognizable target resolves to "ready" immediately
+    /// (see `run_readiness_probe`'s final branch).
+    fn always_ready_probe() -> capsule_core::types::ReadinessProbe {
+        capsule_core::types::ReadinessProbe {
+            http_get: None,
+            tcp_connect: None,
+            exec: None,
+            port: None,
+            initial_delay_seconds: 0,
+            timeout_seconds: 5,
+            interval_seconds: 1,
+        }
+    }
+
+    #[test]
+    fn exited_before_ready_error_includes_code_and_log_tail() {
+        let err = exited_before_ready_error(
+            "main",
+            Some(1),
+            &[
+                "Error: Current user does not have write and/or execute permissions".to_string(),
+                "for the ./data directory: /opt/openlist/data".to_string(),
+            ],
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("oci_container_exited_before_ready"),
+            "code: {msg}"
+        );
+        assert!(msg.contains("service 'main'"), "service: {msg}");
+        assert!(msg.contains("status 1"), "exit code: {msg}");
+        assert!(msg.contains("/opt/openlist/data"), "log tail: {msg}");
+        assert!(msg.contains("hint:"), "hint: {msg}");
+    }
+
+    #[test]
+    fn exited_before_ready_error_handles_unknown_code_and_empty_logs() {
+        let err = exited_before_ready_error("db", None, &[]);
+        let msg = err.to_string();
+        assert!(msg.contains("status unknown"), "unknown code: {msg}");
+        assert!(
+            msg.contains("(no container logs captured)"),
+            "empty logs: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_log_tail_truncates_to_max_lines() {
+        let mut provider = FakeOciProvider::ready();
+        provider.log_chunks = vec![capsule_core::runtime::oci::OciLogChunk {
+            stderr: true,
+            message: b"l1\nl2\nl3\nl4\nl5\n".to_vec(),
+        }];
+        let tail = collect_log_tail(&provider, "cid", 3).await;
+        assert_eq!(
+            tail,
+            vec!["l3", "l4", "l5"],
+            "should keep only the last 3 lines"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_service_readiness_reports_exit_before_ready() {
+        let mut provider = FakeOciProvider::ready();
+        // Container is already dead by the time we inspect.
+        provider.inspect_result = Ok(OciContainerInspect {
+            running: false,
+            exit_code: Some(1),
+            host_ports: std::collections::HashMap::new(),
+        });
+        provider.log_chunks = vec![capsule_core::runtime::oci::OciLogChunk {
+            stderr: true,
+            message:
+                b"Error: Current user does not have write and/or execute permissions for the ./data directory: /opt/openlist/data\n"
+                    .to_vec(),
+        }];
+
+        // A probe that would otherwise loop for 30s; the exit watch must win first.
+        let probe = tcp_probe("127.0.0.1:1", 30);
+        let result =
+            await_service_readiness(&provider, &probe, Some(45678), "cid", "ato-main", "main")
+                .await;
+
+        let err = result.expect_err("must fail with exited-before-ready");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("oci_container_exited_before_ready"),
+            "code: {msg}"
+        );
+        assert!(msg.contains("status 1"), "exit code: {msg}");
+        assert!(msg.contains("/opt/openlist/data"), "log tail: {msg}");
+    }
+
+    #[tokio::test]
+    async fn await_service_readiness_reports_timeout_when_still_running() {
+        let mut provider = FakeOciProvider::ready();
+        // Container keeps running but never passes the probe.
+        provider.inspect_result = Ok(OciContainerInspect {
+            running: true,
+            exit_code: None,
+            host_ports: std::collections::HashMap::new(),
+        });
+
+        // tcp connect to a closed port; short timeout so the probe gives up fast.
+        let probe = tcp_probe("127.0.0.1:1", 1);
+        let result =
+            await_service_readiness(&provider, &probe, None, "cid", "ato-main", "main").await;
+
+        let err = result.expect_err("must fail with healthcheck timeout");
+        let msg = err.to_string();
+        assert!(msg.contains("oci_healthcheck_timeout"), "code: {msg}");
+        assert!(
+            !msg.contains("oci_container_exited_before_ready"),
+            "must not be exit-before-ready while still running: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_service_readiness_ok_when_probe_passes() {
+        let provider = FakeOciProvider::ready(); // inspect running:true by default
+        let probe = always_ready_probe();
+        let result =
+            await_service_readiness(&provider, &probe, None, "cid", "ato-main", "main").await;
+        assert!(result.is_ok(), "ready probe must succeed: {result:?}");
     }
 }
