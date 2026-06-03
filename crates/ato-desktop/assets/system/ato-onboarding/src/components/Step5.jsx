@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { ShieldCheck, Box, Hexagon, FileCode, Container, Wrench, ShipWheel } from 'lucide-react'
 import { BRIDGE } from '../bridge'
 
@@ -313,6 +313,25 @@ export default function Step5({
     if (hasInstallTargets) startInstall()
     else onFinish()
   }
+
+  // App.jsx defers Enter/ArrowRight on the final step to us, so the keyboard
+  // path runs the *same* action as the primary button (install-then-finish or
+  // finish) instead of skipping a pending install. A ref keeps the listener
+  // bound once while always invoking the latest closure/state.
+  const primaryRef = useRef(() => {})
+  primaryRef.current = () => {
+    if (!primaryDisabled) handlePrimary()
+  }
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Enter' || e.key === 'ArrowRight') {
+        e.preventDefault()
+        primaryRef.current()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
 
   const podmanPill = detectionStatusPill({ checked: podmanEnabled, tool: tools.podman })
   const helperPill = bundledStatusPill(tools.ato_helper)

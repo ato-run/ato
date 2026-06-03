@@ -847,6 +847,44 @@ fn toolchain_cache_dir() -> Result<PathBuf> {
     crate::common::paths::toolchain_cache_dir()
 }
 
+/// Locate a managed-runtime executable inside an already-extracted toolchain
+/// directory (`<cache>/<tool>-<version>/`), matching the same layout
+/// [`RuntimeFetcher::ensure_node`] / `ensure_uv` / `ensure_python` produce.
+///
+/// Returns the first `candidates` filename found (direct child first, then a
+/// recursive walk). This is the read-only counterpart used by Runtime Setup
+/// status detection to verify a cached toolchain actually contains a usable
+/// binary — not just a (possibly corrupt/empty) version directory.
+pub fn locate_runtime_binary(runtime_dir: &Path, candidates: &[&str]) -> Option<PathBuf> {
+    for candidate in candidates {
+        let direct = runtime_dir.join(candidate);
+        if direct.is_file() {
+            return Some(direct);
+        }
+    }
+
+    fn walk(dir: &Path, candidates: &[&str]) -> std::io::Result<Option<PathBuf>> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = walk(&path, candidates)? {
+                    return Ok(Some(found));
+                }
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|s| s.to_str())
+                && candidates.iter().any(|c| c.eq_ignore_ascii_case(name))
+            {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+
+    walk(runtime_dir, candidates).ok().flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::RuntimeFetcher;
