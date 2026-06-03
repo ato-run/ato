@@ -482,8 +482,9 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
 
             let cmd = target_runtime.cmd.clone();
 
-            prepare_writable_ownership_mount_sources(service_name, &mounts)
-                .with_context(|| format!("mount preparation failed for service '{service_name}'"))?;
+            prepare_writable_ownership_mount_sources(service_name, &mounts).with_context(|| {
+                format!("mount preparation failed for service '{service_name}'")
+            })?;
 
             reporter
                 .notify(format!(
@@ -1014,7 +1015,7 @@ async fn await_layer_readiness<P: OciProvider>(
 
 /// Maximum number of trailing container-log lines attached to an
 /// `oci_container_exited_before_ready` diagnostic.
-const OCI_EXIT_LOG_TAIL_LINES: usize = 20;
+pub(crate) const OCI_EXIT_LOG_TAIL_LINES: usize = 20;
 
 /// Interval between container-liveness polls while waiting for readiness.
 const OCI_EXIT_WATCH_POLL: Duration = Duration::from_millis(500);
@@ -1089,14 +1090,34 @@ async fn watch_container_exit<P: OciProvider>(provider: &P, container_id: &str) 
 
 /// Collect a bounded tail of a container's logs for diagnostics.
 ///
-/// Truly bounded in memory: we retain at most `max_lines` complete trailing
-/// lines (via a ring buffer) plus a single in-flight line capped at
-/// `MAX_PARTIAL_LINE_BYTES`, so a chatty or newline-less container can't make us
-/// buffer its entire log. Best-effort: a missing or unreadable log stream
-/// yields an empty tail.
+/// Best-effort: a missing or unreadable log stream yields an empty tail. The
+/// memory bound is enforced by [`collect_log_tail_from_rx`].
 async fn collect_log_tail<P: OciProvider>(
     provider: &P,
     container_id: &str,
+    max_lines: usize,
+) -> Vec<String> {
+    match provider.logs(container_id, false).await {
+        Ok(rx) => collect_log_tail_from_rx(rx, max_lines).await,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Collect a bounded tail of lines from an already-opened log stream.
+///
+/// Shared by the multi-service executor (`OciProvider`) and the orchestration
+/// session path (`OciRuntimeClient`) — both yield the same chunk receiver type,
+/// so the exited-before-ready diagnostic carries a log tail regardless of which
+/// path produced it (#445).
+///
+/// Truly bounded in memory: we retain at most `max_lines` complete trailing
+/// lines (via a ring buffer) plus a single in-flight line capped at
+/// `MAX_PARTIAL_LINE_BYTES`, so a chatty or newline-less container can't make us
+/// buffer its entire log.
+pub(crate) async fn collect_log_tail_from_rx(
+    mut rx: tokio::sync::mpsc::Receiver<
+        capsule_core::Result<capsule_core::runtime::oci::OciLogChunk>,
+    >,
     max_lines: usize,
 ) -> Vec<String> {
     use std::collections::VecDeque;
@@ -1119,28 +1140,24 @@ async fn collect_log_tail<P: OciProvider>(
         lines.push_back(trimmed.to_string());
     };
 
-    if let Ok(mut rx) = provider.logs(container_id, false).await {
-        while let Ok(Some(chunk)) =
-            tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
-        {
-            let Ok(chunk) = chunk else { continue };
-            partial.push_str(&String::from_utf8_lossy(&chunk.message));
+    while let Ok(Some(chunk)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+        let Ok(chunk) = chunk else { continue };
+        partial.push_str(&String::from_utf8_lossy(&chunk.message));
 
-            // Flush every complete line, keeping only the trailing `cap`.
-            while let Some(nl) = partial.find('\n') {
-                let line: String = partial.drain(..=nl).collect();
-                push_line(&mut lines, &line);
-            }
+        // Flush every complete line, keeping only the trailing `cap`.
+        while let Some(nl) = partial.find('\n') {
+            let line: String = partial.drain(..=nl).collect();
+            push_line(&mut lines, &line);
+        }
 
-            // Bound the still-incomplete trailing line, keeping its tail on a
-            // valid char boundary.
-            if partial.len() > MAX_PARTIAL_LINE_BYTES {
-                let mut start = partial.len() - MAX_PARTIAL_LINE_BYTES;
-                while start < partial.len() && !partial.is_char_boundary(start) {
-                    start += 1;
-                }
-                partial = partial.split_off(start);
+        // Bound the still-incomplete trailing line, keeping its tail on a
+        // valid char boundary.
+        if partial.len() > MAX_PARTIAL_LINE_BYTES {
+            let mut start = partial.len() - MAX_PARTIAL_LINE_BYTES;
+            while start < partial.len() && !partial.is_char_boundary(start) {
+                start += 1;
             }
+            partial = partial.split_off(start);
         }
     }
 
@@ -1150,31 +1167,71 @@ async fn collect_log_tail<P: OciProvider>(
     lines.into()
 }
 
+/// Typed, downcast-able error for a container that started but exited before it
+/// passed its readiness probe.
+///
+/// Emitted by both the multi-service executor (`await_service_readiness`) and
+/// the orchestration session path (`wait_until_ready_in_state` in
+/// `orchestrator.rs`). It is preserved through the `anyhow` chain so that
+/// `diagnostics::mapping::from_anyhow` can classify it as the typed
+/// `oci_container_exited_before_ready` diagnostic (service name, exit code, log
+/// tail) instead of folding it into the generic E999 fallback. See #445 / #429.
+#[derive(Debug, Clone)]
+pub(crate) struct OciExitedBeforeReadyError {
+    pub service_name: String,
+    pub exit_code: Option<i64>,
+    pub log_tail: Vec<String>,
+}
+
+/// Stable diagnostic code string carried by [`OciExitedBeforeReadyError`].
+pub(crate) const OCI_EXITED_BEFORE_READY_CODE: &str = "oci_container_exited_before_ready";
+
+impl OciExitedBeforeReadyError {
+    /// Render the exit code as `N` or `unknown` for display/details.
+    pub(crate) fn exit_code_display(&self) -> String {
+        self.exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+impl std::fmt::Display for OciExitedBeforeReadyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let logs = if self.log_tail.is_empty() {
+            "    (no container logs captured)".to_string()
+        } else {
+            self.log_tail
+                .iter()
+                .map(|l| format!("    {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        write!(
+            f,
+            "{code}: service '{name}' exited with status {status} before it became ready\n  \
+             last logs:\n{logs}\n  hint: the container started but exited before passing its \
+             readiness probe. Check the logs above; a permission error on a mounted volume \
+             usually means the container user lacks write/execute access to the bind target.",
+            code = OCI_EXITED_BEFORE_READY_CODE,
+            name = self.service_name,
+            status = self.exit_code_display(),
+        )
+    }
+}
+
+impl std::error::Error for OciExitedBeforeReadyError {}
+
 /// Build the typed `oci_container_exited_before_ready` error.
 fn exited_before_ready_error(
     service_name: &str,
     exit_code: Option<i64>,
     log_tail: &[String],
 ) -> anyhow::Error {
-    let code = exit_code
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let logs = if log_tail.is_empty() {
-        "    (no container logs captured)".to_string()
-    } else {
-        log_tail
-            .iter()
-            .map(|l| format!("    {l}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    anyhow::anyhow!(
-        "oci_container_exited_before_ready: service '{service_name}' exited with status {code} \
-         before it became ready\n  last logs:\n{logs}\n  hint: the container started but exited \
-         before passing its readiness probe. Check the logs above; a permission error on a \
-         mounted volume usually means the container user lacks write/execute access to the bind \
-         target."
-    )
+    anyhow::Error::new(OciExitedBeforeReadyError {
+        service_name: service_name.to_string(),
+        exit_code,
+        log_tail: log_tail.to_vec(),
+    })
 }
 
 /// Build the env map for a service container.
@@ -3239,6 +3296,15 @@ volumes:
         assert!(msg.contains("status 1"), "exit code: {msg}");
         assert!(msg.contains("/opt/openlist/data"), "log tail: {msg}");
         assert!(msg.contains("hint:"), "hint: {msg}");
+
+        // The error must remain downcast-able so the diagnostics layer can map
+        // it to the typed `oci_container_exited_before_ready` code (#445).
+        let typed = err
+            .downcast_ref::<OciExitedBeforeReadyError>()
+            .expect("must preserve the typed exited-before-ready error");
+        assert_eq!(typed.service_name, "main");
+        assert_eq!(typed.exit_code, Some(1));
+        assert_eq!(typed.log_tail.len(), 2);
     }
 
     #[test]
@@ -3320,6 +3386,23 @@ volumes:
         );
         assert!(msg.contains("status 1"), "exit code: {msg}");
         assert!(msg.contains("/opt/openlist/data"), "log tail: {msg}");
+
+        // Readiness wait must return the typed (downcast-able) error with the
+        // service name and log tail intact, so the multi-service layer can carry
+        // it to the diagnostics mapping without stringifying it (#445).
+        let typed = err
+            .downcast_ref::<OciExitedBeforeReadyError>()
+            .expect("await_service_readiness must return the typed error");
+        assert_eq!(typed.service_name, "main");
+        assert_eq!(typed.exit_code, Some(1));
+        assert!(
+            typed
+                .log_tail
+                .iter()
+                .any(|line| line.contains("/opt/openlist/data")),
+            "log tail must be preserved on the typed error: {:?}",
+            typed.log_tail
+        );
     }
 
     #[tokio::test]
@@ -3454,7 +3537,10 @@ volumes:
         )];
         prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
         let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o777, "mode must be applied when ownership.mode is Some");
+        assert_eq!(
+            mode, 0o777,
+            "mode must be applied when ownership.mode is Some"
+        );
     }
 
     #[cfg(unix)]
@@ -3473,7 +3559,10 @@ volumes:
         )];
         prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
         let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "mode must not change when ownership.mode is None");
+        assert_eq!(
+            mode, 0o700,
+            "mode must not change when ownership.mode is None"
+        );
     }
 
     #[test]
@@ -3486,7 +3575,10 @@ volumes:
             Some(ownership_with_mode(0o777)),
         )];
         prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
-        assert!(!source.exists(), "readonly mount source must not be created");
+        assert!(
+            !source.exists(),
+            "readonly mount source must not be created"
+        );
     }
 
     #[test]
