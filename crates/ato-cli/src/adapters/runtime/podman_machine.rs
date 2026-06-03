@@ -116,6 +116,31 @@ pub(crate) fn parse_podman_machine_list(stdout: &str) -> PodmanMachineStatus {
     PodmanMachineStatus::Stopped { names: all_names }
 }
 
+/// One Podman machine with just the fields the prepare orchestration needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PodmanMachine {
+    pub(crate) name: String,
+    pub(crate) running: bool,
+}
+
+/// Parse `podman machine list --format json` stdout into per-machine entries.
+///
+/// Unlike [`parse_podman_machine_list`] (which collapses to a coarse status),
+/// this preserves each machine's name and running flag so the prepare flow can
+/// reason about a *specific* machine (e.g. whether `ato-podman` exists / runs).
+/// An empty array parses to an empty `Vec`; invalid JSON is an `Err`.
+pub(crate) fn parse_machine_entries(stdout: &str) -> Result<Vec<PodmanMachine>, String> {
+    let entries: Vec<PodmanMachineListEntry> = serde_json::from_str(stdout)
+        .map_err(|err| format!("podman machine list output was not recognized: {err}"))?;
+    Ok(entries
+        .iter()
+        .map(|entry| PodmanMachine {
+            name: machine_display_name(entry),
+            running: entry.running,
+        })
+        .collect())
+}
+
 pub(crate) fn machine_display_name(entry: &PodmanMachineListEntry) -> String {
     if entry.name.is_empty() {
         "<unnamed>".to_string()
@@ -209,5 +234,34 @@ mod tests {
                 names: vec!["<unnamed>".to_string()]
             }
         );
+    }
+
+    #[test]
+    fn parse_machine_entries_preserves_name_and_running() {
+        let json = r#"[{"Name":"ato-podman","Running":false},{"Name":"other","Running":true}]"#;
+        let entries = parse_machine_entries(json).expect("valid json");
+        assert_eq!(
+            entries,
+            vec![
+                PodmanMachine {
+                    name: "ato-podman".to_string(),
+                    running: false,
+                },
+                PodmanMachine {
+                    name: "other".to_string(),
+                    running: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_machine_entries_empty_is_empty_vec() {
+        assert_eq!(parse_machine_entries("[]").expect("valid"), Vec::new());
+    }
+
+    #[test]
+    fn parse_machine_entries_invalid_json_is_err() {
+        assert!(parse_machine_entries("not-json").is_err());
     }
 }
