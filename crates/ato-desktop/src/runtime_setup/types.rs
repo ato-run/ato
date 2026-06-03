@@ -20,18 +20,21 @@ pub enum RuntimeSetupCommand {
         #[serde(default)]
         request_id: Option<String>,
     },
-    /// Persist the runtime-setup opt-out preferences (Podman use + Ato-managed
-    /// Node/uv/Python installs). Every field defaults on (opt-out), so a
-    /// missing field is treated as enabled.
+    /// Persist runtime-setup preferences (Podman use + Ato-managed
+    /// Node/uv/Python installs). Each field is optional: a field that is
+    /// **omitted** (`None`) leaves the stored value untouched. This lets the
+    /// Settings → Runtime tab persist only the toggles it actually owns without
+    /// silently resetting others (e.g. re-enabling Podman that the user opted
+    /// out of during onboarding). Onboarding sends all four explicitly.
     SaveRuntimeSetupSettings {
-        #[serde(default = "default_true")]
-        podman_enabled: bool,
-        #[serde(default = "default_true")]
-        node_install_enabled: bool,
-        #[serde(default = "default_true")]
-        uv_install_enabled: bool,
-        #[serde(default = "default_true")]
-        python_install_enabled: bool,
+        #[serde(default)]
+        podman_enabled: Option<bool>,
+        #[serde(default)]
+        node_install_enabled: Option<bool>,
+        #[serde(default)]
+        uv_install_enabled: Option<bool>,
+        #[serde(default)]
+        python_install_enabled: Option<bool>,
     },
     /// Foreground-install selected Ato-managed tools. Progress is streamed back
     /// to the calling surface's WebView hydrate hook.
@@ -52,10 +55,6 @@ pub enum RuntimeSetupCommand {
         #[serde(default)]
         request_id: Option<String>,
     },
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl RuntimeSetupCommand {
@@ -137,9 +136,13 @@ mod tests {
     }
 
     #[test]
-    fn save_settings_defaults_missing_fields_to_enabled() {
-        let cmd: RuntimeSetupCommand =
-            serde_json::from_str(r#"{"kind":"save_runtime_setup_settings"}"#).unwrap();
+    fn save_settings_omitted_fields_are_none() {
+        // Settings → Runtime omits podman_enabled; it must deserialize to None
+        // (preserve), never to a value that would silently reset the setting.
+        let cmd: RuntimeSetupCommand = serde_json::from_str(
+            r#"{"kind":"save_runtime_setup_settings","node_install_enabled":false}"#,
+        )
+        .unwrap();
         match cmd {
             RuntimeSetupCommand::SaveRuntimeSetupSettings {
                 podman_enabled,
@@ -147,10 +150,10 @@ mod tests {
                 uv_install_enabled,
                 python_install_enabled,
             } => {
-                assert!(podman_enabled);
-                assert!(node_install_enabled);
-                assert!(uv_install_enabled);
-                assert!(python_install_enabled);
+                assert_eq!(podman_enabled, None);
+                assert_eq!(node_install_enabled, Some(false));
+                assert_eq!(uv_install_enabled, None);
+                assert_eq!(python_install_enabled, None);
             }
             other => panic!("expected SaveRuntimeSetupSettings, got {other:?}"),
         }

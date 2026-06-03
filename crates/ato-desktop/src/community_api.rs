@@ -153,10 +153,12 @@ pub fn fetch_candidates(source: &str) -> Result<Vec<CommunityCandidate>> {
 ///
 /// Blocking; call from a background executor.
 pub fn fetch_candidate_toml(id: &str) -> Result<String> {
-    // The id is interpolated into the URL path, so reject anything that is not
-    // a plain `ctoml_<alnum>` token before building the request.
+    // The id is interpolated into the URL path, so require the canonical
+    // `ctoml_<alnum>` shape (prefix + ASCII alphanumerics/underscore only)
+    // before building the request — this both matches the documented format
+    // and blocks path traversal / injection.
     let trimmed = id.trim();
-    if trimmed.is_empty()
+    if !trimmed.starts_with("ctoml_")
         || !trimmed
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -245,7 +247,15 @@ mod tests {
     fn fetch_candidate_toml_rejects_path_injection_ids() {
         // Anything outside `[A-Za-z0-9_]` must be refused before a request is
         // built, so a crafted id can't traverse or escape the path.
-        for bad in ["", "  ", "ctoml/../admin", "ctoml_abc/extra", "ctoml abc"] {
+        for bad in [
+            "",
+            "  ",
+            "ctoml/../admin",
+            "ctoml_abc/extra",
+            "ctoml abc",
+            "session_01k", // wrong prefix
+            "abc123",      // no ctoml_ prefix
+        ] {
             assert!(
                 fetch_candidate_toml(bad).is_err(),
                 "expected rejection for {bad:?}"
