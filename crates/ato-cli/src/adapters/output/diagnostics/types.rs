@@ -46,6 +46,7 @@ pub enum CliDiagnosticCode {
     E210,
     E211,
     E212,
+    E213,
     E301,
     E302,
     E303,
@@ -79,6 +80,7 @@ impl CliDiagnosticCode {
             Self::E210 => "E210",
             Self::E211 => "E211",
             Self::E212 => "E212",
+            Self::E213 => "E213",
             Self::E301 => "E301",
             Self::E302 => "E302",
             Self::E303 => "E303",
@@ -112,6 +114,7 @@ impl CliDiagnosticCode {
             Self::E210 => "tls_bootstrap_failed",
             Self::E211 => "storage_no_space",
             Self::E212 => "publish_payload_too_large",
+            Self::E213 => "source_build_shell_unavailable",
             Self::E301 => "security_policy_violation",
             Self::E302 => "execution_contract_invalid",
             Self::E303 => "runtime_not_resolved",
@@ -142,7 +145,8 @@ impl CliDiagnosticCode {
             | Self::E209
             | Self::E210
             | Self::E211
-            | Self::E212 => "provisioning",
+            | Self::E212
+            | Self::E213 => "provisioning",
             Self::E301 | Self::E302 | Self::E303 | Self::E304 | Self::E305 => "execution",
             Self::E999 => "internal",
         }
