@@ -31,11 +31,13 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 
 use crate::state::session::{PresentationState, SessionRegistry};
 
-// Stable menu-item ids matched against `MenuEvent.id`.
-const ID_OPEN: &str = "ato.tray.open";
-const ID_RUNNING: &str = "ato.tray.running_apps";
-const ID_STOP_ALL: &str = "ato.tray.stop_all";
-const ID_QUIT: &str = "ato.tray.quit";
+// Stable action tokens. Used as both the muda menu-item ids (matched against
+// `MenuEvent.id`) and the taskbar Jump List `--jump-action` argument / control
+// pipe message, so the tray and the taskbar drive the exact same handlers.
+pub(crate) const ID_OPEN: &str = "open";
+pub(crate) const ID_RUNNING: &str = "running";
+pub(crate) const ID_STOP_ALL: &str = "stop-all";
+pub(crate) const ID_QUIT: &str = "quit";
 
 /// Keeps the [`TrayIcon`] alive for the process lifetime. Dropping the icon
 /// removes it from the notification area, so it is parked on an `App` global.
@@ -106,38 +108,44 @@ pub fn install_tray(cx: &mut App) {
                             let id: &str = event.id.as_ref();
                             id.to_string()
                         };
-                        match menu_id.as_str() {
-                            ID_OPEN => {
-                                let _ = aa.update(tray_open_ato);
-                            }
-                            ID_RUNNING => {
-                                let _ = aa.update(tray_running_apps);
-                            }
-                            ID_STOP_ALL => {
-                                // Stop completes asynchronously; Desktop stays up.
-                                spawn_stop_all(&aa, false);
-                            }
-                            ID_QUIT => {
-                                // Confirm (modal) on the UI thread; proceed only
-                                // if there are no running sessions or the user
-                                // accepts. Stops then run to completion *before*
-                                // the app quits.
-                                let proceed = aa.update(|cx| {
-                                    let running = running_session_count(cx);
-                                    running == 0 || confirm_quit_dialog(running)
-                                });
-                                if proceed {
-                                    crate::window::begin_shutdown();
-                                    spawn_stop_all(&aa, true);
-                                }
-                            }
-                            other => tracing::debug!(id = %other, "tray: unknown menu id"),
-                        }
+                        handle_action(&aa, &menu_id);
                     }
                 }
             }
         })
         .detach();
+}
+
+/// Dispatch a lifecycle action token (`open` / `running` / `stop-all` /
+/// `quit`). Shared by the system-tray menu and the taskbar Jump List (via the
+/// control pipe), so both surfaces behave identically.
+pub(crate) fn handle_action(aa: &gpui::AsyncApp, action: &str) {
+    match action {
+        ID_OPEN => {
+            let _ = aa.update(tray_open_ato);
+        }
+        ID_RUNNING => {
+            let _ = aa.update(tray_running_apps);
+        }
+        ID_STOP_ALL => {
+            // Stop completes asynchronously; Desktop stays up.
+            spawn_stop_all(aa, false);
+        }
+        ID_QUIT => {
+            // Confirm (modal) on the UI thread; proceed only if there are no
+            // running sessions or the user accepts. Stops then run to
+            // completion *before* the app quits.
+            let proceed = aa.update(|cx| {
+                let running = running_session_count(cx);
+                running == 0 || confirm_quit_dialog(running)
+            });
+            if proceed {
+                crate::window::begin_shutdown();
+                spawn_stop_all(aa, true);
+            }
+        }
+        other => tracing::debug!(action = %other, "lifecycle action: unknown token"),
+    }
 }
 
 /// Bring the main Desktop surface (Focus Control Bar) to the foreground.
