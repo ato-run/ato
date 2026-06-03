@@ -482,28 +482,8 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
 
             let cmd = target_runtime.cmd.clone();
 
-            // Ensure filesystem bind-mount source directories exist before podman create,
-            // and apply chmod for writable mounts with an ownership declaration.
-            //
-            // apply_mount_ownership (removed in #428 followup) did chown+chmod; chown
-            // fails with EPERM for non-root users on macOS/Podman-machine/virtiofs, but
-            // chmod is non-root-safe and is required: Podman :U provides user-namespace
-            // uid remapping but the virtiofs layer does NOT make POSIX access() return
-            // writable for the container user (tested: touch works but [ -w dir ] fails).
-            // chmod 0777 is the load-bearing fix here; :U is kept for uid remapping.
-            for mount in &mounts {
-                if mount.source.contains('/') {
-                    let _ = std::fs::create_dir_all(&mount.source);
-                    if !mount.readonly && mount.ownership.is_some() {
-                        if let Ok(meta) = std::fs::metadata(&mount.source) {
-                            use std::os::unix::fs::PermissionsExt;
-                            let mut perms = meta.permissions();
-                            perms.set_mode(0o777);
-                            let _ = std::fs::set_permissions(&mount.source, perms);
-                        }
-                    }
-                }
-            }
+            prepare_writable_ownership_mount_sources(service_name, &mounts)
+                .with_context(|| format!("mount preparation failed for service '{service_name}'"))?;
 
             reporter
                 .notify(format!(
@@ -1233,10 +1213,68 @@ pub(crate) fn build_service_env(
     env
 }
 
-// Host-side chown/chmod (apply_mount_ownership) was removed in the #428 followup.
-// Ownership init is now engine-delegated: Podman uses :U on the -v flag;
-// Docker-compatible emits a warning. See OciMountSpec::ownership and
-// PodmanProvider::create_container.
+/// Prepare filesystem bind-mount sources for writable mounts that carry an
+/// ownership declaration, immediately before `podman create`.
+///
+/// Only mounts satisfying `!readonly && ownership.is_some()` are touched.
+/// Readonly mounts and mounts without an ownership declaration are not modified.
+///
+/// For each qualifying mount source that looks like an absolute path (`/`):
+/// * `create_dir_all` ensures the directory exists.
+/// * If `ownership.mode` is `Some(bits)`, `chmod` applies those permission bits.
+///   `chmod` is non-root-safe; `chown` is intentionally **not** performed (#428 Gate A).
+///
+/// Background: Podman `:U` provides user-namespace uid remapping but the
+/// virtiofs layer on macOS/Podman-machine does NOT reflect this through the
+/// POSIX `access(W_OK)` syscall (Gate B finding). Container entrypoints that
+/// use `[ -w dir ]` (e.g. openlist) will fail unless the host mode bits allow
+/// write access for others. Recipe authors must declare `mode = "0777"` (or a
+/// suitable mode) in `[[services.*.state_bindings]]` to opt in to this chmod.
+fn prepare_writable_ownership_mount_sources(
+    service_name: &str,
+    mounts: &[OciMountSpec],
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    for mount in mounts {
+        if mount.readonly || mount.ownership.is_none() {
+            continue;
+        }
+        if !mount.source.contains('/') {
+            // Named volume (no path separator) — engine-managed, skip.
+            continue;
+        }
+        std::fs::create_dir_all(&mount.source).with_context(|| {
+            format!(
+                "service '{}': failed to create mount source directory '{}'",
+                service_name, mount.source
+            )
+        })?;
+
+        let Some(ownership) = mount.ownership.as_ref() else {
+            continue;
+        };
+        let Some(mode_bits) = ownership.mode else {
+            continue;
+        };
+
+        let meta = std::fs::metadata(&mount.source).with_context(|| {
+            format!(
+                "service '{}': failed to stat mount source '{}'",
+                service_name, mount.source
+            )
+        })?;
+        let mut perms = meta.permissions();
+        perms.set_mode(mode_bits);
+        std::fs::set_permissions(&mount.source, perms).with_context(|| {
+            format!(
+                "service '{}': failed to chmod mount source '{}' to {:o}",
+                service_name, mount.source, mode_bits
+            )
+        })?;
+    }
+    Ok(())
+}
 
 /// Collect mount source directories that belong to `Ephemeral` state bindings.
 fn collect_ephemeral_mount_sources(plan: &ManifestData) -> HashSet<String> {
@@ -3340,5 +3378,126 @@ volumes:
         };
         assert!(spec.ownership.is_none());
         assert!(spec.readonly);
+    }
+
+    // ── prepare_writable_ownership_mount_sources tests ────────────────────────
+
+    fn make_oci_mount(
+        source: &str,
+        readonly: bool,
+        ownership: Option<capsule_core::types::MountOwnership>,
+    ) -> OciMountSpec {
+        OciMountSpec {
+            source: source.to_string(),
+            target: "/container/path".to_string(),
+            readonly,
+            ownership,
+        }
+    }
+
+    fn ownership_with_mode(mode: u32) -> capsule_core::types::MountOwnership {
+        capsule_core::types::MountOwnership {
+            uid: Some(1001),
+            gid: Some(1001),
+            recursive: false,
+            mode: Some(mode),
+        }
+    }
+
+    fn ownership_no_mode() -> capsule_core::types::MountOwnership {
+        capsule_core::types::MountOwnership {
+            uid: Some(1001),
+            gid: Some(1001),
+            recursive: false,
+            mode: None,
+        }
+    }
+
+    #[test]
+    fn prepare_mounts_creates_dir_for_writable_ownership_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("state_data");
+        let mounts = vec![make_oci_mount(
+            source.to_str().unwrap(),
+            false,
+            Some(ownership_with_mode(0o755)),
+        )];
+        prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
+        assert!(source.exists(), "source directory must be created");
+    }
+
+    #[test]
+    fn prepare_mounts_applies_mode_when_declared() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("state_data");
+        let mounts = vec![make_oci_mount(
+            source.to_str().unwrap(),
+            false,
+            Some(ownership_with_mode(0o777)),
+        )];
+        prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o777, "mode must be applied when ownership.mode is Some");
+    }
+
+    #[test]
+    fn prepare_mounts_does_not_chmod_when_mode_is_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("state_data");
+        // Pre-create with restrictive mode.
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mounts = vec![make_oci_mount(
+            source.to_str().unwrap(),
+            false,
+            Some(ownership_no_mode()),
+        )];
+        prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "mode must not change when ownership.mode is None");
+    }
+
+    #[test]
+    fn prepare_mounts_skips_readonly_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("ro_data");
+        let mounts = vec![make_oci_mount(
+            source.to_str().unwrap(),
+            true, // readonly
+            Some(ownership_with_mode(0o777)),
+        )];
+        prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
+        assert!(!source.exists(), "readonly mount source must not be created");
+    }
+
+    #[test]
+    fn prepare_mounts_skips_mounts_without_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("no_owner_data");
+        let mounts = vec![make_oci_mount(
+            source.to_str().unwrap(),
+            false,
+            None, // no ownership
+        )];
+        prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
+        assert!(
+            !source.exists(),
+            "mount without ownership declaration must not be created"
+        );
+    }
+
+    #[test]
+    fn prepare_mounts_skips_named_volumes() {
+        // Named volumes (no path separator) are engine-managed, must not be mkdir'd.
+        let mounts = vec![make_oci_mount(
+            "my-named-volume", // no '/'
+            false,
+            Some(ownership_with_mode(0o777)),
+        )];
+        // Should succeed without touching the filesystem.
+        prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
+        // No directory created (named volume is not a path on the host).
     }
 }
