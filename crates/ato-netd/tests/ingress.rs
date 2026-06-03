@@ -693,3 +693,80 @@ async fn upstream_not_ready_returns_service_starting_page() {
 
     shutdown_daemon(client, child).await;
 }
+
+/// Regression: deregistering a route while a guest still holds an idle
+/// keep-alive connection open must return promptly.
+///
+/// `IngressManager::deregister` previously awaited every in-flight proxy task
+/// unconditionally. A keep-alive connection (exactly what a guest WebView
+/// leaves behind when its window closes) parks in hyper's idle state and never
+/// completes on its own, so the DeregisterIngress reply blocked for the full
+/// connection lifetime — surfacing as a ~57s freeze of the Desktop UI thread
+/// that issued the synchronous deregister from `AppCapsuleShell::Drop`.
+///
+/// Teardown now drains with a bounded grace period and then aborts the
+/// stragglers, so deregister must complete in well under that. Before the fix
+/// this test hangs until the harness timeout.
+#[serial]
+#[tokio::test]
+async fn deregister_is_prompt_with_idle_keepalive_connection() {
+    // Upstream that answers one request and keeps the connection alive, so the
+    // proxied client connection parks in hyper's keep-alive idle state.
+    let (upstream_listener, upstream_addr) = free_listener().await;
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = upstream_listener.accept().await {
+            let io = TokioIo::new(stream);
+            tokio::spawn(hyper::server::conn::http1::Builder::new().serve_connection(
+                io,
+                service_fn(|_req: Request<Incoming>| async {
+                    Ok::<_, hyper::Error>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "text/plain")
+                            .body(Full::new(Bytes::from("ok")))
+                            .unwrap(),
+                    )
+                }),
+            ));
+        }
+    });
+
+    let ato_home = TempDir::new().unwrap();
+    let (child, socket_path) = spawn_daemon(&ato_home);
+    let mut client = wait_for_daemon(&socket_path, 3000).await;
+
+    let IngressInfo { port } = client
+        .register_ingress("test-idle-keepalive", &format!("http://{upstream_addr}"))
+        .await
+        .expect("register_ingress");
+    sleep(Duration::from_millis(150)).await;
+
+    // Open a raw keep-alive connection through the ingress, complete one
+    // request, then deliberately hold the socket open and idle.
+    let mut conn = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .expect("connect to ingress");
+    conn.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
+        .await
+        .expect("write request");
+    let mut buf = vec![0u8; 1024];
+    let n = conn.read(&mut buf).await.expect("read response");
+    assert!(n > 0, "expected a proxied response from the ingress");
+    // `conn` is intentionally NOT dropped before deregister — it stays parked
+    // in the proxy's keep-alive idle state, reproducing the closing WebView.
+
+    let started = tokio::time::Instant::now();
+    client
+        .deregister_ingress("test-idle-keepalive")
+        .await
+        .expect("deregister_ingress");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "deregister blocked on an idle keep-alive connection ({elapsed:?}); \
+         the bounded-drain teardown regressed"
+    );
+
+    drop(conn);
+    shutdown_daemon(client, child).await;
+}
