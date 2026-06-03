@@ -437,6 +437,12 @@ fn runtime_from_target(
             .and_then(json_string_array)
             .unwrap_or_default(),
         mounts: Vec::new(),
+        user: target
+            .get("user")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
 }
 
