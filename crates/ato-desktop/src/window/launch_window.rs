@@ -19,11 +19,10 @@
 //! AppWindow after `orchestrator::resolve_and_start_guest` returns a
 //! ready session.
 //!
-//! Wizards are intentionally NOT registered in `OpenContentWindows`.
-//! They are launch chrome, not destination content — the Card Switcher
-//! should not list a half-formed AppWindow's wizard. The user-facing
-//! AppWindow that follows a successful approve flow registers itself
-//! the normal way via `open_app_window`.
+//! Wizards are registered in `OpenContentWindows` because they are
+//! top-level WebView surfaces the user can switch back to. The
+//! AppWindow that follows a successful approve flow still registers
+//! itself the normal way via `open_app_window`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TryRecvError;
@@ -48,6 +47,7 @@ use crate::state::GuestRoute;
 use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::system_capsule::static_resolver::resolve_system_capsule_protocol_response;
+use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
@@ -356,6 +356,27 @@ const BOOT_W: f32 = 440.0;
 const BOOT_H: f32 = 520.0;
 const GITHUB_RUN_W: f32 = 520.0;
 const GITHUB_RUN_H: f32 = 480.0;
+
+fn register_launch_content_window(
+    cx: &mut App,
+    handle: AnyWindowHandle,
+    title: &'static str,
+    subtitle: String,
+    slug: &'static str,
+) {
+    cx.global_mut::<OpenContentWindows>().insert(
+        handle.window_id().as_u64(),
+        ContentWindowEntry {
+            handle,
+            kind: ContentWindowKind::Launch,
+            title: gpui::SharedString::from(title),
+            subtitle: gpui::SharedString::from(subtitle),
+            url: gpui::SharedString::from(format!("capsule://desktop.ato.run/launch/{slug}")),
+            capsule: None,
+            last_focused_at: std::time::Instant::now(),
+        },
+    );
+}
 
 /// Spawn the consent wizard with no specific target — used for AODD
 /// screenshot generation and standalone MCP testing.
@@ -782,6 +803,13 @@ fn open_consent_wizard_inner(
 
     cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
         .register(SystemCapsuleId::AtoLaunch, *handle);
+    register_launch_content_window(
+        cx,
+        *handle,
+        "Launch consent",
+        "Review permissions and configuration".to_string(),
+        "consent",
+    );
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     let shell = shell_slot
         .lock()
@@ -848,6 +876,10 @@ pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyW
         )
     });
     let (handle, shell) = open_boot_wizard_inner(cx, init_script)?;
+    let subtitle = route
+        .map(|r| r.label())
+        .unwrap_or_else(|| "Launch progress".to_string());
+    register_launch_content_window(cx, handle, "Booting capsule", subtitle, "boot");
     tracing::info!(
         boot_window_id = handle.window_id().as_u64(),
         route = ?route.map(|r| r.label()),
@@ -922,6 +954,13 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
 
     cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
         .register(SystemCapsuleId::AtoLaunch, *handle);
+    register_launch_content_window(
+        cx,
+        *handle,
+        "Run from GitHub",
+        "Select a repository capsule".to_string(),
+        "github-run",
+    );
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     let shell = shell_slot
         .lock()

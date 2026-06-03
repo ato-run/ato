@@ -35,6 +35,7 @@ use crate::community_api::{self, CommunityCandidate};
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
+use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
@@ -221,6 +222,18 @@ pub fn open_for_source(cx: &mut App, source: String, label: String) -> Result<An
 
     cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
         .register(SystemCapsuleId::AtoImport, *handle);
+    cx.global_mut::<OpenContentWindows>().insert(
+        handle.window_id().as_u64(),
+        ContentWindowEntry {
+            handle: *handle,
+            kind: ContentWindowKind::Import,
+            title: gpui::SharedString::from(format!("Review {}", label)),
+            subtitle: gpui::SharedString::from(source.clone()),
+            url: gpui::SharedString::from("capsule://desktop.ato.run/import/community"),
+            capsule: None,
+            last_focused_at: std::time::Instant::now(),
+        },
+    );
     system_ipc::spawn_drain_loop(cx, queue, *handle);
 
     let shell = shell_slot
