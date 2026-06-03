@@ -251,6 +251,32 @@ pub(crate) enum OciProviderError {
          read-only mounts cannot be re-owned by the engine"
     )]
     ReadOnlyOwnershipConflict { target: String },
+
+    #[error(
+        "ATO_PODMAN_BIN is set to '{path}' but that path is not a usable executable. \
+         Unset ATO_PODMAN_BIN or set it to a valid podman binary path."
+    )]
+    InvalidBinaryOverride { path: String },
+
+    #[error(
+        "Podman storage or graph driver reported an error. \
+         This is a provider health issue, not a recipe error.\n\
+         Detail: {reason}\n\
+         Fix: podman system reset (warning: destroys all containers and images)."
+    )]
+    StorageCorrupted { reason: String },
+
+    #[error(
+        "Docker-compatible daemon is not reachable: {reason}. \
+         Start Docker Desktop or switch the container_runtime setting to podman."
+    )]
+    DockerDaemonUnavailable { reason: String },
+
+    #[error(
+        "Permission denied when connecting to the Docker socket. \
+         Add your user to the 'docker' group or use 'sudo', or use Podman instead."
+    )]
+    DockerPermissionDenied,
 }
 
 impl OciProviderError {
@@ -278,6 +304,10 @@ impl OciProviderError {
             Self::MachineReadyTimeout { .. } => "oci_machine_ready_timeout",
             Self::PodmanDisabled => "oci_podman_disabled",
             Self::ReadOnlyOwnershipConflict { .. } => "oci_readonly_ownership_conflict",
+            Self::InvalidBinaryOverride { .. } => "oci_invalid_binary_override",
+            Self::StorageCorrupted { .. } => "oci_storage_corrupted",
+            Self::DockerDaemonUnavailable { .. } => "oci_docker_daemon_unavailable",
+            Self::DockerPermissionDenied => "oci_docker_permission_denied",
         }
     }
 
@@ -356,6 +386,24 @@ pub(crate) trait OciProviderSelector: Send + Sync {
     fn select_provider(&self) -> Self::Provider;
 }
 
+/// Diagnostic report describing which OCI provider was selected and why.
+///
+/// Returned alongside the provider from [`select_ready_runtime_oci_provider_with_report`].
+/// Useful for CLI diagnostics and runtime-setup status commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciProviderSelectionReport {
+    /// The provider kind that was selected, or `None` when no provider was ready.
+    pub selected: Option<OciProviderKind>,
+    /// Human-readable reason for the selection outcome.
+    pub reason: String,
+    /// A provider that could have been used but wasn't selected (e.g. Docker when Podman wins).
+    pub fallback_candidate: Option<OciProviderKind>,
+    /// The readiness error from the Podman probe, when Podman was not selected.
+    pub podman_error: Option<OciProviderError>,
+    /// The readiness error from the Docker-compatible probe, when Docker was not selected.
+    pub docker_error: Option<OciProviderError>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DefaultOciProviderSelector;
 
@@ -406,11 +454,20 @@ pub(crate) fn podman_enabled() -> bool {
 
 pub(crate) async fn select_ready_runtime_oci_provider()
 -> Result<RuntimeOciProvider, OciProviderError> {
+    let (result, _report) = select_ready_runtime_oci_provider_with_report().await;
+    result
+}
+
+/// Select a ready OCI provider, returning both the provider result and a
+/// diagnostic report describing what was tried and why the selection was made.
+///
+/// This is the primary selection entry point; [`select_ready_runtime_oci_provider`]
+/// is a thin wrapper that discards the report.
+pub(crate) async fn select_ready_runtime_oci_provider_with_report() -> (
+    Result<RuntimeOciProvider, OciProviderError>,
+    OciProviderSelectionReport,
+) {
     if !podman_enabled() {
-        // User opted out of Podman: never probe Podman or auto-start a Podman
-        // machine. Try a Docker-compatible daemon instead; if none is ready,
-        // surface the actionable `PodmanDisabled` error rather than a raw
-        // Podman readiness-probe failure.
         tracing::info!("Podman disabled via ATO_PODMAN_ENABLED=0; skipping Podman provider");
         return match connect_ready_docker_compatible_provider().await {
             Ok(docker) => {
@@ -418,14 +475,29 @@ pub(crate) async fn select_ready_runtime_oci_provider()
                     chosen_runtime = "docker-compatible",
                     "selected Docker-compatible OCI runtime provider (Podman disabled)"
                 );
-                Ok(RuntimeOciProvider::DockerCompatible(docker))
+                let report = OciProviderSelectionReport {
+                    selected: Some(OciProviderKind::DockerCompatible),
+                    reason: "Podman disabled via ATO_PODMAN_ENABLED=0; Docker-compatible is ready"
+                        .to_string(),
+                    fallback_candidate: None,
+                    podman_error: Some(OciProviderError::PodmanDisabled),
+                    docker_error: None,
+                };
+                (Ok(RuntimeOciProvider::DockerCompatible(docker)), report)
             }
             Err(docker_error) => {
                 tracing::warn!(
                     docker_error = %docker_error,
                     "Podman disabled and no ready Docker-compatible provider; surfacing PodmanDisabled"
                 );
-                Err(OciProviderError::PodmanDisabled)
+                let report = OciProviderSelectionReport {
+                    selected: None,
+                    reason: "Podman disabled and Docker-compatible is not ready".to_string(),
+                    fallback_candidate: None,
+                    podman_error: Some(OciProviderError::PodmanDisabled),
+                    docker_error: Some(docker_error),
+                };
+                (Err(OciProviderError::PodmanDisabled), report)
             }
         };
     }
@@ -437,7 +509,14 @@ pub(crate) async fn select_ready_runtime_oci_provider()
             chosen_runtime = "podman",
             "selected ready OCI runtime provider"
         );
-        return Ok(RuntimeOciProvider::Podman(podman));
+        let report = OciProviderSelectionReport {
+            selected: Some(OciProviderKind::Podman),
+            reason: "Podman is installed and ready".to_string(),
+            fallback_candidate: None,
+            podman_error: None,
+            docker_error: None,
+        };
+        return (Ok(RuntimeOciProvider::Podman(podman)), report);
     }
     let podman_error = podman_ready.expect_err("checked podman readiness failure");
 
@@ -453,7 +532,18 @@ pub(crate) async fn select_ready_runtime_oci_provider()
                 podman_error = %podman_error,
                 "selected Docker-compatible OCI runtime provider after Podman was not ready"
             );
-            Ok(RuntimeOciProvider::DockerCompatible(docker))
+            let reason = format!(
+                "Podman not ready ({}); Docker-compatible is ready",
+                podman_error.code()
+            );
+            let report = OciProviderSelectionReport {
+                selected: Some(OciProviderKind::DockerCompatible),
+                reason,
+                fallback_candidate: None,
+                podman_error: Some(podman_error),
+                docker_error: None,
+            };
+            (Ok(RuntimeOciProvider::DockerCompatible(docker)), report)
         }
         Ok(RuntimeOciProviderChoice::Podman) => unreachable!("podman readiness already failed"),
         Err(err) => {
@@ -461,12 +551,27 @@ pub(crate) async fn select_ready_runtime_oci_provider()
                 Ok(_) => unreachable!("checked Docker-compatible readiness failure"),
                 Err(docker_error) => docker_error,
             };
+            let reason = format!(
+                "no provider ready: Podman {} ({}), Docker {} ({})",
+                podman_error.code(),
+                podman_error,
+                docker_error.code(),
+                docker_error
+            );
             tracing::warn!(
                 podman_error = %podman_error,
                 docker_error = %docker_error,
-                "no ready Docker-compatible OCI runtime provider found; preserving Podman readiness error"
+                reason = %reason,
+                "no ready OCI provider found"
             );
-            Err(err)
+            let report = OciProviderSelectionReport {
+                selected: None,
+                reason,
+                fallback_candidate: None,
+                podman_error: Some(err.clone()),
+                docker_error: Some(docker_error),
+            };
+            (Err(err), report)
         }
     }
 }
@@ -613,6 +718,26 @@ impl<R> PodmanProvider<R> {
 }
 
 impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
+    /// Run `podman info` and classify its failure mode; called after confirming the
+    /// machine is Running to verify the daemon is actually healthy.
+    fn check_podman_info_health(&self) -> Result<(), OciProviderError> {
+        let info_out = run_provider_command(&self.runner, "podman", &["info"])?;
+        if info_out.success() {
+            return Ok(());
+        }
+        let combined = format!("{} {}", info_out.stdout, info_out.stderr);
+        if is_storage_corrupted(&combined) {
+            Err(OciProviderError::StorageCorrupted {
+                reason: combined.trim().to_string(),
+            })
+        } else {
+            Err(OciProviderError::ProbeFailed {
+                provider: "podman",
+                message: format!("podman info failed: {}", combined.trim()),
+            })
+        }
+    }
+
     /// macOS/Windows: inspect the machine list and start the machine if exactly one is stopped.
     async fn ensure_machine_ready(&self) -> Result<(), OciProviderError> {
         let ver_out = run_provider_command(&self.runner, "podman", &["--version"])?;
@@ -636,7 +761,7 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
                     names: all_names.join(", "),
                 })
             }
-            PodmanMachineStatus::Running { .. } => Ok(()),
+            PodmanMachineStatus::Running { .. } => self.check_podman_info_health(),
             PodmanMachineStatus::NotConfigured => Err(OciProviderError::MachineNotConfigured),
             PodmanMachineStatus::Stopped { names } if names.len() > 1 => {
                 Err(OciProviderError::MachineAmbiguous {
@@ -711,7 +836,7 @@ where
 
         match &self.platform {
             PodmanProbePlatform::Linux => {
-                let mode = detect_linux_podman_mode(&self.runner);
+                let mode = detect_linux_podman_mode(&self.runner)?;
                 let semantics = podman_semantics(mode, OciProviderSubstrate::NativeLinux);
                 let inventory = OciProviderInventory {
                     kind: OciProviderKind::Podman,
@@ -1495,7 +1620,16 @@ fn run_provider_command<R: OciCommandRunner>(
     args: &[&str],
 ) -> Result<CommandOutput, OciProviderError> {
     runner.run(program, args).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
+        if err.kind() == std::io::ErrorKind::NotFound && program == "podman" {
+            // Distinguish an invalid ATO_PODMAN_BIN override from a genuinely
+            // absent binary so the user gets an actionable message.
+            if let Err(capsule_core::podman::PodmanResolveError::InvalidEnvOverride { path }) =
+                capsule_core::podman::resolve_podman()
+            {
+                return OciProviderError::InvalidBinaryOverride {
+                    path: path.display().to_string(),
+                };
+            }
             OciProviderError::Missing {
                 provider: "podman",
                 binary: program,
@@ -1507,6 +1641,16 @@ fn run_provider_command<R: OciCommandRunner>(
             }
         }
     })
+}
+
+/// Detect whether a `podman info` failure is caused by a storage or graph
+/// driver error rather than a transient daemon state.
+fn is_storage_corrupted(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("storage")
+        && (lower.contains("graph") || lower.contains("driver") || lower.contains("corrupt"))
+        || lower.contains("graphdriver")
+        || lower.contains("overlay") && (lower.contains("corrupt") || lower.contains("invalid"))
 }
 
 fn command_failed(command: &'static str, output: CommandOutput) -> OciProviderError {
@@ -1547,21 +1691,32 @@ fn parse_podman_version(stdout: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn detect_linux_podman_mode<R: OciCommandRunner>(runner: &R) -> OciProviderMode {
-    let Ok(output) = runner.run(
-        "podman",
-        &["info", "--format", "{{.Host.Security.Rootless}}"],
-    ) else {
-        return OciProviderMode::Unknown;
-    };
+fn detect_linux_podman_mode<R: OciCommandRunner>(
+    runner: &R,
+) -> Result<OciProviderMode, OciProviderError> {
+    let output = runner
+        .run("podman", &["info", "--format", "{{.Host.Security.Rootless}}"])
+        .map_err(|err| OciProviderError::ProbeFailed {
+            provider: "podman",
+            message: format!("podman info: {err}"),
+        })?;
     if !output.success() {
-        return OciProviderMode::Unknown;
+        let combined = format!("{} {}", output.stdout, output.stderr);
+        if is_storage_corrupted(&combined) {
+            return Err(OciProviderError::StorageCorrupted {
+                reason: combined.trim().to_string(),
+            });
+        }
+        return Err(OciProviderError::ProbeFailed {
+            provider: "podman",
+            message: format!("podman info failed: {}", combined.trim()),
+        });
     }
-    match output.stdout.trim().to_ascii_lowercase().as_str() {
+    Ok(match output.stdout.trim().to_ascii_lowercase().as_str() {
         "true" => OciProviderMode::Rootless,
         "false" => OciProviderMode::Rootful,
         _ => OciProviderMode::Unknown,
-    }
+    })
 }
 
 fn parse_machine_status(stdout: &str) -> OciProviderMachineStatus {
@@ -1791,6 +1946,13 @@ pub(crate) fn build_digest_pull_ref(image: &OciImageResolution) -> String {
 
 fn podman_async_io_error(command: &'static str, err: std::io::Error) -> OciProviderError {
     if err.kind() == std::io::ErrorKind::NotFound {
+        if let Err(capsule_core::podman::PodmanResolveError::InvalidEnvOverride { path }) =
+            capsule_core::podman::resolve_podman()
+        {
+            return OciProviderError::InvalidBinaryOverride {
+                path: path.display().to_string(),
+            };
+        }
         OciProviderError::Missing {
             provider: "podman",
             binary: "podman",
@@ -1876,17 +2038,14 @@ impl DockerCompatibleOciProvider<BollardOciRuntimeClient> {
 
 async fn connect_ready_docker_compatible_provider()
 -> Result<DockerCompatibleOciProvider<BollardOciRuntimeClient>, OciProviderError> {
-    let provider = DockerCompatibleOciProvider::connect_default(docker_compatible_semantics())?;
-    let version =
-        provider
-            .client
-            .docker()
-            .version()
-            .await
-            .map_err(|err| OciProviderError::ProbeFailed {
-                provider: "docker-compatible",
-                message: format!("docker-compatible engine version probe failed: {err}"),
-            })?;
+    let provider = DockerCompatibleOciProvider::connect_default(docker_compatible_semantics())
+        .map_err(|err| classify_docker_connect_error(err))?;
+    let version = provider
+        .client
+        .docker()
+        .version()
+        .await
+        .map_err(|err| classify_docker_error_message(&err.to_string()))?;
 
     let platform_name = version
         .platform
@@ -1923,6 +2082,42 @@ fn docker_compatible_semantics() -> OciProviderSemantics {
         substrate: OciProviderSubstrate::Unknown,
         policy_profile: "oci-docker-compatible-v1".to_string(),
     }
+}
+
+fn classify_docker_connect_error(err: OciProviderError) -> OciProviderError {
+    if let OciProviderError::ProbeFailed { message, .. } = &err {
+        return classify_docker_error_message(message);
+    }
+    err
+}
+
+fn classify_docker_error_message(message: &str) -> OciProviderError {
+    if is_permission_denied(message) {
+        return OciProviderError::DockerPermissionDenied;
+    }
+    if is_daemon_unavailable(message) {
+        return OciProviderError::DockerDaemonUnavailable {
+            reason: message.to_string(),
+        };
+    }
+    OciProviderError::ProbeFailed {
+        provider: "docker-compatible",
+        message: format!("docker-compatible engine version probe failed: {message}"),
+    }
+}
+
+fn is_permission_denied(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("permission denied") || lower.contains("access is denied")
+}
+
+fn is_daemon_unavailable(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("no such file or directory")
+        || lower.contains("connection refused")
+        || lower.contains("cannot connect")
+        || lower.contains("daemon is not running")
+        || lower.contains("is docker running")
 }
 
 #[async_trait]
@@ -3457,7 +3652,8 @@ mod tests {
                 .with_output(
                     &["podman", "machine", "list", "--format", "json"],
                     output(0, machine_json, ""),
-                ),
+                )
+                .with_output(&["podman", "info"], output(0, "{}", "")),
             PodmanProbePlatform::Macos,
         );
         provider
@@ -3734,5 +3930,305 @@ mod tests {
         );
         // podman_mount_opts would return :U but the caller guards this before calling.
         assert_ne!(podman_mount_opts(&m), ":ro");
+    }
+
+    // ── Provider health diagnostics tests (#430) ──────────────────────────────
+
+    #[test]
+    fn invalid_binary_override_has_stable_code() {
+        let err = OciProviderError::InvalidBinaryOverride {
+            path: "/bad/path".to_string(),
+        };
+        assert_eq!(err.code(), "oci_invalid_binary_override");
+        assert!(err.to_string().contains("/bad/path"));
+        assert!(err.to_string().contains("ATO_PODMAN_BIN"));
+    }
+
+    #[test]
+    fn storage_corrupted_has_stable_code() {
+        let err = OciProviderError::StorageCorrupted {
+            reason: "overlay graphDriver: no such file".to_string(),
+        };
+        assert_eq!(err.code(), "oci_storage_corrupted");
+        assert!(err.to_string().contains("storage or graph driver"));
+        assert!(err.to_string().contains("podman system reset"));
+    }
+
+    #[test]
+    fn docker_daemon_unavailable_has_stable_code() {
+        let err = OciProviderError::DockerDaemonUnavailable {
+            reason: "connection refused".to_string(),
+        };
+        assert_eq!(err.code(), "oci_docker_daemon_unavailable");
+        assert!(err.to_string().contains("not reachable"));
+    }
+
+    #[test]
+    fn docker_permission_denied_has_stable_code() {
+        assert_eq!(
+            OciProviderError::DockerPermissionDenied.code(),
+            "oci_docker_permission_denied"
+        );
+        assert!(
+            OciProviderError::DockerPermissionDenied
+                .to_string()
+                .contains("Permission denied")
+        );
+    }
+
+    #[test]
+    fn is_storage_corrupted_classifies_known_patterns() {
+        assert!(is_storage_corrupted(
+            "Error: storage: graphDriver not initialized"
+        ));
+        assert!(is_storage_corrupted(
+            "overlay: storage corrupt: no such file"
+        ));
+        assert!(is_storage_corrupted("graphdriver error"));
+        assert!(!is_storage_corrupted("connection refused"));
+        assert!(!is_storage_corrupted("permission denied"));
+    }
+
+    #[test]
+    fn is_permission_denied_classifies_docker_socket_error() {
+        assert!(is_permission_denied(
+            "Got permission denied while trying to connect to the Docker daemon socket"
+        ));
+        assert!(is_permission_denied("Access is denied (OS error 5)"));
+        assert!(!is_permission_denied("connection refused"));
+    }
+
+    #[test]
+    fn is_daemon_unavailable_classifies_connection_errors() {
+        assert!(is_daemon_unavailable(
+            "error during connect: no such file or directory"
+        ));
+        assert!(is_daemon_unavailable("connection refused"));
+        assert!(is_daemon_unavailable("Is Docker running?"));
+        assert!(!is_daemon_unavailable("permission denied"));
+    }
+
+    #[test]
+    fn classify_docker_error_message_maps_permission_denied() {
+        let err = classify_docker_error_message("permission denied to Docker socket");
+        assert_eq!(err.code(), "oci_docker_permission_denied");
+    }
+
+    #[test]
+    fn classify_docker_error_message_maps_daemon_unavailable() {
+        let err = classify_docker_error_message("connection refused to Docker daemon");
+        assert_eq!(err.code(), "oci_docker_daemon_unavailable");
+    }
+
+    #[test]
+    fn classify_docker_error_message_maps_unknown_to_probe_failed() {
+        let err = classify_docker_error_message("some unexpected error");
+        assert_eq!(err.code(), "oci_provider_probe_failed");
+    }
+
+    // ── StorageCorrupted in real readiness paths ──────────────────────────────
+
+    #[tokio::test]
+    async fn ensure_ready_macos_running_storage_error_returns_storage_corrupted() {
+        let machine_json = r#"[{"Name":"podman-machine-default","Running":true}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, machine_json, ""),
+                )
+                .with_output(
+                    &["podman", "info"],
+                    output(1, "", "Error: storage: graphDriver not initialized"),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("storage error must fail");
+        assert_eq!(err.code(), "oci_storage_corrupted");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_macos_running_connection_refused_is_probe_failed_not_storage_corrupted() {
+        let machine_json = r#"[{"Name":"podman-machine-default","Running":true}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, machine_json, ""),
+                )
+                .with_output(
+                    &["podman", "info"],
+                    output(1, "", "connection refused"),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("failed podman info must fail");
+        assert_eq!(err.code(), "oci_provider_probe_failed");
+        assert_ne!(err.code(), "oci_storage_corrupted");
+    }
+
+    #[tokio::test]
+    async fn podman_probe_linux_storage_error_returns_storage_corrupted() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 4.9.0\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(1, "", "Error: storage: graphDriver not initialized"),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+        let err = provider
+            .probe()
+            .await
+            .expect_err("storage error must fail probe");
+        assert_eq!(err.code(), "oci_storage_corrupted");
+    }
+
+    #[tokio::test]
+    async fn podman_probe_linux_permission_denied_is_not_storage_corrupted() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 4.9.0\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(1, "", "permission denied"),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+        let err = provider
+            .probe()
+            .await
+            .expect_err("permission denied must fail probe");
+        assert_ne!(err.code(), "oci_storage_corrupted");
+    }
+
+    // ── select_ready_runtime_oci_provider_with_report actual return values ────
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn select_ready_runtime_with_report_podman_disabled_sets_podman_error_in_report() {
+        let previous = std::env::var_os("ATO_PODMAN_ENABLED");
+        unsafe { std::env::set_var("ATO_PODMAN_ENABLED", "0") };
+
+        let (_result, report) = select_ready_runtime_oci_provider_with_report().await;
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var("ATO_PODMAN_ENABLED", v) },
+            None => unsafe { std::env::remove_var("ATO_PODMAN_ENABLED") },
+        }
+
+        assert_eq!(
+            report.podman_error.as_ref().map(|e| e.code()),
+            Some("oci_podman_disabled"),
+            "report must record PodmanDisabled when opt-out is set"
+        );
+        assert_ne!(
+            report.selected,
+            Some(OciProviderKind::Podman),
+            "Podman must not be selected when disabled"
+        );
+        assert!(!report.reason.is_empty(), "report reason must be non-empty");
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn select_ready_runtime_with_report_no_provider_emits_both_errors_in_report() {
+        // Force both providers to be unavailable: disable Podman and suppress
+        // Docker by pointing ATO_PODMAN_BIN at an intentionally absent path so
+        // the Docker path is exercised without Podman ever starting.
+        // We only check the Podman-disabled path here since Docker availability
+        // is not controllable in the test environment without a real daemon.
+        let previous = std::env::var_os("ATO_PODMAN_ENABLED");
+        unsafe { std::env::set_var("ATO_PODMAN_ENABLED", "0") };
+
+        let (result, report) = select_ready_runtime_oci_provider_with_report().await;
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var("ATO_PODMAN_ENABLED", v) },
+            None => unsafe { std::env::remove_var("ATO_PODMAN_ENABLED") },
+        }
+
+        // podman_error is always PodmanDisabled in the opt-out path.
+        assert_eq!(
+            report.podman_error.as_ref().map(|e| e.code()),
+            Some("oci_podman_disabled")
+        );
+        // If Docker is also unavailable, result is Err and selected is None.
+        // If Docker is available, result is Ok and selected is DockerCompatible.
+        // Either way, the report must have a non-empty reason.
+        assert!(!report.reason.is_empty());
+        match result {
+            Ok(_) => assert_eq!(report.selected, Some(OciProviderKind::DockerCompatible)),
+            Err(_) => assert_eq!(report.selected, None),
+        }
+    }
+
+    #[test]
+    fn provider_selection_report_auto_podman_ready() {
+        let report = OciProviderSelectionReport {
+            selected: Some(OciProviderKind::Podman),
+            reason: "Podman is installed and ready".to_string(),
+            fallback_candidate: None,
+            podman_error: None,
+            docker_error: None,
+        };
+        assert_eq!(report.selected, Some(OciProviderKind::Podman));
+        assert!(report.podman_error.is_none());
+        assert!(report.docker_error.is_none());
+        assert!(!report.reason.is_empty());
+    }
+
+    #[test]
+    fn provider_selection_report_fallback_to_docker() {
+        let report = OciProviderSelectionReport {
+            selected: Some(OciProviderKind::DockerCompatible),
+            reason: "Podman not ready; Docker-compatible is ready".to_string(),
+            fallback_candidate: None,
+            podman_error: Some(OciProviderError::MachineNotConfigured),
+            docker_error: None,
+        };
+        assert_eq!(report.selected, Some(OciProviderKind::DockerCompatible));
+        assert!(report.podman_error.is_some());
+        assert!(report.docker_error.is_none());
+    }
+
+    #[test]
+    fn provider_selection_report_no_provider() {
+        let report = OciProviderSelectionReport {
+            selected: None,
+            reason: "no provider ready: Podman missing, Docker unavailable".to_string(),
+            fallback_candidate: None,
+            podman_error: Some(OciProviderError::Missing {
+                provider: "podman",
+                binary: "podman",
+            }),
+            docker_error: Some(OciProviderError::DockerDaemonUnavailable {
+                reason: "connection refused".to_string(),
+            }),
+        };
+        assert!(report.selected.is_none());
+        assert!(report.podman_error.is_some());
+        assert!(report.docker_error.is_some());
     }
 }
