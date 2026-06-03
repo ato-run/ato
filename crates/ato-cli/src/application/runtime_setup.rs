@@ -17,13 +17,14 @@
 //! - `ato_helper` / `nacelle` → bundled with the desktop; missing is a bundle
 //!   integrity error, never a download.
 
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 
-use capsule_core::packers::runtime_fetcher::RuntimeFetcher;
+use capsule_core::packers::runtime_fetcher::{RuntimeFetcher, locate_runtime_binary};
 use capsule_core::reporter::CapsuleReporter;
 use capsule_core::runtime_setup::{
     InstallPhase, InstallProgress, RecommendedAction, RuntimeSetupStatus, SUPPORTED_NODE_VERSION,
@@ -78,32 +79,175 @@ fn managed_versions(tool: ToolKind) -> Vec<String> {
     versions
 }
 
-/// Detect a managed language runtime (Node/uv/Python). Managed-first: ready iff
-/// an Ato-managed copy exists in the toolchain cache; otherwise recommend a
-/// managed install, noting any host PATH copy for context only.
+/// Executable filenames a managed install of `tool` may expose, matching the
+/// layout `RuntimeFetcher::ensure_*` produces.
+fn managed_binary_candidates(tool: ToolKind) -> &'static [&'static str] {
+    match tool {
+        ToolKind::Node => &["node", "node.exe"],
+        ToolKind::Uv => &["uv", "uv.exe"],
+        ToolKind::Python => &["python3", "python", "python3.exe", "python.exe"],
+        _ => &[],
+    }
+}
+
+/// The Ato-supported version policy string for a managed tool.
+fn supported_version(tool: ToolKind) -> &'static str {
+    match tool {
+        ToolKind::Node => SUPPORTED_NODE_VERSION,
+        ToolKind::Uv => SUPPORTED_UV_VERSION,
+        ToolKind::Python => SUPPORTED_PYTHON_VERSION,
+        _ => "",
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
+}
+
+/// Extract a dotted numeric version (`22.11.0`) from a `--version` line such as
+/// `v22.11.0`, `Python 3.12.7`, or `uv 0.4.19`.
+fn parse_numeric_version(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && !bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    let start = i;
+    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+        i += 1;
+    }
+    let token = line[start..i].trim_matches('.');
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+/// Whether a detected numeric version satisfies the Ato-supported policy:
+/// - Node: major must match (supported `22`).
+/// - Python: major.minor must match (supported `3.12`).
+/// - uv: exact full-version match (supported `0.4.19`).
+fn version_satisfies(tool: ToolKind, detected: &str, supported: &str) -> bool {
+    let d: Vec<&str> = detected.split('.').collect();
+    match tool {
+        ToolKind::Node => d.first().copied() == Some(supported.trim_start_matches('v')),
+        ToolKind::Python => {
+            let s: Vec<&str> = supported.split('.').collect();
+            d.len() >= 2 && s.len() >= 2 && d[0] == s[0] && d[1] == s[1]
+        }
+        ToolKind::Uv => detected == supported,
+        _ => false,
+    }
+}
+
+/// Read a resolved binary's `--version`, trimmed to a single line. Running the
+/// binary doubles as an executability probe.
+fn tool_version_at(path: &Path) -> Option<String> {
+    let output = Command::new(path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_string())
+    }
+}
+
+/// A validated Ato-managed install: the version directory exists, contains a
+/// runnable executable, and reported a parseable version.
+struct ManagedProbe {
+    detected: String,
+    supported: bool,
+}
+
+/// Probe one `<tool>-<version_dir>` cache entry. Returns `None` when the cache
+/// is incomplete or corrupt (no executable, not runnable, unreadable version),
+/// so a stale/broken directory never counts as "ready".
+fn probe_managed_version(tool: ToolKind, version_dir: &str) -> Option<ManagedProbe> {
+    let cache = capsule_core::common::paths::toolchain_cache_dir().ok()?;
+    let runtime_dir = cache.join(format!("{}-{}", tool.as_str(), version_dir));
+    let bin = locate_runtime_binary(&runtime_dir, managed_binary_candidates(tool))?;
+    if !is_executable(&bin) {
+        return None;
+    }
+    let detected = parse_numeric_version(&tool_version_at(&bin)?)?;
+    let supported = version_satisfies(tool, &detected, supported_version(tool));
+    Some(ManagedProbe { detected, supported })
+}
+
+/// Detect a managed language runtime (Node/uv/Python). Managed-first, but a
+/// version directory only counts when it actually contains a runnable binary
+/// whose version is in range:
+/// - a supported managed copy → Ready;
+/// - a runnable but out-of-range managed copy → `UpgradeManaged`;
+/// - a missing or corrupt cache → `InstallManaged` (reinstall);
+/// - otherwise note any host PATH copy but still recommend a managed install.
 fn detect_managed_language_tool(tool: ToolKind, path_bins: &[&str]) -> ToolStatus {
     let label = tool.as_str();
-    let managed = managed_versions(tool);
-    if let Some(version) = managed.last() {
+    let versions = managed_versions(tool);
+    // Probe newest first (managed_versions is sorted ascending).
+    let probes: Vec<ManagedProbe> = versions
+        .iter()
+        .rev()
+        .filter_map(|v| probe_managed_version(tool, v))
+        .collect();
+
+    if let Some(p) = probes.iter().find(|p| p.supported) {
         return ToolStatus::ready(
             tool,
             ToolSource::ManagedByAto,
-            Some(version.clone()),
-            format!("Ato-managed {label} {version} is ready"),
+            Some(p.detected.clone()),
+            format!("Ato-managed {label} {} is ready", p.detected),
         );
     }
 
-    // No managed copy. Note a host PATH copy if present, but still recommend a
-    // managed install — host toolchains are not used for reproducible launches.
+    if let Some(p) = probes.first() {
+        // A runnable managed copy exists but is out of the supported range.
+        return ToolStatus {
+            kind: tool,
+            installed: true,
+            version: Some(p.detected.clone()),
+            supported: false,
+            ready: false,
+            source: ToolSource::ManagedByAto,
+            action: RecommendedAction::UpgradeManaged,
+            message: format!(
+                "Ato-managed {label} {} is installed, but Ato supports {}. Reinstall to upgrade.",
+                p.detected,
+                supported_version(tool)
+            ),
+        };
+    }
+
+    // No usable managed copy. Distinguish a corrupt cache (dirs exist but no
+    // runnable binary) from a clean "not installed" state.
+    let corrupt_cache = !versions.is_empty();
     let host = path_bins.iter().find_map(|bin| which::which(bin).ok());
-    let message = match &host {
-        Some(_) => format!(
+    let message = if corrupt_cache {
+        format!("Ato-managed {label} cache is incomplete or corrupt; Ato will reinstall it")
+    } else if host.is_some() {
+        format!(
             "A system {label} was found, but Ato installs its own managed copy for reproducible launches"
-        ),
-        None => format!("{label} is not installed; Ato can install a managed copy"),
+        )
+    } else {
+        format!("{label} is not installed; Ato can install a managed copy")
     };
     ToolStatus {
         kind: tool,
+        // A corrupt managed cache is not a usable install.
         installed: host.is_some(),
         version: None,
         supported: false,
@@ -219,29 +363,29 @@ fn detect_ato_helper() -> ToolStatus {
     )
 }
 
-/// Detect bundled `nacelle`: a sibling of the running `ato` binary, falling back
-/// to PATH. Missing is a bundle-integrity error, never a download.
+/// Detect bundled `nacelle`: it must sit next to the running `ato` binary.
+///
+/// Deliberately NO PATH fallback. `nacelle` ships inside the desktop bundle, so
+/// a missing sibling is a bundle-integrity error — reporting a `nacelle` found
+/// elsewhere on `PATH` as "Bundled and ready" would mask broken Windows/MSI
+/// packaging on the very machine where it must be caught. Version is read from
+/// the sibling, never from a PATH copy.
 fn detect_nacelle() -> ToolStatus {
     let sibling = std::env::current_exe().ok().and_then(|exe| {
         let dir = exe.parent()?;
-        for name in ["nacelle", "nacelle.exe"] {
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-        None
+        ["nacelle", "nacelle.exe"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| candidate.is_file())
     });
-    let found = sibling.is_some() || which::which("nacelle").is_ok();
-    if found {
-        ToolStatus::ready(
+    match sibling {
+        Some(path) => ToolStatus::ready(
             ToolKind::Nacelle,
             ToolSource::Bundled,
-            tool_version("nacelle"),
+            tool_version_at(&path),
             "Nacelle is bundled and ready",
-        )
-    } else {
-        ToolStatus {
+        ),
+        None => ToolStatus {
             kind: ToolKind::Nacelle,
             installed: false,
             version: None,
@@ -251,7 +395,7 @@ fn detect_nacelle() -> ToolStatus {
             action: RecommendedAction::BundleRepairRequired,
             message: "Nacelle is missing from the Ato bundle. Reinstall Ato to repair it."
                 .to_string(),
-        }
+        },
     }
 }
 
@@ -475,5 +619,104 @@ mod tests {
         if !status.ready {
             assert_eq!(status.action, RecommendedAction::InstallManaged);
         }
+    }
+
+    #[test]
+    fn parse_numeric_version_extracts_dotted() {
+        assert_eq!(parse_numeric_version("v22.11.0").as_deref(), Some("22.11.0"));
+        assert_eq!(
+            parse_numeric_version("Python 3.12.7").as_deref(),
+            Some("3.12.7")
+        );
+        assert_eq!(parse_numeric_version("uv 0.4.19").as_deref(), Some("0.4.19"));
+        assert!(parse_numeric_version("no digits here").is_none());
+    }
+
+    #[test]
+    fn version_satisfies_enforces_policy() {
+        // Node: major must match.
+        assert!(version_satisfies(ToolKind::Node, "22.11.0", "22"));
+        assert!(!version_satisfies(ToolKind::Node, "20.5.0", "22"));
+        // Python: major.minor must match.
+        assert!(version_satisfies(ToolKind::Python, "3.12.7", "3.12"));
+        assert!(!version_satisfies(ToolKind::Python, "3.11.9", "3.12"));
+        // uv: exact full version.
+        assert!(version_satisfies(ToolKind::Uv, "0.4.19", "0.4.19"));
+        assert!(!version_satisfies(ToolKind::Uv, "0.4.18", "0.4.19"));
+    }
+
+    /// Run `f` with `ATO_HOME` pointed at `home`, restoring the prior value.
+    /// Serialised by callers (`#[serial]`) — it mutates a process-global var.
+    fn with_ato_home<T>(home: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let prev = std::env::var_os("ATO_HOME");
+        unsafe { std::env::set_var("ATO_HOME", home) };
+        let out = f();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ATO_HOME", v),
+                None => std::env::remove_var("ATO_HOME"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn managed_corrupt_cache_is_not_ready() {
+        // A version directory with no usable binary must NOT report Ready —
+        // it is treated as a corrupt cache to reinstall.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("toolchains/node-22.11.0")).unwrap();
+        let status = with_ato_home(tmp.path(), || {
+            detect_managed_language_tool(ToolKind::Node, &["definitely-not-a-real-bin-xyz"])
+        });
+        assert!(!status.ready, "corrupt cache must not be Ready: {status:?}");
+        assert_eq!(status.action, RecommendedAction::InstallManaged);
+        assert!(
+            status.message.contains("corrupt") || status.message.contains("incomplete"),
+            "message should flag the broken cache: {}",
+            status.message
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_exec_script(path: &std::path::Path, version_line: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\necho {version_line}\n")).unwrap();
+        let mut perm = std::fs::metadata(path).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(path, perm).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn managed_supported_node_is_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("toolchains/node-22.0.0/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_exec_script(&bin.join("node"), "v22.0.0");
+        let status = with_ato_home(tmp.path(), || {
+            detect_managed_language_tool(ToolKind::Node, &[])
+        });
+        assert!(status.ready, "expected Ready, got {status:?}");
+        assert_eq!(status.source, ToolSource::ManagedByAto);
+        assert_eq!(status.version.as_deref(), Some("22.0.0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn managed_out_of_range_node_is_upgrade() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("toolchains/node-20.5.0/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_exec_script(&bin.join("node"), "v20.5.0");
+        let status = with_ato_home(tmp.path(), || {
+            detect_managed_language_tool(ToolKind::Node, &[])
+        });
+        assert!(!status.ready, "old major must not be Ready: {status:?}");
+        assert_eq!(status.action, RecommendedAction::UpgradeManaged);
+        assert_eq!(status.version.as_deref(), Some("20.5.0"));
     }
 }
