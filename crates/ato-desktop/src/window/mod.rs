@@ -38,6 +38,8 @@ pub mod settings_window;
 pub mod start_window;
 pub mod store;
 #[cfg(target_os = "windows")]
+pub mod taskbar;
+#[cfg(target_os = "windows")]
 pub mod tray;
 pub mod web_bridge;
 pub mod web_link_view;
