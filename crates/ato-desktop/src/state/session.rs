@@ -602,6 +602,16 @@ impl SessionRegistry {
         entries
     }
 
+    /// Build the Dock / background-app rows. Foreground WebView apps are
+    /// represented by `OpenContentWindows` cards with screenshots, so keeping
+    /// them here would make visual apps look like generic "Running Apps".
+    pub fn background_view_entries(&self) -> Vec<SessionViewEntry> {
+        self.view_entries()
+            .into_iter()
+            .filter(|entry| entry.presentation_state != PresentationState::Visible)
+            .collect()
+    }
+
     /// Derive the display presentation state from process state and client summaries.
     /// Priority: Failed/Stopped > Visible > External > Detached > Headless.
     fn derive_presentation_state(
@@ -905,6 +915,26 @@ mod tests {
     }
 
     #[test]
+    fn background_view_entries_excludes_visible_sessions() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("visible", "foreground"));
+        reg.register_session(make_session("headless", "background"));
+        reg.attach_client(make_client(
+            SessionClientId::next(),
+            "visible",
+            SessionClientKind::AtoWindow,
+            Some(100),
+            SessionClientState::Attached,
+        ));
+
+        let entries = reg.background_view_entries();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id, "headless");
+        assert_eq!(entries[0].presentation_state, PresentationState::Headless);
+    }
+
+    #[test]
     fn view_entries_stopped_wins_over_visible() {
         let mut reg = SessionRegistry::default();
         let mut s = make_session("s1", "test");
@@ -1188,6 +1218,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn oci_session_attached_to_window_leaves_background_rows() {
+        let mut registry = SessionRegistry::default();
+        registry.sync_oci_sessions(vec![make_oci_snapshot(
+            "oci-running",
+            OciSessionStatus::Running,
+        )]);
+        registry.attach_client(make_client(
+            SessionClientId::next(),
+            "oci-running",
+            SessionClientKind::AtoWindow,
+            Some(42),
+            SessionClientState::Attached,
+        ));
+
+        assert!(registry.background_view_entries().is_empty());
+        let entries = registry.view_entries();
+        assert_eq!(entries[0].presentation_state, PresentationState::Visible);
+        assert_eq!(entries[0].primary_window_id, Some(42));
     }
 
     #[test]

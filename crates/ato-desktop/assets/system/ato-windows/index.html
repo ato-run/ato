@@ -678,7 +678,7 @@
     const retry = status === 'stop_failed';
     const endpoint = isOci ? detail.endpoint_url : entry.local_url;
     const endpointAction = endpoint
-      ? `<button class="session-action primary" data-session-endpoint="${escapeHtml(endpoint)}">Open</button>`
+      ? `<button class="session-action primary" data-session-endpoint="${escapeHtml(endpoint)}" data-session-id="${escapeHtml(entry.session_id)}">Open</button>`
       : '';
     const stopAction = isOci
       ? `<button class="session-action" data-session-stop="${escapeHtml(entry.session_id)}">${retry ? 'Retry' : 'Stop'}</button>`
@@ -739,7 +739,11 @@
     const endpointBtn = e.target.closest('[data-session-endpoint]');
     if (endpointBtn) {
       e.stopPropagation();
-      BRIDGE({ kind: 'open_endpoint', url: endpointBtn.getAttribute('data-session-endpoint') });
+      BRIDGE({
+        kind: 'open_endpoint',
+        url: endpointBtn.getAttribute('data-session-endpoint'),
+        sessionId: endpointBtn.getAttribute('data-session-id')
+      });
       return;
     }
     const stopBtn = e.target.closest('[data-session-stop]');
