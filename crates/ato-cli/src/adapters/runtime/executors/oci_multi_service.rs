@@ -482,6 +482,29 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
 
             let cmd = target_runtime.cmd.clone();
 
+            // Ensure filesystem bind-mount source directories exist before podman create,
+            // and apply chmod for writable mounts with an ownership declaration.
+            //
+            // apply_mount_ownership (removed in #428 followup) did chown+chmod; chown
+            // fails with EPERM for non-root users on macOS/Podman-machine/virtiofs, but
+            // chmod is non-root-safe and is required: Podman :U provides user-namespace
+            // uid remapping but the virtiofs layer does NOT make POSIX access() return
+            // writable for the container user (tested: touch works but [ -w dir ] fails).
+            // chmod 0777 is the load-bearing fix here; :U is kept for uid remapping.
+            for mount in &mounts {
+                if mount.source.contains('/') {
+                    let _ = std::fs::create_dir_all(&mount.source);
+                    if !mount.readonly && mount.ownership.is_some() {
+                        if let Ok(meta) = std::fs::metadata(&mount.source) {
+                            use std::os::unix::fs::PermissionsExt;
+                            let mut perms = meta.permissions();
+                            perms.set_mode(0o777);
+                            let _ = std::fs::set_permissions(&mount.source, perms);
+                        }
+                    }
+                }
+            }
+
             reporter
                 .notify(format!(
                     "📦 [{}] Creating container: {}",
