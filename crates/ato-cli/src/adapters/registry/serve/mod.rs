@@ -576,6 +576,21 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
 
     let mut app = build_app_router(ui_enabled).with_state(state);
 
+    // Allow the ato-desktop system-capsule origin (custom protocol) to make
+    // read-only GET requests so JS in the start page can call the Runtime
+    // Control read-path directly (session list, install profiles, SSE logs).
+    // Only GET is permitted; write operations go through the IPC bridge.
+    // This is safe because the registry is loopback-only and GET endpoints
+    // expose no sensitive state.
+    let desktop_origin = "capsule://desktop.ato.run"
+        .parse::<HeaderValue>()
+        .expect("valid header value");
+    app = app.layer(
+        CorsLayer::new()
+            .allow_origin(desktop_origin)
+            .allow_methods([Method::GET]),
+    );
+
     if std::env::var_os("ATO_LOCAL_REGISTRY_DEV_CORS").is_some() {
         app = app.layer(
             CorsLayer::new()
