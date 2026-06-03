@@ -9,6 +9,7 @@ use capsule_core::runtime_setup::ToolKind;
 use crate::adapters::runtime::process::ProcessManager;
 use crate::application::auth::consent_store::approve_execution_plan_consent;
 use crate::application::preflight::collect_aggregate_requirements;
+use crate::application::runtime_prepare::prepare_tools;
 use crate::application::runtime_setup::{collect_setup_status, install_tools};
 use crate::cli::{ConsentInternalCommands, InternalCommands, RuntimeInternalCommands};
 
@@ -52,15 +53,24 @@ fn execute_runtime_command(command: RuntimeInternalCommands) -> Result<()> {
             Ok(())
         }
         RuntimeInternalCommands::Install { tools, json } => {
-            let mut parsed = Vec::with_capacity(tools.len());
-            for token in &tools {
-                let tool = ToolKind::parse_tool(token)
-                    .ok_or_else(|| anyhow!("unknown runtime tool: {token}"))?;
-                parsed.push(tool);
-            }
+            let parsed = parse_tool_tokens(&tools)?;
             install_tools(parsed, json)
         }
+        RuntimeInternalCommands::Prepare { tools, emit_json } => {
+            let parsed = parse_tool_tokens(&tools)?;
+            prepare_tools(parsed, emit_json)
+        }
     }
+}
+
+/// Parse `--tools` tokens into [`ToolKind`]s, erroring on the first unknown one.
+fn parse_tool_tokens(tokens: &[String]) -> Result<Vec<ToolKind>> {
+    tokens
+        .iter()
+        .map(|token| {
+            ToolKind::parse_tool(token).ok_or_else(|| anyhow!("unknown runtime tool: {token}"))
+        })
+        .collect()
 }
 
 /// `ato internal preflight <target> [--json]` handler. Delegates to
