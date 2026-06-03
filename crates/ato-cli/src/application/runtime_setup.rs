@@ -185,7 +185,10 @@ fn probe_managed_version(tool: ToolKind, version_dir: &str) -> Option<ManagedPro
     }
     let detected = parse_numeric_version(&tool_version_at(&bin)?)?;
     let supported = version_satisfies(tool, &detected, supported_version(tool));
-    Some(ManagedProbe { detected, supported })
+    Some(ManagedProbe {
+        detected,
+        supported,
+    })
 }
 
 /// Detect a managed language runtime (Node/uv/Python). Managed-first, but a
@@ -278,18 +281,34 @@ fn tool_version(bin: &str) -> Option<String> {
 }
 
 /// Detect Podman: detection-only (we never auto-install a container engine).
+///
+/// Resolution goes through [`capsule_core::podman`] rather than a bare
+/// `which("podman")` so a GUI-launched probe with a minimal PATH still finds
+/// Homebrew/known-location Podman instead of reporting a false "missing".
 fn detect_podman() -> ToolStatus {
-    if which::which("podman").is_err() {
-        return ToolStatus::missing(
-            ToolKind::Podman,
-            RecommendedAction::OpenInstructions,
-            "Podman is not installed. See https://podman.io/docs/installation to set it up.",
-        );
-    }
-    let version = tool_version("podman");
+    let mut resolved = match capsule_core::podman::resolve_podman() {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            return ToolStatus::missing(
+                ToolKind::Podman,
+                RecommendedAction::OpenInstructions,
+                format!(
+                    "Podman is not installed ({err}). See https://podman.io/docs/installation to set it up."
+                ),
+            );
+        }
+    };
+    let version = resolved.query_version().map(str::to_string);
     // `podman info` returns non-zero quickly when no machine/daemon is running,
-    // so it doubles as a readiness probe without auto-starting anything.
-    let running = Command::new("podman")
+    // so it doubles as a readiness probe without auto-starting anything. Spawn
+    // the resolved absolute binary (+ PATH override) so the probe works under a
+    // minimal GUI PATH.
+    let invocation = capsule_core::podman::podman_invocation();
+    let mut info_cmd = Command::new(&invocation.program);
+    if let Some(path_env) = &invocation.path_env {
+        info_cmd.env("PATH", path_env);
+    }
+    let running = info_cmd
         .args(["info", "--format", "{{.Host.Arch}}"])
         .output()
         .map(|o| o.status.success())
@@ -615,7 +634,8 @@ mod tests {
     fn missing_managed_node_recommends_install() {
         // With no managed copy in a tool's cache, the recommended action is a
         // managed install (host PATH copies don't make it "ready").
-        let status = detect_managed_language_tool(ToolKind::Node, &["definitely-not-a-real-bin-xyz"]);
+        let status =
+            detect_managed_language_tool(ToolKind::Node, &["definitely-not-a-real-bin-xyz"]);
         if !status.ready {
             assert_eq!(status.action, RecommendedAction::InstallManaged);
         }
@@ -623,12 +643,18 @@ mod tests {
 
     #[test]
     fn parse_numeric_version_extracts_dotted() {
-        assert_eq!(parse_numeric_version("v22.11.0").as_deref(), Some("22.11.0"));
+        assert_eq!(
+            parse_numeric_version("v22.11.0").as_deref(),
+            Some("22.11.0")
+        );
         assert_eq!(
             parse_numeric_version("Python 3.12.7").as_deref(),
             Some("3.12.7")
         );
-        assert_eq!(parse_numeric_version("uv 0.4.19").as_deref(), Some("0.4.19"));
+        assert_eq!(
+            parse_numeric_version("uv 0.4.19").as_deref(),
+            Some("0.4.19")
+        );
         assert!(parse_numeric_version("no digits here").is_none());
     }
 
@@ -718,5 +744,50 @@ mod tests {
         assert!(!status.ready, "old major must not be Ready: {status:?}");
         assert_eq!(status.action, RecommendedAction::UpgradeManaged);
         assert_eq!(status.version.as_deref(), Some("20.5.0"));
+    }
+
+    /// Run `f` with `ATO_PODMAN_BIN` pointed at `bin`, restoring the prior value.
+    /// Serialised by callers (`#[serial]`) — it mutates a process-global var.
+    fn with_podman_bin<T>(bin: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let prev = std::env::var_os("ATO_PODMAN_BIN");
+        unsafe { std::env::set_var("ATO_PODMAN_BIN", bin) };
+        let out = f();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ATO_PODMAN_BIN", v),
+                None => std::env::remove_var("ATO_PODMAN_BIN"),
+            }
+        }
+        out
+    }
+
+    /// A resolvable podman binary whose `--version` succeeds but whose `info`
+    /// fails must report installed-but-not-running (StartService), never the
+    /// false "missing binary". The `ATO_PODMAN_BIN` override makes resolution
+    /// deterministic regardless of any real podman on the host.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn detect_podman_installed_no_machine_is_start_service() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("podman");
+        // `--version` → succeed with a version line; anything else (e.g. `info`)
+        // → exit 1, simulating "installed but no machine running".
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'podman version 9.9.9' ;;\n  *) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&bin).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&bin, perm).unwrap();
+
+        let status = with_podman_bin(&bin, detect_podman);
+        assert!(status.installed, "binary exists ⇒ installed: {status:?}");
+        assert_eq!(status.action, RecommendedAction::StartService);
+        assert_eq!(status.source, ToolSource::External);
+        assert_eq!(status.version.as_deref(), Some("podman version 9.9.9"));
+        assert!(!status.ready);
     }
 }
