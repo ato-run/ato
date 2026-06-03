@@ -30,21 +30,84 @@ pub(super) struct RuntimeInstallUiEvent {
     pub(super) terminal: bool,
 }
 
+/// Which `ato internal runtime …` subcommand a streamed job runs. The desktop
+/// keeps the two semantically distinct (managed-toolchain *install* vs.
+/// host-runtime *prepare*) even though both stream progress through the same
+/// `runtimeInstall*` hydrate fields and share the single-job guard.
+#[derive(Clone, Copy)]
+pub(super) enum RuntimeJobKind {
+    Install,
+    Prepare,
+}
+
+impl RuntimeJobKind {
+    /// The `ato internal runtime …` argv for this job. Install streams with
+    /// `--json`; prepare uses `--emit-json` (PR #440's flag).
+    fn cli_args<'a>(&self, tools_arg: &'a str) -> [&'a str; 6] {
+        match self {
+            RuntimeJobKind::Install => {
+                ["internal", "runtime", "install", "--tools", tools_arg, "--json"]
+            }
+            RuntimeJobKind::Prepare => {
+                ["internal", "runtime", "prepare", "--tools", tools_arg, "--emit-json"]
+            }
+        }
+    }
+
+    /// Fallback message when the child exits non-zero with no usable stderr.
+    fn generic_failure(&self) -> &'static str {
+        match self {
+            RuntimeJobKind::Install => "runtime install failed",
+            RuntimeJobKind::Prepare => "Podman setup failed",
+        }
+    }
+
+    /// Message when the child could not even be spawned.
+    fn spawn_failure(&self) -> &'static str {
+        match self {
+            RuntimeJobKind::Install => "failed to start runtime install",
+            RuntimeJobKind::Prepare => "failed to start Podman setup",
+        }
+    }
+
+    /// Cancellation message (only the foreground install path is cancellable
+    /// today, but prepare shares the same terminal-event plumbing).
+    fn cancel_message(&self) -> &'static str {
+        match self {
+            RuntimeJobKind::Install => "runtime install cancelled",
+            RuntimeJobKind::Prepare => "Podman setup cancelled",
+        }
+    }
+}
+
 /// Kick off a foreground install of the requested managed tools.
 pub(crate) fn start_runtime_install(cx: &mut App, request_id: Option<String>, tools: Vec<String>) {
+    let tools = match parse_installable_tools(&tools) {
+        Ok(tools) => tools,
+        Err(err) => {
+            ensure_install_global(cx);
+            push_runtime_setup_error(cx, request_id, &format!("{err:#}"));
+            return;
+        }
+    };
+    spawn_runtime_job(cx, request_id, tools, RuntimeJobKind::Install);
+}
+
+/// Shared driver for both `install` and `prepare`: guard against a concurrent
+/// job, resolve the helper, emit the `started` event, and spawn the streaming
+/// worker. `tools` must already be validated/normalised for `kind`.
+pub(super) fn spawn_runtime_job(
+    cx: &mut App,
+    request_id: Option<String>,
+    tools: Vec<String>,
+    kind: RuntimeJobKind,
+) {
     ensure_install_global(cx);
     if cx.global::<ActiveRuntimeInstall>().0.is_some() {
         push_runtime_setup_error(cx, request_id, "a runtime install is already running");
         return;
     }
 
-    let tools = match parse_installable_tools(&tools) {
-        Ok(tools) => tools,
-        Err(err) => {
-            push_runtime_setup_error(cx, request_id, &format!("{err:#}"));
-            return;
-        }
-    };
     let ato = match crate::orchestrator::resolve_ato_binary() {
         Ok(ato) => ato,
         Err(err) => {
@@ -70,7 +133,7 @@ pub(crate) fn start_runtime_install(cx: &mut App, request_id: Option<String>, to
     let worker_request_id = request_id.clone();
     let worker_job = job.clone();
     std::thread::spawn(move || {
-        run_install_worker(ato, tools, worker_request_id, worker_job, tx);
+        run_runtime_worker(ato, tools, worker_request_id, worker_job, tx, kind);
     });
 
     let async_app = cx.to_async();
@@ -124,20 +187,19 @@ pub(crate) fn parse_installable_tools(tools: &[String]) -> AnyhowResult<Vec<Stri
     Ok(parsed)
 }
 
-fn run_install_worker(
+fn run_runtime_worker(
     ato: PathBuf,
     tools: Vec<String>,
     request_id: Option<String>,
     job: RuntimeInstallJob,
     tx: std::sync::mpsc::Sender<RuntimeInstallUiEvent>,
+    kind: RuntimeJobKind,
 ) {
     let tools_arg = tools.join(",");
     let mut command = Command::new(&ato);
     command
         .no_console_window()
-        .args([
-            "internal", "runtime", "install", "--tools", &tools_arg, "--json",
-        ])
+        .args(kind.cli_args(&tools_arg))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -153,7 +215,7 @@ fn run_install_worker(
                     "runtimeInstallComplete": {
                         "success": false,
                         "canceled": false,
-                        "error": format!("failed to start runtime install: {err}"),
+                        "error": format!("{}: {err}", kind.spawn_failure()),
                     },
                 }),
             );
@@ -231,13 +293,13 @@ fn run_install_worker(
     let error = if success {
         None
     } else if canceled {
-        Some("runtime install cancelled".to_string())
+        Some(kind.cancel_message().to_string())
     } else if helper_lacks_runtime_subcommand(&stderr) {
         Some(HELPER_TOO_OLD_MESSAGE.to_string())
     } else if !stderr.trim().is_empty() {
         Some(stderr.trim().to_string())
     } else {
-        Some("runtime install failed".to_string())
+        Some(kind.generic_failure().to_string())
     };
 
     send_terminal_install_event(
