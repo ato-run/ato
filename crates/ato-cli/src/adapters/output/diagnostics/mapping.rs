@@ -570,6 +570,50 @@ mod podman_disabled_tests {
     use super::{CliDiagnosticCode, CommandContext, from_anyhow};
 
     #[test]
+    fn smoke_shell_failure_maps_to_e213() {
+        // The smoke runner reports a SpawnFailed whose message carries the
+        // shared marker when `executable = "sh"` and no host shell exists. That
+        // must reach E213 through from_anyhow, not the generic E999. (#377)
+        let report = capsule_core::smoke::SmokeFailureReport {
+            class: capsule_core::smoke::SmokeFailureClass::SpawnFailed,
+            message: capsule_core::shell_support::source_build_shell_unavailable_message(
+                "sh", "windows",
+            ),
+            stderr_tail: String::new(),
+            exit_status: None,
+        };
+        let err = anyhow::Error::new(report).context("Smoke test failed");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Build);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E213,
+            "smoke shell failure must map to E213"
+        );
+    }
+
+    #[test]
+    fn smoke_non_shell_spawn_failure_does_not_map_to_e213() {
+        // A non-shell SpawnFailed (e.g. a missing binary) carries no marker and
+        // must NOT be reclassified as the shell-unavailable error.
+        let report = capsule_core::smoke::SmokeFailureReport {
+            class: capsule_core::smoke::SmokeFailureClass::SpawnFailed,
+            message: "failed to start process 'node' for smoke: No such file or directory"
+                .to_string(),
+            stderr_tail: String::new(),
+            exit_status: None,
+        };
+        let err = anyhow::Error::new(report);
+
+        let diagnostic = from_anyhow(&err, CommandContext::Build);
+        assert_ne!(
+            diagnostic.code,
+            CliDiagnosticCode::E213,
+            "non-shell spawn failures must not be reclassified as shell-unavailable"
+        );
+    }
+
+    #[test]
     fn source_build_shell_unavailable_maps_to_e213_not_internal() {
         // Mirrors the real wrapping: the prestart spawn site adds context on
         // top of the typed shell-unavailable error from `shell_preflight`.
