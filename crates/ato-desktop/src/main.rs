@@ -35,6 +35,21 @@ mod webview;
 mod webview_init_guard;
 mod window;
 
+/// Parse `--jump-action <token>` from argv, returning the token only if it is a
+/// recognised lifecycle action. Used to forward taskbar Jump List clicks.
+#[cfg(target_os = "windows")]
+fn jump_action_arg() -> Option<String> {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == "--jump-action" {
+            return args
+                .next()
+                .filter(|v| crate::window::taskbar::is_known_action(v));
+        }
+    }
+    None
+}
+
 fn main() {
     // Must be called before any windows are created so Windows groups
     // taskbar entries correctly and shows "Ato Desktop" instead of the exe name.
@@ -52,6 +67,23 @@ fn main() {
     }
 
     let _log_guard = logging::init_tracing();
+
+    // Taskbar Jump List action (`--jump-action <token>`): forward the lifecycle
+    // command to the already-running Desktop over the control pipe and exit,
+    // rather than opening a second Desktop. No-op for normal launches.
+    #[cfg(target_os = "windows")]
+    if let Some(action) = jump_action_arg() {
+        if crate::window::taskbar::forward_jump_action(&action) {
+            tracing::info!(%action, "jump-action forwarded to running Desktop; exiting");
+            return;
+        }
+        if action == "stop-all" || action == "quit" {
+            // Nothing to control — do not spin up a Desktop just to quit it.
+            tracing::info!(%action, "jump-action with no running Desktop; nothing to do");
+            return;
+        }
+        tracing::info!(%action, "jump-action with no running Desktop; starting normally");
+    }
 
     // Capture panics to the log file + a crash report + (on Windows) a
     // copyable dialog. Without this, a panic inside GPUI's non-unwinding
