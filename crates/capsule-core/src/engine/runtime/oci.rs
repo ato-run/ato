@@ -33,6 +33,10 @@ pub struct OciMountSpec {
     pub source: String,
     pub target: String,
     pub readonly: bool,
+    /// If set, the provider should use engine-delegated ownership init (e.g.
+    /// Podman `:U`) so the container user can write to this mount.
+    /// `None` means no ownership strategy is requested.
+    pub ownership: Option<crate::types::MountOwnership>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
