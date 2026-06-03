@@ -1079,33 +1079,67 @@ async fn watch_container_exit<P: OciProvider>(provider: &P, container_id: &str) 
     }
 }
 
-/// Collect a bounded tail of a container's logs for diagnostics. Best-effort:
-/// a missing or unreadable log stream yields an empty tail.
+/// Collect a bounded tail of a container's logs for diagnostics.
+///
+/// Truly bounded in memory: we retain at most `max_lines` complete trailing
+/// lines (via a ring buffer) plus a single in-flight line capped at
+/// `MAX_PARTIAL_LINE_BYTES`, so a chatty or newline-less container can't make us
+/// buffer its entire log. Best-effort: a missing or unreadable log stream
+/// yields an empty tail.
 async fn collect_log_tail<P: OciProvider>(
     provider: &P,
     container_id: &str,
     max_lines: usize,
 ) -> Vec<String> {
-    let mut buf = String::new();
+    use std::collections::VecDeque;
+
+    /// Cap on a single newline-less line so one runaway line stays bounded.
+    const MAX_PARTIAL_LINE_BYTES: usize = 8 * 1024;
+
+    let cap = max_lines.max(1);
+    let mut lines: VecDeque<String> = VecDeque::with_capacity(cap.min(64));
+    let mut partial = String::new();
+
+    let push_line = |lines: &mut VecDeque<String>, raw: &str| {
+        let trimmed = raw.trim_end();
+        if trimmed.is_empty() {
+            return;
+        }
+        if lines.len() == cap {
+            lines.pop_front();
+        }
+        lines.push_back(trimmed.to_string());
+    };
+
     if let Ok(mut rx) = provider.logs(container_id, false).await {
         while let Ok(Some(chunk)) =
             tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
         {
-            if let Ok(chunk) = chunk {
-                buf.push_str(&String::from_utf8_lossy(&chunk.message));
+            let Ok(chunk) = chunk else { continue };
+            partial.push_str(&String::from_utf8_lossy(&chunk.message));
+
+            // Flush every complete line, keeping only the trailing `cap`.
+            while let Some(nl) = partial.find('\n') {
+                let line: String = partial.drain(..=nl).collect();
+                push_line(&mut lines, &line);
+            }
+
+            // Bound the still-incomplete trailing line, keeping its tail on a
+            // valid char boundary.
+            if partial.len() > MAX_PARTIAL_LINE_BYTES {
+                let mut start = partial.len() - MAX_PARTIAL_LINE_BYTES;
+                while start < partial.len() && !partial.is_char_boundary(start) {
+                    start += 1;
+                }
+                partial = partial.split_off(start);
             }
         }
     }
-    let mut lines: Vec<String> = buf
-        .lines()
-        .map(|l| l.trim_end().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-    if lines.len() > max_lines {
-        let start = lines.len() - max_lines;
-        lines = lines.split_off(start);
-    }
-    lines
+
+    // Flush any trailing line that never got a newline.
+    push_line(&mut lines, &partial);
+
+    lines.into()
 }
 
 /// Build the typed `oci_container_exited_before_ready` error.
@@ -3145,6 +3179,29 @@ volumes:
             tail,
             vec!["l3", "l4", "l5"],
             "should keep only the last 3 lines"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_log_tail_handles_chunk_splits_and_trailing_line() {
+        let mut provider = FakeOciProvider::ready();
+        // A line split across chunk boundaries, plus a final line with no
+        // terminating newline — both must be reassembled/flushed correctly.
+        provider.log_chunks = vec![
+            capsule_core::runtime::oci::OciLogChunk {
+                stderr: false,
+                message: b"first line\nsec".to_vec(),
+            },
+            capsule_core::runtime::oci::OciLogChunk {
+                stderr: false,
+                message: b"ond line\nthird (no newline)".to_vec(),
+            },
+        ];
+        let tail = collect_log_tail(&provider, "cid", 10).await;
+        assert_eq!(
+            tail,
+            vec!["first line", "second line", "third (no newline)"],
+            "split line must be reassembled and the trailing newline-less line flushed"
         );
     }
 
