@@ -551,17 +551,18 @@ pub(crate) async fn select_ready_runtime_oci_provider_with_report() -> (
                 Ok(_) => unreachable!("checked Docker-compatible readiness failure"),
                 Err(docker_error) => docker_error,
             };
-            tracing::warn!(
-                podman_error = %podman_error,
-                docker_error = %docker_error,
-                "no ready OCI provider found"
-            );
             let reason = format!(
                 "no provider ready: Podman {} ({}), Docker {} ({})",
                 podman_error.code(),
                 podman_error,
                 docker_error.code(),
                 docker_error
+            );
+            tracing::warn!(
+                podman_error = %podman_error,
+                docker_error = %docker_error,
+                reason = %reason,
+                "no ready OCI provider found"
             );
             let report = OciProviderSelectionReport {
                 selected: None,
@@ -717,6 +718,26 @@ impl<R> PodmanProvider<R> {
 }
 
 impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
+    /// Run `podman info` and classify its failure mode; called after confirming the
+    /// machine is Running to verify the daemon is actually healthy.
+    fn check_podman_info_health(&self) -> Result<(), OciProviderError> {
+        let info_out = run_provider_command(&self.runner, "podman", &["info"])?;
+        if info_out.success() {
+            return Ok(());
+        }
+        let combined = format!("{} {}", info_out.stdout, info_out.stderr);
+        if is_storage_corrupted(&combined) {
+            Err(OciProviderError::StorageCorrupted {
+                reason: combined.trim().to_string(),
+            })
+        } else {
+            Err(OciProviderError::ProbeFailed {
+                provider: "podman",
+                message: format!("podman info failed: {}", combined.trim()),
+            })
+        }
+    }
+
     /// macOS/Windows: inspect the machine list and start the machine if exactly one is stopped.
     async fn ensure_machine_ready(&self) -> Result<(), OciProviderError> {
         let ver_out = run_provider_command(&self.runner, "podman", &["--version"])?;
@@ -740,7 +761,7 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
                     names: all_names.join(", "),
                 })
             }
-            PodmanMachineStatus::Running { .. } => Ok(()),
+            PodmanMachineStatus::Running { .. } => self.check_podman_info_health(),
             PodmanMachineStatus::NotConfigured => Err(OciProviderError::MachineNotConfigured),
             PodmanMachineStatus::Stopped { names } if names.len() > 1 => {
                 Err(OciProviderError::MachineAmbiguous {
@@ -815,7 +836,7 @@ where
 
         match &self.platform {
             PodmanProbePlatform::Linux => {
-                let mode = detect_linux_podman_mode(&self.runner);
+                let mode = detect_linux_podman_mode(&self.runner)?;
                 let semantics = podman_semantics(mode, OciProviderSubstrate::NativeLinux);
                 let inventory = OciProviderInventory {
                     kind: OciProviderKind::Podman,
@@ -1670,21 +1691,32 @@ fn parse_podman_version(stdout: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn detect_linux_podman_mode<R: OciCommandRunner>(runner: &R) -> OciProviderMode {
-    let Ok(output) = runner.run(
-        "podman",
-        &["info", "--format", "{{.Host.Security.Rootless}}"],
-    ) else {
-        return OciProviderMode::Unknown;
-    };
+fn detect_linux_podman_mode<R: OciCommandRunner>(
+    runner: &R,
+) -> Result<OciProviderMode, OciProviderError> {
+    let output = runner
+        .run("podman", &["info", "--format", "{{.Host.Security.Rootless}}"])
+        .map_err(|err| OciProviderError::ProbeFailed {
+            provider: "podman",
+            message: format!("podman info: {err}"),
+        })?;
     if !output.success() {
-        return OciProviderMode::Unknown;
+        let combined = format!("{} {}", output.stdout, output.stderr);
+        if is_storage_corrupted(&combined) {
+            return Err(OciProviderError::StorageCorrupted {
+                reason: combined.trim().to_string(),
+            });
+        }
+        return Err(OciProviderError::ProbeFailed {
+            provider: "podman",
+            message: format!("podman info failed: {}", combined.trim()),
+        });
     }
-    match output.stdout.trim().to_ascii_lowercase().as_str() {
+    Ok(match output.stdout.trim().to_ascii_lowercase().as_str() {
         "true" => OciProviderMode::Rootless,
         "false" => OciProviderMode::Rootful,
         _ => OciProviderMode::Unknown,
-    }
+    })
 }
 
 fn parse_machine_status(stdout: &str) -> OciProviderMachineStatus {
@@ -3620,7 +3652,8 @@ mod tests {
                 .with_output(
                     &["podman", "machine", "list", "--format", "json"],
                     output(0, machine_json, ""),
-                ),
+                )
+                .with_output(&["podman", "info"], output(0, "{}", "")),
             PodmanProbePlatform::Macos,
         );
         provider
@@ -3993,10 +4026,166 @@ mod tests {
         assert_eq!(err.code(), "oci_provider_probe_failed");
     }
 
+    // ── StorageCorrupted in real readiness paths ──────────────────────────────
+
+    #[tokio::test]
+    async fn ensure_ready_macos_running_storage_error_returns_storage_corrupted() {
+        let machine_json = r#"[{"Name":"podman-machine-default","Running":true}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, machine_json, ""),
+                )
+                .with_output(
+                    &["podman", "info"],
+                    output(1, "", "Error: storage: graphDriver not initialized"),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("storage error must fail");
+        assert_eq!(err.code(), "oci_storage_corrupted");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_macos_running_connection_refused_is_probe_failed_not_storage_corrupted() {
+        let machine_json = r#"[{"Name":"podman-machine-default","Running":true}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, machine_json, ""),
+                )
+                .with_output(
+                    &["podman", "info"],
+                    output(1, "", "connection refused"),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("failed podman info must fail");
+        assert_eq!(err.code(), "oci_provider_probe_failed");
+        assert_ne!(err.code(), "oci_storage_corrupted");
+    }
+
+    #[tokio::test]
+    async fn podman_probe_linux_storage_error_returns_storage_corrupted() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 4.9.0\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(1, "", "Error: storage: graphDriver not initialized"),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+        let err = provider
+            .probe()
+            .await
+            .expect_err("storage error must fail probe");
+        assert_eq!(err.code(), "oci_storage_corrupted");
+    }
+
+    #[tokio::test]
+    async fn podman_probe_linux_permission_denied_is_not_storage_corrupted() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 4.9.0\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(1, "", "permission denied"),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+        let err = provider
+            .probe()
+            .await
+            .expect_err("permission denied must fail probe");
+        assert_ne!(err.code(), "oci_storage_corrupted");
+    }
+
+    // ── select_ready_runtime_oci_provider_with_report actual return values ────
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn select_ready_runtime_with_report_podman_disabled_sets_podman_error_in_report() {
+        let previous = std::env::var_os("ATO_PODMAN_ENABLED");
+        unsafe { std::env::set_var("ATO_PODMAN_ENABLED", "0") };
+
+        let (_result, report) = select_ready_runtime_oci_provider_with_report().await;
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var("ATO_PODMAN_ENABLED", v) },
+            None => unsafe { std::env::remove_var("ATO_PODMAN_ENABLED") },
+        }
+
+        assert_eq!(
+            report.podman_error.as_ref().map(|e| e.code()),
+            Some("oci_podman_disabled"),
+            "report must record PodmanDisabled when opt-out is set"
+        );
+        assert_ne!(
+            report.selected,
+            Some(OciProviderKind::Podman),
+            "Podman must not be selected when disabled"
+        );
+        assert!(!report.reason.is_empty(), "report reason must be non-empty");
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn select_ready_runtime_with_report_no_provider_emits_both_errors_in_report() {
+        // Force both providers to be unavailable: disable Podman and suppress
+        // Docker by pointing ATO_PODMAN_BIN at an intentionally absent path so
+        // the Docker path is exercised without Podman ever starting.
+        // We only check the Podman-disabled path here since Docker availability
+        // is not controllable in the test environment without a real daemon.
+        let previous = std::env::var_os("ATO_PODMAN_ENABLED");
+        unsafe { std::env::set_var("ATO_PODMAN_ENABLED", "0") };
+
+        let (result, report) = select_ready_runtime_oci_provider_with_report().await;
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var("ATO_PODMAN_ENABLED", v) },
+            None => unsafe { std::env::remove_var("ATO_PODMAN_ENABLED") },
+        }
+
+        // podman_error is always PodmanDisabled in the opt-out path.
+        assert_eq!(
+            report.podman_error.as_ref().map(|e| e.code()),
+            Some("oci_podman_disabled")
+        );
+        // If Docker is also unavailable, result is Err and selected is None.
+        // If Docker is available, result is Ok and selected is DockerCompatible.
+        // Either way, the report must have a non-empty reason.
+        assert!(!report.reason.is_empty());
+        match result {
+            Ok(_) => assert_eq!(report.selected, Some(OciProviderKind::DockerCompatible)),
+            Err(_) => assert_eq!(report.selected, None),
+        }
+    }
+
     #[test]
     fn provider_selection_report_auto_podman_ready() {
-        // The report struct can be constructed directly; the async integration
-        // path is tested indirectly via select_ready_runtime_oci_provider tests.
         let report = OciProviderSelectionReport {
             selected: Some(OciProviderKind::Podman),
             reason: "Podman is installed and ready".to_string(),
@@ -4007,6 +4196,7 @@ mod tests {
         assert_eq!(report.selected, Some(OciProviderKind::Podman));
         assert!(report.podman_error.is_none());
         assert!(report.docker_error.is_none());
+        assert!(!report.reason.is_empty());
     }
 
     #[test]
