@@ -1276,4 +1276,64 @@ runtime = "oci""#,
             "unknown GitHub repos should fail resolution (no network in tests)"
         );
     }
+
+    // ── #377: catalog-app GitHub URLs must take the recipe path, never the
+    //          raw source-build path (which would require /bin/sh on Windows).
+
+    #[test]
+    fn github_excalidraw_resolves_through_sample_recipe() {
+        let normalized = normalize_handle("capsule://github.com/excalidraw/excalidraw")
+            .expect("normalize github excalidraw");
+        assert!(
+            matches!(normalized.kind, NormalizedHandleKind::SampleRecipe(_)),
+            "expected SampleRecipe (recipe path), got {:?}",
+            normalized.kind
+        );
+        assert_eq!(normalized.sample_recipe_slug.as_deref(), Some("excalidraw"));
+    }
+
+    #[test]
+    fn github_pgweb_resolves_through_sample_recipe() {
+        let normalized = normalize_handle("capsule://github.com/sosedoff/pgweb")
+            .expect("normalize github pgweb");
+        assert!(
+            matches!(normalized.kind, NormalizedHandleKind::SampleRecipe(_)),
+            "expected SampleRecipe (recipe path), got {:?}",
+            normalized.kind
+        );
+        assert_eq!(normalized.sample_recipe_slug.as_deref(), Some("pgweb"));
+    }
+
+    /// Desktop strips the `capsule://` scheme before handing the handle to
+    /// the CLI, so the bare `github.com/owner/repo` form must resolve to the
+    /// same recipe as the scheme-qualified form and the bare alias. If any of
+    /// these diverged, a catalog app would silently drop into the raw
+    /// source-build path. (#377)
+    #[test]
+    fn excalidraw_resolution_is_consistent_across_forms() {
+        let slug_for = |handle: &str| {
+            let normalized =
+                normalize_handle(handle).unwrap_or_else(|e| panic!("normalize {handle}: {e}"));
+            assert!(
+                matches!(normalized.kind, NormalizedHandleKind::SampleRecipe(_)),
+                "{handle} expected SampleRecipe, got {:?}",
+                normalized.kind
+            );
+            normalized.sample_recipe_slug
+        };
+
+        let alias = slug_for("excalidraw");
+        let scheme = slug_for("capsule://github.com/excalidraw/excalidraw");
+        let bare = slug_for("github.com/excalidraw/excalidraw");
+
+        assert_eq!(alias.as_deref(), Some("excalidraw"));
+        assert_eq!(
+            alias, scheme,
+            "alias and capsule:// scheme forms must resolve to the same recipe"
+        );
+        assert_eq!(
+            scheme, bare,
+            "capsule:// and bare github.com forms must resolve to the same recipe"
+        );
+    }
 }
