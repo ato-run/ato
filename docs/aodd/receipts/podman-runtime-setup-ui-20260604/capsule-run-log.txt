@@ -1,0 +1,26 @@
+PHASE install RUN  target resolution and install
+[2m2026-06-03T19:09:27.658015Z[0m [32m INFO[0m dependency materialization projected isolated run workspace [3mcapsule_id[0m[2m=[0msamples/recipes/adminer [3msession_id[0m[2m=[0mrun [3mderivation_hash[0m[2m=[0msha256:0f6360973e687cfe2df691db7f4b0faebaa872430a571942edaefe096b7df69f [3mcache_strategy[0m[2m=[0m"derivation" [3mcache_result[0m[2m=[0m"miss" [3mblob_hash[0m[2m=[0m""
+PHASE install OK   target resolved and manifest ready; using isolated run workspace
+Using isolated run workspace: /Users/egamikohsuke/.ato/runs/run-19e8ee400e9-869cc341ad0d8aae
+Dependency cache: miss
+PHASE prepare RUN  manifest and launch context resolution
+PHASE prepare OK   manifest and launch context resolved
+PHASE build   RUN  build and lifecycle hooks
+PHASE build   OK   build and lifecycle hooks completed
+PHASE verify  RUN  execution plan verification
+PHASE verify  SKIP orchestration mode resolves execution during execute
+PHASE dry_run RUN  runtime preflight
+PHASE dry_run SKIP orchestration mode does not require run preflight
+PHASE execute RUN  capsule execution
+🔍 Resolving image digest for target 'app': adminer:4.8.1
+✅ Resolved 'app': sha256:00e72822486e
+🔗 Creating OCI network: ato-adminer-c0b08cd4
+⬇  [main] Pulling OCI image: adminer:4.8.1
+📦 [main] Creating container: ato-adminer-main-c0b08cd4
+▶  [main] Starting container
+⏳ [main] Waiting for readiness
+🌐 OCI service available at http://127.0.0.1:43167/
+[main] [Wed Jun  3 19:10:57 2026] PHP 7.4.33 Development Server (http://[::]:8080) started
+[main] [Wed Jun  3 19:10:57 2026] [::ffff:10.89.0.2]:39320 Accepted
+[main] [Wed Jun  3 19:10:57 2026] [::ffff:10.89.0.2]:39320 [200]: GET /
+[main] [Wed Jun  3 19:10:57 2026] [::ffff:10.89.0.2]:39320 Closing
