@@ -630,6 +630,7 @@ async fn launch_service<C: OciRuntimeClient>(
                             source: mount.source.clone(),
                             target: mount.target.clone(),
                             readonly: mount.readonly,
+                            ownership: None,
                         })
                         .collect(),
                     ports,
@@ -637,6 +638,7 @@ async fn launch_service<C: OciRuntimeClient>(
                     aliases: service.network.aliases.clone(),
                     platform: None,
                     extra_hosts: vec![],
+                    user: runtime.user.clone(),
                 })
                 .await
                 .with_context(|| {
@@ -1946,6 +1948,7 @@ mod tests {
                     port: Some(1111),
                     required_env: Vec::new(),
                     mounts: Vec::new(),
+                    user: None,
                 }),
             },
             env,
@@ -2420,6 +2423,7 @@ depends_on = ["db"]
                 port: Some(8080),
                 required_env: Vec::new(),
                 mounts: Vec::new(),
+                user: None,
             }),
         };
         let plan = OrchestrationPlan {

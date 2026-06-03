@@ -33,6 +33,10 @@ pub struct OciMountSpec {
     pub source: String,
     pub target: String,
     pub readonly: bool,
+    /// If set, the provider should use engine-delegated ownership init (e.g.
+    /// Podman `:U`) so the container user can write to this mount.
+    /// `None` means no ownership strategy is requested.
+    pub ownership: Option<crate::types::MountOwnership>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,6 +65,9 @@ pub struct OciContainerRequest {
     /// Each entry is in `name:address` form as accepted by `podman create --add-host`.
     /// Use `host.containers.internal:host-gateway` to let containers reach the host.
     pub extra_hosts: Vec<String>,
+    /// Optional container user (`--user`): `"uid"`, `"uid:gid"`, or a name the
+    /// image resolves. `None` keeps the image's baked-in `USER`. See #428.
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -242,6 +249,7 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
                             .collect()
                     }),
                     cmd: (!request.cmd.is_empty()).then(|| request.cmd.clone()),
+                    user: request.user.clone(),
                     working_dir: request.working_dir.clone(),
                     exposed_ports: (!exposed_ports.is_empty()).then_some(exposed_ports),
                     host_config: Some(host_config),
@@ -633,6 +641,19 @@ fn is_bollard_eof(err: &BollardError) -> bool {
         .contains("eof while parsing a value")
 }
 
+/// Build a tokio `Command` for podman, resolved to an absolute binary with a
+/// `PATH` override so GUI-launched (minimal-PATH) processes find Homebrew/
+/// known-location Podman. Falls back to the bare `"podman"` name when
+/// resolution fails.
+fn podman_cli_command() -> tokio::process::Command {
+    let invocation = crate::foundation::podman::podman_invocation();
+    let mut command = tokio::process::Command::new(&invocation.program);
+    if let Some(path_env) = &invocation.path_env {
+        command.env("PATH", path_env);
+    }
+    command
+}
+
 async fn create_podman_network_cli(request: &OciNetworkRequest) -> Result<String> {
     let mut args = vec!["network".to_string(), "create".to_string()];
     for (key, value) in &request.labels {
@@ -641,7 +662,7 @@ async fn create_podman_network_cli(request: &OciNetworkRequest) -> Result<String
     }
     args.push(request.name.clone());
 
-    let output = tokio::process::Command::new("podman")
+    let output = podman_cli_command()
         .args(&args)
         .output()
         .await
@@ -665,7 +686,7 @@ async fn create_podman_network_cli(request: &OciNetworkRequest) -> Result<String
 }
 
 async fn remove_podman_network_cli(network_name: &str) -> Result<()> {
-    let output = tokio::process::Command::new("podman")
+    let output = podman_cli_command()
         .args(["network", "rm", network_name])
         .output()
         .await

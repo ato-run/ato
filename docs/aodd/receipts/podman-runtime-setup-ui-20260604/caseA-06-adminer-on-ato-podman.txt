@@ -1,0 +1,6 @@
+CONTAINER ID  IMAGE                                                                                              COMMAND               CREATED             STATUS             PORTS                      NAMES
+4c71c8f1da8e  docker.io/library/adminer@sha256:00e72822486e4ac6751c3538254d5bfe241e5c042e3b04d0dbd12e62740fdab7  php -S [::]:8080 ...  About a minute ago  Up About a minute  127.0.0.1:43167->8080/tcp  ato-adminer-main-c0b08cd4
+Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM
+Error: unable to connect to Podman socket: failed to connect: dial tcp 127.0.0.1:53004: connect: connection refused
+NETWORK ID    NAME                  DRIVER
+5b3906d7bff4  ato-adminer-c0b08cd4  bridge
