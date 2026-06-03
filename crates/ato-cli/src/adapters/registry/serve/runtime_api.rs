@@ -15,8 +15,12 @@ use capsule_wire::placement::{
 #[derive(Debug, Deserialize)]
 pub(super) struct LaunchSessionRequest {
     pub install_profile_key: String,
+    /// Optional target label to pass as `--target` to `ato app session start`.
+    /// Corresponds to the target label in the capsule manifest (e.g. `"web"`,
+    /// `"worker"`). Named `target_label` to avoid confusion with install
+    /// profile IDs or launch profile IDs.
     #[serde(default)]
-    pub launch_profile_id: Option<String>,
+    pub target_label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -519,9 +523,9 @@ pub(super) async fn handle_runtime_launch_session(
     // Build the command: `ato app session start <handle> --json [--target <id>]`
     let mut cmd = tokio::process::Command::new(&ato_exe);
     cmd.args(["app", "session", "start", &capsule_handle, "--json"]);
-    if let Some(ref profile_id) = request.launch_profile_id {
-        if !profile_id.trim().is_empty() {
-            cmd.args(["--target", profile_id.trim()]);
+    if let Some(ref target) = request.target_label {
+        if !target.trim().is_empty() {
+            cmd.args(["--target", target.trim()]);
         }
     }
     cmd.stdout(std::process::Stdio::piped());

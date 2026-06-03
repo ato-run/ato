@@ -7,8 +7,9 @@
 //! it to force a new identity (e.g., after a re-provision).
 //!
 //! The `control_token` is an opaque 32-byte random hex string. It is
-//! exposed through the `status` response so that callers with socket
-//! access can bootstrap authenticated remote-control sessions.
+//! **not** included in the regular `status` response. Callers with local
+//! socket access can retrieve it explicitly via the `BootstrapToken` verb,
+//! which is intended for pairing and remote-control bootstrap flows.
 
 use serde::{Deserialize, Serialize};
 

@@ -1312,7 +1312,7 @@ async fn runtime_launch_requires_write_auth() {
         HeaderMap::new(),
         Json(LaunchSessionRequest {
             install_profile_key: "k".to_string(),
-            launch_profile_id: None,
+            target_label: None,
         }),
     )
     .await
@@ -1343,7 +1343,7 @@ async fn runtime_launch_empty_key_returns_400() {
         HeaderMap::new(),
         Json(LaunchSessionRequest {
             install_profile_key: "".to_string(),
-            launch_profile_id: None,
+            target_label: None,
         }),
     )
     .await
@@ -1361,7 +1361,7 @@ async fn runtime_launch_unknown_key_returns_404() {
         HeaderMap::new(),
         Json(LaunchSessionRequest {
             install_profile_key: "nonexistent::default".to_string(),
-            launch_profile_id: None,
+            target_label: None,
         }),
     )
     .await
@@ -1370,21 +1370,52 @@ async fn runtime_launch_unknown_key_returns_404() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn runtime_session_logs_sse_does_not_abort_on_large_backlog() {
+async fn runtime_session_logs_sse_streams_beyond_channel_capacity() {
+    // Verify that SSE back-pressure (send().await) delivers all existing lines
+    // even when the log exceeds the channel capacity (512). Previously try_send
+    // would have silently aborted the stream at 512 lines.
     use axum::http::header::ACCEPT;
+    let _lock = env_lock().lock().expect("env lock");
+    let _ato_home = AtoHomeGuard::set("sse-backlog");
+
+    // Write 600 lines — more than the channel capacity of 512.
+    let session_id = "sse-backlog-session";
+    let log_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("logs");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+    let log_path = log_dir.join(format!("{session_id}.log"));
+    let log_content: String = (0..600).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(&log_path, log_content).expect("write log");
+
     let state = registry_test_state(None);
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, "text/event-stream".parse().unwrap());
-    // Should return 200 even with no log file (empty stream).
     let response = handle_runtime_session_logs(
         State(state),
         headers,
-        AxumPath("no-such-session".to_string()),
+        AxumPath(session_id.to_string()),
         Query(ProcessLogsQuery { tail: None }),
     )
     .await
     .into_response();
     assert_eq!(response.status(), StatusCode::OK);
+
+    // Consume the SSE body. Because there is no running process the background
+    // task terminates after the first poll, so the stream ends promptly.
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("SSE body must arrive within 5s")
+    .expect("body");
+
+    // All 600 lines must appear as `data:` events.
+    let text = String::from_utf8_lossy(&body);
+    let data_count = text.lines().filter(|l| l.starts_with("data:")).count();
+    assert!(
+        data_count >= 600,
+        "expected >= 600 data events, got {data_count}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
