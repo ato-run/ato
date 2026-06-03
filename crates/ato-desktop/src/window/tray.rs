@@ -106,25 +106,38 @@ pub fn install_tray(cx: &mut App) {
                             let id: &str = event.id.as_ref();
                             id.to_string()
                         };
-                        let _ = aa.update(|cx| dispatch_tray_action(cx, &menu_id));
+                        match menu_id.as_str() {
+                            ID_OPEN => {
+                                let _ = aa.update(tray_open_ato);
+                            }
+                            ID_RUNNING => {
+                                let _ = aa.update(tray_running_apps);
+                            }
+                            ID_STOP_ALL => {
+                                // Stop completes asynchronously; Desktop stays up.
+                                spawn_stop_all(&aa, false);
+                            }
+                            ID_QUIT => {
+                                // Confirm (modal) on the UI thread; proceed only
+                                // if there are no running sessions or the user
+                                // accepts. Stops then run to completion *before*
+                                // the app quits.
+                                let proceed = aa.update(|cx| {
+                                    let running = running_session_count(cx);
+                                    running == 0 || confirm_quit_dialog(running)
+                                });
+                                if proceed {
+                                    crate::window::begin_shutdown();
+                                    spawn_stop_all(&aa, true);
+                                }
+                            }
+                            other => tracing::debug!(id = %other, "tray: unknown menu id"),
+                        }
                     }
                 }
             }
         })
         .detach();
-}
-
-fn dispatch_tray_action(cx: &mut App, id: &str) {
-    match id {
-        ID_OPEN => tray_open_ato(cx),
-        ID_RUNNING => tray_running_apps(cx),
-        ID_STOP_ALL => {
-            let count = tray_stop_all(cx);
-            tracing::info!(count, "tray: stop all running apps");
-        }
-        ID_QUIT => tray_quit(cx),
-        other => tracing::debug!(id = %other, "tray: unknown menu id"),
-    }
 }
 
 /// Bring the main Desktop surface (Focus Control Bar) to the foreground.
@@ -142,27 +155,101 @@ fn tray_running_apps(cx: &mut App) {
     }
 }
 
-/// Stop every running session (source + OCI) through the normal stop path,
-/// leaving Desktop itself running. Returns the number of sessions stopped.
-fn tray_stop_all(cx: &mut App) -> usize {
-    crate::system_capsule::ato_import::stop_active_import_preview_blocking(cx, "tray_stop_all");
-    cx.global_mut::<SessionRegistry>().stop_all_running()
+/// Spawn the bounded stop-all flow on the foreground executor.
+fn spawn_stop_all(aa: &gpui::AsyncApp, quit_after: bool) {
+    let aa_task = aa.clone();
+    aa.foreground_executor()
+        .spawn(async move { stop_all_bounded(aa_task, quit_after).await })
+        .detach();
 }
 
-/// Quit Desktop. If sessions are running, confirm first (native dialog); on
-/// confirmation, stop all sessions before quitting.
-fn tray_quit(cx: &mut App) {
-    let running = running_session_count(cx);
-    if running > 0 && !confirm_quit_dialog(running) {
-        tracing::info!("tray: quit cancelled by user");
+/// Stop all running sessions (source + OCI) and wait — up to a bounded
+/// timeout — for the stops to actually complete, writing each session's
+/// terminal state back to the registry as it finishes.
+///
+/// This is deliberately *not* `SessionRegistry::stop_all_running`, which is
+/// fire-and-forget (spawns detached threads and never reconciles state). The
+/// tray needs completion: `Stop All` must empty the running list, and `Quit`
+/// must actually stop everything *before* the app exits. Desktop is left
+/// running unless `quit_after` is set, in which case `cx.quit()` is called only
+/// after the stops have completed (or the timeout elapses).
+async fn stop_all_bounded(aa: gpui::AsyncApp, quit_after: bool) {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const STOP_TIMEOUT: Duration = Duration::from_secs(12);
+
+    // 1. On the UI thread: stop the import preview and mark every running
+    //    session `Stopping`, taking ownership of the stop requests so nothing
+    //    is left fire-and-forget.
+    let requests = aa.update(|cx| {
+        crate::system_capsule::ato_import::stop_active_import_preview_blocking(cx, "tray_stop_all");
+        cx.global_mut::<SessionRegistry>().begin_stop_all()
+    });
+    let total = requests.len();
+    if total == 0 {
+        tracing::info!("tray: stop all — no running sessions");
+        if quit_after {
+            let _ = aa.update(|cx| cx.quit());
+        }
         return;
     }
-    // Latch shutdown before stopping so `on_window_closed` does not race to
-    // reopen the Start surface as GPUI tears windows down.
-    crate::window::begin_shutdown();
-    let count = tray_stop_all(cx);
-    tracing::info!(count, "tray: quit — stopped running sessions");
-    cx.quit();
+
+    // 2. Off the UI thread: run each stop on its own thread (source via the CLI
+    //    stop path, OCI via the container stop path) and report results back.
+    let (tx, rx) = mpsc::channel::<(String, Result<bool, String>)>();
+    for req in requests {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let result = if req.is_oci {
+                crate::orchestrator::stop_oci_session(&req.session_id)
+                    .map(|()| true)
+                    .map_err(|e| e.to_string())
+            } else {
+                crate::orchestrator::stop_guest_session(&req.session_id).map_err(|e| e.to_string())
+            };
+            let _ = tx.send((req.session_id, result));
+        });
+    }
+    drop(tx);
+
+    // 3. Collect results with a bounded timeout, yielding the executor between
+    //    polls so the UI stays responsive while stops run.
+    let be = aa.background_executor();
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    let mut results: Vec<(String, Result<bool, String>)> = Vec::new();
+    while results.len() < total && Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(item) => results.push(item),
+            Err(mpsc::TryRecvError::Empty) => be.timer(Duration::from_millis(100)).await,
+            Err(mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    let stopped = results.len();
+    let forced = total - stopped;
+    if forced > 0 {
+        tracing::warn!(
+            forced,
+            total,
+            "tray: stop all — sessions did not confirm stop before timeout"
+        );
+    }
+
+    // 4. On the UI thread: write terminal states and refresh running surfaces so
+    //    `Stop All` empties the running list (Card Switcher / next Start open).
+    let _ = aa.update(|cx| {
+        let registry = cx.global_mut::<SessionRegistry>();
+        for (sid, result) in &results {
+            registry.finish_stop_session(sid, result.clone());
+        }
+        crate::window::card_switcher::refresh_session_snapshot(cx);
+        tracing::info!(stopped, forced, "tray: stop all running apps complete");
+    });
+
+    // 5. Quit only after stops have completed (or timed out).
+    if quit_after {
+        let _ = aa.update(|cx| cx.quit());
+    }
 }
 
 /// Count sessions that are running (not stopped/failed) for the quit prompt.
