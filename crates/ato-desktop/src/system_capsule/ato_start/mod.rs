@@ -30,6 +30,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::localization::{LocaleCode, tr};
 use crate::state::GuestRoute;
+use crate::state::session::{
+    DesktopSessionKind, PresentationState, SessionRegistry, SessionViewEntry,
+};
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::content_windows::OpenContentWindows;
 
@@ -301,12 +304,95 @@ pub struct OpenWindowSnapshot {
     pub kind: String,
 }
 
+/// One running app/session row for the Start page "開いているアプリ" list.
+///
+/// Unlike [`OpenWindowSnapshot`] (which mirrors visible GPUI windows), this is
+/// derived from the [`SessionRegistry`] — the single source of truth for
+/// running capsule sessions. A session appears here whether it is shown in a
+/// window, opened in the OS browser, or running headless in the background, so
+/// OCI (Docker/Podman) sessions and window-less source sessions are both
+/// represented. Multi-service OCI apps collapse to one row per session.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RunningAppSnapshot {
+    pub session_id: String,
+    pub display_name: String,
+    pub handle: String,
+    /// `"source"` for native source runtimes, `"oci"` for container sessions.
+    pub runtime_kind: String,
+    /// Number of OCI services backing the session, when known (OCI only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_count: Option<usize>,
+    /// Lifecycle status: `running` | `background` | `failed` | `stopped`.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_window_id: Option<u64>,
+    /// Whether a visible AppWindow is currently bound to the session.
+    pub has_window: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StartSnapshot {
     pub open_windows: Vec<OpenWindowSnapshot>,
+    /// Running sessions (source + OCI) from the `SessionRegistry`. This is the
+    /// source of truth for the Start page "開いているアプリ" row — a session
+    /// stays listed while its process runs even if its window is closed.
+    pub running_apps: Vec<RunningAppSnapshot>,
     pub recent_capsules: Vec<StartHistoryEntry>,
     pub local_apps: Vec<LocalAppInfo>,
     pub featured_apps: Vec<FeaturedApp>,
+}
+
+/// Map one `SessionViewEntry` (registry view model) to a Start-page running app
+/// row. Pure function so the mapping is unit-testable without an `App`.
+pub fn running_app_from_entry(entry: &SessionViewEntry) -> RunningAppSnapshot {
+    let (runtime_kind, service_count) = match &entry.session_kind {
+        DesktopSessionKind::NativeSource => ("source".to_string(), None),
+        DesktopSessionKind::Oci { service_count, .. } => ("oci".to_string(), Some(*service_count)),
+    };
+    let status = match entry.presentation_state {
+        PresentationState::Visible | PresentationState::External => "running",
+        PresentationState::Detached | PresentationState::Headless => "background",
+        PresentationState::Failed => "failed",
+        PresentationState::Stopped => "stopped",
+    }
+    .to_string();
+    RunningAppSnapshot {
+        session_id: entry.session_id.clone(),
+        display_name: entry.title.clone(),
+        handle: entry.handle.clone(),
+        runtime_kind,
+        service_count,
+        status,
+        primary_url: entry.local_url.clone(),
+        primary_window_id: entry.primary_window_id,
+        has_window: entry.primary_window_id.is_some(),
+    }
+}
+
+/// Build the running-app list from the live `SessionRegistry`. Stopped sessions
+/// are excluded so the list reflects only what is actually running. Returns an
+/// empty list when the registry global is not installed (e.g. early boot).
+pub fn build_running_apps(cx: &App) -> Vec<RunningAppSnapshot> {
+    if !cx.has_global::<SessionRegistry>() {
+        return Vec::new();
+    }
+    let apps: Vec<RunningAppSnapshot> = cx
+        .global::<SessionRegistry>()
+        .view_entries()
+        .iter()
+        .filter(|entry| entry.presentation_state != PresentationState::Stopped)
+        .map(running_app_from_entry)
+        .collect();
+    let oci = apps.iter().filter(|a| a.runtime_kind == "oci").count();
+    tracing::info!(
+        total = apps.len(),
+        oci,
+        source = apps.len() - oci,
+        "ato_start: running app list updated from session registry"
+    );
+    apps
 }
 
 #[derive(Debug, Serialize)]
@@ -360,6 +446,8 @@ pub fn build_start_snapshot(
         Vec::new()
     };
 
+    let running_apps = build_running_apps(cx);
+
     let recent_capsules = StartPageHistoryStore::load().entries;
 
     let workspace_root_raw = &config.runtime.workspace_root;
@@ -368,6 +456,7 @@ pub fn build_start_snapshot(
 
     StartSnapshot {
         open_windows,
+        running_apps,
         recent_capsules,
         local_apps,
         featured_apps: static_featured_apps(locale),
@@ -855,6 +944,88 @@ mod tests {
             store.record_open(&format!("github.com/owner/repo-{}", i), "Repo");
         }
         assert_eq!(store.entries.len(), MAX_HISTORY);
+    }
+
+    // ─ RunningAppSnapshot mapping ────────────────────────────────────────────
+
+    use crate::state::session::{
+        DesktopSessionKind, OciImportKind, OciSessionStatus, PresentationState, SessionViewEntry,
+    };
+
+    fn source_entry(state: PresentationState, window: Option<u64>) -> SessionViewEntry {
+        SessionViewEntry {
+            session_id: "s-source".to_string(),
+            title: "My App".to_string(),
+            handle: "capsule://github.com/owner/repo".to_string(),
+            presentation_state: state,
+            attached_clients: Vec::new(),
+            primary_window_id: window,
+            local_url: Some("http://127.0.0.1:8080/".to_string()),
+            session_kind: DesktopSessionKind::NativeSource,
+        }
+    }
+
+    fn oci_entry(state: PresentationState) -> SessionViewEntry {
+        SessionViewEntry {
+            session_id: "s-oci".to_string(),
+            title: "blinko".to_string(),
+            handle: "/work/blinko".to_string(),
+            presentation_state: state,
+            attached_clients: Vec::new(),
+            primary_window_id: None,
+            local_url: Some("http://127.0.0.1:43123/".to_string()),
+            session_kind: DesktopSessionKind::Oci {
+                import_kind: OciImportKind::Compose,
+                status: OciSessionStatus::Running,
+                endpoint_url: Some("http://127.0.0.1:43123/".to_string()),
+                service_count: 3,
+                source_path: Some("/work/blinko".to_string()),
+                source_hash: None,
+            },
+        }
+    }
+
+    #[test]
+    fn running_app_maps_source_runtime_kind() {
+        let app = running_app_from_entry(&source_entry(PresentationState::Visible, Some(7)));
+        assert_eq!(app.runtime_kind, "source");
+        assert_eq!(app.service_count, None);
+        assert_eq!(app.status, "running");
+        assert!(app.has_window);
+        assert_eq!(app.primary_window_id, Some(7));
+        assert_eq!(app.display_name, "My App");
+    }
+
+    #[test]
+    fn running_app_maps_oci_session_once_with_service_count() {
+        let app = running_app_from_entry(&oci_entry(PresentationState::Headless));
+        assert_eq!(app.runtime_kind, "oci");
+        // Multi-service OCI session collapses to one row carrying its count.
+        assert_eq!(app.service_count, Some(3));
+        // No visible window → background, not "running".
+        assert_eq!(app.status, "background");
+        assert!(!app.has_window);
+    }
+
+    #[test]
+    fn running_app_detached_window_is_background_not_dropped() {
+        // Closing a window detaches the client; the session keeps running and
+        // must still surface as a background app (not removed).
+        let app = running_app_from_entry(&source_entry(PresentationState::Detached, None));
+        assert_eq!(app.status, "background");
+        assert!(!app.has_window);
+    }
+
+    #[test]
+    fn running_app_failed_and_stopped_status() {
+        assert_eq!(
+            running_app_from_entry(&oci_entry(PresentationState::Failed)).status,
+            "failed"
+        );
+        assert_eq!(
+            running_app_from_entry(&source_entry(PresentationState::Stopped, None)).status,
+            "stopped"
+        );
     }
 
     #[test]
