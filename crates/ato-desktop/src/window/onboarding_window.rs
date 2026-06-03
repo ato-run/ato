@@ -85,6 +85,18 @@ pub struct ActiveOnboardingShell(pub Option<WeakEntity<OnboardingWindowShell>>);
 
 impl gpui::Global for ActiveOnboardingShell {}
 
+/// Push a Runtime Setup payload to the onboarding WebView, if one is open.
+/// No-op when onboarding is not the active surface. Used by
+/// [`crate::runtime_setup`] to fan a payload out to whichever surface is live.
+pub fn hydrate_active_runtime_setup(cx: &mut App, payload_json: &str) {
+    let weak = cx
+        .try_global::<ActiveOnboardingShell>()
+        .and_then(|g| g.0.clone());
+    if let Some(entity) = weak.and_then(|w| w.upgrade()) {
+        entity.update(cx, |shell, _cx| shell.hydrate(payload_json));
+    }
+}
+
 pub fn open_onboarding_window(cx: &mut App) -> Result<()> {
     let config = crate::config::load_config();
     let locale = resolve_locale(config.general.language);
