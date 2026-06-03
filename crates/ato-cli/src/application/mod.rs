@@ -32,6 +32,7 @@ pub(crate) mod producer_input;
 pub(crate) mod projection;
 pub(crate) mod provider_cache;
 pub(crate) mod receipt_boundary;
+pub(crate) mod runtime_prepare;
 pub(crate) mod runtime_setup;
 pub(crate) mod search;
 pub(crate) mod secrets;
@@ -39,6 +40,7 @@ pub(crate) mod services;
 pub(crate) mod session_graph_populate;
 #[allow(dead_code)]
 pub(crate) mod share;
+pub(crate) mod shell_preflight;
 pub(crate) mod source_inference;
 pub(crate) mod source_inventory;
 pub(crate) mod source_projection;

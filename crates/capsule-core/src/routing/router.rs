@@ -11,9 +11,9 @@ use crate::manifest;
 use crate::orchestration;
 use crate::types::{
     CapsuleManifest, ConfigField, ConfigKind, ExternalInjectionSpec, IngressConfig, Mount,
-    NamedTarget, OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceNetwork,
-    ResolvedServiceRuntime, ResolvedTargetRuntime, ServiceConnectionInfo, ServiceSpec,
-    ValidationMode,
+    MountOwnership, NamedTarget, OrchestrationPlan, ReadinessProbe, ResolvedService,
+    ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime, ServiceConnectionInfo,
+    ServiceSpec, ValidationMode,
 };
 
 mod lock_routing;
@@ -1023,6 +1023,14 @@ impl ExecutionDescriptor {
         self.target_working_dir(&self.selected_target)
     }
 
+    /// Container `user` (`--user`) declared on the selected OCI target, if any.
+    /// See #428.
+    pub fn targets_oci_user(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "user"])
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
     pub fn targets_wasm_component(&self) -> Option<String> {
         let runtime = self.execution_runtime()?;
         if !runtime.eq_ignore_ascii_case("wasm") {
@@ -1739,6 +1747,7 @@ target = "/var/lib/app"
                 source: "/var/lib/ato/state/demo-app/data".to_string(),
                 target: "/var/lib/app".to_string(),
                 readonly: false,
+                ownership: None,
             }]
         );
     }
@@ -1834,6 +1843,7 @@ target = "/var/lib/app"
                 source: "/var/lib/ato/persistent/demo-app/data".to_string(),
                 target: "/var/lib/app".to_string(),
                 readonly: false,
+                ownership: None,
             }]
         );
     }

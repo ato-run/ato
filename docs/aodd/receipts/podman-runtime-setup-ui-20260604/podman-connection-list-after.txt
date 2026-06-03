@@ -1,0 +1,3 @@
+Name                         URI                                                         Identity                                                            Default     ReadWrite
+podman-machine-default       ssh://core@127.0.0.1:53004/run/user/501/podman/podman.sock  /Users/egamikohsuke/.local/share/containers/podman/machine/machine  false       true
+podman-machine-default-root  ssh://root@127.0.0.1:53004/run/podman/podman.sock           /Users/egamikohsuke/.local/share/containers/podman/machine/machine  true        true

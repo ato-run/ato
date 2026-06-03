@@ -399,6 +399,32 @@ pub struct ServiceStateBinding {
     /// the enclosing service when omitted.
     #[serde(default)]
     pub service_target: Option<String>,
+    /// Optional ownership initialization for the bound state directory.
+    ///
+    /// When present, Ato `chown`s the host-side state source to this
+    /// uid/(gid) before the container starts, so a non-root container `user`
+    /// can write to a mounted volume. Declaring `owner` is the recipe author's
+    /// explicit opt-in: without it, Ato never changes ownership of a bound
+    /// path (see #428).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<StateOwner>,
+    /// Optional permission bits applied to the host-side state source, as an
+    /// octal string (e.g. `"0700"`, `"0755"`). Applied alongside `owner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+/// Ownership initialization for a bound state directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateOwner {
+    /// Numeric user id the container runs as (matches the OCI target `user`).
+    pub uid: u32,
+    /// Numeric group id; defaults to `uid` when omitted.
+    #[serde(default)]
+    pub gid: Option<u32>,
+    /// Apply ownership recursively to existing directory contents.
+    #[serde(default)]
+    pub recursive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1550,6 +1576,12 @@ pub struct NamedTarget {
     #[serde(default)]
     pub env: HashMap<String, String>,
 
+    /// Optional container user for `runtime = "oci"` targets, passed through to
+    /// the engine as `--user`. Format: `"uid"`, `"uid:gid"`, or a name the
+    /// image resolves (e.g. `"1001:1001"`). See #428.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
     /// Required environment variable names.
     #[serde(default)]
     pub required_env: Vec<String>,
@@ -1763,6 +1795,11 @@ pub struct OciTarget {
     /// Environment variables
     #[serde(default)]
     pub env: HashMap<String, String>,
+
+    /// Optional container user passed to the engine as `--user`
+    /// (`"uid"`, `"uid:gid"`, or a name resolvable in the image). See #428.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 impl TargetsConfig {

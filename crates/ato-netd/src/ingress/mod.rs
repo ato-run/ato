@@ -52,10 +52,11 @@ const ROUTE_DRAIN_GRACE: Duration = Duration::from_millis(750);
 /// session is going away, so there is no client left to serve. In-flight
 /// requests that finish within the grace window still close cleanly.
 async fn drain_or_abort(js: &mut JoinSet<()>) {
-    let drain = async {
-        while js.join_next().await.is_some() {}
-    };
-    if tokio::time::timeout(ROUTE_DRAIN_GRACE, drain).await.is_err() {
+    let drain = async { while js.join_next().await.is_some() {} };
+    if tokio::time::timeout(ROUTE_DRAIN_GRACE, drain)
+        .await
+        .is_err()
+    {
         // Grace elapsed with connections still open — abort them and await the
         // aborts so the JoinSet is empty before we return.
         js.shutdown().await;

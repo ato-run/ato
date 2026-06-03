@@ -76,6 +76,41 @@ impl ToolKind {
     pub fn is_managed_installable(&self) -> bool {
         matches!(self, ToolKind::Node | ToolKind::Uv | ToolKind::Python)
     }
+
+    /// How Ato makes this tool available — see [`InstallStrategy`]. This is the
+    /// single source of truth for routing in the install/prepare commands.
+    pub fn install_strategy(&self) -> InstallStrategy {
+        match self {
+            ToolKind::Node | ToolKind::Uv | ToolKind::Python => InstallStrategy::ManagedToolchain,
+            ToolKind::Podman => InstallStrategy::HostRuntime,
+            ToolKind::DockerDesktop => InstallStrategy::DetectionOnly,
+            ToolKind::AtoHelper | ToolKind::Nacelle => InstallStrategy::Bundled,
+        }
+    }
+
+    /// Whether this tool is prepared as a *host runtime* (install + service/
+    /// machine setup), as opposed to an Ato-managed toolchain. Only Podman
+    /// today. Host runtimes go through `ato internal runtime prepare`, never
+    /// `RuntimeFetcher`/the managed toolchain cache.
+    pub fn is_host_runtime_prepareable(&self) -> bool {
+        matches!(self.install_strategy(), InstallStrategy::HostRuntime)
+    }
+}
+
+/// How Ato provisions a [`ToolKind`]. Keeps Podman (a host runtime that may need
+/// install + machine init/start) distinct from the Ato-managed language
+/// toolchains, so the two never share the `RuntimeFetcher`/cache path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallStrategy {
+    /// Node / uv / Python — fetched into the Ato toolchain cache.
+    ManagedToolchain,
+    /// Podman — a host container runtime; install + machine init/start.
+    HostRuntime,
+    /// Docker Desktop — detected only; Ato never installs it.
+    DetectionOnly,
+    /// `ato_helper` / `nacelle` — shipped inside the desktop bundle.
+    Bundled,
 }
 
 /// Where a detected tool came from.
@@ -109,10 +144,17 @@ pub enum RecommendedAction {
     /// Docker daemon).
     StartService,
     /// Detection-only: show install/setup instructions, do not auto-install
-    /// (Podman missing, Docker Desktop missing).
+    /// (Docker Desktop missing).
     OpenInstructions,
     /// A bundled tool is missing — the install is corrupt, reinstall Ato.
     BundleRepairRequired,
+    /// A host runtime (Podman) needs explicit, opt-in preparation: install
+    /// and/or initialize/start its Ato-managed machine. Run
+    /// `ato internal runtime prepare`. Never triggered automatically.
+    PrepareHostRuntime,
+    /// A host runtime is installed but its machine/state is broken or
+    /// ambiguous and needs a repair pass (re-init/recreate the Ato machine).
+    RepairHostRuntime,
 }
 
 /// Per-tool readiness, as reported by `ato internal runtime setup-status`.
@@ -135,7 +177,12 @@ pub struct ToolStatus {
 
 impl ToolStatus {
     /// A "ready" status for a tool found in `source` at `version`.
-    pub fn ready(kind: ToolKind, source: ToolSource, version: Option<String>, message: impl Into<String>) -> Self {
+    pub fn ready(
+        kind: ToolKind,
+        source: ToolSource,
+        version: Option<String>,
+        message: impl Into<String>,
+    ) -> Self {
         ToolStatus {
             kind,
             installed: true,
@@ -175,15 +222,28 @@ impl RuntimeSetupStatus {
     }
 }
 
-/// Phases an install moves through. Emitted as a stream of JSON lines by
-/// `ato internal runtime install --json`.
+/// Phases an install/prepare moves through. Emitted as a stream of JSON lines by
+/// `ato internal runtime install --json` and `ato internal runtime prepare
+/// --emit-json`.
+///
+/// Managed-toolchain installs use `Queued → Downloading → Installing → Ready`.
+/// Host-runtime prepare (Podman) uses `Queued → Locating →
+/// [Installing] → [InitializingMachine] → [StartingMachine] → Verifying →
+/// Ready`, skipping the bracketed phases when the corresponding step is not
+/// needed. Any phase may be followed by `Failed`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallPhase {
     Queued,
     Downloading,
-    Verifying,
+    /// Host-runtime prepare: resolving the binary / inspecting machine state.
+    Locating,
     Installing,
+    /// Host-runtime prepare: creating the Ato-managed Podman machine.
+    InitializingMachine,
+    /// Host-runtime prepare: starting the Ato-managed Podman machine.
+    StartingMachine,
+    Verifying,
     Ready,
     Failed,
 }
@@ -211,6 +271,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn install_strategy_routes_each_tool() {
+        assert_eq!(
+            ToolKind::Node.install_strategy(),
+            InstallStrategy::ManagedToolchain
+        );
+        assert_eq!(
+            ToolKind::Uv.install_strategy(),
+            InstallStrategy::ManagedToolchain
+        );
+        assert_eq!(
+            ToolKind::Python.install_strategy(),
+            InstallStrategy::ManagedToolchain
+        );
+        assert_eq!(
+            ToolKind::Podman.install_strategy(),
+            InstallStrategy::HostRuntime
+        );
+        assert_eq!(
+            ToolKind::DockerDesktop.install_strategy(),
+            InstallStrategy::DetectionOnly
+        );
+        assert_eq!(
+            ToolKind::AtoHelper.install_strategy(),
+            InstallStrategy::Bundled
+        );
+        assert_eq!(
+            ToolKind::Nacelle.install_strategy(),
+            InstallStrategy::Bundled
+        );
+    }
+
+    #[test]
+    fn only_podman_is_host_runtime_prepareable() {
+        assert!(ToolKind::Podman.is_host_runtime_prepareable());
+        for kind in [
+            ToolKind::Node,
+            ToolKind::Uv,
+            ToolKind::Python,
+            ToolKind::DockerDesktop,
+            ToolKind::AtoHelper,
+            ToolKind::Nacelle,
+        ] {
+            assert!(!kind.is_host_runtime_prepareable(), "{}", kind.as_str());
+        }
+        // Podman is a host runtime, never an Ato-managed toolchain.
+        assert!(!ToolKind::Podman.is_managed_installable());
+    }
+
+    #[test]
     fn tool_kind_roundtrips_through_tokens() {
         for kind in [
             ToolKind::Podman,
@@ -228,7 +337,10 @@ mod tests {
     #[test]
     fn tool_kind_accepts_aliases() {
         assert_eq!(ToolKind::parse_tool("nodejs"), Some(ToolKind::Node));
-        assert_eq!(ToolKind::parse_tool("docker"), Some(ToolKind::DockerDesktop));
+        assert_eq!(
+            ToolKind::parse_tool("docker"),
+            Some(ToolKind::DockerDesktop)
+        );
         assert_eq!(ToolKind::parse_tool(" UV "), Some(ToolKind::Uv));
         assert_eq!(ToolKind::parse_tool("gpu"), None);
     }
