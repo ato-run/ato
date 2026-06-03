@@ -135,6 +135,22 @@ impl CommunityImportWindowShell {
             );
         }
     }
+
+    /// Push a recipe-detail payload (`{ id, toml, error }`) into the live page
+    /// so the "View recipe" overlay can render the fetched `capsule.toml`.
+    fn push_detail(&self, detail_json: &str) {
+        let script = format!(
+            "typeof window.__atoCommunityImportDetail==='function'&&window.__atoCommunityImportDetail({detail_json})"
+        );
+        if let Some(webview) = self._webview.as_ref()
+            && let Err(error) = webview.evaluate_script(&script)
+        {
+            tracing::warn!(
+                ?error,
+                "community-import: evaluate_script(push_detail) failed"
+            );
+        }
+    }
 }
 
 /// Slot for the currently-open community-import window's shell, so the
@@ -259,6 +275,48 @@ pub fn refetch(cx: &mut App, source: String, label: String) {
         return;
     }
     spawn_candidate_fetch(cx, source, label);
+}
+
+/// Fetch a single recipe's raw `capsule.toml` by id and push it into the live
+/// window's detail overlay. Used by the "View recipe" action so the user can
+/// see exactly how two same-titled community recipes differ.
+pub fn fetch_candidate_detail(cx: &mut App, ctoml_id: String) {
+    if !cx.has_global::<CommunityImportWindowSlot>() {
+        tracing::warn!("community-import: view detail with no open window — ignoring");
+        return;
+    }
+    let async_app = cx.to_async();
+    let fe = async_app.foreground_executor().clone();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+
+    fe.spawn(async move {
+        let id_for_fetch = ctoml_id.clone();
+        let result = be
+            .spawn(async move { community_api::fetch_candidate_toml(&id_for_fetch) })
+            .await;
+
+        let detail = match result {
+            Ok(toml) => serde_json::json!({ "id": ctoml_id, "toml": toml, "error": null }),
+            Err(err) => {
+                tracing::warn!(error = %err, "community-import: recipe detail fetch failed");
+                serde_json::json!({ "id": ctoml_id, "toml": null, "error": err.to_string() })
+            }
+        };
+        let json = detail.to_string();
+
+        let _ = aa.update(|cx| {
+            let weak = cx
+                .try_global::<CommunityImportWindowSlot>()
+                .and_then(|s| s.shell.clone());
+            if let Some(weak) = weak
+                && let Some(shell) = weak.upgrade()
+            {
+                shell.read(cx).push_detail(&json);
+            }
+        });
+    })
+    .detach();
 }
 
 /// Fetch community candidates on the background executor, then push the
