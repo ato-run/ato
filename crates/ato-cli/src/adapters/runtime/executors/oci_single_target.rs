@@ -138,6 +138,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
             source: m.source.to_string_lossy().to_string(),
             target: m.target.clone(),
             readonly: m.readonly,
+            ownership: None,
         })
         .collect();
 
@@ -171,6 +172,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
             } else {
                 vec![]
             },
+            user: plan.targets_oci_user(),
         })
         .await
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))
