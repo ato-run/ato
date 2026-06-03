@@ -103,6 +103,15 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
             causes,
         );
     }
+    // A container started but exited before passing its readiness probe. Both
+    // the multi-service executor and the orchestration session path preserve a
+    // typed `OciExitedBeforeReadyError` in the chain; classify it as the typed
+    // `oci_container_exited_before_ready` diagnostic (carrying service name,
+    // exit code, and a log tail) instead of folding it into the generic E999
+    // fallback. See #445 / #429.
+    if let Some(diagnostic) = exited_before_ready_diagnostic(err, &causes) {
+        return diagnostic;
+    }
     if let Some(artifact_message) = distributable_artifact_missing_message(err) {
         return CliDiagnostic::new(
             CliDiagnosticCode::E102,
@@ -379,6 +388,69 @@ fn distributable_artifact_missing_message(err: &AnyhowError) -> Option<String> {
         .find(|message| is_distributable_artifact_missing(message))
 }
 
+/// Map an exited-before-ready failure (a container that started but died before
+/// passing its readiness probe) to the typed `oci_container_exited_before_ready`
+/// diagnostic (E306), preserving the service name, exit code, and log tail.
+///
+/// Prefers the structured typed error carried in the chain; falls back to the
+/// textual marker so any path that emits it still avoids the E999 fallback.
+fn exited_before_ready_diagnostic(err: &AnyhowError, causes: &[String]) -> Option<CliDiagnostic> {
+    use crate::adapters::runtime::executors::oci_multi_service::{
+        OCI_EXITED_BEFORE_READY_CODE, OciExitedBeforeReadyError,
+    };
+
+    const HINT: &str = "コンテナは起動しましたが readiness 前に終了しました。上のログを確認してください。\
+         state mount で permission denied が出ている場合は、state の ownership / mount 方式を見直してください。";
+
+    if let Some(typed) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<OciExitedBeforeReadyError>())
+    {
+        let details = serde_json::json!({
+            "service": typed.service_name,
+            "exit_code": typed.exit_code,
+            "last_logs": typed.log_tail,
+        });
+        return Some(CliDiagnostic::new(
+            CliDiagnosticCode::E306,
+            typed.to_string(),
+            Some(HINT),
+            None,
+            None,
+            Some(details),
+            false,
+            false,
+            causes.to_vec(),
+        ));
+    }
+
+    // Defensive fallback: a chain entry carries the textual marker without the
+    // typed error (e.g. a future call site). Still classify as E306, not E999.
+    if err
+        .chain()
+        .any(|cause| cause.to_string().contains(OCI_EXITED_BEFORE_READY_CODE))
+    {
+        let message = err
+            .chain()
+            .map(|cause| cause.to_string())
+            .find(|m| m.contains(OCI_EXITED_BEFORE_READY_CODE))
+            .unwrap_or_else(|| err.to_string());
+        return Some(CliDiagnostic::new(
+            CliDiagnosticCode::E306,
+            message,
+            Some(HINT),
+            None,
+            None,
+            None,
+            false,
+            false,
+            causes.to_vec(),
+        ));
+    }
+
+    None
+}
+
 pub fn map_exit_code(diagnostic: &CliDiagnostic, err: &AnyhowError) -> i32 {
     if let Some(core_err) = err.downcast_ref::<capsule_core::CapsuleError>() {
         return match core_err {
@@ -403,7 +475,7 @@ pub fn map_exit_code(diagnostic: &CliDiagnostic, err: &AnyhowError) -> i32 {
 
 fn code_to_exit(code: CliDiagnosticCode) -> i32 {
     match code {
-        CliDiagnosticCode::E305 => error_codes::EXIT_RUNTIME_ERROR,
+        CliDiagnosticCode::E305 | CliDiagnosticCode::E306 => error_codes::EXIT_RUNTIME_ERROR,
         CliDiagnosticCode::E212 => error_codes::EXIT_USER_ERROR,
         CliDiagnosticCode::E999 => error_codes::EXIT_SYSTEM_ERROR,
         _ => error_codes::EXIT_USER_ERROR,
@@ -659,6 +731,113 @@ mod podman_disabled_tests {
                 .contains("Podman is disabled in Ato settings"),
             "diagnostic must carry the actionable message, got: {}",
             diagnostic.message
+        );
+    }
+}
+
+#[cfg(test)]
+mod exited_before_ready_tests {
+    use super::{CliDiagnosticCode, CommandContext, from_anyhow};
+    use crate::adapters::runtime::executors::oci_multi_service::OciExitedBeforeReadyError;
+
+    fn db_exited_error() -> OciExitedBeforeReadyError {
+        OciExitedBeforeReadyError {
+            service_name: "db".to_string(),
+            exit_code: Some(1),
+            log_tail: vec![
+                "initdb: error: could not change permissions of directory".to_string(),
+                "chmod: /var/lib/postgresql/data: Operation not permitted".to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn multiservice_exit_before_ready_maps_to_e306_not_internal() {
+        // Mirrors the real session-start wrapping: the orchestration path adds
+        // the "orchestration services failed to start in-process" context on top
+        // of the typed exited-before-ready error. It must reach E306, not the
+        // generic E999 fallback. (#445)
+        let err = anyhow::Error::new(db_exited_error())
+            .context("orchestration services failed to start in-process");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E306,
+            "db exited-before-ready must map to E306, got {:?}: {}",
+            diagnostic.code,
+            diagnostic.message
+        );
+        assert_eq!(diagnostic.name, "oci_container_exited_before_ready");
+        assert!(diagnostic.hint.is_some(), "diagnostic must carry a hint");
+    }
+
+    #[test]
+    fn exit_before_ready_preserves_service_exit_code_and_log_tail() {
+        let err = anyhow::Error::new(db_exited_error())
+            .context("orchestration services failed to start in-process");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+
+        // Human-readable message keeps the service name + exit code + logs.
+        assert!(
+            diagnostic.message.contains("service 'db'"),
+            "service name lost: {}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic.message.contains("status 1"),
+            "exit code lost: {}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic.message.contains("Operation not permitted"),
+            "log tail lost: {}",
+            diagnostic.message
+        );
+
+        // Structured details carry the same fields for machine consumers.
+        let details = diagnostic.details.expect("E306 must carry details");
+        assert_eq!(details["service"], "db");
+        assert_eq!(details["exit_code"], 1);
+        assert_eq!(
+            details["last_logs"]
+                .as_array()
+                .expect("last_logs is an array")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn unrelated_orchestration_error_stays_internal() {
+        // A generic orchestration failure (not exited-before-ready) must keep the
+        // existing E999 classification — we only reclassify the typed error.
+        let err = anyhow::anyhow!("network bridge could not be created")
+            .context("orchestration services failed to start in-process");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E999,
+            "unrelated orchestration errors must stay E999"
+        );
+    }
+
+    #[test]
+    fn healthcheck_timeout_does_not_map_to_e306() {
+        // A readiness timeout (container still running) is a different, unchanged
+        // diagnostic and must not be reclassified as exited-before-ready.
+        let err = anyhow::anyhow!(
+            "oci_healthcheck_timeout: service 'main' did not become ready within 30s"
+        )
+        .context("orchestration services failed to start in-process");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_ne!(
+            diagnostic.code,
+            CliDiagnosticCode::E306,
+            "healthcheck timeout must not be reclassified as exited-before-ready"
         );
     }
 }
