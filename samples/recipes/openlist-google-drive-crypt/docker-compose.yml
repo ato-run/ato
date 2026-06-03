@@ -1,0 +1,33 @@
+services:
+  openlist:
+    image: openlistteam/openlist:v4.2.2
+    container_name: ato-openlist
+    user: "${OPENLIST_UID:-1001}:${OPENLIST_GID:-1001}"
+    volumes:
+      - "${ATO_STATE_DIR:-./data}/openlist:/opt/openlist/data"
+    ports:
+      - "${OPENLIST_PORT:-5244}:5244"
+    environment:
+      - UMASK=022
+      - TZ=${TZ:-Asia/Tokyo}
+      - OPENLIST_ADMIN_PASSWORD=${OPENLIST_ADMIN_PASSWORD:?OPENLIST_ADMIN_PASSWORD is required}
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: ato-openlist-caddy
+    profiles:
+      - public
+      - selfhost
+    depends_on:
+      - openlist
+    environment:
+      - OPENLIST_PUBLIC_DOMAIN=${OPENLIST_PUBLIC_DOMAIN:?OPENLIST_PUBLIC_DOMAIN is required for the public/selfhost profile}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - "${ATO_STATE_DIR:-./data}/caddy/data:/data"
+      - "${ATO_STATE_DIR:-./data}/caddy/config:/config"
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
