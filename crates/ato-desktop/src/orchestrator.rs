@@ -1891,31 +1891,24 @@ fn apply_desktop_ato_home(command: &mut Command, ato_home: Option<std::ffi::OsSt
     }
 }
 
-/// Env-var names carrying the runtime-safety opt-out settings to the CLI.
-/// These are the interim Desktop → CLI boundary carrier for the onboarding
-/// opt-out toggles; a future structured launch profile should replace them.
+/// Env-var name carrying the Podman opt-out to the CLI. This is the interim
+/// Desktop → CLI boundary carrier for the onboarding/settings `podman_enabled`
+/// toggle; a future structured launch profile should replace it.
 pub(crate) const ENV_PODMAN_ENABLED: &str = "ATO_PODMAN_ENABLED";
-pub(crate) const ENV_HOST_DEVICE_DETECTION: &str = "ATO_HOST_DEVICE_DETECTION";
 
-/// Map the runtime-safety config toggles to their `("NAME", "0"|"1")` env
-/// pairs. Pure so the carrier contract is unit-testable.
+/// Map the runtime-safety config toggle to its `("NAME", "0"|"1")` env pair.
+/// Pure so the carrier contract is unit-testable.
 pub(crate) fn runtime_optout_env_pairs(
     config: &crate::config::DesktopConfig,
-) -> [(&'static str, &'static str); 2] {
+) -> [(&'static str, &'static str); 1] {
     let bool_str = |enabled: bool| if enabled { "1" } else { "0" };
-    [
-        (ENV_PODMAN_ENABLED, bool_str(config.runtime.podman_enabled)),
-        (
-            ENV_HOST_DEVICE_DETECTION,
-            bool_str(config.privacy.host_device_detection_enabled),
-        ),
-    ]
+    [(ENV_PODMAN_ENABLED, bool_str(config.runtime.podman_enabled))]
 }
 
-/// Inject the runtime-safety opt-out env vars onto a CLI child command,
-/// reading the current desktop config. Applied to every `ato` helper spawn
-/// (resolve / session start / stop) and the preflight calls so the CLI honors
-/// the user's Podman + host-device-detection choices on every launch path.
+/// Inject the Podman opt-out env var onto a CLI child command, reading the
+/// current desktop config. Applied to every `ato` helper spawn (resolve /
+/// session start / stop) and the preflight calls so the CLI honors the user's
+/// Podman choice on every launch path.
 fn apply_runtime_optout_env(command: &mut Command) {
     let config = crate::config::load_config();
     for (key, value) in runtime_optout_env_pairs(&config) {
@@ -3304,11 +3297,10 @@ mod tests {
     use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
 
     use super::{
-        DesktopLaunchInput, ENV_HOST_DEVICE_DETECTION, ENV_PODMAN_ENABLED, ResolvePayload,
-        SessionStartInfo, allows_registry_guest_recovery, build_launch_session,
-        collect_dev_script_dirs, detect_package_manager, extract_localhost_url, find_capsule_root,
-        find_dev_script_dir, pop_last_codepoint_width, runtime_optout_env_pairs, url_port,
-        which_in_path_entries,
+        DesktopLaunchInput, ENV_PODMAN_ENABLED, ResolvePayload, SessionStartInfo,
+        allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
+        detect_package_manager, extract_localhost_url, find_capsule_root, find_dev_script_dir,
+        pop_last_codepoint_width, runtime_optout_env_pairs, url_port, which_in_path_entries,
     };
 
     #[test]
@@ -3316,7 +3308,6 @@ mod tests {
         let config = crate::config::DesktopConfig::default();
         let pairs = runtime_optout_env_pairs(&config);
         assert_eq!(pairs[0], (ENV_PODMAN_ENABLED, "1"));
-        assert_eq!(pairs[1], (ENV_HOST_DEVICE_DETECTION, "1"));
     }
 
     #[test]
@@ -3325,16 +3316,6 @@ mod tests {
         config.runtime.podman_enabled = false;
         let pairs = runtime_optout_env_pairs(&config);
         assert_eq!(pairs[0], (ENV_PODMAN_ENABLED, "0"));
-        assert_eq!(pairs[1], (ENV_HOST_DEVICE_DETECTION, "1"));
-    }
-
-    #[test]
-    fn runtime_optout_env_pairs_host_detection_disabled() {
-        let mut config = crate::config::DesktopConfig::default();
-        config.privacy.host_device_detection_enabled = false;
-        let pairs = runtime_optout_env_pairs(&config);
-        assert_eq!(pairs[0], (ENV_PODMAN_ENABLED, "1"));
-        assert_eq!(pairs[1], (ENV_HOST_DEVICE_DETECTION, "0"));
     }
 
     fn resolved_payload(
