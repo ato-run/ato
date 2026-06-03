@@ -140,19 +140,29 @@ fn push_runtime_setup(cx: &mut App, payload_json: &str) {
     crate::window::settings_window::hydrate_active_runtime_setup(cx, payload_json);
 }
 
-/// Apply the runtime-setup preferences to an in-memory config. Pure so the
-/// persistence semantics are unit-testable without an `App` or disk I/O.
+/// Apply runtime-setup preferences to an in-memory config. Each argument is
+/// optional: `None` preserves the stored value, so a caller (e.g. the Settings
+/// Runtime tab) can persist a subset without resetting the others. Pure so the
+/// semantics are unit-testable without an `App` or disk I/O.
 fn apply_runtime_setup(
     config: &mut DesktopConfig,
-    podman_enabled: bool,
-    node_install_enabled: bool,
-    uv_install_enabled: bool,
-    python_install_enabled: bool,
+    podman_enabled: Option<bool>,
+    node_install_enabled: Option<bool>,
+    uv_install_enabled: Option<bool>,
+    python_install_enabled: Option<bool>,
 ) {
-    config.runtime.podman_enabled = podman_enabled;
-    config.runtime_setup.node_install_enabled = node_install_enabled;
-    config.runtime_setup.uv_install_enabled = uv_install_enabled;
-    config.runtime_setup.python_install_enabled = python_install_enabled;
+    if let Some(v) = podman_enabled {
+        config.runtime.podman_enabled = v;
+    }
+    if let Some(v) = node_install_enabled {
+        config.runtime_setup.node_install_enabled = v;
+    }
+    if let Some(v) = uv_install_enabled {
+        config.runtime_setup.uv_install_enabled = v;
+    }
+    if let Some(v) = python_install_enabled {
+        config.runtime_setup.python_install_enabled = v;
+    }
 }
 
 #[cfg(test)]
@@ -165,18 +175,40 @@ mod tests {
         assert!(config.runtime.podman_enabled);
         assert!(config.runtime_setup.node_install_enabled);
 
-        apply_runtime_setup(&mut config, false, false, false, false);
+        apply_runtime_setup(
+            &mut config,
+            Some(false),
+            Some(false),
+            Some(false),
+            Some(false),
+        );
         assert!(!config.runtime.podman_enabled);
         assert!(!config.runtime_setup.node_install_enabled);
         assert!(!config.runtime_setup.uv_install_enabled);
         assert!(!config.runtime_setup.python_install_enabled);
 
-        apply_runtime_setup(&mut config, true, true, false, true);
+        apply_runtime_setup(&mut config, Some(true), Some(true), Some(false), Some(true));
         assert!(config.runtime.podman_enabled);
         assert!(config.runtime_setup.node_install_enabled);
         assert!(!config.runtime_setup.uv_install_enabled);
         assert!(config.runtime_setup.python_install_enabled);
         // check_host_tools_on_startup is not touched by runtime setup.
         assert!(config.runtime_setup.check_host_tools_on_startup);
+    }
+
+    #[test]
+    fn apply_runtime_setup_preserves_omitted_fields() {
+        // The Settings Runtime tab persists Node/uv/Python but omits Podman:
+        // a None field must leave the stored value untouched (no silent reset).
+        let mut config = DesktopConfig::default();
+        config.runtime.podman_enabled = false; // user opted out during onboarding
+
+        apply_runtime_setup(&mut config, None, Some(true), None, None);
+
+        assert!(
+            !config.runtime.podman_enabled,
+            "omitted podman_enabled must be preserved, not reset to default"
+        );
+        assert!(config.runtime_setup.node_install_enabled);
     }
 }

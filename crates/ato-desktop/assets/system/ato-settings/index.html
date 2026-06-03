@@ -667,6 +667,7 @@ const TAB_KEYS = {
   developer: 'settings.nav.developer',
   secrets:   'settings.nav.secrets',
   engines:   'settings.nav.engines',
+  runtime:   'settings.nav.runtime',
 };
 
 function showTab(tabId) {
@@ -1236,11 +1237,12 @@ document.getElementById('runtime-install-btn').addEventListener('click', () => {
   if (_runtimeInstalling) return;
   const tools = selectedRuntimeTools();
   if (tools.length === 0) { showRuntimeError('Select at least one runtime to install.'); return; }
-  // Persist the opt-out preferences alongside the install request so the
-  // choices survive (Podman stays enabled here; toggle it on the Engines tab).
+  // Persist only the managed-runtime install toggles this tab owns. Podman is
+  // deliberately omitted (not sent) so a user who opted out of Podman during
+  // onboarding is not silently re-enabled — the backend preserves any field
+  // left out of this command.
   BRIDGE({
     kind: 'save_runtime_setup_settings',
-    podman_enabled: true,
     node_install_enabled: document.getElementById('tog-rt-node').classList.contains('on'),
     uv_install_enabled: document.getElementById('tog-rt-uv').classList.contains('on'),
     python_install_enabled: document.getElementById('tog-rt-python').classList.contains('on'),
