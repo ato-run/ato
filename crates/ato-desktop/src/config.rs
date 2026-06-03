@@ -17,6 +17,8 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub runtime: RuntimeSettings,
     #[serde(default)]
+    pub runtime_setup: RuntimeSetupSettings,
+    #[serde(default)]
     pub sandbox: SandboxSettings,
     #[serde(default)]
     pub trust: TrustSettings,
@@ -81,6 +83,47 @@ pub struct RuntimeSettings {
     /// fetched on-demand when a recipe/lock explicitly requires it.
     #[serde(default)]
     pub backend_engines: BackendEngineSettings,
+    /// Whether Podman may be used as an OCI runtime provider. Default on
+    /// (opt-out). When false, launch/preflight must not probe Podman,
+    /// auto-start a Podman machine, or select Podman as the OCI provider;
+    /// an OCI recipe that can only run on Podman surfaces an actionable
+    /// "Podman disabled" error instead. Carried to the CLI via the
+    /// `ATO_PODMAN_ENABLED` env var (interim Desktop → CLI carrier).
+    #[serde(default = "default_podman_enabled")]
+    pub podman_enabled: bool,
+}
+
+/// Host runtime-setup preferences (issue #420 revision).
+///
+/// Kept as its own config section (rather than folded into `runtime`) so the
+/// distinction between "what Ato executes" (`runtime`) and "what Ato checks /
+/// installs to make the host runnable" (`runtime_setup`) stays legible.
+///
+/// Policy: the language runtimes are Ato-managed-first — when a recipe needs
+/// Node/uv/Python and the corresponding `*_install_enabled` toggle is on, Ato
+/// installs its own managed copy rather than using a host PATH copy. Podman /
+/// Docker are detection-only and have no toggle here (Podman usage is governed
+/// by `runtime.podman_enabled`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RuntimeSetupSettings {
+    /// Reserved opt-out for a future *startup-time* host-tool readiness check
+    /// (run automatically when the app launches). Default on.
+    ///
+    /// It does NOT gate the on-demand Runtime Setup panels (onboarding Step 5
+    /// and Settings → Runtime): those probe via `ato internal runtime
+    /// setup-status` on explicit user action and always run. Nothing reads this
+    /// field yet; the startup probe that will honour it is not implemented.
+    #[serde(default = "default_true")]
+    pub check_host_tools_on_startup: bool,
+    /// Whether Ato may install an Ato-managed Node when a recipe needs it.
+    #[serde(default = "default_true")]
+    pub node_install_enabled: bool,
+    /// Whether Ato may install an Ato-managed uv when a recipe needs it.
+    #[serde(default = "default_true")]
+    pub uv_install_enabled: bool,
+    /// Whether Ato may install an Ato-managed Python when a recipe needs it.
+    #[serde(default = "default_true")]
+    pub python_install_enabled: bool,
 }
 
 /// Backend engine selection for the three capsule execution categories.
@@ -522,6 +565,15 @@ pub enum RegistryTrustMode {
     Pinned,
 }
 
+fn default_podman_enabled() -> bool {
+    true
+}
+
+/// Default for the opt-out `runtime_setup.*` toggles — all on.
+fn default_true() -> bool {
+    true
+}
+
 fn default_terminal_font_size() -> u16 {
     14
 }
@@ -597,6 +649,7 @@ impl Default for DesktopConfig {
             general: GeneralSettings::default(),
             updates: UpdateSettings::default(),
             runtime: RuntimeSettings::default(),
+            runtime_setup: RuntimeSetupSettings::default(),
             sandbox: SandboxSettings::default(),
             trust: TrustSettings::default(),
             registry: RegistrySettings::default(),
@@ -641,6 +694,18 @@ impl Default for RuntimeSettings {
             terminal_font_size: default_terminal_font_size(),
             terminal_max_sessions: default_terminal_max_sessions(),
             backend_engines: BackendEngineSettings::default(),
+            podman_enabled: default_podman_enabled(),
+        }
+    }
+}
+
+impl Default for RuntimeSetupSettings {
+    fn default() -> Self {
+        Self {
+            check_host_tools_on_startup: default_true(),
+            node_install_enabled: default_true(),
+            uv_install_enabled: default_true(),
+            python_install_enabled: default_true(),
         }
     }
 }
@@ -712,6 +777,8 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             #[serde(default)]
             runtime: RuntimeSettings,
             #[serde(default)]
+            runtime_setup: RuntimeSetupSettings,
+            #[serde(default)]
             sandbox: SandboxSettings,
             #[serde(default)]
             trust: TrustSettings,
@@ -740,6 +807,7 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             general: helper.general,
             updates: helper.updates,
             runtime: helper.runtime,
+            runtime_setup: helper.runtime_setup,
             sandbox: helper.sandbox,
             trust: helper.trust,
             registry: helper.registry,
@@ -1248,6 +1316,54 @@ mod tests {
         assert_eq!(parsed.runtime.terminal_max_sessions, 4);
         assert!(!parsed.developer.auto_open_devtools);
         assert_eq!(parsed.general.theme, ThemeConfig::Dark);
+    }
+
+    #[test]
+    fn runtime_setup_defaults_are_enabled() {
+        let config = DesktopConfig::default();
+        assert!(
+            config.runtime.podman_enabled,
+            "podman must default to enabled (opt-out)"
+        );
+        assert!(config.runtime_setup.check_host_tools_on_startup);
+        assert!(config.runtime_setup.node_install_enabled);
+        assert!(config.runtime_setup.uv_install_enabled);
+        assert!(config.runtime_setup.python_install_enabled);
+    }
+
+    #[test]
+    fn runtime_setup_roundtrips_disabled() {
+        let mut config = DesktopConfig::default();
+        config.runtime.podman_enabled = false;
+        config.runtime_setup.node_install_enabled = false;
+        config.runtime_setup.uv_install_enabled = false;
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.runtime.podman_enabled);
+        assert!(!parsed.runtime_setup.node_install_enabled);
+        assert!(!parsed.runtime_setup.uv_install_enabled);
+        assert!(parsed.runtime_setup.python_install_enabled);
+    }
+
+    #[test]
+    fn runtime_setup_missing_fields_default_to_enabled() {
+        // Pre-existing configs without the new fields must load with all on.
+        let json = r#"{"general": {"theme": "dark"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.runtime.podman_enabled);
+        assert!(parsed.runtime_setup.check_host_tools_on_startup);
+        assert!(parsed.runtime_setup.node_install_enabled);
+        assert!(parsed.runtime_setup.uv_install_enabled);
+        assert!(parsed.runtime_setup.python_install_enabled);
+    }
+
+    #[test]
+    fn legacy_privacy_section_is_ignored_gracefully() {
+        // A config written by the earlier host-device-detection build carries
+        // a `privacy` section; it must load (ignored) without error.
+        let json = r#"{"privacy": {"host_device_detection_enabled": false}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.runtime_setup.node_install_enabled);
     }
 
     #[test]

@@ -105,6 +105,11 @@ const TABLE: &[SystemCapsuleDescriptor] = &[
             Capability::SettingsRead,
             Capability::SettingsWrite,
             Capability::WindowsClose,
+            // Settings is the post-onboarding re-setup surface: it can read
+            // Runtime Setup status, install managed tools, and open logs.
+            Capability::RuntimeSetupRead,
+            Capability::RuntimeSetupInstall,
+            Capability::RuntimeSetupOpenLogs,
         ],
     },
     SystemCapsuleDescriptor {
@@ -171,7 +176,14 @@ const TABLE: &[SystemCapsuleDescriptor] = &[
         legacy_aliases: &["ato-onboarding"],
         display_name: "Onboarding",
         expected_origin: "capsule://desktop.ato.run/onboarding",
-        allowed_capabilities: &[Capability::OnboardingComplete],
+        // Onboarding completes the flow and runs the first-run Runtime Setup
+        // panel (read + install), but cannot open logs — that re-setup
+        // affordance lives in Settings.
+        allowed_capabilities: &[
+            Capability::OnboardingComplete,
+            Capability::RuntimeSetupRead,
+            Capability::RuntimeSetupInstall,
+        ],
     },
     SystemCapsuleDescriptor {
         id: SystemCapsuleId::AtoImport,

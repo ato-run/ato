@@ -23,7 +23,7 @@ pub mod allocator;
 pub mod hop_by_hop;
 pub mod proxy;
 
-use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use allocator::{AllocError, EphemeralAllocator, PortAllocator};
 use anyhow::Context as _;
@@ -36,6 +36,31 @@ use tokio::{
 };
 use tracing::{debug, warn};
 use url::Url;
+
+/// Grace period a route teardown waits for in-flight proxy connections to
+/// finish cleanly before aborting whatever remains. Keep-alive HTTP/1
+/// connections and WebSocket upgrades held open by a guest WebView never
+/// complete on their own, so an unbounded await blocks the control-socket
+/// request (and the Desktop UI thread that issued it) for the full connection
+/// lifetime — observed as a ~57s hang on window close.
+const ROUTE_DRAIN_GRACE: Duration = Duration::from_millis(750);
+
+/// Drain a route's active connection tasks with a bounded grace period, then
+/// abort any stragglers. See [`ROUTE_DRAIN_GRACE`].
+///
+/// Aborting is safe at teardown time: the route is being removed because its
+/// session is going away, so there is no client left to serve. In-flight
+/// requests that finish within the grace window still close cleanly.
+async fn drain_or_abort(js: &mut JoinSet<()>) {
+    let drain = async {
+        while js.join_next().await.is_some() {}
+    };
+    if tokio::time::timeout(ROUTE_DRAIN_GRACE, drain).await.is_err() {
+        // Grace elapsed with connections still open — abort them and await the
+        // aborts so the JoinSet is empty before we return.
+        js.shutdown().await;
+    }
+}
 
 /// Public error type for ingress operations.
 #[derive(Debug, thiserror::Error)]
@@ -163,9 +188,9 @@ impl IngressManager {
         if let Some(handle) = self.routes.remove(key) {
             // Cancel the accept loop.
             let _ = handle.cancel_tx.send(true);
-            // Wait for all active proxy connections on this route.
+            // Drain active proxy connections (bounded), then abort stragglers.
             let mut js = handle.join_set.lock().await;
-            while js.join_next().await.is_some() {}
+            drain_or_abort(&mut js).await;
             // Intentionally do NOT remove from allocator: the port stays
             // reserved in stable_origin_ports.json so the next register
             // call for this key returns the same port.
@@ -179,7 +204,7 @@ impl IngressManager {
         if let Some(handle) = self.routes.remove(key) {
             let _ = handle.cancel_tx.send(true);
             let mut js = handle.join_set.lock().await;
-            while js.join_next().await.is_some() {}
+            drain_or_abort(&mut js).await;
         }
         if let Err(e) = self.alloc.remove(key).await {
             warn!("failed to remove key {key:?} from allocator: {e}");
@@ -263,7 +288,7 @@ impl IngressManager {
         if let Some(handle) = self.ephemeral_routes.remove(session_key) {
             let _ = handle.cancel_tx.send(true);
             let mut js = handle.join_set.lock().await;
-            while js.join_next().await.is_some() {}
+            drain_or_abort(&mut js).await;
             self.ephemeral_alloc.release(session_key);
             debug!("ephemeral ingress route {session_key:?} deregistered");
         }
@@ -280,18 +305,18 @@ impl IngressManager {
             .collect()
     }
 
-    /// Cancel all accept loops and await all active connections.
+    /// Cancel all accept loops and drain (then abort) active connections.
     pub async fn shutdown_all(&mut self) {
         for (key, handle) in self.routes.drain() {
             let _ = handle.cancel_tx.send(true);
             let mut js = handle.join_set.lock().await;
-            while js.join_next().await.is_some() {}
+            drain_or_abort(&mut js).await;
             debug!("ingress route {key:?} shut down");
         }
         for (key, handle) in self.ephemeral_routes.drain() {
             let _ = handle.cancel_tx.send(true);
             let mut js = handle.join_set.lock().await;
-            while js.join_next().await.is_some() {}
+            drain_or_abort(&mut js).await;
             debug!("ephemeral ingress route {key:?} shut down");
         }
     }
@@ -338,10 +363,17 @@ async fn run_ingress_listener(
                 match result {
                     Ok((stream, client_addr)) => {
                         let upstream_clone = Arc::clone(&upstream);
-                        let task = tokio::spawn(serve_connection(stream, upstream_clone, client_addr));
-                        join_set.lock().await.spawn(async move {
-                            let _ = task.await;
-                        });
+                        // Spawn the connection directly into the JoinSet (rather
+                        // than a detached `tokio::spawn` awaited by a wrapper
+                        // task) so route teardown's `JoinSet::shutdown` actually
+                        // aborts the live connection. Aborting a wrapper that
+                        // only `.await`s a `JoinHandle` would detach — not
+                        // cancel — the real `serve_connection`, leaking it past
+                        // deregister.
+                        join_set
+                            .lock()
+                            .await
+                            .spawn(serve_connection(stream, upstream_clone, client_addr));
                     }
                     Err(e) => {
                         warn!("accept error on ingress route {key:?}: {e}");
