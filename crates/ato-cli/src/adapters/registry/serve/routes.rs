@@ -123,7 +123,10 @@ pub(super) fn build_app_router(ui_enabled: bool) -> Router<AppState> {
         get(handle_get_process_logs).delete(handle_clear_process_logs),
     );
     app = app.route("/v1/runtime/providers", get(handle_runtime_providers));
-    app = app.route("/v1/runtime/sessions", get(handle_runtime_sessions));
+    app = app.route(
+        "/v1/runtime/sessions",
+        get(handle_runtime_sessions).post(handle_runtime_launch_session),
+    );
     app = app.route(
         "/v1/runtime/install-profiles",
         get(handle_runtime_install_profiles),
@@ -131,6 +134,10 @@ pub(super) fn build_app_router(ui_enabled: bool) -> Router<AppState> {
     app = app.route(
         "/v1/runtime/sessions/:id/logs",
         get(handle_runtime_session_logs),
+    );
+    app = app.route(
+        "/v1/runtime/sessions/:id",
+        delete(handle_runtime_stop_session),
     );
 
     #[cfg(feature = "webui")]

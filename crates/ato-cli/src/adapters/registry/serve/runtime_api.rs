@@ -12,6 +12,24 @@ use capsule_wire::placement::{
     PlacementProviderId, PlacementProviderKind,
 };
 
+#[derive(Debug, Deserialize)]
+pub(super) struct LaunchSessionRequest {
+    pub install_profile_key: String,
+    /// Optional target label to pass as `--target` to `ato app session start`.
+    /// Corresponds to the target label in the capsule manifest (e.g. `"web"`,
+    /// `"worker"`). Named `target_label` to avoid confusion with install
+    /// profile IDs or launch profile IDs.
+    #[serde(default)]
+    pub target_label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LaunchSessionResponse {
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_visible_url: Option<String>,
+}
+
 const LOCAL_DESKTOP_PROVIDER_ID: &str = "desktop:local";
 const LOCAL_DESKTOP_PLACEMENT_ID: &str = "plc_local_desktop";
 
@@ -59,11 +77,11 @@ pub(super) async fn handle_runtime_providers(
         kind: PlacementProviderKind::Desktop,
         display_name: "Local Desktop Runtime".to_string(),
         capabilities: PlacementCapabilities {
-            supports_launch: false,
-            supports_stop: false,
+            supports_launch: true,
+            supports_stop: true,
             supports_logs: true,
             supports_open_url: true,
-            supports_start_serve: false,
+            supports_start_serve: true,
             isolation_classes: vec!["local".to_string()],
             storage_classes: vec!["local".to_string()],
             network_classes: vec!["loopback".to_string()],
@@ -204,7 +222,21 @@ pub(super) async fn handle_runtime_session_logs(
         return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
     }
 
-    let log_path = process_log_path(id.trim());
+    // Check whether the caller wants SSE streaming.
+    let wants_sse = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    let session_id = id.trim().to_string();
+
+    if wants_sse {
+        return stream_session_logs_sse(session_id, state).await.into_response();
+    }
+
+    // Default: batch JSON response (original behaviour).
+    let log_path = process_log_path(session_id.as_str());
     let tail = query.tail.unwrap_or(500).clamp(1, 5000);
     let lines = read_process_log_lines(&log_path, tail);
     let updated_at = std::fs::metadata(&log_path)
@@ -216,6 +248,98 @@ pub(super) async fn handle_runtime_session_logs(
         StatusCode::OK,
         Json(ProcessLogsResponse { lines, updated_at }),
     )
+        .into_response()
+}
+
+/// Stream session log lines as `text/event-stream` (SSE).
+///
+/// - Existing lines in the log file are sent immediately as `data:` events.
+/// - New lines are polled every 100 ms and sent as they appear.
+/// - A heartbeat comment (`:\n\n`) is sent every 15 seconds to keep the
+///   connection alive through proxies.
+/// - The stream terminates when the session process is no longer running.
+async fn stream_session_logs_sse(session_id: String, _state: AppState) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::SinkExt;
+    use futures::channel::mpsc;
+
+    let log_path = process_log_path(session_id.as_str());
+
+    // Bounded channel — capacity covers burst of existing lines plus
+    // in-flight tails.  A slow consumer causes back-pressure on the
+    // poll task which is acceptable for log streaming.
+    let (mut tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(512);
+
+    // Send existing lines then poll for new ones in a background task.
+    let log_path_clone = log_path.clone();
+    tokio::spawn(async move {
+        // 1. Flush existing lines.
+        let existing = read_process_log_lines(&log_path_clone, 5000);
+        for line in existing {
+            if tx.send(Ok(Event::default().data(line))).await.is_err() {
+                return;
+            }
+        }
+
+        // 2. Tail the file for new content.
+        let mut byte_offset: u64 =
+            std::fs::metadata(&log_path_clone).map(|m| m.len()).unwrap_or(0);
+        let mut last_heartbeat = std::time::Instant::now();
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Check process liveness.
+            let still_running = ProcessManager::new()
+                .ok()
+                .and_then(|pm| pm.list_processes().ok())
+                .map(|procs| {
+                    procs
+                        .iter()
+                        .any(|p| p.id == session_id && p.status.is_active())
+                })
+                .unwrap_or(false);
+
+            // Append new log lines since last poll.
+            if let Ok(mut file) = std::fs::File::open(&log_path_clone) {
+                use std::io::{Read, Seek, SeekFrom};
+                if file.seek(SeekFrom::Start(byte_offset)).is_ok() {
+                    let mut buf = String::new();
+                    if file.read_to_string(&mut buf).is_ok() {
+                        byte_offset += buf.len() as u64;
+                        for line in buf.lines() {
+                            if tx
+                                .send(Ok(Event::default().data(line.to_string())))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Send a heartbeat comment every 15 seconds.
+            if last_heartbeat.elapsed() >= std::time::Duration::from_secs(15) {
+                if tx
+                    .send(Ok(Event::default().comment("heartbeat")))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                last_heartbeat = std::time::Instant::now();
+            }
+
+            if !still_running {
+                break;
+            }
+        }
+    });
+
+    Sse::new(rx)
+        .keep_alive(KeepAlive::default())
         .into_response()
 }
 
@@ -301,6 +425,249 @@ fn placement_provider_kind_from_str(value: &str) -> Option<PlacementProviderKind
         "external" => Some(PlacementProviderKind::External),
         _ => None,
     }
+}
+
+/// `POST /v1/runtime/sessions` — launch a new app session.
+///
+/// Spawns `ato app session start --app <install_profile_key>`, captures
+/// the JSON output to extract the `session_id`, then attempts to register
+/// an ephemeral ingress route via ato-netd if the session bound a port.
+pub(super) async fn handle_runtime_launch_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<LaunchSessionRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+        return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
+    }
+
+    let key = request.install_profile_key.trim().to_string();
+    if key.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "install_profile_key is required",
+        );
+    }
+
+    // Verify the install profile exists before spawning.
+    let instances_root = install_profile_store_root();
+    let store = match InstallInstanceStore::new(&instances_root) {
+        Ok(store) => store,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "install_profile_store_error",
+                &err.to_string(),
+            )
+        }
+    };
+
+    // Derive the app_id and profile_id from the install_profile_key.
+    // The key format is "app_id::profile_id" as produced by
+    // `derive_install_profile_key`. We verify the profile is installed
+    // before spawning the process.
+    let apps = match store.list_installed_apps() {
+        Ok(apps) => apps,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "install_profile_list_failed",
+                &err.to_string(),
+            )
+        }
+    };
+    // Resolve the capsule handle from the matching app record.
+    let mut capsule_handle: Option<String> = None;
+    'outer: for app_id in &apps {
+        let app_record = match store.read_app_record(app_id) {
+            Ok(record) => record,
+            Err(_) => continue,
+        };
+        let profiles = match store.list_profiles(app_id) {
+            Ok(profiles) => profiles,
+            Err(_) => continue,
+        };
+        for profile_id in &profiles {
+            if derive_install_profile_key(app_id, profile_id).as_str().to_string() == key {
+                let handle = if app_record.capsule_handle.is_empty() {
+                    format!("{}/{}", app_record.publisher, app_record.slug)
+                } else {
+                    app_record.capsule_handle.clone()
+                };
+                capsule_handle = Some(handle);
+                break 'outer;
+            }
+        }
+    }
+    let Some(capsule_handle) = capsule_handle else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "install_profile_not_found",
+            &format!("install profile '{}' not found", key),
+        );
+    };
+
+    // Resolve the `ato` executable path (same binary that is running).
+    let ato_exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "exe_resolve_failed",
+                &err.to_string(),
+            )
+        }
+    };
+
+    // Build the command: `ato app session start <handle> --json [--target <id>]`
+    let mut cmd = tokio::process::Command::new(&ato_exe);
+    cmd.args(["app", "session", "start", &capsule_handle, "--json"]);
+    if let Some(ref target) = request.target_label {
+        if !target.trim().is_empty() {
+            cmd.args(["--target", target.trim()]);
+        }
+    }
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = match cmd.output().await {
+        Ok(output) => output,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_spawn_failed",
+                &err.to_string(),
+            )
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_start_failed",
+            &format!("session start exited with {}: {}", output.status, stderr.trim()),
+        );
+    }
+
+    // Parse session_id and web_local_url from JSON output.
+    // `ato app session start --json` emits a SessionStartEnvelope.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (mut session_id, mut web_local_url) = (None::<String>, None::<String>);
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if session_id.is_none() {
+            session_id = v
+                .pointer("/session/session_id")
+                .or_else(|| v.get("session_id"))
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
+        }
+        if web_local_url.is_none() {
+            web_local_url = v
+                .pointer("/session/web/local_url")
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
+        }
+    }
+
+    let Some(session_id) = session_id else {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_id_missing",
+            "session start did not emit a session_id in its JSON output",
+        );
+    };
+
+    // Attempt to register an ephemeral ingress route for the new session.
+    // This is best-effort: if ato-netd is not running or no URL is available
+    // we skip it silently.
+    let user_visible_url = if let Some(ref upstream) = web_local_url {
+        try_register_ephemeral_ingress_with_url(&session_id, upstream).await
+    } else {
+        None
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(LaunchSessionResponse {
+            session_id,
+            user_visible_url,
+        }),
+    )
+        .into_response()
+}
+
+/// `DELETE /v1/runtime/sessions/:id` — stop a running session.
+///
+/// Deregisters the ephemeral ingress route (best-effort, ignores
+/// ato-netd-not-running errors) then kills the session process.
+pub(super) async fn handle_runtime_stop_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+        return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
+    }
+
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "session id is required",
+        );
+    }
+
+    // Best-effort: deregister the ephemeral ingress route if ato-netd is up.
+    if let Ok(mut client) = ato_net::control::Client::connect_default().await {
+        let session_key = format!("ephemeral:{id}");
+        // Ignore errors — not running or already deregistered are both fine.
+        let _ = client.deregister_ephemeral_ingress(&session_key).await;
+    }
+
+    // Stop the process via ProcessManager.
+    let pm = match ProcessManager::new() {
+        Ok(pm) => pm,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "process_manager_error",
+                &err.to_string(),
+            )
+        }
+    };
+
+    match pm.stop_process(&id, false) {
+        Ok(_stopped) => (StatusCode::NO_CONTENT, axum::body::Body::empty()).into_response(),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_stop_failed",
+            &err.to_string(),
+        ),
+    }
+}
+
+/// Try to register an ephemeral ingress route for a freshly-started session
+/// using the upstream URL extracted from the session start output.
+///
+/// Returns the `user_visible_url` if registration succeeded, or `None`
+/// if ato-netd is not running.
+async fn try_register_ephemeral_ingress_with_url(
+    session_id: &str,
+    upstream_url: &str,
+) -> Option<String> {
+    let session_key = format!("ephemeral:{session_id}");
+    let mut client = ato_net::control::Client::connect_default().await.ok()?;
+    let info = client
+        .register_ephemeral_ingress(&session_key, upstream_url)
+        .await
+        .ok()?;
+    Some(format!("http://127.0.0.1:{}", info.port))
 }
 
 fn local_desktop_placement_identity() -> PlacementIdentity {
