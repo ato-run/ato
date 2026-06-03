@@ -1,0 +1,527 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "tools": [
+      {
+        "name": "browser_snapshot",
+        "description": "Returns an accessibility tree snapshot of the active WebView page.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pane_id": {
+              "type": "integer",
+              "description": "Target pane ID (0 = active pane)"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "browser_take_screenshot",
+        "description": "Takes a PNG screenshot of the active WebView (macOS via WKWebView snapshotting; Windows via WebView2 CapturePreview).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "browser_click",
+        "description": "Clicks an element by its stable ref from browser_snapshot.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ref"
+          ]
+        }
+      },
+      {
+        "name": "browser_fill",
+        "description": "Sets the value of an input by ref (clears first).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ref",
+            "value"
+          ]
+        }
+      },
+      {
+        "name": "browser_type",
+        "description": "Types text character-by-character into an element.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ref",
+            "text"
+          ]
+        }
+      },
+      {
+        "name": "browser_select_option",
+        "description": "Selects an option in a <select> element by value or text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ref",
+            "value"
+          ]
+        }
+      },
+      {
+        "name": "browser_check",
+        "description": "Checks a checkbox or radio button.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "checked": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ref"
+          ]
+        }
+      },
+      {
+        "name": "browser_uncheck",
+        "description": "Unchecks a checkbox.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ref"
+          ]
+        }
+      },
+      {
+        "name": "browser_press_key",
+        "description": "Presses a key on the currently focused element.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "description": "Key name, e.g. Enter, Escape, ArrowDown"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "key"
+          ]
+        }
+      },
+      {
+        "name": "browser_navigate",
+        "description": "Navigates the WebView to a URL.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "url"
+          ]
+        }
+      },
+      {
+        "name": "browser_navigate_back",
+        "description": "Goes back in the WebView history.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "browser_navigate_forward",
+        "description": "Goes forward in the WebView history.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "browser_wait_for",
+        "description": "Waits until a CSS selector matches an element.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "selector": {
+              "type": "string"
+            },
+            "timeout": {
+              "type": "integer",
+              "description": "Timeout in ms (default 5000)"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "selector"
+          ]
+        }
+      },
+      {
+        "name": "browser_evaluate",
+        "description": "Evaluates a JavaScript expression and returns the result.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "expression"
+          ]
+        }
+      },
+      {
+        "name": "browser_console_messages",
+        "description": "Returns buffered console messages and clears the buffer.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "browser_verify_text_visible",
+        "description": "Checks whether the given text appears in the page content.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      },
+      {
+        "name": "browser_verify_element_visible",
+        "description": "Checks whether the element with the given ref is visible.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ref"
+          ]
+        }
+      },
+      {
+        "name": "browser_tabs",
+        "description": "Lists all open WebView panes with their IDs.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "browser_tab_focus",
+        "description": "Focuses a specific WebView pane by ID.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pane_id"
+          ]
+        }
+      },
+      {
+        "name": "browser_click_at",
+        "description": "Clicks at a specific (x, y) coordinate in the active WebView.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        }
+      },
+      {
+        "name": "browser_close_tab",
+        "description": "Closes a WebView pane by ID.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pane_id"
+          ]
+        }
+      },
+      {
+        "name": "set_capsule_secrets",
+        "description": "Persist one or more secrets for a capsule handle, grant them to that handle, and (default) dismiss any open `missing_required_env` (E103) modal so the launch re-arms with the freshly stored secrets. Mirrors the modal Save handler — disk-write failures (e.g. ~/.ato/secrets.json mode/parent-dir errors) are returned as MCP errors instead of being silently swallowed.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "handle": {
+              "type": "string",
+              "description": "Capsule handle as it appears in pending_config / launch state (e.g. 'github.com/Koh0920/WasedaP2P')."
+            },
+            "secrets": {
+              "type": "object",
+              "description": "Map of env-var-name → secret value (strings only).",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "clear_pending_config": {
+              "type": "boolean",
+              "description": "If true (default), clears AppState.pending_config when its handle matches, re-arming the launch."
+            }
+          },
+          "required": [
+            "handle",
+            "secrets"
+          ]
+        }
+      },
+      {
+        "name": "approve_execution_plan_consent",
+        "description": "Approve the open ExecutionPlan consent modal for `handle`. Goes through the same handler as the UI's Approve button — `apply_capsule_consent` invokes `ato internal consent approve-execution-plan` (CLI owns the JSONL append; desktop never writes the consent file directly), records the per-handle retry-once budget, and clears `pending_consent` so `ensure_pending_local_launch` re-arms the launch on the next render. Errors surface as MCP errors when no matching pending_consent exists or the CLI write fails — the modal is left open so the caller can retry.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "handle": {
+              "type": "string",
+              "description": "Capsule handle as it appears in pending_consent (the same handle the user typed in the omnibar / ato-desktop opened, e.g. 'capsule://github.com/Koh0920/WasedaP2P')."
+            }
+          },
+          "required": [
+            "handle"
+          ]
+        }
+      },
+      {
+        "name": "stop_active_session",
+        "description": "Stop the active pane's underlying capsule session, mirroring the `Cmd+Shift+W` keybind and the omnibar 'stop session' suggestion. Routes through `WebViewManager::stop_active_session` — the same method `DesktopShell::on_stop_active_session` dispatches — so providers (postgres, etc.) and consumers (uvicorn / vite / ...) shut down via `ato app session stop` exactly as a UI-initiated stop would. Returns `{ok:true, stopped, had_active_session, session_id, handle}`; `stopped:false` with `had_active_session:false` means there was nothing to stop (idempotent), `stopped:false` with `had_active_session:true` means the underlying `stop_guest_session` returned a non-success outcome and the caller should inspect ports/processes (refs #92 AC-step 6).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "restart_active_session",
+        "description": "Stop and restart the active Focus-mode capsule session with the same route and launch configs. Restricted to CapsuleHandle/CapsuleUrl routes. The root Focus View window stays open. Returns `{ok:true, restarted, had_active_session, session_id, handle}`; `restarted:false` with `had_active_session:false` means nothing was running (idempotent). If stop fails, reopen is skipped and an error is returned.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "auth_status",
+        "description": "Returns the current ato-desktop sign-in state for AODD agents. Does NOT expose the session token.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "host_take_screenshot",
+        "description": "Captures the full display as PNG on macOS (via `screencapture`) and Windows (via PowerShell + .NET Graphics), writing it under `${ATO_HOME:-~/.ato}/aodd/`. Returns `{ok:true, path:'<abs>'}`. This is the AODD visual-inspection primitive for ato-desktop's GPUI host surfaces, which are not reachable via the `browser_*` tools because those target embedded WebView content only.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "region": {
+              "type": "string",
+              "description": "Optional region in 'x,y,w,h' format. When omitted captures the whole main display."
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "host_activate_app",
+        "description": "Brings an application to the foreground on macOS (via osascript + System Events) and Windows (via PowerShell AppActivate). Required before `host_press_key` so keystrokes route to ato-desktop, not whatever else has focus. Returns `{ok:true}` on success.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "process_name": {
+              "type": "string",
+              "description": "Process name as shown in Activity Monitor or Task Manager (default: 'ato-desktop')."
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "host_press_key",
+        "description": "Sends a keyboard event to the currently focused application on macOS (osascript/System Events) and Windows (PowerShell SendKeys). Pair with `host_activate_app` first. `key` accepts a single character (e.g. 'n', '1') or a named key ('Escape', 'Return', 'Tab', 'Space'). `modifiers` is an array drawn from ['command','shift','option','control'] (Windows ignores command). Returns `{ok:true}` on success.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "description": "Single character or named key."
+            },
+            "modifiers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Modifier keys to hold."
+            }
+          },
+          "required": [
+            "key"
+          ]
+        }
+      },
+      {
+        "name": "cleanup_host_resources",
+        "description": "Preview and clean up stale provider processes (postgres, bun) owned by the current user. On Unix also removes System V shared memory segments; on Unix sends SIGTERM (no SIGKILL), on Windows uses `taskkill /F` (force-kill, no graceful shutdown). Set dry_run=true to only preview without killing.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "dry_run": {
+              "type": "boolean",
+              "description": "If true, only preview without killing (default: false)"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "host_dispatch_action",
+        "description": "Queues a host-level GPUI action by name onto the ato-desktop automation socket. Valid actions: 'NavigateToUrl' (requires `url` parameter), 'ForceApprovePending', 'FocusControlBarInput', 'OpenStartWindow', 'OpenStoreWindow', 'OpenCardSwitcher', 'CompleteOnboarding', 'SkipOnboarding', 'ShowSettings', and others. The desktop drains the queue on its next render pass and invokes the matching handler in-process. Returns `{ok:true, queued_action:'<name>'}`.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "description": "Action name to dispatch."
+            },
+            "url": {
+              "type": "string",
+              "description": "URL parameter required for NavigateToUrl action (e.g. 'capsule://github.com/Koh0920/hello-capsule')."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        }
+      }
+    ]
+  }
+}

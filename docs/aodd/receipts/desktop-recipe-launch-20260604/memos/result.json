@@ -1,0 +1,48 @@
+{
+  "slug": "memos",
+  "repo": "usememos/memos",
+  "url": "capsule://github.com/usememos/memos",
+  "steps": [
+    {
+      "step": "NavigateToUrl",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"ok\\\":true,\\\"queued_action\\\":\\\"NavigateToUrl\\\"}\"}], \"isError\": false}}"
+    },
+    {
+      "step": "snapshot_after_nav",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"no WebView pane\"}], \"isError\": true}}"
+    },
+    {
+      "step": "ForceApprovePending",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"ok\\\":true,\\\"queued_action\\\":\\\"ForceApprovePending\\\"}\"}], \"isError\": false}}"
+    },
+    {
+      "step": "browser_tabs_final",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 10, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"panes\\\":[{\\\"pane_id\\\":4296967303,\\\"kind\\\":\\\"guest-capsule\\\",\\\"window_id\\\":4294967303,\\\"url\\\":\\\"http://127.0.0.1:39425/\\\",\\\"title\\\":\\\"memos\\\",\\\"handle\\\":\\\"github.com/usememos/memos\\\",\\\"session_id\\\":\\\"ato-desktop-session-2544\\\",\\\"status\\\":\\\"Ready\\\"}]}\"}], \"isError\": false}}"
+    },
+    {
+      "step": "stop_active_session",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 11, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"ok\\\":true,\\\"stopped\\\":true,\\\"had_active_session\\\":true,\\\"session_id\\\":\\\"ato-desktop-session-2544\\\",\\\"handle\\\":\\\"capsule://github.com/usememos/memos\\\"}\"}], \"isError\": false}}"
+    }
+  ],
+  "podman_before": {
+    "containers": "",
+    "networks": "ato-affine-79775310-16312\nato-open-webui-69a987ae-13624\nato-open-webui-69a987ae-18848\nato-pgweb-019c1ea3-10308\nato-pgweb-019c1ea3-12780\nato-pgweb-019c1ea3-14076\nato-pgweb-019c1ea3-14312\nato-pgweb-019c1ea3-15036\nato-pgweb-019c1ea3-15592\nato-pgweb-019c1ea3-15728\nato-pgweb-019c1ea3-17144\nato-pgweb-019c1ea3-18236\nato-pgweb-019c1ea3-19940\nato-pgweb-019c1ea3-20864\nato-pgweb-019c1ea3-21756\nato-pgweb-019c1ea3-23672\nato-pgweb-019c1ea3-2456\nato-pgweb-019c1ea3-4888\nato-pgweb-019c1ea3-8244\nato-pgweb-3e23dcc7\npodman"
+  },
+  "tab_polls": [
+    "{\"panes\": []}",
+    "{\"panes\": [{\"pane_id\": 4296967303, \"kind\": \"guest-capsule\", \"window_id\": 4294967303, \"url\": \"http://127.0.0.1:39425/\", \"title\": \"memos\", \"handle\": \"github.com/usememos/memos\", \"session_id\": \"ato-desktop-session-2544\", \"status\": \"Ready\"}]}"
+  ],
+  "ready_detected_after_s": 10,
+  "webview_url": "http://127.0.0.1:39425/",
+  "screenshot": "screenshot.png",
+  "screenshot_bytes": 31020,
+  "console": "{\"jsonrpc\": \"2.0\", \"id\": 9, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"automation command timed out\"}], \"isError\": true}}",
+  "podman_running_at_ready": {
+    "containers": "ato-memos-8942a755-main\tUp 40 seconds\tdocker.io/neosmemo/memos:stable",
+    "networks": "ato-affine-79775310-16312\nato-memos-fb529349-2544\nato-open-webui-69a987ae-13624\nato-open-webui-69a987ae-18848\nato-pgweb-019c1ea3-10308\nato-pgweb-019c1ea3-12780\nato-pgweb-019c1ea3-14076\nato-pgweb-019c1ea3-14312\nato-pgweb-019c1ea3-15036\nato-pgweb-019c1ea3-15592\nato-pgweb-019c1ea3-15728\nato-pgweb-019c1ea3-17144\nato-pgweb-019c1ea3-18236\nato-pgweb-019c1ea3-19940\nato-pgweb-019c1ea3-20864\nato-pgweb-019c1ea3-21756\nato-pgweb-019c1ea3-23672\nato-pgweb-019c1ea3-2456\nato-pgweb-019c1ea3-4888\nato-pgweb-019c1ea3-8244\nato-pgweb-3e23dcc7\npodman"
+  },
+  "podman_after_stop": {
+    "containers": "",
+    "networks": "ato-affine-79775310-16312\nato-open-webui-69a987ae-13624\nato-open-webui-69a987ae-18848\nato-pgweb-019c1ea3-10308\nato-pgweb-019c1ea3-12780\nato-pgweb-019c1ea3-14076\nato-pgweb-019c1ea3-14312\nato-pgweb-019c1ea3-15036\nato-pgweb-019c1ea3-15592\nato-pgweb-019c1ea3-15728\nato-pgweb-019c1ea3-17144\nato-pgweb-019c1ea3-18236\nato-pgweb-019c1ea3-19940\nato-pgweb-019c1ea3-20864\nato-pgweb-019c1ea3-21756\nato-pgweb-019c1ea3-23672\nato-pgweb-019c1ea3-2456\nato-pgweb-019c1ea3-4888\nato-pgweb-019c1ea3-8244\nato-pgweb-3e23dcc7\npodman"
+  }
+}

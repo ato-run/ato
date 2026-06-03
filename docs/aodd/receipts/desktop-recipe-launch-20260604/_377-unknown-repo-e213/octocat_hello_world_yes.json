@@ -1,0 +1,23 @@
+[2m2026-06-03T18:35:25.109572Z[0m [32m INFO[0m resolved GitHub source reference [3mcapsule_id[0m[2m=[0moctocat/Hello-World [3mrequested_ref[0m[2m=[0mmaster [3mresolved_commit[0m[2m=[0m7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+   Generated capsule.toml preview: C:\Users\koh\AppData\Local\Temp\aodd-369-home\previews\preview-ff0ecc806355f446f1fb7a2572860a73\capsule.toml
+   ----- capsule.toml -----
+     1 | name = "hello-world"
+     2 | run = "main.py"
+     3 | runtime = "source"
+     4 | schema_version = "0.3"
+     5 | type = "app"
+     6 | version = "0.1.0"
+     7 | 
+     8 | [pack]
+     9 | exclude = ["node_modules/**", ".venv/**", "**/__pycache__/**", ".git/**", ".next/**", ".astro/**", ".svelte-kit/**", ".nuxt/**", "dist/**", "build/**", "coverage/**"]
+    10 | include = []
+   -----------------------
+📦 Building octocat/Hello-World from GitHub source in C:\Users\koh\AppData\Local\Temp\aodd-369-home\gh-install\gh-install-wfTxJO\Hello-World
+Resolved octocat/Hello-World@master -> 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+   Revision: 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d (master)
+   Using store-generated capsule draft for octocat/Hello-World
+   Confidence: low
+   Warning: README was not detected, so required environment variables may be incomplete.
+Execution receipt (v2-experimental, recoverable-failure): partial:blake3:ca5b0108a746bc506eca049ab4e8c1d752e4861080278aad94b55c3c7b983fc8 (C:\Users\koh\AppData\Local\Temp\aodd-369-home\executions\partial_blake3_ca5b0108a746bc506eca049ab4e8c1d752e4861080278aad94b55c3c7b983fc8\receipt.json)
+RECEIPT: C:\Users\koh\AppData\Local\Temp\aodd-369-home\executions\partial_blake3_ca5b0108a746bc506eca049ab4e8c1d752e4861080278aad94b55c3c7b983fc8\receipt.json
+{"level":"fatal","code":"ATO_ERR_MANUAL_INTERVENTION_REQUIRED","name":"manual_intervention_required","phase":"inference","classification":"manifest","message":"manual intervention required: README was not detected, so required environment variables may be incomplete.\nGenerated capsule.toml: C:\\Users\\koh\\AppData\\Local\\Temp\\aodd-369-home\\previews\\preview-ff0ecc806355f446f1fb7a2572860a73\\capsule.toml\nNext steps:\n- README was not detected, so required environment variables may be incomplete.\n- Review C:\\Users\\koh\\AppData\\Local\\Temp\\aodd-369-home\\previews\\preview-ff0ecc806355f446f1fb7a2572860a73\\capsule.toml and adjust the generated command or target settings as needed.\n- Rerun `ato run octocat/Hello-World` after the prerequisites are ready.","retryable":false,"interactive_resolution":true,"resource":"manifest","target":"C:\\Users\\koh\\AppData\\Local\\Temp\\aodd-369-home\\previews\\preview-ff0ecc806355f446f1fb7a2572860a73\\capsule.toml","hint":"Next steps:\n- README was not detected, so required environment variables may be incomplete.\n- Review C:\\Users\\koh\\AppData\\Local\\Temp\\aodd-369-home\\previews\\preview-ff0ecc806355f446f1fb7a2572860a73\\capsule.toml and adjust the generated command or target settings as needed.\n- Rerun `ato run octocat/Hello-World` after the prerequisites are ready.","details":{"manifest_path":"C:\\Users\\koh\\AppData\\Local\\Temp\\aodd-369-home\\previews\\preview-ff0ecc806355f446f1fb7a2572860a73\\capsule.toml","next_steps":["README was not detected, so required environment variables may be incomplete.","Review C:\\Users\\koh\\AppData\\Local\\Temp\\aodd-369-home\\previews\\preview-ff0ecc806355f446f1fb7a2572860a73\\capsule.toml and adjust the generated command or target settings as needed.","Rerun `ato run octocat/Hello-World` after the prerequisites are ready."]},"cleanup_status":"not_required"}

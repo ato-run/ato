@@ -1,0 +1,75 @@
+{
+  "slug": "n8n",
+  "repo": "n8n-io/n8n",
+  "url": "capsule://github.com/n8n-io/n8n",
+  "steps": [
+    {
+      "step": "NavigateToUrl",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 46, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"ok\\\":true,\\\"queued_action\\\":\\\"NavigateToUrl\\\"}\"}], \"isError\": false}}"
+    },
+    {
+      "step": "snapshot_after_nav",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 47, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"no WebView pane\"}], \"isError\": true}}"
+    },
+    {
+      "step": "ForceApprovePending",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 48, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"ok\\\":true,\\\"queued_action\\\":\\\"ForceApprovePending\\\"}\"}], \"isError\": false}}"
+    },
+    {
+      "step": "browser_tabs_final",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 80, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"panes\\\":[{\\\"pane_id\\\":4296967313,\\\"kind\\\":\\\"guest-capsule\\\",\\\"window_id\\\":4294967313,\\\"url\\\":\\\"http://127.0.0.1:33245/\\\",\\\"title\\\":\\\"n8n\\\",\\\"handle\\\":\\\"github.com/n8n-io/n8n\\\",\\\"session_id\\\":\\\"ato-desktop-session-25480\\\",\\\"status\\\":\\\"Ready\\\"}]}\"}], \"isError\": false}}"
+    },
+    {
+      "step": "stop_active_session",
+      "resp": "{\"jsonrpc\": \"2.0\", \"id\": 81, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"ok\\\":true,\\\"stopped\\\":true,\\\"had_active_session\\\":true,\\\"session_id\\\":\\\"ato-desktop-session-25480\\\",\\\"handle\\\":\\\"capsule://github.com/n8n-io/n8n\\\"}\"}], \"isError\": false}}"
+    }
+  ],
+  "podman_before": {
+    "containers": "",
+    "networks": "ato-affine-79775310-16312\nato-open-webui-69a987ae-13624\nato-open-webui-69a987ae-18848\nato-pgweb-019c1ea3-10308\nato-pgweb-019c1ea3-12780\nato-pgweb-019c1ea3-14076\nato-pgweb-019c1ea3-14312\nato-pgweb-019c1ea3-15036\nato-pgweb-019c1ea3-15592\nato-pgweb-019c1ea3-15728\nato-pgweb-019c1ea3-17144\nato-pgweb-019c1ea3-18236\nato-pgweb-019c1ea3-19940\nato-pgweb-019c1ea3-20864\nato-pgweb-019c1ea3-21756\nato-pgweb-019c1ea3-23672\nato-pgweb-019c1ea3-2456\nato-pgweb-019c1ea3-4888\nato-pgweb-019c1ea3-8244\nato-pgweb-3e23dcc7\npodman"
+  },
+  "tab_polls": [
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": []}",
+    "{\"panes\": [{\"pane_id\": 4296967313, \"kind\": \"guest-capsule\", \"window_id\": 4294967313, \"url\": \"http://127.0.0.1:33245/\", \"title\": \"n8n\", \"handle\": \"github.com/n8n-io/n8n\", \"session_id\": \"ato-desktop-session-25480\", \"status\": \"Ready\"}]}"
+  ],
+  "ready_detected_after_s": 145,
+  "webview_url": "http://127.0.0.1:33245/",
+  "screenshot": "screenshot.png",
+  "screenshot_bytes": 7341,
+  "console": "{\"jsonrpc\": \"2.0\", \"id\": 79, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"automation command timed out\"}], \"isError\": true}}",
+  "podman_running_at_ready": {
+    "containers": "ato-n8n-27497aac-main\tUp 55 seconds\tdocker.io/n8nio/n8n:latest",
+    "networks": "ato-affine-79775310-16312\nato-n8n-218fba2e-25480\nato-open-webui-69a987ae-13624\nato-open-webui-69a987ae-18848\nato-pgweb-019c1ea3-10308\nato-pgweb-019c1ea3-12780\nato-pgweb-019c1ea3-14076\nato-pgweb-019c1ea3-14312\nato-pgweb-019c1ea3-15036\nato-pgweb-019c1ea3-15592\nato-pgweb-019c1ea3-15728\nato-pgweb-019c1ea3-17144\nato-pgweb-019c1ea3-18236\nato-pgweb-019c1ea3-19940\nato-pgweb-019c1ea3-20864\nato-pgweb-019c1ea3-21756\nato-pgweb-019c1ea3-23672\nato-pgweb-019c1ea3-2456\nato-pgweb-019c1ea3-4888\nato-pgweb-019c1ea3-8244\nato-pgweb-3e23dcc7\npodman"
+  },
+  "podman_after_stop": {
+    "containers": "",
+    "networks": "ato-affine-79775310-16312\nato-open-webui-69a987ae-13624\nato-open-webui-69a987ae-18848\nato-pgweb-019c1ea3-10308\nato-pgweb-019c1ea3-12780\nato-pgweb-019c1ea3-14076\nato-pgweb-019c1ea3-14312\nato-pgweb-019c1ea3-15036\nato-pgweb-019c1ea3-15592\nato-pgweb-019c1ea3-15728\nato-pgweb-019c1ea3-17144\nato-pgweb-019c1ea3-18236\nato-pgweb-019c1ea3-19940\nato-pgweb-019c1ea3-20864\nato-pgweb-019c1ea3-21756\nato-pgweb-019c1ea3-23672\nato-pgweb-019c1ea3-2456\nato-pgweb-019c1ea3-4888\nato-pgweb-019c1ea3-8244\nato-pgweb-3e23dcc7\npodman"
+  }
+}
