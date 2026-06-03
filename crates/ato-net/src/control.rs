@@ -184,6 +184,14 @@ pub struct StatusReport {
     /// to `None` via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_proxy_port: Option<u16>,
+    /// Stable UUID identifying this daemon installation. Added in
+    /// slice **B** (#382). Absent in older daemons; `None` by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    /// Opaque bearer token for authenticating remote callers. Added in
+    /// slice **B** (#382). Absent in older daemons; `None` by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_token: Option<String>,
 }
 
 /// Description of an ingress listener owned by the running daemon.
@@ -637,6 +645,8 @@ mod tests {
                 uptime_secs: 7,
                 listeners: vec![],
                 egress_proxy_port: None,
+                runtime_id: None,
+                control_token: None,
             }),
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -727,6 +737,8 @@ mod tests {
                     uptime_secs: 3,
                     listeners: vec![],
                     egress_proxy_port: None,
+                    runtime_id: None,
+                    control_token: None,
                 }),
             };
             let handle = spawn_fake_daemon(&path, resp);

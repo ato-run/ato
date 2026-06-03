@@ -79,7 +79,9 @@ impl AtoHomeGuard {
             ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create ATO_HOME test root");
-        std::env::set_var("ATO_HOME", &root);
+        unsafe {
+            std::env::set_var("ATO_HOME", &root);
+        }
         Self { previous, root }
     }
 }
@@ -87,9 +89,13 @@ impl AtoHomeGuard {
 impl Drop for AtoHomeGuard {
     fn drop(&mut self) {
         if let Some(previous) = self.previous.take() {
-            std::env::set_var("ATO_HOME", previous);
+            unsafe {
+                std::env::set_var("ATO_HOME", previous);
+            }
         } else {
-            std::env::remove_var("ATO_HOME");
+            unsafe {
+                std::env::remove_var("ATO_HOME");
+            }
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -838,7 +844,9 @@ async fn runtime_providers_returns_desktop_provider() {
     assert_eq!(json[0]["id"], "desktop:local");
     assert_eq!(json[0]["kind"], "desktop");
     assert_eq!(json[0]["capabilities"]["supports_logs"], true);
-    assert_eq!(json[0]["capabilities"]["supports_launch"], false);
+    assert_eq!(json[0]["capabilities"]["supports_launch"], true);
+    assert_eq!(json[0]["capabilities"]["supports_stop"], true);
+    assert_eq!(json[0]["capabilities"]["supports_start_serve"], true);
 }
 
 #[tokio::test(flavor = "current_thread")]

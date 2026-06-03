@@ -322,12 +322,15 @@ async fn build_status_report(state: &DaemonState) -> StatusReport {
         .map(|(key, port)| ListenerInfo { key, port })
         .collect();
     let egress_proxy_port = state.egress_port().await;
+    let identity = state.runtime_identity();
     StatusReport {
         version: env!("CARGO_PKG_VERSION").to_string(),
         pid: std::process::id(),
         uptime_secs: state.uptime_secs(),
         listeners,
         egress_proxy_port,
+        runtime_id: Some(identity.runtime_id),
+        control_token: Some(identity.control_token),
     }
 }
 
