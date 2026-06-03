@@ -76,6 +76,33 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
             causes,
         );
     }
+    // Source-native build / prestart hook needs a host POSIX shell (/bin/sh)
+    // that this platform (Windows without Git Bash/MSYS2) does not provide.
+    // Surface a typed, actionable diagnostic (E213) instead of letting the
+    // opaque "os error 2" spawn failure fall through to the generic E999. See
+    // issue #377.
+    if err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains(crate::application::shell_preflight::SOURCE_BUILD_SHELL_UNAVAILABLE_MARKER)
+    }) {
+        return CliDiagnostic::new(
+            CliDiagnosticCode::E213,
+            message,
+            Some(
+                "このリポジトリは source-build 経路で Unix shell (/bin/sh) を必要とします。\
+                 登録済み recipe があればそれを使う (OCI/runtime 経路で起動でき shell 不要)、\
+                 無ければ Windows 対応の build script (PowerShell/cmd) を追加するか、\
+                 Linux/macOS もしくは WSL 上で実行してください。",
+            ),
+            None,
+            None,
+            None,
+            false,
+            false,
+            causes,
+        );
+    }
     if let Some(artifact_message) = distributable_artifact_missing_message(err) {
         return CliDiagnostic::new(
             CliDiagnosticCode::E102,
@@ -538,7 +565,76 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
 
 #[cfg(test)]
 mod podman_disabled_tests {
+    use anyhow::Context as _;
+
     use super::{CliDiagnosticCode, CommandContext, from_anyhow};
+
+    #[test]
+    fn smoke_shell_failure_maps_to_e213() {
+        // The smoke runner reports a SpawnFailed whose message carries the
+        // shared marker when `executable = "sh"` and no host shell exists. That
+        // must reach E213 through from_anyhow, not the generic E999. (#377)
+        let report = capsule_core::smoke::SmokeFailureReport {
+            class: capsule_core::smoke::SmokeFailureClass::SpawnFailed,
+            message: capsule_core::shell_support::source_build_shell_unavailable_message(
+                "sh", "windows",
+            ),
+            stderr_tail: String::new(),
+            exit_status: None,
+        };
+        let err = anyhow::Error::new(report).context("Smoke test failed");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Build);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E213,
+            "smoke shell failure must map to E213"
+        );
+    }
+
+    #[test]
+    fn smoke_non_shell_spawn_failure_does_not_map_to_e213() {
+        // A non-shell SpawnFailed (e.g. a missing binary) carries no marker and
+        // must NOT be reclassified as the shell-unavailable error.
+        let report = capsule_core::smoke::SmokeFailureReport {
+            class: capsule_core::smoke::SmokeFailureClass::SpawnFailed,
+            message: "failed to start process 'node' for smoke: No such file or directory"
+                .to_string(),
+            stderr_tail: String::new(),
+            exit_status: None,
+        };
+        let err = anyhow::Error::new(report);
+
+        let diagnostic = from_anyhow(&err, CommandContext::Build);
+        assert_ne!(
+            diagnostic.code,
+            CliDiagnosticCode::E213,
+            "non-shell spawn failures must not be reclassified as shell-unavailable"
+        );
+    }
+
+    #[test]
+    fn source_build_shell_unavailable_maps_to_e213_not_internal() {
+        // Mirrors the real wrapping: the prestart spawn site adds context on
+        // top of the typed shell-unavailable error from `shell_preflight`.
+        let err = crate::application::shell_preflight::source_build_shell_unavailable_error(
+            "cd app && bun install",
+            "windows",
+        )
+        .context("running prestart command");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E213,
+            "shell-unavailable must map to source_build_shell_unavailable (E213), not E999"
+        );
+        assert_eq!(diagnostic.name, "source_build_shell_unavailable");
+        assert!(
+            diagnostic.hint.is_some(),
+            "diagnostic must carry an actionable hint"
+        );
+    }
 
     #[test]
     fn podman_disabled_maps_to_engine_missing_not_internal() {

@@ -44,6 +44,18 @@ pub enum RuntimeSetupCommand {
         #[serde(default)]
         tools: Vec<String>,
     },
+    /// Foreground-prepare a host runtime (Podman): install when supported,
+    /// create/start the Ato-managed `ato-podman` machine, verify readiness.
+    /// Semantically distinct from `InstallRuntimeTools` (managed toolchains)
+    /// even though both stream progress through the same hydrate fields — this
+    /// is the only host-state-mutating runtime command and is gated by the
+    /// dedicated [`Capability::RuntimeSetupPrepare`].
+    PrepareRuntimeTools {
+        #[serde(default)]
+        request_id: Option<String>,
+        #[serde(default)]
+        tools: Vec<String>,
+    },
     /// Cancel an in-flight foreground runtime install.
     CancelRuntimeInstall {
         #[serde(default)]
@@ -66,6 +78,7 @@ impl RuntimeSetupCommand {
             RuntimeSetupCommand::RuntimeSetupStatus { .. } => Capability::RuntimeSetupRead,
             RuntimeSetupCommand::SaveRuntimeSetupSettings { .. } => Capability::RuntimeSetupInstall,
             RuntimeSetupCommand::InstallRuntimeTools { .. } => Capability::RuntimeSetupInstall,
+            RuntimeSetupCommand::PrepareRuntimeTools { .. } => Capability::RuntimeSetupPrepare,
             RuntimeSetupCommand::CancelRuntimeInstall { .. } => Capability::RuntimeSetupInstall,
             RuntimeSetupCommand::OpenRuntimeSetupLogs { .. } => Capability::RuntimeSetupOpenLogs,
         }
@@ -80,6 +93,7 @@ impl RuntimeSetupCommand {
             "runtime_setup_status"
                 | "save_runtime_setup_settings"
                 | "install_runtime_tools"
+                | "prepare_runtime_tools"
                 | "cancel_runtime_install"
                 | "open_runtime_setup_logs"
         )
@@ -113,6 +127,7 @@ mod tests {
             "runtime_setup_status",
             "save_runtime_setup_settings",
             "install_runtime_tools",
+            "prepare_runtime_tools",
             "cancel_runtime_install",
             "open_runtime_setup_logs",
         ] {
@@ -128,9 +143,16 @@ mod tests {
             request_id: None,
             tools: vec!["node".into()],
         };
+        let prepare = RuntimeSetupCommand::PrepareRuntimeTools {
+            request_id: None,
+            tools: vec!["podman".into()],
+        };
         let logs = RuntimeSetupCommand::OpenRuntimeSetupLogs { request_id: None };
         let status = RuntimeSetupCommand::RuntimeSetupStatus { request_id: None };
         assert_eq!(install.required_capability(), Capability::RuntimeSetupInstall);
+        // Prepare (host-runtime mutation) is gated distinctly from install
+        // (managed-toolchain provisioning).
+        assert_eq!(prepare.required_capability(), Capability::RuntimeSetupPrepare);
         assert_eq!(logs.required_capability(), Capability::RuntimeSetupOpenLogs);
         assert_eq!(status.required_capability(), Capability::RuntimeSetupRead);
     }

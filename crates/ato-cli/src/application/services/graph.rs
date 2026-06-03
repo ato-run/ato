@@ -311,6 +311,7 @@ mod tests {
                 port: None,
                 required_env: Vec::new(),
                 mounts: Vec::new(),
+                user: None,
             }),
         }
     }
