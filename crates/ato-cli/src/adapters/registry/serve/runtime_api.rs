@@ -256,6 +256,7 @@ pub(super) async fn handle_runtime_session_logs(
 /// - The stream terminates when the session process is no longer running.
 async fn stream_session_logs_sse(session_id: String, _state: AppState) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::SinkExt;
     use futures::channel::mpsc;
 
     let log_path = process_log_path(session_id.as_str());
@@ -271,7 +272,7 @@ async fn stream_session_logs_sse(session_id: String, _state: AppState) -> axum::
         // 1. Flush existing lines.
         let existing = read_process_log_lines(&log_path_clone, 5000);
         for line in existing {
-            if tx.try_send(Ok(Event::default().data(line))).is_err() {
+            if tx.send(Ok(Event::default().data(line))).await.is_err() {
                 return;
             }
         }
@@ -304,7 +305,8 @@ async fn stream_session_logs_sse(session_id: String, _state: AppState) -> axum::
                         byte_offset += buf.len() as u64;
                         for line in buf.lines() {
                             if tx
-                                .try_send(Ok(Event::default().data(line.to_string())))
+                                .send(Ok(Event::default().data(line.to_string())))
+                                .await
                                 .is_err()
                             {
                                 return;
@@ -316,7 +318,11 @@ async fn stream_session_logs_sse(session_id: String, _state: AppState) -> axum::
 
             // Send a heartbeat comment every 15 seconds.
             if last_heartbeat.elapsed() >= std::time::Duration::from_secs(15) {
-                if tx.try_send(Ok(Event::default().comment("heartbeat"))).is_err() {
+                if tx
+                    .send(Ok(Event::default().comment("heartbeat")))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 last_heartbeat = std::time::Instant::now();
@@ -467,24 +473,36 @@ pub(super) async fn handle_runtime_launch_session(
             )
         }
     };
-    let profile_found = apps.iter().any(|app_id| {
-        store
-            .list_profiles(app_id)
-            .ok()
-            .map(|profiles| {
-                profiles.iter().any(|profile_id| {
-                    derive_install_profile_key(app_id, profile_id).as_str().to_string() == key
-                })
-            })
-            .unwrap_or(false)
-    });
-    if !profile_found {
+    // Resolve the capsule handle from the matching app record.
+    let mut capsule_handle: Option<String> = None;
+    'outer: for app_id in &apps {
+        let app_record = match store.read_app_record(app_id) {
+            Ok(record) => record,
+            Err(_) => continue,
+        };
+        let profiles = match store.list_profiles(app_id) {
+            Ok(profiles) => profiles,
+            Err(_) => continue,
+        };
+        for profile_id in &profiles {
+            if derive_install_profile_key(app_id, profile_id).as_str().to_string() == key {
+                let handle = if app_record.capsule_handle.is_empty() {
+                    format!("{}/{}", app_record.publisher, app_record.slug)
+                } else {
+                    app_record.capsule_handle.clone()
+                };
+                capsule_handle = Some(handle);
+                break 'outer;
+            }
+        }
+    }
+    let Some(capsule_handle) = capsule_handle else {
         return json_error(
             StatusCode::NOT_FOUND,
             "install_profile_not_found",
             &format!("install profile '{}' not found", key),
         );
-    }
+    };
 
     // Resolve the `ato` executable path (same binary that is running).
     let ato_exe = match std::env::current_exe() {
@@ -498,12 +516,12 @@ pub(super) async fn handle_runtime_launch_session(
         }
     };
 
-    // Build the command: `ato app session start --app <key> [--profile <id>]`
+    // Build the command: `ato app session start <handle> --json [--target <id>]`
     let mut cmd = tokio::process::Command::new(&ato_exe);
-    cmd.args(["app", "session", "start", "--app", &key]);
+    cmd.args(["app", "session", "start", &capsule_handle, "--json"]);
     if let Some(ref profile_id) = request.launch_profile_id {
         if !profile_id.trim().is_empty() {
-            cmd.args(["--profile", profile_id.trim()]);
+            cmd.args(["--target", profile_id.trim()]);
         }
     }
     cmd.stdout(std::process::Stdio::piped());
@@ -529,19 +547,28 @@ pub(super) async fn handle_runtime_launch_session(
         );
     }
 
-    // Parse session_id from JSON output. `ato app session start` emits a
-    // JSON envelope; we look for a `session_id` field anywhere in the
-    // output lines.
+    // Parse session_id and web_local_url from JSON output.
+    // `ato app session start --json` emits a SessionStartEnvelope.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let session_id = stdout
-        .lines()
-        .find_map(|line| {
-            let v: serde_json::Value = serde_json::from_str(line).ok()?;
-            v.get("session_id")
-                .or_else(|| v.get("id"))
+    let (mut session_id, mut web_local_url) = (None::<String>, None::<String>);
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if session_id.is_none() {
+            session_id = v
+                .pointer("/session/session_id")
+                .or_else(|| v.get("session_id"))
                 .and_then(|s| s.as_str())
-                .map(str::to_string)
-        });
+                .map(str::to_string);
+        }
+        if web_local_url.is_none() {
+            web_local_url = v
+                .pointer("/session/web/local_url")
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
+        }
+    }
 
     let Some(session_id) = session_id else {
         return json_error(
@@ -552,8 +579,13 @@ pub(super) async fn handle_runtime_launch_session(
     };
 
     // Attempt to register an ephemeral ingress route for the new session.
-    // This is best-effort: if ato-netd is not running we skip it silently.
-    let user_visible_url = try_register_ephemeral_ingress(&session_id).await;
+    // This is best-effort: if ato-netd is not running or no URL is available
+    // we skip it silently.
+    let user_visible_url = if let Some(ref upstream) = web_local_url {
+        try_register_ephemeral_ingress_with_url(&session_id, upstream).await
+    } else {
+        None
+    };
 
     (
         StatusCode::CREATED,
@@ -616,25 +648,19 @@ pub(super) async fn handle_runtime_stop_session(
     }
 }
 
-/// Try to register an ephemeral ingress route for a freshly-started session.
+/// Try to register an ephemeral ingress route for a freshly-started session
+/// using the upstream URL extracted from the session start output.
 ///
 /// Returns the `user_visible_url` if registration succeeded, or `None`
-/// if ato-netd is not running or the session has no port binding yet.
-async fn try_register_ephemeral_ingress(session_id: &str) -> Option<String> {
-    // Look up the process port from ProcessManager.
-    let pm = ProcessManager::new().ok()?;
-    let processes = pm.list_processes().ok()?;
-    let process = processes
-        .into_iter()
-        .find(|p| p.id == session_id)?;
-    let port = process.requested_port?;
-
-    let upstream_url = format!("http://127.0.0.1:{port}");
+/// if ato-netd is not running.
+async fn try_register_ephemeral_ingress_with_url(
+    session_id: &str,
+    upstream_url: &str,
+) -> Option<String> {
     let session_key = format!("ephemeral:{session_id}");
-
     let mut client = ato_net::control::Client::connect_default().await.ok()?;
     let info = client
-        .register_ephemeral_ingress(&session_key, &upstream_url)
+        .register_ephemeral_ingress(&session_key, upstream_url)
         .await
         .ok()?;
     Some(format!("http://127.0.0.1:{}", info.port))

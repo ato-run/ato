@@ -1305,6 +1305,89 @@ async fn version_resolve_returns_gone_for_yanked_release() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_requires_write_auth() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_launch_session(
+        State(state),
+        HeaderMap::new(),
+        Json(LaunchSessionRequest {
+            install_profile_key: "k".to_string(),
+            launch_profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_requires_write_auth() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_stop_session(
+        State(state),
+        HeaderMap::new(),
+        AxumPath("sess-1".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_empty_key_returns_400() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _ato_home = AtoHomeGuard::set("launch-empty-key");
+    let state = registry_test_state(None);
+    let response = handle_runtime_launch_session(
+        State(state),
+        HeaderMap::new(),
+        Json(LaunchSessionRequest {
+            install_profile_key: "".to_string(),
+            launch_profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_unknown_key_returns_404() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _ato_home = AtoHomeGuard::set("launch-unknown-key");
+    let state = registry_test_state(None);
+    let response = handle_runtime_launch_session(
+        State(state),
+        HeaderMap::new(),
+        Json(LaunchSessionRequest {
+            install_profile_key: "nonexistent::default".to_string(),
+            launch_profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_session_logs_sse_does_not_abort_on_large_backlog() {
+    use axum::http::header::ACCEPT;
+    let state = registry_test_state(None);
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, "text/event-stream".parse().unwrap());
+    // Should return 200 even with no log file (empty stream).
+    let response = handle_runtime_session_logs(
+        State(state),
+        headers,
+        AxumPath("no-such-session".to_string()),
+        Query(ProcessLogsQuery { tail: None }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn persistent_state_local_api_registers_and_lists_records() {
     let (_home, _home_guard, manifest_path, bind_dir, state) = {
         let _guard = env_lock().lock().expect("env lock");

@@ -188,10 +188,6 @@ pub struct StatusReport {
     /// slice **B** (#382). Absent in older daemons; `None` by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_id: Option<String>,
-    /// Opaque bearer token for authenticating remote callers. Added in
-    /// slice **B** (#382). Absent in older daemons; `None` by default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub control_token: Option<String>,
 }
 
 /// Description of an ingress listener owned by the running daemon.
@@ -266,6 +262,10 @@ pub enum Request {
         /// Key previously passed to `RegisterEphemeralIngress`.
         session_key: String,
     },
+    /// Retrieve the control token for this daemon installation. This is
+    /// deliberately a separate verb (not included in `Status`) so that the
+    /// token is never emitted in routine status dumps, logs, or diagnostics.
+    BootstrapToken,
 }
 
 /// Tagged-enum response envelope mirroring [`Request`].
@@ -276,6 +276,17 @@ pub enum Response {
     Error { error: ErrorPayload },
 }
 
+/// Bootstrap token info returned by the `BootstrapToken` verb.
+///
+/// This is kept separate from [`StatusReport`] so that the control token
+/// never appears in routine status dumps, logs, or diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapTokenInfo {
+    /// Opaque bearer token for authenticating remote callers. A 32-byte
+    /// random value encoded as 64 lowercase hex characters.
+    pub control_token: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ResponseResult {
@@ -283,6 +294,8 @@ pub enum ResponseResult {
     /// Result from `RegisterIngress`. Contains the stable port on
     /// `127.0.0.1` that the daemon is listening on for this route.
     IngressRegistered(IngressInfo),
+    /// Result from `BootstrapToken`. Contains the control token.
+    BootstrapToken(BootstrapTokenInfo),
     /// Empty `{}` body, used for verbs whose only useful signal is
     /// "succeeded" (e.g. `Shutdown`, `DeregisterIngress`).
     Empty {},
@@ -456,6 +469,20 @@ impl Client {
         }
     }
 
+    /// Retrieve the bootstrap control token for this daemon.
+    ///
+    /// This is a separate verb from `status` so the token is never
+    /// included in routine status dumps or logs.
+    pub async fn query_bootstrap_token(&mut self) -> Result<BootstrapTokenInfo, Error> {
+        match self.call(Request::BootstrapToken).await? {
+            ResponseResult::BootstrapToken(info) => Ok(info),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected BootstrapToken, got: {other:?}"),
+            }),
+        }
+    }
+
     /// Low-level request/response helper. Public for tests and future
     /// verbs; consumers should prefer the verb-specific methods above.
     pub async fn call(&mut self, request: Request) -> Result<ResponseResult, Error> {
@@ -583,6 +610,20 @@ impl SyncClient {
         }
     }
 
+    /// Retrieve the bootstrap control token for this daemon.
+    ///
+    /// This is a separate verb from `status` so the token is never
+    /// included in routine status dumps or logs.
+    pub fn query_bootstrap_token(&mut self) -> Result<BootstrapTokenInfo, Error> {
+        match self.call(Request::BootstrapToken)? {
+            ResponseResult::BootstrapToken(info) => Ok(info),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected BootstrapToken, got: {other:?}"),
+            }),
+        }
+    }
+
     /// Send a `Status` request and parse the response.
     pub fn status(&mut self) -> Result<StatusReport, Error> {
         match self.call(Request::Status)? {
@@ -646,7 +687,6 @@ mod tests {
                 listeners: vec![],
                 egress_proxy_port: None,
                 runtime_id: None,
-                control_token: None,
             }),
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -738,7 +778,6 @@ mod tests {
                     listeners: vec![],
                     egress_proxy_port: None,
                     runtime_id: None,
-                    control_token: None,
                 }),
             };
             let handle = spawn_fake_daemon(&path, resp);

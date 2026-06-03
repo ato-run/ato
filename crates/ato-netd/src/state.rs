@@ -42,7 +42,7 @@ impl DaemonState {
     /// identity from `${ATO_HOME}/state/netd/runtime_identity.json`.
     pub async fn new(ato_home: PathBuf) -> anyhow::Result<Self> {
         let ingress = IngressManager::new(&ato_home).await?;
-        let runtime_identity = RuntimeIdentity::load_or_create()?;
+        let runtime_identity = RuntimeIdentity::load_or_create(&ato_home)?;
         let (shutdown_tx, _) = watch::channel(false);
         Ok(Self {
             inner: Arc::new(DaemonStateInner {

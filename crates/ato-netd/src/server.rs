@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ato_net::control::{
-    ErrorPayload, ListenerInfo, Request, Response, ResponseResult, StatusReport,
+    BootstrapTokenInfo, ErrorPayload, ListenerInfo, Request, Response, ResponseResult, StatusReport,
 };
 use ato_net::resolver::SystemResolver;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, split};
@@ -312,6 +312,14 @@ async fn dispatch(request: Request, state: &DaemonState) -> Response {
                 result: ResponseResult::Empty {},
             }
         }
+        Request::BootstrapToken => {
+            let identity = state.runtime_identity();
+            Response::Ok {
+                result: ResponseResult::BootstrapToken(BootstrapTokenInfo {
+                    control_token: identity.control_token,
+                }),
+            }
+        }
     }
 }
 
@@ -330,7 +338,6 @@ async fn build_status_report(state: &DaemonState) -> StatusReport {
         listeners,
         egress_proxy_port,
         runtime_id: Some(identity.runtime_id),
-        control_token: Some(identity.control_token),
     }
 }
 

@@ -10,8 +10,6 @@
 //! exposed through the `status` response so that callers with socket
 //! access can bootstrap authenticated remote-control sessions.
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 /// Stable identity for a single `ato-netd` installation.
@@ -25,16 +23,15 @@ pub struct RuntimeIdentity {
 }
 
 impl RuntimeIdentity {
-    /// Load the identity from
-    /// `${ATO_HOME}/state/netd/runtime_identity.json`.
+    /// Load the identity from `<ato_home>/state/netd/runtime_identity.json`.
     ///
     /// If the file does not exist (first start) a new identity is
     /// generated and written to disk before being returned. If the file
     /// exists but cannot be parsed it is overwritten with a fresh
     /// identity so that a corrupt file never prevents the daemon from
     /// starting.
-    pub fn load_or_create() -> anyhow::Result<Self> {
-        let path = identity_path()?;
+    pub fn load_or_create(ato_home: &std::path::Path) -> anyhow::Result<Self> {
+        let path = ato_home.join("state/netd/runtime_identity.json");
 
         if path.exists() {
             match try_load_from_path(&path) {
@@ -91,11 +88,6 @@ impl RuntimeIdentity {
             control_token,
         }
     }
-}
-
-fn identity_path() -> anyhow::Result<PathBuf> {
-    capsule_core::common::paths::ato_path("state/netd/runtime_identity.json")
-        .map_err(|err| anyhow::anyhow!("cannot resolve runtime identity path: {err}"))
 }
 
 fn try_load_from_path(path: &std::path::Path) -> anyhow::Result<RuntimeIdentity> {
@@ -156,15 +148,26 @@ mod tests {
     #[test]
     fn load_or_create_round_trips_through_json() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("runtime_identity.json");
-        // Manually write a known identity.
+        // Write a known identity into the expected sub-path.
+        let state_dir = dir.path().join("state/netd");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let path = state_dir.join("runtime_identity.json");
         let known = RuntimeIdentity {
             runtime_id: "11111111-2222-4333-8444-555555555555".to_string(),
             control_token: "a".repeat(64),
         };
         std::fs::write(&path, serde_json::to_string(&known).unwrap()).unwrap();
-        let loaded: RuntimeIdentity = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let loaded = RuntimeIdentity::load_or_create(dir.path()).unwrap();
         assert_eq!(loaded.runtime_id, known.runtime_id);
         assert_eq!(loaded.control_token, known.control_token);
+    }
+
+    #[test]
+    fn load_or_create_persists_and_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = RuntimeIdentity::load_or_create(dir.path()).unwrap();
+        let second = RuntimeIdentity::load_or_create(dir.path()).unwrap();
+        assert_eq!(first.runtime_id, second.runtime_id);
+        assert_eq!(first.control_token, second.control_token);
     }
 }
