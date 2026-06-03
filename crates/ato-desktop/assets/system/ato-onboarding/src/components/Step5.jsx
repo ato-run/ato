@@ -239,7 +239,7 @@ export default function Step5({
     }
 
     window.addEventListener('ato-onboarding-runtime-setup', onHydrate)
-    BRIDGE({ kind: 'load_runtime_setup_status', request_id: nextRequestId() })
+    BRIDGE({ kind: 'runtime_setup_status', request_id: nextRequestId() })
     return () => {
       window.removeEventListener('ato-onboarding-runtime-setup', onHydrate)
       window.__ATO_ONBOARDING_HYDRATE__ = previousHydrate
