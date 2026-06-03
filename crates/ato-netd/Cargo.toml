@@ -66,6 +66,11 @@ socket2 = { version = "0.5", features = ["all"] }
 # (transitive does not work for trait bounds on the egress policy engine).
 ipnet = "2"
 
+# Runtime identity (slice B, #382): generate cryptographically random
+# runtime_id and control_token on first start.
+rand = "0.8"
+hex = "0.4"
+
 [dev-dependencies]
 ato-net = { path = "../ato-net", version = "0.5.2" }
 tempfile = "3.8"
