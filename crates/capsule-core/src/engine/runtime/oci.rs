@@ -641,6 +641,19 @@ fn is_bollard_eof(err: &BollardError) -> bool {
         .contains("eof while parsing a value")
 }
 
+/// Build a tokio `Command` for podman, resolved to an absolute binary with a
+/// `PATH` override so GUI-launched (minimal-PATH) processes find Homebrew/
+/// known-location Podman. Falls back to the bare `"podman"` name when
+/// resolution fails.
+fn podman_cli_command() -> tokio::process::Command {
+    let invocation = crate::foundation::podman::podman_invocation();
+    let mut command = tokio::process::Command::new(&invocation.program);
+    if let Some(path_env) = &invocation.path_env {
+        command.env("PATH", path_env);
+    }
+    command
+}
+
 async fn create_podman_network_cli(request: &OciNetworkRequest) -> Result<String> {
     let mut args = vec!["network".to_string(), "create".to_string()];
     for (key, value) in &request.labels {
@@ -649,7 +662,7 @@ async fn create_podman_network_cli(request: &OciNetworkRequest) -> Result<String
     }
     args.push(request.name.clone());
 
-    let output = tokio::process::Command::new("podman")
+    let output = podman_cli_command()
         .args(&args)
         .output()
         .await
@@ -673,7 +686,7 @@ async fn create_podman_network_cli(request: &OciNetworkRequest) -> Result<String
 }
 
 async fn remove_podman_network_cli(network_name: &str) -> Result<()> {
-    let output = tokio::process::Command::new("podman")
+    let output = podman_cli_command()
         .args(["network", "rm", network_name])
         .output()
         .await
