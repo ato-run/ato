@@ -465,6 +465,13 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
                 vec![]
             };
 
+            // Best-effort host-side ownership/permission init for state bindings
+            // that declared `owner`/`mode` (so a non-root container `user` can
+            // access its volume). Never fatal: if it isn't enough, the readiness
+            // path reports the real container error via
+            // `oci_container_exited_before_ready` (#429). See #428.
+            apply_mount_ownership(service_name, &target_runtime.mounts);
+
             // Mounts: convert state bindings to OciMountSpec.
             let mounts: Vec<OciMountSpec> = target_runtime
                 .mounts
@@ -499,6 +506,7 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
                     aliases: service.network.aliases.clone(),
                     platform: Some(image.platform.clone()),
                     extra_hosts,
+                    user: target_runtime.user.clone(),
                 })
                 .await
             {
@@ -1205,6 +1213,137 @@ pub(crate) fn build_service_env(
     env
 }
 
+/// Best-effort host-side ownership/permission init for state bindings that
+/// declared `owner`/`mode` (see `MountOwnership` / #428), so a non-root
+/// container `user` can access its mounted volume.
+///
+/// Two independent, best-effort operations:
+/// * `chmod` to `mode` — load-bearing on Podman-machine/virtiofs, where real
+///   I/O maps to the host owner but apps gate on `access(2)`/mode bits. Allowed
+///   for the path owner.
+/// * `chown` to `uid[:gid]` — succeeds for root / native-Linux rootful; on
+///   `EPERM` (e.g. a normal macOS user) it is logged and skipped, not fatal.
+///
+/// **Never aborts the launch.** If the container still cannot write, the
+/// readiness path surfaces the real container error via
+/// `oci_container_exited_before_ready` (#429). Bindings without `owner`/`mode`
+/// are left untouched (no silent mutation of user-provided paths). `:U`-style
+/// engine remap is intentionally avoided — it corrupts virtiofs on macOS
+/// Podman.
+fn apply_mount_ownership(service_name: &str, mounts: &[capsule_core::types::Mount]) {
+    for mount in mounts {
+        let Some(ownership) = mount.ownership.as_ref() else {
+            continue;
+        };
+        let source = std::path::Path::new(&mount.source);
+        if !source.exists()
+            && let Err(e) = std::fs::create_dir_all(source)
+        {
+            tracing::warn!(
+                service = service_name,
+                path = %source.display(),
+                error = %e,
+                "could not create state source for ownership init; leaving to the engine"
+            );
+            continue;
+        }
+        apply_ownership_to_path(service_name, source, ownership);
+    }
+}
+
+#[cfg(unix)]
+fn apply_ownership_to_path(
+    service_name: &str,
+    path: &std::path::Path,
+    ownership: &capsule_core::types::MountOwnership,
+) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let chown_one = |p: &std::path::Path| {
+        let Some(uid) = ownership.uid else {
+            return;
+        };
+        let gid = ownership.gid.unwrap_or(uid);
+        if let Err(e) = std::os::unix::fs::chown(p, Some(uid), Some(gid)) {
+            // Expected for a non-root host user (e.g. macOS); chmod below is the
+            // load-bearing op there, and #429 reports any real write failure.
+            tracing::warn!(
+                service = service_name,
+                path = %p.display(),
+                target = %format!("{uid}:{gid}"),
+                error = %e,
+                "best-effort chown skipped (not fatal); relying on mode + engine mount semantics"
+            );
+        }
+    };
+    let chmod_one = |p: &std::path::Path| {
+        if let Some(mode) = ownership.mode
+            && let Err(e) = std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
+        {
+            tracing::warn!(
+                service = service_name,
+                path = %p.display(),
+                mode = format!("{mode:o}"),
+                error = %e,
+                "best-effort chmod failed (not fatal)"
+            );
+        }
+    };
+
+    chown_one(path);
+    chmod_one(path);
+
+    if ownership.recursive && path.is_dir() {
+        match walk_dir_entries(path) {
+            Ok(entries) => {
+                for entry in entries {
+                    chown_one(&entry);
+                    chmod_one(&entry);
+                }
+            }
+            Err(e) => tracing::warn!(
+                service = service_name,
+                path = %path.display(),
+                error = %e,
+                "could not enumerate directory for recursive ownership init (not fatal)"
+            ),
+        }
+    }
+}
+
+#[cfg(unix)]
+/// Depth-first collection of every path under `root` (excluding `root` itself),
+/// not following symlinks.
+fn walk_dir_entries(root: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if std::fs::symlink_metadata(&path)?.is_dir() {
+                stack.push(path.clone());
+            }
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(not(unix))]
+fn apply_ownership_to_path(
+    service_name: &str,
+    path: &std::path::Path,
+    _ownership: &capsule_core::types::MountOwnership,
+) {
+    tracing::warn!(
+        service = service_name,
+        path = %path.display(),
+        "state_binding `owner`/`mode` is declared but ownership init is not supported on this \
+         platform; leaving to the engine"
+    );
+}
+
 /// Collect mount source directories that belong to `Ephemeral` state bindings.
 fn collect_ephemeral_mount_sources(plan: &ManifestData) -> HashSet<String> {
     let Ok(manifest) = plan.typed_manifest() else {
@@ -1534,6 +1673,7 @@ mod tests {
                 port,
                 required_env: vec![],
                 mounts: vec![],
+                user: None,
             }),
         }
     }
@@ -2754,6 +2894,7 @@ volumes:
                 source: shared_source.to_string(),
                 target: shared_target.to_string(),
                 readonly: false,
+                ownership: None,
             }];
         }
 
@@ -2763,6 +2904,7 @@ volumes:
                 source: shared_source.to_string(),
                 target: shared_target.to_string(),
                 readonly: false,
+                ownership: None,
             }];
         }
 
@@ -3268,5 +3410,151 @@ volumes:
         let result =
             await_service_readiness(&provider, &probe, None, "cid", "ato-main", "main").await;
         assert!(result.is_ok(), "ready probe must succeed: {result:?}");
+    }
+
+    // ── State ownership initialization tests (#428) ────────────────────────────
+
+    fn mount_with_ownership(
+        source: &str,
+        ownership: Option<capsule_core::types::MountOwnership>,
+    ) -> capsule_core::types::Mount {
+        capsule_core::types::Mount {
+            source: source.to_string(),
+            target: "/opt/app/data".to_string(),
+            readonly: false,
+            ownership,
+        }
+    }
+
+    #[test]
+    fn apply_mount_ownership_noop_without_ownership() {
+        // No `ownership` declared → the source is left untouched (and not created).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("does-not-exist");
+        let mounts = vec![mount_with_ownership(missing.to_str().unwrap(), None)];
+        apply_mount_ownership("main", &mounts);
+        assert!(
+            !missing.exists(),
+            "source must not be created when no owner declared"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_mount_ownership_creates_missing_source_and_chmods() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("state");
+        // chown to the *current* uid/gid is privilege-free, so this exercises
+        // the create + chown(+chmod) path without needing root.
+        let (uid, gid) = current_uid_gid();
+        let ownership = capsule_core::types::MountOwnership {
+            uid: Some(uid),
+            gid: Some(gid),
+            recursive: false,
+            mode: Some(0o755),
+        };
+        let mounts = vec![mount_with_ownership(
+            source.to_str().unwrap(),
+            Some(ownership),
+        )];
+        apply_mount_ownership("main", &mounts);
+        assert!(source.is_dir(), "missing source must be created");
+
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "declared mode must be applied");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_mount_ownership_chmod_only_when_no_owner() {
+        // The common Podman-machine case: mode-only (no chown target). chmod is
+        // the load-bearing op.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("state");
+        std::fs::create_dir_all(&source).unwrap();
+        let ownership = capsule_core::types::MountOwnership {
+            uid: None,
+            gid: None,
+            recursive: false,
+            mode: Some(0o777),
+        };
+        let mounts = vec![mount_with_ownership(
+            source.to_str().unwrap(),
+            Some(ownership),
+        )];
+        apply_mount_ownership("main", &mounts);
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o777, "chmod-only must apply the declared mode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_mount_ownership_chown_eperm_is_not_fatal_and_chmod_still_applies() {
+        // chown to a foreign uid (1) fails with EPERM for a normal user, but the
+        // call must NOT abort and the chmod must still land. This is the macOS
+        // OpenList case (#428): mode is what unblocks; chown is best-effort.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("state");
+        std::fs::create_dir_all(&source).unwrap();
+        let ownership = capsule_core::types::MountOwnership {
+            uid: Some(1), // root-ish foreign uid → chown EPERM for a normal user
+            gid: Some(1),
+            recursive: false,
+            mode: Some(0o777),
+        };
+        let mounts = vec![mount_with_ownership(
+            source.to_str().unwrap(),
+            Some(ownership),
+        )];
+        // Must not panic / abort despite the chown EPERM.
+        apply_mount_ownership("main", &mounts);
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o777, "chmod must still apply even when chown EPERMs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_mount_ownership_recurses_into_children() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("state");
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::write(source.join("sub").join("f.txt"), b"x").unwrap();
+
+        let (uid, gid) = current_uid_gid();
+        let ownership = capsule_core::types::MountOwnership {
+            uid: Some(uid),
+            gid: Some(gid),
+            recursive: true,
+            mode: Some(0o700),
+        };
+        let mounts = vec![mount_with_ownership(
+            source.to_str().unwrap(),
+            Some(ownership),
+        )];
+        apply_mount_ownership("main", &mounts);
+
+        let child_mode = std::fs::metadata(source.join("sub").join("f.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            child_mode, 0o700,
+            "mode must be applied recursively to children"
+        );
+    }
+
+    /// Read the current process's effective uid/gid from a freshly created
+    /// temp file's metadata — avoids a direct `libc` dependency in tests.
+    #[cfg(unix)]
+    fn current_uid_gid() -> (u32, u32) {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let md = tmp.as_file().metadata().expect("metadata");
+        (md.uid(), md.gid())
     }
 }

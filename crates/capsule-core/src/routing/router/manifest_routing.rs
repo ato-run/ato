@@ -65,6 +65,7 @@ pub(super) fn synthesize_runtime_model_from_manifest(
         port: named_target.port,
         required_env: named_target.required_env,
         mounts: Vec::<Mount>::new(),
+        user: named_target.user,
     };
     let selected = LockServiceUnit {
         name: "main".to_string(),
@@ -313,6 +314,7 @@ pub(super) fn synthesize_runtime_model_from_v03(
         port,
         required_env,
         mounts: Vec::new(),
+        user: None,
     };
 
     let selected = LockServiceUnit {
