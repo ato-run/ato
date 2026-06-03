@@ -268,27 +268,61 @@ impl PrepareEnv for SystemPrepareEnv {
 }
 
 /// Locate a Homebrew `brew` binary: the two standard prefixes first (a GUI
-/// launch may not have them on PATH), then `PATH`.
+/// launch may not have them on PATH), then `PATH`. Each candidate must be an
+/// executable file, not merely present.
 fn resolve_brew() -> Option<PathBuf> {
     for candidate in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] {
         let path = PathBuf::from(candidate);
-        if path.is_file() {
+        if is_executable_file(&path) {
             return Some(path);
         }
     }
     which::which("brew").ok()
 }
 
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// What to do with the Podman machine before verifying.
 #[derive(Debug, PartialEq, Eq)]
 enum MachinePlan {
-    /// A usable machine is already running (the Ato machine, or — when the Ato
-    /// machine is absent — exactly one other running machine). Do not mutate.
-    UseExisting,
-    /// The Ato machine exists but is stopped → start it (no init).
+    /// The Ato machine is already running → verify it explicitly.
+    UseAto,
+    /// The Ato machine exists but is stopped → start it (no init), verify it.
     StartAto,
-    /// No usable machine → create and start the Ato machine.
+    /// No usable Ato machine → create and start it, then verify it.
     InitAndStartAto,
+    /// No Ato machine, but exactly one other machine is already running → use it
+    /// through the default connection. Do not create or mutate anything.
+    UseDefault,
+}
+
+impl MachinePlan {
+    /// The connection `verify` (and, later, the provider) must target.
+    ///
+    /// Whenever Ato owns/creates the machine, verification is pinned to it by
+    /// connection name (which Podman names after the machine). This is the crux:
+    /// without it, `podman info` would follow the *global default* connection,
+    /// so on a host whose default points at a different machine we could start
+    /// `ato-podman` yet verify (or run capsules against) the wrong one. Ato never
+    /// changes the global default, so it must address its machine explicitly.
+    /// An existing user machine is verified through the default it already owns.
+    fn verify_connection(&self) -> Option<&'static str> {
+        match self {
+            Self::UseAto | Self::StartAto | Self::InitAndStartAto => Some(ATO_PODMAN_MACHINE_NAME),
+            Self::UseDefault => None,
+        }
+    }
 }
 
 /// Decide the machine action from the current machine list. Pure.
@@ -299,7 +333,7 @@ enum MachinePlan {
 fn plan_machine(entries: &[PodmanMachine]) -> MachinePlan {
     if let Some(ato) = entries.iter().find(|m| m.name == ATO_PODMAN_MACHINE_NAME) {
         return if ato.running {
-            MachinePlan::UseExisting
+            MachinePlan::UseAto
         } else {
             MachinePlan::StartAto
         };
@@ -309,7 +343,7 @@ fn plan_machine(entries: &[PodmanMachine]) -> MachinePlan {
     // (nothing running, or an ambiguous multi-machine state) create our own.
     let running = entries.iter().filter(|m| m.running).count();
     if running == 1 {
-        MachinePlan::UseExisting
+        MachinePlan::UseDefault
     } else {
         MachinePlan::InitAndStartAto
     }
@@ -345,18 +379,21 @@ fn prepare_podman<E: PrepareEnv, R: PrepareReporter>(
         }
     };
 
-    match env.platform() {
-        // Native Linux Podman needs no machine.
-        PreparePlatform::Linux => {}
+    // The connection to verify against: the Ato machine when Ato owns it
+    // (explicit, default-independent), or the default for native Linux / an
+    // existing running user machine.
+    let verify_connection = match env.platform() {
+        // Native Linux Podman needs no machine; verify the default.
+        PreparePlatform::Linux => None,
         PreparePlatform::Macos | PreparePlatform::Windows => prepare_machine(env, reporter)?,
         PreparePlatform::Other => {
             return Err(PrepareError::Unsupported(
                 "Podman preparation is not supported on this platform".to_string(),
             ));
         }
-    }
+    };
 
-    verify(env, reporter)?;
+    verify(env, reporter, verify_connection)?;
     reporter.phase(InstallPhase::Ready, "Podman is ready");
     Ok(())
 }
@@ -422,11 +459,12 @@ fn still_missing_message(platform: PreparePlatform) -> String {
 }
 
 /// Set up the Ato-managed machine per [`plan_machine`], emitting the relevant
-/// phases. Only the `ato-podman` machine is ever created/started.
+/// phases. Only the `ato-podman` machine is ever created/started. Returns the
+/// connection that [`verify`] (and later the provider) must target.
 fn prepare_machine<E: PrepareEnv, R: PrepareReporter>(
     env: &E,
     reporter: &R,
-) -> Result<(), PrepareError> {
+) -> Result<Option<&'static str>, PrepareError> {
     let list = env
         .run_podman(&["machine", "list", "--format", "json"])
         .map_err(|err| PrepareError::MachineQueryFailed(err.to_string()))?;
@@ -435,15 +473,16 @@ fn prepare_machine<E: PrepareEnv, R: PrepareReporter>(
     }
     let entries = parse_machine_entries(&list.stdout).map_err(PrepareError::MachineQueryFailed)?;
 
-    match plan_machine(&entries) {
-        MachinePlan::UseExisting => {}
+    let plan = plan_machine(&entries);
+    match plan {
+        MachinePlan::UseAto | MachinePlan::UseDefault => {}
         MachinePlan::StartAto => start_ato_machine(env, reporter)?,
         MachinePlan::InitAndStartAto => {
             init_ato_machine(env, reporter)?;
             start_ato_machine(env, reporter)?;
         }
     }
-    Ok(())
+    Ok(plan.verify_connection())
 }
 
 fn init_ato_machine<E: PrepareEnv, R: PrepareReporter>(
@@ -480,10 +519,23 @@ fn start_ato_machine<E: PrepareEnv, R: PrepareReporter>(
     Ok(())
 }
 
-fn verify<E: PrepareEnv, R: PrepareReporter>(env: &E, reporter: &R) -> Result<(), PrepareError> {
+/// Verify readiness with `podman info`, pinned to `connection` when set so the
+/// Ato machine is checked regardless of the host's global default connection.
+fn verify<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+    connection: Option<&str>,
+) -> Result<(), PrepareError> {
     reporter.phase(InstallPhase::Verifying, "Verifying Podman readiness…");
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(connection) = connection {
+        // Global flag — must precede the subcommand.
+        args.push("--connection");
+        args.push(connection);
+    }
+    args.extend_from_slice(&["info", "--format", "json"]);
     let out = env
-        .run_podman(&["info", "--format", "json"])
+        .run_podman(&args)
         .map_err(|err| PrepareError::VerifyFailed(err.to_string()))?;
     if !out.success() {
         return Err(PrepareError::VerifyFailed(out.message()));
@@ -645,19 +697,29 @@ mod tests {
     }
 
     #[test]
-    fn plan_ato_running_uses_existing() {
-        assert_eq!(
-            plan_machine(&[machine(ATO_PODMAN_MACHINE_NAME, true)]),
-            MachinePlan::UseExisting
-        );
+    fn plan_ato_running_uses_ato() {
+        let plan = plan_machine(&[machine(ATO_PODMAN_MACHINE_NAME, true)]);
+        assert_eq!(plan, MachinePlan::UseAto);
+        // The Ato machine is verified explicitly, never via the global default.
+        assert_eq!(plan.verify_connection(), Some(ATO_PODMAN_MACHINE_NAME));
     }
 
     #[test]
-    fn plan_single_running_non_ato_uses_existing() {
-        assert_eq!(
-            plan_machine(&[machine("podman-machine-default", true)]),
-            MachinePlan::UseExisting
-        );
+    fn plan_single_running_non_ato_uses_default() {
+        let plan = plan_machine(&[machine("podman-machine-default", true)]);
+        assert_eq!(plan, MachinePlan::UseDefault);
+        assert_eq!(plan.verify_connection(), None);
+    }
+
+    #[test]
+    fn ato_plans_verify_the_ato_connection() {
+        for plan in [
+            MachinePlan::UseAto,
+            MachinePlan::StartAto,
+            MachinePlan::InitAndStartAto,
+        ] {
+            assert_eq!(plan.verify_connection(), Some(ATO_PODMAN_MACHINE_NAME));
+        }
     }
 
     #[test]
@@ -724,13 +786,18 @@ mod tests {
             .with_podman("machine list --format json", 0, "[]")
             .with_podman("machine init ato-podman", 0, "")
             .with_podman("machine start ato-podman", 0, "")
-            .with_podman("info --format json", 0, "{}");
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
         let reporter = RecordingReporter::default();
         prepare_podman(&env, &reporter).expect("prepares after install");
         let calls = env.calls();
         assert!(calls.iter().any(|c| c.starts_with("brew install podman")));
         assert!(calls.contains(&"podman machine init ato-podman".to_string()));
         assert!(calls.contains(&"podman machine start ato-podman".to_string()));
+        // Verify is pinned to the Ato machine, not the global default.
+        assert!(
+            calls.contains(&"podman --connection ato-podman info --format json".to_string()),
+            "verify must target ato-podman: {calls:?}"
+        );
         assert_eq!(
             reporter.phases(),
             vec![
@@ -750,7 +817,7 @@ mod tests {
             .with_podman("machine list --format json", 0, "[]")
             .with_podman("machine init ato-podman", 0, "")
             .with_podman("machine start ato-podman", 0, "")
-            .with_podman("info --format json", 0, "{}");
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
         let reporter = RecordingReporter::default();
         prepare_podman(&env, &reporter).expect("prepares");
         let calls = env.calls();
@@ -761,7 +828,7 @@ mod tests {
                 "podman machine list --format json",
                 "podman machine init ato-podman",
                 "podman machine start ato-podman",
-                "podman info --format json",
+                "podman --connection ato-podman info --format json",
             ]
         );
     }
@@ -775,7 +842,7 @@ mod tests {
                 r#"[{"Name":"ato-podman","Running":false}]"#,
             )
             .with_podman("machine start ato-podman", 0, "")
-            .with_podman("info --format json", 0, "{}");
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
         let reporter = RecordingReporter::default();
         prepare_podman(&env, &reporter).expect("starts");
         let calls = env.calls();
@@ -794,13 +861,17 @@ mod tests {
                 0,
                 r#"[{"Name":"ato-podman","Running":true}]"#,
             )
-            .with_podman("info --format json", 0, "{}");
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
         let reporter = RecordingReporter::default();
         prepare_podman(&env, &reporter).expect("verifies");
         let calls = env.calls();
         assert!(!calls.iter().any(|c| c.contains("machine init")));
         assert!(!calls.iter().any(|c| c.contains("machine start")));
-        assert!(calls.contains(&"podman info --format json".to_string()));
+        // Even when only verifying, the Ato machine is targeted explicitly.
+        assert!(
+            calls.contains(&"podman --connection ato-podman info --format json".to_string()),
+            "{calls:?}"
+        );
     }
 
     #[test]
@@ -839,7 +910,7 @@ mod tests {
                 0,
                 r#"[{"Name":"ato-podman","Running":true}]"#,
             )
-            .with_podman("info --format json", 125, "");
+            .with_podman("--connection ato-podman info --format json", 125, "");
         let reporter = RecordingReporter::default();
         let err = prepare_podman(&env, &reporter).expect_err("info fails");
         assert!(matches!(err, PrepareError::VerifyFailed(_)), "{err:?}");
