@@ -1,0 +1,877 @@
+//! Opt-in host-runtime preparation (Podman).
+//!
+//! This is the *only* path that may mutate host/runtime state for a container
+//! engine: install Podman (explicit opt-in), create/start the Ato-managed
+//! Podman machine (`ato-podman`), and verify readiness with `podman info`.
+//! Passive status detection ([`crate::application::runtime_setup`]) never calls
+//! into here — it only reads.
+//!
+//! Podman is a *host runtime*, not an Ato-managed toolchain: it is never routed
+//! through `RuntimeFetcher` or the toolchain cache. Routing is decided by
+//! [`ToolKind::install_strategy`]:
+//! - `ManagedToolchain` (node/uv/python) → reuse [`install_tools`]
+//! - `HostRuntime` (podman) → [`prepare_podman`]
+//! - `DetectionOnly` (docker) / `Bundled` → rejected up front
+//!
+//! Backend only — no onboarding/settings UI (that is PR B-2).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Result, anyhow};
+
+use capsule_core::podman::{self, ATO_PODMAN_MACHINE_NAME, PodmanResolveError, ResolvedPodman};
+use capsule_core::runtime_setup::{InstallPhase, InstallStrategy, ToolKind};
+
+use crate::adapters::runtime::podman_machine::{PodmanMachine, parse_machine_entries};
+use crate::application::runtime_setup::{emit_progress, install_tools};
+
+/// Public entry for `ato internal runtime prepare --tools … [--emit-json]`.
+///
+/// Rejects detection-only/bundled tools up front (transaction-safe). Managed
+/// toolchains reuse [`install_tools`]; host runtimes (Podman) go through
+/// [`prepare_podman`]. Returns an error if any tool failed.
+pub(crate) fn prepare_tools(tools: Vec<ToolKind>, json: bool) -> Result<()> {
+    if tools.is_empty() {
+        return Err(anyhow!("no tools specified to prepare"));
+    }
+    let (managed, host) = classify_prepare_tools(&tools)
+        .map_err(|reasons| anyhow!("these tools cannot be prepared: {}", reasons.join("; ")))?;
+
+    let mut failures = Vec::new();
+
+    // Managed language runtimes reuse the existing install path verbatim, so
+    // `prepare --tools node` does not drift from `install --tools node`.
+    if !managed.is_empty()
+        && let Err(err) = install_tools(managed, json)
+    {
+        failures.push(err.to_string());
+    }
+
+    let env = SystemPrepareEnv;
+    for tool in host {
+        emit_progress(tool, InstallPhase::Queued, "Queued", json);
+        let reporter = StreamReporter { tool, json };
+        // Only Podman is a host runtime today; `prepare_podman` is generic over
+        // the env so it stays unit-testable without a real podman.
+        if let Err(err) = prepare_podman(&env, &reporter) {
+            emit_progress(tool, InstallPhase::Failed, err.to_string(), json);
+            failures.push(format!("{}: {err}", tool.as_str()));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("runtime prepare failed: {}", failures.join("; ")))
+    }
+}
+
+/// Split the requested tools into (managed-toolchain, host-runtime) groups, or
+/// return actionable reasons for any tool that cannot be prepared. Pure so the
+/// routing policy is unit-testable.
+fn classify_prepare_tools(
+    tools: &[ToolKind],
+) -> Result<(Vec<ToolKind>, Vec<ToolKind>), Vec<String>> {
+    let mut managed = Vec::new();
+    let mut host = Vec::new();
+    let mut rejected = Vec::new();
+    for &tool in tools {
+        match tool.install_strategy() {
+            InstallStrategy::ManagedToolchain => managed.push(tool),
+            InstallStrategy::HostRuntime => host.push(tool),
+            InstallStrategy::DetectionOnly => rejected.push(format!(
+                "{} is detection-only; Ato never installs it",
+                tool.as_str()
+            )),
+            InstallStrategy::Bundled => rejected.push(format!(
+                "{} ships inside the Ato bundle and cannot be prepared",
+                tool.as_str()
+            )),
+        }
+    }
+    if rejected.is_empty() {
+        Ok((managed, host))
+    } else {
+        Err(rejected)
+    }
+}
+
+/// Typed failures from a host-runtime prepare. Carries actionable messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrepareError {
+    /// `ATO_PODMAN_BIN` was set but unusable — fail hard, never substitute.
+    InvalidOverride(String),
+    /// Podman is missing and Ato cannot install it here (no brew, or an
+    /// unsupported platform); carries instructions.
+    InstallUnavailable(String),
+    /// The install command ran but failed.
+    InstallFailed(String),
+    /// After installing, Podman still could not be resolved (likely a PATH
+    /// refresh / restart is required).
+    StillMissingAfterInstall(String),
+    /// `podman machine list` failed or was unparseable.
+    MachineQueryFailed(String),
+    /// `podman machine init ato-podman` failed.
+    MachineInitFailed(String),
+    /// `podman machine start ato-podman` failed.
+    MachineStartFailed(String),
+    /// `podman info` verification failed after preparation.
+    VerifyFailed(String),
+    /// Podman preparation is not supported on this platform.
+    Unsupported(String),
+}
+
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidOverride(m) => write!(f, "{m}"),
+            Self::InstallUnavailable(m) => write!(f, "{m}"),
+            Self::InstallFailed(m) => write!(f, "podman install failed: {m}"),
+            Self::StillMissingAfterInstall(m) => write!(f, "{m}"),
+            Self::MachineQueryFailed(m) => write!(f, "could not read podman machines: {m}"),
+            Self::MachineInitFailed(m) => {
+                write!(
+                    f,
+                    "failed to create podman machine '{ATO_PODMAN_MACHINE_NAME}': {m}"
+                )
+            }
+            Self::MachineStartFailed(m) => {
+                write!(
+                    f,
+                    "failed to start podman machine '{ATO_PODMAN_MACHINE_NAME}': {m}"
+                )
+            }
+            Self::VerifyFailed(m) => write!(f, "podman readiness check failed: {m}"),
+            Self::Unsupported(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for PrepareError {}
+
+/// Host platform for prepare decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreparePlatform {
+    Macos,
+    Windows,
+    Linux,
+    Other,
+}
+
+impl PreparePlatform {
+    fn current() -> Self {
+        match std::env::consts::OS {
+            "macos" => Self::Macos,
+            "windows" => Self::Windows,
+            "linux" => Self::Linux,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Output of a prepare subprocess.
+#[derive(Clone, Debug)]
+struct CmdOutput {
+    status: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl CmdOutput {
+    fn success(&self) -> bool {
+        self.status == 0
+    }
+
+    /// stderr if non-empty, else stdout — trimmed — for diagnostics.
+    fn message(&self) -> String {
+        if self.stderr.trim().is_empty() {
+            self.stdout.trim().to_string()
+        } else {
+            self.stderr.trim().to_string()
+        }
+    }
+}
+
+/// Receives prepare progress. The real implementation streams `InstallProgress`
+/// events; tests record the phases.
+trait PrepareReporter {
+    fn phase(&self, phase: InstallPhase, message: &str);
+}
+
+/// Streams `InstallProgress` lines for one tool via the shared emitter.
+struct StreamReporter {
+    tool: ToolKind,
+    json: bool,
+}
+
+impl PrepareReporter for StreamReporter {
+    fn phase(&self, phase: InstallPhase, message: &str) {
+        emit_progress(self.tool, phase, message, self.json);
+    }
+}
+
+/// Host operations a prepare needs. Injected so the orchestration is testable
+/// without a real podman, brew, or machine.
+trait PrepareEnv {
+    fn platform(&self) -> PreparePlatform;
+    /// Resolve Podman (no spawn). Mirrors [`podman::resolve_podman`] semantics,
+    /// including the hard failure on an invalid `ATO_PODMAN_BIN`.
+    fn resolve_podman(&self) -> Result<ResolvedPodman, PodmanResolveError>;
+    /// Run a podman subcommand (args after the resolved binary).
+    fn run_podman(&self, args: &[&str]) -> std::io::Result<CmdOutput>;
+    /// A usable Homebrew `brew` binary, if present (macOS).
+    fn brew_bin(&self) -> Option<PathBuf>;
+    /// Run `brew install podman`.
+    fn run_brew_install_podman(&self, brew: &Path) -> std::io::Result<CmdOutput>;
+}
+
+/// Real host environment: spawns processes, resolving podman through PR #436's
+/// resolver so GUI-launched (minimal-PATH) invocations still find it.
+struct SystemPrepareEnv;
+
+impl PrepareEnv for SystemPrepareEnv {
+    fn platform(&self) -> PreparePlatform {
+        PreparePlatform::current()
+    }
+
+    fn resolve_podman(&self) -> Result<ResolvedPodman, PodmanResolveError> {
+        podman::resolve_podman()
+    }
+
+    fn run_podman(&self, args: &[&str]) -> std::io::Result<CmdOutput> {
+        let invocation = podman::podman_invocation();
+        let mut command = Command::new(&invocation.program);
+        if let Some(path_env) = &invocation.path_env {
+            command.env("PATH", path_env);
+        }
+        let output = command.args(args).output()?;
+        Ok(CmdOutput {
+            status: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+
+    fn brew_bin(&self) -> Option<PathBuf> {
+        resolve_brew()
+    }
+
+    fn run_brew_install_podman(&self, brew: &Path) -> std::io::Result<CmdOutput> {
+        let output = Command::new(brew).args(["install", "podman"]).output()?;
+        Ok(CmdOutput {
+            status: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
+/// Locate a Homebrew `brew` binary: the two standard prefixes first (a GUI
+/// launch may not have them on PATH), then `PATH`.
+fn resolve_brew() -> Option<PathBuf> {
+    for candidate in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    which::which("brew").ok()
+}
+
+/// What to do with the Podman machine before verifying.
+#[derive(Debug, PartialEq, Eq)]
+enum MachinePlan {
+    /// A usable machine is already running (the Ato machine, or — when the Ato
+    /// machine is absent — exactly one other running machine). Do not mutate.
+    UseExisting,
+    /// The Ato machine exists but is stopped → start it (no init).
+    StartAto,
+    /// No usable machine → create and start the Ato machine.
+    InitAndStartAto,
+}
+
+/// Decide the machine action from the current machine list. Pure.
+///
+/// Policy: only ever mutate the Ato-managed machine. Never start, stop, or
+/// reconfigure a user's own machine, and never change the global default
+/// connection.
+fn plan_machine(entries: &[PodmanMachine]) -> MachinePlan {
+    if let Some(ato) = entries.iter().find(|m| m.name == ATO_PODMAN_MACHINE_NAME) {
+        return if ato.running {
+            MachinePlan::UseExisting
+        } else {
+            MachinePlan::StartAto
+        };
+    }
+    // No Ato machine. If exactly one (non-Ato) machine is already running, treat
+    // it as usable rather than creating a redundant Ato machine. Otherwise
+    // (nothing running, or an ambiguous multi-machine state) create our own.
+    let running = entries.iter().filter(|m| m.running).count();
+    if running == 1 {
+        MachinePlan::UseExisting
+    } else {
+        MachinePlan::InitAndStartAto
+    }
+}
+
+/// Prepare Podman end-to-end: resolve (install if missing & opted-in), set up
+/// the Ato machine when the platform needs one, and verify with `podman info`.
+fn prepare_podman<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+) -> Result<(), PrepareError> {
+    reporter.phase(InstallPhase::Locating, "Locating Podman…");
+
+    let _resolved = match env.resolve_podman() {
+        Ok(resolved) => resolved,
+        Err(PodmanResolveError::InvalidEnvOverride { path }) => {
+            return Err(invalid_override(&path));
+        }
+        Err(PodmanResolveError::NotFound { .. }) => {
+            install_podman(env, reporter)?;
+            // Re-resolve: a successful install must produce a resolvable binary.
+            match env.resolve_podman() {
+                Ok(resolved) => resolved,
+                Err(PodmanResolveError::InvalidEnvOverride { path }) => {
+                    return Err(invalid_override(&path));
+                }
+                Err(PodmanResolveError::NotFound { .. }) => {
+                    return Err(PrepareError::StillMissingAfterInstall(
+                        still_missing_message(env.platform()),
+                    ));
+                }
+            }
+        }
+    };
+
+    match env.platform() {
+        // Native Linux Podman needs no machine.
+        PreparePlatform::Linux => {}
+        PreparePlatform::Macos | PreparePlatform::Windows => prepare_machine(env, reporter)?,
+        PreparePlatform::Other => {
+            return Err(PrepareError::Unsupported(
+                "Podman preparation is not supported on this platform".to_string(),
+            ));
+        }
+    }
+
+    verify(env, reporter)?;
+    reporter.phase(InstallPhase::Ready, "Podman is ready");
+    Ok(())
+}
+
+fn invalid_override(path: &Path) -> PrepareError {
+    PrepareError::InvalidOverride(format!(
+        "ATO_PODMAN_BIN points at '{}', which is not a usable executable; \
+         fix or unset it before preparing Podman",
+        path.display()
+    ))
+}
+
+/// Install Podman after explicit opt-in. macOS uses Homebrew; other platforms
+/// return actionable instructions rather than running an installer here.
+fn install_podman<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+) -> Result<(), PrepareError> {
+    match env.platform() {
+        PreparePlatform::Macos => {
+            let Some(brew) = env.brew_bin() else {
+                return Err(PrepareError::InstallUnavailable(
+                    "Podman is not installed and Homebrew was not found. Install Homebrew \
+                     (https://brew.sh) and re-run, or install Podman manually from \
+                     https://podman.io/docs/installation."
+                        .to_string(),
+                ));
+            };
+            reporter.phase(InstallPhase::Installing, "Installing Podman via Homebrew…");
+            let out = env
+                .run_brew_install_podman(&brew)
+                .map_err(|err| PrepareError::InstallFailed(err.to_string()))?;
+            if !out.success() {
+                return Err(PrepareError::InstallFailed(out.message()));
+            }
+            Ok(())
+        }
+        PreparePlatform::Windows => Err(PrepareError::InstallUnavailable(
+            "Podman is not installed. Install it (e.g. `winget install RedHat.Podman`) and \
+             re-run; a sign-out/restart may be required before the CLI is visible."
+                .to_string(),
+        )),
+        PreparePlatform::Linux => Err(PrepareError::InstallUnavailable(
+            "Podman is not installed. Install it with your package manager (e.g. \
+             `sudo apt install podman` or `sudo dnf install podman`) and re-run."
+                .to_string(),
+        )),
+        PreparePlatform::Other => Err(PrepareError::Unsupported(
+            "Podman preparation is not supported on this platform".to_string(),
+        )),
+    }
+}
+
+fn still_missing_message(platform: PreparePlatform) -> String {
+    match platform {
+        PreparePlatform::Windows => "Podman was installed but is not yet visible. A sign-out or \
+             restart may be required to refresh PATH; then re-run prepare."
+            .to_string(),
+        _ => "Podman was installed but could not be resolved afterward. Re-run prepare; if it \
+             persists, check the install location."
+            .to_string(),
+    }
+}
+
+/// Set up the Ato-managed machine per [`plan_machine`], emitting the relevant
+/// phases. Only the `ato-podman` machine is ever created/started.
+fn prepare_machine<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+) -> Result<(), PrepareError> {
+    let list = env
+        .run_podman(&["machine", "list", "--format", "json"])
+        .map_err(|err| PrepareError::MachineQueryFailed(err.to_string()))?;
+    if !list.success() {
+        return Err(PrepareError::MachineQueryFailed(list.message()));
+    }
+    let entries = parse_machine_entries(&list.stdout).map_err(PrepareError::MachineQueryFailed)?;
+
+    match plan_machine(&entries) {
+        MachinePlan::UseExisting => {}
+        MachinePlan::StartAto => start_ato_machine(env, reporter)?,
+        MachinePlan::InitAndStartAto => {
+            init_ato_machine(env, reporter)?;
+            start_ato_machine(env, reporter)?;
+        }
+    }
+    Ok(())
+}
+
+fn init_ato_machine<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+) -> Result<(), PrepareError> {
+    reporter.phase(
+        InstallPhase::InitializingMachine,
+        &format!("Creating Podman machine '{ATO_PODMAN_MACHINE_NAME}'…"),
+    );
+    let out = env
+        .run_podman(&["machine", "init", ATO_PODMAN_MACHINE_NAME])
+        .map_err(|err| PrepareError::MachineInitFailed(err.to_string()))?;
+    if !out.success() {
+        return Err(PrepareError::MachineInitFailed(out.message()));
+    }
+    Ok(())
+}
+
+fn start_ato_machine<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+) -> Result<(), PrepareError> {
+    reporter.phase(
+        InstallPhase::StartingMachine,
+        &format!("Starting Podman machine '{ATO_PODMAN_MACHINE_NAME}'…"),
+    );
+    let out = env
+        .run_podman(&["machine", "start", ATO_PODMAN_MACHINE_NAME])
+        .map_err(|err| PrepareError::MachineStartFailed(err.to_string()))?;
+    if !out.success() {
+        return Err(PrepareError::MachineStartFailed(out.message()));
+    }
+    Ok(())
+}
+
+fn verify<E: PrepareEnv, R: PrepareReporter>(env: &E, reporter: &R) -> Result<(), PrepareError> {
+    reporter.phase(InstallPhase::Verifying, "Verifying Podman readiness…");
+    let out = env
+        .run_podman(&["info", "--format", "json"])
+        .map_err(|err| PrepareError::VerifyFailed(err.to_string()))?;
+    if !out.success() {
+        return Err(PrepareError::VerifyFailed(out.message()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capsule_core::podman::PodmanBinarySource;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    fn resolved() -> ResolvedPodman {
+        ResolvedPodman {
+            bin: PathBuf::from("/opt/homebrew/bin/podman"),
+            source: PodmanBinarySource::KnownLocation,
+            version: None,
+        }
+    }
+
+    /// Deterministic [`PrepareEnv`] that records every command invoked.
+    struct FakeEnv {
+        platform: PreparePlatform,
+        /// Resolution results consumed front-to-back (initial, then re-resolve).
+        resolves: RefCell<Vec<Result<ResolvedPodman, PodmanResolveError>>>,
+        /// `podman <args joined>` → output.
+        podman: HashMap<String, CmdOutput>,
+        brew: Option<PathBuf>,
+        brew_install: Option<CmdOutput>,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl FakeEnv {
+        fn new(platform: PreparePlatform) -> Self {
+            FakeEnv {
+                platform,
+                resolves: RefCell::new(vec![Ok(resolved())]),
+                podman: HashMap::new(),
+                brew: None,
+                brew_install: None,
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn with_resolves(
+            mut self,
+            results: Vec<Result<ResolvedPodman, PodmanResolveError>>,
+        ) -> Self {
+            self.resolves = RefCell::new(results);
+            self
+        }
+
+        fn with_podman(mut self, args: &str, status: i32, stdout: &str) -> Self {
+            self.podman.insert(
+                args.to_string(),
+                CmdOutput {
+                    status,
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                },
+            );
+            self
+        }
+
+        fn with_brew(mut self, brew: Option<&str>, install_status: Option<i32>) -> Self {
+            self.brew = brew.map(PathBuf::from);
+            self.brew_install = install_status.map(|status| CmdOutput {
+                status,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+            self
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl PrepareEnv for FakeEnv {
+        fn platform(&self) -> PreparePlatform {
+            self.platform
+        }
+
+        fn resolve_podman(&self) -> Result<ResolvedPodman, PodmanResolveError> {
+            let mut resolves = self.resolves.borrow_mut();
+            if resolves.len() > 1 {
+                resolves.remove(0)
+            } else {
+                resolves[0].clone()
+            }
+        }
+
+        fn run_podman(&self, args: &[&str]) -> std::io::Result<CmdOutput> {
+            let key = args.join(" ");
+            self.calls.borrow_mut().push(format!("podman {key}"));
+            self.podman.get(&key).cloned().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no fake podman output for: {key}"),
+                )
+            })
+        }
+
+        fn brew_bin(&self) -> Option<PathBuf> {
+            self.brew.clone()
+        }
+
+        fn run_brew_install_podman(&self, brew: &Path) -> std::io::Result<CmdOutput> {
+            self.calls
+                .borrow_mut()
+                .push(format!("brew install podman ({})", brew.display()));
+            self.brew_install.clone().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "brew install not configured")
+            })
+        }
+    }
+
+    /// Records emitted phases for assertions.
+    #[derive(Default)]
+    struct RecordingReporter {
+        phases: RefCell<Vec<InstallPhase>>,
+    }
+
+    impl RecordingReporter {
+        fn phases(&self) -> Vec<InstallPhase> {
+            self.phases.borrow().clone()
+        }
+    }
+
+    impl PrepareReporter for RecordingReporter {
+        fn phase(&self, phase: InstallPhase, _message: &str) {
+            self.phases.borrow_mut().push(phase);
+        }
+    }
+
+    // ── plan_machine ────────────────────────────────────────────────────────
+
+    fn machine(name: &str, running: bool) -> PodmanMachine {
+        PodmanMachine {
+            name: name.to_string(),
+            running,
+        }
+    }
+
+    #[test]
+    fn plan_no_machine_inits_and_starts() {
+        assert_eq!(plan_machine(&[]), MachinePlan::InitAndStartAto);
+    }
+
+    #[test]
+    fn plan_ato_stopped_starts_only() {
+        assert_eq!(
+            plan_machine(&[machine(ATO_PODMAN_MACHINE_NAME, false)]),
+            MachinePlan::StartAto
+        );
+    }
+
+    #[test]
+    fn plan_ato_running_uses_existing() {
+        assert_eq!(
+            plan_machine(&[machine(ATO_PODMAN_MACHINE_NAME, true)]),
+            MachinePlan::UseExisting
+        );
+    }
+
+    #[test]
+    fn plan_single_running_non_ato_uses_existing() {
+        assert_eq!(
+            plan_machine(&[machine("podman-machine-default", true)]),
+            MachinePlan::UseExisting
+        );
+    }
+
+    #[test]
+    fn plan_multiple_stopped_non_ato_creates_ato() {
+        assert_eq!(
+            plan_machine(&[machine("a", false), machine("b", false)]),
+            MachinePlan::InitAndStartAto
+        );
+    }
+
+    #[test]
+    fn plan_multiple_running_non_ato_creates_ato() {
+        // Ambiguous (>1 running, no Ato machine): be deterministic, make our own.
+        assert_eq!(
+            plan_machine(&[machine("a", true), machine("b", true)]),
+            MachinePlan::InitAndStartAto
+        );
+    }
+
+    // ── prepare_podman ──────────────────────────────────────────────────────
+
+    #[test]
+    fn invalid_override_fails_hard_without_spawning() {
+        let env = FakeEnv::new(PreparePlatform::Macos).with_resolves(vec![Err(
+            PodmanResolveError::InvalidEnvOverride {
+                path: PathBuf::from("/stale/podman"),
+            },
+        )]);
+        let reporter = RecordingReporter::default();
+        let err = prepare_podman(&env, &reporter).expect_err("invalid override must fail");
+        assert!(matches!(err, PrepareError::InvalidOverride(_)), "{err:?}");
+        assert!(
+            env.calls().is_empty(),
+            "must not spawn anything: {:?}",
+            env.calls()
+        );
+    }
+
+    #[test]
+    fn missing_podman_without_brew_is_install_unavailable() {
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_resolves(vec![Err(PodmanResolveError::NotFound {
+                searched: Vec::new(),
+            })])
+            .with_brew(None, None);
+        let reporter = RecordingReporter::default();
+        let err = prepare_podman(&env, &reporter).expect_err("no brew => unavailable");
+        assert!(
+            matches!(err, PrepareError::InstallUnavailable(_)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_podman_installs_via_brew_then_prepares() {
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_resolves(vec![
+                Err(PodmanResolveError::NotFound {
+                    searched: Vec::new(),
+                }),
+                Ok(resolved()),
+            ])
+            .with_brew(Some("/opt/homebrew/bin/brew"), Some(0))
+            .with_podman("machine list --format json", 0, "[]")
+            .with_podman("machine init ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("prepares after install");
+        let calls = env.calls();
+        assert!(calls.iter().any(|c| c.starts_with("brew install podman")));
+        assert!(calls.contains(&"podman machine init ato-podman".to_string()));
+        assert!(calls.contains(&"podman machine start ato-podman".to_string()));
+        assert_eq!(
+            reporter.phases(),
+            vec![
+                InstallPhase::Locating,
+                InstallPhase::Installing,
+                InstallPhase::InitializingMachine,
+                InstallPhase::StartingMachine,
+                InstallPhase::Verifying,
+                InstallPhase::Ready,
+            ]
+        );
+    }
+
+    #[test]
+    fn podman_present_no_machine_inits_starts_verifies() {
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_podman("machine list --format json", 0, "[]")
+            .with_podman("machine init ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("prepares");
+        let calls = env.calls();
+        assert!(!calls.iter().any(|c| c.starts_with("brew install")));
+        assert_eq!(
+            calls,
+            vec![
+                "podman machine list --format json",
+                "podman machine init ato-podman",
+                "podman machine start ato-podman",
+                "podman info --format json",
+            ]
+        );
+    }
+
+    #[test]
+    fn ato_machine_stopped_starts_only_no_init() {
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_podman(
+                "machine list --format json",
+                0,
+                r#"[{"Name":"ato-podman","Running":false}]"#,
+            )
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("starts");
+        let calls = env.calls();
+        assert!(
+            !calls.contains(&"podman machine init ato-podman".to_string()),
+            "must not init when machine exists: {calls:?}"
+        );
+        assert!(calls.contains(&"podman machine start ato-podman".to_string()));
+    }
+
+    #[test]
+    fn ato_machine_running_verifies_only() {
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_podman(
+                "machine list --format json",
+                0,
+                r#"[{"Name":"ato-podman","Running":true}]"#,
+            )
+            .with_podman("info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("verifies");
+        let calls = env.calls();
+        assert!(!calls.iter().any(|c| c.contains("machine init")));
+        assert!(!calls.iter().any(|c| c.contains("machine start")));
+        assert!(calls.contains(&"podman info --format json".to_string()));
+    }
+
+    #[test]
+    fn single_running_user_machine_is_used_without_creating_ato() {
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_podman(
+                "machine list --format json",
+                0,
+                r#"[{"Name":"podman-machine-default","Running":true}]"#,
+            )
+            .with_podman("info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("uses existing");
+        let calls = env.calls();
+        assert!(
+            !calls.iter().any(|c| c.contains("ato-podman")),
+            "must not touch ato-podman when a user machine runs: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn linux_skips_machine_and_verifies() {
+        let env = FakeEnv::new(PreparePlatform::Linux).with_podman("info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("linux native");
+        let calls = env.calls();
+        assert!(!calls.iter().any(|c| c.contains("machine")));
+        assert_eq!(calls, vec!["podman info --format json"]);
+    }
+
+    #[test]
+    fn verify_failure_surfaces_as_verify_failed() {
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_podman(
+                "machine list --format json",
+                0,
+                r#"[{"Name":"ato-podman","Running":true}]"#,
+            )
+            .with_podman("info --format json", 125, "");
+        let reporter = RecordingReporter::default();
+        let err = prepare_podman(&env, &reporter).expect_err("info fails");
+        assert!(matches!(err, PrepareError::VerifyFailed(_)), "{err:?}");
+    }
+
+    // ── classify_prepare_tools ────────────────────────────────────────────────
+
+    #[test]
+    fn classify_splits_managed_and_host() {
+        let (managed, host) =
+            classify_prepare_tools(&[ToolKind::Node, ToolKind::Podman, ToolKind::Uv])
+                .expect("valid");
+        assert_eq!(managed, vec![ToolKind::Node, ToolKind::Uv]);
+        assert_eq!(host, vec![ToolKind::Podman]);
+    }
+
+    #[test]
+    fn classify_rejects_docker_and_bundled() {
+        let err = classify_prepare_tools(&[ToolKind::DockerDesktop]).unwrap_err();
+        assert!(err.iter().any(|m| m.contains("detection-only")), "{err:?}");
+        let err = classify_prepare_tools(&[ToolKind::Nacelle]).unwrap_err();
+        assert!(err.iter().any(|m| m.contains("bundle")), "{err:?}");
+    }
+
+    #[test]
+    fn prepare_tools_rejects_docker_before_any_work() {
+        let err = prepare_tools(vec![ToolKind::DockerDesktop], true).unwrap_err();
+        assert!(err.to_string().contains("cannot be prepared"), "{err}");
+    }
+
+    #[test]
+    fn prepare_tools_rejects_empty() {
+        assert!(prepare_tools(vec![], true).is_err());
+    }
+}
