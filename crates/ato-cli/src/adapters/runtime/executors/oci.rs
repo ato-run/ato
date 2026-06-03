@@ -100,6 +100,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
                     source: mount.source.to_string_lossy().to_string(),
                     target: mount.target.clone(),
                     readonly: mount.readonly,
+                    ownership: None,
                 })
                 .collect(),
             ports,
