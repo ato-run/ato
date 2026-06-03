@@ -28,6 +28,9 @@ use capsule_core::types::{
 };
 
 use super::launch_context::RuntimeLaunchContext;
+use super::oci_multi_service::{
+    OCI_EXIT_LOG_TAIL_LINES, OciExitedBeforeReadyError, collect_log_tail_from_rx,
+};
 use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
 use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
@@ -993,22 +996,37 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                 match poll_local_readiness_events(local)? {
                     LocalReadinessState::Ready => return Ok(()),
                     LocalReadinessState::Exited(exit_code) => {
-                        anyhow::bail!(
-                            "service '{}' exited before readiness event was observed (exit code: {})",
-                            service_name,
-                            exit_code
-                        );
+                        // Preserve the typed exited-before-ready diagnostic so the
+                        // session path surfaces `oci_container_exited_before_ready`
+                        // instead of the generic E999 fallback (#445).
+                        return Err(OciExitedBeforeReadyError {
+                            service_name: service_name.to_string(),
+                            exit_code: Some(exit_code as i64),
+                            log_tail: Vec::new(),
+                        }
+                        .into());
                     }
                     LocalReadinessState::Pending => {}
                 }
             }
 
             if let Some(exit_code) = try_wait(&mut service, client).await? {
-                anyhow::bail!(
-                    "service '{}' exited before readiness check passed (exit code: {})",
-                    service_name,
-                    exit_code
-                );
+                // Extract the owned container id before awaiting the log fetch so
+                // the future stays `Send` (RunningService is `!Sync`).
+                let container_id = match &service.handle {
+                    RunningHandle::Oci(oci) => Some(oci.container_id.clone()),
+                    RunningHandle::Local(_) => None,
+                };
+                let log_tail = match container_id {
+                    Some(cid) => oci_log_tail(client, &cid).await,
+                    None => Vec::new(),
+                };
+                return Err(OciExitedBeforeReadyError {
+                    service_name: service_name.to_string(),
+                    exit_code: Some(exit_code as i64),
+                    log_tail,
+                }
+                .into());
             }
 
             if !uses_event_driven_readiness(&service) {
@@ -1018,9 +1036,10 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                         return Ok(());
                     }
                 } else if let Some(port) = resolve_probe_port(&service, &probe)?
-                    && readiness_probe_ok(&probe, port)? {
-                        return Ok(());
-                    }
+                    && readiness_probe_ok(&probe, port)?
+                {
+                    return Ok(());
+                }
             }
 
             if Instant::now() >= deadline {
@@ -1313,6 +1332,20 @@ async fn try_wait<C: OciRuntimeClient>(
                 Ok(Some(inspect.exit_code.unwrap_or(1) as i32))
             }
         }
+    }
+}
+
+/// Best-effort tail of an OCI service's container logs for an
+/// `oci_container_exited_before_ready` diagnostic, so the postgres / init output
+/// is attached to the diagnostic. Local services have already streamed their
+/// stdout/stderr to the console, so this is only called for OCI containers.
+///
+/// Takes an owned `container_id` rather than `&RunningService` so the future
+/// stays `Send` (a `RunningService` is `!Sync` due to its lifecycle channel).
+async fn oci_log_tail<C: OciRuntimeClient>(client: &C, container_id: &str) -> Vec<String> {
+    match client.logs(container_id, false).await {
+        Ok(rx) => collect_log_tail_from_rx(rx, OCI_EXIT_LOG_TAIL_LINES).await,
+        Err(_) => Vec::new(),
     }
 }
 
