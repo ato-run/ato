@@ -31,6 +31,8 @@ use capsule_core::runtime_setup::{
     SUPPORTED_PYTHON_VERSION, SUPPORTED_UV_VERSION, ToolKind, ToolSource, ToolStatus,
 };
 
+use capsule_core::podman::ATO_PODMAN_MACHINE_NAME;
+
 use crate::adapters::runtime::podman_machine::{PodmanMachineStatus, parse_podman_machine_list};
 
 /// Collect the full host runtime-setup status by probing each tool. Probes are
@@ -313,15 +315,24 @@ fn detect_podman() -> ToolStatus {
         }
         cmd.args(args).output().ok()
     };
-    let info_ok = || {
-        run(&["info", "--format", "{{.Host.Arch}}"])
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+    // `podman info`, optionally pinned to a connection. Pinning matters because
+    // the host's *default* connection may point at a different (e.g. stopped)
+    // machine than the one that is actually running — so a plain `info` can fail
+    // even though a machine (e.g. ato-podman) is up. Connection name == machine
+    // name for machine-created connections.
+    let info_ok = |connection: Option<&str>| -> bool {
+        let mut args: Vec<&str> = Vec::new();
+        if let Some(connection) = connection {
+            args.push("--connection");
+            args.push(connection);
+        }
+        args.extend_from_slice(&["info", "--format", "{{.Host.Arch}}"]);
+        run(&args).map(|o| o.status.success()).unwrap_or(false)
     };
 
     // Native Linux Podman has no machine; readiness is just `podman info`.
     if cfg!(target_os = "linux") {
-        return if info_ok() {
+        return if info_ok(None) {
             ToolStatus::ready(
                 ToolKind::Podman,
                 ToolSource::External,
@@ -349,13 +360,31 @@ fn detect_podman() -> ToolStatus {
             reason: "podman machine list could not be run".to_string(),
         },
     };
-    // `podman info` only matters when a machine is running; skip it otherwise.
-    let info_running_ok = matches!(machine, PodmanMachineStatus::Running { .. }) && info_ok();
+    // Confirm readiness against a *running* machine explicitly (prefer the Ato
+    // machine), not the global default — only meaningful when one is running.
+    let info_running_ok = match &machine {
+        PodmanMachineStatus::Running { running_names, .. } => {
+            info_ok(preferred_running_connection(running_names))
+        }
+        _ => false,
+    };
     let (ready, action, message) = classify_podman_machine(&machine, info_running_ok);
     if ready {
         ToolStatus::ready(ToolKind::Podman, ToolSource::External, version, message)
     } else {
         podman_not_ready(version, action, message)
+    }
+}
+
+/// Pick the connection to probe for readiness from the running machines: prefer
+/// the Ato-managed machine, else the first running one. Returns `None` only when
+/// nothing is running (caller treats that as not-ready). Connection name equals
+/// the machine name for machine-created connections.
+fn preferred_running_connection(running_names: &[String]) -> Option<&str> {
+    if running_names.iter().any(|n| n == ATO_PODMAN_MACHINE_NAME) {
+        Some(ATO_PODMAN_MACHINE_NAME)
+    } else {
+        running_names.first().map(String::as_str)
     }
 }
 
@@ -986,6 +1015,25 @@ mod tests {
         };
         let (_, action, _) = classify_podman_machine(&machine, false);
         assert_eq!(action, RecommendedAction::PrepareHostRuntime);
+    }
+
+    #[test]
+    fn preferred_connection_prefers_ato_machine() {
+        let names = vec![
+            "podman-machine-default".to_string(),
+            "ato-podman".to_string(),
+        ];
+        assert_eq!(preferred_running_connection(&names), Some("ato-podman"));
+    }
+
+    #[test]
+    fn preferred_connection_falls_back_to_first_running() {
+        let names = vec!["podman-machine-default".to_string()];
+        assert_eq!(
+            preferred_running_connection(&names),
+            Some("podman-machine-default")
+        );
+        assert_eq!(preferred_running_connection(&[]), None);
     }
 
     #[test]
