@@ -20,6 +20,7 @@ mod netd;
 mod orchestrator;
 mod proc_util;
 mod retention;
+mod runtime_setup;
 mod secret_bridge;
 mod settings;
 mod source_import_api;
