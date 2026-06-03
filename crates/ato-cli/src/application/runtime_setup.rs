@@ -289,21 +289,21 @@ fn detect_podman() -> ToolStatus {
     let mut resolved = match capsule_core::podman::resolve_podman() {
         Ok(resolved) => resolved,
         Err(err) => {
+            // Covers both "not found" and an invalid ATO_PODMAN_BIN override;
+            // the error's Display distinguishes them.
             return ToolStatus::missing(
                 ToolKind::Podman,
                 RecommendedAction::OpenInstructions,
-                format!(
-                    "Podman is not installed ({err}). See https://podman.io/docs/installation to set it up."
-                ),
+                format!("{err}. See https://podman.io/docs/installation to set it up."),
             );
         }
     };
     let version = resolved.query_version().map(str::to_string);
     // `podman info` returns non-zero quickly when no machine/daemon is running,
-    // so it doubles as a readiness probe without auto-starting anything. Spawn
-    // the resolved absolute binary (+ PATH override) so the probe works under a
-    // minimal GUI PATH.
-    let invocation = capsule_core::podman::podman_invocation();
+    // so it doubles as a readiness probe without auto-starting anything. Build
+    // the probe from the *same* resolved binary (+ PATH override) so version and
+    // readiness target one binary and it works under a minimal GUI PATH.
+    let invocation = resolved.invocation();
     let mut info_cmd = Command::new(&invocation.program);
     if let Some(path_env) = &invocation.path_env {
         info_cmd.env("PATH", path_env);
