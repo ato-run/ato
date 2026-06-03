@@ -54,6 +54,10 @@ pub enum ImportCommand {
         ctoml_id: String,
         label: String,
     },
+    /// Community Import surface: fetch and display a single recipe's raw
+    /// `capsule.toml` so the user can inspect how two same-titled community
+    /// recipes differ. Read-only; does not close the window.
+    ViewCommunityToml { ctoml_id: String },
     /// Community Import surface: re-run community discovery in place after
     /// a transient fetch error. Does NOT close the window — it re-fetches
     /// candidates and pushes a fresh snapshot into the same page.
@@ -81,6 +85,7 @@ impl ImportCommand {
             // Both community actions tear down this window and spawn a new
             // one (consent flow / GitHub import surface).
             ImportCommand::LaunchCommunityToml { .. } => Capability::WebviewCreate,
+            ImportCommand::ViewCommunityToml { .. } => Capability::WebviewCreate,
             ImportCommand::RetryCommunity { .. } => Capability::WebviewCreate,
             ImportCommand::ImportFromGithubSource { .. } => Capability::WebviewCreate,
             ImportCommand::Close => Capability::WindowsClose,
@@ -105,6 +110,9 @@ pub fn dispatch(
             ctoml_id,
             label,
         } => handle_launch_community_toml(cx, host, handle, ctoml_id, label),
+        ImportCommand::ViewCommunityToml { ctoml_id } => {
+            crate::window::community_import_window::fetch_candidate_detail(cx, ctoml_id);
+        }
         ImportCommand::RetryCommunity { source, label } => {
             // Re-fetch in place; the page already reset itself to loading.
             crate::window::community_import_window::refetch(cx, source, label);
@@ -690,6 +698,28 @@ mod community_command_tests {
             }
             other => panic!("expected LaunchCommunityToml, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn view_community_toml_envelope_parses() {
+        // Posted by community.html when the user clicks "View recipe".
+        let cmd: ImportCommand = serde_json::from_str(
+            r#"{"kind":"view_community_toml","ctoml_id":"ctoml_01ksza4np2yrs1mqe7jz10ep1g"}"#,
+        )
+        .expect("view_community_toml must parse");
+        match cmd {
+            ImportCommand::ViewCommunityToml { ctoml_id } => {
+                assert_eq!(ctoml_id, "ctoml_01ksza4np2yrs1mqe7jz10ep1g");
+            }
+            other => panic!("expected ViewCommunityToml, got {other:?}"),
+        }
+        assert_eq!(
+            ImportCommand::ViewCommunityToml {
+                ctoml_id: String::new(),
+            }
+            .required_capability(),
+            Capability::WebviewCreate
+        );
     }
 
     #[test]

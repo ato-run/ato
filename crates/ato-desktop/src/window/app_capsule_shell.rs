@@ -735,6 +735,13 @@ impl AppCapsuleShell {
                     source: CapsuleOpenSource::NavigateToUrl,
                 };
                 let capsule_session = CapsuleSession::from_launch_session(&session, launch_context);
+                tracing::info!(
+                    session_id = %session.session_id,
+                    handle = %self.handle,
+                    runtime_kind = "source",
+                    window_id = ?self.content_window_id,
+                    "app instance registered in desktop state (source)"
+                );
                 let registry = cx.global_mut::<SessionRegistry>();
                 registry.register_session(capsule_session);
                 let client = SessionClient {
@@ -879,9 +886,27 @@ impl Drop for AppCapsuleShell {
         // arrives after the entity is gone.
         self.abort_flag.store(true, Ordering::Release);
 
-        // Deregister stable ingress route if one was registered.
+        // Deregister the stable ingress route if one was registered.
+        //
+        // `deregister_stable_ingress` issues a *synchronous* IPC round-trip to
+        // ato-netd. The daemon can take up to ~60s to answer DeregisterIngress
+        // while it drains in-flight ingress connections, so calling it inline
+        // here blocks the GPUI main thread for the full duration — the closed
+        // window stays on screen and the whole app freezes (measured: a 57.7s
+        // hang on close). Deregistration is best-effort and idempotent (the key
+        // is re-registered on the next launch), so fire-and-forget it on a
+        // detached background thread instead of blocking window teardown.
         if let Some(key) = self.stable_ingress_key.take() {
-            crate::netd::deregister_stable_ingress(&key);
+            let window_id = self.content_window_id;
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                crate::netd::deregister_stable_ingress(&key);
+                tracing::debug!(
+                    ?window_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "deregistered stable ingress off the UI thread"
+                );
+            });
         }
 
         // Session lifecycle is now owned by the SessionRegistry.
