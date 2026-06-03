@@ -67,6 +67,7 @@ pub enum FetchKind {
         repo: &'static str,
         tag_template: &'static str,
         asset_template: &'static str,
+        asset_template_windows: Option<&'static str>,
         triple_style: TripleStyle,
     },
 }
@@ -144,6 +145,7 @@ pub static BUN: RuntimeToolSpec = RuntimeToolSpec {
         repo: "oven-sh/bun",
         tag_template: "bun-v{version}",
         asset_template: "bun-{triple}.zip",
+        asset_template_windows: None,
         triple_style: TripleStyle::Bun,
     },
     layout: ToolLayout::NativeBinary {
@@ -164,9 +166,12 @@ pub static UV: RuntimeToolSpec = RuntimeToolSpec {
         repo: "astral-sh/uv",
         tag_template: "{version}",
         asset_template: "uv-{triple}.tar.gz",
+        asset_template_windows: Some("uv-{triple}.zip"),
         triple_style: TripleStyle::Rust,
     },
-    layout: ToolLayout::NativeBinary { rel_path: "uv" },
+    layout: ToolLayout::NativeBinary {
+        rel_path: "uv{exe_suffix}",
+    },
 };
 
 const REGISTRY: &[&RuntimeToolSpec] = &[&PNPM, &YARN, &BUN, &UV];
@@ -370,16 +375,10 @@ fn build_fetch_url(fetch: &FetchKind, version: &str) -> Result<String> {
             "https://registry.npmjs.org/{package}/-/{package}-{version}.tgz"
         )),
         FetchKind::GithubRelease {
-            repo,
-            tag_template,
-            asset_template,
-            triple_style,
+            repo, tag_template, ..
         } => {
             let tag = tag_template.replace("{version}", version);
-            let triple = host_triple(*triple_style)?;
-            let asset = asset_template
-                .replace("{version}", version)
-                .replace("{triple}", &triple);
+            let asset = resolved_asset_name(fetch, version)?;
             Ok(format!(
                 "https://github.com/{repo}/releases/download/{tag}/{asset}"
             ))
@@ -390,16 +389,57 @@ fn build_fetch_url(fetch: &FetchKind, version: &str) -> Result<String> {
 fn archive_filename(fetch: &FetchKind, version: &str) -> Result<String> {
     match fetch {
         FetchKind::NpmRegistry { package } => Ok(format!("{package}-{version}.tgz")),
+        FetchKind::GithubRelease { .. } => resolved_asset_name(fetch, version),
+    }
+}
+
+/// Selects and expands the correct asset template for the given platform.
+/// Extracted to allow platform-injected testing on non-Windows CI runners.
+#[cfg_attr(not(test), allow(dead_code))]
+fn apply_asset_template(
+    asset_template: &str,
+    asset_template_windows: Option<&str>,
+    version: &str,
+    triple: &str,
+    is_windows: bool,
+) -> String {
+    let template = if is_windows {
+        asset_template_windows.unwrap_or(asset_template)
+    } else {
+        asset_template
+    };
+    template
+        .replace("{version}", version)
+        .replace("{triple}", triple)
+}
+
+/// Expands `{triple}` and `{exe_suffix}` placeholders in a layout rel_path.
+/// Extracted to allow platform-injected testing on non-Windows CI runners.
+fn apply_layout_template(rel_path: &str, triple: &str, is_windows: bool) -> String {
+    let exe_suffix = if is_windows { ".exe" } else { "" };
+    rel_path
+        .replace("{triple}", triple)
+        .replace("{exe_suffix}", exe_suffix)
+}
+
+fn resolved_asset_name(fetch: &FetchKind, version: &str) -> Result<String> {
+    match fetch {
         FetchKind::GithubRelease {
             asset_template,
+            asset_template_windows,
             triple_style,
             ..
         } => {
             let triple = host_triple(*triple_style)?;
-            Ok(asset_template
-                .replace("{version}", version)
-                .replace("{triple}", &triple))
+            Ok(apply_asset_template(
+                asset_template,
+                *asset_template_windows,
+                version,
+                &triple,
+                cfg!(windows),
+            ))
         }
+        FetchKind::NpmRegistry { package } => Ok(format!("{package}-{version}.tgz")),
     }
 }
 
@@ -620,7 +660,11 @@ fn validate_cached_shim(spec: &RuntimeToolSpec, shim_path: &Path) -> Result<()> 
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(shim_path)
             .map_err(|e| {
-                CapsuleError::Pack(format!("Failed to stat shim {}: {}", shim_path.display(), e))
+                CapsuleError::Pack(format!(
+                    "Failed to stat shim {}: {}",
+                    shim_path.display(),
+                    e
+                ))
             })?
             .permissions()
             .mode();
@@ -647,7 +691,11 @@ fn validate_cached_sha(sha_path: &Path) -> Result<String> {
     if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(CapsuleError::Pack(format!(
             "binary.sha256 is not a valid SHA-256 hex string (got {:?})",
-            if sha.len() > 20 { format!("{}…", &sha[..20]) } else { sha.clone() }
+            if sha.len() > 20 {
+                format!("{}…", &sha[..20])
+            } else {
+                sha.clone()
+            }
         )));
     }
     Ok(sha)
@@ -701,7 +749,7 @@ fn find_single_top_level_binary(extracted_dir: &Path, file_name: &str) -> Result
                 "Failed to inspect tool extract dir {}: {}",
                 extracted_dir.display(),
                 e
-            )))
+            )));
         }
     };
 
@@ -756,9 +804,7 @@ fn copy_tool_target_to_canonical(source: &Path, target: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         let perms = fs::metadata(source)
-            .map_err(|e| {
-                CapsuleError::Pack(format!("Failed to stat {}: {}", source.display(), e))
-            })?
+            .map_err(|e| CapsuleError::Pack(format!("Failed to stat {}: {}", source.display(), e)))?
             .permissions();
         fs::set_permissions(target, perms).map_err(|e| {
             CapsuleError::Pack(format!("Failed to chmod {}: {}", target.display(), e))
@@ -813,9 +859,9 @@ fn resolved_layout_path(spec: &RuntimeToolSpec) -> Result<String> {
     match &spec.fetch {
         FetchKind::GithubRelease { triple_style, .. } => {
             let triple = host_triple(*triple_style)?;
-            Ok(target_rel.replace("{triple}", &triple))
+            Ok(apply_layout_template(target_rel, &triple, cfg!(windows)))
         }
-        _ => Ok(target_rel.to_string()),
+        _ => Ok(apply_layout_template(target_rel, "", cfg!(windows))),
     }
 }
 
@@ -1057,8 +1103,69 @@ mod tests {
         gz.finish().expect("finish uv tgz")
     }
 
+    fn build_uv_archive() -> Vec<u8> {
+        #[cfg(windows)]
+        {
+            let mut cursor = Cursor::new(Vec::new());
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let options = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o755);
+            let path = resolved_layout_path(&UV).expect("uv layout");
+            zip.start_file(path, options).expect("start uv file");
+            zip.write_all(b"uv binary").expect("write uv");
+            zip.finish().expect("finish uv zip");
+            return cursor.into_inner();
+        }
+        #[cfg(not(windows))]
+        {
+            let mut builder = tar::Builder::new(Vec::new());
+            let payload = b"#!/bin/sh\necho uv\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    resolved_layout_path(&UV).expect("uv layout"),
+                    Cursor::new(payload),
+                )
+                .expect("append uv");
+            let tar = builder.into_inner().expect("finish uv tar");
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(&tar).expect("write uv tgz");
+            return gz.finish().expect("finish uv tgz");
+        }
+    }
+
     fn build_uv_tgz() -> Vec<u8> {
         build_uv_tgz_at(&resolved_layout_path(&UV).expect("uv layout"), 0o755)
+    }
+
+    /// Builds a nested-layout archive where the uv binary is inside a
+    /// `uv-{triple}/` subdirectory (the layout astral-sh/uv uses on some
+    /// releases).  On Windows the archive is a .zip containing `uv.exe`;
+    /// on Unix it is a .tar.gz containing `uv`.
+    fn build_uv_nested_archive(triple: &str) -> Vec<u8> {
+        #[cfg(windows)]
+        {
+            let nested_path = format!("uv-{triple}/uv.exe");
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let options = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o755);
+            zip.start_file(&nested_path, options)
+                .expect("start nested uv");
+            zip.write_all(b"uv binary").expect("write nested uv");
+            zip.finish().expect("finish nested zip");
+            return cursor.into_inner();
+        }
+        #[cfg(not(windows))]
+        {
+            build_uv_tgz_at(&format!("uv-{triple}/uv"), 0o755)
+        }
     }
 
     fn write_zip_archive(path: &Path, entries: &[(&str, &[u8], Option<u32>)]) {
@@ -1200,13 +1307,23 @@ mod tests {
         );
         assert_eq!(
             build_fetch_url(&UV.fetch, "0.5.21").unwrap(),
-            format!(
-                "https://github.com/astral-sh/uv/releases/download/0.5.21/uv-{uv_triple}.tar.gz"
-            )
+            if cfg!(windows) {
+                format!(
+                    "https://github.com/astral-sh/uv/releases/download/0.5.21/uv-{uv_triple}.zip"
+                )
+            } else {
+                format!(
+                    "https://github.com/astral-sh/uv/releases/download/0.5.21/uv-{uv_triple}.tar.gz"
+                )
+            }
         );
         assert_eq!(
             archive_filename(&UV.fetch, "0.5.21").unwrap(),
-            format!("uv-{uv_triple}.tar.gz")
+            if cfg!(windows) {
+                format!("uv-{uv_triple}.zip")
+            } else {
+                format!("uv-{uv_triple}.tar.gz")
+            }
         );
     }
 
@@ -1218,7 +1335,10 @@ mod tests {
             resolved_layout_path(&BUN).unwrap(),
             format!("bun-{}/bun", host_triple(TripleStyle::Bun).unwrap())
         );
-        assert_eq!(resolved_layout_path(&UV).unwrap(), "uv");
+        assert_eq!(
+            resolved_layout_path(&UV).unwrap(),
+            if cfg!(windows) { "uv.exe" } else { "uv" }
+        );
     }
 
     #[test]
@@ -1306,9 +1426,13 @@ mod tests {
         );
 
         let uv_version = unique_version("uv");
-        let uv_handle =
-            install_runtime_tool_archive(&UV, &uv_version, &ToolDeps::default(), &build_uv_tgz())
-                .expect("install uv");
+        let uv_handle = install_runtime_tool_archive(
+            &UV,
+            &uv_version,
+            &ToolDeps::default(),
+            &build_uv_archive(),
+        )
+        .expect("install uv");
         assert!(
             uv_handle
                 .bin_dir
@@ -1321,7 +1445,7 @@ mod tests {
                 .join("toolchains/tools/uv")
                 .join(&uv_version)
                 .join("extracted")
-                .join("uv")
+                .join(resolved_layout_path(&UV).unwrap())
                 .is_file()
         );
     }
@@ -1352,7 +1476,7 @@ mod tests {
             &UV,
             &version,
             &ToolDeps::default(),
-            &build_uv_tgz_at(&format!("uv-{triple}/uv"), 0o755),
+            &build_uv_nested_archive(&triple),
         )
         .expect("install nested uv");
 
@@ -1367,9 +1491,9 @@ mod tests {
             "expected uv binary at canonical path {canonical_uv:?}"
         );
         assert!(
-            handle.bin_dir.join("uv").is_file()
-            || handle.bin_dir.join("uv.cmd").is_file(),
-            "shim must exist in bin_dir {:?}", handle.bin_dir
+            handle.bin_dir.join("uv").is_file() || handle.bin_dir.join("uv.cmd").is_file(),
+            "shim must exist in bin_dir {:?}",
+            handle.bin_dir
         );
     }
 
@@ -1395,7 +1519,13 @@ mod tests {
             let sha_path = tools_root.join("binary.sha256");
             let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
             let shim_path = shim_dir.join(shim_name);
-            FakeCacheDir { root, extracted_dir, shim_dir, sha_path, shim_path }
+            FakeCacheDir {
+                root,
+                extracted_dir,
+                shim_dir,
+                sha_path,
+                shim_path,
+            }
         }
 
         fn write_shim(&self, mode: u32) {
@@ -1523,18 +1653,11 @@ mod tests {
         let version = unique_version("uv-reinstall");
 
         // First install: valid
-        let handle1 = install_runtime_tool_archive(
-            &UV,
-            &version,
-            &ToolDeps::default(),
-            &build_uv_tgz(),
-        )
-        .expect("first install");
+        let handle1 =
+            install_runtime_tool_archive(&UV, &version, &ToolDeps::default(), &build_uv_archive())
+                .expect("first install");
 
-        let tools_root = ato_home
-            .path()
-            .join("toolchains/tools/uv")
-            .join(&version);
+        let tools_root = ato_home.path().join("toolchains/tools/uv").join(&version);
         let sha_path = tools_root.join("binary.sha256");
         let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
         let shim_path = handle1.bin_dir.join(shim_name);
@@ -1544,8 +1667,7 @@ mod tests {
 
         // validate_tool_cache must now fail
         assert!(
-            validate_tool_cache(&UV, &shim_path, &tools_root.join("extracted"), &sha_path)
-                .is_err(),
+            validate_tool_cache(&UV, &shim_path, &tools_root.join("extracted"), &sha_path).is_err(),
             "corrupted cache must fail validation"
         );
 
@@ -1556,13 +1678,9 @@ mod tests {
         assert!(!shim_path.exists(), "shim must be gone after discard");
 
         // Reinstall via archive (the download-then-install leg)
-        let handle2 = install_runtime_tool_archive(
-            &UV,
-            &version,
-            &ToolDeps::default(),
-            &build_uv_tgz(),
-        )
-        .expect("reinstall after discard");
+        let handle2 =
+            install_runtime_tool_archive(&UV, &version, &ToolDeps::default(), &build_uv_archive())
+                .expect("reinstall after discard");
         assert_eq!(handle2.version, handle1.version);
         assert!(
             handle2.bin_dir.join(shim_name).is_file(),
@@ -1589,6 +1707,121 @@ mod tests {
         assert!(
             message.contains("unsupported symlink"),
             "unexpected error: {message}"
+        );
+    }
+
+    // ── Platform-injected asset resolution tests ──────────────────────────
+    // These tests exercise apply_asset_template / apply_layout_template with
+    // explicit triples so that Linux/macOS CI runners can verify Windows
+    // asset paths without cfg!(windows) being true.
+
+    #[test]
+    fn uv_windows_asset_name_resolves_to_zip() {
+        let FetchKind::GithubRelease {
+            asset_template,
+            asset_template_windows,
+            ..
+        } = &UV.fetch
+        else {
+            panic!("UV must use GithubRelease");
+        };
+        let name = apply_asset_template(
+            asset_template,
+            *asset_template_windows,
+            "0.5.21",
+            "x86_64-pc-windows-msvc",
+            true,
+        );
+        assert_eq!(name, "uv-x86_64-pc-windows-msvc.zip");
+    }
+
+    #[test]
+    fn uv_linux_asset_name_resolves_to_targz() {
+        let FetchKind::GithubRelease {
+            asset_template,
+            asset_template_windows,
+            ..
+        } = &UV.fetch
+        else {
+            panic!("UV must use GithubRelease");
+        };
+        let name = apply_asset_template(
+            asset_template,
+            *asset_template_windows,
+            "0.5.21",
+            "x86_64-unknown-linux-gnu",
+            false,
+        );
+        assert_eq!(name, "uv-x86_64-unknown-linux-gnu.tar.gz");
+    }
+
+    #[test]
+    fn uv_macos_asset_name_resolves_to_targz() {
+        let FetchKind::GithubRelease {
+            asset_template,
+            asset_template_windows,
+            ..
+        } = &UV.fetch
+        else {
+            panic!("UV must use GithubRelease");
+        };
+        let name = apply_asset_template(
+            asset_template,
+            *asset_template_windows,
+            "0.5.21",
+            "aarch64-apple-darwin",
+            false,
+        );
+        assert_eq!(name, "uv-aarch64-apple-darwin.tar.gz");
+    }
+
+    #[test]
+    fn uv_windows_layout_resolves_to_exe() {
+        let ToolLayout::NativeBinary { rel_path } = &UV.layout else {
+            panic!("UV must use NativeBinary layout");
+        };
+        let path = apply_layout_template(rel_path, "x86_64-pc-windows-msvc", true);
+        assert_eq!(path, "uv.exe");
+    }
+
+    #[test]
+    fn uv_unix_layout_resolves_to_plain_binary() {
+        let ToolLayout::NativeBinary { rel_path } = &UV.layout else {
+            panic!("UV must use NativeBinary layout");
+        };
+        let path = apply_layout_template(rel_path, "x86_64-unknown-linux-gnu", false);
+        assert_eq!(path, "uv");
+    }
+
+    #[test]
+    fn uv_windows_build_url_uses_zip() {
+        let FetchKind::GithubRelease {
+            repo, tag_template, ..
+        } = &UV.fetch
+        else {
+            panic!("UV must use GithubRelease");
+        };
+        let version = "0.5.21";
+        let tag = tag_template.replace("{version}", version);
+        let asset = apply_asset_template(
+            "uv-{triple}.tar.gz",
+            Some("uv-{triple}.zip"),
+            version,
+            "x86_64-pc-windows-msvc",
+            true,
+        );
+        let url = format!("https://github.com/{repo}/releases/download/{tag}/{asset}");
+        assert!(
+            url.ends_with(".zip"),
+            "Windows uv URL must use .zip, got: {url}"
+        );
+        assert!(
+            url.contains("x86_64-pc-windows-msvc"),
+            "Windows triple missing: {url}"
+        );
+        assert_eq!(
+            url,
+            "https://github.com/astral-sh/uv/releases/download/0.5.21/uv-x86_64-pc-windows-msvc.zip"
         );
     }
 }

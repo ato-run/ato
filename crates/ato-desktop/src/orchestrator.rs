@@ -696,16 +696,17 @@ fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope
 
     let mut attempt = 0u32;
     loop {
-        let output = Command::new(&ato_bin)
+        let mut command = Command::new(&ato_bin);
+        command
             .no_console_window()
-            .args(["internal", "preflight", handle, "--json"])
-            .output()
-            .with_context(|| {
-                format!(
-                    "failed to invoke '{}' internal preflight",
-                    ato_bin.display()
-                )
-            })?;
+            .args(["internal", "preflight", handle, "--json"]);
+        apply_runtime_optout_env(&mut command);
+        let output = command.output().with_context(|| {
+            format!(
+                "failed to invoke '{}' internal preflight",
+                ato_bin.display()
+            )
+        })?;
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -775,23 +776,22 @@ fn collect_preflight_envelope_for_community_toml(
 
     let mut attempt = 0u32;
     loop {
-        let output = Command::new(&ato_bin)
-            .no_console_window()
-            .args([
-                "internal",
-                "preflight",
-                &normalized,
-                "--community-toml-id",
-                ctoml_id,
-                "--json",
-            ])
-            .output()
-            .with_context(|| {
-                format!(
-                    "failed to invoke '{}' internal preflight --community-toml-id",
-                    ato_bin.display()
-                )
-            })?;
+        let mut command = Command::new(&ato_bin);
+        command.no_console_window().args([
+            "internal",
+            "preflight",
+            &normalized,
+            "--community-toml-id",
+            ctoml_id,
+            "--json",
+        ]);
+        apply_runtime_optout_env(&mut command);
+        let output = command.output().with_context(|| {
+            format!(
+                "failed to invoke '{}' internal preflight --community-toml-id",
+                ato_bin.display()
+            )
+        })?;
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1881,12 +1881,38 @@ fn ato_helper_command(ato_bin: &Path) -> Command {
     let mut command = Command::new(ato_bin);
     command.no_console_window();
     apply_desktop_ato_home(&mut command, std::env::var_os("ATO_HOME"));
+    apply_runtime_optout_env(&mut command);
     command
 }
 
 fn apply_desktop_ato_home(command: &mut Command, ato_home: Option<std::ffi::OsString>) {
     if let Some(ato_home) = ato_home {
         command.env("ATO_HOME", ato_home);
+    }
+}
+
+/// Env-var name carrying the Podman opt-out to the CLI. This is the interim
+/// Desktop → CLI boundary carrier for the onboarding/settings `podman_enabled`
+/// toggle; a future structured launch profile should replace it.
+pub(crate) const ENV_PODMAN_ENABLED: &str = "ATO_PODMAN_ENABLED";
+
+/// Map the runtime-safety config toggle to its `("NAME", "0"|"1")` env pair.
+/// Pure so the carrier contract is unit-testable.
+pub(crate) fn runtime_optout_env_pairs(
+    config: &crate::config::DesktopConfig,
+) -> [(&'static str, &'static str); 1] {
+    let bool_str = |enabled: bool| if enabled { "1" } else { "0" };
+    [(ENV_PODMAN_ENABLED, bool_str(config.runtime.podman_enabled))]
+}
+
+/// Inject the Podman opt-out env var onto a CLI child command, reading the
+/// current desktop config. Applied to every `ato` helper spawn (resolve /
+/// session start / stop) and the preflight calls so the CLI honors the user's
+/// Podman choice on every launch path.
+fn apply_runtime_optout_env(command: &mut Command) {
+    let config = crate::config::load_config();
+    for (key, value) in runtime_optout_env_pairs(&config) {
+        command.env(key, value);
     }
 }
 
@@ -3271,11 +3297,26 @@ mod tests {
     use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
 
     use super::{
-        DesktopLaunchInput, ResolvePayload, SessionStartInfo, allows_registry_guest_recovery,
-        build_launch_session, collect_dev_script_dirs, detect_package_manager,
-        extract_localhost_url, find_capsule_root, find_dev_script_dir, pop_last_codepoint_width,
-        url_port, which_in_path_entries,
+        DesktopLaunchInput, ENV_PODMAN_ENABLED, ResolvePayload, SessionStartInfo,
+        allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
+        detect_package_manager, extract_localhost_url, find_capsule_root, find_dev_script_dir,
+        pop_last_codepoint_width, runtime_optout_env_pairs, url_port, which_in_path_entries,
     };
+
+    #[test]
+    fn runtime_optout_env_pairs_default_enabled() {
+        let config = crate::config::DesktopConfig::default();
+        let pairs = runtime_optout_env_pairs(&config);
+        assert_eq!(pairs[0], (ENV_PODMAN_ENABLED, "1"));
+    }
+
+    #[test]
+    fn runtime_optout_env_pairs_podman_disabled() {
+        let mut config = crate::config::DesktopConfig::default();
+        config.runtime.podman_enabled = false;
+        let pairs = runtime_optout_env_pairs(&config);
+        assert_eq!(pairs[0], (ENV_PODMAN_ENABLED, "0"));
+    }
 
     fn resolved_payload(
         render_strategy: &str,

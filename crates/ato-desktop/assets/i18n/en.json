@@ -74,6 +74,8 @@
   "settings.nav.updates": "Updates",
   "settings.nav.developer": "Developer",
   "settings.nav.secrets": "Secrets",
+  "settings.nav.engines": "Engines",
+  "settings.nav.runtime": "Runtime",
   "settings.section.appearance": "Appearance",
   "settings.appearance.theme": "Theme",
   "settings.appearance.theme.dark": "Dark",

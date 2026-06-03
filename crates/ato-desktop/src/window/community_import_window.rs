@@ -35,6 +35,7 @@ use crate::community_api::{self, CommunityCandidate};
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
+use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
@@ -134,6 +135,22 @@ impl CommunityImportWindowShell {
             );
         }
     }
+
+    /// Push a recipe-detail payload (`{ id, toml, error }`) into the live page
+    /// so the "View recipe" overlay can render the fetched `capsule.toml`.
+    fn push_detail(&self, detail_json: &str) {
+        let script = format!(
+            "typeof window.__atoCommunityImportDetail==='function'&&window.__atoCommunityImportDetail({detail_json})"
+        );
+        if let Some(webview) = self._webview.as_ref()
+            && let Err(error) = webview.evaluate_script(&script)
+        {
+            tracing::warn!(
+                ?error,
+                "community-import: evaluate_script(push_detail) failed"
+            );
+        }
+    }
 }
 
 /// Slot for the currently-open community-import window's shell, so the
@@ -221,6 +238,18 @@ pub fn open_for_source(cx: &mut App, source: String, label: String) -> Result<An
 
     cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
         .register(SystemCapsuleId::AtoImport, *handle);
+    cx.global_mut::<OpenContentWindows>().insert(
+        handle.window_id().as_u64(),
+        ContentWindowEntry {
+            handle: *handle,
+            kind: ContentWindowKind::Import,
+            title: gpui::SharedString::from(format!("Review {}", label)),
+            subtitle: gpui::SharedString::from(source.clone()),
+            url: gpui::SharedString::from("capsule://desktop.ato.run/import/community"),
+            capsule: None,
+            last_focused_at: std::time::Instant::now(),
+        },
+    );
     system_ipc::spawn_drain_loop(cx, queue, *handle);
 
     let shell = shell_slot
@@ -246,6 +275,48 @@ pub fn refetch(cx: &mut App, source: String, label: String) {
         return;
     }
     spawn_candidate_fetch(cx, source, label);
+}
+
+/// Fetch a single recipe's raw `capsule.toml` by id and push it into the live
+/// window's detail overlay. Used by the "View recipe" action so the user can
+/// see exactly how two same-titled community recipes differ.
+pub fn fetch_candidate_detail(cx: &mut App, ctoml_id: String) {
+    if !cx.has_global::<CommunityImportWindowSlot>() {
+        tracing::warn!("community-import: view detail with no open window — ignoring");
+        return;
+    }
+    let async_app = cx.to_async();
+    let fe = async_app.foreground_executor().clone();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+
+    fe.spawn(async move {
+        let id_for_fetch = ctoml_id.clone();
+        let result = be
+            .spawn(async move { community_api::fetch_candidate_toml(&id_for_fetch) })
+            .await;
+
+        let detail = match result {
+            Ok(toml) => serde_json::json!({ "id": ctoml_id, "toml": toml, "error": null }),
+            Err(err) => {
+                tracing::warn!(error = %err, "community-import: recipe detail fetch failed");
+                serde_json::json!({ "id": ctoml_id, "toml": null, "error": err.to_string() })
+            }
+        };
+        let json = detail.to_string();
+
+        let _ = aa.update(|cx| {
+            let weak = cx
+                .try_global::<CommunityImportWindowSlot>()
+                .and_then(|s| s.shell.clone());
+            if let Some(weak) = weak
+                && let Some(shell) = weak.upgrade()
+            {
+                shell.read(cx).push_detail(&json);
+            }
+        });
+    })
+    .detach();
 }
 
 /// Fetch community candidates on the background executor, then push the
