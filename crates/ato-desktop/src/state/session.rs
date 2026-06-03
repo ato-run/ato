@@ -439,10 +439,14 @@ impl SessionRegistry {
         }
         let registered = snapshots.len();
         for snapshot in snapshots {
+            // `provider` (podman|docker) is not carried on `OciSessionSnapshot`
+            // yet — `ato ps` reports it on the host-machine entry, not per app
+            // session. Log `unknown` rather than guessing a provider, so the
+            // Docker/Podman comparison the issue asks for is not misled.
             tracing::info!(
                 session_id = %snapshot.id,
                 runtime_kind = "oci",
-                provider = "podman",
+                provider = "unknown",
                 service_count = snapshot.service_count,
                 status = ?snapshot.status,
                 "app instance registered in desktop state (oci)"
@@ -541,6 +545,32 @@ impl SessionRegistry {
                 self.update_process_state(session_id, SessionProcessState::FailedToStop { error });
             }
         }
+    }
+
+    /// Mark every running session (Starting or Ready) as `Stopping` and return
+    /// the stop work, without spawning any background threads. Unlike
+    /// [`Self::stop_all_running`] (fire-and-forget), this hands completion to
+    /// the caller, which must run each stop and call [`Self::finish_stop_session`]
+    /// with the result so presentation state does not stay stuck at `Stopping`.
+    ///
+    /// Used by the Windows tray's `Stop All` / `Quit`, where the caller needs to
+    /// observe completion (to update running state, or to wait before quitting).
+    pub fn begin_stop_all(&mut self) -> Vec<StopSessionRequest> {
+        let running: Vec<String> = self
+            .sessions
+            .values()
+            .filter(|s| {
+                matches!(
+                    s.process_state,
+                    SessionProcessState::Starting | SessionProcessState::Ready
+                )
+            })
+            .map(|s| s.session_id.clone())
+            .collect();
+        running
+            .iter()
+            .filter_map(|sid| self.begin_stop_session_once(sid))
+            .collect()
     }
 
     /// Stop every session that is still running (Starting or Ready).
@@ -1175,6 +1205,33 @@ mod tests {
             reg.get_session("s2").unwrap().process_state,
             SessionProcessState::Stopped
         );
+    }
+
+    #[test]
+    fn begin_stop_all_marks_running_stopping_and_returns_requests() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "t1"));
+        reg.register_session(make_session("s2", "t2"));
+        reg.register_session(make_session("s3", "t3"));
+        reg.update_process_state("s2", SessionProcessState::Stopped);
+        reg.update_process_state("s3", SessionProcessState::Stopping);
+
+        let requests = reg.begin_stop_all();
+
+        // Only the Ready session yields a request; it is now Stopping.
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].session_id, "s1");
+        assert_eq!(
+            reg.get_session("s1").unwrap().process_state,
+            SessionProcessState::Stopping
+        );
+        // Already-terminal/stopping sessions are untouched and not re-requested.
+        assert_eq!(
+            reg.get_session("s2").unwrap().process_state,
+            SessionProcessState::Stopped
+        );
+        // A second call is a no-op now that nothing is running.
+        assert!(reg.begin_stop_all().is_empty());
     }
 
     #[test]
