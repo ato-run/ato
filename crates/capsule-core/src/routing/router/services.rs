@@ -153,6 +153,7 @@ impl ManifestData {
                     name,
                     &self.state_source_overrides,
                 )?,
+                user: target.user.clone(),
             };
 
             let runtime = match runtime_kind {
@@ -336,9 +337,132 @@ fn state_mounts_for_service(
                         .map_err(|e| CapsuleError::Runtime(e.to_string()))?,
                     target: binding.target.trim().to_string(),
                     readonly: false,
+                    ownership: mount_ownership_from_binding(svc_name, binding)?,
                 });
             }
         }
     }
     Ok(mounts)
+}
+
+/// Resolve a state binding's optional `owner`/`mode` into a [`MountOwnership`].
+///
+/// Returns `None` when no `owner` is declared (Ato leaves ownership untouched).
+/// `mode` is parsed as an octal string (e.g. `"0700"`); a `mode` without an
+/// `owner` is rejected because there is no ownership pass to apply it during.
+fn mount_ownership_from_binding(
+    svc_name: &str,
+    binding: &crate::types::ServiceStateBinding,
+) -> Result<Option<MountOwnership>> {
+    let mode = match binding.mode.as_deref() {
+        Some(raw) => Some(parse_octal_mode(svc_name, &binding.state, raw)?),
+        None => None,
+    };
+    match &binding.owner {
+        Some(owner) => Ok(Some(MountOwnership {
+            uid: owner.uid,
+            gid: owner.gid,
+            recursive: owner.recursive,
+            mode,
+        })),
+        None => {
+            if mode.is_some() {
+                return Err(CapsuleError::Config(format!(
+                    "services.{svc_name}.state_bindings for state '{}' sets `mode` without `owner`; \
+                     add an `owner = {{ uid = .. }}` block so Ato has an ownership pass to apply it",
+                    binding.state
+                )));
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Parse an octal permission string like `"0700"`/`"755"` into mode bits.
+fn parse_octal_mode(svc_name: &str, state: &str, raw: &str) -> Result<u32> {
+    let trimmed = raw.trim().trim_start_matches("0o");
+    u32::from_str_radix(trimmed, 8).map_err(|_| {
+        CapsuleError::Config(format!(
+            "services.{svc_name}.state_bindings for state '{state}' has invalid `mode` \"{raw}\"; \
+             expected an octal string like \"0700\" or \"0755\""
+        ))
+    })
+}
+
+#[cfg(test)]
+mod state_ownership_tests {
+    use super::*;
+    use crate::types::{ServiceStateBinding, StateOwner};
+
+    fn binding(owner: Option<StateOwner>, mode: Option<&str>) -> ServiceStateBinding {
+        ServiceStateBinding {
+            state: "data".to_string(),
+            target: "/opt/app/data".to_string(),
+            service_target: None,
+            owner,
+            mode: mode.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn parse_octal_mode_accepts_common_forms() {
+        assert_eq!(parse_octal_mode("s", "data", "0700").unwrap(), 0o700);
+        assert_eq!(parse_octal_mode("s", "data", "755").unwrap(), 0o755);
+        assert_eq!(parse_octal_mode("s", "data", "0o640").unwrap(), 0o640);
+    }
+
+    #[test]
+    fn parse_octal_mode_rejects_non_octal() {
+        assert!(parse_octal_mode("s", "data", "u+rwx").is_err());
+        assert!(parse_octal_mode("s", "data", "999").is_err()); // 9 is not an octal digit
+    }
+
+    #[test]
+    fn owner_with_mode_resolves_to_mount_ownership() {
+        let b = binding(
+            Some(StateOwner {
+                uid: 1001,
+                gid: Some(1001),
+                recursive: true,
+            }),
+            Some("0700"),
+        );
+        let own = mount_ownership_from_binding("main", &b).unwrap().unwrap();
+        assert_eq!(own.uid, 1001);
+        assert_eq!(own.gid, Some(1001));
+        assert!(own.recursive);
+        assert_eq!(own.mode, Some(0o700));
+    }
+
+    #[test]
+    fn owner_without_mode_is_ok_with_no_mode() {
+        let b = binding(
+            Some(StateOwner {
+                uid: 1001,
+                gid: None,
+                recursive: false,
+            }),
+            None,
+        );
+        let own = mount_ownership_from_binding("main", &b).unwrap().unwrap();
+        assert_eq!(own.uid, 1001);
+        assert_eq!(own.gid, None);
+        assert_eq!(own.mode, None);
+    }
+
+    #[test]
+    fn no_owner_yields_no_ownership() {
+        let b = binding(None, None);
+        assert!(mount_ownership_from_binding("main", &b).unwrap().is_none());
+    }
+
+    #[test]
+    fn mode_without_owner_is_rejected() {
+        let b = binding(None, Some("0700"));
+        let err = mount_ownership_from_binding("main", &b).unwrap_err();
+        assert!(
+            err.to_string().contains("`mode` without `owner`"),
+            "error should explain mode needs owner: {err}"
+        );
+    }
 }
