@@ -825,6 +825,28 @@ mod exited_before_ready_tests {
     }
 
     #[test]
+    fn local_service_exit_before_ready_stays_internal() {
+        // A local (source/native/managed) service exits before readiness with the
+        // generic orchestration string — it must NOT be reclassified as the
+        // OCI-specific E306, since that diagnostic (and its hint) is OCI-only.
+        let err =
+            anyhow::anyhow!("service 'web' exited before readiness check passed (exit code: 1)")
+                .context("orchestration services failed to start in-process");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_ne!(
+            diagnostic.code,
+            CliDiagnosticCode::E306,
+            "local service exit must not map to the OCI exited-before-ready code"
+        );
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E999,
+            "local service exit keeps the existing generic classification"
+        );
+    }
+
+    #[test]
     fn healthcheck_timeout_does_not_map_to_e306() {
         // A readiness timeout (container still running) is a different, unchanged
         // diagnostic and must not be reclassified as exited-before-ready.
