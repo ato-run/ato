@@ -735,6 +735,13 @@ impl AppCapsuleShell {
                     source: CapsuleOpenSource::NavigateToUrl,
                 };
                 let capsule_session = CapsuleSession::from_launch_session(&session, launch_context);
+                tracing::info!(
+                    session_id = %session.session_id,
+                    handle = %self.handle,
+                    runtime_kind = "source",
+                    window_id = ?self.content_window_id,
+                    "app instance registered in desktop state (source)"
+                );
                 let registry = cx.global_mut::<SessionRegistry>();
                 registry.register_session(capsule_session);
                 let client = SessionClient {

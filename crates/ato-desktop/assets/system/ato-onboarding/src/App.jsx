@@ -20,22 +20,29 @@ const orbitColors = {
 
 export default function App() {
   const [step, setStep] = useState(1)
-  // Runtime-safety opt-out toggles. Default on (opt-out); state lives here so
-  // the keyboard "finish" path and the Step 5 button submit the same values.
+  // Runtime-setup preferences. Default on (opt-out); state lives here so the
+  // keyboard "finish" path and the Step 5 button submit the same values.
+  // Podman governs OCI provider selection; the language-tool toggles control
+  // whether Ato may install its own managed Node/uv/Python when a recipe needs
+  // them (managed-first policy).
   const [podmanEnabled, setPodmanEnabled] = useState(true)
-  const [hostDetectionEnabled, setHostDetectionEnabled] = useState(true)
+  const [nodeInstallEnabled, setNodeInstallEnabled] = useState(true)
+  const [uvInstallEnabled, setUvInstallEnabled] = useState(true)
+  const [pythonInstallEnabled, setPythonInstallEnabled] = useState(true)
 
   const nextStep = () => setStep((prev) => Math.min(prev + 1, LAST_STEP))
   const prevStep = () => setStep((prev) => Math.max(prev - 1, 1))
 
-  // Persist the runtime-safety choices, then mark onboarding complete. The
-  // save command is sent first so the toggles land in desktop config before
-  // the complete command tears down the window.
+  // Persist the runtime-setup choices, then mark onboarding complete. The save
+  // command is sent first so the toggles land in desktop config before the
+  // complete command tears down the window.
   const finish = () => {
     BRIDGE({
-      kind: "save_runtime_optout_settings",
+      kind: "save_runtime_setup_settings",
       podman_enabled: podmanEnabled,
-      host_device_detection_enabled: hostDetectionEnabled,
+      node_install_enabled: nodeInstallEnabled,
+      uv_install_enabled: uvInstallEnabled,
+      python_install_enabled: pythonInstallEnabled,
     })
     BRIDGE({ kind: "complete", version: ONBOARDING_VERSION, skipped: false })
   }
@@ -43,21 +50,25 @@ export default function App() {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Enter" || e.key === "ArrowRight") {
+        // On the final step, Step 5 owns the primary action — which may need to
+        // run a runtime install *before* completing. Finishing here on Enter
+        // would silently skip that install (the bug this guard fixes), so we
+        // let Step 5's own key handler route Enter through `handlePrimary`.
+        if (step === LAST_STEP) return
         e.preventDefault()
-        if (step === LAST_STEP) finish()
-        else nextStep()
+        nextStep()
       } else if (e.key === "ArrowLeft") {
         e.preventDefault()
         prevStep()
       } else if (e.key === "Escape") {
         e.preventDefault()
-        // Skipping leaves both runtime-safety settings at their default (on).
+        // Skipping leaves all runtime-setup settings at their default (on).
         BRIDGE({ kind: "complete", version: ONBOARDING_VERSION, skipped: true })
       }
     }
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
-  }, [step, podmanEnabled, hostDetectionEnabled])
+  }, [step])
 
   return (
     <div className="w-screen h-screen bg-slate-100 font-sans selection:bg-rose-100 selection:text-rose-900">
@@ -73,8 +84,12 @@ export default function App() {
               onFinish={finish}
               podmanEnabled={podmanEnabled}
               setPodmanEnabled={setPodmanEnabled}
-              hostDetectionEnabled={hostDetectionEnabled}
-              setHostDetectionEnabled={setHostDetectionEnabled}
+              nodeInstallEnabled={nodeInstallEnabled}
+              setNodeInstallEnabled={setNodeInstallEnabled}
+              uvInstallEnabled={uvInstallEnabled}
+              setUvInstallEnabled={setUvInstallEnabled}
+              pythonInstallEnabled={pythonInstallEnabled}
+              setPythonInstallEnabled={setPythonInstallEnabled}
             />
           )}
         </div>

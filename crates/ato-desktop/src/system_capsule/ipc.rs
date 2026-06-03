@@ -140,6 +140,24 @@ fn parse_system_command(
     capsule: SystemCapsuleId,
     command: serde_json::Value,
 ) -> Result<SystemCommand, serde_json::Error> {
+    use crate::runtime_setup::RuntimeSetupCommand;
+
+    // Runtime Setup is a feature shared by onboarding and settings: route by
+    // command `kind`, not by capsule name, so both surfaces hit the same
+    // backend. The broker still gates each request against the calling
+    // capsule's manifest grant.
+    if matches!(
+        capsule,
+        SystemCapsuleId::AtoOnboarding | SystemCapsuleId::AtoSettings
+    ) && command
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .is_some_and(RuntimeSetupCommand::is_runtime_setup_kind)
+    {
+        return serde_json::from_value::<RuntimeSetupCommand>(command)
+            .map(SystemCommand::RuntimeSetup);
+    }
+
     match capsule {
         SystemCapsuleId::AtoWindows => {
             serde_json::from_value::<WindowsCommand>(command).map(SystemCommand::AtoWindows)
@@ -338,6 +356,51 @@ mod tests {
         handler(fake_req);
         // The spoof must have been silently rejected — queue stays empty.
         assert!(queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn runtime_setup_kind_routes_to_feature_command_from_onboarding() {
+        let cmd = parse_system_command(
+            SystemCapsuleId::AtoOnboarding,
+            serde_json::json!({ "kind": "runtime_setup_status" }),
+        )
+        .unwrap();
+        assert!(matches!(cmd, SystemCommand::RuntimeSetup(_)));
+    }
+
+    #[test]
+    fn runtime_setup_kind_routes_to_feature_command_from_settings() {
+        let cmd = parse_system_command(
+            SystemCapsuleId::AtoSettings,
+            serde_json::json!({ "kind": "install_runtime_tools", "tools": ["node"] }),
+        )
+        .unwrap();
+        assert!(matches!(cmd, SystemCommand::RuntimeSetup(_)));
+    }
+
+    #[test]
+    fn settings_native_command_still_routes_to_settings() {
+        // A camelCase settings command must not be hijacked by the runtime
+        // feature router.
+        let cmd = parse_system_command(
+            SystemCapsuleId::AtoSettings,
+            serde_json::json!({ "kind": "loadSnapshot" }),
+        )
+        .unwrap();
+        assert!(matches!(cmd, SystemCommand::AtoSettings(_)));
+    }
+
+    #[test]
+    fn runtime_setup_kind_not_special_cased_for_other_capsules() {
+        // Only onboarding/settings opt into the shared router; a store envelope
+        // with a runtime kind must fall through to the store parser (and fail).
+        assert!(
+            parse_system_command(
+                SystemCapsuleId::AtoStore,
+                serde_json::json!({ "kind": "runtime_setup_status" }),
+            )
+            .is_err()
+        );
     }
 
     #[test]
