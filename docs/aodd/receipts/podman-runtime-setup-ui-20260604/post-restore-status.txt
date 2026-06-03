@@ -1,0 +1,1 @@
+ready=True action=none msg=Podman is installed and a machine is running

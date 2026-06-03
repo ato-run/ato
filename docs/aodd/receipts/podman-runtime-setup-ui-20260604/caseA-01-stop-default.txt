@@ -1,0 +1,3 @@
+Machine "podman-machine-default" stopped successfully
+NAME                    VM TYPE     CREATED       LAST UP                 CPUS        MEMORY      DISK SIZE
+podman-machine-default  applehv     8 months ago  Less than a second ago  4           8GiB        100GiB
