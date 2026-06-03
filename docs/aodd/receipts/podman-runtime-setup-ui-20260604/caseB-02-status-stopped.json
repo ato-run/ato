@@ -1,0 +1,10 @@
+{
+  "kind": "podman",
+  "installed": true,
+  "version": "podman version 5.7.1",
+  "supported": true,
+  "ready": false,
+  "source": "external",
+  "action": "prepare_host_runtime",
+  "message": "Multiple stopped Podman machines (ato-podman, podman-machine-default); prepare an Ato-managed machine."
+}
