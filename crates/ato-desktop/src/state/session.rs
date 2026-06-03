@@ -433,12 +433,27 @@ impl SessionRegistry {
             })
             .map(|session| session.session_id.clone())
             .collect();
+        let removed = stale_ids.len();
         for id in stale_ids {
             self.remove_session(&id);
         }
+        let registered = snapshots.len();
         for snapshot in snapshots {
+            tracing::info!(
+                session_id = %snapshot.id,
+                runtime_kind = "oci",
+                provider = "podman",
+                service_count = snapshot.service_count,
+                status = ?snapshot.status,
+                "app instance registered in desktop state (oci)"
+            );
             self.register_session(CapsuleSession::from_oci_snapshot(snapshot));
         }
+        tracing::info!(
+            registered,
+            removed,
+            "sync_oci_sessions: desktop OCI projection synced"
+        );
     }
 
     // ── lifecycle actions ──────────────────────────────────────────────
