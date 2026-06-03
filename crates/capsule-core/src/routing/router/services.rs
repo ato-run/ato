@@ -347,9 +347,11 @@ fn state_mounts_for_service(
 
 /// Resolve a state binding's optional `owner`/`mode` into a [`MountOwnership`].
 ///
-/// Returns `None` when no `owner` is declared (Ato leaves ownership untouched).
-/// `mode` is parsed as an octal string (e.g. `"0700"`); a `mode` without an
-/// `owner` is rejected because there is no ownership pass to apply it during.
+/// Returns `None` when neither `owner` nor `mode` is declared (Ato leaves the
+/// bound path untouched). Either may appear independently:
+/// * `owner` → best-effort `chown` to that uid/gid.
+/// * `mode` → `chmod` (octal string, e.g. `"0777"`). This is the load-bearing
+///   op on Podman-machine/virtiofs; it is valid on its own (chmod-only).
 fn mount_ownership_from_binding(
     svc_name: &str,
     binding: &crate::types::ServiceStateBinding,
@@ -358,24 +360,15 @@ fn mount_ownership_from_binding(
         Some(raw) => Some(parse_octal_mode(svc_name, &binding.state, raw)?),
         None => None,
     };
-    match &binding.owner {
-        Some(owner) => Ok(Some(MountOwnership {
-            uid: owner.uid,
-            gid: owner.gid,
-            recursive: owner.recursive,
-            mode,
-        })),
-        None => {
-            if mode.is_some() {
-                return Err(CapsuleError::Config(format!(
-                    "services.{svc_name}.state_bindings for state '{}' sets `mode` without `owner`; \
-                     add an `owner = {{ uid = .. }}` block so Ato has an ownership pass to apply it",
-                    binding.state
-                )));
-            }
-            Ok(None)
-        }
+    if binding.owner.is_none() && mode.is_none() {
+        return Ok(None);
     }
+    Ok(Some(MountOwnership {
+        uid: binding.owner.as_ref().map(|o| o.uid),
+        gid: binding.owner.as_ref().and_then(|o| o.gid),
+        recursive: binding.owner.as_ref().is_some_and(|o| o.recursive),
+        mode,
+    }))
 }
 
 /// Parse an octal permission string like `"0700"`/`"755"` into mode bits.
@@ -425,13 +418,13 @@ mod state_ownership_tests {
                 gid: Some(1001),
                 recursive: true,
             }),
-            Some("0700"),
+            Some("0777"),
         );
         let own = mount_ownership_from_binding("main", &b).unwrap().unwrap();
-        assert_eq!(own.uid, 1001);
+        assert_eq!(own.uid, Some(1001));
         assert_eq!(own.gid, Some(1001));
         assert!(own.recursive);
-        assert_eq!(own.mode, Some(0o700));
+        assert_eq!(own.mode, Some(0o777));
     }
 
     #[test]
@@ -445,24 +438,26 @@ mod state_ownership_tests {
             None,
         );
         let own = mount_ownership_from_binding("main", &b).unwrap().unwrap();
-        assert_eq!(own.uid, 1001);
+        assert_eq!(own.uid, Some(1001));
         assert_eq!(own.gid, None);
         assert_eq!(own.mode, None);
     }
 
     #[test]
-    fn no_owner_yields_no_ownership() {
-        let b = binding(None, None);
-        assert!(mount_ownership_from_binding("main", &b).unwrap().is_none());
+    fn mode_without_owner_is_allowed_chmod_only() {
+        // mode-only is the common Podman-machine case: chmod is the load-bearing
+        // op, no chown needed/possible for a non-root host user.
+        let b = binding(None, Some("0777"));
+        let own = mount_ownership_from_binding("main", &b).unwrap().unwrap();
+        assert_eq!(own.uid, None, "no owner → no chown target");
+        assert_eq!(own.gid, None);
+        assert!(!own.recursive);
+        assert_eq!(own.mode, Some(0o777));
     }
 
     #[test]
-    fn mode_without_owner_is_rejected() {
-        let b = binding(None, Some("0700"));
-        let err = mount_ownership_from_binding("main", &b).unwrap_err();
-        assert!(
-            err.to_string().contains("`mode` without `owner`"),
-            "error should explain mode needs owner: {err}"
-        );
+    fn no_owner_no_mode_yields_no_ownership() {
+        let b = binding(None, None);
+        assert!(mount_ownership_from_binding("main", &b).unwrap().is_none());
     }
 }
