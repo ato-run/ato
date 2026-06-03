@@ -60,6 +60,10 @@ pub struct ResolvedTargetRuntime {
     pub required_env: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<Mount>,
+    /// Optional container user for OCI targets, passed to the engine as
+    /// `--user`. Resolved from `[targets.<label>] user`. See #428.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
