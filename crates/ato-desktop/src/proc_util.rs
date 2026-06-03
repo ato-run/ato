@@ -45,6 +45,30 @@ impl CommandNoWindowExt for Command {
     }
 }
 
+/// Reveal a local path (file or directory) in the OS file manager.
+///
+/// Uses `open` on macOS, `explorer` on Windows, `xdg-open` on Linux. Shares the
+/// console-window suppression with the rest of the desktop's subprocess spawns.
+pub(crate) fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    let mut command = if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        Command::new("explorer")
+    } else {
+        Command::new("xdg-open")
+    };
+    CommandNoWindowExt::no_console_window(&mut command);
+    // `explorer` returns a non-zero exit code even on success, so on Windows we
+    // only treat a failure to *spawn* as an error.
+    let status = command.arg(path).status()?;
+    if cfg!(not(target_os = "windows")) && !status.success() {
+        return Err(std::io::Error::other(format!(
+            "file-manager open exited with status {status}"
+        )));
+    }
+    Ok(())
+}
+
 /// Open a URL in the user's default browser using the OS shell.
 ///
 /// Uses `open` on macOS, `cmd /C start` on Windows, `xdg-open` on Linux.

@@ -74,6 +74,18 @@ pub enum Capability {
     WindowsCloseTarget,
     /// Mark onboarding completed/skipped and proceed to startup surface.
     OnboardingComplete,
+    /// Read Runtime Setup status (probe the host via the `ato` helper).
+    /// Feature-level: granted to every surface that shows the Runtime Setup
+    /// panel (onboarding + settings).
+    RuntimeSetupRead,
+    /// Install Ato-managed runtime tools and persist the runtime-setup
+    /// preferences. Feature-level — deliberately distinct from
+    /// `OnboardingComplete` so downloading/installing tools is not gated by the
+    /// onboarding-completion token.
+    RuntimeSetupInstall,
+    /// Reveal the desktop log directory for runtime-setup troubleshooting.
+    /// Granted to settings only (the re-setup surface), not to onboarding.
+    RuntimeSetupOpenLogs,
     /// Quit the whole desktop application. Granted only to `AtoStart`,
     /// whose page is the process-lifetime landing surface and therefore
     /// the single legitimate place to terminate the app on platforms
@@ -97,6 +109,10 @@ pub enum SystemCommand {
     AtoDock(ato_dock::DockCommand),
     AtoOnboarding(ato_onboarding::OnboardingCommand),
     AtoImport(ato_import::ImportCommand),
+    /// Feature-level Runtime Setup command, shared by `ato-onboarding` and
+    /// `ato-settings`. Routed by command `kind` (not capsule name) in the IPC
+    /// parser; gated by the calling capsule's manifest grant.
+    RuntimeSetup(crate::runtime_setup::RuntimeSetupCommand),
 }
 
 impl SystemCommand {
@@ -114,6 +130,7 @@ impl SystemCommand {
             SystemCommand::AtoDock(c) => c.required_capability(),
             SystemCommand::AtoOnboarding(c) => c.required_capability(),
             SystemCommand::AtoImport(c) => c.required_capability(),
+            SystemCommand::RuntimeSetup(c) => c.required_capability(),
         }
     }
 }
@@ -189,6 +206,7 @@ impl CapabilityBroker {
             }
             SystemCommand::AtoOnboarding(c) => ato_onboarding::dispatch(cx, host, c),
             SystemCommand::AtoImport(c) => ato_import::dispatch(cx, host, c),
+            SystemCommand::RuntimeSetup(c) => crate::runtime_setup::dispatch(cx, host, c),
         }
     }
 }
@@ -206,6 +224,42 @@ mod tests {
         assert!(!is_capability_allowed(
             SystemCapsuleId::AtoStore,
             Capability::OnboardingComplete
+        ));
+    }
+
+    #[test]
+    fn runtime_setup_capabilities_are_feature_level() {
+        use Capability::{RuntimeSetupInstall, RuntimeSetupOpenLogs, RuntimeSetupRead};
+        // Onboarding can read + install but NOT open logs (re-setup affordance).
+        assert!(is_capability_allowed(
+            SystemCapsuleId::AtoOnboarding,
+            RuntimeSetupRead
+        ));
+        assert!(is_capability_allowed(
+            SystemCapsuleId::AtoOnboarding,
+            RuntimeSetupInstall
+        ));
+        assert!(!is_capability_allowed(
+            SystemCapsuleId::AtoOnboarding,
+            RuntimeSetupOpenLogs
+        ));
+        // Settings has the full re-setup surface.
+        assert!(is_capability_allowed(
+            SystemCapsuleId::AtoSettings,
+            RuntimeSetupRead
+        ));
+        assert!(is_capability_allowed(
+            SystemCapsuleId::AtoSettings,
+            RuntimeSetupInstall
+        ));
+        assert!(is_capability_allowed(
+            SystemCapsuleId::AtoSettings,
+            RuntimeSetupOpenLogs
+        ));
+        // Unrelated capsules get nothing.
+        assert!(!is_capability_allowed(
+            SystemCapsuleId::AtoStore,
+            RuntimeSetupInstall
         ));
     }
 }
