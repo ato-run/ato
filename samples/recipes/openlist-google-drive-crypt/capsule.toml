@@ -11,6 +11,7 @@ default_target = "app"
 runtime = "oci"
 image = "openlistteam/openlist:v4.2.2"
 port = 5244
+user = "1001:1001"
 required_env = ["OPENLIST_ADMIN_PASSWORD"]
 env = { UMASK = "022", TZ = "Asia/Tokyo", OPENLIST_PUBLIC_DOMAIN = "" }
 
@@ -34,3 +35,9 @@ readiness_probe = { http_get = "/", port = "5244", timeout_seconds = 120, initia
 [[services.main.state_bindings]]
 state = "data"
 target = "/opt/openlist/data"
+mode = "0777"
+
+[services.main.state_bindings.owner]
+uid = 1001
+gid = 1001
+recursive = false
