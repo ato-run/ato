@@ -14,6 +14,7 @@
 //! command needs is fixed; what differs is which capsule's manifest grants it.
 
 mod install;
+mod prepare;
 mod status;
 mod types;
 
@@ -96,6 +97,9 @@ pub fn dispatch(
         }
         RuntimeSetupCommand::InstallRuntimeTools { request_id, tools } => {
             install::start_runtime_install(cx, request_id, tools);
+        }
+        RuntimeSetupCommand::PrepareRuntimeTools { request_id, tools } => {
+            prepare::start_runtime_prepare(cx, request_id, tools);
         }
         RuntimeSetupCommand::CancelRuntimeInstall { request_id } => {
             let cancelled = cancel_active_install(cx);
