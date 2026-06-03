@@ -40,6 +40,7 @@ pub(crate) mod services;
 pub(crate) mod session_graph_populate;
 #[allow(dead_code)]
 pub(crate) mod share;
+pub(crate) mod shell_preflight;
 pub(crate) mod source_inference;
 pub(crate) mod source_inventory;
 pub(crate) mod source_projection;
