@@ -31,6 +31,10 @@ use capsule_core::runtime_setup::{
     SUPPORTED_PYTHON_VERSION, SUPPORTED_UV_VERSION, ToolKind, ToolSource, ToolStatus,
 };
 
+use capsule_core::podman::ATO_PODMAN_MACHINE_NAME;
+
+use crate::adapters::runtime::podman_machine::{PodmanMachineStatus, parse_podman_machine_list};
+
 /// Collect the full host runtime-setup status by probing each tool. Probes are
 /// independent and best-effort: a failure to read one tool degrades that tool's
 /// row, never the whole report.
@@ -280,7 +284,9 @@ fn tool_version(bin: &str) -> Option<String> {
     }
 }
 
-/// Detect Podman: detection-only (we never auto-install a container engine).
+/// Detect Podman. Detection-only and **read-only**: this never installs Podman
+/// or inits/starts a machine — that is `ato internal runtime prepare`. It may
+/// run `podman --version`, `podman machine list`, and `podman info` (all reads).
 ///
 /// Resolution goes through [`capsule_core::podman`] rather than a bare
 /// `which("podman")` so a GUI-launched probe with a minimal PATH still finds
@@ -289,48 +295,168 @@ fn detect_podman() -> ToolStatus {
     let mut resolved = match capsule_core::podman::resolve_podman() {
         Ok(resolved) => resolved,
         Err(err) => {
-            // Covers both "not found" and an invalid ATO_PODMAN_BIN override;
-            // the error's Display distinguishes them.
+            // Missing binary (or an invalid ATO_PODMAN_BIN override; the error's
+            // Display distinguishes them). The next step is an explicit prepare.
             return ToolStatus::missing(
                 ToolKind::Podman,
-                RecommendedAction::OpenInstructions,
-                format!("{err}. See https://podman.io/docs/installation to set it up."),
+                RecommendedAction::PrepareHostRuntime,
+                format!("{err}. Prepare Podman to install and set it up."),
             );
         }
     };
     let version = resolved.query_version().map(str::to_string);
-    // `podman info` returns non-zero quickly when no machine/daemon is running,
-    // so it doubles as a readiness probe without auto-starting anything. Build
-    // the probe from the *same* resolved binary (+ PATH override) so version and
-    // readiness target one binary and it works under a minimal GUI PATH.
+    // Build every probe from the *same* resolved binary (+ PATH override) so
+    // version and readiness target one binary and work under a minimal GUI PATH.
     let invocation = resolved.invocation();
-    let mut info_cmd = Command::new(&invocation.program);
-    if let Some(path_env) = &invocation.path_env {
-        info_cmd.env("PATH", path_env);
-    }
-    let running = info_cmd
-        .args(["info", "--format", "{{.Host.Arch}}"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if running {
-        ToolStatus::ready(
-            ToolKind::Podman,
-            ToolSource::External,
-            version,
-            "Podman is installed and running",
-        )
-    } else {
-        ToolStatus {
-            kind: ToolKind::Podman,
-            installed: true,
-            version,
-            supported: true,
-            ready: false,
-            source: ToolSource::External,
-            action: RecommendedAction::StartService,
-            message: "Podman is installed but no machine is running. Start it with `podman machine start`.".to_string(),
+    let run = |args: &[&str]| -> Option<std::process::Output> {
+        let mut cmd = Command::new(&invocation.program);
+        if let Some(path_env) = &invocation.path_env {
+            cmd.env("PATH", path_env);
         }
+        cmd.args(args).output().ok()
+    };
+    // `podman info`, optionally pinned to a connection. Pinning matters because
+    // the host's *default* connection may point at a different (e.g. stopped)
+    // machine than the one that is actually running — so a plain `info` can fail
+    // even though a machine (e.g. ato-podman) is up. Connection name == machine
+    // name for machine-created connections.
+    let info_ok = |connection: Option<&str>| -> bool {
+        let mut args: Vec<&str> = Vec::new();
+        if let Some(connection) = connection {
+            args.push("--connection");
+            args.push(connection);
+        }
+        args.extend_from_slice(&["info", "--format", "{{.Host.Arch}}"]);
+        run(&args).map(|o| o.status.success()).unwrap_or(false)
+    };
+
+    // Native Linux Podman has no machine; readiness is just `podman info`.
+    if cfg!(target_os = "linux") {
+        return if info_ok(None) {
+            ToolStatus::ready(
+                ToolKind::Podman,
+                ToolSource::External,
+                version,
+                "Podman is installed and running",
+            )
+        } else {
+            podman_not_ready(
+                version,
+                RecommendedAction::RepairHostRuntime,
+                "Podman is installed but `podman info` failed. Re-prepare Podman.",
+            )
+        };
+    }
+
+    // macOS/Windows: a machine must exist and run. Read-only probe.
+    let machine = match run(&["machine", "list", "--format", "json"]) {
+        Some(out) if out.status.success() => {
+            parse_podman_machine_list(&String::from_utf8_lossy(&out.stdout))
+        }
+        Some(out) => PodmanMachineStatus::Unknown {
+            reason: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        },
+        None => PodmanMachineStatus::Unavailable {
+            reason: "podman machine list could not be run".to_string(),
+        },
+    };
+    // Confirm readiness against a *running* machine explicitly (prefer the Ato
+    // machine), not the global default — only meaningful when one is running.
+    let info_running_ok = match &machine {
+        PodmanMachineStatus::Running { running_names, .. } => {
+            info_ok(preferred_running_connection(running_names))
+        }
+        _ => false,
+    };
+    let (ready, action, message) = classify_podman_machine(&machine, info_running_ok);
+    if ready {
+        ToolStatus::ready(ToolKind::Podman, ToolSource::External, version, message)
+    } else {
+        podman_not_ready(version, action, message)
+    }
+}
+
+/// Pick the connection to probe for readiness from the running machines: prefer
+/// the Ato-managed machine, else the first running one. Returns `None` only when
+/// nothing is running (caller treats that as not-ready). Connection name equals
+/// the machine name for machine-created connections.
+fn preferred_running_connection(running_names: &[String]) -> Option<&str> {
+    if running_names.iter().any(|n| n == ATO_PODMAN_MACHINE_NAME) {
+        Some(ATO_PODMAN_MACHINE_NAME)
+    } else {
+        running_names.first().map(String::as_str)
+    }
+}
+
+/// Build a not-ready, installed Podman status (External source).
+fn podman_not_ready(
+    version: Option<String>,
+    action: RecommendedAction,
+    message: impl Into<String>,
+) -> ToolStatus {
+    ToolStatus {
+        kind: ToolKind::Podman,
+        installed: true,
+        version,
+        supported: true,
+        ready: false,
+        source: ToolSource::External,
+        action,
+        message: message.into(),
+    }
+}
+
+/// Map a Podman machine status (+ whether `podman info` succeeded for a running
+/// machine) to the readiness verdict and recommended action. Pure.
+fn classify_podman_machine(
+    machine: &PodmanMachineStatus,
+    info_running_ok: bool,
+) -> (bool, RecommendedAction, String) {
+    match machine {
+        PodmanMachineStatus::Running { .. } => {
+            if info_running_ok {
+                (
+                    true,
+                    RecommendedAction::None,
+                    "Podman is installed and a machine is running".to_string(),
+                )
+            } else {
+                (
+                    false,
+                    RecommendedAction::RepairHostRuntime,
+                    "A Podman machine is running but `podman info` failed; it may be broken. \
+                     Re-prepare Podman."
+                        .to_string(),
+                )
+            }
+        }
+        PodmanMachineStatus::NotConfigured => (
+            false,
+            RecommendedAction::PrepareHostRuntime,
+            "Podman is installed but has no machine. Prepare Podman to create and start one."
+                .to_string(),
+        ),
+        PodmanMachineStatus::Stopped { names } if names.len() == 1 => (
+            false,
+            RecommendedAction::StartService,
+            format!(
+                "Podman is installed but its machine ({}) is stopped. Start it or prepare Podman.",
+                names.join(", ")
+            ),
+        ),
+        PodmanMachineStatus::Stopped { names } => (
+            false,
+            RecommendedAction::PrepareHostRuntime,
+            format!(
+                "Multiple stopped Podman machines ({}); prepare an Ato-managed machine.",
+                names.join(", ")
+            ),
+        ),
+        PodmanMachineStatus::Unavailable { reason } | PodmanMachineStatus::Unknown { reason } => (
+            false,
+            RecommendedAction::RepairHostRuntime,
+            format!("Podman machine state could not be determined ({reason}); re-prepare Podman."),
+        ),
     }
 }
 
@@ -465,7 +591,14 @@ impl CapsuleReporter for InstallReporter {
 }
 
 /// Print a single progress event (JSON line for the desktop, or a human line).
-fn emit_progress(tool: ToolKind, phase: InstallPhase, message: impl Into<String>, json: bool) {
+/// Shared with `runtime_prepare` so install and prepare emit the identical
+/// `InstallProgress` wire shape.
+pub(crate) fn emit_progress(
+    tool: ToolKind,
+    phase: InstallPhase,
+    message: impl Into<String>,
+    json: bool,
+) {
     use std::io::Write;
     let event = InstallProgress::new(tool, phase, message);
     let mut stdout = std::io::stdout().lock();
@@ -761,33 +894,154 @@ mod tests {
         out
     }
 
-    /// A resolvable podman binary whose `--version` succeeds but whose `info`
-    /// fails must report installed-but-not-running (StartService), never the
-    /// false "missing binary". The `ATO_PODMAN_BIN` override makes resolution
-    /// deterministic regardless of any real podman on the host.
+    /// Write `script` as an executable file at `path` (0o755).
+    #[cfg(unix)]
+    fn write_script(path: &std::path::Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script).unwrap();
+        let mut perm = std::fs::metadata(path).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(path, perm).unwrap();
+    }
+
+    /// A resolvable podman binary whose `--version` succeeds but whose other
+    /// subcommands fail must report installed-but-not-ready (never the false
+    /// "missing binary"). `info`/`machine list` failing maps to a repair action.
+    /// The `ATO_PODMAN_BIN` override makes resolution deterministic regardless
+    /// of any real podman on the host.
     #[cfg(unix)]
     #[test]
     #[serial_test::serial]
-    fn detect_podman_installed_no_machine_is_start_service() {
-        use std::os::unix::fs::PermissionsExt;
+    fn detect_podman_installed_but_broken_is_not_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("podman");
-        // `--version` → succeed with a version line; anything else (e.g. `info`)
-        // → exit 1, simulating "installed but no machine running".
-        std::fs::write(
+        // `--version` → version line; everything else (info / machine list) → fail.
+        write_script(
             &bin,
             "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'podman version 9.9.9' ;;\n  *) exit 1 ;;\nesac\n",
-        )
-        .unwrap();
-        let mut perm = std::fs::metadata(&bin).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&bin, perm).unwrap();
+        );
 
         let status = with_podman_bin(&bin, detect_podman);
         assert!(status.installed, "binary exists ⇒ installed: {status:?}");
-        assert_eq!(status.action, RecommendedAction::StartService);
         assert_eq!(status.source, ToolSource::External);
         assert_eq!(status.version.as_deref(), Some("podman version 9.9.9"));
         assert!(!status.ready);
+        // Both the Linux (info fails) and macOS (machine list fails → Unknown)
+        // paths surface a repair action — never a "missing"/install verdict.
+        assert_eq!(status.action, RecommendedAction::RepairHostRuntime);
+    }
+
+    /// Passive status detection must be read-only: it may probe version / machine
+    /// list / info, but must NEVER install or init/start a machine.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn setup_status_never_mutates_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("podman");
+        let log = tmp.path().join("calls.log");
+        // Log every invocation; answer reads so detection completes.
+        write_script(
+            &bin,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in\n  --version) echo 'podman version 9.9.9' ;;\n  machine) echo '[]' ;;\n  info) echo 'arm64' ;;\n  *) ;;\nesac\n",
+                log.display()
+            ),
+        );
+
+        let prev = std::env::var_os("ATO_PODMAN_BIN");
+        unsafe { std::env::set_var("ATO_PODMAN_BIN", &bin) };
+        let _status = collect_setup_status();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ATO_PODMAN_BIN", v),
+                None => std::env::remove_var("ATO_PODMAN_BIN"),
+            }
+        }
+
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        for forbidden in ["machine init", "machine start", "install"] {
+            assert!(
+                !calls.contains(forbidden),
+                "passive status must not run `{forbidden}`; calls were:\n{calls}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_running_machine_with_info_ok_is_ready() {
+        let machine = PodmanMachineStatus::Running {
+            running_names: vec!["ato-podman".to_string()],
+            all_names: vec!["ato-podman".to_string()],
+        };
+        let (ready, action, _) = classify_podman_machine(&machine, true);
+        assert!(ready);
+        assert_eq!(action, RecommendedAction::None);
+    }
+
+    #[test]
+    fn classify_running_machine_with_info_fail_is_repair() {
+        let machine = PodmanMachineStatus::Running {
+            running_names: vec!["ato-podman".to_string()],
+            all_names: vec!["ato-podman".to_string()],
+        };
+        let (ready, action, _) = classify_podman_machine(&machine, false);
+        assert!(!ready);
+        assert_eq!(action, RecommendedAction::RepairHostRuntime);
+    }
+
+    #[test]
+    fn classify_no_machine_is_prepare() {
+        let (ready, action, _) =
+            classify_podman_machine(&PodmanMachineStatus::NotConfigured, false);
+        assert!(!ready);
+        assert_eq!(action, RecommendedAction::PrepareHostRuntime);
+    }
+
+    #[test]
+    fn classify_single_stopped_machine_is_start_service() {
+        let machine = PodmanMachineStatus::Stopped {
+            names: vec!["ato-podman".to_string()],
+        };
+        let (ready, action, _) = classify_podman_machine(&machine, false);
+        assert!(!ready);
+        assert_eq!(action, RecommendedAction::StartService);
+    }
+
+    #[test]
+    fn classify_multiple_stopped_machines_is_prepare() {
+        let machine = PodmanMachineStatus::Stopped {
+            names: vec!["a".to_string(), "b".to_string()],
+        };
+        let (_, action, _) = classify_podman_machine(&machine, false);
+        assert_eq!(action, RecommendedAction::PrepareHostRuntime);
+    }
+
+    #[test]
+    fn preferred_connection_prefers_ato_machine() {
+        let names = vec![
+            "podman-machine-default".to_string(),
+            "ato-podman".to_string(),
+        ];
+        assert_eq!(preferred_running_connection(&names), Some("ato-podman"));
+    }
+
+    #[test]
+    fn preferred_connection_falls_back_to_first_running() {
+        let names = vec!["podman-machine-default".to_string()];
+        assert_eq!(
+            preferred_running_connection(&names),
+            Some("podman-machine-default")
+        );
+        assert_eq!(preferred_running_connection(&[]), None);
+    }
+
+    #[test]
+    fn classify_unknown_machine_state_is_repair() {
+        let machine = PodmanMachineStatus::Unknown {
+            reason: "boom".to_string(),
+        };
+        let (_, action, _) = classify_podman_machine(&machine, false);
+        assert_eq!(action, RecommendedAction::RepairHostRuntime);
     }
 }
