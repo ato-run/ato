@@ -74,6 +74,8 @@
   "settings.nav.updates": "更新",
   "settings.nav.developer": "Developer",
   "settings.nav.secrets": "Secrets",
+  "settings.nav.engines": "Engines",
+  "settings.nav.runtime": "ランタイム",
   "settings.section.appearance": "外観",
   "settings.appearance.theme": "テーマ",
   "settings.appearance.theme.dark": "ダーク",

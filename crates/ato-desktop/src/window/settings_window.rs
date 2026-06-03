@@ -94,6 +94,20 @@ pub struct ActiveSettingsShell(pub Option<WeakEntity<SettingsWindowShell>>);
 
 impl gpui::Global for ActiveSettingsShell {}
 
+/// Push a Runtime Setup payload to the settings WebView, if one is open.
+/// No-op when settings is not the active surface. Settings shares its single
+/// `__ATO_SETTINGS_HYDRATE__` hook for all payloads; the JS filters on the
+/// `runtimeSetup*` / `runtimeInstall*` fields. Used by
+/// [`crate::runtime_setup`] to fan a payload out to whichever surface is live.
+pub fn hydrate_active_runtime_setup(cx: &mut App, payload_json: &str) {
+    let weak = cx
+        .try_global::<ActiveSettingsShell>()
+        .and_then(|g| g.0.clone());
+    if let Some(entity) = weak.and_then(|w| w.upgrade()) {
+        entity.update(cx, |shell, _cx| shell.hydrate(payload_json));
+    }
+}
+
 /// Slot tracking the single open Settings window so repeated
 /// `ShowSettings` dispatches focus the existing window instead of
 /// spawning duplicates — same pattern as `StoreWindowSlot`.

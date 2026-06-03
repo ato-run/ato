@@ -74,7 +74,7 @@ pub fn install_panic_hook() {
             os = std::env::consts::OS,
             arch = std::env::consts::ARCH,
         );
-        let _report_path = write_crash_report(&report);
+        let report_path = write_crash_report(&report);
 
         #[cfg(target_os = "windows")]
         show_dialog(
