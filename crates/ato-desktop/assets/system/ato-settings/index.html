@@ -274,6 +274,7 @@
       <div class="nav-item" data-tab="developer">Developer</div>
       <div class="nav-item" data-tab="secrets">Secrets</div>
       <div class="nav-item" data-tab="engines">Engines</div>
+      <div class="nav-item" data-tab="runtime">Runtime</div>
     </div>
 
     <!-- MAIN PANEL -->
@@ -568,6 +569,52 @@
         </div>
 
       </div>
+
+      <!-- ── Runtime Setup ── -->
+      <div class="tab-content" id="tab-runtime">
+        <div id="runtime-error" class="error-banner" style="display:none;"></div>
+
+        <!-- Status -->
+        <div class="block">
+          <div style="display:flex; align-items:center; justify-content:space-between;">
+            <div class="block-title" style="margin:0;">Runtime tools</div>
+            <button class="btn" id="runtime-refresh-btn" style="font-size:12px; padding:2px 10px;">Refresh</button>
+          </div>
+          <div id="runtime-status-msg" class="state-msg">Checking runtime tools…</div>
+          <div id="runtime-tools-list"></div>
+        </div>
+
+        <!-- Install Ato-managed language runtimes -->
+        <div class="block">
+          <div class="block-title">Install Ato-managed language runtimes</div>
+          <div class="row">
+            <span class="row-label">Node.js</span>
+            <div class="toggle-track on" id="tog-rt-node" data-tool="node"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="row">
+            <span class="row-label">uv</span>
+            <div class="toggle-track on" id="tog-rt-uv" data-tool="uv"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="row">
+            <span class="row-label">Python</span>
+            <div class="toggle-track on" id="tog-rt-python" data-tool="python"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="form-row" style="justify-content:flex-end;">
+            <button class="btn btn-primary" id="runtime-install-btn">Install selected tools</button>
+          </div>
+        </div>
+
+        <!-- Logs -->
+        <div class="block">
+          <div class="row">
+            <div class="row-label-group">
+              <span class="row-label">Diagnostics</span>
+              <span class="row-sublabel">Open the desktop log directory to inspect runtime-setup failures.</span>
+            </div>
+            <button class="btn" id="runtime-logs-btn">Open logs</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -620,6 +667,7 @@ const TAB_KEYS = {
   developer: 'settings.nav.developer',
   secrets:   'settings.nav.secrets',
   engines:   'settings.nav.engines',
+  runtime:   'settings.nav.runtime',
 };
 
 function showTab(tabId) {
@@ -637,6 +685,11 @@ function showTab(tabId) {
   }
   if (tabId === 'engines') {
     BRIDGE({ kind: 'loadEnginesDiagnostics', requestId: nextReqId() });
+  }
+  if (tabId === 'runtime' && !_runtimeLoaded) {
+    // Feature-level Runtime Setup command — same IPC the onboarding Step 5
+    // panel uses. Note runtime-setup commands use snake_case `request_id`.
+    BRIDGE({ kind: 'runtime_setup_status', request_id: nextReqId() });
   }
 }
 
@@ -866,8 +919,22 @@ window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
       updatePodmanDiagnostics(payload.engineDiagnostics.podman);
     }
   }
+  // ── Runtime Setup (shared feature IPC) ──
+  let runtimeTouched = false;
+  if (payload && payload.runtimeSetupStatus) { renderRuntimeStatus(payload.runtimeSetupStatus); runtimeTouched = true; }
+  if (payload && payload.runtimeInstallStarted) { setRuntimeInstalling(true); runtimeTouched = true; }
+  if (payload && payload.runtimeInstallProgress) { updateRuntimeProgress(payload.runtimeInstallProgress); runtimeTouched = true; }
+  if (payload && payload.runtimeInstallComplete) { onRuntimeInstallComplete(payload.runtimeInstallComplete); runtimeTouched = true; }
+  if (payload && payload.runtimeInstallCancelled !== undefined) { setRuntimeInstalling(false); runtimeTouched = true; }
+  if (payload && payload.runtimeSetupLogsOpened) { runtimeTouched = true; }
+
   if (payload && !payload.ok && payload.error) {
-    showSecretsError(payload.error.message || String(payload.error));
+    const msg = payload.error.message || String(payload.error);
+    // Route the error to the surface the user is actually looking at: the
+    // runtime status probe and the secrets editor share the generic error
+    // envelope.
+    if (runtimeTouched || isRuntimeContext()) { showRuntimeError(msg); }
+    else { showSecretsError(msg); }
   }
 };
 
@@ -1047,6 +1114,145 @@ document.getElementById('grant-btn').addEventListener('click', () => {
 
 document.getElementById('diag-refresh-btn').addEventListener('click', () => {
   BRIDGE({ kind: 'loadEnginesDiagnostics', requestId: nextReqId() });
+});
+
+// ── Runtime Setup tab ──────────────────────────────────────────────────────────
+let _runtimeLoaded = false;
+let _runtimeInstalling = false;
+
+const RT_TOOL_LABELS = {
+  podman: 'Podman', docker_desktop: 'Docker Desktop',
+  node: 'Node.js', uv: 'uv', python: 'Python',
+  ato_helper: 'Ato helper', nacelle: 'Nacelle',
+};
+
+function isRuntimeContext() {
+  const t = document.getElementById('tab-runtime');
+  return _runtimeInstalling || (t && t.classList.contains('visible'));
+}
+
+function showRuntimeError(msg) {
+  const el = document.getElementById('runtime-error');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = '';
+  setTimeout(() => { el.style.display = 'none'; }, 8000);
+}
+
+function runtimePill(tool) {
+  if (tool.ready) return ['green', 'Ready'];
+  switch (tool.action) {
+    case 'install_managed': return ['yellow', 'Will install'];
+    case 'upgrade_managed': return ['yellow', 'Update available'];
+    case 'start_service':   return ['yellow', 'Not running'];
+    case 'open_instructions': return ['gray', 'Not installed'];
+    case 'bundle_repair_required': return ['red', 'Missing'];
+    default: return ['gray', tool.installed ? 'Installed' : 'Missing'];
+  }
+}
+
+function renderRuntimeStatus(status) {
+  _runtimeLoaded = true;
+  const msg = document.getElementById('runtime-status-msg');
+  const list = document.getElementById('runtime-tools-list');
+  if (!list) return;
+  if (msg) msg.style.display = 'none';
+  while (list.firstChild) list.removeChild(list.firstChild);
+  for (const tool of (status.tools || [])) {
+    const [color, label] = runtimePill(tool);
+    const row = document.createElement('div');
+    row.className = 'diag-row';
+    row.style.justifyContent = 'space-between';
+
+    const left = document.createElement('span');
+    left.className = 'diag-value';
+    left.innerHTML = '<span class="diag-dot ' + color + '"></span>' + (RT_TOOL_LABELS[tool.kind] || tool.kind);
+
+    const right = document.createElement('span');
+    right.style.fontSize = '12px';
+    right.style.color = 'var(--muted)';
+    right.textContent = label;
+
+    row.appendChild(left);
+    row.appendChild(right);
+    list.appendChild(row);
+
+    if (tool.message) {
+      const m = document.createElement('div');
+      m.style.fontSize = '11px';
+      m.style.color = 'var(--soft)';
+      m.style.margin = '2px 0 8px 16px';
+      m.textContent = tool.message;
+      list.appendChild(m);
+    }
+  }
+}
+
+function setRuntimeInstalling(on) {
+  _runtimeInstalling = on;
+  const btn = document.getElementById('runtime-install-btn');
+  if (btn) {
+    btn.disabled = on;
+    btn.textContent = on ? 'Installing…' : 'Install selected tools';
+  }
+}
+
+function updateRuntimeProgress(ev) {
+  const msg = document.getElementById('runtime-status-msg');
+  if (msg) {
+    msg.style.display = '';
+    msg.textContent = (RT_TOOL_LABELS[ev.tool] || ev.tool) + ': ' + (ev.message || ev.phase);
+  }
+}
+
+function onRuntimeInstallComplete(c) {
+  setRuntimeInstalling(false);
+  if (c.status) renderRuntimeStatus(c.status);
+  if (!c.success && c.error) {
+    showRuntimeError(c.error);
+  } else if (c.canceled) {
+    const msg = document.getElementById('runtime-status-msg');
+    if (msg) { msg.style.display = ''; msg.textContent = 'Install cancelled.'; }
+  }
+}
+
+['tog-rt-node', 'tog-rt-uv', 'tog-rt-python'].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('click', () => setToggleState(el, !el.classList.contains('on')));
+});
+
+function selectedRuntimeTools() {
+  return ['node', 'uv', 'python'].filter(t => {
+    const el = document.getElementById('tog-rt-' + t);
+    return el && el.classList.contains('on');
+  });
+}
+
+document.getElementById('runtime-refresh-btn').addEventListener('click', () => {
+  BRIDGE({ kind: 'runtime_setup_status', request_id: nextReqId() });
+});
+
+document.getElementById('runtime-install-btn').addEventListener('click', () => {
+  if (_runtimeInstalling) return;
+  const tools = selectedRuntimeTools();
+  if (tools.length === 0) { showRuntimeError('Select at least one runtime to install.'); return; }
+  // Persist only the managed-runtime install toggles this tab owns. Podman is
+  // deliberately omitted (not sent) so a user who opted out of Podman during
+  // onboarding is not silently re-enabled — the backend preserves any field
+  // left out of this command.
+  BRIDGE({
+    kind: 'save_runtime_setup_settings',
+    node_install_enabled: document.getElementById('tog-rt-node').classList.contains('on'),
+    uv_install_enabled: document.getElementById('tog-rt-uv').classList.contains('on'),
+    python_install_enabled: document.getElementById('tog-rt-python').classList.contains('on'),
+  });
+  setRuntimeInstalling(true);
+  BRIDGE({ kind: 'install_runtime_tools', request_id: nextReqId(), tools });
+});
+
+document.getElementById('runtime-logs-btn').addEventListener('click', () => {
+  BRIDGE({ kind: 'open_runtime_setup_logs', request_id: nextReqId() });
 });
 
 (function init() {
