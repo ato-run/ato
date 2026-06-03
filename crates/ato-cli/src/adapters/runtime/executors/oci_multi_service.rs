@@ -1234,8 +1234,6 @@ fn prepare_writable_ownership_mount_sources(
     service_name: &str,
     mounts: &[OciMountSpec],
 ) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     for mount in mounts {
         if mount.readonly || mount.ownership.is_none() {
             continue;
@@ -1258,20 +1256,33 @@ fn prepare_writable_ownership_mount_sources(
             continue;
         };
 
-        let meta = std::fs::metadata(&mount.source).with_context(|| {
-            format!(
-                "service '{}': failed to stat mount source '{}'",
-                service_name, mount.source
-            )
-        })?;
-        let mut perms = meta.permissions();
-        perms.set_mode(mode_bits);
-        std::fs::set_permissions(&mount.source, perms).with_context(|| {
-            format!(
-                "service '{}': failed to chmod mount source '{}' to {:o}",
-                service_name, mount.source, mode_bits
-            )
-        })?;
+        // POSIX mode bits only have meaning on Unix hosts. On Windows the OCI
+        // engine (Docker Desktop) manages mount permissions inside its own
+        // Linux VM, so a host-side chmod is impossible and unnecessary — the
+        // directory creation above is the portable part. Gating this keeps
+        // `ato-cli` compiling on the Windows desktop target. (#377)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&mount.source).with_context(|| {
+                format!(
+                    "service '{}': failed to stat mount source '{}'",
+                    service_name, mount.source
+                )
+            })?;
+            let mut perms = meta.permissions();
+            perms.set_mode(mode_bits);
+            std::fs::set_permissions(&mount.source, perms).with_context(|| {
+                format!(
+                    "service '{}': failed to chmod mount source '{}' to {:o}",
+                    service_name, mount.source, mode_bits
+                )
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = mode_bits;
+        }
     }
     Ok(())
 }
@@ -3413,6 +3424,10 @@ volumes:
         }
     }
 
+    // Uses a host filesystem path as the mount source; the named-volume
+    // heuristic (`source.contains('/')`) and the directory layout assume
+    // POSIX path separators, so this is a Unix-only assertion.
+    #[cfg(unix)]
     #[test]
     fn prepare_mounts_creates_dir_for_writable_ownership_mounts() {
         let dir = tempfile::tempdir().unwrap();
@@ -3426,6 +3441,7 @@ volumes:
         assert!(source.exists(), "source directory must be created");
     }
 
+    #[cfg(unix)]
     #[test]
     fn prepare_mounts_applies_mode_when_declared() {
         use std::os::unix::fs::PermissionsExt;
@@ -3441,6 +3457,7 @@ volumes:
         assert_eq!(mode, 0o777, "mode must be applied when ownership.mode is Some");
     }
 
+    #[cfg(unix)]
     #[test]
     fn prepare_mounts_does_not_chmod_when_mode_is_none() {
         use std::os::unix::fs::PermissionsExt;
