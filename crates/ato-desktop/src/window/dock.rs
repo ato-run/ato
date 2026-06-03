@@ -194,12 +194,12 @@ impl Render for DockWebView {
     }
 }
 
-pub fn open_external_url(cx: &mut App, url: &str) -> Result<()> {
+pub fn open_external_url(cx: &mut App, url: &str) -> Result<gpui::AnyWindowHandle> {
     let parsed = Url::parse(url).with_context(|| format!("Invalid URL: {url}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         anyhow::bail!("Dock can open only http(s) URLs");
     }
-    crate::window::open_app_window(cx, GuestRoute::ExternalUrl(parsed)).map(|_| ())
+    crate::window::open_app_window(cx, GuestRoute::ExternalUrl(parsed))
 }
 
 pub fn cleanup_dock_window(cx: &mut App) {
