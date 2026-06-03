@@ -3497,6 +3497,12 @@ where
         if let Some((_, db_url)) = resolved_env.iter().find(|(k, _)| k == "DATABASE_URL") {
             tracing::info!(%db_url, "prestart DATABASE_URL resolved");
         }
+        // The prestart hook runs as a POSIX shell script on the host. On a
+        // platform without `/bin/sh` (Windows lacking Git Bash/MSYS2) the
+        // spawn below would fail with an opaque "os error 2" → generic E999.
+        // Gate it with a typed, actionable error instead (issue #377). No-op
+        // on Linux/macOS where a shell is always present.
+        crate::application::shell_preflight::ensure_host_posix_shell(&command)?;
         let mut cmd = std::process::Command::new("sh");
         cmd.arg("-c")
             .arg(&command)
@@ -3505,7 +3511,24 @@ where
         for (key, value) in &resolved_env {
             cmd.env(key, value);
         }
-        let mut child = cmd.spawn().context("failed to spawn prestart command")?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            // Defense in depth: if the shell probe passed but the spawn still
+            // can't find `sh` (PATH race, broken symlink), translate the
+            // file-not-found failure into the same typed error rather than a
+            // bare spawn context that maps to E999.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(
+                    crate::application::shell_preflight::source_build_shell_unavailable_error(
+                        &command,
+                        std::env::consts::OS,
+                    ),
+                );
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context("failed to spawn prestart command"));
+            }
+        };
         let status = child.wait().context("prestart command wait failed")?;
         if !status.success() {
             anyhow::bail!(
