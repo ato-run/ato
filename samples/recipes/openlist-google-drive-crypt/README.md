@@ -20,12 +20,18 @@ For local development from this recipe directory:
 OPENLIST_ADMIN_PASSWORD='replace-with-a-strong-password' ato run .
 ```
 
-Open `http://127.0.0.1:5244/` and sign in with:
+When the container is ready, Ato prints the loopback URL, for example:
+
+```
+🌐 OCI service available at http://127.0.0.1:PORT/
+```
+
+Open that URL and sign in with:
 
 - Username: `admin`
 - Password: the value of `OPENLIST_ADMIN_PASSWORD`
 
-The default Ato target only exposes OpenList over loopback HTTP. It does not bind ports 80 or 443.
+The host port is auto-allocated on each run. The default Ato target only exposes OpenList over loopback HTTP. It does not bind ports 80 or 443.
 
 ## Ato Runtime Smoke (Required Before Merge)
 
@@ -40,18 +46,23 @@ export OPENLIST_ADMIN_PASSWORD='dummy-password'
 
 mkdir -p "$ATO_HOME" "$OPENLIST_STATE_DIR"
 
-cargo run -p ato-cli -- run ./capsule.toml --yes --state data="$OPENLIST_STATE_DIR"
-curl -I -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5244/
+cargo run -p ato-cli -- run ./capsule.toml --yes --state data="$OPENLIST_STATE_DIR" 2>&1 | tee /tmp/ato-openlist-run.log &
+ATO_PID=$!
+# Wait for the emitted loopback URL, then curl it
+ATO_URL=$(grep -m1 '🌐 OCI service available at' /tmp/ato-openlist-run.log 2>/dev/null | grep -oE 'http://[^ ]+')
+curl -I -s -o /dev/null -w '%{http_code}\n' "$ATO_URL"
 
-# stop + restart with same ATO_HOME/state binding
-cargo run -p ato-cli -- stop --all --force
-cargo run -p ato-cli -- run ./capsule.toml --yes --state data="$OPENLIST_STATE_DIR"
-curl -I -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5244/
+# stop + restart with same state binding
+kill $ATO_PID 2>/dev/null; cargo run -p ato-cli -- stop --all --force
+cargo run -p ato-cli -- run ./capsule.toml --yes --state data="$OPENLIST_STATE_DIR" 2>&1 | tee /tmp/ato-openlist-run2.log &
+ATO_PID=$!
+ATO_URL=$(grep -m1 '🌐 OCI service available at' /tmp/ato-openlist-run2.log 2>/dev/null | grep -oE 'http://[^ ]+')
+curl -I -s -o /dev/null -w '%{http_code}\n' "$ATO_URL"
 ```
 
 Expected result:
 
-- Both curl checks return `200`.
+- Both curl checks return `200` against the emitted loopback URL (auto-allocated port, not a fixed port).
 - OpenList initializes successfully on first run (no DB/config write failure).
 - Admin/session/storage settings remain after stop and restart when reusing the same `--state data=...` directory.
 
@@ -107,7 +118,7 @@ For non-standard public ports, pass the full `domain:port` value in `Host` and `
 ## Verification Checklist
 
 - OpenList starts from the Ato capsule.
-- `http://127.0.0.1:5244/` returns HTTP 200 and shows the login UI.
+- The emitted loopback URL (`🌐 OCI service available at http://127.0.0.1:PORT/`) returns HTTP 200 and shows the login UI.
 - Missing `OPENLIST_ADMIN_PASSWORD` blocks launch before the container starts.
 - `/opt/openlist/data` is backed by persistent Ato state, is writable by OpenList, and survives restart.
 - A test Google Drive driver points to an `encrypted_storage` folder.
