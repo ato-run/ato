@@ -90,6 +90,15 @@ pub enum ContentWindowKind {
     Settings,
     Dock,
     Onboarding,
+    /// `ato-launch` consent / boot / GitHub run wizard windows. These
+    /// are top-level WebView surfaces and should appear in Open Windows,
+    /// but they are not restartable capsule AppWindows.
+    Launch,
+    /// `ato-import` review windows, including GitHub import and
+    /// community recipe review.
+    Import,
+    /// Embedded auth login WebView opened by `ato login --desktop-webview`.
+    Auth,
 }
 
 #[derive(Clone, Debug)]
