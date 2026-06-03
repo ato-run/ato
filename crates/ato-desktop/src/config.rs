@@ -613,7 +613,7 @@ fn default_store_site_url() -> String {
     "https://ato.run".to_string()
 }
 
-fn default_local_registry_port() -> u16 {
+pub(crate) fn default_local_registry_port() -> u16 {
     8080
 }
 
