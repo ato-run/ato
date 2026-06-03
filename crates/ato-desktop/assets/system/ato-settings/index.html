@@ -584,9 +584,28 @@
           <div id="runtime-tools-list"></div>
         </div>
 
+        <!-- Host runtimes -->
+        <div class="block">
+          <div class="block-title">Host runtimes</div>
+          <div class="row">
+            <div class="row-label-group">
+              <span class="row-label">Podman</span>
+              <span class="row-sublabel">Runs container-based apps locally. Ato uses an Ato-managed machine named ato-podman when prepared.</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span id="podman-rt-status" class="diag-value"><span class="diag-dot gray"></span>—</span>
+              <button class="btn btn-primary" id="podman-prepare-btn">Prepare</button>
+            </div>
+          </div>
+          <div id="podman-rt-detail" style="font-size:11px; color:var(--soft); margin:2px 0 0 0;"></div>
+          <div class="form-row" style="justify-content:flex-end;">
+            <button class="btn" id="podman-disable-btn">Disable Podman</button>
+          </div>
+        </div>
+
         <!-- Install Ato-managed language runtimes -->
         <div class="block">
-          <div class="block-title">Install Ato-managed language runtimes</div>
+          <div class="block-title">Ato-managed language runtimes</div>
           <div class="row">
             <span class="row-label">Node.js</span>
             <div class="toggle-track on" id="tog-rt-node" data-tool="node"><div class="toggle-knob"></div></div>
@@ -1119,11 +1138,27 @@ document.getElementById('diag-refresh-btn').addEventListener('click', () => {
 // ── Runtime Setup tab ──────────────────────────────────────────────────────────
 let _runtimeLoaded = false;
 let _runtimeInstalling = false;
+// Which streamed job is active ('install' | 'prepare' | null). Install
+// provisions Ato-managed language toolchains; prepare mutates host runtime
+// state (Podman). They never run concurrently.
+let _runtimeJob = null;
+let _lastPodmanTool = null;
 
 const RT_TOOL_LABELS = {
   podman: 'Podman', docker_desktop: 'Docker Desktop',
   node: 'Node.js', uv: 'uv', python: 'Python',
   ato_helper: 'Ato helper', nacelle: 'Nacelle',
+};
+
+// Podman status actions an explicit Prepare can resolve (others, e.g.
+// open_instructions, are not auto-preparable — the row shows guidance only).
+const PODMAN_PREPARE_ACTIONS = new Set(['prepare_host_runtime', 'start_service', 'repair_host_runtime']);
+// Host-runtime prepare phases (PR #440) → human display, keyed off the
+// structured phase token, never an English backend message.
+const PODMAN_PHASE_LABELS = {
+  queued: 'Queued', locating: 'Checking Podman', installing: 'Installing Podman',
+  initializing_machine: 'Creating ato-podman', starting_machine: 'Starting ato-podman',
+  verifying: 'Verifying Podman', ready: 'Podman is ready', failed: 'Podman setup failed',
 };
 
 function isRuntimeContext() {
@@ -1145,6 +1180,8 @@ function runtimePill(tool) {
     case 'install_managed': return ['yellow', 'Will install'];
     case 'upgrade_managed': return ['yellow', 'Update available'];
     case 'start_service':   return ['yellow', 'Not running'];
+    case 'prepare_host_runtime': return ['yellow', 'Needs setup'];
+    case 'repair_host_runtime':  return ['yellow', 'Needs repair'];
     case 'open_instructions': return ['gray', 'Not installed'];
     case 'bundle_repair_required': return ['red', 'Missing'];
     default: return ['gray', tool.installed ? 'Installed' : 'Missing'];
@@ -1186,22 +1223,94 @@ function renderRuntimeStatus(status) {
       list.appendChild(m);
     }
   }
+  // Drive the actionable Host-runtimes Podman row from the same status.
+  renderPodmanRow((status.tools || []).find(t => t.kind === 'podman'));
 }
 
-function setRuntimeInstalling(on) {
-  _runtimeInstalling = on;
+// ── Host runtimes: Podman prepare row ───────────────────────────────────────
+function podmanRowStatus(tool) {
+  if (!tool) return ['gray', 'Unknown'];
+  if (tool.ready) return ['green', 'Ready'];
+  switch (tool.action) {
+    case 'prepare_host_runtime': return ['yellow', 'Needs setup'];
+    case 'start_service':        return ['yellow', 'Stopped'];
+    case 'repair_host_runtime':  return ['yellow', 'Needs repair'];
+    case 'open_instructions':    return ['gray', tool.installed ? 'Unsupported' : 'Not installed'];
+    default:                     return ['gray', tool.installed ? 'Installed' : 'Missing'];
+  }
+}
+
+function podmanPrepareLabel(tool) {
+  switch (tool && tool.action) {
+    case 'start_service':       return 'Start / Prepare';
+    case 'repair_host_runtime': return 'Repair';
+    default:                    return 'Prepare';
+  }
+}
+
+function renderPodmanRow(tool) {
+  _lastPodmanTool = tool || null;
+  const statusEl = document.getElementById('podman-rt-status');
+  const detailEl = document.getElementById('podman-rt-detail');
+  const prepBtn  = document.getElementById('podman-prepare-btn');
+  const disBtn   = document.getElementById('podman-disable-btn');
+  if (statusEl) {
+    const [color, label] = podmanRowStatus(tool);
+    statusEl.innerHTML = '<span class="diag-dot ' + color + '"></span>' + label;
+  }
+  if (detailEl) {
+    const parts = [];
+    if (tool && tool.version) parts.push('v' + tool.version);
+    if (tool && tool.message) parts.push(tool.message);
+    detailEl.textContent = parts.join(' — ');
+  }
+  if (prepBtn) {
+    if (tool && tool.ready) {
+      prepBtn.textContent = 'Ready';
+      prepBtn.disabled = true;
+    } else if (tool && PODMAN_PREPARE_ACTIONS.has(tool.action)) {
+      prepBtn.textContent = podmanPrepareLabel(tool);
+      prepBtn.disabled = _runtimeInstalling;
+    } else {
+      // open_instructions / unknown host — not auto-preparable.
+      prepBtn.textContent = 'Prepare';
+      prepBtn.disabled = true;
+    }
+  }
+  if (disBtn) disBtn.disabled = _runtimeInstalling;
+}
+
+function setRuntimeInstalling(on, job) {
+  _runtimeInstalling = !!on;
+  _runtimeJob = on ? (job || _runtimeJob || 'install') : null;
   const btn = document.getElementById('runtime-install-btn');
   if (btn) {
-    btn.disabled = on;
-    btn.textContent = on ? 'Installing…' : 'Install selected tools';
+    btn.disabled = _runtimeInstalling;
+    btn.textContent = _runtimeJob === 'install' ? 'Installing…' : 'Install selected tools';
   }
+  const prepBtn = document.getElementById('podman-prepare-btn');
+  if (prepBtn) {
+    if (_runtimeJob === 'prepare') { prepBtn.disabled = true; prepBtn.textContent = 'Preparing…'; }
+    else if (_runtimeInstalling)  { prepBtn.disabled = true; }
+  }
+  const disBtn = document.getElementById('podman-disable-btn');
+  if (disBtn) disBtn.disabled = _runtimeInstalling;
+  // When the job clears, restore the Podman row buttons from the last status.
+  if (!_runtimeInstalling) renderPodmanRow(_lastPodmanTool);
 }
 
 function updateRuntimeProgress(ev) {
   const msg = document.getElementById('runtime-status-msg');
+  const label = ev.tool === 'podman'
+    ? (PODMAN_PHASE_LABELS[ev.phase] || ev.message || ev.phase)
+    : (ev.message || ev.phase);
   if (msg) {
     msg.style.display = '';
-    msg.textContent = (RT_TOOL_LABELS[ev.tool] || ev.tool) + ': ' + (ev.message || ev.phase);
+    msg.textContent = (RT_TOOL_LABELS[ev.tool] || ev.tool) + ': ' + label;
+  }
+  if (ev.tool === 'podman') {
+    const detailEl = document.getElementById('podman-rt-detail');
+    if (detailEl) detailEl.textContent = label;
   }
 }
 
@@ -1253,6 +1362,23 @@ document.getElementById('runtime-install-btn').addEventListener('click', () => {
 
 document.getElementById('runtime-logs-btn').addEventListener('click', () => {
   BRIDGE({ kind: 'open_runtime_setup_logs', request_id: nextReqId() });
+});
+
+// Explicit Podman preparation (the only path that may set podman_enabled:true
+// and mutate host runtime state). Language installs never send podman_enabled.
+document.getElementById('podman-prepare-btn').addEventListener('click', () => {
+  if (_runtimeInstalling) return;
+  BRIDGE({ kind: 'save_runtime_setup_settings', podman_enabled: true });
+  setRuntimeInstalling(true, 'prepare');
+  BRIDGE({ kind: 'prepare_runtime_tools', request_id: nextReqId(), tools: ['podman'] });
+});
+
+// Explicit opt-out: persist podman_enabled:false and re-probe so the row
+// reflects the disabled intent. Only this explicit action turns Podman off.
+document.getElementById('podman-disable-btn').addEventListener('click', () => {
+  if (_runtimeInstalling) return;
+  BRIDGE({ kind: 'save_runtime_setup_settings', podman_enabled: false });
+  BRIDGE({ kind: 'runtime_setup_status', request_id: nextReqId() });
 });
 
 (function init() {

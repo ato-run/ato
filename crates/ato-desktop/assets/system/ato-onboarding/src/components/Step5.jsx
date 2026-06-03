@@ -11,6 +11,14 @@ const pillTones = {
 }
 
 const installActionKinds = new Set(['install_managed', 'upgrade_managed'])
+// Podman status actions that an explicit user "Prepare" can resolve. Anything
+// else (e.g. `open_instructions` for an unsupported host or a missing package
+// manager) is not auto-preparable — the UI shows guidance and a skip path.
+const podmanPrepareActions = new Set([
+  'prepare_host_runtime',
+  'start_service',
+  'repair_host_runtime',
+])
 const progressLabels = {
   queued: 'Queued',
   downloading: 'Downloading',
@@ -18,6 +26,18 @@ const progressLabels = {
   installing: 'Installing',
   ready: 'Ready',
   failed: 'Failed',
+}
+// Host-runtime prepare phases (PR #440) → human display. Keyed off the
+// structured `phase` token, never an English backend message.
+const podmanPhaseLabels = {
+  queued: 'Queued',
+  locating: 'Checking Podman',
+  installing: 'Installing Podman',
+  initializing_machine: 'Creating ato-podman',
+  starting_machine: 'Starting ato-podman',
+  verifying: 'Verifying Podman',
+  ready: 'Podman is ready',
+  failed: 'Podman setup failed',
 }
 
 let requestCounter = 0
@@ -56,6 +76,33 @@ function detectionStatusPill({ checked = true, tool }) {
   if (tool.installed && tool.action === 'start_service') return { label: 'Not running', tone: 'amber' }
   if (tool.installed && !tool.supported) return { label: 'Unsupported', tone: 'rose' }
   return { label: 'Missing', tone: 'amber' }
+}
+
+// Podman is a host runtime Ato can *prepare* on explicit opt-in (install +
+// create/start the `ato-podman` machine). Classify from the structured
+// `ready`/`action` fields and any live prepare progress — never message text.
+function podmanStatusPill({ checked, tool, progress }) {
+  if (!checked) return { label: 'Disabled', tone: 'slate' }
+  if (progress?.phase) {
+    return {
+      label: podmanPhaseLabels[progress.phase] || progress.phase,
+      tone: progress.phase === 'failed' ? 'rose' : progress.phase === 'ready' ? 'emerald' : 'amber',
+    }
+  }
+  if (!tool) return { label: 'Checking', tone: 'slate' }
+  if (tool.ready) return { label: 'Ready', tone: 'emerald' }
+  switch (tool.action) {
+    case 'prepare_host_runtime':
+      return { label: 'Needs setup', tone: 'violet' }
+    case 'start_service':
+      return { label: 'Stopped', tone: 'amber' }
+    case 'repair_host_runtime':
+      return { label: 'Needs repair', tone: 'amber' }
+    case 'open_instructions':
+      return { label: tool.installed ? 'Unsupported' : 'Not installed', tone: 'amber' }
+    default:
+      return { label: tool.installed ? 'Installed' : 'Missing', tone: 'amber' }
+  }
 }
 
 function bundledStatusPill(tool) {
@@ -183,6 +230,15 @@ export default function Step5({
   const [installing, setInstalling] = useState(false)
   const [installError, setInstallError] = useState(null)
   const [progressByTool, setProgressByTool] = useState({})
+  // Which streamed job is running ('install' | 'prepare' | null) — drives the
+  // busy label and lets the completion handler chain managed-install → Podman
+  // prepare. Mirrored into refs so the once-bound hydrate listener and key
+  // handler read the latest value without re-subscribing.
+  const [activeJob, setActiveJob] = useState(null)
+  const activeJobRef = useRef(null)
+  activeJobRef.current = activeJob
+  const prepareQueuedRef = useRef(false)
+  const startPrepareRef = useRef(() => {})
 
   useEffect(() => {
     const previousHydrate = window.__ATO_ONBOARDING_HYDRATE__
@@ -198,11 +254,14 @@ export default function Step5({
         setChecking(false)
       }
       if (payload.runtimeInstallStarted) {
+        // Merge (don't replace): a chained Podman prepare must not erase the
+        // managed-tool rows that already finished, so the combined activity
+        // list stays intact.
         const queued = Object.fromEntries((payload.runtimeInstallStarted.tools || []).map((tool) => [
           tool,
           { phase: 'queued', message: 'Queued' },
         ]))
-        setProgressByTool(queued)
+        setProgressByTool((current) => ({ ...current, ...queued }))
         setInstalling(true)
         setInstallError(null)
       }
@@ -217,11 +276,22 @@ export default function Step5({
       }
       if (payload.runtimeInstallComplete) {
         const complete = payload.runtimeInstallComplete
-        setInstalling(false)
         if (complete.status) {
           setRuntimeStatus(complete.status)
         }
-        setInstallError(complete.success ? null : complete.error || 'Runtime install failed')
+        if (complete.success && activeJobRef.current === 'install' && prepareQueuedRef.current) {
+          // Managed install finished — chain straight into Podman prepare
+          // without dropping the busy state (one user click, sequential work).
+          prepareQueuedRef.current = false
+          setInstallError(null)
+          startPrepareRef.current()
+        } else {
+          setInstalling(false)
+          setActiveJob(null)
+          activeJobRef.current = null
+          prepareQueuedRef.current = false
+          setInstallError(complete.success ? null : complete.error || 'Runtime setup failed')
+        }
       }
       if (payload.runtimeInstallCancelled) {
         setInstallError('Cancelling runtime install...')
@@ -276,27 +346,61 @@ export default function Step5({
   const selectedInstallTools = languageCards
     .filter((card) => card.checked && isInstallNeeded(tools[card.kind]))
     .map((card) => card.kind)
-  const hasInstallTargets = selectedInstallTools.length > 0
-  const failedInstall = Object.values(progressByTool).some((progress) => progress.phase === 'failed')
-  const primaryLabel = installing
-    ? 'Installing selected tools...'
-    : checking
-      ? 'Checking tools...'
-      : hasInstallTargets
-        ? failedInstall
-          ? 'Retry selected tools'
-          : 'Install selected tools'
-        : 'Continue'
+  const managedPending = selectedInstallTools.length > 0
+
+  // Podman is pending only when the user opted in, it isn't already ready, and
+  // its recommended action is one an explicit Prepare can resolve. This is the
+  // single source of truth for "the primary action must prepare, not finish".
+  const podmanTool = tools.podman
+  const podmanShouldPrepare =
+    podmanEnabled &&
+    !!podmanTool &&
+    !podmanTool.ready &&
+    podmanPrepareActions.has(podmanTool.action)
+  // Opted-in but not preparable (e.g. unsupported host / no package manager):
+  // show guidance, never trap — Continue still finishes, skip still offered.
+  const podmanNeedsInstructions =
+    podmanEnabled && !!podmanTool && !podmanTool.ready && podmanTool.action === 'open_instructions'
+
+  const hasPendingWork = managedPending || podmanShouldPrepare
+  const failedProgress = Object.values(progressByTool).some((progress) => progress.phase === 'failed')
+
+  let primaryLabel
+  if (installing) {
+    primaryLabel = activeJob === 'prepare' ? 'Preparing Podman...' : 'Installing selected tools...'
+  } else if (checking) {
+    primaryLabel = 'Checking tools...'
+  } else if (managedPending && podmanShouldPrepare) {
+    primaryLabel = failedProgress ? 'Retry setup' : 'Install and prepare selected tools'
+  } else if (managedPending) {
+    primaryLabel = failedProgress ? 'Retry selected tools' : 'Install selected tools'
+  } else if (podmanShouldPrepare) {
+    primaryLabel = failedProgress ? 'Retry Podman setup' : 'Prepare Podman'
+  } else {
+    primaryLabel = 'Continue'
+  }
   const primaryDisabled = installing || checking
 
-  const startInstall = () => {
-    if (!hasInstallTargets) return
+  const saveSettings = () => {
+    BRIDGE({
+      kind: 'save_runtime_setup_settings',
+      podman_enabled: podmanEnabled,
+      node_install_enabled: nodeInstallEnabled,
+      uv_install_enabled: uvInstallEnabled,
+      python_install_enabled: pythonInstallEnabled,
+    })
+  }
+
+  const startInstall = (prepareAfter) => {
     setInstalling(true)
     setInstallError(null)
-    setProgressByTool(Object.fromEntries(selectedInstallTools.map((tool) => [
-      tool,
-      { phase: 'queued', message: 'Queued' },
-    ])))
+    setActiveJob('install')
+    activeJobRef.current = 'install'
+    prepareQueuedRef.current = !!prepareAfter
+    setProgressByTool((current) => ({
+      ...current,
+      ...Object.fromEntries(selectedInstallTools.map((tool) => [tool, { phase: 'queued', message: 'Queued' }])),
+    }))
     BRIDGE({
       kind: 'install_runtime_tools',
       request_id: nextRequestId(),
@@ -304,14 +408,51 @@ export default function Step5({
     })
   }
 
+  const startPrepare = () => {
+    setInstalling(true)
+    setInstallError(null)
+    setActiveJob('prepare')
+    activeJobRef.current = 'prepare'
+    prepareQueuedRef.current = false
+    setProgressByTool((current) => ({ ...current, podman: { phase: 'queued', message: 'Queued' } }))
+    BRIDGE({
+      kind: 'prepare_runtime_tools',
+      request_id: nextRequestId(),
+      tools: ['podman'],
+    })
+  }
+  // Keep the ref pointed at the latest closure so the completion handler can
+  // chain managed-install → Podman prepare.
+  startPrepareRef.current = startPrepare
+
   const cancelInstall = () => {
-    setInstallError('Cancelling runtime install...')
+    setInstallError('Cancelling runtime setup...')
     BRIDGE({ kind: 'cancel_runtime_install', request_id: nextRequestId() })
   }
 
+  const skipPodman = () => {
+    // Explicit opt-out: disable Podman locally and persist false deterministically
+    // (via the finish override) so a failed/unavailable prepare never traps the
+    // user on the final step.
+    setPodmanEnabled(false)
+    onFinish({ podman_enabled: false })
+  }
+
   const handlePrimary = () => {
-    if (hasInstallTargets) startInstall()
-    else onFinish()
+    if (installing || checking) return
+    if (!hasPendingWork) {
+      onFinish()
+      return
+    }
+    // 1) persist settings  2) managed install (if selected)  3) Podman prepare.
+    // Install and prepare never run in parallel — prepare is chained after the
+    // install completes in the runtimeInstallComplete handler.
+    saveSettings()
+    if (managedPending) {
+      startInstall(podmanShouldPrepare)
+    } else {
+      startPrepare()
+    }
   }
 
   // App.jsx defers Enter/ArrowRight on the final step to us, so the keyboard
@@ -333,7 +474,11 @@ export default function Step5({
     return () => document.removeEventListener('keydown', onKey)
   }, [])
 
-  const podmanPill = detectionStatusPill({ checked: podmanEnabled, tool: tools.podman })
+  const podmanPill = podmanStatusPill({
+    checked: podmanEnabled,
+    tool: tools.podman,
+    progress: progressByTool.podman,
+  })
   const helperPill = bundledStatusPill(tools.ato_helper)
   const nacellePill = bundledStatusPill(tools.nacelle)
   const dockerPill = detectionStatusPill({ tool: tools.docker_desktop })
@@ -359,32 +504,40 @@ export default function Step5({
 
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3">
         <p className="text-[12px] font-bold tracking-widest text-slate-400 uppercase">
-          Container runtime
+          Container apps
         </p>
         <ToggleCard
           checked={podmanEnabled}
           onToggle={() => setPodmanEnabled((v) => !v)}
           disabled={installing}
           icon={Container}
-          title="Use existing Podman for containers"
+          title="Use Podman for container apps"
           status={podmanPill.label}
           statusTone={podmanPill.tone}
           control="switch"
           footer={
             <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap gap-2">
-                <StatusPill tone="amber">Detection only</StatusPill>
-                <StatusPill tone="slate">Ato will not install Podman automatically</StatusPill>
-              </div>
-              {tools.podman?.message && (
+              {progressByTool.podman?.message ? (
+                <p className="text-[12px] leading-snug text-slate-500">{progressByTool.podman.message}</p>
+              ) : tools.podman?.message ? (
                 <p className="text-[12px] leading-snug text-slate-500">{tools.podman.message}</p>
+              ) : null}
+              {!installing && podmanShouldPrepare && (
+                <p className="text-[12px] leading-snug text-violet-600">
+                  Ato will set this up when you continue — this may download packages or a VM image.
+                </p>
+              )}
+              {!installing && podmanNeedsInstructions && (
+                <p className="text-[12px] leading-snug text-amber-700">
+                  Ato can’t install Podman automatically here. Follow the guidance above, or skip Podman for now.
+                </p>
               )}
             </div>
           }
         >
-          Lets Ato use Podman as a container engine when a recipe needs one. If
-          Podman or Docker Desktop is missing, Ato shows setup instructions
-          instead of installing a container runtime.
+          Ato uses Podman to run container-based apps locally. When supported,
+          Ato can install Podman and create/start an Ato-managed machine named
+          ato-podman after you confirm. This may download packages or a VM image.
         </ToggleCard>
 
         <p className="mt-2 text-[12px] font-bold tracking-widest text-slate-400 uppercase">
@@ -458,13 +611,13 @@ export default function Step5({
         )}
       </div>
 
-      <div className={`shrink-0 mt-6 grid gap-3 ${installing || hasInstallTargets ? 'grid-cols-[0.75fr_1.25fr]' : 'grid-cols-1'}`}>
-        {(installing || hasInstallTargets) && (
+      <div className={`shrink-0 mt-6 grid gap-3 ${installing || hasPendingWork ? 'grid-cols-[0.75fr_1.25fr]' : 'grid-cols-1'}`}>
+        {(installing || hasPendingWork) && (
           <button
-            onClick={installing ? cancelInstall : onFinish}
+            onClick={installing ? cancelInstall : podmanShouldPrepare ? skipPodman : onFinish}
             className="w-full py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold text-[15px] hover:bg-slate-50 transition-colors flex justify-center items-center"
           >
-            {installing ? 'Cancel install' : 'Skip for now'}
+            {installing ? 'Cancel' : podmanShouldPrepare ? 'Skip Podman for now' : 'Skip for now'}
           </button>
         )}
         <button
