@@ -197,6 +197,10 @@ async fn stop_all_bounded(aa: gpui::AsyncApp, quit_after: bool) {
 
     // 2. Off the UI thread: run each stop on its own thread (source via the CLI
     //    stop path, OCI via the container stop path) and report results back.
+    //    `pending` tracks sessions we have not yet heard back from, so any that
+    //    never report can be resolved to a terminal state (not left `Stopping`).
+    let mut pending: std::collections::HashSet<String> =
+        requests.iter().map(|req| req.session_id.clone()).collect();
     let (tx, rx) = mpsc::channel::<(String, Result<bool, String>)>();
     for req in requests {
         let tx = tx.clone();
@@ -220,30 +224,43 @@ async fn stop_all_bounded(aa: gpui::AsyncApp, quit_after: bool) {
     let mut results: Vec<(String, Result<bool, String>)> = Vec::new();
     while results.len() < total && Instant::now() < deadline {
         match rx.try_recv() {
-            Ok(item) => results.push(item),
+            Ok(item) => {
+                pending.remove(&item.0);
+                results.push(item);
+            }
             Err(mpsc::TryRecvError::Empty) => be.timer(Duration::from_millis(100)).await,
             Err(mpsc::TryRecvError::Disconnected) => break,
         }
     }
     let stopped = results.len();
-    let forced = total - stopped;
-    if forced > 0 {
+    let unconfirmed = pending.len();
+    if unconfirmed > 0 {
+        // We do not force-kill in this PR, so call them "unconfirmed", not
+        // "forced". They are still moved out of `Stopping` below.
         tracing::warn!(
-            forced,
+            unconfirmed,
             total,
-            "tray: stop all — sessions did not confirm stop before timeout"
+            "tray: stop all — sessions did not confirm stop within timeout"
         );
     }
 
     // 4. On the UI thread: write terminal states and refresh running surfaces so
     //    `Stop All` empties the running list (Card Switcher / next Start open).
+    //    Sessions that confirmed get their real result; sessions that never
+    //    reported are resolved to `FailedToStop` so none are stuck `Stopping`.
     let _ = aa.update(|cx| {
         let registry = cx.global_mut::<SessionRegistry>();
         for (sid, result) in &results {
             registry.finish_stop_session(sid, result.clone());
         }
+        for sid in &pending {
+            registry.finish_stop_session(
+                sid,
+                Err("stop did not confirm within 12s".to_string()),
+            );
+        }
         crate::window::card_switcher::refresh_session_snapshot(cx);
-        tracing::info!(stopped, forced, "tray: stop all running apps complete");
+        tracing::info!(stopped, unconfirmed, "tray: stop all running apps complete");
     });
 
     // 5. Quit only after stops have completed (or timed out).
