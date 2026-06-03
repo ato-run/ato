@@ -20,6 +20,9 @@ import FeaturedApps from "../components/FeaturedApps.astro";
 
     <div class="absolute inset-0 z-10 flex flex-col">
       <div class="flex-1 overflow-y-auto px-8 pb-8 custom-scrollbar">
+        <!-- Running apps row — derived from the SessionRegistry (source + OCI),
+             not from visible windows. Populated by the snapshot script below. -->
+        <div id="runningAppsRow" class="hidden"></div>
         <SearchSection />
         <ActionCards />
         <EmptyStateSection />
@@ -53,6 +56,59 @@ import FeaturedApps from "../components/FeaturedApps.astro";
       const searchInput = document.getElementById('searchInput');
       const recentCapsulesContent = document.getElementById('recentCapsulesContent');
       const localAppsContent = document.getElementById('localAppsContent');
+      const runningAppsRow = document.getElementById('runningAppsRow');
+
+      function runningDotColor(status) {
+        if (status === 'failed') return '#ef4444';   // red
+        if (status === 'background') return '#f59e0b'; // amber — running, no window
+        return '#10b981';                              // green — running, visible
+      }
+
+      // Render the "開いているアプリ" row from running sessions. A session stays
+      // listed while its process runs even after its window closes (background);
+      // OCI multi-service apps appear once per session.
+      function renderRunningApps(list) {
+        if (!runningAppsRow) return;
+        runningAppsRow.innerHTML = '';
+        const apps = Array.isArray(list) ? list : [];
+        if (!apps.length) {
+          runningAppsRow.className = 'hidden';
+          return;
+        }
+        runningAppsRow.className = 'flex flex-wrap gap-2 pt-4 pb-1';
+        apps.forEach(function (app) {
+          const pill = document.createElement('button');
+          pill.type = 'button';
+          pill.className = 'inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-[12px] text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition-colors max-w-[220px]';
+          const dot = document.createElement('span');
+          dot.className = 'w-2 h-2 rounded-full shrink-0';
+          dot.style.background = runningDotColor(app.status);
+          const label = document.createElement('span');
+          label.className = 'truncate';
+          const name = app.display_name || app.handle || app.session_id || '';
+          label.textContent = app.runtime_kind === 'oci' ? name + ' · OCI' : name;
+          pill.appendChild(dot);
+          pill.appendChild(label);
+          pill.title = [String(app.runtime_kind || '').toUpperCase(), app.status, app.primary_url]
+            .filter(Boolean)
+            .join(' · ');
+          // Re-open source apps by handle; OCI reopen is out of scope here.
+          if (app.runtime_kind === 'source' && app.handle) {
+            pill.addEventListener('click', function () {
+              ipc({ kind: 'open_capsule', handle: app.handle });
+            });
+          } else {
+            pill.style.cursor = 'default';
+          }
+          runningAppsRow.appendChild(pill);
+        });
+      }
+
+      // Invoked from Rust (evaluate_script) after an async OCI session refresh.
+      window.__ATO_RUNNING_APPS_REFRESH__ = function (list) {
+        snap.running_apps = list;
+        renderRunningApps(list);
+      };
 
       function submitSearch() {
         const value = searchInput.value.trim();
@@ -210,6 +266,7 @@ import FeaturedApps from "../components/FeaturedApps.astro";
 
       renderRecentCapsules();
       renderLocalApps();
+      renderRunningApps(snap.running_apps);
 
       if (searchInput) searchInput.focus();
     })();

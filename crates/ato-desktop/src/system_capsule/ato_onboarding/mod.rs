@@ -1,3 +1,13 @@
+//! `ato-onboarding` system capsule — first-run onboarding flow.
+//!
+//! Scope (issue #420 architecture correction): this module owns *only*
+//! onboarding-specific concerns — completing/skipping the flow and advancing to
+//! the configured startup surface. The Runtime Setup panel shown on the last
+//! onboarding step is backed by the shared [`crate::runtime_setup`] feature
+//! module: those commands (`runtime_setup_status`, `install_runtime_tools`,
+//! `save_runtime_setup_settings`, …) are routed by command `kind` in the IPC
+//! parser, not handled here, so the Settings surface can reuse them verbatim.
+
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
@@ -18,6 +28,9 @@ pub enum OnboardingCommand {
 
 impl OnboardingCommand {
     pub fn required_capability(&self) -> Capability {
+        // Completing onboarding is the one onboarding-only privileged action.
+        // Runtime-setup reads/installs are NOT routed here — they use the
+        // feature-level `RuntimeSetup*` capabilities via `crate::runtime_setup`.
         Capability::OnboardingComplete
     }
 }
@@ -33,6 +46,8 @@ pub fn dispatch(
 ) -> Result<(), BrokerError> {
     match command {
         OnboardingCommand::Complete { version, skipped } => {
+            // Tear down any in-flight runtime install before leaving the flow.
+            crate::runtime_setup::cancel_active_install(cx);
             let mut config = load_config();
             config.desktop.onboarding.completed = true;
             config.desktop.onboarding.skipped = skipped;

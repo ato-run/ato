@@ -468,6 +468,16 @@ pub fn run(skip_onboarding: bool) {
             crate::system_capsule::window_registry::SystemCapsuleWindowRegistry::default(),
         );
         crate::window::install_control_bar_controller(cx);
+        // Windows system tray (KOH-41): global lifecycle menu (Open Ato /
+        // Running Apps / Stop All Running Apps / Quit Ato). The tray is the
+        // escape hatch for stopping background-running sessions since closing a
+        // window no longer stops its session.
+        #[cfg(target_os = "windows")]
+        crate::window::tray::install_tray(cx);
+        // Windows taskbar Jump List (KOH-41): same lifecycle actions exposed on
+        // the taskbar button's right-click menu, forwarded to this instance.
+        #[cfg(target_os = "windows")]
+        crate::window::taskbar::install_taskbar(cx);
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
         // rather than stack overlays.
@@ -612,7 +622,7 @@ pub fn run(skip_onboarding: bool) {
             tracing::info!(
                 closed_id,
                 %closed_kind,
-                "on_window_closed observed window close"
+                "OS/GPUI window close observed; foreground surface destroyed"
             );
             let removed_id = cx
                 .global_mut::<crate::state::AppWindowRegistry>()
@@ -766,12 +776,9 @@ pub fn run(skip_onboarding: bool) {
                     cx.global_mut::<crate::state::session::SessionRegistry>();
                 let ids = registry.detach_clients_by_window_id(closed_id);
                 if close_behavior == crate::config::WindowCloseBehavior::StopSession {
-                    for sid in &ids {
-                        registry.stop_session_once(sid);
-                    }
                     tracing::info!(
                         ?ids,
-                        "windowCloseBehavior=stop-session: stopping sessions"
+                        "windowCloseBehavior=stop-session: detached clients; stopping sessions asynchronously"
                     );
                 } else {
                     tracing::info!(
@@ -781,6 +788,11 @@ pub fn run(skip_onboarding: bool) {
                 }
                 ids
             };
+            if close_behavior == crate::config::WindowCloseBehavior::StopSession {
+                for sid in &affected_session_ids {
+                    crate::window::stop_session_once_with_ui_completion(cx, sid);
+                }
+            }
             if close_behavior == crate::config::WindowCloseBehavior::StopSession {
                 // Clear ephemeral capsule state for stopped sessions.
                 for sid in &affected_session_ids {

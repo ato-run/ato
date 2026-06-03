@@ -239,6 +239,12 @@ pub(crate) enum OciProviderError {
         machine_name: String,
         elapsed_secs: u64,
     },
+
+    #[error(
+        "This recipe needs a container runtime, but Podman is disabled in Ato settings. \
+         Enable Podman in Settings, then try again."
+    )]
+    PodmanDisabled,
 }
 
 impl OciProviderError {
@@ -264,6 +270,7 @@ impl OciProviderError {
             Self::MachineAmbiguous { .. } => "oci_machine_ambiguous",
             Self::MachineStartFailed { .. } => "oci_machine_start_failed",
             Self::MachineReadyTimeout { .. } => "oci_machine_ready_timeout",
+            Self::PodmanDisabled => "oci_podman_disabled",
         }
     }
 
@@ -378,8 +385,44 @@ pub(crate) enum RuntimeOciProvider {
     DockerCompatible(DockerCompatibleOciProvider<BollardOciRuntimeClient>),
 }
 
+/// Returns `false` only when Podman has been explicitly disabled via
+/// `ATO_PODMAN_ENABLED=0` (the desktop sets this from the onboarding opt-out
+/// toggle). Unset or any other value leaves Podman enabled — the opt-out
+/// default. This is the interim Desktop → CLI carrier; a structured launch
+/// profile should replace it later.
+pub(crate) fn podman_enabled() -> bool {
+    !matches!(
+        std::env::var("ATO_PODMAN_ENABLED").ok().as_deref(),
+        Some("0")
+    )
+}
+
 pub(crate) async fn select_ready_runtime_oci_provider()
 -> Result<RuntimeOciProvider, OciProviderError> {
+    if !podman_enabled() {
+        // User opted out of Podman: never probe Podman or auto-start a Podman
+        // machine. Try a Docker-compatible daemon instead; if none is ready,
+        // surface the actionable `PodmanDisabled` error rather than a raw
+        // Podman readiness-probe failure.
+        tracing::info!("Podman disabled via ATO_PODMAN_ENABLED=0; skipping Podman provider");
+        return match connect_ready_docker_compatible_provider().await {
+            Ok(docker) => {
+                tracing::info!(
+                    chosen_runtime = "docker-compatible",
+                    "selected Docker-compatible OCI runtime provider (Podman disabled)"
+                );
+                Ok(RuntimeOciProvider::DockerCompatible(docker))
+            }
+            Err(docker_error) => {
+                tracing::warn!(
+                    docker_error = %docker_error,
+                    "Podman disabled and no ready Docker-compatible provider; surfacing PodmanDisabled"
+                );
+                Err(OciProviderError::PodmanDisabled)
+            }
+        };
+    }
+
     let podman = PodmanProvider::new();
     let podman_ready = podman.ensure_ready().await;
     if podman_ready.is_ok() {
@@ -3515,5 +3558,37 @@ mod tests {
             .ensure_ready()
             .await
             .expect("linux native podman is always ready");
+    }
+
+    #[test]
+    fn podman_disabled_error_has_stable_code() {
+        assert_eq!(
+            OciProviderError::PodmanDisabled.code(),
+            "oci_podman_disabled"
+        );
+    }
+
+    /// `ATO_PODMAN_ENABLED` is process-global. `#[serial]` keeps this off the
+    /// parallel test scheduler so it can't perturb other tests that exercise
+    /// `select_ready_runtime_oci_provider()`; the test also restores the prior
+    /// value on the way out.
+    #[serial_test::serial]
+    #[test]
+    fn podman_enabled_reads_env_opt_out() {
+        let previous = std::env::var_os("ATO_PODMAN_ENABLED");
+
+        unsafe { std::env::set_var("ATO_PODMAN_ENABLED", "0") };
+        assert!(!podman_enabled(), "\"0\" must disable Podman");
+
+        unsafe { std::env::set_var("ATO_PODMAN_ENABLED", "1") };
+        assert!(podman_enabled(), "\"1\" must enable Podman");
+
+        unsafe { std::env::remove_var("ATO_PODMAN_ENABLED") };
+        assert!(podman_enabled(), "unset must default to enabled (opt-out)");
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("ATO_PODMAN_ENABLED", value) },
+            None => unsafe { std::env::remove_var("ATO_PODMAN_ENABLED") },
+        }
     }
 }
