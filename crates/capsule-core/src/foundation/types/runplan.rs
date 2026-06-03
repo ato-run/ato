@@ -112,11 +112,24 @@ pub struct Mount {
     pub ownership: Option<MountOwnership>,
 }
 
-/// Host-side ownership initialization applied to a mount source before the
-/// container starts. Lets a non-root OCI `user` write to a mounted volume.
+/// Host-side ownership/permission initialization applied to a mount source
+/// before the container starts, so a non-root OCI `user` can access a mounted
+/// volume.
+///
+/// Both fields are best-effort and independent:
+/// * `uid`/`gid` → `chown` (succeeds for root / native-Linux rootful; warns and
+///   continues on `EPERM`, e.g. a normal macOS user).
+/// * `mode` → `chmod` (permitted for the path owner). This is the load-bearing
+///   op on Podman-machine/virtiofs, where real I/O maps to the host owner but
+///   apps gate on `access(2)`/mode bits.
+///
+/// `:U`-style engine remap is intentionally not used — it corrupts the
+/// virtiofs mount on macOS Podman.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MountOwnership {
-    pub uid: u32,
+    /// Target uid for `chown`; `None` skips the ownership change (chmod-only).
+    #[serde(default)]
+    pub uid: Option<u32>,
     #[serde(default)]
     pub gid: Option<u32>,
     #[serde(default)]
