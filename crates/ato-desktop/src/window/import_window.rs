@@ -27,6 +27,7 @@ use crate::source_import_api::ApiCreds;
 use crate::source_import_session::{GitHubImportSession, SessionSnapshot};
 use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
+use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 use gpui::px;
@@ -173,6 +174,8 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .update(cx, |_, window, _| window.activate_window())
             .is_ok();
         if activate_ok {
+            cx.global_mut::<OpenContentWindows>()
+                .focus(handle.window_id().as_u64());
             return Ok(handle);
         }
     }
@@ -235,6 +238,18 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
 
     cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
         .register(SystemCapsuleId::AtoImport, *handle);
+    cx.global_mut::<OpenContentWindows>().insert(
+        handle.window_id().as_u64(),
+        ContentWindowEntry {
+            handle: *handle,
+            kind: ContentWindowKind::Import,
+            title: gpui::SharedString::from("Import from GitHub"),
+            subtitle: gpui::SharedString::from("Review generated capsule recipe"),
+            url: gpui::SharedString::from("capsule://desktop.ato.run/import"),
+            capsule: None,
+            last_focused_at: std::time::Instant::now(),
+        },
+    );
     system_ipc::spawn_drain_loop(cx, queue, *handle);
 
     let shell = shell_slot
