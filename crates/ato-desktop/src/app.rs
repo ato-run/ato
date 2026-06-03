@@ -468,6 +468,16 @@ pub fn run(skip_onboarding: bool) {
             crate::system_capsule::window_registry::SystemCapsuleWindowRegistry::default(),
         );
         crate::window::install_control_bar_controller(cx);
+        // Windows system tray (KOH-41): global lifecycle menu (Open Ato /
+        // Running Apps / Stop All Running Apps / Quit Ato). The tray is the
+        // escape hatch for stopping background-running sessions since closing a
+        // window no longer stops its session.
+        #[cfg(target_os = "windows")]
+        crate::window::tray::install_tray(cx);
+        // Windows taskbar Jump List (KOH-41): same lifecycle actions exposed on
+        // the taskbar button's right-click menu, forwarded to this instance.
+        #[cfg(target_os = "windows")]
+        crate::window::taskbar::install_taskbar(cx);
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
         // rather than stack overlays.
