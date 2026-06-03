@@ -17,7 +17,6 @@
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
-use crate::state::session::SessionRegistry;
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::card_switcher::CardSwitcherWindowSlot;
 use crate::window::content_windows::OpenContentWindows;
@@ -119,6 +118,7 @@ pub fn dispatch(
         WindowsCommand::CloseWindow { window_id } => {
             // Look up the target handle. If the window was already closed
             // between the snapshot and the click, treat as no-op.
+            tracing::info!(window_id, "ato_windows: close button requested target window close");
             let target = cx
                 .global::<OpenContentWindows>()
                 .get(window_id)
@@ -138,13 +138,12 @@ pub fn dispatch(
         }
         WindowsCommand::StopSession { session_id } => {
             // Use the non-blocking stop path for all session kinds.
-            // `stop_session_once` sets process_state to Stopping immediately
+            // `stop_session_once_with_ui_completion` sets process_state to Stopping immediately
             // and then dispatches the actual stop (ato stop --id / ato stop
-            // --session) on a background thread, keeping the GPUI event loop
-            // and the rest of the Desktop UI responsive even when container
-            // stop is slow or hangs.
-            cx.global_mut::<SessionRegistry>()
-                .stop_session_once(&session_id);
+            // --session) on a background executor, then posts completion back
+            // to the UI thread so the row does not stay in teardown/loading
+            // state after the child process has stopped.
+            crate::window::stop_session_once_with_ui_completion(cx, &session_id);
             crate::window::card_switcher::refresh_session_snapshot(cx);
             tracing::info!(
                 session_id = %session_id,
