@@ -135,7 +135,12 @@ pub struct ToolStatus {
 
 impl ToolStatus {
     /// A "ready" status for a tool found in `source` at `version`.
-    pub fn ready(kind: ToolKind, source: ToolSource, version: Option<String>, message: impl Into<String>) -> Self {
+    pub fn ready(
+        kind: ToolKind,
+        source: ToolSource,
+        version: Option<String>,
+        message: impl Into<String>,
+    ) -> Self {
         ToolStatus {
             kind,
             installed: true,
@@ -228,7 +233,10 @@ mod tests {
     #[test]
     fn tool_kind_accepts_aliases() {
         assert_eq!(ToolKind::parse_tool("nodejs"), Some(ToolKind::Node));
-        assert_eq!(ToolKind::parse_tool("docker"), Some(ToolKind::DockerDesktop));
+        assert_eq!(
+            ToolKind::parse_tool("docker"),
+            Some(ToolKind::DockerDesktop)
+        );
         assert_eq!(ToolKind::parse_tool(" UV "), Some(ToolKind::Uv));
         assert_eq!(ToolKind::parse_tool("gpu"), None);
     }
