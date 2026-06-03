@@ -35,14 +35,17 @@ export default function App() {
 
   // Persist the runtime-setup choices, then mark onboarding complete. The save
   // command is sent first so the toggles land in desktop config before the
-  // complete command tears down the window.
-  const finish = () => {
+  // complete command tears down the window. `overrides` lets the Step 5 "Skip
+  // Podman for now" path persist `podman_enabled: false` deterministically
+  // without waiting on an async setState to flush.
+  const finish = (overrides = {}) => {
     BRIDGE({
       kind: "save_runtime_setup_settings",
       podman_enabled: podmanEnabled,
       node_install_enabled: nodeInstallEnabled,
       uv_install_enabled: uvInstallEnabled,
       python_install_enabled: pythonInstallEnabled,
+      ...overrides,
     })
     BRIDGE({ kind: "complete", version: ONBOARDING_VERSION, skipped: false })
   }
