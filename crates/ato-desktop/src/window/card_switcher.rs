@@ -169,6 +169,9 @@ fn glyph_for(title: &str, kind: &ContentWindowKind) -> &'static str {
         ContentWindowKind::Settings => "panel",
         ContentWindowKind::Dock => "terminal",
         ContentWindowKind::Onboarding => "sparkle",
+        ContentWindowKind::Launch => "sparkle",
+        ContentWindowKind::Import => "code",
+        ContentWindowKind::Auth => "panel",
         ContentWindowKind::AppWindow { .. } => {
             let lower = title.to_lowercase();
             if lower.contains("code") || lower.contains("term") || lower.contains("shell") {
@@ -214,6 +217,9 @@ fn kind_tag(kind: &ContentWindowKind) -> &'static str {
         ContentWindowKind::Settings => "Settings",
         ContentWindowKind::Dock => "Dock",
         ContentWindowKind::Onboarding => "Onboarding",
+        ContentWindowKind::Launch => "Launch",
+        ContentWindowKind::Import => "Import",
+        ContentWindowKind::Auth => "Auth",
     }
 }
 
@@ -267,8 +273,9 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         .collect();
     let cards_json = serde_json::to_string(&cards).unwrap_or_else(|_| "[]".to_string());
     let windows_script = format!("window.__ATO_WINDOWS = {};", cards_json);
-    let sessions_json = serde_json::to_string(&cx.global::<SessionRegistry>().view_entries())
-        .unwrap_or_else(|_| "[]".to_string());
+    let sessions_json =
+        serde_json::to_string(&cx.global::<SessionRegistry>().background_view_entries())
+            .unwrap_or_else(|_| "[]".to_string());
     let combined_script = format!("{windows_script}\nwindow.__ATO_SESSIONS = {sessions_json};");
     let locale = resolve_locale(crate::config::load_config().general.language);
     let init_script = compose_init_script(locale, Some(&combined_script));
@@ -458,8 +465,9 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
 }
 
 pub fn refresh_session_snapshot(cx: &mut App) {
-    let sessions_json = serde_json::to_string(&cx.global::<SessionRegistry>().view_entries())
-        .unwrap_or_else(|_| "[]".to_string());
+    let sessions_json =
+        serde_json::to_string(&cx.global::<SessionRegistry>().background_view_entries())
+            .unwrap_or_else(|_| "[]".to_string());
     if let Some(entity) = cx
         .try_global::<CardSwitcherEntitySlot>()
         .and_then(|slot| slot.0.clone())
