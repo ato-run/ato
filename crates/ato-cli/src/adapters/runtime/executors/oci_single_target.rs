@@ -171,6 +171,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
             } else {
                 vec![]
             },
+            user: plan.targets_oci_user(),
         })
         .await
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))
