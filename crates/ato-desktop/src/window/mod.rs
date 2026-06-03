@@ -37,6 +37,10 @@ pub mod orchestrator;
 pub mod settings_window;
 pub mod start_window;
 pub mod store;
+#[cfg(target_os = "windows")]
+pub mod taskbar;
+#[cfg(target_os = "windows")]
+pub mod tray;
 pub mod web_bridge;
 pub mod web_link_view;
 #[cfg(target_os = "windows")]
@@ -59,6 +63,65 @@ pub use control_bar::{
     toggle_control_bar,
 };
 pub use orchestrator::open_app_window;
+
+pub(crate) fn stop_session_once_with_ui_completion(cx: &mut gpui::App, session_id: &str) {
+    let request = cx
+        .global_mut::<crate::state::session::SessionRegistry>()
+        .begin_stop_session_once(session_id);
+    let Some(request) = request else {
+        tracing::debug!(
+            session_id,
+            "stop_session_once_with_ui_completion: stop already in progress or complete"
+        );
+        return;
+    };
+
+    tracing::info!(
+        session_id = %request.session_id,
+        is_oci = request.is_oci,
+        "session stop requested"
+    );
+
+    let async_app = cx.to_async();
+    let fe = async_app.foreground_executor().clone();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+
+    fe.spawn(async move {
+        let stop_session_id = request.session_id.clone();
+        let is_oci = request.is_oci;
+        let completion = be
+            .spawn(async move {
+                if is_oci {
+                    crate::orchestrator::stop_oci_session(&stop_session_id).map(|()| true)
+                } else {
+                    crate::orchestrator::stop_guest_session(&stop_session_id)
+                }
+                .map_err(|error| format!("{error:#}"))
+            })
+            .await;
+
+        let session_id = request.session_id;
+        aa.update(move |cx| {
+            let outcome = match &completion {
+                Ok(true) => "stopped",
+                Ok(false) => "already-inactive",
+                Err(_) => "failed",
+            };
+            let error = completion.as_ref().err().cloned();
+            cx.global_mut::<crate::state::session::SessionRegistry>()
+                .finish_stop_session(&session_id, completion);
+            crate::window::card_switcher::refresh_session_snapshot(cx);
+            tracing::info!(
+                session_id = %session_id,
+                outcome,
+                error = ?error,
+                "session stop completed"
+            );
+        });
+    })
+    .detach();
+}
 
 /// Build a Wry child WebView, degrading gracefully on failure instead of
 /// aborting the process.

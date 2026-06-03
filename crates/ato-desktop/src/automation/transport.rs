@@ -406,6 +406,10 @@ mod tests {
         ));
     }
 
+    // `reap_orphan_sockets` is unix-only (Windows uses a named-pipe listener),
+    // so its test must be gated too — otherwise the Windows test binary fails
+    // to compile with "cannot find function `reap_orphan_sockets`".
+    #[cfg(unix)]
     #[test]
     fn reap_orphan_sockets_removes_dead_pid_socket_only() {
         use std::fs;

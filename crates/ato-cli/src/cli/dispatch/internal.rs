@@ -4,10 +4,13 @@ use anyhow::{Result, anyhow};
 
 use capsule_core::router::ExecutionProfile;
 
+use capsule_core::runtime_setup::ToolKind;
+
 use crate::adapters::runtime::process::ProcessManager;
 use crate::application::auth::consent_store::approve_execution_plan_consent;
 use crate::application::preflight::collect_aggregate_requirements;
-use crate::cli::{ConsentInternalCommands, InternalCommands};
+use crate::application::runtime_setup::{collect_setup_status, install_tools};
+use crate::cli::{ConsentInternalCommands, InternalCommands, RuntimeInternalCommands};
 
 pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> {
     match command {
@@ -17,8 +20,45 @@ pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> 
             community_toml_id,
             json,
         } => execute_preflight_command(target, community_toml_id, json),
+        InternalCommands::Runtime { command } => execute_runtime_command(command),
         InternalCommands::ImportPreviewSweep { force, json } => {
             execute_import_preview_sweep_command(force, json)
+        }
+    }
+}
+
+/// `ato internal runtime *` handler. `setup-status` always exits `Ok` (the
+/// per-tool `action` carries the verdict); `install` exits non-zero if any
+/// requested tool failed to install.
+fn execute_runtime_command(command: RuntimeInternalCommands) -> Result<()> {
+    match command {
+        RuntimeInternalCommands::SetupStatus { json } => {
+            let status = collect_setup_status();
+            if json {
+                println!("{}", serde_json::to_string(&status)?);
+            } else {
+                println!("runtime setup status:");
+                for tool in &status.tools {
+                    let version = tool.version.as_deref().unwrap_or("-");
+                    println!(
+                        "  - {:<14} ready={} version={} action={:?}",
+                        tool.kind.as_str(),
+                        tool.ready,
+                        version,
+                        tool.action
+                    );
+                }
+            }
+            Ok(())
+        }
+        RuntimeInternalCommands::Install { tools, json } => {
+            let mut parsed = Vec::with_capacity(tools.len());
+            for token in &tools {
+                let tool = ToolKind::parse_tool(token)
+                    .ok_or_else(|| anyhow!("unknown runtime tool: {token}"))?;
+                parsed.push(tool);
+            }
+            install_tools(parsed, json)
         }
     }
 }
