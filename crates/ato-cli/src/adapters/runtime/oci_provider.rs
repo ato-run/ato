@@ -873,7 +873,16 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
             }
             PodmanMachineStatus::Stopped { names } => {
                 let machine_name = names.into_iter().next().unwrap_or_default();
-                self.start_machine_and_wait(&machine_name).await
+                // If the single stopped machine is the Ato machine, pin the
+                // connection so the readiness poll (and later ops) target it
+                // rather than the host's default connection.
+                let connection = if machine_name == ATO_PODMAN_MACHINE_NAME {
+                    self.set_connection(Some(ATO_PODMAN_MACHINE_NAME.to_string()));
+                    Some(ATO_PODMAN_MACHINE_NAME)
+                } else {
+                    None
+                };
+                self.start_machine_and_wait(&machine_name, connection).await
             }
             PodmanMachineStatus::Unknown { reason }
             | PodmanMachineStatus::Unavailable { reason } => Err(OciProviderError::ProbeFailed {
@@ -884,7 +893,13 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
     }
 
     /// Start a single stopped machine and poll `podman info` until it is ready.
-    async fn start_machine_and_wait(&self, machine_name: &str) -> Result<(), OciProviderError> {
+    /// The poll is pinned to `connection` when set (the Ato machine), so it does
+    /// not check the host's default connection instead of the machine we started.
+    async fn start_machine_and_wait(
+        &self,
+        machine_name: &str,
+        connection: Option<&str>,
+    ) -> Result<(), OciProviderError> {
         let start_out =
             run_provider_command(&self.runner, "podman", &["machine", "start", machine_name])?;
         if !start_out.success() {
@@ -898,10 +913,12 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
                 reason,
             });
         }
-        // Poll `podman info` until the machine daemon is up.
+        // Poll `podman info` (pinned to `connection` when set) until the machine
+        // daemon is up.
+        let info_args = prepend_connection(connection, &["info"]);
         let start = std::time::Instant::now();
         loop {
-            let info_out = self.runner.run("podman", &["info"]).map_err(|err| {
+            let info_out = self.runner.run("podman", &info_args).map_err(|err| {
                 OciProviderError::ProbeFailed {
                     provider: "podman",
                     message: format!("podman info poll: {err}"),
@@ -3953,6 +3970,42 @@ mod tests {
             .ensure_ready()
             .await
             .expect("single stopped machine should start and become ready");
+        // Non-Ato machine → no connection pin (default preserved).
+        assert_eq!(provider.cached_connection(), None);
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_macos_ato_stopped_starts_and_polls_ato_connection() {
+        // A stopped ato-podman must be started AND its readiness poll pinned to
+        // `--connection ato-podman` — not the host default (which may point at a
+        // different/stopped machine).
+        let stopped_json = r#"[{"Name":"ato-podman","Running":false}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.8.2\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, stopped_json, ""),
+                )
+                .with_output(
+                    &["podman", "machine", "start", "ato-podman"],
+                    output(0, "Machine \"ato-podman\" started successfully\n", ""),
+                )
+                // The poll must target the Ato connection, never plain `info`.
+                .with_output(
+                    &["podman", "--connection", "ato-podman", "info"],
+                    output(0, "{}", ""),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        provider
+            .ensure_ready()
+            .await
+            .expect("stopped ato-podman should start and verify via its connection");
+        assert_eq!(provider.cached_connection(), Some("ato-podman".to_string()));
     }
 
     #[tokio::test]
