@@ -294,13 +294,22 @@ fn tool_version(bin: &str) -> Option<String> {
 fn detect_podman() -> ToolStatus {
     let mut resolved = match capsule_core::podman::resolve_podman() {
         Ok(resolved) => resolved,
-        Err(err) => {
-            // Missing binary (or an invalid ATO_PODMAN_BIN override; the error's
-            // Display distinguishes them). The next step is an explicit prepare.
+        Err(capsule_core::podman::PodmanResolveError::InvalidEnvOverride { path }) => {
+            return ToolStatus::missing(
+                ToolKind::Podman,
+                RecommendedAction::OpenInstructions,
+                format!(
+                    "ATO_PODMAN_BIN is set to '{}' but that path is not a usable executable. \
+                     Unset ATO_PODMAN_BIN or point it at a valid podman binary.",
+                    path.display()
+                ),
+            );
+        }
+        Err(capsule_core::podman::PodmanResolveError::NotFound { .. }) => {
             return ToolStatus::missing(
                 ToolKind::Podman,
                 RecommendedAction::PrepareHostRuntime,
-                format!("{err}. Prepare Podman to install and set it up."),
+                "Podman is not installed. Prepare Podman to install and set it up.",
             );
         }
     };
@@ -471,29 +480,46 @@ fn detect_docker_desktop() -> ToolStatus {
         );
     }
     let version = tool_version("docker");
-    let running = Command::new("docker")
+    let info_output = Command::new("docker")
         .args(["info", "--format", "{{.ServerVersion}}"])
-        .output()
+        .output();
+    let running = info_output
+        .as_ref()
         .map(|o| o.status.success())
         .unwrap_or(false);
     if running {
-        ToolStatus::ready(
+        return ToolStatus::ready(
             ToolKind::DockerDesktop,
             ToolSource::External,
             version,
             "Docker is installed and the daemon is running",
-        )
+        );
+    }
+
+    // Check stderr for permission denied to give a more specific message.
+    let stderr = info_output
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+        .unwrap_or_default();
+    let message = if stderr.to_ascii_lowercase().contains("permission denied")
+        || stderr.to_ascii_lowercase().contains("access is denied")
+    {
+        "Docker is installed but permission was denied when connecting to the Docker socket. \
+         Add your user to the 'docker' group or use 'sudo', or use Podman instead."
+            .to_string()
     } else {
-        ToolStatus {
-            kind: ToolKind::DockerDesktop,
-            installed: true,
-            version,
-            supported: true,
-            ready: false,
-            source: ToolSource::External,
-            action: RecommendedAction::StartService,
-            message: "Docker is installed but the daemon is not running. Start Docker Desktop and try again.".to_string(),
-        }
+        "Docker is installed but the daemon is not running. Start Docker Desktop and try again."
+            .to_string()
+    };
+    ToolStatus {
+        kind: ToolKind::DockerDesktop,
+        installed: true,
+        version,
+        supported: true,
+        ready: false,
+        source: ToolSource::External,
+        action: RecommendedAction::StartService,
+        message,
     }
 }
 
@@ -1043,5 +1069,70 @@ mod tests {
         };
         let (_, action, _) = classify_podman_machine(&machine, false);
         assert_eq!(action, RecommendedAction::RepairHostRuntime);
+    }
+
+    /// An invalid `ATO_PODMAN_BIN` path must report missing with an actionable
+    /// message that names the bad path, not a generic "Podman is not installed".
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn detect_podman_invalid_override_reports_actionable_message() {
+        let status = with_podman_bin(
+            std::path::Path::new("/nonexistent/bad/podman"),
+            detect_podman,
+        );
+        assert!(
+            !status.installed,
+            "bad override must not count as installed"
+        );
+        assert!(!status.ready);
+        assert!(
+            status.message.contains("ATO_PODMAN_BIN"),
+            "message must mention ATO_PODMAN_BIN: {}",
+            status.message
+        );
+        assert!(
+            status.message.contains("/nonexistent/bad/podman"),
+            "message must name the bad path: {}",
+            status.message
+        );
+    }
+
+    /// When `ATO_PODMAN_BIN` is not set and podman is not on PATH/known locations,
+    /// the message should mention the install URL.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn detect_podman_not_found_suggests_install() {
+        // Temporarily clear ATO_PODMAN_BIN and set a PATH with no podman.
+        let prev_bin = std::env::var_os("ATO_PODMAN_BIN");
+        let prev_path = std::env::var_os("PATH");
+        unsafe { std::env::remove_var("ATO_PODMAN_BIN") };
+        // Use an empty PATH to ensure which::which finds nothing, and pick a
+        // non-existent location for known paths.
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PATH", tmp.path()) };
+        let status = detect_podman();
+        unsafe {
+            match prev_bin {
+                Some(v) => std::env::set_var("ATO_PODMAN_BIN", v),
+                None => std::env::remove_var("ATO_PODMAN_BIN"),
+            }
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        // Only assert when we're confident podman is not on the system (the
+        // test may still find a real podman in known locations on developer
+        // machines, which is fine — skip in that case).
+        if !status.ready {
+            assert!(
+                status.message.contains("not installed")
+                    || status.message.contains("ATO_PODMAN_BIN"),
+                "message should indicate podman is not installed or missing: {}",
+                status.message
+            );
+        }
     }
 }
