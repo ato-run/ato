@@ -86,6 +86,13 @@ pub enum Capability {
     /// Reveal the desktop log directory for runtime-setup troubleshooting.
     /// Granted to settings only (the re-setup surface), not to onboarding.
     RuntimeSetupOpenLogs,
+    /// Prepare a *host runtime* (Podman): install it when supported, create /
+    /// start the Ato-managed `ato-podman` machine, and verify readiness. This
+    /// mutates host/runtime state and so is deliberately distinct from
+    /// `RuntimeSetupInstall` (which only provisions Ato-managed language
+    /// toolchains). Granted to onboarding + settings; never to store/start or
+    /// any unrelated surface that merely shows runtime status.
+    RuntimeSetupPrepare,
     /// Quit the whole desktop application. Granted only to `AtoStart`,
     /// whose page is the process-lifetime landing surface and therefore
     /// the single legitimate place to terminate the app on platforms
@@ -261,5 +268,33 @@ mod tests {
             SystemCapsuleId::AtoStore,
             RuntimeSetupInstall
         ));
+    }
+
+    #[test]
+    fn runtime_setup_prepare_allowed_only_for_onboarding_and_settings() {
+        use Capability::RuntimeSetupPrepare;
+        // Both runtime-setup surfaces may prepare host runtimes (Podman).
+        assert!(is_capability_allowed(
+            SystemCapsuleId::AtoOnboarding,
+            RuntimeSetupPrepare
+        ));
+        assert!(is_capability_allowed(
+            SystemCapsuleId::AtoSettings,
+            RuntimeSetupPrepare
+        ));
+        // No other surface may mutate host runtime state — store/start pages
+        // that merely show status must not be able to trigger a prepare.
+        for capsule in [
+            SystemCapsuleId::AtoStore,
+            SystemCapsuleId::AtoStart,
+            SystemCapsuleId::AtoWindows,
+            SystemCapsuleId::AtoLaunch,
+            SystemCapsuleId::AtoDock,
+        ] {
+            assert!(
+                !is_capability_allowed(capsule, RuntimeSetupPrepare),
+                "{capsule:?} must not be allowed RuntimeSetupPrepare"
+            );
+        }
     }
 }
