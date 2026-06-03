@@ -83,6 +83,43 @@
       color: var(--ink); font-size: 12px; font-weight: 700; padding: 8px 14px; border-radius: 9px;
     }
     .btn-secondary:hover { background: #f8fafc; }
+    /* Distinguishing tags + actions */
+    .id-chip {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 999px;
+      background: #f1f5f9; color: #64748b; border: 1px solid var(--line);
+    }
+    .card-actions { display: flex; gap: 8px; margin-top: 14px; }
+    .btn-view {
+      flex: 0 0 auto; border: 1px solid var(--line-strong); cursor: pointer;
+      background: #fff; color: var(--ink); font-weight: 700; font-size: 12px;
+      padding: 10px 14px; border-radius: 10px;
+    }
+    .btn-view:hover { background: #f8fafc; }
+    .card-actions .launch { margin-top: 0; flex: 1; }
+    /* Detail overlay */
+    .overlay {
+      position: fixed; inset: 0; background: rgba(15, 23, 42, .45);
+      display: flex; align-items: center; justify-content: center; padding: 28px; z-index: 50;
+    }
+    .detail-box {
+      background: #fff; border-radius: 16px; width: 100%; max-width: 620px;
+      max-height: 84vh; display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 20px 60px rgba(15, 23, 42, .3);
+    }
+    .detail-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 16px 20px; border-bottom: 1px solid var(--line);
+    }
+    .detail-head h2 { font-size: 14px; font-weight: 800; margin: 0; }
+    .detail-head .id-chip { flex-shrink: 0; }
+    .detail-body { flex: 1; overflow: auto; padding: 16px 20px; }
+    .detail-pre {
+      margin: 0; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
+      color: var(--ink);
+    }
+    .detail-foot { padding: 12px 20px; border-top: 1px solid var(--line); text-align: right; }
     .hidden { display: none !important; }
   </style>
 </head>
@@ -123,6 +160,24 @@
     </footer>
   </div>
 
+  <!-- Recipe detail overlay (capsule.toml viewer) -->
+  <div class="overlay hidden" id="detailOverlay">
+    <div class="detail-box">
+      <div class="detail-head">
+        <h2 id="detailTitle">capsule.toml</h2>
+        <span class="id-chip" id="detailId"></span>
+      </div>
+      <div class="detail-body">
+        <div class="state" id="detailLoading"><div class="spinner"></div><p>Loading recipe…</p></div>
+        <p class="perms hidden" id="detailError" style="color:var(--accent);"></p>
+        <pre class="detail-pre hidden" id="detailPre"></pre>
+      </div>
+      <div class="detail-foot">
+        <button class="btn-secondary" id="detailCloseBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     (function () {
       'use strict';
@@ -159,6 +214,15 @@
         title.className = 'title';
         title.textContent = c.title || snap.label || c.id;
         top.appendChild(title);
+        // The recipe id is the one field that is always unique, so it is the
+        // reliable way to tell two same-titled community recipes apart.
+        if (c.id) {
+          const idChip = document.createElement('span');
+          idChip.className = 'id-chip';
+          idChip.textContent = shortId(c.id);
+          idChip.title = c.id;
+          top.appendChild(idChip);
+        }
         card.appendChild(top);
 
         const badges = document.createElement('div');
@@ -190,9 +254,16 @@
         if (typeof c.successfulReceipts === 'number') {
           meta.appendChild(metaItem(c.successfulReceipts + ' successful runs'));
         }
+        if (typeof c.failedReceipts === 'number' && c.failedReceipts > 0) {
+          meta.appendChild(metaItem(c.failedReceipts + ' failed runs'));
+        }
         if (c.lastVerifiedAt) {
           meta.appendChild(metaItem('verified ' + shortDate(c.lastVerifiedAt)));
         }
+        // Submission time, decoded from the ULID embedded in the recipe id —
+        // distinguishes duplicates that share every other field.
+        const submitted = ulidDate(c.id);
+        if (submitted) meta.appendChild(metaItem('submitted ' + submitted));
         card.appendChild(meta);
 
         if (Array.isArray(c.permissionsSummary) && c.permissionsSummary.length) {
@@ -201,6 +272,17 @@
           perms.textContent = 'Permissions: ' + c.permissionsSummary.join(' · ');
           card.appendChild(perms);
         }
+
+        const actions = document.createElement('div');
+        actions.className = 'card-actions';
+
+        const view = document.createElement('button');
+        view.className = 'btn-view';
+        view.textContent = 'View recipe';
+        view.addEventListener('click', function () {
+          openDetail(c);
+        });
+        actions.appendChild(view);
 
         const launch = document.createElement('button');
         launch.className = 'launch';
@@ -213,7 +295,9 @@
             label: c.title || snap.label || snap.source,
           });
         });
-        card.appendChild(launch);
+        actions.appendChild(launch);
+
+        card.appendChild(actions);
         return card;
       }
 
@@ -227,6 +311,64 @@
         const d = new Date(iso);
         return isNaN(d.getTime()) ? iso : d.toLocaleDateString();
       }
+
+      // Last 6 chars of the ctoml id — short but unique enough to eyeball.
+      function shortId(id) {
+        const s = String(id || '');
+        const body = s.replace(/^ctoml_/, '');
+        return body.length > 6 ? '…' + body.slice(-6) : (body || s);
+      }
+
+      // Decode the submission time from the ULID embedded in `ctoml_<ULID>`.
+      // The first 10 Crockford-base32 chars encode a 48-bit epoch-ms value.
+      const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+      function ulidDate(id) {
+        const ulid = String(id || '').replace(/^ctoml_/, '').toUpperCase();
+        if (ulid.length < 10) return null;
+        let ms = 0;
+        for (let i = 0; i < 10; i++) {
+          const v = CROCKFORD.indexOf(ulid[i]);
+          if (v < 0) return null;
+          ms = ms * 32 + v;
+        }
+        const d = new Date(ms);
+        if (isNaN(d.getTime()) || d.getFullYear() < 2020) return null;
+        return d.toLocaleString();
+      }
+
+      // ── Recipe detail overlay ──
+      let detailOpenId = null;
+      function setDetailState(s) {
+        show(el('detailLoading'), s === 'loading');
+        show(el('detailError'), s === 'error');
+        show(el('detailPre'), s === 'ready');
+      }
+      function openDetail(c) {
+        detailOpenId = c.id;
+        el('detailTitle').textContent = c.title || snap.label || 'capsule.toml';
+        el('detailId').textContent = shortId(c.id);
+        el('detailId').title = c.id || '';
+        el('detailPre').textContent = '';
+        el('detailError').textContent = '';
+        setDetailState('loading');
+        show(el('detailOverlay'), true);
+        SEND({ kind: 'view_community_toml', ctoml_id: c.id });
+      }
+      function closeDetail() {
+        detailOpenId = null;
+        show(el('detailOverlay'), false);
+      }
+      // Backend pushes the fetched capsule.toml here.
+      window.__atoCommunityImportDetail = function (payload) {
+        if (!payload || payload.id !== detailOpenId) return; // stale / different card
+        if (payload.error) {
+          el('detailError').textContent = 'Could not load recipe: ' + payload.error;
+          setDetailState('error');
+        } else {
+          el('detailPre').textContent = payload.toml || '(empty recipe)';
+          setDetailState('ready');
+        }
+      };
 
       function render() {
         el('appTitle').textContent = snap.label || 'Community Import';
@@ -274,6 +416,10 @@
       };
 
       el('closeBtn').addEventListener('click', function () { SEND({ kind: 'close' }); });
+      el('detailCloseBtn').addEventListener('click', closeDetail);
+      el('detailOverlay').addEventListener('click', function (e) {
+        if (e.target === el('detailOverlay')) closeDetail();
+      });
       el('githubBtn').addEventListener('click', function () {
         SEND({ kind: 'import_from_github_source', source: snap.source });
       });
@@ -285,7 +431,10 @@
         SEND({ kind: 'retry_community', source: snap.source, label: snap.label });
       });
       document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') SEND({ kind: 'close' });
+        if (e.key !== 'Escape') return;
+        // Esc closes the detail overlay first, then the window.
+        if (detailOpenId !== null) closeDetail();
+        else SEND({ kind: 'close' });
       });
 
       render();

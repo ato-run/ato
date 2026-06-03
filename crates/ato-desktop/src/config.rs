@@ -17,7 +17,7 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub runtime: RuntimeSettings,
     #[serde(default)]
-    pub privacy: PrivacySettings,
+    pub runtime_setup: RuntimeSetupSettings,
     #[serde(default)]
     pub sandbox: SandboxSettings,
     #[serde(default)]
@@ -93,21 +93,37 @@ pub struct RuntimeSettings {
     pub podman_enabled: bool,
 }
 
-/// Privacy-related opt-out controls.
+/// Host runtime-setup preferences (issue #420 revision).
 ///
 /// Kept as its own config section (rather than folded into `runtime`) so the
-/// distinction between "what Ato executes" and "what Ato inspects about the
-/// host" stays legible, and so future privacy toggles have an obvious home.
+/// distinction between "what Ato executes" (`runtime`) and "what Ato checks /
+/// installs to make the host runnable" (`runtime_setup`) stays legible.
+///
+/// Policy: the language runtimes are Ato-managed-first — when a recipe needs
+/// Node/uv/Python and the corresponding `*_install_enabled` toggle is on, Ato
+/// installs its own managed copy rather than using a host PATH copy. Podman /
+/// Docker are detection-only and have no toggle here (Podman usage is governed
+/// by `runtime.podman_enabled`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PrivacySettings {
-    /// Whether Ato may run optional host device / capability scans (e.g. GPU
-    /// presence) before launching a recipe. Default on (opt-out). When
-    /// false, those optional scans are skipped and device-dependent
-    /// recommendations are suppressed. Essential OS / architecture detection
-    /// needed to decide runnability is NOT gated by this flag. Carried to the
-    /// CLI via the `ATO_HOST_DEVICE_DETECTION` env var (interim carrier).
-    #[serde(default = "default_host_device_detection_enabled")]
-    pub host_device_detection_enabled: bool,
+pub struct RuntimeSetupSettings {
+    /// Reserved opt-out for a future *startup-time* host-tool readiness check
+    /// (run automatically when the app launches). Default on.
+    ///
+    /// It does NOT gate the on-demand Runtime Setup panels (onboarding Step 5
+    /// and Settings → Runtime): those probe via `ato internal runtime
+    /// setup-status` on explicit user action and always run. Nothing reads this
+    /// field yet; the startup probe that will honour it is not implemented.
+    #[serde(default = "default_true")]
+    pub check_host_tools_on_startup: bool,
+    /// Whether Ato may install an Ato-managed Node when a recipe needs it.
+    #[serde(default = "default_true")]
+    pub node_install_enabled: bool,
+    /// Whether Ato may install an Ato-managed uv when a recipe needs it.
+    #[serde(default = "default_true")]
+    pub uv_install_enabled: bool,
+    /// Whether Ato may install an Ato-managed Python when a recipe needs it.
+    #[serde(default = "default_true")]
+    pub python_install_enabled: bool,
 }
 
 /// Backend engine selection for the three capsule execution categories.
@@ -553,7 +569,8 @@ fn default_podman_enabled() -> bool {
     true
 }
 
-fn default_host_device_detection_enabled() -> bool {
+/// Default for the opt-out `runtime_setup.*` toggles — all on.
+fn default_true() -> bool {
     true
 }
 
@@ -632,7 +649,7 @@ impl Default for DesktopConfig {
             general: GeneralSettings::default(),
             updates: UpdateSettings::default(),
             runtime: RuntimeSettings::default(),
-            privacy: PrivacySettings::default(),
+            runtime_setup: RuntimeSetupSettings::default(),
             sandbox: SandboxSettings::default(),
             trust: TrustSettings::default(),
             registry: RegistrySettings::default(),
@@ -682,10 +699,13 @@ impl Default for RuntimeSettings {
     }
 }
 
-impl Default for PrivacySettings {
+impl Default for RuntimeSetupSettings {
     fn default() -> Self {
         Self {
-            host_device_detection_enabled: default_host_device_detection_enabled(),
+            check_host_tools_on_startup: default_true(),
+            node_install_enabled: default_true(),
+            uv_install_enabled: default_true(),
+            python_install_enabled: default_true(),
         }
     }
 }
@@ -757,7 +777,7 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             #[serde(default)]
             runtime: RuntimeSettings,
             #[serde(default)]
-            privacy: PrivacySettings,
+            runtime_setup: RuntimeSetupSettings,
             #[serde(default)]
             sandbox: SandboxSettings,
             #[serde(default)]
@@ -787,7 +807,7 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             general: helper.general,
             updates: helper.updates,
             runtime: helper.runtime,
-            privacy: helper.privacy,
+            runtime_setup: helper.runtime_setup,
             sandbox: helper.sandbox,
             trust: helper.trust,
             registry: helper.registry,
@@ -1299,36 +1319,51 @@ mod tests {
     }
 
     #[test]
-    fn runtime_optout_defaults_are_enabled() {
+    fn runtime_setup_defaults_are_enabled() {
         let config = DesktopConfig::default();
         assert!(
             config.runtime.podman_enabled,
             "podman must default to enabled (opt-out)"
         );
-        assert!(
-            config.privacy.host_device_detection_enabled,
-            "host device detection must default to enabled (opt-out)"
-        );
+        assert!(config.runtime_setup.check_host_tools_on_startup);
+        assert!(config.runtime_setup.node_install_enabled);
+        assert!(config.runtime_setup.uv_install_enabled);
+        assert!(config.runtime_setup.python_install_enabled);
     }
 
     #[test]
-    fn runtime_optout_roundtrips_disabled() {
+    fn runtime_setup_roundtrips_disabled() {
         let mut config = DesktopConfig::default();
         config.runtime.podman_enabled = false;
-        config.privacy.host_device_detection_enabled = false;
+        config.runtime_setup.node_install_enabled = false;
+        config.runtime_setup.uv_install_enabled = false;
         let json = serde_json::to_string(&config).unwrap();
         let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
         assert!(!parsed.runtime.podman_enabled);
-        assert!(!parsed.privacy.host_device_detection_enabled);
+        assert!(!parsed.runtime_setup.node_install_enabled);
+        assert!(!parsed.runtime_setup.uv_install_enabled);
+        assert!(parsed.runtime_setup.python_install_enabled);
     }
 
     #[test]
-    fn runtime_optout_missing_fields_default_to_enabled() {
-        // Pre-existing configs without the new fields must load with both on.
+    fn runtime_setup_missing_fields_default_to_enabled() {
+        // Pre-existing configs without the new fields must load with all on.
         let json = r#"{"general": {"theme": "dark"}}"#;
         let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
         assert!(parsed.runtime.podman_enabled);
-        assert!(parsed.privacy.host_device_detection_enabled);
+        assert!(parsed.runtime_setup.check_host_tools_on_startup);
+        assert!(parsed.runtime_setup.node_install_enabled);
+        assert!(parsed.runtime_setup.uv_install_enabled);
+        assert!(parsed.runtime_setup.python_install_enabled);
+    }
+
+    #[test]
+    fn legacy_privacy_section_is_ignored_gracefully() {
+        // A config written by the earlier host-device-detection build carries
+        // a `privacy` section; it must load (ignored) without error.
+        let json = r#"{"privacy": {"host_device_detection_enabled": false}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.runtime_setup.node_install_enabled);
     }
 
     #[test]
