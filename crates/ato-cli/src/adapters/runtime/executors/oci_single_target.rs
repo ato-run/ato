@@ -138,6 +138,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
             source: m.source.to_string_lossy().to_string(),
             target: m.target.clone(),
             readonly: m.readonly,
+            ownership: None,
         })
         .collect();
 
