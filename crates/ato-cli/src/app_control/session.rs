@@ -5547,6 +5547,7 @@ mod tests {
                 port,
                 required_env: vec![],
                 mounts: vec![],
+                user: None,
             }),
         }
     }
@@ -5638,6 +5639,7 @@ mod tests {
                 port: Some(8080),
                 required_env: vec![],
                 mounts: vec![],
+                user: None,
             }),
         };
 

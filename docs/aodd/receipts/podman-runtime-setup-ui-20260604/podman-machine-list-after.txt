@@ -1,0 +1,3 @@
+NAME                    VM TYPE     CREATED         LAST UP             CPUS        MEMORY      DISK SIZE
+ato-podman              applehv     45 seconds ago  Currently running   4           2GiB        100GiB
+podman-machine-default  applehv     8 months ago    About a minute ago  4           8GiB        100GiB
