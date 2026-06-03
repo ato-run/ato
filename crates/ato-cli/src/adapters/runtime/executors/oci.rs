@@ -100,6 +100,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
                     source: mount.source.to_string_lossy().to_string(),
                     target: mount.target.clone(),
                     readonly: mount.readonly,
+                    ownership: None,
                 })
                 .collect(),
             ports,
@@ -107,6 +108,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
             aliases: Vec::new(),
             platform: None,
             extra_hosts: vec![],
+            user: plan.targets_oci_user(),
         })
         .await?;
     client.start_container(&container_id).await?;

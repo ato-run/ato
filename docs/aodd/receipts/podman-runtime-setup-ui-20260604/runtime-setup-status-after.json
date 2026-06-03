@@ -1,0 +1,10 @@
+{
+  "kind": "podman",
+  "installed": true,
+  "version": "podman version 5.7.1",
+  "supported": true,
+  "ready": true,
+  "source": "external",
+  "action": "none",
+  "message": "Podman is installed and a machine is running"
+}

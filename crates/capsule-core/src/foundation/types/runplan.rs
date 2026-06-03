@@ -105,6 +105,41 @@ pub struct Mount {
     pub source: String,
     pub target: String,
     pub readonly: bool,
+    /// Optional host-side ownership/mode initialization for this mount source,
+    /// resolved from a `[[services.*.state_bindings]] owner`/`mode` declaration.
+    /// `None` means Ato leaves the source's ownership untouched. See #428.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<MountOwnership>,
+}
+
+/// Engine-delegated ownership strategy for a mount source, resolved from a
+/// `[[services.*.state_bindings]] owner`/`mode` declaration in the manifest.
+///
+/// The presence of this struct signals that the provider should use its native
+/// ownership mechanism (e.g. Podman `:U`) so a non-root container `user` can
+/// write to the mounted volume.  Host-side `chown`/`chmod` is **not** performed.
+///
+/// * `uid`/`gid` — informational; Podman `:U` remaps to the container's
+///   namespace UID/GID automatically.
+/// * `mode` — accepted for forward-compatibility but **not guaranteed** when
+///   using engine-delegated strategies; providers that cannot apply the mode
+///   emit a warning and continue.
+/// * `recursive` — applies to engine-delegated ownership only when supported.
+///
+/// Gate A finding: host-side `chown` fails with `EPERM` for normal users on
+/// macOS/Podman-machine.  `:U` is the correct mechanism for Podman; see #428.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MountOwnership {
+    /// Target uid for `chown`; `None` skips the ownership change (chmod-only).
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub gid: Option<u32>,
+    #[serde(default)]
+    pub recursive: bool,
+    /// Permission bits to apply (already parsed from the manifest octal string).
+    #[serde(default)]
+    pub mode: Option<u32>,
 }
 
 impl CapsuleManifest {
@@ -179,6 +214,7 @@ impl CapsuleManifest {
                             ),
                             target: mount_path.to_string(),
                             readonly: vol.read_only,
+                            ownership: None,
                         });
                     }
                 }
@@ -291,6 +327,10 @@ fn state_mounts(
                 )?,
                 target: target.to_string(),
                 readonly: false,
+                // Ownership init is applied on the orchestration/OCI execution
+                // path (see router::services); the single-service RunPlan path
+                // does not run containers as a non-root `user`.
+                ownership: None,
             })
         })
         .collect()

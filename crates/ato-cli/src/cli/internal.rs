@@ -122,6 +122,24 @@ pub(crate) enum RuntimeInternalCommands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Explicitly prepare host runtimes (Podman): install if missing, create and
+    /// start the Ato-managed machine when needed, and verify with `podman info`.
+    /// The only command that may mutate host/runtime container-engine state, and
+    /// only after the user invokes it. Managed toolchains (node/uv/python) route
+    /// to the same install path as `install`.
+    #[command(
+        hide = true,
+        about = "Prepare host runtimes (podman) — install + machine setup (plumbing)"
+    )]
+    Prepare {
+        /// Comma-separated tool list, e.g. `--tools podman`.
+        #[arg(long = "tools", value_delimiter = ',', required = true)]
+        tools: Vec<String>,
+        /// Emit machine-readable JSON progress lines on stdout.
+        #[arg(long = "emit-json", default_value_t = false)]
+        emit_json: bool,
+    },
 }
 
 #[derive(Subcommand)]

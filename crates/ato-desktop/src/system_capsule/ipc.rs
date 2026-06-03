@@ -379,6 +379,21 @@ mod tests {
     }
 
     #[test]
+    fn prepare_runtime_tools_routes_to_feature_command_from_both_surfaces() {
+        for capsule in [SystemCapsuleId::AtoOnboarding, SystemCapsuleId::AtoSettings] {
+            let cmd = parse_system_command(
+                capsule,
+                serde_json::json!({ "kind": "prepare_runtime_tools", "tools": ["podman"] }),
+            )
+            .unwrap();
+            assert!(
+                matches!(cmd, SystemCommand::RuntimeSetup(_)),
+                "prepare_runtime_tools from {capsule:?} should route to RuntimeSetup"
+            );
+        }
+    }
+
+    #[test]
     fn settings_native_command_still_routes_to_settings() {
         // A camelCase settings command must not be hijacked by the runtime
         // feature router.

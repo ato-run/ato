@@ -1,0 +1,3 @@
+        export DOCKER_HOST='unix:///tmp/claude-501/podman/podman-machine-default-api.sock'
+
+Machine "podman-machine-default" started successfully
