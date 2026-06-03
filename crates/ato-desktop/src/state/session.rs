@@ -110,6 +110,12 @@ pub enum SessionProcessState {
     FailedToStop { error: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StopSessionRequest {
+    pub session_id: String,
+    pub is_oci: bool,
+}
+
 /// All information needed to re-launch or restart a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapsuleLaunchContext {
@@ -453,13 +459,10 @@ impl SessionRegistry {
         session_ids
     }
 
-    /// Mark a session as `Stopping` and spawn a background thread to
-    /// actually stop the process.  Only acts once — if the session is
-    /// already `Stopping` or `Stopped`, this is a no-op.
-    ///
-    /// The caller SHOULD arrange for the completion event to update the
-    /// process state on the UI thread (via `AsyncApp::update()`).
-    pub fn stop_session_once(&mut self, session_id: &str) {
+    /// Mark a session as `Stopping` and return the stop work that must run
+    /// outside the UI thread. Only acts once — if the session is already
+    /// `Stopping` or `Stopped`, this is a no-op.
+    pub fn begin_stop_session_once(&mut self, session_id: &str) -> Option<StopSessionRequest> {
         let needs_stop = matches!(
             self.sessions.get(session_id),
             Some(s)
@@ -469,16 +472,30 @@ impl SessionRegistry {
                 )
         );
         if !needs_stop {
-            return;
+            return None;
         }
         self.update_process_state(session_id, SessionProcessState::Stopping);
 
-        let sid = session_id.to_string();
         let is_oci = self
             .sessions
             .get(session_id)
             .map(|session| session.session_kind.is_oci())
             .unwrap_or(false);
+        Some(StopSessionRequest {
+            session_id: session_id.to_string(),
+            is_oci,
+        })
+    }
+
+    /// Backwards-compatible fire-and-forget stop path. UI callers should use
+    /// `begin_stop_session_once` plus a completion update so presentation state
+    /// does not remain stuck at `Stopping`.
+    pub fn stop_session_once(&mut self, session_id: &str) {
+        let Some(request) = self.begin_stop_session_once(session_id) else {
+            return;
+        };
+        let sid = request.session_id;
+        let is_oci = request.is_oci;
         std::thread::spawn(move || {
             let stop_result = if is_oci {
                 crate::orchestrator::stop_oci_session(&sid).map(|()| true)
@@ -498,6 +515,17 @@ impl SessionRegistry {
             }
             // TODO(D4): post completion to UI thread to update process_state to Stopped
         });
+    }
+
+    pub fn finish_stop_session(&mut self, session_id: &str, result: Result<bool, String>) {
+        match result {
+            Ok(true) | Ok(false) => {
+                self.update_process_state(session_id, SessionProcessState::Stopped);
+            }
+            Err(error) => {
+                self.update_process_state(session_id, SessionProcessState::FailedToStop { error });
+            }
+        }
     }
 
     /// Stop every session that is still running (Starting or Ready).
@@ -996,10 +1024,50 @@ mod tests {
 
         reg.update_process_state("s1", SessionProcessState::Stopped);
         let state_before = reg.get_session("s1").unwrap().process_state.clone();
-        reg.stop_session_once("s1");
+        let request = reg.begin_stop_session_once("s1");
         let state_after = reg.get_session("s1").unwrap().process_state.clone();
+        assert!(request.is_none());
         assert_eq!(state_before, state_after);
         assert_eq!(state_after, SessionProcessState::Stopped);
+    }
+
+    #[test]
+    fn begin_stop_session_once_marks_stopping_and_returns_request() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "test/capsule"));
+
+        let request = reg.begin_stop_session_once("s1").expect("stop request");
+
+        assert_eq!(request.session_id, "s1");
+        assert!(!request.is_oci);
+        assert_eq!(
+            reg.get_session("s1").unwrap().process_state,
+            SessionProcessState::Stopping
+        );
+        assert!(reg.begin_stop_session_once("s1").is_none());
+    }
+
+    #[test]
+    fn finish_stop_session_updates_terminal_state() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "test/capsule"));
+        reg.begin_stop_session_once("s1").expect("stop request");
+
+        reg.finish_stop_session("s1", Ok(true));
+
+        assert_eq!(
+            reg.get_session("s1").unwrap().process_state,
+            SessionProcessState::Stopped
+        );
+
+        reg.register_session(make_session("s2", "test/capsule-2"));
+        reg.begin_stop_session_once("s2").expect("stop request");
+        reg.finish_stop_session("s2", Err("timeout".to_string()));
+
+        assert!(matches!(
+            &reg.get_session("s2").unwrap().process_state,
+            SessionProcessState::FailedToStop { error } if error == "timeout"
+        ));
     }
 
     #[test]
