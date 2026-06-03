@@ -38,6 +38,13 @@ pub fn requires_gpu(manifest: &toml::Value) -> bool {
 ///
 /// Returns `Ok(None)` when `nvidia-smi` is not on `PATH` or reports no GPUs.
 /// Returns `Err` only on unexpected process I/O failures.
+///
+/// Scope (issue #420): this is a **recipe-gated** probe — it runs only at OCI
+/// launch when a recipe's manifest declares a GPU requirement (see
+/// [`requires_gpu`] / `engine::executors::oci`). The earlier unconditional
+/// "host device detection" GPU scan and its `ATO_HOST_DEVICE_DETECTION` opt-out
+/// were removed; Runtime Setup deliberately does not scan GPUs. GPU detection
+/// itself is not abolished — it just no longer runs speculatively at startup.
 pub fn detect_nvidia_gpus() -> Result<Option<GpuReport>> {
     if which::which("nvidia-smi").is_err() {
         return Ok(None);

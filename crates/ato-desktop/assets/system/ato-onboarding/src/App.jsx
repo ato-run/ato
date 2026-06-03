@@ -50,9 +50,13 @@ export default function App() {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Enter" || e.key === "ArrowRight") {
+        // On the final step, Step 5 owns the primary action — which may need to
+        // run a runtime install *before* completing. Finishing here on Enter
+        // would silently skip that install (the bug this guard fixes), so we
+        // let Step 5's own key handler route Enter through `handlePrimary`.
+        if (step === LAST_STEP) return
         e.preventDefault()
-        if (step === LAST_STEP) finish()
-        else nextStep()
+        nextStep()
       } else if (e.key === "ArrowLeft") {
         e.preventDefault()
         prevStep()
@@ -64,7 +68,7 @@ export default function App() {
     }
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
-  }, [step, podmanEnabled, nodeInstallEnabled, uvInstallEnabled, pythonInstallEnabled])
+  }, [step])
 
   return (
     <div className="w-screen h-screen bg-slate-100 font-sans selection:bg-rose-100 selection:text-rose-900">
