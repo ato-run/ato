@@ -107,6 +107,11 @@ pub fn settings_snapshot_from_config(config: &DesktopConfig) -> Value {
                 "executionBoundary": setting(config.runtime.execution_boundary, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "unsafePrompt": setting(config.runtime.unsafe_prompt, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "allowUnsafeEnv": setting(config.runtime.allow_unsafe_env, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                // Ato's Podman opt-in. Exposed so the Settings → Runtime tab can
+                // distinguish "host Podman is ready" from "Podman is disabled in
+                // Ato" — host status probing stays config-independent, so the
+                // UI needs this flag from config to render the disabled state.
+                "podmanEnabled": setting(config.runtime.podman_enabled, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "backendEngines": {
                     "source": setting(config.runtime.backend_engines.source, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                     "oci": setting(config.runtime.backend_engines.oci, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
@@ -730,6 +735,32 @@ mod tests {
         assert!(resolved.get("general").is_some());
         assert!(resolved.get("updates").is_some());
         assert!(resolved.get("developer").is_some());
+    }
+
+    #[test]
+    fn snapshot_exposes_runtime_podman_enabled() {
+        // The Settings → Runtime tab needs the Ato Podman opt-in from config to
+        // render "Disabled in Ato" independently of host probing. Verify the
+        // flag round-trips through the resolved snapshot for both states.
+        let mut config = default_config();
+        config.runtime.podman_enabled = true;
+        let snap = settings_snapshot_from_config(&config);
+        assert_eq!(
+            snap["resolved"]["runtime"]["podmanEnabled"]["declared"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            snap["resolved"]["runtime"]["podmanEnabled"]["effective"],
+            serde_json::json!(true)
+        );
+
+        config.runtime.podman_enabled = false;
+        let snap = settings_snapshot_from_config(&config);
+        assert_eq!(
+            snap["resolved"]["runtime"]["podmanEnabled"]["declared"],
+            serde_json::json!(false),
+            "disabled Podman must surface in the snapshot, not be omitted"
+        );
     }
 
     // --- Secrets snapshot tests ---
