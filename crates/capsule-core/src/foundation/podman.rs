@@ -21,6 +21,11 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+/// Name of the Podman machine Ato creates and manages on macOS/Windows. Ato
+/// only ever inits/starts a machine with this name; it never mutates a user's
+/// own machines or changes the global default connection.
+pub const ATO_PODMAN_MACHINE_NAME: &str = "ato-podman";
+
 /// Where a resolved podman binary was found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PodmanBinarySource {
