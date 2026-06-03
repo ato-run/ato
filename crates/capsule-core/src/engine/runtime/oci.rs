@@ -61,6 +61,9 @@ pub struct OciContainerRequest {
     /// Each entry is in `name:address` form as accepted by `podman create --add-host`.
     /// Use `host.containers.internal:host-gateway` to let containers reach the host.
     pub extra_hosts: Vec<String>,
+    /// Optional container user (`--user`): `"uid"`, `"uid:gid"`, or a name the
+    /// image resolves. `None` keeps the image's baked-in `USER`. See #428.
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -242,6 +245,7 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
                             .collect()
                     }),
                     cmd: (!request.cmd.is_empty()).then(|| request.cmd.clone()),
+                    user: request.user.clone(),
                     working_dir: request.working_dir.clone(),
                     exposed_ports: (!exposed_ports.is_empty()).then_some(exposed_ports),
                     host_config: Some(host_config),

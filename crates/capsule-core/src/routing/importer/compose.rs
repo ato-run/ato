@@ -373,6 +373,7 @@ impl ComposeImportOutput {
                     source: vm.state_name.clone(),
                     target: vm.target.clone(),
                     readonly: vm.readonly,
+                    ownership: None,
                 })
                 .collect();
 
@@ -412,6 +413,7 @@ impl ComposeImportOutput {
                     .map(|e| e.key.clone())
                     .collect(),
                 mounts,
+                user: None,
             };
 
             services.push(ResolvedService {
