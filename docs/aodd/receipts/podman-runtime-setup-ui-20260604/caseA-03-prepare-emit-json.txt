@@ -1,0 +1,6 @@
+{"tool":"podman","phase":"queued","message":"Queued"}
+{"tool":"podman","phase":"locating","message":"Locating Podman…"}
+{"tool":"podman","phase":"initializing_machine","message":"Creating Podman machine 'ato-podman'…"}
+{"tool":"podman","phase":"starting_machine","message":"Starting Podman machine 'ato-podman'…"}
+{"tool":"podman","phase":"verifying","message":"Verifying Podman readiness…"}
+{"tool":"podman","phase":"ready","message":"Podman is ready"}
