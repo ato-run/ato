@@ -1,0 +1,10 @@
+{
+  "kind": "podman",
+  "installed": true,
+  "version": "podman version 5.7.1",
+  "supported": true,
+  "ready": false,
+  "source": "external",
+  "action": "start_service",
+  "message": "Podman is installed but its machine (podman-machine-default) is stopped. Start it or prepare Podman."
+}

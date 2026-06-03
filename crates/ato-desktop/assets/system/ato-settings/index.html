@@ -858,6 +858,27 @@ function hydrateFromSnapshot(snap) {
   hydrateEngineSelect('sel-sourceEngine', val(r, 'runtime', 'backendEngines', 'source'));
   hydrateEngineSelect('sel-ociEngine',    val(r, 'runtime', 'backendEngines', 'oci'));
   hydrateEngineSelect('sel-wasmEngine',   val(r, 'runtime', 'backendEngines', 'wasm'));
+
+  // Runtime → Podman opt-in (config flag, not host status). Read the boolean
+  // out of the {declared,effective,…} setting envelope robustly so the Runtime
+  // tab can render "Disabled in Ato" independently of host probing.
+  const pe = settingBool(r && r.runtime && r.runtime.podmanEnabled);
+  if (pe !== undefined) {
+    _podmanConfigEnabled = pe;
+    renderPodmanRow(_lastPodmanTool);
+  }
+}
+
+// Unwrap a boolean from a settings envelope ({declared,effective,…}) or a bare
+// value. The generic `val()` helper above only handles a `.value` key, so it
+// can't read this envelope as a boolean — hence this focused helper.
+function settingBool(node) {
+  if (node == null) return undefined;
+  if (typeof node === 'boolean') return node;
+  if (typeof node.effective === 'boolean') return node.effective;
+  if (typeof node.declared === 'boolean') return node.declared;
+  if (typeof node.value === 'boolean') return node.value;
+  return undefined;
 }
 
 function setToggleEl(id, value) {
@@ -1143,6 +1164,11 @@ let _runtimeInstalling = false;
 // state (Podman). They never run concurrently.
 let _runtimeJob = null;
 let _lastPodmanTool = null;
+// Ato's Podman opt-in from desktop config (settings snapshot), independent of
+// host readiness. `null` until the snapshot hydrates; `false` means the user
+// turned Podman off in Ato — the row must say "Disabled in Ato" even if the
+// host Podman itself is ready. Updated optimistically on enable/disable clicks.
+let _podmanConfigEnabled = null;
 
 const RT_TOOL_LABELS = {
   podman: 'Podman', docker_desktop: 'Docker Desktop',
@@ -1254,18 +1280,38 @@ function renderPodmanRow(tool) {
   const detailEl = document.getElementById('podman-rt-detail');
   const prepBtn  = document.getElementById('podman-prepare-btn');
   const disBtn   = document.getElementById('podman-disable-btn');
+  // Disabled in Ato config takes precedence over host readiness: a ready host
+  // Podman that the user opted out of must not read as "Ready".
+  const disabledInAto = _podmanConfigEnabled === false;
+
   if (statusEl) {
-    const [color, label] = podmanRowStatus(tool);
-    statusEl.innerHTML = '<span class="diag-dot ' + color + '"></span>' + label;
+    if (disabledInAto) {
+      statusEl.innerHTML = '<span class="diag-dot gray"></span>Disabled in Ato';
+    } else {
+      const [color, label] = podmanRowStatus(tool);
+      statusEl.innerHTML = '<span class="diag-dot ' + color + '"></span>' + label;
+    }
   }
   if (detailEl) {
-    const parts = [];
-    if (tool && tool.version) parts.push('v' + tool.version);
-    if (tool && tool.message) parts.push(tool.message);
-    detailEl.textContent = parts.join(' — ');
+    if (disabledInAto) {
+      const hostHint = tool && tool.ready
+        ? ' Host Podman is installed and ready.'
+        : '';
+      detailEl.textContent = 'Podman is turned off in Ato.' + hostHint;
+    } else {
+      const parts = [];
+      if (tool && tool.version) parts.push('v' + tool.version);
+      if (tool && tool.message) parts.push(tool.message);
+      detailEl.textContent = parts.join(' — ');
+    }
   }
   if (prepBtn) {
-    if (tool && tool.ready) {
+    if (disabledInAto) {
+      // Enabling only saves the flag when the host is already prepared;
+      // otherwise it enables and prepares. The click handler picks the path.
+      prepBtn.textContent = (tool && tool.ready) ? 'Enable Podman' : 'Enable & Prepare';
+      prepBtn.disabled = _runtimeInstalling;
+    } else if (tool && tool.ready) {
       prepBtn.textContent = 'Ready';
       prepBtn.disabled = true;
     } else if (tool && PODMAN_PREPARE_ACTIONS.has(tool.action)) {
@@ -1277,7 +1323,11 @@ function renderPodmanRow(tool) {
       prepBtn.disabled = true;
     }
   }
-  if (disBtn) disBtn.disabled = _runtimeInstalling;
+  if (disBtn) {
+    // "Disable Podman" is meaningless when Podman is already disabled.
+    disBtn.style.display = disabledInAto ? 'none' : '';
+    disBtn.disabled = _runtimeInstalling;
+  }
 }
 
 function setRuntimeInstalling(on, job) {
@@ -1364,13 +1414,26 @@ document.getElementById('runtime-logs-btn').addEventListener('click', () => {
   BRIDGE({ kind: 'open_runtime_setup_logs', request_id: nextReqId() });
 });
 
-// Explicit Podman preparation (the only path that may set podman_enabled:true
-// and mutate host runtime state). Language installs never send podman_enabled.
+// Explicit Podman preparation / enablement (the only path that may set
+// podman_enabled:true and mutate host runtime state). Language installs never
+// send podman_enabled. When Podman is disabled in Ato but the host is already
+// ready, enabling just persists the flag and refreshes — no prepare needed.
 document.getElementById('podman-prepare-btn').addEventListener('click', () => {
   if (_runtimeInstalling) return;
+  const hostReady = !!(_lastPodmanTool && _lastPodmanTool.ready);
+  // Explicit opt-in: persist and reflect immediately so the row leaves the
+  // "Disabled in Ato" state without waiting on a round-trip.
   BRIDGE({ kind: 'save_runtime_setup_settings', podman_enabled: true });
-  setRuntimeInstalling(true, 'prepare');
-  BRIDGE({ kind: 'prepare_runtime_tools', request_id: nextReqId(), tools: ['podman'] });
+  _podmanConfigEnabled = true;
+  if (hostReady) {
+    // Host already prepared — enabling is a pure config change. Re-probe so
+    // the row renders the live "Ready" state.
+    renderPodmanRow(_lastPodmanTool);
+    BRIDGE({ kind: 'runtime_setup_status', request_id: nextReqId() });
+  } else {
+    setRuntimeInstalling(true, 'prepare');
+    BRIDGE({ kind: 'prepare_runtime_tools', request_id: nextReqId(), tools: ['podman'] });
+  }
 });
 
 // Explicit opt-out: persist podman_enabled:false and re-probe so the row
@@ -1378,6 +1441,8 @@ document.getElementById('podman-prepare-btn').addEventListener('click', () => {
 document.getElementById('podman-disable-btn').addEventListener('click', () => {
   if (_runtimeInstalling) return;
   BRIDGE({ kind: 'save_runtime_setup_settings', podman_enabled: false });
+  _podmanConfigEnabled = false;
+  renderPodmanRow(_lastPodmanTool);
   BRIDGE({ kind: 'runtime_setup_status', request_id: nextReqId() });
 });
 
