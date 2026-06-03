@@ -1058,6 +1058,10 @@ where
             args.push("--workdir".into());
             args.push(wd.clone());
         }
+        if let Some(user) = &request.user {
+            args.push("--user".into());
+            args.push(user.clone());
+        }
         for mount in &request.mounts {
             args.push("-v".into());
             let opts = if mount.readonly { ":ro" } else { "" };
@@ -3089,6 +3093,7 @@ mod tests {
                 aliases: Vec::new(),
                 platform: None,
                 extra_hosts: vec![],
+                user: None,
             },
         )
         .await
