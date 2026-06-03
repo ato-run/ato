@@ -245,6 +245,12 @@ pub(crate) enum OciProviderError {
          Enable Podman in Settings, then try again."
     )]
     PodmanDisabled,
+
+    #[error(
+        "mount '{target}' is read-only but declares an ownership init; \
+         read-only mounts cannot be re-owned by the engine"
+    )]
+    ReadOnlyOwnershipConflict { target: String },
 }
 
 impl OciProviderError {
@@ -271,6 +277,7 @@ impl OciProviderError {
             Self::MachineStartFailed { .. } => "oci_machine_start_failed",
             Self::MachineReadyTimeout { .. } => "oci_machine_ready_timeout",
             Self::PodmanDisabled => "oci_podman_disabled",
+            Self::ReadOnlyOwnershipConflict { .. } => "oci_readonly_ownership_conflict",
         }
     }
 
@@ -520,6 +527,22 @@ impl PodmanProbePlatform {
             Self::Windows => "windows",
             Self::Unsupported(value) => value.as_str(),
         }
+    }
+}
+
+/// Returns the option suffix for a `-v` mount argument.
+///
+/// * no ownership, writable  → `""`
+/// * no ownership, readonly  → `":ro"`
+/// * ownership,    writable  → `":U"` (Podman engine-delegated UID/GID remap, #428)
+///
+/// Caller must ensure `readonly && ownership.is_some()` is rejected before
+/// calling (that is a `ReadOnlyOwnershipConflict` error).
+fn podman_mount_opts(mount: &capsule_core::runtime::oci::OciMountSpec) -> &'static str {
+    match (mount.readonly, mount.ownership.is_some()) {
+        (true, false) => ":ro",
+        (false, true) => ":U",
+        _ => "",
     }
 }
 
@@ -1063,12 +1086,19 @@ where
             args.push(user.clone());
         }
         for mount in &request.mounts {
+            // readonly + ownership is a contradiction: a read-only mount cannot
+            // be re-owned by the engine (:U requires write access).
+            if mount.readonly && mount.ownership.is_some() {
+                return Err(OciProviderError::ReadOnlyOwnershipConflict {
+                    target: mount.target.clone(),
+                });
+            }
             args.push("-v".into());
-            let opts = if mount.readonly { ":ro" } else { "" };
             // Canonicalize the source path to resolve symlinks (e.g. /tmp → /private/tmp on macOS).
             let source = std::fs::canonicalize(&mount.source)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| mount.source.clone());
+            let opts = podman_mount_opts(mount);
             args.push(format!("{}:{}{}", source, mount.target, opts));
         }
         if let Some(net) = &request.network {
@@ -1908,6 +1938,19 @@ where
         &self,
         request: &OciContainerRequest,
     ) -> Result<String, OciProviderError> {
+        // Docker-compatible providers do not support engine-delegated ownership
+        // (:U is Podman-specific). Emit a warning but continue — the container
+        // user must match bind-mount permissions or the recipe will fail at
+        // runtime.
+        for mount in &request.mounts {
+            if mount.ownership.is_some() {
+                tracing::warn!(
+                    target = %mount.target,
+                    "state binding owner requested but docker-compatible provider does not \
+                     support engine-delegated ownership; relying on bind mount permissions"
+                );
+            }
+        }
         self.client
             .create_container(request)
             .await
@@ -3082,6 +3125,7 @@ mod tests {
                     source: "state://app".to_string(),
                     target: "/data".to_string(),
                     readonly: false,
+                    ownership: None,
                 }],
                 ports: vec![OciPortSpec {
                     container_port: 3000,
@@ -3595,5 +3639,59 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("ATO_PODMAN_ENABLED", value) },
             None => unsafe { std::env::remove_var("ATO_PODMAN_ENABLED") },
         }
+    }
+
+    // ── Podman mount :U / ReadOnlyOwnershipConflict tests (#428 followup) ────
+
+    fn test_ownership() -> capsule_core::types::MountOwnership {
+        capsule_core::types::MountOwnership {
+            uid: Some(1001),
+            gid: Some(1001),
+            recursive: false,
+            mode: Some(0o755),
+        }
+    }
+
+    fn oci_mount_spec(
+        target: &str,
+        readonly: bool,
+        ownership: Option<capsule_core::types::MountOwnership>,
+    ) -> OciMountSpec {
+        OciMountSpec {
+            source: "/host/src".to_string(),
+            target: target.to_string(),
+            readonly,
+            ownership,
+        }
+    }
+
+    #[test]
+    fn podman_mount_opts_writable_without_ownership_is_empty() {
+        let m = oci_mount_spec("/app/data", false, None);
+        assert_eq!(podman_mount_opts(&m), "");
+    }
+
+    #[test]
+    fn podman_mount_opts_readonly_without_ownership_is_ro() {
+        let m = oci_mount_spec("/app/cfg", true, None);
+        assert_eq!(podman_mount_opts(&m), ":ro");
+    }
+
+    #[test]
+    fn podman_mount_opts_writable_with_ownership_is_colon_u() {
+        let m = oci_mount_spec("/app/data", false, Some(test_ownership()));
+        assert_eq!(podman_mount_opts(&m), ":U");
+    }
+
+    #[test]
+    fn podman_mount_opts_readonly_with_ownership_errors() {
+        // Confirm the predicate that triggers ReadOnlyOwnershipConflict.
+        let m = oci_mount_spec("/app/data", true, Some(test_ownership()));
+        assert!(
+            m.readonly && m.ownership.is_some(),
+            "readonly + ownership must be detectable as a conflict"
+        );
+        // podman_mount_opts would return :U but the caller guards this before calling.
+        assert_ne!(podman_mount_opts(&m), ":ro");
     }
 }

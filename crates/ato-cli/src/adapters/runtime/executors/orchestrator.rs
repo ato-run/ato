@@ -630,6 +630,7 @@ async fn launch_service<C: OciRuntimeClient>(
                             source: mount.source.clone(),
                             target: mount.target.clone(),
                             readonly: mount.readonly,
+                            ownership: None,
                         })
                         .collect(),
                     ports,

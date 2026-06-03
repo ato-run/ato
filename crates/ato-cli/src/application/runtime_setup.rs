@@ -185,7 +185,10 @@ fn probe_managed_version(tool: ToolKind, version_dir: &str) -> Option<ManagedPro
     }
     let detected = parse_numeric_version(&tool_version_at(&bin)?)?;
     let supported = version_satisfies(tool, &detected, supported_version(tool));
-    Some(ManagedProbe { detected, supported })
+    Some(ManagedProbe {
+        detected,
+        supported,
+    })
 }
 
 /// Detect a managed language runtime (Node/uv/Python). Managed-first, but a
@@ -615,7 +618,8 @@ mod tests {
     fn missing_managed_node_recommends_install() {
         // With no managed copy in a tool's cache, the recommended action is a
         // managed install (host PATH copies don't make it "ready").
-        let status = detect_managed_language_tool(ToolKind::Node, &["definitely-not-a-real-bin-xyz"]);
+        let status =
+            detect_managed_language_tool(ToolKind::Node, &["definitely-not-a-real-bin-xyz"]);
         if !status.ready {
             assert_eq!(status.action, RecommendedAction::InstallManaged);
         }
@@ -623,12 +627,18 @@ mod tests {
 
     #[test]
     fn parse_numeric_version_extracts_dotted() {
-        assert_eq!(parse_numeric_version("v22.11.0").as_deref(), Some("22.11.0"));
+        assert_eq!(
+            parse_numeric_version("v22.11.0").as_deref(),
+            Some("22.11.0")
+        );
         assert_eq!(
             parse_numeric_version("Python 3.12.7").as_deref(),
             Some("3.12.7")
         );
-        assert_eq!(parse_numeric_version("uv 0.4.19").as_deref(), Some("0.4.19"));
+        assert_eq!(
+            parse_numeric_version("uv 0.4.19").as_deref(),
+            Some("0.4.19")
+        );
         assert!(parse_numeric_version("no digits here").is_none());
     }
 
