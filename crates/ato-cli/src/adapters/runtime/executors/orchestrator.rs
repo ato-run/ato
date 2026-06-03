@@ -20,8 +20,8 @@ use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{
-    BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciMountSpec, OciNetworkRequest,
-    OciPortSpec, OciRuntimeClient,
+    BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciMountSourceKind, OciMountSpec,
+    OciNetworkRequest, OciPortSpec, OciRuntimeClient,
 };
 use capsule_core::types::{
     OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceRuntime,
@@ -634,6 +634,7 @@ async fn launch_service<C: OciRuntimeClient>(
                             target: mount.target.clone(),
                             readonly: mount.readonly,
                             ownership: None,
+                            source_kind: OciMountSourceKind::default(),
                         })
                         .collect(),
                     ports,
