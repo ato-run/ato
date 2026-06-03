@@ -105,6 +105,25 @@ pub struct Mount {
     pub source: String,
     pub target: String,
     pub readonly: bool,
+    /// Optional host-side ownership/mode initialization for this mount source,
+    /// resolved from a `[[services.*.state_bindings]] owner`/`mode` declaration.
+    /// `None` means Ato leaves the source's ownership untouched. See #428.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<MountOwnership>,
+}
+
+/// Host-side ownership initialization applied to a mount source before the
+/// container starts. Lets a non-root OCI `user` write to a mounted volume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MountOwnership {
+    pub uid: u32,
+    #[serde(default)]
+    pub gid: Option<u32>,
+    #[serde(default)]
+    pub recursive: bool,
+    /// Permission bits to apply (already parsed from the manifest octal string).
+    #[serde(default)]
+    pub mode: Option<u32>,
 }
 
 impl CapsuleManifest {
@@ -179,6 +198,7 @@ impl CapsuleManifest {
                             ),
                             target: mount_path.to_string(),
                             readonly: vol.read_only,
+                            ownership: None,
                         });
                     }
                 }
@@ -291,6 +311,10 @@ fn state_mounts(
                 )?,
                 target: target.to_string(),
                 readonly: false,
+                // Ownership init is applied on the orchestration/OCI execution
+                // path (see router::services); the single-service RunPlan path
+                // does not run containers as a non-root `user`.
+                ownership: None,
             })
         })
         .collect()
