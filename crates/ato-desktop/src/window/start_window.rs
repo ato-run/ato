@@ -57,6 +57,20 @@ impl Render for StartWindowShell {
 }
 
 impl StartWindowShell {
+    /// Push a refreshed running-app list into the page after an async
+    /// `SessionRegistry` sync (e.g. once OCI sessions are discovered). The page
+    /// re-renders the "開いているアプリ" row from this array.
+    fn push_running_apps(&self, running_apps_json: &str) {
+        let script = format!(
+            "window.__ATO_RUNNING_APPS_REFRESH__ && window.__ATO_RUNNING_APPS_REFRESH__({running_apps_json});"
+        );
+        if let Some(webview) = self._webview.as_ref()
+            && let Err(error) = webview.evaluate_script(&script)
+        {
+            tracing::debug!(?error, "start: running apps push failed");
+        }
+    }
+
     fn sync_webview_bounds(&mut self, window: &mut gpui::Window) {
         let current = window.bounds().size;
         if current == self.window_size {
@@ -179,6 +193,9 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
     let queue = system_ipc::new_queue();
     let queue_for_drain = queue.clone();
     let start_run_dir = start_run_dir_from_manifest();
+    let entity_capture: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<StartWindowShell>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let entity_capture2 = entity_capture.clone();
     let handle = cx.open_window(options, move |window, cx| {
         window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
@@ -247,6 +264,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             window_size: win_size,
             paste: WebViewPasteSupport::new(cx),
         });
+        *entity_capture2.borrow_mut() = Some(shell.clone());
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
@@ -267,6 +285,62 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
     cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
         .register(SystemCapsuleId::AtoStart, *handle);
     system_ipc::spawn_drain_loop(cx, queue_for_drain, *handle);
+
+    // The initial snapshot only carries sessions already known to the
+    // `SessionRegistry` (source sessions are registered synchronously at
+    // start). OCI sessions live in the CLI's `ato ps` projection and are only
+    // mirrored into the registry on demand, so a freshly-launched OCI app would
+    // otherwise be missing from the running-apps row. Mirror the Card
+    // Switcher's pattern: open immediately, then refresh OCI sessions off the
+    // UI thread and push the merged list back into the page once it returns.
+    let shell = entity_capture.borrow_mut().take();
+    if let Some(shell) = shell {
+        let shell = shell.downgrade();
+        let async_app = cx.to_async();
+        async_app
+            .foreground_executor()
+            .spawn({
+                let be = async_app.background_executor().clone();
+                let aa = async_app.clone();
+                async move {
+                    use std::time::Duration;
+                    be.timer(Duration::from_millis(200)).await;
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::orchestrator::list_oci_sessions());
+                    });
+                    loop {
+                        be.timer(Duration::from_millis(100)).await;
+                        if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                            continue;
+                        }
+                        match rx.try_recv() {
+                            Ok(Ok(snapshots)) => {
+                                let _ = aa.update(|cx| {
+                                    cx.global_mut::<crate::state::session::SessionRegistry>()
+                                        .sync_oci_sessions(snapshots);
+                                    let running_apps =
+                                        crate::system_capsule::ato_start::build_running_apps(cx);
+                                    let json = serde_json::to_string(&running_apps)
+                                        .unwrap_or_else(|_| "[]".to_string());
+                                    let _ = shell.update(cx, |shell, _cx| {
+                                        shell.push_running_apps(&json);
+                                    });
+                                });
+                                break;
+                            }
+                            Ok(Err(error)) => {
+                                tracing::warn!(?error, "start: async OCI session refresh failed");
+                                break;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                        }
+                    }
+                }
+            })
+            .detach();
+    }
 
     Ok(())
 }
