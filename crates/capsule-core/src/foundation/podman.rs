@@ -56,28 +56,54 @@ impl ResolvedPodman {
         }
         self.version.as_deref()
     }
+
+    /// Build a [`PodmanInvocation`] from this already-resolved binary, so a
+    /// caller that probed the version and then spawns a command targets the
+    /// exact same binary instead of re-resolving.
+    pub fn invocation(&self) -> PodmanInvocation {
+        let path_env = self.bin_dir().and_then(prepend_path_env);
+        PodmanInvocation {
+            program: self.bin.clone().into_os_string(),
+            path_env,
+            found: true,
+        }
+    }
 }
 
-/// Podman could not be resolved anywhere. Carries the paths that were searched
-/// so the diagnostic is actionable.
+/// Why podman resolution failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PodmanResolveError {
-    pub searched: Vec<PathBuf>,
+pub enum PodmanResolveError {
+    /// `ATO_PODMAN_BIN` was set but does not point at a usable executable. This
+    /// is an explicit user runtime selection, so it fails hard rather than
+    /// silently falling back to a *different* podman on `PATH` — which would
+    /// make the override look effective while a different binary is used.
+    InvalidEnvOverride { path: PathBuf },
+    /// Podman could not be found anywhere. Carries the paths searched (besides
+    /// `PATH`) so the diagnostic is actionable.
+    NotFound { searched: Vec<PathBuf> },
 }
 
 impl std::fmt::Display for PodmanResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "podman binary not found")?;
-        if !self.searched.is_empty() {
-            let joined = self
-                .searched
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            write!(f, " (searched PATH and: {joined})")?;
+        match self {
+            Self::InvalidEnvOverride { path } => write!(
+                f,
+                "ATO_PODMAN_BIN points at '{}', which is not a usable executable",
+                path.display()
+            ),
+            Self::NotFound { searched } => {
+                write!(f, "podman binary not found")?;
+                if !searched.is_empty() {
+                    let joined = searched
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(f, " (searched PATH and: {joined})")?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 }
 
@@ -87,12 +113,14 @@ impl std::error::Error for PodmanResolveError {}
 /// optional `PATH` override that prepends the binary's directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PodmanInvocation {
-    /// Absolute resolved binary, or the literal `"podman"` fallback when
-    /// unresolved (never worse than spawning the bare name as before).
+    /// The program to spawn. A resolved absolute binary; on an *invalid*
+    /// `ATO_PODMAN_BIN` override the override path itself (so the spawn fails
+    /// loudly on that exact path rather than silently using a different
+    /// podman); only the bare `"podman"` when podman is genuinely absent.
     pub program: OsString,
     /// `PATH` value to set on the child, when a directory could be resolved.
     pub path_env: Option<OsString>,
-    /// Whether a real binary was resolved (vs. the `"podman"` fallback).
+    /// Whether a real binary was resolved (vs. a fallback program).
     pub found: bool,
 }
 
@@ -109,19 +137,30 @@ pub fn resolve_podman() -> Result<ResolvedPodman, PodmanResolveError> {
     })
 }
 
-/// Build a [`PodmanInvocation`] for spawning podman commands. Falls back to the
-/// bare `"podman"` name (no PATH override) when resolution fails.
+/// Build a [`PodmanInvocation`] for spawning podman commands.
+///
+/// On an invalid `ATO_PODMAN_BIN` override the override path is used verbatim so
+/// the spawn fails loudly on that exact path — it never silently substitutes a
+/// different podman from `PATH`. Only a genuine "not found" falls back to the
+/// bare `"podman"` name (no worse than spawning the bare name as before).
 pub fn podman_invocation() -> PodmanInvocation {
-    match resolve_podman() {
-        Ok(resolved) => {
-            let path_env = resolved.bin_dir().and_then(prepend_path_env);
-            PodmanInvocation {
-                program: resolved.bin.into_os_string(),
-                path_env,
-                found: true,
-            }
-        }
-        Err(_) => PodmanInvocation {
+    invocation_from(resolve_podman())
+}
+
+/// Pure mapping from a resolution result to a [`PodmanInvocation`], split out so
+/// the fallback policy is unit-testable without touching process env / `PATH`.
+fn invocation_from(resolved: Result<ResolvedPodman, PodmanResolveError>) -> PodmanInvocation {
+    match resolved {
+        Ok(resolved) => resolved.invocation(),
+        // Invalid override: spawn the exact override path so it fails visibly
+        // rather than picking up a different podman on PATH.
+        Err(PodmanResolveError::InvalidEnvOverride { path }) => PodmanInvocation {
+            program: path.into_os_string(),
+            path_env: None,
+            found: false,
+        },
+        // Genuinely missing: fall back to the bare name.
+        Err(PodmanResolveError::NotFound { .. }) => PodmanInvocation {
             program: OsString::from("podman"),
             path_env: None,
             found: false,
@@ -144,14 +183,15 @@ fn resolve_from(
     known: &[PathBuf],
     is_usable: &dyn Fn(&Path) -> bool,
 ) -> Result<(PathBuf, PodmanBinarySource), PodmanResolveError> {
-    let mut searched = Vec::new();
-
+    // An explicit override is an exact runtime selection: if it is set but
+    // unusable, fail hard. Do NOT fall back to PATH/known dirs — that would run
+    // a *different* podman while the override appears to be in effect, which is
+    // undebuggable once PR B carries machine/socket context on the binary.
     if let Some(candidate) = env_override {
         if is_usable(&candidate) {
             return Ok((candidate, PodmanBinarySource::EnvOverride));
         }
-        // A stale override should not hard-fail when PATH/known dirs still work.
-        searched.push(candidate);
+        return Err(PodmanResolveError::InvalidEnvOverride { path: candidate });
     }
 
     if let Some(candidate) = path_lookup {
@@ -159,6 +199,7 @@ fn resolve_from(
         return Ok((candidate, PodmanBinarySource::Path));
     }
 
+    let mut searched = Vec::new();
     for candidate in known {
         if is_usable(candidate) {
             return Ok((candidate.clone(), PodmanBinarySource::KnownLocation));
@@ -166,7 +207,7 @@ fn resolve_from(
         searched.push(candidate.clone());
     }
 
-    Err(PodmanResolveError { searched })
+    Err(PodmanResolveError::NotFound { searched })
 }
 
 /// Per-OS known locations, parameterized on the OS string for testability.
@@ -263,16 +304,23 @@ mod tests {
     }
 
     #[test]
-    fn unusable_override_falls_through_to_path() {
-        let (bin, source) = resolve_from(
+    fn unusable_override_is_error() {
+        // An explicit but broken ATO_PODMAN_BIN must fail hard, NOT silently
+        // run a different podman that happens to be on PATH.
+        let err = resolve_from(
             Some(PathBuf::from("/stale/podman")),
             Some(PathBuf::from("/usr/bin/podman")),
-            &[],
+            &[PathBuf::from("/opt/homebrew/bin/podman")],
             &|p| p != Path::new("/stale/podman"),
         )
-        .expect("falls through to PATH");
-        assert_eq!(bin, PathBuf::from("/usr/bin/podman"));
-        assert_eq!(source, PodmanBinarySource::Path);
+        .expect_err("invalid override must not fall through");
+        assert_eq!(
+            err,
+            PodmanResolveError::InvalidEnvOverride {
+                path: PathBuf::from("/stale/podman"),
+            }
+        );
+        assert!(err.to_string().contains("/stale/podman"), "{err}");
     }
 
     #[test]
@@ -321,17 +369,48 @@ mod tests {
             PathBuf::from("/opt/homebrew/bin/podman"),
             PathBuf::from("/usr/local/bin/podman"),
         ];
-        let err = resolve_from(Some(PathBuf::from("/stale/podman")), None, &known, &|_| {
-            false
-        })
-        .expect_err("nothing usable => missing");
-        assert!(err.searched.contains(&PathBuf::from("/stale/podman")));
-        assert!(
-            err.searched
-                .contains(&PathBuf::from("/opt/homebrew/bin/podman"))
-        );
+        // No override, no PATH, nothing usable => NotFound listing known dirs.
+        let err =
+            resolve_from(None, None, &known, &|_| false).expect_err("nothing usable => missing");
+        let PodmanResolveError::NotFound { searched } = &err else {
+            panic!("expected NotFound, got {err:?}");
+        };
+        assert!(searched.contains(&PathBuf::from("/opt/homebrew/bin/podman")));
         let rendered = err.to_string();
         assert!(rendered.contains("/opt/homebrew/bin/podman"), "{rendered}");
+    }
+
+    #[test]
+    fn invocation_uses_override_path_on_invalid_override() {
+        // An invalid override must spawn the override path itself (so it fails
+        // visibly), never the bare "podman" that could pick up a PATH binary.
+        let inv = invocation_from(Err(PodmanResolveError::InvalidEnvOverride {
+            path: PathBuf::from("/stale/podman"),
+        }));
+        assert_eq!(inv.program, OsString::from("/stale/podman"));
+        assert!(!inv.found);
+        assert!(inv.path_env.is_none());
+    }
+
+    #[test]
+    fn invocation_falls_back_to_bare_name_only_when_not_found() {
+        let inv = invocation_from(Err(PodmanResolveError::NotFound {
+            searched: Vec::new(),
+        }));
+        assert_eq!(inv.program, OsString::from("podman"));
+        assert!(!inv.found);
+    }
+
+    #[test]
+    fn invocation_from_resolved_targets_that_binary() {
+        let resolved = ResolvedPodman {
+            bin: PathBuf::from("/opt/homebrew/bin/podman"),
+            source: PodmanBinarySource::KnownLocation,
+            version: None,
+        };
+        let inv = invocation_from(Ok(resolved));
+        assert_eq!(inv.program, OsString::from("/opt/homebrew/bin/podman"));
+        assert!(inv.found);
     }
 
     #[test]
