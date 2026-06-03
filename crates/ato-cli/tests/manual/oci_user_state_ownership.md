@@ -1,69 +1,70 @@
 # Manual verification — OCI container `user` + state ownership init (#428)
 
-Automated unit tests cover the resolution + chown plumbing (privilege-free, against
-the current uid). They cannot prove a real non-root container can write a mounted
-volume on a real engine, because that needs Docker/Podman and (on macOS) a
-podman machine. This doc is the manual gate for that.
+Automated tests cover the resolution + chmod/chown plumbing (privilege-free,
+against the current uid). They cannot prove a real non-root container can write
+a mounted volume on a real engine, because that needs Docker/Podman and (on
+macOS) a podman machine. This doc is the manual gate for that.
 
-## What #428 adds
+## What #428 does
 
 - `[targets.<label>] user = "uid[:gid]"` on an OCI target → passed to the engine as `--user`.
-- `[[services.<svc>.state_bindings]] owner = { uid, gid, recursive }` + `mode = "0700"`
-  → Ato `chown`s (and optionally `chmod`s) the **host-side** state source before the
-  container starts. Declaring `owner` is the opt-in; without it Ato never changes
-  ownership of a bound path.
+- `[[services.<svc>.state_bindings]] owner = { uid, gid, recursive }` + `mode = "0777"`
+  (octal) → **best-effort** host-side init of the bound state source before the
+  container starts:
+  - **`chmod` to `mode`** — the load-bearing op on Podman-machine/virtiofs. There,
+    real I/O maps to the host owner, but apps gate on `access(2)`/mode bits, so the
+    dir must be mode-accessible to the container user (e.g. `0777` when the
+    container uid ≠ host uid).
+  - **`chown` to `uid[:gid]`** — best-effort. Works for root / native-Linux rootful;
+    on a normal macOS/Linux user it returns `EPERM`, which is **logged and skipped,
+    not fatal**.
+- Declaring `owner`/`mode` is the recipe author's explicit opt-in; bindings without
+  it are left untouched (no silent mutation of user-provided paths).
+- **Never aborts the launch.** If the container still can't write, the readiness path
+  surfaces the real error via `oci_container_exited_before_ready` (#429).
+- **`:U` is intentionally not used** — it corrupts the virtiofs mount on macOS Podman
+  (`mkdir: No such file or directory`).
 
-## A. Minimal synthetic check (engine-agnostic, fast)
-
-Any non-root image that writes to a mounted dir works. Example `capsule.toml`:
+## A. Synthetic non-root smoke (engine-agnostic, fast)
 
 ```toml
-[capsule]
-name = "owner-smoke"
+[capsule]   # plus schema_version="0.3", name, version, type, default_target="main"
 
 [targets.main]
 runtime = "oci"
 image = "alpine:3.20"
 user = "1001:1001"
-# Fail loudly if the volume is not writable by uid 1001:
-cmd = ["sh", "-lc", "touch /data/ok && echo WROTE_OK && sleep 30"]
+cmd = ["sh", "-lc", "id; touch /data/ok && echo WROTE_OK && sleep 30"]
 
 [state.data]
 kind = "filesystem"
 durability = "persistent"
 attach = "explicit"
 purpose = "smoke state"
+schema_id = "sha256:0000…0001"   # persistent state requires a (non-empty) schema_id
 
 [services.main]
 target = "main"
-[[services.main.state_bindings]]
-state = "data"
-target = "/data"
-owner = { uid = 1001, gid = 1001, recursive = true }
-mode = "0775"
-
 [services.main.readiness_probe]
 exec = ["test", "-f", "/data/ok"]
 timeout_seconds = 20
 interval_seconds = 2
-```
 
-Run (pick a host dir you own):
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
+mode = "0777"                      # chmod is load-bearing; owner is optional
+```
 
 ```sh
 mkdir -p /tmp/owner-smoke-data
-ato run ./owner-smoke --state data:/tmp/owner-smoke-data --yes
+ato run ./owner-smoke --state data=/tmp/owner-smoke-data --yes   # note: --state uses '='
 ```
-
-Expected:
-- Readiness passes (the `exec` probe finds `/data/ok`), i.e. uid 1001 could write.
-- Without the fix, the container exits and you get
-  `oci_container_exited_before_ready` (from #429) or a readiness timeout.
-- `ls -ln /tmp/owner-smoke-data` shows the dir owned by `1001:1001` on the host.
+Expected: readiness passes (`/data/ok` created by uid 1001). Host dir becomes
+mode `0777` (still host-owned). If a stale run left the dir root-owned and
+chmod can't fix it, the run fails via `oci_container_exited_before_ready` (#429).
 
 ## B. OpenList end-to-end (the real #394 target)
-
-Re-point the OpenList recipe target/binding to the new fields:
 
 ```toml
 [targets.main]
@@ -71,36 +72,38 @@ runtime = "oci"
 image = "openlistteam/openlist:v4.2.2"
 user = "1001:1001"
 port = 5244
-
-[state.data]
-kind = "filesystem"
-durability = "persistent"
-attach = "explicit"
-purpose = "OpenList data"
+env = { OPENLIST_ADMIN_PASSWORD = "dummy-pass" }
 
 [[services.main.state_bindings]]
 state = "data"
 target = "/opt/openlist/data"
-owner = { uid = 1001, gid = 1001, recursive = true }
-mode = "0700"
+owner = { uid = 1001, gid = 1001, recursive = true }   # chown best-effort
+mode = "0777"                                           # chmod unblocks access(2)
 ```
 
 ```sh
 mkdir -p /tmp/openlist-data
-OPENLIST_ADMIN_PASSWORD=dummy ato run ./openlist --state data:/tmp/openlist-data --yes
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<allocated-port>/
+ato run ./openlist --state data=/tmp/openlist-data --yes
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<allocated-port>/
 ```
 
 Acceptance:
-- macOS Podman: HTTP 200 (was: `Exited (1)` "does not have write … permissions for ./data").
-- Restart persistence: stop, `ato run` again, prior config under `/tmp/openlist-data` is intact.
-- Docker Desktop: HTTP 200 (no regression).
-- Secrets (`OPENLIST_ADMIN_PASSWORD`, OAuth, Crypt password/salt) do not appear in logs/receipts.
+- macOS Podman: HTTP 200, restart persistence, no secret leakage in Ato receipts.
+- Docker Desktop: HTTP 200 (no regression — no `:U` is added for docker).
+
+### Verified runs
+
+- **2026-06-03, macOS, Podman 5.7.1, host uid 501** — gate A and gate B both pass:
+  - chown→1001 logs `best-effort chown skipped (not fatal)`; chmod 0777 applies.
+  - OpenList: `start HTTP server @ 0.0.0.0:5244`, **HTTP 200** on the allocated port.
+  - Restart: second `ato run` logs `reading config file …config.json` (no
+    "config file not exists") → **persistence confirmed**; HTTP 200 again.
+  - `ato stop --all` removes the container + network cleanly.
+- Docker Desktop: not yet run; expected to pass via permissive bind mounts.
 
 ## Notes / known limits
 
-- On macOS the host `chown` runs against the host path; whether uid 1001 then maps
-  through the podman-machine VM is exactly what step B verifies.
-- `mode` is an **octal** string (`"0700"`, `"0775"`). Symbolic modes (`u+rwx`) are not parsed.
-- A `mode` without an `owner` is rejected at resolution (no ownership pass to apply it during).
-- On non-unix hosts, `owner` is logged and skipped (chown semantics don't transfer).
+- `mode` is an **octal** string (`"0700"`, `"0777"`). Symbolic modes (`u+rwx`) are not parsed.
+- `chmod 0777` is world-writable; on Podman-machine/virtiofs this does not widen real
+  access beyond the host user, but on native Linux it does. Scope `mode` accordingly.
+- On non-unix hosts, `owner`/`mode` are logged and skipped (left to the engine).
