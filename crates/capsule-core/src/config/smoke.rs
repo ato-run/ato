@@ -571,11 +571,35 @@ fn resolve_required_port(
     Ok(None)
 }
 
+/// Preflight the smoke main-service executable for the POSIX-shell dependency
+/// (#377). Source-build recipes whose main service is a shell script surface
+/// `executable = "sh"` (or a resolved `…/sh` path); on a host without a POSIX
+/// shell the spawn would otherwise fail with an opaque `os error 2` that maps
+/// to the generic E999. Returning a marker-tagged `NotFound` lets the ato-cli
+/// diagnostics layer map it to the typed E213 instead.
+///
+/// `shell_available` and `os` are injected so both branches are unit-testable
+/// on any host.
+fn smoke_shell_preflight(executable: &str, shell_available: bool, os: &str) -> std::io::Result<()> {
+    if crate::shell_support::executable_requires_posix_shell(executable) && !shell_available {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            crate::shell_support::source_build_shell_unavailable_message(executable, os),
+        ));
+    }
+    Ok(())
+}
+
 fn spawn_main_service(
     root: &Path,
     service: &MainService,
     isolated_env: &HostIsolationContext,
 ) -> std::io::Result<Child> {
+    smoke_shell_preflight(
+        &service.executable,
+        crate::shell_support::host_posix_shell_available(),
+        std::env::consts::OS,
+    )?;
     let cwd_path = resolve_path(root, &service.cwd);
     // Resolve `npm:X` → `node_modules/.bin/X` so ato's package-bin references
     // work inside the smoke's isolated environment.
@@ -615,6 +639,21 @@ fn spawn_main_service(
     }
 
     cmd.spawn().map_err(|e| {
+        // Defense in depth: if the preflight passed but the spawn still can't
+        // find a shell executable (PATH race, broken Git Bash install), upgrade
+        // the file-not-found failure to the same marker-tagged message so it
+        // maps to E213 rather than the generic spawn error → E999. (#377)
+        if e.kind() == std::io::ErrorKind::NotFound
+            && crate::shell_support::executable_requires_posix_shell(&service.executable)
+        {
+            return std::io::Error::new(
+                e.kind(),
+                crate::shell_support::source_build_shell_unavailable_message(
+                    &service.executable,
+                    std::env::consts::OS,
+                ),
+            );
+        }
         std::io::Error::new(
             e.kind(),
             format!(
@@ -1162,6 +1201,51 @@ startup_timeout_ms = 0
         .unwrap();
         let err = parse_smoke_options(&manifest, "cli").unwrap_err();
         assert!(err.to_string().contains("startup_timeout_ms"));
+    }
+
+    #[test]
+    fn smoke_preflight_shell_missing_yields_source_build_shell_marker() {
+        // Windows-style host (injected) with no POSIX shell and an `sh` main
+        // service must surface the typed marker, not a bare spawn failure.
+        let err = smoke_shell_preflight("sh", false, "windows").expect_err("must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        let message = err.to_string();
+        assert!(
+            message.contains(crate::shell_support::SOURCE_BUILD_SHELL_UNAVAILABLE_MARKER),
+            "marker missing: {message}"
+        );
+        assert!(
+            message.contains("platform=windows"),
+            "platform missing: {message}"
+        );
+        assert!(
+            message.contains("/bin/sh"),
+            "required tool missing: {message}"
+        );
+    }
+
+    #[test]
+    fn smoke_preflight_detects_resolved_sh_path() {
+        // The #377 failure resolved `sh` to a `…\sh` path; both forms must trip.
+        for exe in ["sh", "/bin/sh", "C:\\msys64\\usr\\bin\\sh.exe"] {
+            assert!(
+                smoke_shell_preflight(exe, false, "windows").is_err(),
+                "{exe} should be gated when no shell is present"
+            );
+        }
+    }
+
+    #[test]
+    fn smoke_preflight_non_shell_executable_is_not_gated() {
+        // A non-shell executable missing at spawn must keep the existing
+        // SpawnFailed semantics — the preflight does not intercept it.
+        smoke_shell_preflight("node", false, "windows").expect("node must not be gated");
+        smoke_shell_preflight("uv", false, "windows").expect("uv must not be gated");
+    }
+
+    #[test]
+    fn smoke_preflight_noop_when_shell_available() {
+        smoke_shell_preflight("sh", true, "windows").expect("available shell must not error");
     }
 
     #[test]
