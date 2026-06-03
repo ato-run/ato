@@ -486,7 +486,20 @@ pub(crate) struct SystemCommandRunner;
 
 impl OciCommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
-        let output = Command::new(program).args(args).output()?;
+        // Resolve the logical "podman" program to an absolute binary (+ PATH
+        // override) so GUI-launched processes with a minimal PATH still find
+        // Homebrew/known-location Podman. Other programs run unchanged.
+        let mut command = if program == "podman" {
+            let invocation = capsule_core::podman::podman_invocation();
+            let mut command = Command::new(&invocation.program);
+            if let Some(path_env) = &invocation.path_env {
+                command.env("PATH", path_env);
+            }
+            command
+        } else {
+            Command::new(program)
+        };
+        let output = command.args(args).output()?;
         Ok(CommandOutput {
             status: output.status.code().unwrap_or(1),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -559,6 +572,20 @@ impl<R> PodmanProvider<R> {
             platform,
             semantics: podman_semantics(OciProviderMode::Unknown, OciProviderSubstrate::Unknown),
         }
+    }
+
+    /// Build a tokio `Command` for spawning podman, resolved to an absolute
+    /// binary with a `PATH` override so GUI-launched (minimal-PATH) processes
+    /// find Homebrew/known-location Podman. Falls back to the bare `"podman"`
+    /// name when resolution fails, preserving prior behavior (and the genuine
+    /// `NotFound → Missing` mapping when podman is truly absent).
+    fn podman_command(&self) -> tokio::process::Command {
+        let invocation = capsule_core::podman::podman_invocation();
+        let mut command = tokio::process::Command::new(&invocation.program);
+        if let Some(path_env) = &invocation.path_env {
+            command.env("PATH", path_env);
+        }
+        command
     }
 }
 
@@ -966,7 +993,8 @@ where
             args.push(format!("linux/{}", image.platform.architecture));
         }
         args.push(pull_ref.clone());
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(&args)
             .output()
             .await
@@ -998,7 +1026,8 @@ where
             args.push(format!("{k}={v}"));
         }
         args.push(request.name.clone());
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(&args)
             .output()
             .await
@@ -1015,7 +1044,8 @@ where
     }
 
     async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(["network", "rm", network_name])
             .output()
             .await
@@ -1085,7 +1115,8 @@ where
         }
         args.push(request.image.clone());
         args.extend(request.cmd.iter().cloned());
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(&args)
             .output()
             .await
@@ -1102,7 +1133,8 @@ where
     }
 
     async fn start_container(&self, container_id: &str) -> Result<(), OciProviderError> {
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(["start", container_id])
             .output()
             .await
@@ -1120,7 +1152,8 @@ where
         &self,
         container_id: &str,
     ) -> Result<OciContainerInspect, OciProviderError> {
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(["inspect", "--format", "json", container_id])
             .output()
             .await
@@ -1147,7 +1180,8 @@ where
             args.push("--follow".into());
         }
         args.push(container_id.to_string());
-        let mut child = tokio::process::Command::new("podman")
+        let mut child = self
+            .podman_command()
             .args(&args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1191,7 +1225,8 @@ where
     }
 
     async fn wait_container(&self, container_id: &str) -> Result<i64, OciProviderError> {
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(["wait", container_id])
             .output()
             .await
@@ -1217,7 +1252,8 @@ where
         timeout_secs: i64,
     ) -> Result<(), OciProviderError> {
         let timeout = timeout_secs.to_string();
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(["stop", "--time", &timeout, container_id])
             .output()
             .await
@@ -1241,7 +1277,8 @@ where
             args.push("--force".into());
         }
         args.push(container_id.to_string());
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(&args)
             .output()
             .await
@@ -1267,7 +1304,8 @@ impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
         // resilience that PR #289's broader "never skip" rule accidentally
         // removed for digest-pinned refs.
         if image.contains("@sha256:") {
-            let exists = tokio::process::Command::new("podman")
+            let exists = self
+                .podman_command()
                 .args(["image", "exists", image])
                 .status()
                 .await
@@ -1285,7 +1323,8 @@ impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
         // so the cached image refreshes against the registry, matching the
         // prior bollard semantics. The resolved-digest path lives on
         // `OciProvider::pull_image(&OciImageResolution)`.
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .args(["pull", image])
             .output()
             .await
@@ -1301,7 +1340,8 @@ impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
         // transient registry/DNS outage. For mutable tags this means the
         // session runs against possibly-stale content, which is preferable to
         // refusing to start at all.
-        let cached = tokio::process::Command::new("podman")
+        let cached = self
+            .podman_command()
             .args(["image", "exists", image])
             .status()
             .await
@@ -1374,7 +1414,8 @@ impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
         container_id: &str,
         cmd: &[String],
     ) -> capsule_core::Result<i64> {
-        let output = tokio::process::Command::new("podman")
+        let output = self
+            .podman_command()
             .arg("exec")
             .arg(container_id)
             .args(cmd)
