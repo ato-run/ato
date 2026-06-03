@@ -104,6 +104,7 @@ pub use config::diagnostics;
 pub use config::python_runtime;
 pub use config::runtime_config;
 pub use config::schema_registry;
+pub use config::shell_support;
 pub use config::smoke;
 
 // ── Re-exports (public API — unchanged) ───────────────────────────────────
