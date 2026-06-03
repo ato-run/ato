@@ -28,6 +28,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::orchestrator::resolve_ato_binary;
 use crate::proc_util::CommandNoWindowExt;
+use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
 
 // ── Global slot ───────────────────────────────────────────────────────────────
 
@@ -102,6 +103,8 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
     {
         let result = handle.update(cx, |_, window, _| window.activate_window());
         if result.is_ok() {
+            cx.global_mut::<OpenContentWindows>()
+                .focus(handle.window_id().as_u64());
             return Ok(());
         }
         cx.set_global(AuthLoginWindowSlot(None));
@@ -172,6 +175,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
         ..Default::default()
     };
 
+    let login_url_for_webview = login_url.clone();
     let handle = cx.open_window(options, move |window, cx| {
         window.set_window_title(crate::window::WINDOW_TITLE);
         let win_size = window.bounds().size;
@@ -186,7 +190,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
 
         let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
-            .with_url(&login_url)
+            .with_url(&login_url_for_webview)
             .with_bounds(webview_rect);
         let webview = crate::window::build_child_webview("Login window", webview, window);
 
@@ -198,6 +202,18 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
     })?;
 
     cx.set_global(AuthLoginWindowSlot(Some(*handle)));
+    cx.global_mut::<OpenContentWindows>().insert(
+        handle.window_id().as_u64(),
+        ContentWindowEntry {
+            handle: *handle,
+            kind: ContentWindowKind::Auth,
+            title: gpui::SharedString::from("Ato login"),
+            subtitle: gpui::SharedString::from("Authenticate in embedded WebView"),
+            url: gpui::SharedString::from(login_url),
+            capsule: None,
+            last_focused_at: std::time::Instant::now(),
+        },
+    );
 
     // ── Background watcher using GPUI executors ────────────────────────────────
     // `be.spawn` runs the blocking I/O on background threads (requires Send).
