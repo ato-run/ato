@@ -49,10 +49,20 @@ impl RuntimeControlClient {
         let response = ureq::post(&url)
             .set("Content-Type", "application/json")
             .send_json(body_value)
-            .context("POST /v1/runtime/sessions")?;
-        let status = response.status();
-        if status != 201 {
-            bail!("POST /v1/runtime/sessions returned HTTP {status}");
+            .map_err(|err| match err {
+                ureq::Error::Status(status, resp) => {
+                    let body = resp.into_string().unwrap_or_default();
+                    anyhow::anyhow!(
+                        "POST /v1/runtime/sessions returned HTTP {status}: {body}"
+                    )
+                }
+                other => anyhow::Error::new(other).context("POST /v1/runtime/sessions"),
+            })?;
+        if response.status() != 201 {
+            bail!(
+                "POST /v1/runtime/sessions returned unexpected HTTP {}",
+                response.status()
+            );
         }
         let result: LaunchSessionResponse =
             response.into_json().context("parse LaunchSessionResponse")?;
@@ -97,6 +107,13 @@ mod tests {
     fn base_url_includes_port() {
         let c = RuntimeControlClient::new(8787);
         assert_eq!(c.base_url(), "http://127.0.0.1:8787");
+    }
+
+    #[test]
+    fn base_url_uses_configured_port_not_default() {
+        let c = RuntimeControlClient::new(9999);
+        assert_eq!(c.base_url(), "http://127.0.0.1:9999");
+        assert_ne!(c.base_url(), "http://127.0.0.1:8080");
     }
 
     #[test]

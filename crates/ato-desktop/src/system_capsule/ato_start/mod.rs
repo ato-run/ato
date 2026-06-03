@@ -657,7 +657,10 @@ pub fn dispatch(
             let async_app = cx.to_async();
             let fe = cx.foreground_executor().clone();
             let be = cx.background_executor().clone();
-            let port = crate::config::default_local_registry_port();
+            let port = cx
+                .try_global::<crate::config::LocalRegistryPort>()
+                .map(|g| g.0)
+                .unwrap_or_else(crate::config::default_local_registry_port);
 
             fe.spawn(async move {
                 let key = install_profile_key.clone();
@@ -710,7 +713,10 @@ pub fn dispatch(
 
         AtoStartCommand::RuntimeStopSession { session_id } => {
             let be = cx.background_executor().clone();
-            let port = crate::config::default_local_registry_port();
+            let port = cx
+                .try_global::<crate::config::LocalRegistryPort>()
+                .map(|g| g.0)
+                .unwrap_or_else(crate::config::default_local_registry_port);
 
             be.spawn(async move {
                 let result =
