@@ -612,7 +612,7 @@ pub fn run(skip_onboarding: bool) {
             tracing::info!(
                 closed_id,
                 %closed_kind,
-                "on_window_closed observed window close"
+                "OS/GPUI window close observed; foreground surface destroyed"
             );
             let removed_id = cx
                 .global_mut::<crate::state::AppWindowRegistry>()
@@ -766,12 +766,9 @@ pub fn run(skip_onboarding: bool) {
                     cx.global_mut::<crate::state::session::SessionRegistry>();
                 let ids = registry.detach_clients_by_window_id(closed_id);
                 if close_behavior == crate::config::WindowCloseBehavior::StopSession {
-                    for sid in &ids {
-                        registry.stop_session_once(sid);
-                    }
                     tracing::info!(
                         ?ids,
-                        "windowCloseBehavior=stop-session: stopping sessions"
+                        "windowCloseBehavior=stop-session: detached clients; stopping sessions asynchronously"
                     );
                 } else {
                     tracing::info!(
@@ -781,6 +778,11 @@ pub fn run(skip_onboarding: bool) {
                 }
                 ids
             };
+            if close_behavior == crate::config::WindowCloseBehavior::StopSession {
+                for sid in &affected_session_ids {
+                    crate::window::stop_session_once_with_ui_completion(cx, sid);
+                }
+            }
             if close_behavior == crate::config::WindowCloseBehavior::StopSession {
                 // Clear ephemeral capsule state for stopped sessions.
                 for sid in &affected_session_ids {
