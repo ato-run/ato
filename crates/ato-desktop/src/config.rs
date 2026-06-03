@@ -106,8 +106,13 @@ pub struct RuntimeSettings {
 /// by `runtime.podman_enabled`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeSetupSettings {
-    /// Whether onboarding / settings should check host tool readiness via
-    /// `ato internal runtime setup-status`. Default on (opt-out).
+    /// Reserved opt-out for a future *startup-time* host-tool readiness check
+    /// (run automatically when the app launches). Default on.
+    ///
+    /// It does NOT gate the on-demand Runtime Setup panels (onboarding Step 5
+    /// and Settings → Runtime): those probe via `ato internal runtime
+    /// setup-status` on explicit user action and always run. Nothing reads this
+    /// field yet; the startup probe that will honour it is not implemented.
     #[serde(default = "default_true")]
     pub check_host_tools_on_startup: bool,
     /// Whether Ato may install an Ato-managed Node when a recipe needs it.
