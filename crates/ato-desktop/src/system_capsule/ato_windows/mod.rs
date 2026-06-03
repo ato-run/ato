@@ -17,6 +17,9 @@
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
+use crate::state::session::{
+    SessionClient, SessionClientId, SessionClientKind, SessionClientState, SessionRegistry,
+};
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::card_switcher::CardSwitcherWindowSlot;
 use crate::window::content_windows::OpenContentWindows;
@@ -54,7 +57,11 @@ pub enum WindowsCommand {
         session_id: String,
     },
     /// Open an OCI session endpoint through Desktop's normal URL surface.
-    OpenEndpoint { url: String },
+    OpenEndpoint {
+        url: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
 }
 
 impl WindowsCommand {
@@ -118,7 +125,10 @@ pub fn dispatch(
         WindowsCommand::CloseWindow { window_id } => {
             // Look up the target handle. If the window was already closed
             // between the snapshot and the click, treat as no-op.
-            tracing::info!(window_id, "ato_windows: close button requested target window close");
+            tracing::info!(
+                window_id,
+                "ato_windows: close button requested target window close"
+            );
             let target = cx
                 .global::<OpenContentWindows>()
                 .get(window_id)
@@ -150,9 +160,41 @@ pub fn dispatch(
                 "ato_windows: StopSession dispatched (non-blocking)"
             );
         }
-        WindowsCommand::OpenEndpoint { url } => {
-            if let Err(error) = crate::window::dock::open_external_url(cx, &url) {
-                tracing::error!(%url, %error, "ato_windows: endpoint open failed");
+        WindowsCommand::OpenEndpoint { url, session_id } => {
+            match crate::window::dock::open_external_url(cx, &url) {
+                Ok(handle) => {
+                    let window_id = handle.window_id().as_u64();
+                    let registry = cx.global_mut::<SessionRegistry>();
+                    if registry.get_session(&session_id).is_some() {
+                        registry.attach_client(SessionClient {
+                            client_id: SessionClientId::next(),
+                            session_id: session_id.clone(),
+                            client_kind: SessionClientKind::AtoWindow,
+                            window_id: Some(window_id),
+                            pane_id: None,
+                            state: SessionClientState::Attached,
+                            attached_at: std::time::SystemTime::now(),
+                            last_seen_at: std::time::SystemTime::now(),
+                        });
+                    } else {
+                        tracing::warn!(
+                            %url,
+                            %session_id,
+                            window_id,
+                            "ato_windows: endpoint opened without matching session"
+                        );
+                    }
+                    crate::window::card_switcher::refresh_session_snapshot(cx);
+                    tracing::info!(
+                        %url,
+                        %session_id,
+                        window_id,
+                        "ato_windows: endpoint opened and attached to session"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(%url, %session_id, %error, "ato_windows: endpoint open failed");
+                }
             }
         }
     }
