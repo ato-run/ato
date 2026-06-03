@@ -1,0 +1,2 @@
+NAME                    VM TYPE     CREATED       LAST UP            CPUS        MEMORY      DISK SIZE
+podman-machine-default  applehv     8 months ago  Currently running  4           8GiB        100GiB
