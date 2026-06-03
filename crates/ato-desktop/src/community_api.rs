@@ -145,6 +145,53 @@ pub fn fetch_candidates(source: &str) -> Result<Vec<CommunityCandidate>> {
     }
 }
 
+/// Fetch the raw `capsule.toml` for a single community recipe by its
+/// `ctoml_…` id. The detail endpoint (`GET /v1/capsule-tomls/{id}`) returns
+/// the TOML body directly (not a JSON envelope), so callers can show the user
+/// exactly what they're about to launch — the only reliable way to tell two
+/// same-titled community recipes apart.
+///
+/// Blocking; call from a background executor.
+pub fn fetch_candidate_toml(id: &str) -> Result<String> {
+    // The id is interpolated into the URL path, so reject anything that is not
+    // a plain `ctoml_<alnum>` token before building the request.
+    let trimmed = id.trim();
+    if trimmed.is_empty()
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        bail!("invalid community recipe id");
+    }
+    let endpoint = format!(
+        "{}/v1/capsule-tomls/{}",
+        resolve_community_api_base_url(),
+        trimmed
+    );
+    tracing::debug!(%endpoint, "community_api: fetching recipe toml");
+
+    match ureq::get(&endpoint)
+        .timeout(Duration::from_secs(TIMEOUT_SECS))
+        .set("User-Agent", "ato-desktop")
+        .set("Accept", "text/plain, application/toml, */*")
+        .call()
+    {
+        Ok(resp) => resp
+            .into_string()
+            .map_err(|e| anyhow!("community_api: could not read recipe body from {endpoint}: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            bail!(
+                "community_api: {endpoint} returned HTTP {code}: {}",
+                body.lines().take(3).collect::<Vec<_>>().join(" ")
+            )
+        }
+        Err(other) => Err(anyhow!(
+            "community_api: request to {endpoint} failed: {other}"
+        )),
+    }
+}
+
 /// Percent-encode a query-parameter value. The `source` is `owner/repo`,
 /// so only `/` and a handful of reserved characters need escaping; the
 /// `percent-encoding` crate (already a dependency) handles the rest.
@@ -192,6 +239,18 @@ mod tests {
     #[test]
     fn urlencode_escapes_slash() {
         assert_eq!(urlencode("owner/repo"), "owner%2Frepo");
+    }
+
+    #[test]
+    fn fetch_candidate_toml_rejects_path_injection_ids() {
+        // Anything outside `[A-Za-z0-9_]` must be refused before a request is
+        // built, so a crafted id can't traverse or escape the path.
+        for bad in ["", "  ", "ctoml/../admin", "ctoml_abc/extra", "ctoml abc"] {
+            assert!(
+                fetch_candidate_toml(bad).is_err(),
+                "expected rejection for {bad:?}"
+            );
+        }
     }
 
     #[test]
