@@ -34,6 +34,28 @@ platforms. The purpose is to make launch conditions explicit, comparable,
 replayable, and diagnosable. Ato records declared/resolved execution evidence
 and derives stable launch-envelope identities from canonical graph content.
 
+This is a **launch reproducibility** model, not merely an evidence/receipt
+model. The guarantee:
+
+> Ato does not guarantee identical behavior. Ato guarantees that a resolved
+> execution identity either reconstructs an equivalent launch envelope or fails
+> with a typed explanation.
+
+Concretely, the same `resolved_execution_id` reconstructs the same source tree,
+runtime, runtime tools, dependency output, filesystem view, env closure,
+network policy, capability policy, entrypoint, argv, cwd, and state-binding
+contract — and when it cannot, it **fails closed** instead of pretending
+success. Under this model a receipt is a *materialization proof*, not a log:
+each `NodeReceipt`/`EdgeReceipt` asserts that a component of the launch envelope
+is verified, not merely that it was observed.
+
+Analogy: **Nix makes build outputs reproducible; Ato makes launch envelopes
+reproducible.** Nix does not guarantee arbitrary program behavior either — it
+guarantees that the same build inputs realize the same store output and that
+undeclared dependencies are not silently tolerated. The Ato analogue of
+`nix-store --realise` is resolved-graph realization; the analogue of Nix's
+undeclared-dependency failure is the strict-profile fail-closed behavior.
+
 Reproducibility is classified as a **class**, not a boolean: `pure`,
 `host-bound`, `state-bound`, `time-bound`, `network-bound`, `best-effort`.
 
@@ -196,6 +218,47 @@ execution behavior changes. May be absent when observation is unavailable. Must
 be paired with `GraphCompleteness`, `ObservationScope`, and the observation
 backend. An observed identity is a fingerprint of observed runtime facts, not a
 proof of full determinism. **Not implemented yet; not synthesized today.**
+
+## Realization (replay) contract
+
+`resolved_execution_id` must name the **complete realization conditions** of the
+launch envelope, and Ato must be able to re-materialize that envelope — or fail
+closed. This is what separates a *describable* receipt from a *reproducible*
+launch.
+
+For every node in `G_resolved`, Ato computes a realization status:
+
+- **materializable** — the node's identity can be reconstructed and verified
+  from content-addressed inputs (verified content hash; see below).
+- **host-bound** — depends on a host-specific fact outside the resolved graph.
+- **state-bound** — depends on a persistent/previous state binding; realizable
+  only with a compatible snapshot/binding contract.
+- **unavailable** — cannot be realized or verified.
+
+The realization result is derived from the graph (not a separate source of
+truth). If any required node is not `materializable` (nor satisfiable as
+`state-bound` with an available binding), realization **fails closed with a
+typed, reasoned error** naming the node(s) — it must not report success.
+
+**Content-hash verification (pre-launch).** A node is `materializable` only if
+its content-addressed identity verifies: runtime `binary_hash`, runtime tool
+`binary_sha256`, `dependency_output_hash`, build `artifact_output_hash`, and the
+filesystem-view source identities. A missing or mismatched hash yields
+`unavailable`/typed failure, never a false `materializable`.
+
+**Invariants:**
+
+1. `resolved_execution_id` names the complete realization conditions of the launch envelope.
+2. Ato can re-materialize the launch envelope from `resolved_execution_id`.
+3. If any required node is not realizable → fail-closed with reasons.
+4. Host fallback is never invisible; strict mode fails on it.
+5. Dependency output / runtime tool / artifact are verified by content hash.
+6. State is not mixed with immutables; it is contracted as `state-bound`.
+
+This contract is implemented incrementally: the replay/realization contract
+(#498), the materialization verifier (#499), and the fail-closed strict profile
+(#500). Until they land, receipts remain descriptive; the contract above is the
+target semantics.
 
 ## Canonicalization
 
@@ -442,24 +505,51 @@ addon compatibility boundary. It should **not** include session id, process id,
 dynamic port, container id, log path, receipt path, runtime pid, or
 launch-only mutable state. `execution_id` identifies a launch envelope.
 
+## Relationship to Nix
+
+| Nix | Ato |
+|-----|-----|
+| derivation | resolved launch graph / build derivation node |
+| store path | immutable materialized object |
+| closure | resolved execution graph closure |
+| store output hash | `dependency_output_hash` / `artifact_output_hash` |
+| profile generation | `install_revision_id` / launch profile |
+| `nix-store --realise` | Ato replay / resolved graph materialization |
+| undeclared dependency failure | strict profile fail-closed |
+
+Nix derives a store path from all build inputs (source, builder, arguments,
+environment, build-time dependencies) and prevents undeclared dependencies and
+interference. Ato's analogue is the resolved execution graph closure: the same
+`resolved_execution_id` realizes the same launch envelope, and undeclared host
+dependencies are surfaced (permissive) or fail closed (strict).
+
 ## Implementation roadmap
 
-This RFC ships incrementally. The near-term milestone (#490) makes the
-declared/resolved evidence path real before any observation.
+This RFC ships incrementally under #490. The near-term milestone makes the
+declared/resolved path **reproducible** (realizable + verifiable), not just
+describable, before any runtime observation.
 
-- **P0 (#491)** — land this RFC; fix stale graph-migration comments.
-- **P1 (#492)** — canonical graph contract tests (deterministic IDs; session
-  metadata absent from graph input; semantic mutations change IDs).
-- **P2 (#493)** — non-empty `NodeReceipt`/`EdgeReceipt` from existing
+- **#491** — land this RFC; fix stale graph-migration comments.
+- **#492** — canonical graph contract tests (deterministic IDs; session metadata
+  absent from graph input; semantic mutations change IDs).
+- **#493** — non-empty `NodeReceipt`/`EdgeReceipt` from existing
   declared/resolved graph data.
-- **P4 (#495)** — `ObservationScope` metadata in receipts (no fake
+- **#498** — resolved graph **replay/realization contract**: per-node
+  materializable / host-bound / state-bound / unavailable; typed fail when
+  unrealizable. *(the pivot from describable to reproducible)*
+  - **#499** — resolved graph **materialization verifier** (content-hash verify
+    before launch; feeds #498).
+- **#495** — `ObservationScope` metadata in receipts (no fake
   `observed_execution_id`).
-- **P3 (#494)** — derive `GraphCompleteness` (Partial + reasons; no `Complete`
-  yet) and conservative pre-observation `ReproducibilityClass`.
-- **P5 (#496)** — component-level drift diff v1.
+- **#494** — derive `GraphCompleteness` (Partial + reasons; no `Complete` yet)
+  and conservative pre-observation `ReproducibilityClass`.
+- **#500** — **fail-closed strict launch profile** for an unreproducible
+  resolved graph (host fallback / missing dependency output / unknown runtime
+  tool / unsupported policy enforcement).
+- **#496** — component-level drift diff v1.
 
-Later (filed when the evidence layer lands): minimal runtime observation
-(`G_observed`), `observed_execution_id`, strict-profile enforcement, Desktop
+Later (filed when the reproducibility layer lands): minimal runtime observation
+(`G_observed`), `observed_execution_id`, observation-driven strict rules, Desktop
 graph/drift viewer.
 
 ## Acceptance criteria
