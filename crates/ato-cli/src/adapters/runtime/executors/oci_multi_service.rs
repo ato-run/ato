@@ -28,11 +28,12 @@ use capsule_core::contract::lock_runtime::resolve_oci_image_for_target;
 use capsule_core::execution_plan::model::OciPolicyMode;
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{
-    OciContainerRequest, OciMountSpec, OciNetworkRequest, OciPortSpec,
+    OciContainerRequest, OciMountSourceKind, OciMountSpec, OciNetworkRequest, OciPortSpec,
+    resolve_oci_mount,
 };
 use capsule_core::types::{
-    IngressConfig, OciImageResolution, OrchestrationPlan, ResolvedService, ResolvedServiceRuntime,
-    StateDurability,
+    IngressConfig, OciImageResolution, OciProviderKind, OrchestrationPlan, ResolvedService,
+    ResolvedServiceRuntime, StateDurability,
 };
 
 use super::launch_context::RuntimeLaunchContext;
@@ -342,12 +343,22 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     let launch_ctx_merged = launch_ctx.merged_env();
 
     let mut started: Vec<ServiceStartRecord> = Vec::new();
+    // Ephemeral engine-managed state volumes created during this run; cleanup
+    // removes them since their state lives inside the engine, not on disk. See #444.
+    let mut ephemeral_engine_volumes: HashSet<String> = HashSet::new();
     let mut graph_error: Option<anyhow::Error> = None;
 
     let service_layers = match service_start_layers(orch_plan) {
         Ok(layers) => layers,
         Err(err) => {
-            cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+            cleanup_services(
+                &started,
+                &network_name,
+                ephemeral_mount_sources,
+                &ephemeral_engine_volumes,
+                provider,
+            )
+            .await;
             return Err(err);
         }
     };
@@ -466,19 +477,31 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
             };
 
             // Mounts: convert state bindings to OciMountSpec.
-            // Ownership is passed through so the provider (Podman: :U,
+            //
+            // The source strategy (host bind path vs engine-managed named volume)
+            // is selected per-mount by `resolve_oci_mount`: on Windows + Podman,
+            // Ato-managed writable state becomes an engine volume so the container
+            // user can initialize permissions the Windows host FS can't grant
+            // (#444). Ownership is passed through so the provider (Podman: `:U`,
             // Docker-compatible: warn + no-op) can apply engine-delegated
             // ownership init. Host-side chown is not performed. See #428.
+            let is_podman = provider.semantics().kind == OciProviderKind::Podman;
             let mounts: Vec<OciMountSpec> = target_runtime
                 .mounts
                 .iter()
-                .map(|m| OciMountSpec {
-                    source: m.source.clone(),
-                    target: m.target.clone(),
-                    readonly: m.readonly,
-                    ownership: m.ownership.clone(),
-                })
+                .map(|m| resolve_oci_mount(m, is_podman, cfg!(target_os = "windows")))
                 .collect();
+
+            // Track ephemeral engine volumes so cleanup can delete them; their
+            // state lives inside the engine, not on a host directory.
+            for mount in &mounts {
+                if let OciMountSourceKind::EngineVolume {
+                    remove_on_stop: true,
+                } = mount.source_kind
+                {
+                    ephemeral_engine_volumes.insert(mount.source.clone());
+                }
+            }
 
             let cmd = target_runtime.cmd.clone();
 
@@ -633,7 +656,14 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
 
     // If any service failed to start, clean up and return error.
     if let Some(err) = graph_error {
-        cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+        cleanup_services(
+            &started,
+            &network_name,
+            ephemeral_mount_sources,
+            &ephemeral_engine_volumes,
+            provider,
+        )
+        .await;
         return Err(err);
     }
 
@@ -680,7 +710,14 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
             Err(e) => {
                 // Ingress init failed after services started. Clean up
                 // containers/network so we don't orphan them.
-                cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+                cleanup_services(
+                    &started,
+                    &network_name,
+                    ephemeral_mount_sources,
+                    &ephemeral_engine_volumes,
+                    provider,
+                )
+                .await;
                 return Err(e);
             }
         }
@@ -699,7 +736,14 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
             .notify(format!("🌐 OCI service available at {endpoint}"))
             .await
     {
-        cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+        cleanup_services(
+            &started,
+            &network_name,
+            ephemeral_mount_sources,
+            &ephemeral_engine_volumes,
+            provider,
+        )
+        .await;
         if let Some(ref mut handle) = router_handle {
             handle.stop().await;
         }
@@ -751,7 +795,14 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     // Stream logs for all services and wait for the main container to exit.
     let exit_code = wait_all_services(&started, orch_plan, reporter, provider).await;
 
-    cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+    cleanup_services(
+        &started,
+        &network_name,
+        ephemeral_mount_sources,
+        &ephemeral_engine_volumes,
+        provider,
+    )
+    .await;
 
     // Stop ingress router (if it was started).
     if let Some(ref mut handle) = router_handle {
@@ -1295,8 +1346,9 @@ fn prepare_writable_ownership_mount_sources(
         if mount.readonly || mount.ownership.is_none() {
             continue;
         }
-        if !mount.source.contains('/') {
-            // Named volume (no path separator) — engine-managed, skip.
+        if mount.is_engine_volume() {
+            // Engine-managed volume — the engine initializes ownership (copy-up
+            // / `:U`); there is no host directory to prepare. See #444.
             continue;
         }
         std::fs::create_dir_all(&mount.source).with_context(|| {
@@ -1565,11 +1617,13 @@ async fn wait_all_services<P: OciProvider>(
     }
 }
 
-/// Stop and remove all started containers, remove the network, and delete ephemeral mount sources.
+/// Stop and remove all started containers, remove the network, and delete
+/// ephemeral mount sources (both host directories and engine-managed volumes).
 async fn cleanup_services<P: OciProvider>(
     started: &[ServiceStartRecord],
     network_name: &str,
     ephemeral_mount_sources: &HashSet<String>,
+    ephemeral_engine_volumes: &HashSet<String>,
     provider: &P,
 ) {
     // Stop and remove in reverse start order.
@@ -1583,12 +1637,19 @@ async fn cleanup_services<P: OciProvider>(
     // Remove the session-scoped network.
     let _ = provider.remove_network(network_name).await;
 
-    // Delete ephemeral mount source directories.
+    // Delete ephemeral host mount source directories. Persistent sources, and
+    // engine-managed volumes, are intentionally left untouched here.
     for source in ephemeral_mount_sources {
         let path = std::path::Path::new(source);
         if path.exists() {
             let _ = std::fs::remove_dir_all(path);
         }
+    }
+
+    // Remove ephemeral engine-managed volumes; persistent volumes survive stop
+    // so durable state is preserved. See #444.
+    for volume in ephemeral_engine_volumes {
+        let _ = provider.remove_volume(volume).await;
     }
 }
 
@@ -1618,9 +1679,9 @@ use std::io::Write;
 mod tests {
     use super::*;
     use crate::adapters::runtime::oci_provider::FakeOciProvider;
-    use capsule_core::runtime::oci::OciContainerInspect;
+    use capsule_core::runtime::oci::{OciContainerInspect, engine_state_volume_name};
     use capsule_core::types::{
-        OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
+        Mount, OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
         ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
         ServiceConnectionInfo,
     };
@@ -2961,7 +3022,17 @@ volumes:
             api_mount.source, worker_mount.source,
             "shared state must use the same mount source for both services"
         );
-        assert_eq!(api_mount.source, shared_source);
+        // The source-strategy is platform-dependent (#444): on Windows + Podman
+        // this Ato-managed writable state becomes a stable engine volume, while
+        // on other hosts it stays the bind path. Either way the source is stable
+        // and shared between the two services (asserted above).
+        if cfg!(target_os = "windows") {
+            assert_eq!(api_mount.source, engine_state_volume_name(shared_source));
+            assert!(api_mount.is_engine_volume());
+        } else {
+            assert_eq!(api_mount.source, shared_source);
+            assert_eq!(api_mount.source_kind, OciMountSourceKind::BindPath);
+        }
         assert!(!api_mount.readonly, "shared state mount must be writable");
         assert!(
             !worker_mount.readonly,
@@ -3458,6 +3529,7 @@ volumes:
             target: manifest_mount.target.clone(),
             readonly: manifest_mount.readonly,
             ownership: manifest_mount.ownership.clone(),
+            source_kind: OciMountSourceKind::default(),
         };
         assert_eq!(spec.ownership.as_ref().unwrap().uid, Some(1001));
     }
@@ -3469,9 +3541,51 @@ volumes:
             target: "/app/cfg".to_string(),
             readonly: true,
             ownership: None,
+            source_kind: OciMountSourceKind::default(),
         };
         assert!(spec.ownership.is_none());
         assert!(spec.readonly);
+    }
+
+    // resolve_oci_mount strategy selection is unit-tested in capsule-core
+    // (`engine::runtime::oci::mount_source_tests`) since the helper now lives
+    // there and is shared by both the multi-service and orchestrator paths (#444).
+
+    // ── cleanup_services: ephemeral engine volume removal (#444) ──────────────
+
+    #[tokio::test]
+    async fn cleanup_removes_ephemeral_engine_volumes() {
+        let provider = FakeOciProvider::ready();
+        let started: Vec<ServiceStartRecord> = vec![];
+        let sources: HashSet<String> = HashSet::new();
+        let mut volumes: HashSet<String> = HashSet::new();
+        volumes.insert("ato-state-deadbeef0000-cache".to_string());
+
+        cleanup_services(&started, "ato-net", &sources, &volumes, &provider).await;
+
+        let log = provider.call_log.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|e| e == "remove_volume:ato-state-deadbeef0000-cache"),
+            "ephemeral engine volume must be removed: {log:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_does_not_remove_persistent_engine_volumes() {
+        let provider = FakeOciProvider::ready();
+        let started: Vec<ServiceStartRecord> = vec![];
+        let sources: HashSet<String> = HashSet::new();
+        // Persistent volumes are never added to the ephemeral set.
+        let volumes: HashSet<String> = HashSet::new();
+
+        cleanup_services(&started, "ato-net", &sources, &volumes, &provider).await;
+
+        let log = provider.call_log.lock().unwrap();
+        assert!(
+            !log.iter().any(|e| e.starts_with("remove_volume:")),
+            "persistent engine volumes must survive cleanup: {log:?}"
+        );
     }
 
     // ── prepare_writable_ownership_mount_sources tests ────────────────────────
@@ -3486,6 +3600,7 @@ volumes:
             target: "/container/path".to_string(),
             readonly,
             ownership,
+            source_kind: OciMountSourceKind::default(),
         }
     }
 
