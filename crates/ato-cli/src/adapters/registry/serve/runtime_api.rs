@@ -57,7 +57,7 @@ struct RuntimeProviderResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct RuntimeInstallProfileResponse {
+pub(super) struct RuntimeInstallProfileResponse {
     installed_app_id: String,
     publisher: String,
     slug: String,
@@ -97,6 +97,7 @@ pub(super) async fn handle_runtime_providers(
             supports_logs: true,
             supports_open_url: true,
             supports_start_serve: false,
+            supports_add_capsule: true,
             isolation_classes: vec!["local".to_string()],
             storage_classes: vec!["local".to_string()],
             network_classes: vec!["loopback".to_string()],
@@ -806,6 +807,309 @@ async fn try_register_ephemeral_ingress_with_url(
         .await
         .ok()?;
     Some(format!("http://127.0.0.1:{}", info.port))
+}
+
+// ── Source validation ──────────────────────────────────────────────────────
+
+/// Schemes the Store→PWA bridge explicitly disallows regardless of format.
+const UNSAFE_SCHEMES: &[&str] = &[
+    "javascript:",
+    "data:",
+    "file:",
+    "vbscript:",
+    "blob:",
+    "about:",
+];
+
+/// Validates a capsule source string from the PWA add-capsule request.
+///
+/// Accepted for MVP:
+///   - `publisher/slug` (canonical for `ato install`)
+///   - `publisher/slug@version`
+///   - `https://ato.run/s/<id>` (share URL — validated format, resolved below)
+///
+/// Returns `Ok(normalized)` or an error string suitable for the 400 response.
+pub(super) fn validate_add_capsule_source(raw: &str) -> Result<String, String> {
+    let source = raw.trim();
+    if source.is_empty() {
+        return Err("source is required".to_string());
+    }
+    if source.len() > 2048 {
+        return Err("source exceeds maximum length".to_string());
+    }
+    let lower = source.to_lowercase();
+    for scheme in UNSAFE_SCHEMES {
+        if lower.starts_with(scheme) {
+            return Err(format!(
+                "unsafe source scheme: '{}'",
+                scheme.trim_end_matches(':')
+            ));
+        }
+    }
+    // Accepted: https://ato.run/s/<id>
+    if source.starts_with("https://ato.run/s/") {
+        let tail = source.trim_start_matches("https://ato.run/s/");
+        if tail.is_empty() || tail.contains('/') {
+            return Err("invalid ato.run share URL: expected https://ato.run/s/<id>".to_string());
+        }
+        return Ok(source.to_string());
+    }
+    // Accepted: publisher/slug[@version]
+    let slug_part = source.split('@').next().unwrap_or(source);
+    let parts: Vec<&str> = slug_part.splitn(2, '/').collect();
+    if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+        let valid = |s: &str| {
+            s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        };
+        if valid(parts[0]) && valid(parts[1]) {
+            return Ok(source.to_string());
+        }
+    }
+    Err(
+        "source must be publisher/slug or https://ato.run/s/<id> (received: invalid format)"
+            .to_string(),
+    )
+}
+
+/// Resolve an `https://ato.run/s/<id>` share URL to a `publisher/slug` capsule ref.
+///
+/// The share URL redirects to the canonical detail page at
+/// `https://ato.run/<publisher>/<slug>`. We follow the redirect (HEAD request)
+/// and extract the path.
+async fn resolve_share_url_to_slug(share_url: &str) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+
+    let resp = client
+        .head(share_url)
+        .send()
+        .await
+        .map_err(|e| format!("failed to resolve share URL: {e}"))?;
+
+    if resp.status().is_redirection() {
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "share URL redirect missing Location header".to_string())?;
+
+        // Location: https://ato.run/<publisher>/<slug>
+        let path = location
+            .trim_start_matches("https://ato.run/")
+            .trim_start_matches("http://ato.run/");
+        let parts: Vec<&str> = path.splitn(2, '/').collect();
+        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return Ok(format!("{}/{}", parts[0], parts[1]));
+        }
+        return Err(format!(
+            "share URL resolved to unexpected path: {}",
+            location
+        ));
+    }
+
+    if resp.status().is_success() {
+        // No redirect — the ID path itself might be publisher/slug
+        let path = share_url
+            .trim_start_matches("https://ato.run/s/")
+            .trim_start_matches("http://ato.run/s/");
+        if path.contains('/') {
+            return Ok(path.to_string());
+        }
+    }
+
+    Err(format!(
+        "share URL did not redirect to a capsule (status {})",
+        resp.status()
+    ))
+}
+
+// ── Add-capsule handler ────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct AddCapsuleRequest {
+    pub(super) source: String,
+    #[serde(default)]
+    pub(super) profile_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct AddCapsuleResponse {
+    pub(super) status: String, // "installed" | "already_installed"
+    pub(super) profile: RuntimeInstallProfileResponse,
+}
+
+/// `POST /v1/runtime/install-profiles` — add/install a capsule from a source.
+///
+/// Spawns `ato install <publisher/slug> --json --yes --no-project`, waits for
+/// completion, then reads the resulting install profile from the instance store.
+/// Returns 201 Created (newly installed) or 200 OK (already installed).
+pub(super) async fn handle_runtime_add_capsule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AddCapsuleRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+        return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
+    }
+
+    // Validate and normalize source.
+    let source = match validate_add_capsule_source(&request.source) {
+        Ok(s) => s,
+        Err(msg) => return json_error(StatusCode::BAD_REQUEST, "invalid_source", &msg),
+    };
+
+    // Only default profile is supported for MVP.
+    if let Some(ref pid) = request.profile_id {
+        if pid != "default" {
+            return json_error(
+                StatusCode::NOT_IMPLEMENTED,
+                "non_default_profile_not_supported",
+                "only 'default' profile is supported for add-capsule at this time",
+            );
+        }
+    }
+
+    // Resolve https://ato.run/s/<id> to publisher/slug.
+    let capsule_ref = if source.starts_with("https://ato.run/s/") {
+        match resolve_share_url_to_slug(&source).await {
+            Ok(slug) => slug,
+            Err(msg) => return json_error(StatusCode::NOT_FOUND, "source_not_found", &msg),
+        }
+    } else {
+        source.clone()
+    };
+
+    // Snapshot existing profiles to detect whether install is new or idempotent.
+    let instances_root = install_profile_store_root();
+    let profile_before = read_default_profile_for_ref(&instances_root, &capsule_ref);
+
+    // If already installed, return immediately (idempotent).
+    if let Some(profile) = profile_before {
+        return (
+            StatusCode::OK,
+            Json(AddCapsuleResponse {
+                status: "already_installed".to_string(),
+                profile,
+            }),
+        )
+            .into_response();
+    }
+
+    // Spawn `ato install <ref> --json --yes --no-project`.
+    let ato_exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "exe_resolve_failed",
+                &err.to_string(),
+            );
+        }
+    };
+
+    let mut cmd = tokio::process::Command::new(&ato_exe);
+    cmd.args(["install", &capsule_ref, "--json", "--yes", "--no-project"]);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = match cmd.output().await {
+        Ok(output) => output,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "install_spawn_failed",
+                &err.to_string(),
+            );
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Surface any structured error from the JSON output.
+        let detail = if stdout.contains("price") {
+            "paid capsules are not supported in MVP"
+        } else if stderr.contains("not found") || stdout.contains("not_found") {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                "capsule_not_found",
+                &format!("capsule '{}' not found in registry", capsule_ref),
+            );
+        } else {
+            stderr.trim()
+        };
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "install_failed",
+            &format!("install exited with {}: {}", output.status, detail),
+        );
+    }
+
+    // Read the installed profile from the instance store.
+    let profile_after = read_default_profile_for_ref(&instances_root, &capsule_ref);
+
+    match profile_after {
+        Some(profile) => (
+            StatusCode::CREATED,
+            Json(AddCapsuleResponse {
+                status: "installed".to_string(),
+                profile,
+            }),
+        )
+            .into_response(),
+        None => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "install_profile_missing",
+            "install completed but profile not found in instance store",
+        ),
+    }
+}
+
+/// Look up the `default` install profile for a `publisher/slug` capsule ref.
+/// Returns `None` if not installed.
+fn read_default_profile_for_ref(
+    instances_root: &std::path::Path,
+    capsule_ref: &str,
+) -> Option<RuntimeInstallProfileResponse> {
+    use capsule_core::foundation::install_lifecycle::ids::{
+        InstalledAppId, ProfileId, path_safe_app_id,
+    };
+
+    let store = InstallInstanceStore::new(instances_root).ok()?;
+
+    // Derive the app_id from the scoped id (publisher/slug part only).
+    let scoped_id = capsule_ref.split('@').next().unwrap_or(capsule_ref);
+    let app_id: InstalledAppId = path_safe_app_id(scoped_id);
+    let profile_id = ProfileId::new("default");
+
+    let app_record = store.read_app_record(&app_id).ok()?;
+    let profile = store.read_profile(&app_id, &profile_id).ok()?;
+    let ipk = derive_install_profile_key(&app_id, &profile_id);
+    let current_revision_id = store
+        .current_revision(&app_id, &profile_id)
+        .ok()
+        .map(|r| r.as_str().to_string());
+
+    Some(RuntimeInstallProfileResponse {
+        installed_app_id: app_id.as_str().to_string(),
+        publisher: app_record.publisher.clone(),
+        slug: app_record.slug.clone(),
+        capsule_handle: if app_record.capsule_handle.is_empty() {
+            format!("{}/{}", app_record.publisher, app_record.slug)
+        } else {
+            app_record.capsule_handle.clone()
+        },
+        profile_id: profile_id.as_str().to_string(),
+        install_profile_key: ipk.as_str().to_string(),
+        current_revision_id,
+        port_policy: profile.port_policy,
+        concurrency_policy: profile.concurrency_policy,
+        isolation: profile.isolation,
+    })
 }
 
 fn local_desktop_placement_identity() -> PlacementIdentity {

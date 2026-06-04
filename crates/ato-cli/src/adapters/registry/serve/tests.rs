@@ -1725,6 +1725,170 @@ fn write_private_file_corrects_existing_loose_permissions() {
     assert_eq!(contents, "new-token");
 }
 
+// ─── validate_add_capsule_source unit tests ───────────────────────────────────
+
+#[test]
+fn validate_add_capsule_source_accepts_publisher_slug() {
+    assert!(validate_add_capsule_source("koh0920/adminer").is_ok());
+    assert!(validate_add_capsule_source("my-publisher/my-slug").is_ok());
+    assert!(validate_add_capsule_source("publisher123/slug456").is_ok());
+}
+
+#[test]
+fn validate_add_capsule_source_accepts_share_url() {
+    assert!(validate_add_capsule_source("https://ato.run/s/abc123").is_ok());
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_empty() {
+    assert!(validate_add_capsule_source("").is_err());
+    assert!(validate_add_capsule_source("   ").is_err());
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_unsafe_schemes() {
+    for scheme in &[
+        "javascript:alert(1)",
+        "data:text/html,<h1>x</h1>",
+        "file:///etc/passwd",
+        "vbscript:msgbox(1)",
+        "blob:http://example.com/abc",
+        "about:blank",
+    ] {
+        assert!(
+            validate_add_capsule_source(scheme).is_err(),
+            "expected rejection for: {scheme}"
+        );
+    }
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_missing_slug() {
+    assert!(validate_add_capsule_source("publisher").is_err());
+    assert!(validate_add_capsule_source("publisher/").is_err());
+    assert!(validate_add_capsule_source("/slug").is_err());
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_too_long() {
+    let long = "a".repeat(2049);
+    assert!(validate_add_capsule_source(&long).is_err());
+}
+
+// ─── add-capsule handler tests ────────────────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_requires_auth() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_add_capsule(
+        State(state),
+        HeaderMap::new(),
+        Json(AddCapsuleRequest {
+            source: "koh0920/adminer".to_string(),
+            profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_rejects_wrong_token() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_add_capsule(
+        State(state),
+        bearer_headers("wrong"),
+        Json(AddCapsuleRequest {
+            source: "koh0920/adminer".to_string(),
+            profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_empty_source_returns_400() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_add_capsule(
+        State(state),
+        HeaderMap::new(),
+        Json(AddCapsuleRequest {
+            source: "".to_string(),
+            profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"], "invalid_source");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_rejects_unsafe_scheme() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_add_capsule(
+        State(state),
+        HeaderMap::new(),
+        Json(AddCapsuleRequest {
+            source: "javascript:alert(1)".to_string(),
+            profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"], "invalid_source");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_non_default_profile_returns_501() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_add_capsule(
+        State(state),
+        HeaderMap::new(),
+        Json(AddCapsuleRequest {
+            source: "koh0920/adminer".to_string(),
+            profile_id: Some("gpu".to_string()),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"], "non_default_profile_not_supported");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_reports_supports_add_capsule_true() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_providers(State(state), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        json[0]["capabilities"]["supports_add_capsule"], true,
+        "supports_add_capsule must be true"
+    );
+}
+
 // ─── CORS / PNA middleware integration tests ─────────────────────────────────
 
 mod cors_pna_tests {
@@ -2102,6 +2266,70 @@ mod cors_pna_tests {
                 .get("access-control-allow-private-network")
                 .expect("ACAPN missing"),
             "true"
+        );
+    }
+
+    #[tokio::test]
+    async fn pwa_post_preflight_for_add_capsule_returns_acao_and_acapn() {
+        let app = make_full_stack_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(post_preflight("/v1/runtime/install-profiles", origin, true))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing"),
+            origin
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .expect("ACAPN missing"),
+            "true"
+        );
+        let acam = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .expect("ACAM missing")
+            .to_str()
+            .unwrap();
+        assert!(
+            acam.contains("POST"),
+            "POST must be in allowed methods for add-capsule: {acam}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disallowed_add_capsule_preflight_omits_all_cors_headers() {
+        let app = make_full_stack_router(None);
+        let resp = app
+            .oneshot(post_preflight(
+                "/v1/runtime/install-profiles",
+                "https://evil.example.com",
+                true,
+            ))
+            .await
+            .expect("call full-stack router");
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not get ACAO"
+        );
+        assert!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .is_none(),
+            "disallowed origin must not get ACAPN"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-methods").is_none(),
+            "disallowed origin must not get ACAM"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-headers").is_none(),
+            "disallowed origin must not get ACAH"
         );
     }
 
