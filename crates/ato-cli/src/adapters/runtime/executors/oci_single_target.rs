@@ -139,6 +139,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
             target: m.target.clone(),
             readonly: m.readonly,
             ownership: None,
+            source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
         })
         .collect();
 

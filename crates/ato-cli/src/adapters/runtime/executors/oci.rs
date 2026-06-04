@@ -101,6 +101,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
                     target: mount.target.clone(),
                     readonly: mount.readonly,
                     ownership: None,
+                    source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
                 })
                 .collect(),
             ports,

@@ -9,6 +9,7 @@ use bollard::exec::{CreateExecOptions, StartExecOptions};
 use bollard::image::CreateImageOptions;
 use bollard::models::{EndpointSettings, HostConfig, PortBinding};
 use bollard::network::{ConnectNetworkOptions, CreateNetworkOptions};
+use bollard::volume::RemoveVolumeOptions;
 use futures_util::stream::StreamExt;
 use std::collections::HashMap;
 use std::process::Command;
@@ -30,6 +31,9 @@ pub struct OciPortSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciMountSpec {
+    /// Left-hand side of the engine `-v` flag. Interpreted according to
+    /// `source_kind`: a host filesystem path for [`OciMountSourceKind::BindPath`],
+    /// or an engine-managed volume name for [`OciMountSourceKind::EngineVolume`].
     pub source: String,
     pub target: String,
     pub readonly: bool,
@@ -37,6 +41,160 @@ pub struct OciMountSpec {
     /// Podman `:U`) so the container user can write to this mount.
     /// `None` means no ownership strategy is requested.
     pub ownership: Option<crate::types::MountOwnership>,
+    /// How the provider should interpret `source`: a host bind path or an
+    /// engine-managed named volume.
+    ///
+    /// On Windows + rootless Podman, Ato-managed writable state must use an
+    /// engine-managed volume rather than a host bind mount: the Windows host
+    /// filesystem has no POSIX ownership/permission semantics, so a non-root
+    /// container user (or `postgres initdb`) cannot `chmod`/`chown` a bind-mounted
+    /// host directory and stateful recipes fail to start. Named volumes live
+    /// inside the engine's own Linux filesystem, where copy-up and `:U` give the
+    /// container user a writable, correctly-owned directory. See #444.
+    pub source_kind: OciMountSourceKind,
+}
+
+/// Whether an [`OciMountSpec`] source is a host bind path or an engine-managed
+/// named volume. See [`OciMountSpec::source_kind`] and #444.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OciMountSourceKind {
+    /// `source` is a host filesystem path; the provider creates a bind mount.
+    #[default]
+    BindPath,
+    /// `source` is an engine-managed named volume living inside the engine's own
+    /// Linux filesystem.
+    ///
+    /// `remove_on_stop` marks ephemeral volumes that cleanup should delete;
+    /// persistent volumes are left intact across stops so durable state survives.
+    EngineVolume { remove_on_stop: bool },
+}
+
+impl OciMountSpec {
+    /// True when `source` names an engine-managed volume rather than a host path.
+    pub fn is_engine_volume(&self) -> bool {
+        matches!(self.source_kind, OciMountSourceKind::EngineVolume { .. })
+    }
+}
+
+/// True when `source` is an Ato-managed state directory — either an ephemeral
+/// state path or a path under the durable state root — rather than an explicit
+/// user-supplied host path.
+///
+/// Only Ato-managed sources are eligible for the engine-managed volume strategy:
+/// when a user pins an explicit host path we honor it as a bind mount. See #444.
+pub fn is_ato_managed_state_source(source: &str) -> bool {
+    is_ephemeral_state_source(source) || {
+        let state_root = crate::common::paths::ato_state_dir();
+        path_starts_with(source, &state_root)
+    }
+}
+
+/// True when `source` lives under the ephemeral state base (state that is safe
+/// to discard when the session stops). See #444.
+pub fn is_ephemeral_state_source(source: &str) -> bool {
+    let base = crate::types::default_ephemeral_state_base();
+    path_starts_with(source, std::path::Path::new(&base))
+}
+
+fn path_starts_with(source: &str, prefix: &std::path::Path) -> bool {
+    !prefix.as_os_str().is_empty() && std::path::Path::new(source).starts_with(prefix)
+}
+
+/// Select the source strategy (host bind path vs engine-managed volume) for one
+/// state-binding mount and build the resulting [`OciMountSpec`].
+///
+/// On **Windows + Podman**, an Ato-managed *writable* state binding uses an
+/// engine-managed named volume instead of a host bind mount: the Windows host
+/// filesystem has no POSIX ownership/permission semantics, so a non-root
+/// container user (or `postgres initdb`) cannot `chmod`/`chown` a bind-mounted
+/// host directory and stateful recipes (node-red, blinko) fail to start. Named
+/// volumes live in the engine's own Linux filesystem, where copy-up and `:U`
+/// give the container user a writable, correctly-owned directory.
+///
+/// Everything else stays a bind mount, preserving existing behavior:
+/// * explicit user-supplied host paths (not Ato-managed) — honor the path,
+/// * read-only mounts — never re-homed to a volume,
+/// * non-Windows hosts and non-Podman engines — unchanged.
+///
+/// `ownership` is carried through unchanged so the provider can still request
+/// engine-delegated ownership init (`:U`) on the resulting mount.
+///
+/// The engine volume name is derived from the source-path identity (not the
+/// session id) so persistent state maps to a stable volume across restarts;
+/// ephemeral state is marked `remove_on_stop` so cleanup deletes it.
+///
+/// This is shared by both OCI execution paths — the multi-service executor
+/// (`OciProvider`) and the Desktop session orchestrator (`OciRuntimeClient`) —
+/// so the strategy is identical regardless of which path materializes the
+/// container. See #444.
+pub fn resolve_oci_mount(
+    mount: &crate::types::Mount,
+    is_podman: bool,
+    is_windows_host: bool,
+) -> OciMountSpec {
+    let use_engine_volume = is_windows_host
+        && is_podman
+        && !mount.readonly
+        && is_ato_managed_state_source(&mount.source);
+
+    if use_engine_volume {
+        OciMountSpec {
+            source: engine_state_volume_name(&mount.source),
+            target: mount.target.clone(),
+            readonly: mount.readonly,
+            ownership: mount.ownership.clone(),
+            source_kind: OciMountSourceKind::EngineVolume {
+                remove_on_stop: is_ephemeral_state_source(&mount.source),
+            },
+        }
+    } else {
+        OciMountSpec {
+            source: mount.source.clone(),
+            target: mount.target.clone(),
+            readonly: mount.readonly,
+            ownership: mount.ownership.clone(),
+            source_kind: OciMountSourceKind::BindPath,
+        }
+    }
+}
+
+/// Build a stable, sanitized engine volume name for an Ato-managed state mount.
+///
+/// The name is derived from the *source-path identity*, not the session id, so
+/// the same persistent state binding maps to the same volume across restarts
+/// (and across worktrees only insofar as their state paths differ). The result
+/// is restricted to characters valid in a Podman/Docker volume name
+/// (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`). See #444.
+pub fn engine_state_volume_name(source: &str) -> String {
+    let hash = fnv1a_hex(source);
+    let leaf = source
+        .rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("state");
+    let sanitized: String = leaf
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let leaf = sanitized.trim_matches('-');
+    let leaf = if leaf.is_empty() { "state" } else { leaf };
+    format!("ato-state-{}-{}", &hash[..12], leaf)
+}
+
+/// Deterministic FNV-1a (64-bit) hash rendered as lowercase hex. Used for stable
+/// volume names; intentionally not a cryptographic hash.
+fn fnv1a_hex(input: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -100,6 +258,20 @@ pub trait OciRuntimeClient: Send + Sync {
     async fn wait_container(&self, container_id: &str) -> Result<i64>;
     async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> Result<()>;
     async fn remove_container(&self, container_id: &str, force: bool) -> Result<()>;
+
+    /// Remove an engine-managed named volume. Default is a no-op so clients that
+    /// never create volumes need not implement it. Used by cleanup to delete
+    /// ephemeral state volumes. See #444.
+    async fn remove_volume(&self, _volume_name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether the engine behind this client is Podman (vs Docker). Used to
+    /// select the Windows engine-managed-volume mount strategy. Default `false`.
+    /// See #444.
+    async fn is_podman(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -474,6 +646,26 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
             .await
             .map_err(map_bollard_error)
     }
+
+    async fn remove_volume(&self, volume_name: &str) -> Result<()> {
+        // `force: true` so removing an already-gone volume is a no-op rather
+        // than an error (idempotent cleanup). See #444.
+        match self
+            .docker
+            .remove_volume(volume_name, Some(RemoveVolumeOptions { force: true }))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) if is_bollard_eof(&err) && self.is_podman_engine().await => {
+                remove_podman_volume_cli(volume_name).await
+            }
+            Err(err) => Err(map_bollard_error(err)),
+        }
+    }
+
+    async fn is_podman(&self) -> bool {
+        self.is_podman_engine().await
+    }
 }
 
 /// OCI(Docker/Podman) 実行のメトリクスハンドル。
@@ -704,6 +896,25 @@ async fn remove_podman_network_cli(network_name: &str) -> Result<()> {
     )))
 }
 
+async fn remove_podman_volume_cli(volume_name: &str) -> Result<()> {
+    let output = podman_cli_command()
+        .args(["volume", "rm", "--force", volume_name])
+        .output()
+        .await
+        .map_err(|err| {
+            CapsuleError::ContainerEngine(format!("failed to run podman volume rm: {err}"))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(CapsuleError::Runtime(format!(
+        "podman volume rm failed for '{}': {}",
+        volume_name,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
 pub fn connect_docker_default() -> Result<Docker> {
     if let Some(host) = resolve_docker_host() {
         if let Some(path) = host.strip_prefix("unix://") {
@@ -787,4 +998,205 @@ fn extract_memory_bytes(stats: &bollard::container::Stats) -> Option<u64> {
         return Some(usage);
     }
     None
+}
+
+#[cfg(test)]
+mod mount_source_tests {
+    use super::*;
+
+    #[test]
+    fn engine_volume_name_is_stable_for_same_source() {
+        let a = engine_state_volume_name("/var/lib/ato/state/blinko/pgdata");
+        let b = engine_state_volume_name("/var/lib/ato/state/blinko/pgdata");
+        assert_eq!(a, b, "name must be deterministic across calls");
+    }
+
+    #[test]
+    fn engine_volume_name_differs_for_different_sources() {
+        let a = engine_state_volume_name("/var/lib/ato/state/blinko/pgdata");
+        let b = engine_state_volume_name("/var/lib/ato/state/blinko/uploads");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn engine_volume_name_is_a_valid_volume_identifier() {
+        // Podman/Docker volume names: [a-zA-Z0-9][a-zA-Z0-9_.-]*
+        let name = engine_state_volume_name("/var/lib/ato/state/My App/data dir!");
+        assert!(name.starts_with("ato-state-"));
+        let mut chars = name.chars();
+        let first = chars.next().unwrap();
+        assert!(first.is_ascii_alphanumeric(), "first char must be alnum");
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-'),
+            "name has invalid chars: {name}"
+        );
+        // The sanitized leaf preserves the human-readable tail.
+        assert!(name.ends_with("-data-dir") || name.ends_with("-data-dir-"));
+    }
+
+    #[test]
+    fn ephemeral_source_is_detected_under_ephemeral_base() {
+        let base = crate::types::default_ephemeral_state_base();
+        let source = format!("{}/node-red/data", base.trim_end_matches(['/', '\\']));
+        assert!(is_ephemeral_state_source(&source));
+        assert!(is_ato_managed_state_source(&source));
+    }
+
+    #[test]
+    fn explicit_host_path_is_not_managed() {
+        assert!(!is_ato_managed_state_source("/explicit/user/data"));
+        assert!(!is_ephemeral_state_source("/explicit/user/data"));
+    }
+
+    #[test]
+    fn durable_state_root_path_is_managed_but_not_ephemeral() {
+        let source = crate::common::paths::ato_state_dir()
+            .join("blinko")
+            .join("pgdata")
+            .to_string_lossy()
+            .to_string();
+        assert!(is_ato_managed_state_source(&source));
+        // The durable root is not under the ephemeral base.
+        assert!(!is_ephemeral_state_source(&source));
+    }
+
+    // ── resolve_oci_mount: Windows/Podman engine-volume strategy (#444) ───────
+
+    fn managed_persistent_mount(target: &str) -> crate::types::Mount {
+        // A path under the durable state root → Ato-managed, persistent.
+        let source = crate::common::paths::ato_state_dir()
+            .join("blinko")
+            .join("pgdata")
+            .to_string_lossy()
+            .to_string();
+        crate::types::Mount {
+            source,
+            target: target.to_string(),
+            readonly: false,
+            ownership: None,
+        }
+    }
+
+    fn managed_ephemeral_mount(target: &str) -> crate::types::Mount {
+        // A path under the ephemeral state base → Ato-managed, ephemeral.
+        let base = crate::types::default_ephemeral_state_base();
+        let source = format!("{}/node-red/data", base.trim_end_matches(['/', '\\']));
+        crate::types::Mount {
+            source,
+            target: target.to_string(),
+            readonly: false,
+            ownership: None,
+        }
+    }
+
+    fn explicit_host_mount(target: &str) -> crate::types::Mount {
+        crate::types::Mount {
+            source: "/explicit/user/data".to_string(),
+            target: target.to_string(),
+            readonly: false,
+            ownership: None,
+        }
+    }
+
+    #[test]
+    fn windows_podman_managed_persistent_is_persistent_engine_volume() {
+        let m = managed_persistent_mount("/var/lib/postgresql/data");
+        let spec = resolve_oci_mount(&m, true, true);
+        assert_eq!(
+            spec.source_kind,
+            OciMountSourceKind::EngineVolume {
+                remove_on_stop: false
+            }
+        );
+        assert!(spec.source.starts_with("ato-state-"));
+        assert_ne!(spec.source, m.source);
+    }
+
+    #[test]
+    fn windows_podman_managed_ephemeral_removes_on_stop() {
+        let m = managed_ephemeral_mount("/data");
+        let spec = resolve_oci_mount(&m, true, true);
+        assert_eq!(
+            spec.source_kind,
+            OciMountSourceKind::EngineVolume {
+                remove_on_stop: true
+            }
+        );
+    }
+
+    #[test]
+    fn windows_podman_explicit_host_path_stays_bind() {
+        let m = explicit_host_mount("/data");
+        let spec = resolve_oci_mount(&m, true, true);
+        assert_eq!(spec.source_kind, OciMountSourceKind::BindPath);
+        assert_eq!(spec.source, m.source);
+    }
+
+    #[test]
+    fn non_windows_podman_managed_stays_bind() {
+        let m = managed_persistent_mount("/data");
+        let spec = resolve_oci_mount(&m, true, false);
+        assert_eq!(spec.source_kind, OciMountSourceKind::BindPath);
+        assert_eq!(spec.source, m.source);
+    }
+
+    #[test]
+    fn windows_non_podman_managed_stays_bind() {
+        let m = managed_persistent_mount("/data");
+        let spec = resolve_oci_mount(&m, false, true);
+        assert_eq!(spec.source_kind, OciMountSourceKind::BindPath);
+    }
+
+    #[test]
+    fn windows_podman_readonly_managed_stays_bind() {
+        let mut m = managed_persistent_mount("/data");
+        m.readonly = true;
+        let spec = resolve_oci_mount(&m, true, true);
+        assert_eq!(spec.source_kind, OciMountSourceKind::BindPath);
+    }
+
+    #[test]
+    fn node_red_data_mount_is_engine_volume_on_windows() {
+        // node-red binds /data; ephemeral managed state → engine volume.
+        let m = managed_ephemeral_mount("/data");
+        let spec = resolve_oci_mount(&m, true, true);
+        assert!(spec.is_engine_volume());
+    }
+
+    #[test]
+    fn blinko_pgdata_mount_is_engine_volume_on_windows() {
+        // blinko's postgres binds /var/lib/postgresql/data; persistent managed
+        // state → engine volume, ownership carried through.
+        let mut m = managed_persistent_mount("/var/lib/postgresql/data");
+        m.ownership = Some(crate::types::MountOwnership {
+            uid: Some(999),
+            gid: Some(999),
+            recursive: false,
+            mode: Some(0o700),
+        });
+        let spec = resolve_oci_mount(&m, true, true);
+        assert!(spec.is_engine_volume());
+        assert_eq!(spec.ownership.as_ref().unwrap().uid, Some(999));
+    }
+
+    #[test]
+    fn engine_volume_spec_reports_is_engine_volume() {
+        let spec = OciMountSpec {
+            source: "ato-state-x-data".to_string(),
+            target: "/data".to_string(),
+            readonly: false,
+            ownership: None,
+            source_kind: OciMountSourceKind::EngineVolume {
+                remove_on_stop: true,
+            },
+        };
+        assert!(spec.is_engine_volume());
+
+        let bind = OciMountSpec {
+            source_kind: OciMountSourceKind::BindPath,
+            ..spec
+        };
+        assert!(!bind.is_engine_volume());
+    }
 }
