@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -578,10 +580,19 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
 
     // Persist the auth token so `ato console open` can read it without
     // requiring the user to copy-paste it manually.
-    if let Some(ref tok) = config.auth_token {
-        let token_path = state.data_dir.join(".console-token");
-        if let Err(e) = std::fs::write(&token_path, tok) {
-            eprintln!("⚠️  Could not write console token file: {e}");
+    // The file is written 0600 (owner read/write only) to ensure the local
+    // bearer token is not readable by other users on the same machine.
+    let token_path = state.data_dir.join(".console-token");
+    match config.auth_token.as_deref() {
+        Some(tok) => {
+            if let Err(e) = write_private_file(&token_path, tok.as_bytes()) {
+                eprintln!("⚠️  Could not write console token file: {e}");
+            }
+        }
+        None => {
+            // No auth token configured — remove any stale token file so
+            // `ato console open` doesn't accidentally use an old credential.
+            let _ = std::fs::remove_file(&token_path);
         }
     }
 
@@ -1957,6 +1968,21 @@ impl Default for RegistryIndex {
             capsules: vec![],
         }
     }
+}
+
+/// Write `contents` to `path` with 0600 permissions (owner read/write only).
+///
+/// On non-Unix targets the permissions flags are a no-op and the file is
+/// created with whatever the process umask dictates.  This is acceptable
+/// because the registry token is only sensitive on multi-user systems where
+/// Unix permissions are meaningful.
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    file.write_all(contents)
 }
 
 #[cfg(test)]
