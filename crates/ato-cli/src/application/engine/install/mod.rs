@@ -2267,10 +2267,18 @@ pub(crate) enum StorageAdmissionOutcome {
     Skipped,
 }
 
-/// Declared disk requirement (bytes) from a resolved manifest, if any.
-fn declared_disk_requirement_bytes(manifest_toml: Option<&str>) -> Option<u64> {
-    let manifest = CapsuleManifest::from_toml(manifest_toml?).ok()?;
-    manifest.requirements.disk_bytes().ok().flatten()
+/// Declared disk requirement (bytes) from a resolved manifest.
+///
+/// `Ok(None)` only when there is no manifest or no declared `requirements.disk`.
+/// A malformed manifest or a malformed disk value (e.g. `disk = "nonsense"`) is
+/// an **error**, not a silent skip — it must stop the install up front rather
+/// than weaken admission to "no requirement".
+fn declared_disk_requirement_bytes(manifest_toml: Option<&str>) -> Result<Option<u64>> {
+    let Some(toml) = manifest_toml else {
+        return Ok(None);
+    };
+    let manifest = CapsuleManifest::from_toml(toml)?;
+    Ok(manifest.requirements.disk_bytes()?)
 }
 
 /// Volume to probe for an install: the configured store root, or the default
@@ -2304,7 +2312,7 @@ pub(crate) fn enforce_storage_admission(
     manifest_toml: Option<&str>,
     install_volume: &Path,
 ) -> Result<StorageAdmissionOutcome> {
-    let Some(required_bytes) = declared_disk_requirement_bytes(manifest_toml) else {
+    let Some(required_bytes) = declared_disk_requirement_bytes(manifest_toml)? else {
         debug!("storage admission skipped: no declared disk requirement");
         return Ok(StorageAdmissionOutcome::Skipped);
     };
