@@ -8,13 +8,14 @@ use capsule_core::engine::execution_graph::{
 use capsule_core::execution_identity::{
     ExecutionIdentityInput, ExecutionIdentityInputV2, ExecutionReceipt, ExecutionReceiptDocument,
     ExecutionReceiptV2, ExecutionRunnerIdentity, FilesystemIdentityBuilder, FilesystemIdentityV2,
-    GraphCompleteness, GraphReceipt, LaunchIdentity, PolicyIdentity, PolicyIdentityBuilder,
-    PolicyIdentityV2, Tracked,
+    GraphCompleteness, GraphReceipt, LaunchIdentity, OciProviderReceiptEvidence, PolicyIdentity,
+    PolicyIdentityBuilder, PolicyIdentityV2, Tracked,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ManifestData;
+use capsule_core::runtime::oci::{OciContainerRequest, OciPortSpec};
 use capsule_core::types::{
     OciLaunchEnvelope, OciPolicyEnforcementLevel, OciPolicyEnforcementMode, OciPolicyEnvelope,
     OciProviderKind, OciProviderMode, OciProviderSemantics, OciProviderSubstrate,
@@ -28,6 +29,7 @@ use crate::application::execution_observers_v2::{
     observe_environment_v2, observe_filesystem_v2, observe_launch_v2, observe_runtime_v2,
     observe_source_provenance, observe_source_v2,
 };
+use crate::application::provider_projection::oci::OciProjectionPlan;
 use crate::executors::launch_context::RuntimeLaunchContext;
 
 /// Receipt schema selector. Step 17 of the portability v2 implementation
@@ -310,6 +312,11 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
     // observed_execution_id stays None per v0.6.0 contract (no
     // observation hooks). Setter exists for forward-compat only.
 
+    // Receipt-safe OCI provider evidence (#493), derived through the #516
+    // provider projection boundary from the declared/locked OCI envelope. Empty
+    // for non-OCI launches.
+    let provider_projections = declared_oci_provider_projections(plan, execution_plan);
+
     let receipt = ExecutionReceiptV2::from_input(identity_input, chrono::Utc::now().to_rfc3339())?
         .with_runner(ExecutionRunnerIdentity::new(
             "ato-cli",
@@ -321,6 +328,13 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
             std::env::consts::ARCH,
             "unknown-libc"
         ))
+        // Node/edge receipts are a projection of the *resolved* launch graph —
+        // the load-bearing graph, never ad hoc runtime command strings (#493).
+        .with_graph_projection(&launch_graph_bundle.resolved_graph)
+        .with_provider_projections(provider_projections)
+        // Completeness stays Partial: receipts are derived from the
+        // declared/resolved graph only — there is no observed (post-spawn)
+        // coverage yet (#494/#495). Emitting Complete would overclaim.
         .with_graph_completeness(GraphCompleteness::Partial)
         .with_graph_receipt(GraphReceipt::launch_passed(
             declared_execution_id,
@@ -329,6 +343,74 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
         ));
 
     Ok((receipt, launch_graph_bundle))
+}
+
+/// Derive receipt-safe OCI provider evidence for the launch, if it targets an
+/// OCI runtime (#493).
+///
+/// The evidence is produced by routing the declared/locked OCI launch facts
+/// through the #516 provider projection boundary
+/// ([`OciProjectionPlan::receipt_evidence`]), so the receipt records the same
+/// projection the runtime realizes — not a separate ad hoc summary. Only
+/// plan-time-known facts are available here (the receipt is built at preflight,
+/// before spawn): declared image ref + locked digest, declared container port,
+/// env var *names*, working dir/user. Runtime-resolved mounts and the live
+/// container id/pid are intentionally absent — they are session-local provider
+/// evidence, not part of this declared projection.
+///
+/// Returns an empty vec for non-OCI launches.
+fn declared_oci_provider_projections(
+    plan: &ManifestData,
+    execution_plan: &ExecutionPlan,
+) -> Vec<OciProviderReceiptEvidence> {
+    let Some(oci) = &execution_plan.oci else {
+        return Vec::new();
+    };
+
+    // Prefer the locked digest (pinned) when the lock resolved one; otherwise
+    // fall back to the declared tag (honestly unpinned).
+    let image = match &oci.resolved_image {
+        Some(resolved) if resolved.resolved_digest.starts_with("sha256:") => {
+            format!("{}@{}", oci.declared_image_ref, resolved.resolved_digest)
+        }
+        _ => oci.declared_image_ref.clone(),
+    };
+
+    let ports = oci
+        .port_exposure
+        .map(|container_port| {
+            vec![OciPortSpec {
+                container_port,
+                host_port: None,
+                protocol: "tcp".to_string(),
+                host_ip: Some("127.0.0.1".to_string()),
+            }]
+        })
+        .unwrap_or_default();
+
+    // A declared request: launch conditions known at plan time. `env` carries
+    // declared values but `receipt_evidence()` projects *keys only*, so no value
+    // is persisted. Runtime-only inputs (injected mounts, container name, live
+    // platform/emulation choice) are left empty.
+    let request = OciContainerRequest {
+        // Name is a runtime handle and is never read by `receipt_evidence()`;
+        // a declared placeholder keeps the projection session-independent.
+        name: "ato-oci-declared".to_string(),
+        image,
+        cmd: plan.targets_oci_cmd(),
+        env: plan.targets_oci_env(),
+        working_dir: plan.targets_oci_working_dir(),
+        labels: std::collections::HashMap::new(),
+        mounts: Vec::new(),
+        ports,
+        network: None,
+        aliases: Vec::new(),
+        platform: None,
+        extra_hosts: Vec::new(),
+        user: plan.targets_oci_user(),
+    };
+
+    vec![OciProjectionPlan::from_container_request(&request).receipt_evidence()]
 }
 
 /// Build the declared-domain `ExecutionGraph` for the receipt path.
@@ -620,6 +702,27 @@ contract = "service@1"
         graph
             .canonical_form(CanonicalGraphDomain::Resolved)
             .digest_hex()
+    }
+
+    /// #493: the launch graph the receipt builder projects into node/edge
+    /// receipts is non-empty for a normal dependency-bearing launch. This
+    /// closes the loop with the capsule-core mapping tests: the production
+    /// graph source the builder feeds to `with_graph_projection` actually
+    /// carries nodes and edges, so the wired receipts are non-empty.
+    #[test]
+    fn launch_graph_receipt_source_is_non_empty_for_dependency_launch() {
+        let plan = synthetic_plan(SAMPLE_MANIFEST);
+        let fs = synthetic_filesystem("blake3:fs");
+        let policy = synthetic_policy("blake3:net", "blake3:cap", "blake3:sandbox");
+        let graph = build_declared_graph(&plan, &fs, &policy).expect("declared graph");
+        assert!(
+            !graph.nodes.is_empty(),
+            "graph nodes feed node_receipts; a dependency launch must have some"
+        );
+        assert!(
+            !graph.edges.is_empty(),
+            "graph edges feed edge_receipts; a dependency launch must have some"
+        );
     }
 
     /// Declared id reacts to a manifest-level dependency change.
