@@ -606,7 +606,10 @@
           <div id="substrate-section" class="row" style="display:none; flex-direction:column; align-items:stretch; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid var(--border, #2a2a2a);">
             <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
               <span id="substrate-status" class="diag-value"><span class="diag-dot gray"></span>—</span>
-              <button class="btn btn-primary" id="substrate-action-btn" style="display:none;"></button>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <button class="btn" id="substrate-resume-btn" style="display:none;">Already restarted? Continue</button>
+                <button class="btn btn-primary" id="substrate-action-btn" style="display:none;"></button>
+              </div>
             </div>
             <div id="substrate-detail" style="font-size:11px; color:var(--soft); margin:0;"></div>
           </div>
@@ -1297,17 +1300,26 @@ function renderWindowsSubstrate(substrate, podmanTool) {
       : 'Windows substrate';
     statusEl.innerHTML = '<span class="diag-dot ' + dot + '"></span>' + label;
   }
-  if (detailEl) detailEl.textContent = ready ? (substrate.message || 'WSL2 is available.')
-    : (action.description || substrate.message || '');
+  // For a Podman machine health error the substrate message ("WSL2 is
+  // available") is misleading — describe the machine fault instead.
+  if (detailEl) {
+    detailEl.textContent = healthError
+      ? ((podmanTool && podmanTool.message) || 'The Ato Podman machine is running but not responding.')
+      : ready ? (substrate.message || 'WSL2 is available.')
+      : (action.description || substrate.message || '');
+  }
 
-  // Decide the CTA.
-  let label = null, kind = null, command = null;
+  // Decide the primary CTA. `reboot_required` persists the resume marker via
+  // prepare-windows-substrate (NOT resume, which is read-only); the separate
+  // resume button below is the explicit post-restart continuation.
+  let label = null, command = null;
   if (action.kind === 'reboot_required') {
-    label = 'Continue after restart'; command = { kind: 'resume_runtime_setup_after_reboot' };
+    label = 'Save and restart';
+    command = { kind: 'prepare_windows_runtime_substrate', action: 'reboot_required', source_surface: 'settings' };
   } else if (healthError || action.kind === 'repair_podman_machine') {
     label = 'Repair Ato Podman machine'; command = { kind: 'repair_host_runtime' };
   } else if (!ready && action.kind && action.kind !== 'none' && action.can_run_from_desktop) {
-    label = action.label || 'Fix'; kind = action.kind;
+    label = action.label || 'Fix';
     command = { kind: 'prepare_windows_runtime_substrate', action: action.kind, source_surface: 'settings' };
   }
   _lastSubstrateAction = command;
@@ -1315,6 +1327,10 @@ function renderWindowsSubstrate(substrate, podmanTool) {
     if (command) { btn.style.display = ''; btn.textContent = label; }
     else { btn.style.display = 'none'; }
   }
+  // The explicit "Already restarted? Continue" (read-only resume) shows only for
+  // the reboot-required state.
+  const resumeBtn = document.getElementById('substrate-resume-btn');
+  if (resumeBtn) resumeBtn.style.display = action.kind === 'reboot_required' ? '' : 'none';
 }
 
 // ── Host runtimes: Podman prepare row ───────────────────────────────────────
@@ -1484,11 +1500,17 @@ document.getElementById('runtime-logs-btn').addEventListener('click', () => {
 document.getElementById('substrate-action-btn').addEventListener('click', () => {
   const cmd = _lastSubstrateAction;
   if (!cmd) return;
-  if (cmd.kind !== 'resume_runtime_setup_after_reboot') {
-    if (_runtimeInstalling) return;
-    setRuntimeInstalling(true, 'prepare');
-  }
+  // Every primary substrate CTA mutates host state (prepare/repair) → reuse the
+  // runtime-install busy state.
+  if (_runtimeInstalling) return;
+  setRuntimeInstalling(true, 'prepare');
   BRIDGE(Object.assign({ request_id: nextReqId() }, cmd));
+});
+
+// Explicit post-restart continuation: read-only resume (does not write a marker
+// or mutate host state), so it does not enter the install busy state.
+document.getElementById('substrate-resume-btn').addEventListener('click', () => {
+  BRIDGE({ kind: 'resume_runtime_setup_after_reboot', request_id: nextReqId() });
 });
 
 // Explicit Podman preparation / enablement (the only path that may set

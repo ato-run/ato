@@ -235,12 +235,27 @@ function WindowsSubstrateCard({ substrate, podmanTool, installing, onAction, onR
 
   const btn =
     'self-start rounded-lg bg-[#8B5CF6] px-3 py-1.5 text-[12px] font-semibold text-white disabled:opacity-50'
+  const linkBtn =
+    'self-start text-[12px] font-semibold text-[#8B5CF6] underline disabled:opacity-50'
   let cta = null
   if (action.kind === 'reboot_required') {
+    // `reboot_required` persists the resume marker via prepare-windows-substrate
+    // (NOT resume, which is read-only) so setup can continue after the restart.
+    // The secondary link is the explicit post-restart continuation.
     cta = (
-      <button type="button" disabled={installing} onClick={onResume} className={btn}>
-        Continue after restart
-      </button>
+      <div className="flex flex-col gap-1.5">
+        <button
+          type="button"
+          disabled={installing}
+          onClick={() => onAction('reboot_required')}
+          className={btn}
+        >
+          Save and restart
+        </button>
+        <button type="button" disabled={installing} onClick={onResume} className={linkBtn}>
+          Already restarted? Continue
+        </button>
+      </div>
     )
   } else if (healthError || action.kind === 'repair_podman_machine') {
     cta = (
@@ -261,12 +276,16 @@ function WindowsSubstrateCard({ substrate, podmanTool, installing, onAction, onR
     )
   }
 
+  // For a Podman machine health error the substrate message ("WSL2 is
+  // available") is misleading — describe the machine fault instead.
+  const detail = healthError
+    ? podmanTool?.message || 'The Ato Podman machine is running but not responding.'
+    : action.description || substrate.message
+
   return (
     <div className="flex flex-col gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
       <p className="text-[13px] font-bold text-amber-800">Windows container substrate</p>
-      <p className="text-[12px] leading-snug text-amber-700">
-        {action.description || substrate.message}
-      </p>
+      <p className="text-[12px] leading-snug text-amber-700">{detail}</p>
       {action.requires_admin ? (
         <p className="text-[11px] leading-snug text-amber-600">
           Needs administrator approval; Ato will request it.
