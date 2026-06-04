@@ -5549,11 +5549,16 @@ mod tests {
         );
     }
 
-    /// Setting the lifecycle context must NOT write any `ATO_INSTALL_LIFECYCLE_*`
-    /// process environment variables. Process env is inherited by guest / child
+    /// Setting the lifecycle context must NOT mutate any `ATO_INSTALL_LIFECYCLE_*`
+    /// process environment variable. Process env is inherited by guest / child
     /// processes and is externally settable, so control-plane metadata must never
     /// travel through it.
+    ///
+    /// `#[serial]` because this test observes process env, which is global; it
+    /// must not overlap with any other test that mutates the same keys (see
+    /// `dependency_materializer::tests::stamp_install_lifecycle_ignores_process_env_when_request_has_no_context`).
     #[test]
+    #[serial_test::serial(ato_install_lifecycle_env)]
     fn set_install_lifecycle_context_does_not_touch_process_env() {
         const ENV_KEYS: &[&str] = &[
             "ATO_INSTALL_LIFECYCLE_APP_ID",
@@ -5562,6 +5567,12 @@ mod tests {
             "ATO_INSTALL_LIFECYCLE_REVISION_ID",
         ];
 
+        // Snapshot whatever the env happens to be before the call so the
+        // assertion checks "unchanged", not "absent" — robust regardless of
+        // the ambient environment.
+        let before: Vec<Option<std::ffi::OsString>> =
+            ENV_KEYS.iter().map(|key| std::env::var_os(key)).collect();
+
         let ctx = crate::cli::commands::run::InstallLifecycleContext {
             installed_app_id: "app_env".to_string(),
             install_profile_id: "default".to_string(),
@@ -5569,11 +5580,22 @@ mod tests {
             install_revision_id: "rev_env".to_string(),
         };
 
-        let _guard = ScopedInstallLifecycleGuard::set(ctx);
-        for key in ENV_KEYS {
-            assert!(
-                std::env::var_os(key).is_none(),
-                "lifecycle context must not set process env var {key}"
+        {
+            let _guard = ScopedInstallLifecycleGuard::set(ctx);
+            for (key, prior) in ENV_KEYS.iter().zip(&before) {
+                assert_eq!(
+                    std::env::var_os(key).as_ref(),
+                    prior.as_ref(),
+                    "lifecycle context must not mutate process env var {key}"
+                );
+            }
+        }
+        // Dropping the guard must likewise leave process env untouched.
+        for (key, prior) in ENV_KEYS.iter().zip(&before) {
+            assert_eq!(
+                std::env::var_os(key).as_ref(),
+                prior.as_ref(),
+                "clearing lifecycle context must not mutate process env var {key}"
             );
         }
     }
