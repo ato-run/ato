@@ -20,12 +20,14 @@
 use std::path::{Path, PathBuf};
 
 use capsule_core::runtime_setup::{
-    LaunchIntentKind, LaunchIntentNextStep, RUNTIME_SETUP_LAUNCH_INTENT_SCHEMA_VERSION,
-    RuntimeSetupLaunchIntent, RuntimeSetupStatus, ToolKind,
+    LaunchClientKind, LaunchIntentKind, LaunchIntentNextStep,
+    RUNTIME_SETUP_LAUNCH_INTENT_SCHEMA_VERSION, RuntimeSetupLaunchIntent, RuntimeSetupStatus,
+    ToolKind,
 };
 use gpui::App;
 
 use crate::state::GuestRoute;
+use crate::state::session::SessionClientKind;
 
 use super::push_runtime_setup;
 
@@ -38,7 +40,8 @@ const LAUNCH_INTENT_TTL_MS: u64 = 24 * 60 * 60 * 1000; // 24h
 /// path launches).
 const PGWEB_SAMPLE_HANDLE: &str = "capsule://github.com/sosedoff/pgweb";
 
-/// Default on-disk path for the launch-intent marker. Never falls back to /tmp;
+/// Default on-disk path for the launch-intent marker. Resolves under the ato
+/// home (falling back to a workspace-local `.ato/` tree, never the system tmp);
 /// matches `ato-cli::application::runtime_setup_launch::launch_intent_path`.
 pub(crate) fn launch_intent_path() -> PathBuf {
     capsule_core::common::paths::ato_path_or_workspace_tmp("runtime-setup/launch-intent.json")
@@ -131,25 +134,54 @@ fn unsupported(message: impl Into<String>) -> UnsupportedLaunchIntent {
     }
 }
 
-/// Whether a route is a capsule launch that needs the host OCI runtime (and so
-/// is worth recording as a launch intent / gating on Runtime Setup). External
+/// Whether a route is a capsule launch that [`intent_from_route`] can record and
+/// replay, and so is worth gating on Runtime Setup. Kept in lock-step with
+/// `intent_from_route`: only the replayable handle routes qualify. External
 /// URLs, terminals, and already-resolved sessions are not.
+///
+/// `LocalManifest` is intentionally excluded for now — it needs the host OCI
+/// runtime, but resuming a local-manifest launch is not yet replayable (see the
+/// `LocalManifest` arm of `intent_from_route`), so gating it would strand the
+/// user. Treat it as a future addition alongside that arm.
 pub(crate) fn route_needs_host_runtime(route: &GuestRoute) -> bool {
     matches!(
         route,
-        GuestRoute::CapsuleHandle { .. }
-            | GuestRoute::CapsuleUrl { .. }
-            | GuestRoute::LocalManifest(_)
+        GuestRoute::CapsuleHandle { .. } | GuestRoute::CapsuleUrl { .. }
     )
+}
+
+/// Map the Desktop's [`SessionClientKind`] to the persisted [`LaunchClientKind`]
+/// so the original open mode survives the Runtime Setup detour. Only the two
+/// clients the launch gate uses are represented; any other client falls back to
+/// the windowed default.
+fn client_kind_for_intent(client: SessionClientKind) -> LaunchClientKind {
+    match client {
+        SessionClientKind::OsBrowser => LaunchClientKind::OsBrowser,
+        // AtoWindow + any non-gate client (WebViewPane / Headless never reach the
+        // launch gate) resume in the windowed client.
+        _ => LaunchClientKind::AtoWindow,
+    }
+}
+
+/// Resolve which [`SessionClientKind`] to reattach when resuming `intent`. An
+/// absent `requested_client` (older markers / CLI-written intents) defaults to
+/// the windowed client. Pure, so the continuity is unit-testable.
+pub(crate) fn resume_client_kind(intent: &RuntimeSetupLaunchIntent) -> SessionClientKind {
+    match intent.requested_client {
+        Some(LaunchClientKind::OsBrowser) => SessionClientKind::OsBrowser,
+        Some(LaunchClientKind::AtoWindow) | None => SessionClientKind::AtoWindow,
+    }
 }
 
 /// Build a launch intent from an attempted launch route. Returns `None` for
 /// routes that are not replayable host-runtime capsule launches, or when the
 /// launch input is empty/untrusted — so we never record an intent we cannot or
-/// should not resume.
+/// should not resume. `requested_client` records the original open mode so the
+/// resumed launch reattaches the same display client (#460 PR3b).
 pub(crate) fn intent_from_route(
     route: &GuestRoute,
     source_surface: &str,
+    requested_client: SessionClientKind,
     now_unix_ms: u64,
 ) -> Option<RuntimeSetupLaunchIntent> {
     let (intent_kind, launch_input, display_label) = match route {
@@ -200,6 +232,7 @@ pub(crate) fn intent_from_route(
         expected_next_step: LaunchIntentNextStep::ContinueLaunch,
         request_id: None,
         display_label: display_label.filter(|l| !l.trim().is_empty()),
+        requested_client: Some(client_kind_for_intent(requested_client)),
     })
 }
 
@@ -278,9 +311,7 @@ pub(crate) fn launch_intent_to_guest_route(
 /// Whether a sample slug/handle refers to the bundled pgweb sample.
 fn sample_is_pgweb(input: &str) -> bool {
     let input = input.trim().trim_start_matches("capsule://");
-    input == "pgweb"
-        || input == "github.com/sosedoff/pgweb"
-        || input.ends_with("/sosedoff/pgweb")
+    input == "pgweb" || input == "github.com/sosedoff/pgweb" || input.ends_with("/sosedoff/pgweb")
 }
 
 // ── host-runtime readiness predicate ──────────────────────────────────────────
@@ -304,8 +335,9 @@ pub(crate) fn host_runtime_ready(status: &RuntimeSetupStatus) -> bool {
 pub(crate) fn record_launch_intent(
     route: &GuestRoute,
     source_surface: &str,
+    requested_client: SessionClientKind,
 ) -> Option<RuntimeSetupLaunchIntent> {
-    let intent = intent_from_route(route, source_surface, now_unix_ms())?;
+    let intent = intent_from_route(route, source_surface, requested_client, now_unix_ms())?;
     if let Err(err) = write_launch_intent_at(&launch_intent_path(), &intent) {
         tracing::warn!(error = %err, "failed to record runtime-setup launch intent");
         return None;
@@ -330,13 +362,21 @@ pub(crate) fn try_resume_launch_if_ready(cx: &mut App, status: &RuntimeSetupStat
         return;
     };
 
+    // Reattach the same display client the user originally launched with, so a
+    // `capsule_open_mode = os_browser` launch resumes in the OS browser rather
+    // than silently falling back to a windowed pane (#460 PR3b).
+    let client = resume_client_kind(&intent);
     match launch_intent_to_guest_route(&intent) {
         Ok(route) => {
             tracing::info!(
                 handle = %intent.launch_input,
+                ?client,
                 "Runtime ready — resuming interrupted capsule launch"
             );
-            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
+            if let Err(err) =
+                crate::window::launch_window::open_consent_window_for_route_with_client(
+                    cx, route, client,
+                )
             {
                 push_launch_resume_error(
                     cx,
@@ -456,7 +496,8 @@ pub(crate) fn open_capsule_launch_gated(
     source_surface: &str,
 ) {
     let config = crate::config::load_config();
-    let podman_engine = config.runtime.backend_engines.oci == crate::config::OciBackendEngine::Podman
+    let podman_engine = config.runtime.backend_engines.oci
+        == crate::config::OciBackendEngine::Podman
         && config.runtime.podman_enabled;
 
     if !route_needs_host_runtime(&route) || !podman_engine {
@@ -482,7 +523,7 @@ pub(crate) fn open_capsule_launch_gated(
             match status.as_ref() {
                 // Status read AND host runtime not ready → divert to Runtime Setup.
                 Some(status) if !host_runtime_ready(status) => {
-                    let intent = record_launch_intent(&route, &surface);
+                    let intent = record_launch_intent(&route, &surface, requested_client);
                     open_runtime_setup_for_pending_launch(cx, intent.as_ref());
                 }
                 // Ready, or status indeterminate (probe failed) → fail open and
@@ -510,10 +551,7 @@ fn open_consent_or_log(
 
 /// Open the Runtime Setup surface (Settings → Runtime) for a pending launch and
 /// hydrate it with the banner + a fresh status, once the WebView is idle.
-fn open_runtime_setup_for_pending_launch(
-    cx: &mut App,
-    intent: Option<&RuntimeSetupLaunchIntent>,
-) {
+fn open_runtime_setup_for_pending_launch(cx: &mut App, intent: Option<&RuntimeSetupLaunchIntent>) {
     if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
         tracing::error!(error = %err, "failed to open Settings for pending launch");
         return;
@@ -548,6 +586,7 @@ mod tests {
             expected_next_step: LaunchIntentNextStep::ContinueLaunch,
             request_id: None,
             display_label: Some("pgweb".to_string()),
+            requested_client: None,
         }
     }
 
@@ -626,11 +665,13 @@ mod tests {
             label: "pgweb".to_string(),
             community_toml_id: None,
         };
-        let intent = intent_from_route(&route, "launch_flow", 5_000).expect("intent");
+        let intent = intent_from_route(&route, "launch_flow", SessionClientKind::AtoWindow, 5_000)
+            .expect("intent");
         assert_eq!(intent.intent_kind, LaunchIntentKind::CapsuleUrl);
         assert_eq!(intent.launch_input, "github.com/sosedoff/pgweb");
         assert_eq!(intent.display_label.as_deref(), Some("pgweb"));
         assert_eq!(intent.created_at_unix_ms, 5_000);
+        assert_eq!(intent.requested_client, Some(LaunchClientKind::AtoWindow));
     }
 
     #[test]
@@ -640,7 +681,8 @@ mod tests {
             label: "chat".to_string(),
             community_toml_id: Some("ctoml_abc".to_string()),
         };
-        let intent = intent_from_route(&route, "omnibar", 5_000).expect("intent");
+        let intent = intent_from_route(&route, "omnibar", SessionClientKind::AtoWindow, 5_000)
+            .expect("intent");
         assert_eq!(intent.intent_kind, LaunchIntentKind::CommunityTomlId);
         assert_eq!(intent.launch_input, "ctoml_abc");
     }
@@ -653,20 +695,95 @@ mod tests {
             label: "x".to_string(),
             community_toml_id: None,
         };
-        assert!(intent_from_route(&empty, "launch_flow", 1).is_none());
+        assert!(
+            intent_from_route(&empty, "launch_flow", SessionClientKind::AtoWindow, 1).is_none()
+        );
         // Whitespace / control chars in the handle → untrusted.
         let bad = GuestRoute::CapsuleHandle {
             handle: "capsule://a b/c".to_string(),
             label: "x".to_string(),
             community_toml_id: None,
         };
-        assert!(intent_from_route(&bad, "launch_flow", 1).is_none());
+        assert!(intent_from_route(&bad, "launch_flow", SessionClientKind::AtoWindow, 1).is_none());
     }
 
     #[test]
     fn intent_from_external_url_is_none() {
         let route = GuestRoute::ExternalUrl(url::Url::parse("https://example.com").unwrap());
-        assert!(intent_from_route(&route, "launch_flow", 1).is_none());
+        assert!(
+            intent_from_route(&route, "launch_flow", SessionClientKind::AtoWindow, 1).is_none()
+        );
+    }
+
+    // ── launch client continuity (#460 PR3b blocker) ──────────────────────────
+
+    #[test]
+    fn os_browser_launch_intent_resumes_with_os_browser_client() {
+        let route = GuestRoute::CapsuleHandle {
+            handle: "github.com/sosedoff/pgweb".to_string(),
+            label: "pgweb".to_string(),
+            community_toml_id: None,
+        };
+        let intent = intent_from_route(&route, "launch_flow", SessionClientKind::OsBrowser, 5_000)
+            .expect("intent");
+        assert_eq!(intent.requested_client, Some(LaunchClientKind::OsBrowser));
+        // …and the resume side restores the OS-browser client.
+        assert_eq!(resume_client_kind(&intent), SessionClientKind::OsBrowser);
+    }
+
+    #[test]
+    fn ato_window_launch_intent_resumes_with_ato_window_client() {
+        let route = GuestRoute::CapsuleHandle {
+            handle: "github.com/sosedoff/pgweb".to_string(),
+            label: "pgweb".to_string(),
+            community_toml_id: None,
+        };
+        let intent = intent_from_route(&route, "launch_flow", SessionClientKind::AtoWindow, 5_000)
+            .expect("intent");
+        assert_eq!(intent.requested_client, Some(LaunchClientKind::AtoWindow));
+        assert_eq!(resume_client_kind(&intent), SessionClientKind::AtoWindow);
+    }
+
+    #[test]
+    fn non_gate_clients_record_as_windowed() {
+        // WebViewPane / Headless never reach the gate, but if one did it must
+        // resolve to a safe windowed client, not silently drop the launch.
+        for client in [SessionClientKind::WebViewPane, SessionClientKind::Headless] {
+            assert_eq!(client_kind_for_intent(client), LaunchClientKind::AtoWindow);
+        }
+    }
+
+    #[test]
+    fn old_marker_without_requested_client_defaults_to_ato_window() {
+        // A marker written before PR3b (or by the CLI) has no requested_client.
+        // It must deserialize and resume safely in the windowed client.
+        let json = r#"{
+            "schema_version": 1,
+            "created_at_unix_ms": 1000,
+            "source_surface": "launch_flow",
+            "intent_kind": "capsule_url",
+            "launch_input": "capsule://github.com/x/y",
+            "expected_next_step": "continue_launch"
+        }"#;
+        let intent: RuntimeSetupLaunchIntent = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(intent.requested_client, None);
+        assert_eq!(resume_client_kind(&intent), SessionClientKind::AtoWindow);
+    }
+
+    #[test]
+    fn requested_client_survives_marker_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("launch-intent.json");
+        let route = GuestRoute::CapsuleHandle {
+            handle: "github.com/sosedoff/pgweb".to_string(),
+            label: "pgweb".to_string(),
+            community_toml_id: None,
+        };
+        let intent = intent_from_route(&route, "launch_flow", SessionClientKind::OsBrowser, 1_000)
+            .expect("intent");
+        write_launch_intent_at(&path, &intent).expect("write");
+        let read = consume_launch_intent_at(&path, 2_000).expect("consume");
+        assert_eq!(resume_client_kind(&read), SessionClientKind::OsBrowser);
     }
 
     // ── launch_intent_to_guest_route ───────────────────────────────────────────
@@ -756,7 +873,10 @@ mod tests {
         let inner = serde_json::json!({
             "launchContinuation": { "status": "continue" },
         });
-        assert_eq!(reboot_resume_launch_action(&inner), RebootResumeLaunch::None);
+        assert_eq!(
+            reboot_resume_launch_action(&inner),
+            RebootResumeLaunch::None
+        );
     }
 
     #[test]
