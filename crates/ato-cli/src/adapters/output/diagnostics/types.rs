@@ -52,6 +52,7 @@ pub enum CliDiagnosticCode {
     E303,
     E304,
     E305,
+    E306,
     E999,
 }
 
@@ -86,6 +87,7 @@ impl CliDiagnosticCode {
             Self::E303 => "E303",
             Self::E304 => "E304",
             Self::E305 => "E305",
+            Self::E306 => "E306",
             Self::E999 => "E999",
         }
     }
@@ -120,6 +122,7 @@ impl CliDiagnosticCode {
             Self::E303 => "runtime_not_resolved",
             Self::E304 => "sandbox_unavailable",
             Self::E305 => "runtime_launch_failed",
+            Self::E306 => "oci_container_exited_before_ready",
             Self::E999 => "internal_error",
         }
     }
@@ -147,7 +150,9 @@ impl CliDiagnosticCode {
             | Self::E211
             | Self::E212
             | Self::E213 => "provisioning",
-            Self::E301 | Self::E302 | Self::E303 | Self::E304 | Self::E305 => "execution",
+            Self::E301 | Self::E302 | Self::E303 | Self::E304 | Self::E305 | Self::E306 => {
+                "execution"
+            }
             Self::E999 => "internal",
         }
     }
