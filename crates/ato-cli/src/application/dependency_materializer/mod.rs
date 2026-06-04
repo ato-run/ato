@@ -481,7 +481,7 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
             CacheLookupResult::Hit { blob_hash } => Some(blob_hash.clone()),
             _ => None,
         };
-        let session = serde_json::json!({
+        let mut session = serde_json::json!({
             "schema_version": "1",
             "session_id": req.session_id,
             "capsule_id": req.capsule_id,
@@ -494,6 +494,7 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
                 "blob_hash": blob_hash_for_log,
             },
         });
+        stamp_install_lifecycle_from_env(&mut session);
         write_json(&layout.session_json, &session)?;
         tracing::info!(
             capsule_id = %req.capsule_id,
@@ -545,6 +546,38 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
 
     fn gc_hint(&self, _session_id: &str) -> Result<()> {
         Ok(())
+    }
+}
+
+fn stamp_install_lifecycle_from_env(session: &mut serde_json::Value) {
+    const APP_ID: &str = "ATO_INSTALL_LIFECYCLE_APP_ID";
+    const PROFILE_ID: &str = "ATO_INSTALL_LIFECYCLE_PROFILE_ID";
+    const PROFILE_KEY: &str = "ATO_INSTALL_LIFECYCLE_PROFILE_KEY";
+    const REVISION_ID: &str = "ATO_INSTALL_LIFECYCLE_REVISION_ID";
+
+    let (Ok(app_id), Ok(profile_id), Ok(profile_key), Ok(revision_id)) = (
+        std::env::var(APP_ID),
+        std::env::var(PROFILE_ID),
+        std::env::var(PROFILE_KEY),
+        std::env::var(REVISION_ID),
+    ) else {
+        return;
+    };
+
+    if let Some(object) = session.as_object_mut() {
+        object.insert("installed_app_id".into(), serde_json::Value::String(app_id));
+        object.insert(
+            "install_profile_id".into(),
+            serde_json::Value::String(profile_id),
+        );
+        object.insert(
+            "install_profile_key".into(),
+            serde_json::Value::String(profile_key),
+        );
+        object.insert(
+            "install_revision_id".into(),
+            serde_json::Value::String(revision_id),
+        );
     }
 }
 

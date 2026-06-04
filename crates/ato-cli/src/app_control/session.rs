@@ -57,11 +57,10 @@ use super::guest_contract::GuestContract;
 use super::resolve::resolve_local_plan_with_state_overrides;
 
 // Thread-local install lifecycle context set by `ato launch` before calling
-// `execute_run_command`. Using thread-local (rather than process-global OnceLock)
-// means:
-// - Multiple sequential launches in the same process work correctly (daemon / Desktop)
-// - Test isolation: each test thread gets its own slot; no cross-test leakage
-// - The context is automatically cleared when the thread terminates
+// `execute_run_command`. The thread-local slot is the preferred path for
+// same-thread writes, while the process slot lets tokio worker threads stamp
+// records created during `ato launch`. Scoped env vars carry the same context
+// into spawned execution helpers that write session records out-of-thread.
 //
 // Always use [`ScopedInstallLifecycleGuard`] to set/clear the context so it is
 // guaranteed to be cleaned up on return, even if the run pipeline panics.
@@ -71,18 +70,39 @@ thread_local! {
     > = const { std::cell::RefCell::new(None) };
 }
 
+const INSTALL_CTX_APP_ID_ENV: &str = "ATO_INSTALL_LIFECYCLE_APP_ID";
+const INSTALL_CTX_PROFILE_ID_ENV: &str = "ATO_INSTALL_LIFECYCLE_PROFILE_ID";
+const INSTALL_CTX_PROFILE_KEY_ENV: &str = "ATO_INSTALL_LIFECYCLE_PROFILE_KEY";
+const INSTALL_CTX_REVISION_ID_ENV: &str = "ATO_INSTALL_LIFECYCLE_REVISION_ID";
+
+fn process_install_lifecycle_context()
+-> &'static std::sync::Mutex<Option<crate::cli::commands::run::InstallLifecycleContext>> {
+    static CONTEXT: std::sync::OnceLock<
+        std::sync::Mutex<Option<crate::cli::commands::run::InstallLifecycleContext>>,
+    > = std::sync::OnceLock::new();
+    CONTEXT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 pub(crate) fn set_install_lifecycle_context(
     ctx: crate::cli::commands::run::InstallLifecycleContext,
 ) {
     INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
-        *slot.borrow_mut() = Some(ctx);
+        *slot.borrow_mut() = Some(ctx.clone());
     });
+    *process_install_lifecycle_context()
+        .lock()
+        .expect("install lifecycle context lock") = Some(ctx.clone());
+    set_install_lifecycle_env(&ctx);
 }
 
 pub(crate) fn clear_install_lifecycle_context() {
     INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
         *slot.borrow_mut() = None;
     });
+    *process_install_lifecycle_context()
+        .lock()
+        .expect("install lifecycle context lock") = None;
+    clear_install_lifecycle_env();
 }
 
 /// RAII guard that sets the thread-local install lifecycle context on construction
@@ -115,9 +135,43 @@ fn with_install_lifecycle_context<F, R>(f: F) -> R
 where
     F: FnOnce(Option<&crate::cli::commands::run::InstallLifecycleContext>) -> R,
 {
-    INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
-        let guard = slot.borrow();
-        f(guard.as_ref())
+    let ctx = INSTALL_LIFECYCLE_CONTEXT
+        .with(|slot| slot.borrow().clone())
+        .or_else(|| {
+            process_install_lifecycle_context()
+                .lock()
+                .expect("install lifecycle context lock")
+                .clone()
+        })
+        .or_else(install_lifecycle_context_from_env);
+    f(ctx.as_ref())
+}
+
+fn set_install_lifecycle_env(ctx: &crate::cli::commands::run::InstallLifecycleContext) {
+    unsafe {
+        std::env::set_var(INSTALL_CTX_APP_ID_ENV, &ctx.installed_app_id);
+        std::env::set_var(INSTALL_CTX_PROFILE_ID_ENV, &ctx.install_profile_id);
+        std::env::set_var(INSTALL_CTX_PROFILE_KEY_ENV, &ctx.install_profile_key);
+        std::env::set_var(INSTALL_CTX_REVISION_ID_ENV, &ctx.install_revision_id);
+    }
+}
+
+fn clear_install_lifecycle_env() {
+    unsafe {
+        std::env::remove_var(INSTALL_CTX_APP_ID_ENV);
+        std::env::remove_var(INSTALL_CTX_PROFILE_ID_ENV);
+        std::env::remove_var(INSTALL_CTX_PROFILE_KEY_ENV);
+        std::env::remove_var(INSTALL_CTX_REVISION_ID_ENV);
+    }
+}
+
+fn install_lifecycle_context_from_env() -> Option<crate::cli::commands::run::InstallLifecycleContext>
+{
+    Some(crate::cli::commands::run::InstallLifecycleContext {
+        installed_app_id: std::env::var(INSTALL_CTX_APP_ID_ENV).ok()?,
+        install_profile_id: std::env::var(INSTALL_CTX_PROFILE_ID_ENV).ok()?,
+        install_profile_key: std::env::var(INSTALL_CTX_PROFILE_KEY_ENV).ok()?,
+        install_revision_id: std::env::var(INSTALL_CTX_REVISION_ID_ENV).ok()?,
     })
 }
 
@@ -5439,6 +5493,7 @@ mod tests {
     /// `capsule_instance_key` from the session's `execution_id` when the
     /// thread-local context is active.
     #[test]
+    #[serial_test::serial]
     fn apply_install_lifecycle_stamps_all_fields_and_derives_cik() {
         use capsule_core::foundation::install_lifecycle::{
             ExecutionId, InstallProfileKey, InstallRevisionId, derive_capsule_instance_key,
@@ -5497,6 +5552,7 @@ mod tests {
     /// When `execution_id` is absent at write time, `capsule_instance_key` stays
     /// `None` (it will be back-filled when the receipt assigns the execution_id).
     #[test]
+    #[serial_test::serial]
     fn apply_install_lifecycle_leaves_cik_none_when_no_execution_id() {
         let ctx = crate::cli::commands::run::InstallLifecycleContext {
             installed_app_id: "app_001".to_string(),
@@ -5516,8 +5572,67 @@ mod tests {
         );
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn install_lifecycle_context_is_visible_to_worker_threads() {
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_worker".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: "ipk_worker".to_string(),
+            install_revision_id: "rev_worker".to_string(),
+        };
+
+        let _guard = ScopedInstallLifecycleGuard::set(ctx);
+        let worker_saw_context = std::thread::spawn(|| {
+            with_install_lifecycle_context(|ctx| {
+                ctx.map(|ctx| ctx.install_profile_key.as_str() == "ipk_worker")
+                    .unwrap_or(false)
+            })
+        })
+        .join()
+        .expect("worker thread joins");
+
+        assert!(
+            worker_saw_context,
+            "ato launch session stamping must survive tokio worker threads"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn install_lifecycle_context_can_be_recovered_from_env() {
+        clear_install_lifecycle_context();
+        unsafe {
+            std::env::set_var(INSTALL_CTX_APP_ID_ENV, "app_env");
+            std::env::set_var(INSTALL_CTX_PROFILE_ID_ENV, "default");
+            std::env::set_var(INSTALL_CTX_PROFILE_KEY_ENV, "ipk_env");
+            std::env::set_var(INSTALL_CTX_REVISION_ID_ENV, "rev_env");
+        }
+
+        let recovered = with_install_lifecycle_context(|ctx| {
+            ctx.map(|ctx| {
+                (
+                    ctx.installed_app_id.clone(),
+                    ctx.install_profile_key.clone(),
+                    ctx.install_revision_id.clone(),
+                )
+            })
+        });
+        clear_install_lifecycle_context();
+
+        assert_eq!(
+            recovered,
+            Some((
+                "app_env".to_string(),
+                "ipk_env".to_string(),
+                "rev_env".to_string()
+            ))
+        );
+    }
+
     /// Verify `ScopedInstallLifecycleGuard` clears the context after it is dropped.
     #[test]
+    #[serial_test::serial]
     fn scoped_guard_clears_context_on_drop() {
         let ctx = crate::cli::commands::run::InstallLifecycleContext {
             installed_app_id: "app_002".to_string(),

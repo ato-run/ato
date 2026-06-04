@@ -498,6 +498,33 @@ mod tests {
     }
 
     #[test]
+    fn tools_list_includes_host_dispatch_action_with_url_property() {
+        let tools: serde_json::Value =
+            serde_json::from_str(super::TOOLS).expect("TOOLS is valid JSON");
+        let arr = tools.as_array().expect("array");
+        let entry = arr
+            .iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("host_dispatch_action"))
+            .expect("host_dispatch_action registered");
+        let required = entry
+            .get("inputSchema")
+            .and_then(|s| s.get("required"))
+            .and_then(|r| r.as_array())
+            .expect("required[]");
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"action"), "action required");
+        assert!(
+            !names.contains(&"url"),
+            "url is required only for selected actions"
+        );
+        let url_prop = entry
+            .get("inputSchema")
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.get("url"));
+        assert!(url_prop.is_some(), "url property must exist");
+    }
+
+    #[test]
     fn is_valid_region_accepts_four_int_csv() {
         assert!(super::is_valid_region("0,0,800,600"));
         assert!(super::is_valid_region("12, 34, 567, 890"));
@@ -553,6 +580,39 @@ mod tests {
         assert!(
             result.is_ok(),
             "restart_active_session must accept empty args, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn map_tool_host_dispatch_action_passes_installed_app_url() {
+        let args = serde_json::json!({
+            "action": "NavigateToUrl",
+            "url": "ato://app/ipk_82508d85640a941525c49106efdd4071",
+        });
+        let (method, params) =
+            super::map_tool_to_command("host_dispatch_action", &args).expect("map");
+        assert_eq!(method, "host_dispatch_action");
+        assert_eq!(
+            params.get("action").and_then(|v| v.as_str()),
+            Some("NavigateToUrl")
+        );
+        assert_eq!(
+            params.get("url").and_then(|v| v.as_str()),
+            Some("ato://app/ipk_82508d85640a941525c49106efdd4071")
+        );
+        assert_eq!(params.get("pane_id").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    fn map_tool_host_dispatch_action_rejects_missing_url_for_navigate() {
+        let err = super::map_tool_to_command(
+            "host_dispatch_action",
+            &serde_json::json!({"action": "NavigateToUrl"}),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("NavigateToUrl requires"),
+            "expected NavigateToUrl url error: {err}"
         );
     }
 
