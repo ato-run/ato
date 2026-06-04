@@ -35,6 +35,7 @@ pub use foundation::error;
 pub use foundation::hardware;
 pub use foundation::installed_state;
 pub use foundation::interactive_resolution;
+pub use foundation::interface;
 pub use foundation::metrics;
 pub use foundation::podman;
 pub use foundation::reporter;
