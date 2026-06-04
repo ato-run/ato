@@ -692,4 +692,200 @@ mod tests {
             materialized.materialized_graph_seed.nodes
         );
     }
+
+    // -----------------------------------------------------------------
+    // #492 canonical contract coverage: session/receipt metadata must be
+    // absent from the canonical graph input.
+    //
+    // The execution IDs are derived from `declared_graph` (Declared
+    // domain) and `resolved_graph` (Resolved domain). Session/receipt
+    // metadata — pid, session_id, container_id, log/receipt paths,
+    // timestamps, random temp suffixes — only ever reaches the
+    // *materialization seed* (process-node metadata) and the receipt
+    // seed, neither of which feeds the canonical ID input. These tests
+    // prove that boundary directly with recognizable sentinel values,
+    // not merely by asserting "the id didn't change."
+    // -----------------------------------------------------------------
+
+    use crate::engine::execution_graph::CanonicalGraphDomain;
+
+    /// Recognizable non-semantic sentinels. None of these is visible to
+    /// the guest process via env/argv/fs/network, so none may enter the
+    /// canonical graph input.
+    const SESSION_SENTINELS: &[&str] = &[
+        "SESSION_SHOULD_NOT_CANONICALIZE",
+        "424242",
+        "CONTAINER_SHOULD_NOT_CANONICALIZE",
+        "/tmp/LOG_SHOULD_NOT_CANONICALIZE",
+        "/tmp/RECEIPT_SHOULD_NOT_CANONICALIZE",
+        "2099-01-01T00:00:00Z",
+        "RANDOM_SUFFIX_SHOULD_NOT_CANONICALIZE",
+    ];
+
+    /// Session/receipt metadata map keyed the way a real launch site
+    /// would: pid, session id, container id, log/receipt paths, a
+    /// timestamp, and a random temp suffix.
+    fn session_metadata() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "session_id".to_string(),
+                "SESSION_SHOULD_NOT_CANONICALIZE".to_string(),
+            ),
+            ("pid".to_string(), "424242".to_string()),
+            (
+                "container_id".to_string(),
+                "CONTAINER_SHOULD_NOT_CANONICALIZE".to_string(),
+            ),
+            (
+                "log_path".to_string(),
+                "/tmp/LOG_SHOULD_NOT_CANONICALIZE".to_string(),
+            ),
+            (
+                "receipt_path".to_string(),
+                "/tmp/RECEIPT_SHOULD_NOT_CANONICALIZE".to_string(),
+            ),
+            ("timestamp".to_string(), "2099-01-01T00:00:00Z".to_string()),
+            (
+                "random_temp_suffix".to_string(),
+                "RANDOM_SUFFIX_SHOULD_NOT_CANONICALIZE".to_string(),
+            ),
+        ])
+    }
+
+    /// `sample_input()` with a process node carrying the full session
+    /// metadata map — the closest real boundary at which session/receipt
+    /// metadata enters the launch graph bundle.
+    fn input_with_session_metadata() -> LaunchGraphBundleInput {
+        let mut input = sample_input();
+        input
+            .materialized
+            .process_nodes
+            .push(GraphRuntimeNodeInput {
+                kind: GraphRuntimeNodeKind::Process,
+                identifier: "main".to_string(),
+                metadata: session_metadata(),
+            });
+        input
+    }
+
+    /// Assert no sentinel appears anywhere the canonical ID input could
+    /// observe it: the graph's nodes, edges, labels, constraints, or the
+    /// canonical serialized bytes in either ID domain.
+    fn assert_no_session_sentinels(graph: &ExecutionGraph, label: &str) {
+        let mut haystacks: Vec<String> = Vec::new();
+        for node in &graph.nodes {
+            haystacks.push(format!("{node:?}"));
+        }
+        for edge in &graph.edges {
+            haystacks.push(format!("{edge:?}"));
+        }
+        for (k, v) in &graph.labels {
+            haystacks.push(k.clone());
+            haystacks.push(v.clone());
+        }
+        for c in &graph.constraints {
+            haystacks.push(c.kind.clone());
+            haystacks.push(c.target.clone());
+        }
+        for domain in [
+            CanonicalGraphDomain::Declared,
+            CanonicalGraphDomain::Resolved,
+        ] {
+            let bytes = graph.canonical_form(domain).bytes;
+            haystacks.push(String::from_utf8_lossy(&bytes).into_owned());
+        }
+
+        for sentinel in SESSION_SENTINELS {
+            for hay in &haystacks {
+                assert!(
+                    !hay.contains(sentinel),
+                    "session/receipt sentinel {sentinel:?} leaked into {label}: {hay:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_graph_input_excludes_session_metadata() {
+        let bundle = ExecutionGraphBuilder::build_launch_bundle(input_with_session_metadata());
+
+        // The sentinels must not be present in either canonical-ID graph
+        // (nodes/edges/labels/constraints or the serialized bytes).
+        assert_no_session_sentinels(&bundle.declared_graph, "declared_graph");
+        assert_no_session_sentinels(&bundle.resolved_graph, "resolved_graph");
+
+        // And, as a corollary, the execution IDs are byte-for-byte what a
+        // metadata-free build of the same launch produces.
+        let clean = ExecutionGraphBuilder::build_launch_bundle(sample_input());
+        assert_eq!(
+            bundle.derived.execution_ids.declared_execution_id,
+            clean.derived.execution_ids.declared_execution_id,
+            "session metadata must not perturb declared_execution_id",
+        );
+        assert_eq!(
+            bundle.derived.execution_ids.resolved_execution_id,
+            clean.derived.execution_ids.resolved_execution_id,
+            "session metadata must not perturb resolved_execution_id",
+        );
+    }
+
+    #[test]
+    fn same_launch_different_session_yields_same_canonical_bytes() {
+        // Two bundles for the same launch, differing ONLY in session
+        // metadata.
+        let a = ExecutionGraphBuilder::build_launch_bundle(input_with_session_metadata());
+
+        let mut b_input = input_with_session_metadata();
+        b_input.materialized.process_nodes[0].metadata = BTreeMap::from([
+            ("session_id".to_string(), "ANOTHER_SESSION".to_string()),
+            ("pid".to_string(), "999999".to_string()),
+            ("container_id".to_string(), "ANOTHER_CONTAINER".to_string()),
+            ("log_path".to_string(), "/tmp/another-log".to_string()),
+            (
+                "receipt_path".to_string(),
+                "/tmp/another-receipt".to_string(),
+            ),
+            ("timestamp".to_string(), "2100-12-31T23:59:59Z".to_string()),
+            (
+                "random_temp_suffix".to_string(),
+                "ANOTHER_SUFFIX".to_string(),
+            ),
+        ]);
+        let b = ExecutionGraphBuilder::build_launch_bundle(b_input);
+
+        // Byte-identical canonical form in both ID domains.
+        assert_eq!(
+            a.declared_graph
+                .canonical_form(CanonicalGraphDomain::Declared)
+                .bytes,
+            b.declared_graph
+                .canonical_form(CanonicalGraphDomain::Declared)
+                .bytes,
+            "declared canonical bytes must not depend on session metadata",
+        );
+        assert_eq!(
+            a.resolved_graph
+                .canonical_form(CanonicalGraphDomain::Resolved)
+                .bytes,
+            b.resolved_graph
+                .canonical_form(CanonicalGraphDomain::Resolved)
+                .bytes,
+            "resolved canonical bytes must not depend on session metadata",
+        );
+
+        // Identical declared/resolved IDs.
+        assert_eq!(
+            a.derived.execution_ids.declared_execution_id,
+            b.derived.execution_ids.declared_execution_id,
+        );
+        assert_eq!(
+            a.derived.execution_ids.resolved_execution_id,
+            b.derived.execution_ids.resolved_execution_id,
+        );
+
+        // Direct sentinel-absence check on the first bundle's canonical
+        // graphs (the second uses different, non-sentinel session values).
+        assert_no_session_sentinels(&a.declared_graph, "declared_graph");
+        assert_no_session_sentinels(&a.resolved_graph, "resolved_graph");
+    }
 }
