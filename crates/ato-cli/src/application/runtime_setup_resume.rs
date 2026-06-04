@@ -221,68 +221,158 @@ pub(crate) fn plan_substrate_action(kind: WindowsSubstrateActionKind) -> Substra
     }
 }
 
+/// Outcome of executing a substrate remediation (`run_substrate_remediation`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SubstrateRemediationResult {
+    /// `(success, output)` of the `wsl.exe` step, if one ran.
+    pub ran: Option<(bool, String)>,
+    /// Whether a reboot-resume marker was persisted.
+    pub marker_written: bool,
+    /// Whether this was a guidance-only action (nothing executed).
+    pub guidance_only: bool,
+}
+
+/// Execute a substrate remediation against an injected `wsl.exe` runner and
+/// marker path. Pure of process/global state so the failure semantics are
+/// unit-testable. See #460 PR2.
+///
+/// Order matters: the `wsl.exe` step runs **first**; a reboot-resume marker is
+/// written **only after** it succeeds. A non-zero `wsl.exe` exit is an **error**
+/// and leaves **no** marker behind — so a denied/failed remediation never strands
+/// the user in a bogus "resume after reboot" state.
+///
+/// `RepairPodmanMachine` is handled by the caller (it delegates to the Podman
+/// repair flow) and must not be passed here.
+fn run_substrate_remediation<F>(
+    kind: WindowsSubstrateActionKind,
+    source_surface: &str,
+    status_summary: &str,
+    marker_path: &std::path::Path,
+    now_ms: u64,
+    run_wsl: F,
+) -> Result<SubstrateRemediationResult>
+where
+    F: Fn(&[&str]) -> std::io::Result<(bool, String)>,
+{
+    let plan = plan_substrate_action(kind);
+    debug_assert!(!plan.delegates_to_repair, "repair is handled by the caller");
+
+    // 1. Run the wsl.exe step (if any). A non-zero exit fails the whole action.
+    let ran = if let Some(args) = &plan.wsl_args {
+        let (ok, output) =
+            run_wsl(args).with_context(|| format!("failed to run wsl.exe {}", args.join(" ")))?;
+        if !ok {
+            return Err(anyhow::anyhow!(
+                "wsl.exe {} failed: {}",
+                args.join(" "),
+                output.trim()
+            ));
+        }
+        Some((true, output))
+    } else {
+        None
+    };
+
+    // 2. Only after a successful (or absent) command, persist the reboot marker.
+    let marker_written = if plan.writes_reboot_marker {
+        let marker = RuntimeSetupResumeMarker {
+            schema_version: capsule_core::runtime_setup::RUNTIME_SETUP_RESUME_SCHEMA_VERSION,
+            requested_action: kind,
+            source_surface: source_surface.to_string(),
+            created_at_unix_ms: now_ms,
+            requires_reboot: true,
+            expected_next_step: RuntimeSetupResumeStep::ContinuePodmanPrepare,
+            status_before_reboot: status_summary.to_string(),
+        };
+        write_resume_marker_at(marker_path, &marker).context("failed to write resume marker")?;
+        true
+    } else {
+        false
+    };
+
+    Ok(SubstrateRemediationResult {
+        ran,
+        marker_written,
+        guidance_only: plan.guidance_only,
+    })
+}
+
 /// Public entry for `ato internal runtime prepare-windows-substrate --action …`
 /// (#460 PR2). Executes the substrate remediation the Desktop offered: runs the
 /// relevant `wsl.exe` step (non-destructive; never converts user distros),
-/// persists a reboot-resume marker when the action needs a restart, or delegates
-/// to the Podman machine repair flow. The Desktop supplies elevation for
-/// actions whose plan `requires_admin`.
+/// persists a reboot-resume marker **only after** the step succeeds, or delegates
+/// to the Podman machine repair flow. The Desktop supplies elevation for actions
+/// whose plan `requires_admin`. A failed `wsl.exe` step returns an error (and in
+/// JSON mode, `ok:false`) and leaves no marker.
 pub(crate) fn prepare_windows_substrate(
     kind: WindowsSubstrateActionKind,
     source_surface: String,
     json: bool,
 ) -> Result<()> {
-    let plan = plan_substrate_action(kind);
+    // `none` is not a runnable remediation — reject it rather than report a
+    // misleading guidance-only success.
+    if kind == WindowsSubstrateActionKind::None {
+        return Err(anyhow::anyhow!("no remediation to run for action 'none'"));
+    }
 
-    if plan.delegates_to_repair {
+    if plan_substrate_action(kind).delegates_to_repair {
         return crate::application::runtime_prepare::repair_host_runtime(json);
     }
 
-    if plan.writes_reboot_marker {
-        let marker = RuntimeSetupResumeMarker {
-            schema_version: capsule_core::runtime_setup::RUNTIME_SETUP_RESUME_SCHEMA_VERSION,
-            requested_action: kind,
-            source_surface: source_surface.clone(),
-            created_at_unix_ms: now_unix_ms(),
-            requires_reboot: true,
-            expected_next_step: RuntimeSetupResumeStep::ContinuePodmanPrepare,
-            status_before_reboot: format!("{kind:?}"),
-        };
-        write_resume_marker(&marker).context("failed to write resume marker")?;
-    }
+    let status_summary = capsule_core::runtime_setup::WindowsSubstrateAction::for_kind(kind).label;
+    let result = run_substrate_remediation(
+        kind,
+        &source_surface,
+        &status_summary,
+        &resume_marker_path(),
+        now_unix_ms(),
+        |args| {
+            let output = std::process::Command::new("wsl.exe").args(args).output()?;
+            let mut combined = output.stdout.clone();
+            combined.extend_from_slice(&output.stderr);
+            Ok((
+                output.status.success(),
+                crate::application::runtime_setup::decode_wsl_output(&combined),
+            ))
+        },
+    );
 
-    let mut ran: Option<(bool, String)> = None;
-    if let Some(args) = &plan.wsl_args {
-        let output = std::process::Command::new("wsl.exe")
-            .args(args)
-            .output()
-            .with_context(|| format!("failed to run wsl.exe {}", args.join(" ")))?;
-        let mut combined = output.stdout.clone();
-        combined.extend_from_slice(&output.stderr);
-        ran = Some((
-            output.status.success(),
-            crate::application::runtime_setup::decode_wsl_output(&combined),
-        ));
+    match result {
+        Ok(result) => {
+            if json {
+                let payload = serde_json::json!({
+                    "ok": true,
+                    "action": format!("{kind:?}"),
+                    "sourceSurface": source_surface,
+                    "guidanceOnly": result.guidance_only,
+                    "rebootMarkerWritten": result.marker_written,
+                    "ran": result.ran.as_ref().map(|(ok, out)| serde_json::json!({ "ok": ok, "output": out })),
+                });
+                println!("{payload}");
+            } else if result.guidance_only {
+                println!("No automatic action; follow the on-screen guidance for {kind:?}.");
+            } else if result.marker_written {
+                println!(
+                    "Started {kind:?}; restart to continue — Ato will resume setup afterward."
+                );
+            } else {
+                println!("Ran {kind:?}: ok");
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if json {
+                let payload = serde_json::json!({
+                    "ok": false,
+                    "action": format!("{kind:?}"),
+                    "sourceSurface": source_surface,
+                    "error": { "message": format!("{err:#}") },
+                });
+                println!("{payload}");
+            }
+            Err(err)
+        }
     }
-
-    if json {
-        let payload = serde_json::json!({
-            "ok": true,
-            "action": format!("{kind:?}"),
-            "sourceSurface": source_surface,
-            "guidanceOnly": plan.guidance_only,
-            "rebootMarkerWritten": plan.writes_reboot_marker,
-            "ran": ran.as_ref().map(|(ok, out)| serde_json::json!({ "ok": ok, "output": out })),
-        });
-        println!("{payload}");
-    } else if plan.guidance_only {
-        println!("No automatic action; follow the on-screen guidance for {kind:?}.");
-    } else if plan.writes_reboot_marker {
-        println!("Started {kind:?}; restart to continue — Ato will resume setup afterward.");
-    } else if let Some((ok, _)) = &ran {
-        println!("Ran {kind:?}: {}", if *ok { "ok" } else { "failed" });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -434,5 +524,122 @@ mod tests {
             assert!(!plan.writes_reboot_marker);
             assert!(!plan.delegates_to_repair);
         }
+    }
+
+    // ── run_substrate_remediation: failure semantics (#460 PR2 review) ─────────
+
+    use std::cell::RefCell;
+
+    /// A fake `wsl.exe` runner that records calls and returns a fixed result.
+    fn fake_wsl<'a>(
+        calls: &'a RefCell<Vec<Vec<String>>>,
+        success: bool,
+        output: &'a str,
+    ) -> impl Fn(&[&str]) -> std::io::Result<(bool, String)> + 'a {
+        move |args: &[&str]| {
+            calls
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            Ok((success, output.to_string()))
+        }
+    }
+
+    #[test]
+    fn remediation_install_wsl_success_runs_then_writes_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("resume.json");
+        let calls = RefCell::new(Vec::new());
+        let result = run_substrate_remediation(
+            WindowsSubstrateActionKind::InstallWsl,
+            "onboarding",
+            "WSL missing",
+            &path,
+            1_000,
+            fake_wsl(&calls, true, "ok"),
+        )
+        .expect("install ok");
+        assert_eq!(result.ran, Some((true, "ok".to_string())));
+        assert!(result.marker_written);
+        assert!(path.exists(), "marker must exist after success");
+        assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn remediation_install_wsl_failure_errs_and_leaves_no_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("resume.json");
+        let calls = RefCell::new(Vec::new());
+        let err = run_substrate_remediation(
+            WindowsSubstrateActionKind::InstallWsl,
+            "onboarding",
+            "WSL missing",
+            &path,
+            1_000,
+            fake_wsl(&calls, false, "access denied"),
+        )
+        .expect_err("non-zero wsl exit must fail");
+        assert!(err.to_string().contains("failed"), "{err}");
+        assert!(
+            !path.exists(),
+            "a failed remediation must NOT leave a resume marker"
+        );
+    }
+
+    #[test]
+    fn remediation_enable_wsl2_success_no_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("resume.json");
+        let calls = RefCell::new(Vec::new());
+        let result = run_substrate_remediation(
+            WindowsSubstrateActionKind::EnableWsl2,
+            "settings",
+            "WSL2 unavailable",
+            &path,
+            1_000,
+            fake_wsl(&calls, true, ""),
+        )
+        .expect("enable ok");
+        assert!(result.ran.is_some());
+        assert!(!result.marker_written);
+        assert!(!path.exists());
+        assert_eq!(calls.borrow()[0], vec!["--set-default-version", "2"]);
+    }
+
+    #[test]
+    fn remediation_enable_wsl2_failure_errs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("resume.json");
+        let calls = RefCell::new(Vec::new());
+        let err = run_substrate_remediation(
+            WindowsSubstrateActionKind::EnableWsl2,
+            "settings",
+            "WSL2 unavailable",
+            &path,
+            1_000,
+            fake_wsl(&calls, false, "boom"),
+        )
+        .expect_err("non-zero wsl exit must fail");
+        assert!(err.to_string().contains("failed"), "{err}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remediation_reboot_required_writes_marker_without_wsl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("resume.json");
+        let calls = RefCell::new(Vec::new());
+        let result = run_substrate_remediation(
+            WindowsSubstrateActionKind::RebootRequired,
+            "onboarding",
+            "Reboot required",
+            &path,
+            1_000,
+            fake_wsl(&calls, true, "unused"),
+        )
+        .expect("reboot marker");
+        assert_eq!(result.ran, None, "no wsl.exe runs for reboot-required");
+        assert!(result.marker_written);
+        assert!(path.exists());
+        assert!(calls.borrow().is_empty(), "must not invoke wsl.exe");
     }
 }
