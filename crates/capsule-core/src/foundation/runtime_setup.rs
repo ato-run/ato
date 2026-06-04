@@ -269,10 +269,11 @@ pub enum VirtualizationStatus {
 /// Windows substrate diagnostics surfaced to the Desktop Runtime Setup UI so it
 /// can guide the user to a working OCI engine without any CLI/WSL hand-ops (#460).
 ///
-/// This is *diagnostic only* — remediation actions (enable WSL, reboot-and-resume,
-/// machine repair) are a follow-up. The per-tool Podman [`ToolStatus`] continues
-/// to carry the machine-level readiness/repair action; this struct adds the
-/// host-substrate context that sits *underneath* Podman.
+/// Carries both the read-only diagnosis and the single recommended
+/// [`WindowsSubstrateAction`] the Desktop should offer. The per-tool Podman
+/// [`ToolStatus`] continues to own the *machine-level* readiness/repair action;
+/// this struct owns the *substrate* (WSL / virtualization / reboot) action that
+/// sits underneath Podman.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowsSubstrateStatus {
     pub wsl: WslStatus,
@@ -281,7 +282,173 @@ pub struct WindowsSubstrateStatus {
     pub reboot_required: bool,
     /// Short, user-facing one-line explanation of the substrate state.
     pub message: String,
+    /// The remediation the Desktop should offer for this state. `None`-kind when
+    /// the substrate is ready or no Desktop-runnable action applies.
+    #[serde(default)]
+    pub action: WindowsSubstrateAction,
 }
+
+/// The kind of remediation the Desktop should offer for a Windows substrate
+/// state (#460). Pairs with [`WindowsSubstrateAction`] metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsSubstrateActionKind {
+    /// Substrate is ready (or unknown) — nothing to offer.
+    #[default]
+    None,
+    /// WSL is not installed — install it (`wsl --install`).
+    InstallWsl,
+    /// WSL present but not WSL2 — set the default version to 2.
+    EnableWsl2,
+    /// A reboot must complete before setup can continue.
+    RebootRequired,
+    /// Virtualization/VM-platform appears off — show guidance (some of which is
+    /// firmware/BIOS and cannot be fully automated).
+    OpenVirtualizationInstructions,
+    /// The Ato-managed Podman machine is running but unhealthy — repair it.
+    RepairPodmanMachine,
+}
+
+/// A single Desktop-presentable remediation for the Windows substrate (#460).
+///
+/// This is *descriptive metadata* the UI renders into a button + explanation;
+/// executing it is a separate, capability-gated IPC command. `setup-status`
+/// itself never mutates the host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsSubstrateAction {
+    pub kind: WindowsSubstrateActionKind,
+    /// Button label, e.g. "Enable WSL".
+    pub label: String,
+    /// One-line description of what running the action does.
+    pub description: String,
+    /// Needs elevation (UAC) to run.
+    pub requires_admin: bool,
+    /// Completing the action requires an OS reboot.
+    pub requires_reboot: bool,
+    /// Running the action can destroy state (e.g. recreate a machine).
+    pub destructive: bool,
+    /// The Desktop can run this directly (vs. guidance the user must follow,
+    /// e.g. firmware/BIOS virtualization changes).
+    pub can_run_from_desktop: bool,
+}
+
+impl Default for WindowsSubstrateAction {
+    fn default() -> Self {
+        WindowsSubstrateAction {
+            kind: WindowsSubstrateActionKind::None,
+            label: String::new(),
+            description: String::new(),
+            requires_admin: false,
+            requires_reboot: false,
+            destructive: false,
+            can_run_from_desktop: false,
+        }
+    }
+}
+
+impl WindowsSubstrateAction {
+    /// The canonical action for a substrate kind. Pure so the Desktop and tests
+    /// agree on labels/flags. See #460.
+    pub fn for_kind(kind: WindowsSubstrateActionKind) -> Self {
+        use WindowsSubstrateActionKind as K;
+        match kind {
+            K::None => WindowsSubstrateAction::default(),
+            K::InstallWsl => WindowsSubstrateAction {
+                kind,
+                label: "Enable WSL".to_string(),
+                description: "Install the Windows Subsystem for Linux so Ato can run \
+                              containers. This needs administrator approval and a restart."
+                    .to_string(),
+                requires_admin: true,
+                requires_reboot: true,
+                destructive: false,
+                can_run_from_desktop: true,
+            },
+            K::EnableWsl2 => WindowsSubstrateAction {
+                kind,
+                label: "Enable WSL 2".to_string(),
+                description: "Set WSL's default version to 2, which Ato's container \
+                              engine requires."
+                    .to_string(),
+                requires_admin: false,
+                requires_reboot: false,
+                destructive: false,
+                can_run_from_desktop: true,
+            },
+            K::RebootRequired => WindowsSubstrateAction {
+                kind,
+                label: "Continue after restart".to_string(),
+                description: "WSL setup needs a restart to finish. Ato will resume setup \
+                              automatically after you restart."
+                    .to_string(),
+                requires_admin: false,
+                requires_reboot: true,
+                destructive: false,
+                can_run_from_desktop: true,
+            },
+            K::OpenVirtualizationInstructions => WindowsSubstrateAction {
+                kind,
+                label: "Show virtualization steps".to_string(),
+                description: "Virtualization (Virtual Machine Platform / firmware) appears \
+                              disabled. Some steps may require firmware/BIOS changes Ato \
+                              cannot make for you."
+                    .to_string(),
+                requires_admin: true,
+                requires_reboot: false,
+                destructive: false,
+                // Windows-feature enablement can be Desktop-driven; firmware cannot,
+                // so the UI presents guidance rather than a guaranteed one-click fix.
+                can_run_from_desktop: false,
+            },
+            K::RepairPodmanMachine => WindowsSubstrateAction {
+                kind,
+                label: "Repair Ato Podman machine".to_string(),
+                description: "Restart and re-verify the Ato-managed Podman machine.".to_string(),
+                requires_admin: false,
+                requires_reboot: false,
+                destructive: false,
+                can_run_from_desktop: true,
+            },
+        }
+    }
+}
+
+/// Persisted marker that a Windows substrate remediation needs a reboot to
+/// finish, so the Desktop can resume Runtime Setup on next launch (#460).
+///
+/// Written under `~/.ato/runtime-setup/resume.json` before a reboot-requiring
+/// action; read on Desktop startup / Settings open, then cleared once the
+/// substrate is ready.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSetupResumeMarker {
+    pub schema_version: u32,
+    /// The action that asked for the reboot.
+    pub requested_action: WindowsSubstrateActionKind,
+    /// Which surface initiated it (`"onboarding"` / `"settings"`).
+    pub source_surface: String,
+    /// Unix-ms timestamp the marker was written (stamped by the caller).
+    pub created_at_unix_ms: u64,
+    pub requires_reboot: bool,
+    /// What the Desktop should do once back: continue podman prepare, or just
+    /// re-check status.
+    pub expected_next_step: RuntimeSetupResumeStep,
+    /// Human-readable summary of the substrate state before the reboot.
+    pub status_before_reboot: String,
+}
+
+/// What to do when resuming Runtime Setup after a reboot (#460).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSetupResumeStep {
+    /// Re-check substrate status and show the next action.
+    #[default]
+    RecheckStatus,
+    /// Substrate should be ready — continue creating/starting the Podman machine.
+    ContinuePodmanPrepare,
+}
+
+/// Current resume-marker schema version.
+pub const RUNTIME_SETUP_RESUME_SCHEMA_VERSION: u32 = 1;
 
 /// Phases an install/prepare moves through. Emitted as a stream of JSON lines by
 /// `ato internal runtime install --json` and `ato internal runtime prepare
