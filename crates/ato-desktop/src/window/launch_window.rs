@@ -1305,13 +1305,16 @@ pub fn start_boot_launch(
 /// Installed apps are pre-consented (see `ato launch` / `dangerously_skip_permissions`),
 /// so relaunching one must never re-show review — the historical bug this fixes.
 /// The flow:
-///   1. ensures a backing session exists by running `ato launch <ipk> -y`
-///      (pinned current revision, install-lifecycle stamped, pre-consented),
-///      off the UI thread, and waits until the desktop can see its session
-///      record;
-///   2. then drives the normal boot→window path via [`start_boot_launch`],
-///      whose session-record fast path reuses the just-launched session instead
-///      of starting a second one through `ato app session start`.
+///   1. ensures a backing session by running `ato launch <ipk> -y` (pinned
+///      current revision, install-lifecycle stamped, pre-consented) through the
+///      Desktop's own `ATO_HOME` / runtime-env plumbing, off the UI thread, and
+///      waits until that session's record is visible;
+///   2. opens the app window directly from that session record.
+///
+/// **Fail-closed:** if `ato launch` exits early, errors, or no session appears
+/// before the deadline, this surfaces a boot failure. It never falls back to a
+/// handle-based `ato app session start`, which would lose the pinned revision
+/// and install-lifecycle identity (and could re-enter consent).
 ///
 /// The durable open identity is the install profile's `app_url`
 /// (`ato://app/<ipk>`), persisted to Start history by the caller. Until a router
@@ -1323,10 +1326,10 @@ pub fn start_installed_launch(
     install_profile_key: String,
     boot_handle: AnyWindowHandle,
 ) {
+    let boot_shell_weak = cx
+        .try_global::<PendingBootShell>()
+        .and_then(|g| g.0.clone());
     let Some(launch_input) = launch_input_for_route(&route) else {
-        let boot_shell_weak = cx
-            .try_global::<PendingBootShell>()
-            .and_then(|g| g.0.clone());
         show_boot_failure(
             cx,
             &boot_shell_weak,
@@ -1336,6 +1339,21 @@ pub fn start_installed_launch(
     };
     let handle = launch_input.source_handle().to_string();
 
+    // Abort support: closing the boot window flips the flag so we stop waiting
+    // and tear down the launch instead of opening a window.
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    cx.set_global(PendingBootShell(None));
+    cx.set_global(BootWindowSlot {
+        boot_window: Some(boot_handle),
+        abort_flag: Some(Arc::clone(&abort_flag)),
+    });
+    if let Some(shell) = boot_shell_weak.as_ref().and_then(|weak| weak.upgrade()) {
+        shell.update(cx, |shell, _cx| {
+            shell.push_detail("Launching installed app");
+            shell.push_detail("Starting current revision (pre-consented)");
+        });
+    }
+
     let async_app = cx.to_async();
     let be = async_app.background_executor().clone();
     let aa = async_app.clone();
@@ -1344,64 +1362,126 @@ pub fn start_installed_launch(
         .spawn(async move {
             let ensure_handle = handle.clone();
             let ensure_ipk = install_profile_key.clone();
-            // Start `ato launch` and wait for its session record off the UI
-            // thread, so the subsequent `start_boot_launch` fast path reuses it.
-            let ensured = be
-                .spawn(async move { ensure_installed_session(&ensure_ipk, &ensure_handle) })
+            let abort_bg = Arc::clone(&abort_flag);
+            // Spawn `ato launch` and wait for its session record off the UI thread.
+            let result = be
+                .spawn(
+                    async move { ensure_installed_session(&ensure_ipk, &ensure_handle, &abort_bg) },
+                )
                 .await;
-            tracing::info!(
-                ipk = %install_profile_key,
-                handle = %handle,
-                ensured,
-                "start_installed_launch: backing session ensured; opening window"
-            );
+            let aborted = abort_flag.load(Ordering::Acquire);
+            let shell_for_result = boot_shell_weak.clone();
+            let route_for_open = route.clone();
             aa.update(move |cx: &mut App| {
-                // start_boot_launch resolves via the session-record fast path
-                // first; when `ensured` it hits the pinned/stamped `ato launch`
-                // session. When it timed out, the consent-free session-start
-                // fallback still opens a window (the temporary adapter) — either
-                // way no consent wizard is shown.
-                start_boot_launch(
-                    cx,
-                    route,
-                    Vec::new(),
-                    boot_handle,
-                    crate::state::session::SessionClientKind::AtoWindow,
-                );
+                if aborted {
+                    if let Ok(session) = &result {
+                        stop_session_async(session.session_id.clone());
+                    }
+                    close_boot_window_handle(cx, boot_handle, None);
+                    return;
+                }
+                match result {
+                    Ok(session) => {
+                        let session_id = session.session_id.clone();
+                        match crate::window::orchestrator::open_ready_capsule_window(
+                            cx,
+                            route_for_open,
+                            session,
+                            Vec::new(),
+                        ) {
+                            Ok(app_handle) => {
+                                let app_window_id = app_handle.window_id().as_u64();
+                                let _ =
+                                    app_handle.update(cx, |_, window, _| window.activate_window());
+                                close_boot_window_handle(cx, boot_handle, Some(app_window_id));
+                                tracing::info!(
+                                    %session_id,
+                                    app_window_id,
+                                    "installed launch: app window opened (no consent wizard)"
+                                );
+                            }
+                            Err(err) => {
+                                stop_session_async(session_id);
+                                show_boot_failure(
+                                    cx,
+                                    &shell_for_result,
+                                    &format!("App window creation failed: {err}"),
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        // Fail closed — never fall back to handle-based session
+                        // start for an installed app.
+                        show_boot_failure(
+                            cx,
+                            &shell_for_result,
+                            &format!("Couldn't launch installed app: {err:#}"),
+                        );
+                    }
+                }
             });
         })
         .detach();
 }
 
-/// Spawn `ato launch <ipk> -y` (which blocks for the session's lifetime, so it
-/// runs on its own detached thread) and poll until the desktop can see a
-/// reusable session record for `handle`. Returns whether a session became
-/// visible before the deadline.
-fn ensure_installed_session(install_profile_key: &str, handle: &str) -> bool {
-    let ipk = install_profile_key.to_string();
-    std::thread::spawn(move || match crate::orchestrator::resolve_ato_binary() {
-        Ok(bin) => {
-            if let Err(err) = crate::install_lifecycle_dashboard::spawn_launch(&bin, &ipk) {
-                tracing::warn!(error = %err, ipk = %ipk, "ato launch (installed) exited with error");
-            }
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "cannot resolve ato binary for installed launch")
-        }
-    });
+/// Spawn `ato launch <ipk> -y` (which blocks for the session's lifetime) and
+/// poll until the desktop can see a reusable session record for `handle`.
+///
+/// Returns the launched session on success. Returns `Err` if `ato launch` exits
+/// before a session appears, if the wait times out, or if the launch is aborted
+/// — the caller treats every `Err` as a fail-closed boot failure rather than
+/// falling back to a handle launch. On any non-success path the (possibly still
+/// running) launch process is killed so it does not leak.
+fn ensure_installed_session(
+    install_profile_key: &str,
+    handle: &str,
+    abort: &AtomicBool,
+) -> Result<crate::orchestrator::CapsuleLaunchSession> {
+    // Uses the Desktop helper plumbing (ATO_HOME + runtime opt-out env), so the
+    // launch targets the same store/runtime the Desktop is using.
+    let mut launched = crate::orchestrator::spawn_installed_launch(install_profile_key)
+        .map_err(|e| anyhow::anyhow!("start `ato launch` for installed app: {e:#}"))?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
-    while std::time::Instant::now() < deadline {
+    let outcome = loop {
+        if abort.load(Ordering::Acquire) {
+            break Err(anyhow::anyhow!("launch aborted"));
+        }
         match crate::orchestrator::try_reuse_live_session_for_click(handle) {
-            Ok(Some(_)) => return true,
+            // Success: leave the launch process running — it serves the app.
+            Ok(Some(session)) => return Ok(session),
             Ok(None) => {}
             Err(err) => {
                 tracing::debug!(error = %err, handle, "installed launch: session poll error")
             }
         }
+        match launched.child.try_wait() {
+            Ok(Some(status)) => {
+                let tail = crate::orchestrator::read_installed_launch_log_tail(&launched.log_path);
+                let detail = if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{tail}")
+                };
+                break Err(anyhow::anyhow!(
+                    "`ato launch` exited early ({status}) before the app was ready.{detail}"
+                ));
+            }
+            Ok(None) => {}
+            Err(err) => break Err(anyhow::anyhow!("failed to poll `ato launch`: {err}")),
+        }
+        if std::time::Instant::now() >= deadline {
+            break Err(anyhow::anyhow!(
+                "timed out waiting for the installed app session to start"
+            ));
+        }
         std::thread::sleep(Duration::from_millis(200));
-    }
-    false
+    };
+
+    // Failure/abort: don't leave a stuck launch process behind.
+    let _ = launched.child.kill();
+    outcome
 }
 
 fn launch_input_for_route(route: &GuestRoute) -> Option<DesktopLaunchInput> {
