@@ -11,6 +11,19 @@
 /// We echo back `Access-Control-Allow-Private-Network: true` **only** for
 /// allowlisted origins.
 ///
+/// ## Disallowed origin handling
+///
+/// When an `Origin` header is present but not in the allowlist, the middleware
+/// must not leak any CORS allow headers — even those that might be added by an
+/// inner layer (e.g. the desktop `CorsLayer`).  The contract is:
+///
+/// - **OPTIONS preflight from disallowed origin**: return `204 No Content`
+///   immediately with only `Vary: Origin`.  No allow headers.  The inner
+///   handler is NOT called, so the desktop `CorsLayer` cannot add its ACAO.
+/// - **Actual request from disallowed origin**: run the inner handler normally
+///   (so auth, routing, and endpoint behaviour are preserved), then strip all
+///   CORS allow headers from the response before returning.
+///
 /// # Configuration
 ///
 /// Built-in defaults:
@@ -39,6 +52,7 @@ pub(super) const DEFAULT_ORIGINS: &[&str] = &[
 static HDR_ORIGIN: HeaderName = HeaderName::from_static("origin");
 static HDR_VARY: HeaderName = HeaderName::from_static("vary");
 static HDR_ACAO: HeaderName = HeaderName::from_static("access-control-allow-origin");
+static HDR_ACAC: HeaderName = HeaderName::from_static("access-control-allow-credentials");
 static HDR_ACAM: HeaderName = HeaderName::from_static("access-control-allow-methods");
 static HDR_ACAH: HeaderName = HeaderName::from_static("access-control-allow-headers");
 static HDR_ACMA: HeaderName = HeaderName::from_static("access-control-max-age");
@@ -105,10 +119,27 @@ pub(super) async fn cors_pna_layer(
         None => return next.run(request).await,
     };
 
-    // Origin not in allowlist → pass through without CORS headers.
-    // The browser will enforce the same-origin policy.
+    // Origin present but not in allowlist.
+    //
+    // We must not let any inner layer (e.g. the desktop CorsLayer) attach CORS
+    // allow headers that could be misread by diagnostics tools or scanners.
+    //
+    // - OPTIONS preflight: short-circuit immediately so the inner stack never
+    //   runs.  Return 204 + Vary: Origin and nothing else.
+    // - Actual request: run the inner handler (preserves auth/routing/endpoint
+    //   behaviour), then strip all CORS allow headers from the response.
     if !is_allowed(&origin_str, &allowed) {
-        return next.run(request).await;
+        if request.method() == Method::OPTIONS {
+            let mut resp = Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .expect("infallible disallowed-origin preflight response");
+            set_header(resp.headers_mut(), &HDR_VARY, "Origin");
+            return resp;
+        }
+        let mut resp = next.run(request).await;
+        remove_cors_allow_headers(resp.headers_mut());
+        return resp;
     }
 
     let wants_pna = request
@@ -147,6 +178,18 @@ fn insert_cors_preflight_headers(headers: &mut HeaderMap, origin: &str, pna: boo
     if pna {
         set_header(headers, &HDR_ACAPN, "true");
     }
+}
+
+/// Strip all CORS allow-* headers from a response.  Used to prevent inner
+/// layers (e.g. the desktop `CorsLayer`) from leaking their ACAO to disallowed
+/// browser origins.
+fn remove_cors_allow_headers(headers: &mut HeaderMap) {
+    headers.remove(&HDR_ACAO);
+    headers.remove(&HDR_ACAC);
+    headers.remove(&HDR_ACAM);
+    headers.remove(&HDR_ACAH);
+    headers.remove(&HDR_ACMA);
+    headers.remove(&HDR_ACAPN);
 }
 
 fn set_header(headers: &mut HeaderMap, name: &HeaderName, value: &str) {
