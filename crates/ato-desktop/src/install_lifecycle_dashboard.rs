@@ -130,6 +130,36 @@ pub struct InstalledAppSessionSummary {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchableInstalledProfile {
+    pub installed_app_id: String,
+    pub profile_id: String,
+    pub install_profile_key: String,
+    pub install_revision_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstalledProfileLaunchError {
+    NotFound,
+    Degraded { message: String },
+}
+
+impl InstalledProfileLaunchError {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            InstalledProfileLaunchError::NotFound => "installed_profile_not_found",
+            InstalledProfileLaunchError::Degraded { .. } => "installed_profile_degraded",
+        }
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            InstalledProfileLaunchError::NotFound => None,
+            InstalledProfileLaunchError::Degraded { message } => Some(message.as_str()),
+        }
+    }
+}
+
 // ── Dashboard cache (Blocker 1 fix) ─────────────────────────────────────────
 
 /// Thread-safe, lazily-refreshed snapshot of the installed-app list.
@@ -276,6 +306,96 @@ pub fn list_app_revisions(
             })
         })
         .collect()
+}
+
+/// Resolve an install profile key to a launchable installed profile without
+/// launching it. Used by MCP `NavigateToUrl` preflight to distinguish a
+/// not-found key from a degraded (missing-revision) profile before the actual
+/// launch path (`open_installed_app_by_ipk`) runs.
+pub fn inspect_launchable_installed_profile(
+    install_profile_key: &str,
+) -> std::result::Result<LaunchableInstalledProfile, InstalledProfileLaunchError> {
+    let store = open_store().map_err(|err| InstalledProfileLaunchError::Degraded {
+        message: format!("{:#}", err.context("open installed app store")),
+    })?;
+    let apps =
+        store
+            .list_installed_apps()
+            .map_err(|err| InstalledProfileLaunchError::Degraded {
+                message: format!("{:#}", err.context("list installed apps")),
+            })?;
+
+    for app_id in &apps {
+        let profiles =
+            store
+                .list_profiles(app_id)
+                .map_err(|err| InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "{:#}",
+                        err.context(format!("list profiles for {}", app_id.as_str()))
+                    ),
+                })?;
+        for profile_id in &profiles {
+            let candidate_key = install_lifecycle::derive_install_profile_key(app_id, profile_id);
+            if candidate_key.as_str() != install_profile_key {
+                continue;
+            }
+
+            let _record = store.read_app_record(app_id).map_err(|err| {
+                InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "{:#}",
+                        err.context(format!("read app record for {}", app_id.as_str()))
+                    ),
+                }
+            })?;
+            let current_revision = store.current_revision(app_id, profile_id).map_err(|err| {
+                InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "{:#}",
+                        err.context(format!(
+                            "read current revision for {}/{}",
+                            app_id.as_str(),
+                            profile_id.as_str()
+                        ))
+                    ),
+                }
+            })?;
+            let revision_dir = store.revision_dir(&current_revision);
+            if !revision_dir.is_dir() {
+                return Err(InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "current revision {} for {}/{} is missing at {}",
+                        current_revision.as_str(),
+                        app_id.as_str(),
+                        profile_id.as_str(),
+                        revision_dir.display()
+                    ),
+                });
+            }
+            let output_dir = store.revision_output_dir(&current_revision);
+            if !output_dir.is_dir() {
+                return Err(InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "current revision {} for {}/{} has no output directory at {}",
+                        current_revision.as_str(),
+                        app_id.as_str(),
+                        profile_id.as_str(),
+                        output_dir.display()
+                    ),
+                });
+            }
+
+            return Ok(LaunchableInstalledProfile {
+                installed_app_id: app_id.as_str().to_owned(),
+                profile_id: profile_id.as_str().to_owned(),
+                install_profile_key: candidate_key.as_str().to_owned(),
+                install_revision_id: current_revision.as_str().to_owned(),
+            });
+        }
+    }
+
+    Err(InstalledProfileLaunchError::NotFound)
 }
 
 // ── Launch command contract ─────────────────────────────────────────────────
@@ -669,6 +789,79 @@ mod tests {
         assert_eq!(revisions.len(), 2);
         assert!(!revisions[0].is_current);
         assert!(revisions[1].is_current);
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_launchable_installed_profile_returns_identity_for_current_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app_id, profile_id, ipk) = scaffold_one(&dir, 1);
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+
+        let profile = inspect_launchable_installed_profile(ipk.as_str()).unwrap();
+
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+
+        assert_eq!(profile.installed_app_id, app_id.as_str());
+        assert_eq!(profile.profile_id, profile_id.as_str());
+        assert_eq!(profile.install_profile_key, ipk.as_str());
+        assert!(profile.install_revision_id.starts_with("rev_dash_"));
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_launchable_installed_profile_returns_not_found_for_unknown_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 1);
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+
+        let err = inspect_launchable_installed_profile("ipk_does_not_exist").unwrap_err();
+
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+
+        assert_eq!(err, InstalledProfileLaunchError::NotFound);
+        assert_eq!(err.reason(), "installed_profile_not_found");
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_launchable_installed_profile_returns_degraded_when_current_revision_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(&dir);
+        let app_id = InstalledAppId::new("app_degraded_launch");
+        let profile_id = ProfileId::new("default");
+        store
+            .write_app_record(&make_app_record(&app_id, "acme", "broken", "1.0.0"))
+            .unwrap();
+        store
+            .write_profile(&app_id, &make_default_profile(&profile_id))
+            .unwrap();
+        let ipk = install_lifecycle::derive_install_profile_key(&app_id, &profile_id);
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+
+        let err = inspect_launchable_installed_profile(ipk.as_str()).unwrap_err();
+
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+
+        assert_eq!(err.reason(), "installed_profile_degraded");
+        assert!(
+            err.detail()
+                .unwrap_or_default()
+                .contains("current revision"),
+            "expected current revision detail, got {err:?}"
+        );
     }
 
     #[test]
