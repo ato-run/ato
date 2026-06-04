@@ -3449,3 +3449,87 @@ fn install_profile_key_is_stable_across_reinstalls() {
         "each distinct content_hash must produce a different install_revision_id"
     );
 }
+
+// ── Storage admission integration (#508) ────────────────────────────────────
+
+const ADMISSION_MANIFEST_NO_DISK: &str = r#"
+schema_version = "0.3"
+name = "no-disk-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+
+fn admission_manifest_with_disk(disk: &str) -> String {
+    format!(
+        r#"
+schema_version = "0.3"
+name = "needs-disk-app"
+type = "app"
+default_target = "app"
+[requirements]
+disk = "{disk}"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#
+    )
+}
+
+fn admission_db() -> (tempfile::TempDir, InstalledStateDb) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = InstalledStateDb::open(dir.path().join("state")).expect("open installed-state db");
+    (dir, db)
+}
+
+#[test]
+fn storage_admission_skips_when_no_disk_requirement() {
+    let (dir, db) = admission_db();
+    let outcome =
+        enforce_storage_admission(&db, Some(ADMISSION_MANIFEST_NO_DISK), dir.path()).unwrap();
+    assert!(matches!(outcome, StorageAdmissionOutcome::Skipped));
+}
+
+#[test]
+fn storage_admission_admits_when_space_available_and_returns_required() {
+    let (dir, db) = admission_db();
+    let manifest = admission_manifest_with_disk("1MB");
+    let outcome = enforce_storage_admission(&db, Some(&manifest), dir.path()).unwrap();
+    match outcome {
+        StorageAdmissionOutcome::Admitted { required_bytes } => {
+            assert!(
+                required_bytes > 0,
+                "declared 1MB must yield a positive estimate"
+            );
+        }
+        other => panic!("expected Admitted, got {other:?}"),
+    }
+}
+
+#[test]
+fn storage_admission_rejects_when_existing_claims_exhaust_the_volume() {
+    let (dir, db) = admission_db();
+    // Reserve more than the free space (wide margin so the result is stable),
+    // so even a modest declared requirement no longer fits.
+    let free = capsule_core::installed_state::available_space_for_target(dir.path()).unwrap();
+    db.record_storage_claim(&StorageClaim {
+        install_profile_key: "hog".to_string(),
+        reserved_bytes: free.saturating_add(100 * 1024 * 1024 * 1024),
+    })
+    .unwrap();
+
+    let manifest = admission_manifest_with_disk("1GB");
+    let err = enforce_storage_admission(&db, Some(&manifest), dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains(crate::utils::error::ATO_ERR_INSUFFICIENT_STORAGE),
+        "error must carry the typed code: {msg}"
+    );
+    // The message surfaces required / reserved / shortfall context.
+    assert!(
+        msg.contains("required") && msg.contains("reserved") && msg.contains("short by"),
+        "error must explain why: {msg}"
+    );
+}

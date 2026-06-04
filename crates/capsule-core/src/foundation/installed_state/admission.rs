@@ -80,9 +80,9 @@ pub fn evaluate_storage_admission(
 /// Available (free) bytes on the filesystem backing `path`. Uses the existing
 /// `fs2` dependency — no new crate.
 ///
-/// `path` must exist: probing a not-yet-created path errors. The install-flow
-/// integration should pass an existing root (creating the install dir first, or
-/// probing the nearest existing ancestor) before calling admission.
+/// `path` must exist; probing a not-yet-created path errors. Use
+/// [`available_space_for_target`] when the target (e.g. an install dir) may not
+/// exist yet.
 pub fn available_space(path: impl AsRef<Path>) -> Result<u64> {
     let path = path.as_ref();
     fs2::available_space(path).map_err(|e| {
@@ -91,6 +91,25 @@ pub fn available_space(path: impl AsRef<Path>) -> Result<u64> {
             path.display()
         ))
     })
+}
+
+/// Free bytes on the volume backing `path`, probing the nearest existing
+/// ancestor when `path` itself does not exist yet (an install dir is created
+/// during materialization, after admission runs). The probed ancestor is on the
+/// same volume the target will be created on in the common case.
+pub fn available_space_for_target(path: impl AsRef<Path>) -> Result<u64> {
+    let mut current = path.as_ref();
+    loop {
+        if current.exists() {
+            return available_space(current);
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            // No existing ancestor (or reached the root): let `available_space`
+            // produce a meaningful error for this path.
+            _ => return available_space(current),
+        }
+    }
 }
 
 #[cfg(test)]
