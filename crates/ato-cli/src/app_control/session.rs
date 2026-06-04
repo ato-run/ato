@@ -1400,6 +1400,7 @@ pub(super) fn start_orchestration_session_in_process(
         std::process::id() as i32,
         &detached.services,
         detached.network_name.clone(),
+        detached.ephemeral_volumes.clone(),
     );
     let graph =
         crate::application::session_graph_populate::append_orchestration_services_to_graph_with_deps(
@@ -1762,6 +1763,7 @@ fn orchestration_services_for_session_record(
     wrapper_pid: i32,
     snapshots: &[crate::executors::orchestrator::DetachedServiceSnapshot],
     network_name: Option<String>,
+    ephemeral_volumes: Vec<String>,
 ) -> Option<StoredOrchestrationServices> {
     if snapshots.is_empty() {
         return None;
@@ -1781,6 +1783,7 @@ fn orchestration_services_for_session_record(
         wrapper_pid,
         services,
         network_name,
+        ephemeral_volumes,
     })
 }
 
@@ -2651,6 +2654,7 @@ fn orchestration_services_from_graph(
         wrapper_pid: record.pid,
         services: services.into_iter().map(|(_, service)| service).collect(),
         network_name: None,
+        ephemeral_volumes: Vec::new(),
     })
 }
 
@@ -3023,6 +3027,31 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
     } else {
         None
     };
+
+    // Delete ephemeral engine-managed state volumes (#444). Runs after the
+    // containers stop so the volumes are no longer in use. Persistent volumes
+    // are not listed on the record, so durable state survives stop. Failures
+    // are logged but never block teardown — a leaked ephemeral volume is far
+    // less harmful than a session that refuses to stop.
+    if stopped {
+        if let Some(volumes) = session_record
+            .as_ref()
+            .and_then(|r| r.orchestration_services.as_ref())
+            .map(|s| s.ephemeral_volumes.as_slice())
+        {
+            use crate::application::orchestration_teardown::{
+                VolumeRemovalOutcome, remove_volume_if_present,
+            };
+            for volume in volumes {
+                if let VolumeRemovalOutcome::Failed(err) = remove_volume_if_present(volume) {
+                    eprintln!(
+                        "ATO-WARN ephemeral volume cleanup failed for {volume}: {err}; \
+                         run `podman volume rm {volume}` to clean up manually"
+                    );
+                }
+            }
+        }
+    }
 
     if stopped && session_path.exists() {
         fs::remove_file(&session_path)
@@ -4730,6 +4759,7 @@ mod tests {
                     },
                 ],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
@@ -4893,6 +4923,7 @@ mod tests {
                         },
                     ],
                     network_name: None,
+                    ephemeral_volumes: Vec::new(),
                 }),
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
@@ -5062,6 +5093,7 @@ mod tests {
                     published_port: Some(port),
                 }],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
@@ -5331,6 +5363,7 @@ mod tests {
                     published_port: Some(port),
                 }],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
