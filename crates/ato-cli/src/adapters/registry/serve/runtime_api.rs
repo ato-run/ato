@@ -593,13 +593,22 @@ pub(super) async fn handle_runtime_launch_session(
     }
 
     // Parse session_id and web_local_url from JSON output.
-    // `ato app session start --json` emits a SessionStartEnvelope.
+    // `ato app session start --json` emits a SessionStartEnvelope as either:
+    //   - a single pretty-printed JSON object (most common), or
+    //   - one JSON object per line (JSONL, for streaming future compatibility).
+    // Try the full output as one blob first; fall back to line-by-line JSONL.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let (mut session_id, mut web_local_url) = (None::<String>, None::<String>);
-    for line in stdout.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+    let candidates: Vec<serde_json::Value> =
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            vec![v]
+        } else {
+            stdout
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
         };
+    for v in &candidates {
         if session_id.is_none() {
             session_id = v
                 .pointer("/session/session_id")
@@ -612,6 +621,9 @@ pub(super) async fn handle_runtime_launch_session(
                 .pointer("/session/web/local_url")
                 .and_then(|s| s.as_str())
                 .map(str::to_string);
+        }
+        if session_id.is_some() && web_local_url.is_some() {
+            break;
         }
     }
 
