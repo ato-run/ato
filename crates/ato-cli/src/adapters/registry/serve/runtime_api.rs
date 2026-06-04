@@ -24,19 +24,19 @@ pub(super) struct LaunchSessionRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct LaunchSessionResponse {
-    session_id: String,
-    status: String,
-    install_profile_key: String,
+pub(super) struct LaunchSessionResponse {
+    pub(super) session_id: String,
+    pub(super) status: String,
+    pub(super) install_profile_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    launch_profile_id: Option<String>,
-    placement: PlacementIdentity,
-    requested_by_client: String,
-    runtime_owner: String,
+    pub(super) launch_profile_id: Option<String>,
+    pub(super) placement: PlacementIdentity,
+    pub(super) requested_by_client: String,
+    pub(super) runtime_owner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    user_visible_url: Option<String>,
+    pub(super) user_visible_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    local_runtime_url: Option<String>,
+    pub(super) local_runtime_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,7 +96,7 @@ pub(super) async fn handle_runtime_providers(
             supports_stop: true,
             supports_logs: true,
             supports_open_url: true,
-            supports_start_serve: true,
+            supports_start_serve: false,
             isolation_classes: vec!["local".to_string()],
             storage_classes: vec!["local".to_string()],
             network_classes: vec!["loopback".to_string()],
@@ -495,8 +495,8 @@ pub(super) async fn handle_runtime_launch_session(
             );
         }
     };
-    // Resolve the capsule handle from the matching app record.
-    let mut capsule_handle: Option<String> = None;
+    // Resolve the capsule handle and profile_id from the matching app record.
+    let mut resolved: Option<(String, String)> = None; // (capsule_handle, profile_id)
     'outer: for app_id in &apps {
         let app_record = match store.read_app_record(app_id) {
             Ok(record) => record,
@@ -517,18 +517,33 @@ pub(super) async fn handle_runtime_launch_session(
                 } else {
                     app_record.capsule_handle.clone()
                 };
-                capsule_handle = Some(handle);
+                resolved = Some((handle, profile_id.as_str().to_string()));
                 break 'outer;
             }
         }
     }
-    let Some(capsule_handle) = capsule_handle else {
+    let Some((capsule_handle, profile_id)) = resolved else {
         return json_error(
             StatusCode::NOT_FOUND,
             "install_profile_not_found",
             &format!("install profile '{}' not found", key),
         );
     };
+
+    // `ato app session start` does not accept a --profile flag, so it always
+    // launches with the default profile. Reject non-default profiles explicitly
+    // to prevent silently running the wrong configuration.
+    if profile_id != "default" {
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "non_default_profile_not_supported",
+            &format!(
+                "install profile '{}' uses profile_id '{}'; only the 'default' profile can be \
+                 launched via the Runtime Control API at this time",
+                key, profile_id
+            ),
+        );
+    }
 
     // Resolve the `ato` executable path (same binary that is running).
     let ato_exe = match std::env::current_exe() {
@@ -608,14 +623,14 @@ pub(super) async fn handle_runtime_launch_session(
         );
     };
 
-    // Attempt to register an ephemeral ingress route for the new session.
-    // This is best-effort: if ato-netd is not running or no URL is available
-    // we skip it silently.
-    let user_visible_url = if let Some(ref upstream) = web_local_url {
-        try_register_ephemeral_ingress_with_url(&session_id, upstream).await
-    } else {
-        None
-    };
+    // Best-effort: register an ephemeral ingress route so the local port is
+    // reachable through ato-netd. The resulting URL is a loopback address and
+    // must NOT be used as user_visible_url (which is reserved for mobile-safe /
+    // externally-reachable URLs). It is not exposed in the response for now;
+    // StartServe integration is a future concern.
+    if let Some(ref upstream) = web_local_url {
+        try_register_ephemeral_ingress_with_url(&session_id, upstream).await;
+    }
 
     (
         StatusCode::CREATED,
@@ -627,7 +642,10 @@ pub(super) async fn handle_runtime_launch_session(
             requested_by_client: "web_console".to_string(),
             runtime_owner: "local_runtime".to_string(),
             session_id,
-            user_visible_url,
+            // user_visible_url is reserved for mobile-safe / externally-reachable
+            // URLs (StartServe). Loopback addresses from ato-netd must not appear
+            // here, so this is None until StartServe integration lands.
+            user_visible_url: None,
             local_runtime_url: web_local_url,
         }),
     )
