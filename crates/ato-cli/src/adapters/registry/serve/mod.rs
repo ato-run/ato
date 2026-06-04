@@ -1982,7 +1982,16 @@ fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Resul
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(path)?;
-    file.write_all(contents)
+    file.write_all(contents)?;
+    file.sync_all().ok();
+    // Unconditionally enforce 0600 on the open file descriptor so pre-existing
+    // files created with a looser umask are also corrected.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
