@@ -214,12 +214,73 @@ impl ToolStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSetupStatus {
     pub tools: Vec<ToolStatus>,
+    /// Windows-only substrate diagnostics for the local OCI engine (WSL /
+    /// virtualization / reboot). `None` on non-Windows hosts and on older
+    /// records written before this field existed. See #460.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_substrate: Option<WindowsSubstrateStatus>,
 }
 
 impl RuntimeSetupStatus {
     pub fn get(&self, kind: ToolKind) -> Option<&ToolStatus> {
         self.tools.iter().find(|t| t.kind == kind)
     }
+}
+
+/// WSL availability classification for the Windows OCI substrate (#460).
+///
+/// On Windows, a local Podman capsule runs inside a WSL2-backed `podman
+/// machine`; the Desktop uses this to tell the user *what is missing* and never
+/// requires them to open a shell. `NotApplicable` is used on non-Windows hosts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WslStatus {
+    /// Non-Windows host — WSL is irrelevant.
+    #[default]
+    NotApplicable,
+    /// `wsl.exe` is absent, or reports the Windows Subsystem for Linux is not
+    /// installed.
+    Missing,
+    /// WSL is present but no WSL2-capable distribution is usable (no distro, or
+    /// only version-1 distros / default version 1).
+    Wsl2Unavailable,
+    /// WSL setup completed but a reboot is pending before it can be used.
+    RebootRequired,
+    /// WSL2 is installed and a version-2 distribution is available.
+    Ready,
+    /// WSL state could not be determined from the probe output.
+    Unknown,
+}
+
+/// Best-effort virtualization-platform signal for the Windows substrate (#460).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualizationStatus {
+    /// Could not determine virtualization state (the common, benign default).
+    #[default]
+    Unknown,
+    /// Probe output indicates the Virtual Machine Platform / hardware
+    /// virtualization is disabled (Windows feature off, or BIOS/firmware).
+    UnavailableOrUnknown,
+    /// Virtualization appears available.
+    Available,
+}
+
+/// Windows substrate diagnostics surfaced to the Desktop Runtime Setup UI so it
+/// can guide the user to a working OCI engine without any CLI/WSL hand-ops (#460).
+///
+/// This is *diagnostic only* — remediation actions (enable WSL, reboot-and-resume,
+/// machine repair) are a follow-up. The per-tool Podman [`ToolStatus`] continues
+/// to carry the machine-level readiness/repair action; this struct adds the
+/// host-substrate context that sits *underneath* Podman.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsSubstrateStatus {
+    pub wsl: WslStatus,
+    pub virtualization: VirtualizationStatus,
+    /// A reboot is required before the substrate is usable.
+    pub reboot_required: bool,
+    /// Short, user-facing one-line explanation of the substrate state.
+    pub message: String,
 }
 
 /// Phases an install/prepare moves through. Emitted as a stream of JSON lines by
@@ -379,6 +440,7 @@ mod tests {
                 Some("22.11.0".to_string()),
                 "ready",
             )],
+            windows_substrate: None,
         };
         assert!(status.get(ToolKind::Node).is_some());
         assert!(status.get(ToolKind::Uv).is_none());
