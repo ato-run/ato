@@ -477,6 +477,26 @@ pub struct RuntimeSetupLaunchIntent {
     /// Optional human-readable label for the pending launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_label: Option<String>,
+    /// Which Desktop display client to reattach when the launch resumes (#460
+    /// PR3b). Desktop-only: the CLI round-trips it untouched. Absent on older
+    /// markers and on CLI-written intents → the Desktop falls back to its
+    /// default windowed client, preserving the original open mode on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_client: Option<LaunchClientKind>,
+}
+
+/// Which Desktop display client to reattach when a recorded launch resumes after
+/// Runtime Setup (#460 PR3b). Carried on [`RuntimeSetupLaunchIntent`] so the
+/// original `capsule_open_mode` (windowed vs. OS browser) survives the detour
+/// through Runtime Setup. Desktop-only in practice; the CLI never sets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchClientKind {
+    /// Focus View top-level window — the Desktop default.
+    #[default]
+    AtoWindow,
+    /// The user's OS default browser (no Ato pane).
+    OsBrowser,
 }
 
 /// What kind of launch input a [`RuntimeSetupLaunchIntent`] carries (#460 PR3).
