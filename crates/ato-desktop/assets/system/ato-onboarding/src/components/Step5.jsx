@@ -750,6 +750,19 @@ export default function Step5({
         )}
       </div>
 
+      {/* #460 PR3 (Case A): once setup is ready with nothing pending, offer to
+          resume straight into a lightweight sample app instead of just finishing.
+          pgweb is single-service, secret-free, and a good Podman smoke. */}
+      {!installing && !checking && !hasPendingWork && podmanEnabled && !!tools.podman?.ready && (
+        <button
+          type="button"
+          onClick={() => onFinish({}, 'capsule://github.com/sosedoff/pgweb')}
+          className="shrink-0 mt-6 w-full py-3 bg-white border border-violet-200 text-[#8B5CF6] rounded-2xl font-bold text-[15px] hover:bg-violet-50 transition-colors flex justify-center items-center gap-2"
+        >
+          Continue to a sample app <span className="text-lg">→</span>
+        </button>
+      )}
+
       <div className={`shrink-0 mt-6 grid gap-3 ${installing || hasPendingWork ? 'grid-cols-[0.75fr_1.25fr]' : 'grid-cols-1'}`}>
         {(installing || hasPendingWork) && (
           <button
