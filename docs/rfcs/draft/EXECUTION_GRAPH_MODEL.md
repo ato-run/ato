@@ -286,6 +286,126 @@ This contract is implemented incrementally: the replay/realization contract
 (#500). Until they land, receipts remain descriptive; the contract above is the
 target semantics.
 
+## Provider-neutral Capsule Realization
+
+Capsule Realization is **provider-neutral**. A Capsule is not a Docker
+container, OCI image, process command, or task-runner script. A Capsule is a
+reproducible launch closure that can be **projected onto** one of several
+realization providers:
+
+- source-native provider
+- OCI provider (podman / docker / youki / containerd)
+- Web/static provider
+- Wasm provider
+- ManagedCloud provider
+- ExternalRunner provider
+
+The provider is an implementation detail of realization. It must not become the
+identity object. Ato must not collapse into:
+
+```
+capsule.toml → docker/podman command generator → container task runner
+```
+
+The required structure is:
+
+```
+Capsule → Resolved Capsule Graph → Launch Envelope
+        → project onto provider (source-native / OCI / wasm / web / cloud / external)
+```
+
+### Principles
+
+1. Capsule is provider-neutral.
+2. OCI is a realization provider, not the product abstraction.
+3. A container image digest is a graph **node**, not the capsule identity.
+4. A `docker`/`podman` command line is a derived projection, not a source of truth.
+5. Ato owns policy, state, identity, receipt, replay, and drift.
+6. The OCI provider must satisfy the **same Capsule Realization Contract** as
+   source-native providers.
+
+The critical non-collapses:
+
+```
+image digest      != capsule identity
+container id       != execution identity
+docker run args    != source of truth
+```
+
+### OCI maps onto graph nodes
+
+For OCI launches, all provider facts are graph nodes/edges, and the generated
+runtime invocation is a projection:
+
+- OCI image reference + resolved digest → `OciImageNode`
+  (`image_ref`, `image_digest`, `platform`, `provenance`).
+- container runtime → `OciRuntimeNode`
+  (`provider = podman | docker | youki | containerd | managed-cloud`,
+  `provider_version`, `capability_matrix`).
+- mounts / volumes → `FilesystemViewNode` / `StateBindingNode`.
+- network settings → `NetworkPolicyNode` (egress/ingress, service `allow_from`,
+  enforcement status).
+- entrypoint / argv / cwd / user → `EntrypointNode` (+ runtime attrs).
+- the generated `podman run` / `docker run` invocation → derived output only.
+
+Ato must not treat OCI as a task-runner backend where arbitrary commands are
+passed through without graph identity, policy, or receipt evidence.
+
+### Realization provider boundary
+
+A provider-neutral boundary keeps identity above the provider (conceptual; the
+exact Rust shape may differ):
+
+```rust
+trait CapsuleRealizationProvider {
+    fn provider_id(&self) -> ProviderId;
+    fn capabilities(&self) -> ProviderCapabilities;
+    fn plan(&self, graph: &ResolvedCapsuleGraph) -> RealizationPlan;
+    fn verify(&self, plan: &RealizationPlan) -> RealizationVerification;
+    fn launch(&self, plan: &RealizationPlan) -> LaunchResult;
+}
+```
+
+`ProviderCapabilities` makes provider differences explicit (podman ≠ docker ≠
+youki ≠ containerd): `filesystem_projection`, `read_only_mounts`,
+`persistent_volumes`, `network_deny_by_default`, `network_allowlist`,
+`process_tree_observation`, `env_closure_control`, `uid_gid_control`, `seccomp`,
+`apparmor/selinux/landlock/seatbelt`, `readiness_probe`, `service_network_alias`.
+Capabilities feed `ObservationScope` and the enforcement-status of policy nodes,
+so two providers realizing the same Capsule do not silently claim the same
+guarantees.
+
+For OCI, the provider produces an `OciProjectionPlan` that is canonicalized into
+the resolved capsule identity (so changing mounts/env/network/entrypoint changes
+`resolved_execution_id`):
+
+```
+OciProjectionPlan {
+  image_digest, platform, runtime_provider,
+  entrypoint, argv, cwd, user,
+  env_closure, mounts, state_bindings,
+  network_policy, service_edges, readiness_probes,
+  enforcement_expectations,
+}
+```
+
+Receipts carry `ProviderEvidence` (provider nodes/edges, not just "container
+started") and a `ProviderCompleteness` that reflects what the provider can
+actually enforce/observe.
+
+**Prohibited:** building resolved identity from an image tag alone; putting
+container id into `execution_id`; using a raw `docker run` command as the
+identity source; placing env/mount/network outside the receipt; claiming
+`pure`/`Complete` when policy enforcement is impossible; special-casing the OCI
+path to bypass the Capsule Graph.
+
+> Ato can use containers without becoming a container wrapper: the identity
+> target is the Capsule / launch envelope (not the image), policy and state
+> bindings are Ato-level (not docker-CLI / anonymous volumes), receipt/drift are
+> Ato-level, the realization contract is provider-neutral, and OCI is one
+> projection backend. **Ato is not a container wrapper; Ato is a capsule
+> realization engine, and OCI is one provider for realizing capsules.**
+
 ## Canonicalization
 
 All graph identities must be derived from a deterministic canonical form. The
@@ -320,7 +440,9 @@ The initial node taxonomy is intentionally small and stable:
 `DependencyOutputNode`, `BuildDerivationNode`, `BuildArtifactNode`,
 `FilesystemViewNode`, `EnvNode`, `NetworkPolicyNode`, `CapabilityPolicyNode`,
 `StateBindingNode`, `EntrypointNode`, `ServiceNode`, `ProcessNode` (observed),
-`HostObservationNode` (observed).
+`HostObservationNode` (observed). Provider-specific realization nodes
+(`OciImageNode`, `OciRuntimeNode`, …) are added per provider — see
+*Provider-neutral Capsule Realization*.
 
 Representative fields:
 
