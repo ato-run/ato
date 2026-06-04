@@ -34,6 +34,7 @@ pub(crate) mod provider_cache;
 pub(crate) mod receipt_boundary;
 pub(crate) mod runtime_prepare;
 pub(crate) mod runtime_setup;
+pub(crate) mod runtime_setup_launch;
 pub(crate) mod runtime_setup_resume;
 pub(crate) mod search;
 pub(crate) mod secrets;
