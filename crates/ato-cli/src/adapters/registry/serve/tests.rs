@@ -1701,4 +1701,71 @@ mod cors_pna_tests {
             "ACAO must be set for allowed origin"
         );
     }
+
+    // ── Full-stack regression: desktop CorsLayer + cors_pna_layer combined ────
+    //
+    // Mirrors the real layer order in `serve()` so regressions are caught when
+    // both middleware stacks are active simultaneously.
+
+    fn make_full_stack_router(token: Option<&str>) -> axum::Router {
+        use tower_http::cors::CorsLayer;
+        let state = registry_test_state(token);
+        let allowed = parse_allowed_origins();
+        let desktop_origin = "capsule://desktop.ato.run"
+            .parse::<axum::http::HeaderValue>()
+            .expect("valid header value");
+        build_app_router(false)
+            .with_state(state)
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(desktop_origin)
+                    .allow_methods([Method::GET]),
+            )
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: axum::middleware::Next| {
+                    cors_pna_layer(Arc::clone(&allowed), req, next)
+                },
+            ))
+    }
+
+    #[tokio::test]
+    async fn full_stack_pwa_preflight_returns_acao_and_acapn() {
+        let app = make_full_stack_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(preflight(origin, true))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing"),
+            origin
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .expect("ACAPN missing"),
+            "true"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_stack_pwa_get_with_valid_token_returns_acao() {
+        let _guard = AtoHomeGuard::set("full_stack_valid_token");
+        let app = make_full_stack_router(Some("tok"));
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(get_req(origin, "tok"))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing on actual GET"),
+            origin
+        );
+    }
 }
