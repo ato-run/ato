@@ -2,6 +2,7 @@
 pub mod attestation;
 pub mod blob;
 pub mod common;
+pub mod composition;
 pub mod dependency_contracts;
 pub mod error;
 pub mod hardware;
