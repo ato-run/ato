@@ -403,7 +403,11 @@ fn refreshed_status_if_successful(
     payload: &Value,
 ) -> Option<capsule_core::runtime_setup::RuntimeSetupStatus> {
     let complete = payload.get("runtimeInstallComplete")?;
-    if !complete.get("success").and_then(Value::as_bool).unwrap_or(false) {
+    if !complete
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return None;
     }
     let status = complete.get("status")?;
