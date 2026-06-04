@@ -6,6 +6,7 @@
 //! (`adapters/resource/cas/index.rs`): bundled `rusqlite`, WAL journal,
 //! `schema_migrations` table.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -15,6 +16,9 @@ use crate::common::paths::ato_state_dir;
 use crate::error::{CapsuleError, Result};
 
 use super::admission::{StorageAdmission, available_space_for_target, evaluate_storage_admission};
+use super::port::{
+    ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
+};
 
 const DB_FILE_NAME: &str = "installed_state.sqlite3";
 const MIGRATION_0001: &str = "2026-06-05-0001-installed-state";
@@ -131,6 +135,22 @@ impl InstalledStateDb {
             -- reserved sum cannot double-count the same app.
             CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_claims_profile_kind
               ON resource_claims(install_profile_key, kind);
+            CREATE TABLE IF NOT EXISTS port_claims(
+              id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+              install_profile_key TEXT NOT NULL,
+              logical_endpoint    TEXT NOT NULL,
+              preferred_port      INTEGER NOT NULL CHECK(preferred_port BETWEEN 0 AND 65535),
+              last_actual_port    INTEGER CHECK(last_actual_port IS NULL OR last_actual_port BETWEEN 0 AND 65535),
+              protocol            TEXT NOT NULL,
+              conflict_policy     TEXT NOT NULL CHECK(conflict_policy IN ('remap', 'prompt', 'fail')),
+              created_at          TEXT NOT NULL
+            );
+            -- One claim per (installed app, logical endpoint): re-claiming the
+            -- same endpoint replaces the row rather than stacking duplicates.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_port_claims_profile_endpoint
+              ON port_claims(install_profile_key, logical_endpoint);
+            CREATE INDEX IF NOT EXISTS idx_port_claims_preferred
+              ON port_claims(preferred_port);
             ",
         )
         .map_err(rt)?;
@@ -245,6 +265,134 @@ impl InstalledStateDb {
             available,
             reserved,
         ))
+    }
+
+    // ── Port claims (#508) ──────────────────────────────────────────────────
+
+    /// Record (upsert) a port claim for an installed capsule's logical endpoint.
+    ///
+    /// Keyed by `(install_profile_key, logical_endpoint)`: re-claiming the same
+    /// endpoint replaces the row rather than stacking duplicates. A port claim
+    /// is a relaunch ledger entry, **not** exclusive OS ownership.
+    pub fn record_port_claim(&self, claim: &PortClaim) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO port_claims(
+               install_profile_key, logical_endpoint, preferred_port,
+               last_actual_port, protocol, conflict_policy, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(install_profile_key, logical_endpoint) DO UPDATE SET
+               preferred_port = excluded.preferred_port,
+               last_actual_port = excluded.last_actual_port,
+               protocol = excluded.protocol,
+               conflict_policy = excluded.conflict_policy,
+               created_at = excluded.created_at",
+            params![
+                claim.install_profile_key,
+                claim.logical_endpoint,
+                claim.preferred_port as i64,
+                claim.last_actual_port.map(|p| p as i64),
+                claim.protocol,
+                claim.conflict_policy.as_str(),
+                now,
+            ],
+        )
+        .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(())
+    }
+
+    /// All recorded port claims across installed capsules.
+    pub fn port_claims(&self) -> Result<Vec<PortClaim>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT install_profile_key, logical_endpoint, preferred_port,
+                        last_actual_port, protocol, conflict_policy
+                 FROM port_claims",
+            )
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let preferred_port: i64 = row.get(2)?;
+                let last_actual_port: Option<i64> = row.get(3)?;
+                let policy_str: String = row.get(5)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    preferred_port,
+                    last_actual_port,
+                    row.get::<_, String>(4)?,
+                    policy_str,
+                ))
+            })
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+
+        let mut claims = Vec::new();
+        for row in rows {
+            let (install_profile_key, logical_endpoint, preferred, last_actual, protocol, policy) =
+                row.map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+            let conflict_policy = ConflictPolicy::from_str_opt(&policy).ok_or_else(|| {
+                CapsuleError::Runtime(format!("invalid conflict_policy in port_claims: {policy}"))
+            })?;
+            claims.push(PortClaim {
+                install_profile_key,
+                logical_endpoint,
+                preferred_port: u16::try_from(preferred).map_err(|_| {
+                    CapsuleError::Runtime(format!("port out of range in port_claims: {preferred}"))
+                })?,
+                last_actual_port: last_actual
+                    .map(u16::try_from)
+                    .transpose()
+                    .map_err(|_| CapsuleError::Runtime("last_actual_port out of range".into()))?,
+                protocol,
+                conflict_policy,
+            });
+        }
+        Ok(claims)
+    }
+
+    /// Ports claimed by installed capsules **other** than `requesting_app`
+    /// (preferred and last-actual). These are treated as taken when admitting a
+    /// new launch's port.
+    fn ports_claimed_by_others(&self, requesting_app: &str) -> Result<HashSet<u16>> {
+        let mut taken = HashSet::new();
+        for claim in self.port_claims()? {
+            if claim.install_profile_key == requesting_app {
+                continue;
+            }
+            taken.insert(claim.preferred_port);
+            if let Some(actual) = claim.last_actual_port {
+                taken.insert(actual);
+            }
+        }
+        Ok(taken)
+    }
+
+    /// Port **admission** for a relaunch: is `preferred` free (not claimed by
+    /// another installed app and free on the OS)? If taken, the `policy` decides
+    /// remap / prompt / fail. Reads only; never writes.
+    pub fn check_port_admission(
+        &self,
+        requesting_app: &str,
+        preferred: u16,
+        policy: ConflictPolicy,
+    ) -> Result<PortAdmission> {
+        self.check_port_admission_with(requesting_app, preferred, policy, os_port_is_free)
+    }
+
+    /// Like [`Self::check_port_admission`] but with an injectable OS-availability
+    /// probe, so the decision can be exercised deterministically in tests.
+    pub fn check_port_admission_with(
+        &self,
+        requesting_app: &str,
+        preferred: u16,
+        policy: ConflictPolicy,
+        os_available: impl Fn(u16) -> bool,
+    ) -> Result<PortAdmission> {
+        let taken_by_others = self.ports_claimed_by_others(requesting_app)?;
+        let is_available = |port: u16| !taken_by_others.contains(&port) && os_available(port);
+        Ok(evaluate_port_admission(preferred, policy, is_available))
     }
 }
 
@@ -452,5 +600,92 @@ mod tests {
         })
         .unwrap();
         assert_eq!(db.reserved_storage_bytes().unwrap(), 2_500_000_000);
+    }
+
+    fn port_claim(app: &str, port: u16, policy: ConflictPolicy) -> PortClaim {
+        PortClaim {
+            install_profile_key: app.to_string(),
+            logical_endpoint: "http".to_string(),
+            preferred_port: port,
+            last_actual_port: None,
+            protocol: "tcp".to_string(),
+            conflict_policy: policy,
+        }
+    }
+
+    #[test]
+    fn port_claim_upsert_is_per_app_endpoint() {
+        let (_dir, db) = temp_db();
+        let mut claim = port_claim("app", 3000, ConflictPolicy::Remap);
+        db.record_port_claim(&claim).unwrap();
+        claim.preferred_port = 3100;
+        claim.last_actual_port = Some(49200);
+        db.record_port_claim(&claim).unwrap();
+        let claims = db.port_claims().unwrap();
+        assert_eq!(
+            claims.len(),
+            1,
+            "re-claiming the same endpoint must upsert, not duplicate"
+        );
+        assert_eq!(claims[0].preferred_port, 3100);
+        assert_eq!(claims[0].last_actual_port, Some(49200));
+    }
+
+    #[test]
+    fn port_admission_admits_uncontended_preferred() {
+        let (_dir, db) = temp_db();
+        let decision = db
+            .check_port_admission_with("app", 3000, ConflictPolicy::Fail, |_| true)
+            .unwrap();
+        assert_eq!(decision, PortAdmission::Admitted { port: 3000 });
+    }
+
+    #[test]
+    fn port_admission_fail_policy_rejects_when_another_app_holds_the_port() {
+        let (_dir, db) = temp_db();
+        db.record_port_claim(&port_claim("app-b", 3000, ConflictPolicy::Fail))
+            .unwrap();
+        // app-a wants the same port; OS reports everything free, so the conflict
+        // is purely app-b's claim.
+        let decision = db
+            .check_port_admission_with("app-a", 3000, ConflictPolicy::Fail, |_| true)
+            .unwrap();
+        assert!(matches!(
+            decision,
+            PortAdmission::Rejected {
+                preferred: 3000,
+                policy: ConflictPolicy::Fail
+            }
+        ));
+    }
+
+    #[test]
+    fn port_admission_remap_policy_returns_alternative_when_port_taken() {
+        let (_dir, db) = temp_db();
+        db.record_port_claim(&port_claim("app-b", 3000, ConflictPolicy::Remap))
+            .unwrap();
+        let decision = db
+            .check_port_admission_with("app-a", 3000, ConflictPolicy::Remap, |_| true)
+            .unwrap();
+        match decision {
+            PortAdmission::Remapped { preferred, port } => {
+                assert_eq!(preferred, 3000);
+                assert_ne!(port, 3000);
+                assert!(port >= 49152, "remap should pick from the dynamic range");
+            }
+            other => panic!("expected Remapped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn port_admission_ignores_the_requesting_apps_own_claim() {
+        let (_dir, db) = temp_db();
+        // The same app re-claiming its endpoint is not a self-conflict.
+        db.record_port_claim(&port_claim("app-a", 3000, ConflictPolicy::Fail))
+            .unwrap();
+        let decision = db
+            .check_port_admission_with("app-a", 3000, ConflictPolicy::Fail, |_| true)
+            .unwrap();
+        assert_eq!(decision, PortAdmission::Admitted { port: 3000 });
     }
 }
