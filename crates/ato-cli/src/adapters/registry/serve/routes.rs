@@ -135,6 +135,13 @@ pub(super) fn build_app_router(ui_enabled: bool) -> Router<AppState> {
         "/v1/runtime/sessions/:id/logs",
         get(handle_runtime_session_logs),
     );
+    // POST /v1/runtime/sessions/:id/stop is the PWA-facing stop endpoint.
+    // DELETE /v1/runtime/sessions/:id is kept for backward compatibility with
+    // existing callers (desktop, CLI) that use the older route shape.
+    app = app.route(
+        "/v1/runtime/sessions/:id/stop",
+        post(handle_runtime_stop_session_post),
+    );
     app = app.route(
         "/v1/runtime/sessions/:id",
         delete(handle_runtime_stop_session),
