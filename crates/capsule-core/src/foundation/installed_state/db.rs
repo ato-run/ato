@@ -139,8 +139,8 @@ impl InstalledStateDb {
               id                  INTEGER PRIMARY KEY AUTOINCREMENT,
               install_profile_key TEXT NOT NULL,
               logical_endpoint    TEXT NOT NULL,
-              preferred_port      INTEGER NOT NULL CHECK(preferred_port BETWEEN 0 AND 65535),
-              last_actual_port    INTEGER CHECK(last_actual_port IS NULL OR last_actual_port BETWEEN 0 AND 65535),
+              preferred_port      INTEGER NOT NULL CHECK(preferred_port BETWEEN 1 AND 65535),
+              last_actual_port    INTEGER CHECK(last_actual_port IS NULL OR last_actual_port BETWEEN 1 AND 65535),
               protocol            TEXT NOT NULL,
               conflict_policy     TEXT NOT NULL CHECK(conflict_policy IN ('remap', 'prompt', 'fail')),
               created_at          TEXT NOT NULL
@@ -275,6 +275,14 @@ impl InstalledStateDb {
     /// endpoint replaces the row rather than stacking duplicates. A port claim
     /// is a relaunch ledger entry, **not** exclusive OS ownership.
     pub fn record_port_claim(&self, claim: &PortClaim) -> Result<()> {
+        // A preferred port claim names a concrete port (1..=65535). Port 0 means
+        // "any port" (auto-assign), which is not a ledger claim.
+        if claim.preferred_port == 0 || claim.last_actual_port == Some(0) {
+            return Err(CapsuleError::Runtime(format!(
+                "port claim ports must be 1..=65535 (preferred={}, last_actual={:?})",
+                claim.preferred_port, claim.last_actual_port
+            )));
+        }
         let now = Utc::now().to_rfc3339();
         let conn = self.connect()?;
         conn.execute(
@@ -352,13 +360,26 @@ impl InstalledStateDb {
         Ok(claims)
     }
 
-    /// Ports claimed by installed capsules **other** than `requesting_app`
-    /// (preferred and last-actual). These are treated as taken when admitting a
-    /// new launch's port.
-    fn ports_claimed_by_others(&self, requesting_app: &str) -> Result<HashSet<u16>> {
+    /// Ports already taken (by claims that contend with the requesting
+    /// endpoint), for the same `protocol`. The requesting endpoint's **own**
+    /// ledger entry — same `(install_profile_key, logical_endpoint, protocol)` —
+    /// is excluded; every other claim (including a *different* endpoint of the
+    /// **same** app) contends, since two endpoints cannot bind the same port.
+    /// Only same-protocol claims contend (TCP and UDP are separate namespaces).
+    fn contending_ports(
+        &self,
+        requesting_app: &str,
+        logical_endpoint: &str,
+        protocol: &str,
+    ) -> Result<HashSet<u16>> {
         let mut taken = HashSet::new();
         for claim in self.port_claims()? {
-            if claim.install_profile_key == requesting_app {
+            if claim.protocol != protocol {
+                continue;
+            }
+            let is_own_endpoint = claim.install_profile_key == requesting_app
+                && claim.logical_endpoint == logical_endpoint;
+            if is_own_endpoint {
                 continue;
             }
             taken.insert(claim.preferred_port);
@@ -369,29 +390,42 @@ impl InstalledStateDb {
         Ok(taken)
     }
 
-    /// Port **admission** for a relaunch: is `preferred` free (not claimed by
-    /// another installed app and free on the OS)? If taken, the `policy` decides
-    /// remap / prompt / fail. Reads only; never writes.
+    /// Port **admission** for a relaunch of `(requesting_app, logical_endpoint,
+    /// protocol)`: is `preferred` free (not claimed by a contending endpoint and
+    /// free on the OS)? If taken, the `policy` decides remap / prompt / fail.
+    /// Reads only; never writes.
     pub fn check_port_admission(
         &self,
         requesting_app: &str,
+        logical_endpoint: &str,
+        protocol: &str,
         preferred: u16,
         policy: ConflictPolicy,
     ) -> Result<PortAdmission> {
-        self.check_port_admission_with(requesting_app, preferred, policy, os_port_is_free)
+        self.check_port_admission_with(
+            requesting_app,
+            logical_endpoint,
+            protocol,
+            preferred,
+            policy,
+            os_port_is_free,
+        )
     }
 
     /// Like [`Self::check_port_admission`] but with an injectable OS-availability
     /// probe, so the decision can be exercised deterministically in tests.
+    #[allow(clippy::too_many_arguments)]
     pub fn check_port_admission_with(
         &self,
         requesting_app: &str,
+        logical_endpoint: &str,
+        protocol: &str,
         preferred: u16,
         policy: ConflictPolicy,
         os_available: impl Fn(u16) -> bool,
     ) -> Result<PortAdmission> {
-        let taken_by_others = self.ports_claimed_by_others(requesting_app)?;
-        let is_available = |port: u16| !taken_by_others.contains(&port) && os_available(port);
+        let taken = self.contending_ports(requesting_app, logical_endpoint, protocol)?;
+        let is_available = |port: u16| !taken.contains(&port) && os_available(port);
         Ok(evaluate_port_admission(preferred, policy, is_available))
     }
 }
@@ -602,10 +636,10 @@ mod tests {
         assert_eq!(db.reserved_storage_bytes().unwrap(), 2_500_000_000);
     }
 
-    fn port_claim(app: &str, port: u16, policy: ConflictPolicy) -> PortClaim {
+    fn port_claim_ep(app: &str, endpoint: &str, port: u16, policy: ConflictPolicy) -> PortClaim {
         PortClaim {
             install_profile_key: app.to_string(),
-            logical_endpoint: "http".to_string(),
+            logical_endpoint: endpoint.to_string(),
             preferred_port: port,
             last_actual_port: None,
             protocol: "tcp".to_string(),
@@ -616,7 +650,7 @@ mod tests {
     #[test]
     fn port_claim_upsert_is_per_app_endpoint() {
         let (_dir, db) = temp_db();
-        let mut claim = port_claim("app", 3000, ConflictPolicy::Remap);
+        let mut claim = port_claim_ep("app", "http", 3000, ConflictPolicy::Remap);
         db.record_port_claim(&claim).unwrap();
         claim.preferred_port = 3100;
         claim.last_actual_port = Some(49200);
@@ -632,10 +666,20 @@ mod tests {
     }
 
     #[test]
+    fn record_port_claim_rejects_port_zero() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_port_claim(&port_claim_ep("app", "http", 0, ConflictPolicy::Remap))
+                .is_err(),
+            "port 0 is auto-assign, not a concrete claim"
+        );
+    }
+
+    #[test]
     fn port_admission_admits_uncontended_preferred() {
         let (_dir, db) = temp_db();
         let decision = db
-            .check_port_admission_with("app", 3000, ConflictPolicy::Fail, |_| true)
+            .check_port_admission_with("app", "http", "tcp", 3000, ConflictPolicy::Fail, |_| true)
             .unwrap();
         assert_eq!(decision, PortAdmission::Admitted { port: 3000 });
     }
@@ -643,12 +687,12 @@ mod tests {
     #[test]
     fn port_admission_fail_policy_rejects_when_another_app_holds_the_port() {
         let (_dir, db) = temp_db();
-        db.record_port_claim(&port_claim("app-b", 3000, ConflictPolicy::Fail))
+        db.record_port_claim(&port_claim_ep("app-b", "http", 3000, ConflictPolicy::Fail))
             .unwrap();
         // app-a wants the same port; OS reports everything free, so the conflict
         // is purely app-b's claim.
         let decision = db
-            .check_port_admission_with("app-a", 3000, ConflictPolicy::Fail, |_| true)
+            .check_port_admission_with("app-a", "http", "tcp", 3000, ConflictPolicy::Fail, |_| true)
             .unwrap();
         assert!(matches!(
             decision,
@@ -662,10 +706,12 @@ mod tests {
     #[test]
     fn port_admission_remap_policy_returns_alternative_when_port_taken() {
         let (_dir, db) = temp_db();
-        db.record_port_claim(&port_claim("app-b", 3000, ConflictPolicy::Remap))
+        db.record_port_claim(&port_claim_ep("app-b", "http", 3000, ConflictPolicy::Remap))
             .unwrap();
         let decision = db
-            .check_port_admission_with("app-a", 3000, ConflictPolicy::Remap, |_| true)
+            .check_port_admission_with("app-a", "http", "tcp", 3000, ConflictPolicy::Remap, |_| {
+                true
+            })
             .unwrap();
         match decision {
             PortAdmission::Remapped { preferred, port } => {
@@ -678,13 +724,56 @@ mod tests {
     }
 
     #[test]
-    fn port_admission_ignores_the_requesting_apps_own_claim() {
+    fn port_admission_same_app_same_endpoint_ignores_own_claim() {
         let (_dir, db) = temp_db();
-        // The same app re-claiming its endpoint is not a self-conflict.
-        db.record_port_claim(&port_claim("app-a", 3000, ConflictPolicy::Fail))
+        // The same app re-claiming its OWN endpoint is not a self-conflict.
+        db.record_port_claim(&port_claim_ep("app-a", "http", 3000, ConflictPolicy::Fail))
             .unwrap();
         let decision = db
-            .check_port_admission_with("app-a", 3000, ConflictPolicy::Fail, |_| true)
+            .check_port_admission_with("app-a", "http", "tcp", 3000, ConflictPolicy::Fail, |_| true)
+            .unwrap();
+        assert_eq!(decision, PortAdmission::Admitted { port: 3000 });
+    }
+
+    #[test]
+    fn port_admission_same_app_different_endpoint_conflicts() {
+        let (_dir, db) = temp_db();
+        // app-a/http already holds 3000; app-a/admin cannot also bind 3000 — a
+        // different endpoint of the same app still contends for the port.
+        db.record_port_claim(&port_claim_ep("app-a", "http", 3000, ConflictPolicy::Fail))
+            .unwrap();
+        let decision = db
+            .check_port_admission_with("app-a", "admin", "tcp", 3000, ConflictPolicy::Fail, |_| {
+                true
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                decision,
+                PortAdmission::Rejected {
+                    preferred: 3000,
+                    ..
+                }
+            ),
+            "same app, different endpoint must conflict on the same port: {decision:?}"
+        );
+    }
+
+    #[test]
+    fn port_admission_different_protocol_same_port_does_not_conflict() {
+        let (_dir, db) = temp_db();
+        // A UDP claim on 3000 does not block a TCP request for 3000.
+        let udp_claim = PortClaim {
+            install_profile_key: "app-b".to_string(),
+            logical_endpoint: "udp-svc".to_string(),
+            preferred_port: 3000,
+            last_actual_port: None,
+            protocol: "udp".to_string(),
+            conflict_policy: ConflictPolicy::Fail,
+        };
+        db.record_port_claim(&udp_claim).unwrap();
+        let decision = db
+            .check_port_admission_with("app-a", "http", "tcp", 3000, ConflictPolicy::Fail, |_| true)
             .unwrap();
         assert_eq!(decision, PortAdmission::Admitted { port: 3000 });
     }
