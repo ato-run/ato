@@ -975,6 +975,7 @@ Current lockfile and runtime requirements:
 - source/deno and web/deno require capsule.lock.json and deno.lock or package-lock.json
 - source/node and web/node require capsule.lock.json and package-lock.json
 - python flows require uv.lock
+- for requirements.txt-only Python capsules, Ato currently treats uv.lock as a pip-compile-style requirements lock, not uv's project-mode TOML uv.lock
 - Tier2 flows require nacelle
 - unsupported or out-of-policy behavior does not auto-fallback; it stops fail-closed
 
@@ -1012,9 +1013,15 @@ Current notable behavior:
 - preview TOML is normalized before installation
 - legacy env.required is collapsed into required_env
 - GitHub auto-fix can assign an available Ato-managed port to generated web manifests when port correction is requested
+- GitHub `--auto-fix:all` can repair missing Python uv.lock files only inside the temporary checkout before build/install
+- for pyproject.toml projects this repair runs `uv lock`; for requirements.txt-only projects it runs `uv pip compile requirements.txt -o uv.lock` and keeps the generated pip-compile lock local to the checkout
 - runtime_version can be inferred for node, python, and deno draft installs
 - inferred Deno apps must preserve run_command and execute via the dedicated Deno executor
 - when deno.json references importMap, the referenced file must be included in pack.include
+
+Community and sample Python capsules should still commit the appropriate uv.lock
+upstream for publication. GitHub auto-fix is an install UX repair path, not an
+upstream writeback mechanism.
 
 Debugging surface:
 
