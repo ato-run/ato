@@ -874,10 +874,19 @@ pub(super) fn validate_add_capsule_source(raw: &str) -> Result<String, String> {
 
 /// Resolve an `https://ato.run/s/<id>` share URL to a `publisher/slug` capsule ref.
 ///
-/// The share URL redirects to the canonical detail page at
-/// `https://ato.run/<publisher>/<slug>`. We follow the redirect (HEAD request)
-/// and extract the path.
+/// SSRF guard: the request is only issued to `https://ato.run/`. The redirect
+/// Location header is also validated — it must point back to `ato.run` so that
+/// a compromised or spoofed short-link cannot cause the server to make requests
+/// to private networks (127.x, 10.x, 192.168.x, 169.254.x, ::1, …).
 async fn resolve_share_url_to_slug(share_url: &str) -> Result<String, String> {
+    // Belt-and-suspenders: verify the URL is exactly ato.run before issuing the request.
+    // validate_add_capsule_source() already checked this, but defense-in-depth is cheap.
+    let parsed = reqwest::Url::parse(share_url)
+        .map_err(|e| format!("invalid share URL: {e}"))?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("ato.run") {
+        return Err("share URL must use https://ato.run/s/<id>".to_string());
+    }
+
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
@@ -897,10 +906,17 @@ async fn resolve_share_url_to_slug(share_url: &str) -> Result<String, String> {
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| "share URL redirect missing Location header".to_string())?;
 
-        // Location: https://ato.run/<publisher>/<slug>
-        let path = location
-            .trim_start_matches("https://ato.run/")
-            .trim_start_matches("http://ato.run/");
+        // Validate redirect target: must be https://ato.run/<publisher>/<slug>.
+        // Rejects redirects to localhost, private IPs, or arbitrary external hosts.
+        let location_url = reqwest::Url::parse(location)
+            .map_err(|_| format!("share URL redirected to unparseable location: {location}"))?;
+        if location_url.scheme() != "https" || location_url.host_str() != Some("ato.run") {
+            return Err(format!(
+                "share URL redirected to disallowed host: {}",
+                location_url.host_str().unwrap_or("unknown")
+            ));
+        }
+        let path = location_url.path().trim_start_matches('/');
         let parts: Vec<&str> = path.splitn(2, '/').collect();
         if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
             return Ok(format!("{}/{}", parts[0], parts[1]));
@@ -909,16 +925,6 @@ async fn resolve_share_url_to_slug(share_url: &str) -> Result<String, String> {
             "share URL resolved to unexpected path: {}",
             location
         ));
-    }
-
-    if resp.status().is_success() {
-        // No redirect — the ID path itself might be publisher/slug
-        let path = share_url
-            .trim_start_matches("https://ato.run/s/")
-            .trim_start_matches("http://ato.run/s/");
-        if path.contains('/') {
-            return Ok(path.to_string());
-        }
     }
 
     Err(format!(
