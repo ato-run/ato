@@ -19,8 +19,12 @@
 
 mod admission;
 mod db;
+mod port;
 
 pub use admission::{
     StorageAdmission, available_space, available_space_for_target, evaluate_storage_admission,
 };
 pub use db::{InstalledStateDb, MaterializedObject, StorageClaim};
+pub use port::{
+    ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
+};
