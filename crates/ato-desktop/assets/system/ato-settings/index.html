@@ -601,6 +601,15 @@
           <div class="form-row" style="justify-content:flex-end;">
             <button class="btn" id="podman-disable-btn">Disable Podman</button>
           </div>
+
+          <!-- #460 PR2: Windows substrate (WSL / virtualization / reboot / machine health) -->
+          <div id="substrate-section" class="row" style="display:none; flex-direction:column; align-items:stretch; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid var(--border, #2a2a2a);">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+              <span id="substrate-status" class="diag-value"><span class="diag-dot gray"></span>—</span>
+              <button class="btn btn-primary" id="substrate-action-btn" style="display:none;"></button>
+            </div>
+            <div id="substrate-detail" style="font-size:11px; color:var(--soft); margin:0;"></div>
+          </div>
         </div>
 
         <!-- Install Ato-managed language runtimes -->
@@ -967,6 +976,12 @@ window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
   if (payload && payload.runtimeInstallComplete) { onRuntimeInstallComplete(payload.runtimeInstallComplete); runtimeTouched = true; }
   if (payload && payload.runtimeInstallCancelled !== undefined) { setRuntimeInstalling(false); runtimeTouched = true; }
   if (payload && payload.runtimeSetupLogsOpened) { runtimeTouched = true; }
+  // #460 PR2: resume-after-reboot carries a refreshed status snapshot.
+  if (payload && payload.runtimeSetupResume) {
+    const resumed = payload.runtimeSetupResume.runtimeSetupStatus;
+    if (resumed) renderRuntimeStatus(resumed);
+    runtimeTouched = true;
+  }
 
   if (payload && !payload.ok && payload.error) {
     const msg = payload.error.message || String(payload.error);
@@ -1251,6 +1266,55 @@ function renderRuntimeStatus(status) {
   }
   // Drive the actionable Host-runtimes Podman row from the same status.
   renderPodmanRow((status.tools || []).find(t => t.kind === 'podman'));
+  // #460 PR2: Windows substrate (WSL / virtualization / reboot / machine health).
+  renderWindowsSubstrate(status.windows_substrate, (status.tools || []).find(t => t.kind === 'podman'));
+}
+
+// #460 PR2: render the Windows substrate state + Desktop-driven CTA. The button
+// dispatches the new IPC commands; no PowerShell/WSL shell is ever shown.
+let _lastSubstrateAction = null;
+function renderWindowsSubstrate(substrate, podmanTool) {
+  const section = document.getElementById('substrate-section');
+  if (!section) return;
+  // Only meaningful on Windows, where setup-status carries windows_substrate.
+  if (!substrate) { section.style.display = 'none'; return; }
+  section.style.display = 'flex';
+
+  const statusEl = document.getElementById('substrate-status');
+  const detailEl = document.getElementById('substrate-detail');
+  const btn = document.getElementById('substrate-action-btn');
+  const action = substrate.action || { kind: 'none' };
+  const healthError = !!podmanTool && podmanTool.action === 'repair_host_runtime';
+  const ready = substrate.wsl === 'ready' && !healthError;
+
+  if (statusEl) {
+    const dot = ready ? 'green' : 'yellow';
+    const label = ready ? 'WSL2 ready'
+      : substrate.wsl === 'missing' ? 'WSL not installed'
+      : substrate.wsl === 'wsl2_unavailable' ? 'WSL2 unavailable'
+      : substrate.wsl === 'reboot_required' ? 'Restart required'
+      : healthError ? 'Podman machine needs repair'
+      : 'Windows substrate';
+    statusEl.innerHTML = '<span class="diag-dot ' + dot + '"></span>' + label;
+  }
+  if (detailEl) detailEl.textContent = ready ? (substrate.message || 'WSL2 is available.')
+    : (action.description || substrate.message || '');
+
+  // Decide the CTA.
+  let label = null, kind = null, command = null;
+  if (action.kind === 'reboot_required') {
+    label = 'Continue after restart'; command = { kind: 'resume_runtime_setup_after_reboot' };
+  } else if (healthError || action.kind === 'repair_podman_machine') {
+    label = 'Repair Ato Podman machine'; command = { kind: 'repair_host_runtime' };
+  } else if (!ready && action.kind && action.kind !== 'none' && action.can_run_from_desktop) {
+    label = action.label || 'Fix'; kind = action.kind;
+    command = { kind: 'prepare_windows_runtime_substrate', action: action.kind, source_surface: 'settings' };
+  }
+  _lastSubstrateAction = command;
+  if (btn) {
+    if (command) { btn.style.display = ''; btn.textContent = label; }
+    else { btn.style.display = 'none'; }
+  }
 }
 
 // ── Host runtimes: Podman prepare row ───────────────────────────────────────
@@ -1412,6 +1476,19 @@ document.getElementById('runtime-install-btn').addEventListener('click', () => {
 
 document.getElementById('runtime-logs-btn').addEventListener('click', () => {
   BRIDGE({ kind: 'open_runtime_setup_logs', request_id: nextReqId() });
+});
+
+// #460 PR2: Windows substrate remediation CTA (enable WSL / repair machine /
+// continue-after-restart). Mutating actions reuse the runtime-install busy state;
+// resume is read-only.
+document.getElementById('substrate-action-btn').addEventListener('click', () => {
+  const cmd = _lastSubstrateAction;
+  if (!cmd) return;
+  if (cmd.kind !== 'resume_runtime_setup_after_reboot') {
+    if (_runtimeInstalling) return;
+    setRuntimeInstalling(true, 'prepare');
+  }
+  BRIDGE(Object.assign({ request_id: nextReqId() }, cmd));
 });
 
 // Explicit Podman preparation / enablement (the only path that may set

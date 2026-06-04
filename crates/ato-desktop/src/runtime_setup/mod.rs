@@ -114,6 +114,19 @@ pub fn dispatch(
         RuntimeSetupCommand::OpenRuntimeSetupLogs { request_id } => {
             install::open_runtime_setup_logs(cx, request_id);
         }
+        RuntimeSetupCommand::PrepareWindowsRuntimeSubstrate {
+            request_id,
+            action,
+            source_surface,
+        } => {
+            prepare::start_windows_substrate(cx, request_id, action, source_surface);
+        }
+        RuntimeSetupCommand::RepairHostRuntime { request_id } => {
+            prepare::start_runtime_repair(cx, request_id);
+        }
+        RuntimeSetupCommand::ResumeRuntimeSetupAfterReboot { request_id } => {
+            status::spawn_runtime_setup_resume(cx, request_id);
+        }
     }
     Ok(())
 }
