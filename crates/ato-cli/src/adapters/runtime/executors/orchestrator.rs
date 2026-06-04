@@ -28,6 +28,9 @@ use capsule_core::types::{
 };
 
 use super::launch_context::RuntimeLaunchContext;
+use super::oci_multi_service::{
+    OCI_EXIT_LOG_TAIL_LINES, OciExitedBeforeReadyError, collect_log_tail_from_rx,
+};
 use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
 use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
@@ -993,6 +996,10 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                 match poll_local_readiness_events(local)? {
                     LocalReadinessState::Ready => return Ok(()),
                     LocalReadinessState::Exited(exit_code) => {
+                        // Local (source/native/managed) services keep the generic
+                        // orchestration error — the typed
+                        // `oci_container_exited_before_ready` diagnostic is for OCI
+                        // containers only (#445 review).
                         anyhow::bail!(
                             "service '{}' exited before readiness event was observed (exit code: {})",
                             service_name,
@@ -1004,11 +1011,33 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
             }
 
             if let Some(exit_code) = try_wait(&mut service, client).await? {
-                anyhow::bail!(
-                    "service '{}' exited before readiness check passed (exit code: {})",
-                    service_name,
-                    exit_code
-                );
+                // Only OCI containers get the typed exited-before-ready diagnostic
+                // (it carries a container log tail and OCI-specific hint); local
+                // services keep the generic orchestration error (#445 review).
+                // The container id is cloned out of the borrow before awaiting the
+                // log fetch so the future stays `Send` (RunningService is `!Sync`).
+                let oci_container_id = match &service.handle {
+                    RunningHandle::Oci(oci) => Some(oci.container_id.clone()),
+                    RunningHandle::Local(_) => None,
+                };
+                match oci_container_id {
+                    Some(container_id) => {
+                        let log_tail = oci_log_tail(client, &container_id).await;
+                        return Err(OciExitedBeforeReadyError {
+                            service_name: service_name.to_string(),
+                            exit_code: Some(exit_code as i64),
+                            log_tail,
+                        }
+                        .into());
+                    }
+                    None => {
+                        anyhow::bail!(
+                            "service '{}' exited before readiness check passed (exit code: {})",
+                            service_name,
+                            exit_code
+                        );
+                    }
+                }
             }
 
             if !uses_event_driven_readiness(&service) {
@@ -1018,9 +1047,10 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                         return Ok(());
                     }
                 } else if let Some(port) = resolve_probe_port(&service, &probe)?
-                    && readiness_probe_ok(&probe, port)? {
-                        return Ok(());
-                    }
+                    && readiness_probe_ok(&probe, port)?
+                {
+                    return Ok(());
+                }
             }
 
             if Instant::now() >= deadline {
@@ -1313,6 +1343,20 @@ async fn try_wait<C: OciRuntimeClient>(
                 Ok(Some(inspect.exit_code.unwrap_or(1) as i32))
             }
         }
+    }
+}
+
+/// Best-effort tail of an OCI service's container logs for an
+/// `oci_container_exited_before_ready` diagnostic, so the postgres / init output
+/// is attached to the diagnostic. Local services have already streamed their
+/// stdout/stderr to the console, so this is only called for OCI containers.
+///
+/// Takes an owned `container_id` rather than `&RunningService` so the future
+/// stays `Send` (a `RunningService` is `!Sync` due to its lifecycle channel).
+async fn oci_log_tail<C: OciRuntimeClient>(client: &C, container_id: &str) -> Vec<String> {
+    match client.logs(container_id, false).await {
+        Ok(rx) => collect_log_tail_from_rx(rx, OCI_EXIT_LOG_TAIL_LINES).await,
+        Err(_) => Vec::new(),
     }
 }
 
@@ -1977,6 +2021,98 @@ mod tests {
         let port = resolve_probe_port(&service, &http_probe("APP_PORT"))
             .expect("env placeholder should resolve");
         assert_eq!(port, Some(49111));
+    }
+
+    /// Spawn a throwaway, immediately-exiting child so a `RunningLocalService`
+    /// can be constructed in tests without driving a real readiness lifecycle.
+    fn spawn_dummy_child() -> Child {
+        if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+                .expect("spawn cmd")
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .expect("spawn sh")
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_service_exit_before_ready_returns_typed_error() {
+        // An OCI container that exits before readiness must surface the typed
+        // `OciExitedBeforeReadyError` so diagnostics can map it to E306 (#445).
+        let client = FakeClient::default();
+        client.states.lock().unwrap().insert(
+            "container-main".to_string(),
+            FakeState {
+                service: "main".to_string(),
+                running: false,
+                exit_code: 1,
+                ..FakeState::default()
+            },
+        );
+
+        let mut service = oci_running_service(HashMap::new(), HashMap::new());
+        service.service.readiness_probe = Some(http_probe("1111"));
+
+        let state = Arc::new(tokio::sync::Mutex::new(OrchestratorStartupState::default()));
+        state
+            .lock()
+            .await
+            .running
+            .insert("main".to_string(), service);
+
+        let err = wait_until_ready_in_state("main", &state, &client)
+            .await
+            .expect_err("exited-before-ready must fail readiness");
+
+        let typed = err
+            .downcast_ref::<OciExitedBeforeReadyError>()
+            .expect("OCI exit must produce the typed error");
+        assert_eq!(typed.service_name, "main");
+        assert_eq!(typed.exit_code, Some(1));
+    }
+
+    #[tokio::test]
+    async fn local_service_exit_before_ready_is_not_oci_typed_error() {
+        // A local (source/native/managed) service that exits before readiness
+        // must keep the generic orchestration error — it must NOT be reclassified
+        // as the OCI-specific `oci_container_exited_before_ready` (#445 review).
+        let client = FakeClient::default();
+
+        let mut service = oci_running_service(HashMap::new(), HashMap::new());
+        service.service.readiness_probe = Some(http_probe("1111"));
+        service.handle = RunningHandle::Local(RunningLocalService {
+            child: spawn_dummy_child(),
+            stdout_thread: None,
+            stderr_thread: None,
+            cleanup_paths: Vec::new(),
+            exit_task: None,
+            event_rx: None,
+            readiness_state: LocalReadinessState::Exited(7),
+        });
+
+        let state = Arc::new(tokio::sync::Mutex::new(OrchestratorStartupState::default()));
+        state
+            .lock()
+            .await
+            .running
+            .insert("main".to_string(), service);
+
+        let err = wait_until_ready_in_state("main", &state, &client)
+            .await
+            .expect_err("local exit-before-ready must fail readiness");
+
+        assert!(
+            err.downcast_ref::<OciExitedBeforeReadyError>().is_none(),
+            "local service exit must not produce the OCI typed error: {err}"
+        );
+        assert!(
+            err.to_string().contains("exited before readiness"),
+            "local service must keep the generic orchestration error: {err}"
+        );
     }
 
     #[tokio::test]
