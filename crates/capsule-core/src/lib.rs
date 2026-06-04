@@ -33,6 +33,7 @@ pub use foundation::common;
 pub use foundation::dependency_contracts;
 pub use foundation::error;
 pub use foundation::hardware;
+pub use foundation::installed_state;
 pub use foundation::interactive_resolution;
 pub use foundation::metrics;
 pub use foundation::podman;
