@@ -79,6 +79,10 @@ pub fn evaluate_storage_admission(
 
 /// Available (free) bytes on the filesystem backing `path`. Uses the existing
 /// `fs2` dependency — no new crate.
+///
+/// `path` must exist: probing a not-yet-created path errors. The install-flow
+/// integration should pass an existing root (creating the install dir first, or
+/// probing the nearest existing ancestor) before calling admission.
 pub fn available_space(path: impl AsRef<Path>) -> Result<u64> {
     let path = path.as_ref();
     fs2::available_space(path).map_err(|e| {
