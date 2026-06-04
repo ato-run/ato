@@ -1,0 +1,334 @@
+//! Unit tests for the Capsule Realization Contract (#498-A).
+//!
+//! These lock the typed classification contract: the right status for each
+//! node shape, fail-closed only on `Unavailable`, the #473 runtime-tool guard,
+//! and the #501 identity boundary (container id / rendered command are
+//! evidence, never identity).
+
+use std::collections::BTreeMap;
+
+use super::*;
+use crate::engine::execution_graph::{
+    ExecutionGraphBuilder, GraphLaunchInput, GraphSourceInput, GraphTargetInput,
+    LaunchGraphBundleInput,
+};
+
+const EXEC_ID: &str = "resolved-exec-id-deadbeef";
+
+fn request(nodes: Vec<RealizationNode>) -> RealizationRequest {
+    RealizationRequest {
+        resolved_execution_id: EXEC_ID.to_string(),
+        nodes,
+        edges: Vec::new(),
+    }
+}
+
+fn status_of<'a>(contract: &'a RealizationContract, node_id: &str) -> &'a RealizationNodeStatus {
+    contract
+        .node_statuses
+        .iter()
+        .find(|n| n.node_id == node_id)
+        .unwrap_or_else(|| panic!("node {node_id} not classified"))
+}
+
+#[test]
+fn realization_contract_reports_realized_for_minimal_managed_graph() {
+    let contract = classify(request(vec![
+        RealizationNode::required(
+            "source",
+            RealizationNodeFacts::Source {
+                declared_tree_hash: Some("sha256:src".into()),
+                materialized_tree_hash: None,
+            },
+        ),
+        RealizationNode::required(
+            "runtime",
+            RealizationNodeFacts::Runtime {
+                declared_identity: Some("node@20".into()),
+                materialized_binary_hash: None,
+            },
+        ),
+        RealizationNode::required(
+            "runtime-tool:pnpm",
+            RealizationNodeFacts::RuntimeTool {
+                binary_sha256: Some("sha256:pnpm".into()),
+                materialized_match: true,
+            },
+        ),
+        RealizationNode::required(
+            "entrypoint",
+            RealizationNodeFacts::Entrypoint {
+                argv_declared: true,
+                cwd_declared: true,
+            },
+        ),
+        RealizationNode::required(
+            "env-closure",
+            RealizationNodeFacts::EnvClosure {
+                undeclared_required: Vec::new(),
+            },
+        ),
+    ]));
+
+    assert!(
+        contract.result.is_realized(),
+        "minimal managed graph realizes"
+    );
+    assert!(!contract.has_status(RealizationStatus::Unavailable));
+    assert_eq!(
+        status_of(&contract, "runtime-tool:pnpm").status,
+        RealizationStatus::Verified,
+    );
+    assert_eq!(
+        status_of(&contract, "source").status,
+        RealizationStatus::Materializable,
+    );
+}
+
+#[test]
+fn realization_contract_marks_missing_immutable_node_unrealizable() {
+    let contract = classify(request(vec![RealizationNode::required(
+        "source",
+        RealizationNodeFacts::Source {
+            declared_tree_hash: None,
+            materialized_tree_hash: None,
+        },
+    )]));
+
+    assert_eq!(
+        status_of(&contract, "source").status,
+        RealizationStatus::Unavailable,
+    );
+    match contract.result {
+        RealizationResult::Unrealizable { reasons } => {
+            assert_eq!(
+                reasons,
+                vec![UnrealizableReason::MissingImmutableInput {
+                    node_id: "source".into(),
+                    node_kind: RealizationNodeKind::Source,
+                }]
+            );
+        }
+        RealizationResult::Realized => panic!("missing immutable source must be unrealizable"),
+    }
+}
+
+#[test]
+fn realization_contract_marks_runtime_tool_without_binary_sha256_unavailable() {
+    let contract = classify(request(vec![RealizationNode::required(
+        "runtime-tool:pnpm",
+        RealizationNodeFacts::RuntimeTool {
+            binary_sha256: None,
+            materialized_match: false,
+        },
+    )]));
+
+    let status = status_of(&contract, "runtime-tool:pnpm");
+    assert_eq!(
+        status.status,
+        RealizationStatus::Unavailable,
+        "missing binary_sha256 must never be Verified (#473)",
+    );
+    assert_ne!(status.status, RealizationStatus::Verified);
+    match contract.result {
+        RealizationResult::Unrealizable { reasons } => assert_eq!(
+            reasons,
+            vec![UnrealizableReason::RuntimeToolBinaryHashUnavailable {
+                node_id: "runtime-tool:pnpm".into(),
+            }]
+        ),
+        RealizationResult::Realized => panic!("must be unrealizable"),
+    }
+}
+
+#[test]
+fn realization_contract_marks_state_binding_as_state_bound() {
+    let contract = classify(request(vec![RealizationNode::required(
+        "state-binding:pgdata",
+        RealizationNodeFacts::StateBinding {
+            binding_present: true,
+            has_creation_policy: false,
+            reference: Some("volume://pgdata".into()),
+        },
+    )]));
+
+    assert_eq!(
+        status_of(&contract, "state-binding:pgdata").status,
+        RealizationStatus::StateBound,
+    );
+    // StateBound is visible but not fail-closed.
+    assert!(contract.result.is_realized());
+}
+
+#[test]
+fn realization_contract_marks_host_path_as_host_bound() {
+    let contract = classify(request(vec![RealizationNode::required(
+        "filesystem-view",
+        RealizationNodeFacts::FilesystemView {
+            mounts: vec![MountFact {
+                role: "config".into(),
+                host_path_required: true,
+                projectable: false,
+            }],
+        },
+    )]));
+
+    let status = status_of(&contract, "filesystem-view");
+    assert_eq!(status.status, RealizationStatus::HostBound);
+    assert!(matches!(
+        status.evidence.first(),
+        Some(RealizationEvidence::HostBinding { .. })
+    ));
+    assert!(contract.result.is_realized());
+}
+
+#[test]
+fn realization_contract_marks_unenforceable_network_policy_as_policy_downgraded() {
+    let contract = classify(request(vec![RealizationNode::required(
+        "network-policy",
+        RealizationNodeFacts::NetworkPolicy {
+            required: true,
+            provider_can_enforce: false,
+            policy_ref: Some("sha256:netpol".into()),
+        },
+    )]));
+
+    let status = status_of(&contract, "network-policy");
+    assert_eq!(status.status, RealizationStatus::PolicyDowngraded);
+    assert!(matches!(
+        status.evidence.first(),
+        Some(RealizationEvidence::PolicyEnforcementGap { .. })
+    ));
+    // Downgrade is surfaced, not reported as clean; strict fail-closed is #500.
+    assert!(contract.result.is_realized());
+}
+
+#[test]
+fn realization_contract_serializes_unrealizable_reasons() {
+    let contract = classify(request(vec![
+        RealizationNode::required(
+            "runtime-tool:pnpm",
+            RealizationNodeFacts::RuntimeTool {
+                binary_sha256: None,
+                materialized_match: false,
+            },
+        ),
+        RealizationNode::required(
+            "dependency-output:db",
+            RealizationNodeFacts::DependencyOutput {
+                dependency_output_hash: None,
+            },
+        ),
+    ]));
+
+    let json = serde_json::to_string(&contract).expect("serialize");
+    assert!(json.contains("runtime-tool-binary-hash-unavailable"));
+    assert!(json.contains("missing-dependency-output"));
+
+    let round_trip: RealizationContract = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(round_trip, contract);
+}
+
+// ---------------------------------------------------------------------------
+// Bundle adapter + identity boundary (#501)
+// ---------------------------------------------------------------------------
+
+fn minimal_bundle() -> crate::engine::execution_graph::LaunchGraphBundle {
+    ExecutionGraphBuilder::build_launch_bundle(LaunchGraphBundleInput {
+        source: Some(GraphSourceInput {
+            identifier: "capsule://app".into(),
+        }),
+        targets: vec![GraphTargetInput {
+            identifier: "entry".into(),
+            runtime: "node-20".into(),
+        }],
+        launch: Some(GraphLaunchInput {
+            command: "node".into(),
+            args: vec!["server.js".into()],
+            logical_cwd: "/app".into(),
+            declared_port: Some(3000),
+            effective_port: None,
+            readiness_port: None,
+            readiness_path: "/".into(),
+            build_input_digest: None,
+            lock_digest: None,
+            toolchain_fingerprint: "tc-1".into(),
+        }),
+        ..Default::default()
+    })
+}
+
+fn oci_environment() -> RealizationEnvironment {
+    RealizationEnvironment {
+        declared_source_hash: Some("sha256:src".into()),
+        runtimes: BTreeMap::from([(
+            "node-20".to_string(),
+            RuntimeEvidence {
+                declared_identity: Some("node@20".into()),
+                materialized_binary_hash: None,
+            },
+        )]),
+        provider_projection: Some(ProviderProjectionEvidence {
+            provider: "oci:podman".into(),
+            projection_command: Some("podman run --rm app@sha256:img node server.js".into()),
+            container_id: Some("container-abc123def".into()),
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn realization_contract_never_uses_container_id_as_identity() {
+    let bundle = minimal_bundle();
+    let env = oci_environment();
+    let contract = realization_from_launch_bundle(&bundle, &env);
+
+    // Identity is the graph-derived resolved execution id, full stop.
+    assert_eq!(
+        contract.resolved_execution_id,
+        bundle.derived.execution_ids.resolved_execution_id,
+    );
+    assert_ne!(contract.resolved_execution_id, "container-abc123def");
+
+    // The container id must not leak anywhere in the serialized contract.
+    let json = serde_json::to_string(&contract).expect("serialize");
+    assert!(
+        !json.contains("container-abc123def"),
+        "container id must never appear in the realization contract",
+    );
+
+    // No node id is the container id.
+    assert!(
+        contract
+            .node_statuses
+            .iter()
+            .all(|n| !n.node_id.contains("container-abc123def")),
+    );
+}
+
+#[test]
+fn oci_projection_command_is_derived_evidence_not_identity() {
+    let bundle = minimal_bundle();
+    let env = oci_environment();
+    let contract = realization_from_launch_bundle(&bundle, &env);
+
+    let projection = contract
+        .node_statuses
+        .iter()
+        .find(|n| n.node_kind == RealizationNodeKind::ProviderProjection)
+        .expect("provider projection node present");
+
+    // Node id is derived from the provider, not from the rendered command.
+    assert_eq!(projection.node_id, "provider-projection:oci:podman");
+    assert_eq!(projection.status, RealizationStatus::Materializable);
+
+    // The rendered command lives in evidence, and only in evidence.
+    let command = "podman run --rm app@sha256:img node server.js";
+    assert!(matches!(
+        projection.evidence.first(),
+        Some(RealizationEvidence::DerivedProjectionCommand { command: c, .. }) if c == command
+    ));
+    assert_ne!(projection.node_id, command);
+    assert_ne!(contract.resolved_execution_id, command);
+    assert!(contract.node_statuses.iter().all(|n| n.node_id != command),);
+}
