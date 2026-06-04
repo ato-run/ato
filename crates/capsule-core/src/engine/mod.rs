@@ -7,6 +7,7 @@ pub mod executors;
 pub mod lifecycle;
 pub mod oci_engine_select;
 pub mod orchestration;
+pub mod realization;
 pub mod runner;
 pub mod runtime;
 pub mod share;
