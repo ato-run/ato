@@ -2,8 +2,7 @@ use super::*;
 
 use crate::adapters::runtime::provisioning::{
     LifecyclePathPlan, LifecyclePhase, build_lifecycle_path_plan, dependency_root,
-    materialize_lifecycle_toolchains, python_requirements_lock_missing,
-    python_requirements_lock_sync_command,
+    materialize_lifecycle_toolchains, python_requirements_lock_sync_command,
 };
 use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
@@ -692,16 +691,31 @@ fn provision_command_from_python_importer(
     }
 
     if let Some(requirements_path) = resolve_python_requirements_path(execution_working_directory) {
+        // Prefer a committed pip-compile lock when one is present (e.g. a
+        // GitHub install repaired via `--auto-fix:all`). Local developer runs
+        // of a requirements-only project that has no lockfile yet must keep
+        // working, so fall back to the historical `uv pip install` path rather
+        // than failing closed — tightening that is out of scope here.
         if uv_lock.exists() {
             return Ok(Some(python_requirements_lock_sync_command(runtime_version)));
         }
-        if !uv_lock.exists() {
-            return Err(python_requirements_lock_missing(format!(
-                "source/python target has {} but is missing uv.lock for fail-closed provisioning",
-                requirements_path.display()
-            ))
-            .into());
-        }
+        let python_pin = runtime_version
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" --python {value}"))
+            .unwrap_or_default();
+        let requirements_arg = requirements_path
+            .strip_prefix(execution_working_directory)
+            .unwrap_or(requirements_path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        return Ok(Some(format!(
+            // setuptools>=72 dropped `pkg_resources`; pin <72 so legacy packages
+            // (e.g. gunicorn<21) that import pkg_resources still work.
+            // Apps that explicitly pin setuptools>=72 in requirements.txt will
+            // get a clear uv conflict error and can remove the implicit constraint.
+            "uv venv{python_pin} --seed --clear && uv pip install -r {requirements_arg} 'setuptools<72'"
+        )));
     }
 
     match probe_required_python_lockfile(execution_working_directory)? {
@@ -881,35 +895,13 @@ fn preflight_python_uv_lock_for_source_driver(
     // sync with `plan_v03_provision_command` instead of relying on a layout
     // accident.
     let dep_root = dependency_root(plan);
-    let uv_lock = dep_root.join("uv.lock");
-    let pyproject = dep_root.join("pyproject.toml");
 
-    if pyproject.exists() {
-        match probe_required_python_lockfile(&dep_root)? {
-            ProbeResult::Found(_) => return Ok(()),
-            ProbeResult::Missing(missing) => {
-                return Err(
-                    AtoExecutionError::lock_incomplete(missing.message, Some("uv.lock")).into(),
-                );
-            }
-            ProbeResult::Ambiguous(ambiguity) => {
-                return Err(
-                    AtoExecutionError::lock_incomplete(ambiguity.message, Some("uv.lock")).into(),
-                );
-            }
-            ProbeResult::NotApplicable => {}
-        }
-    }
-
-    if let Some(requirements_path) = resolve_python_requirements_path(&dep_root) {
-        if uv_lock.exists() {
-            return Ok(());
-        }
-        return Err(python_requirements_lock_missing(format!(
-            "source/python target has {} but is missing uv.lock for fail-closed provisioning",
-            requirements_path.display()
-        ))
-        .into());
+    // A requirements-only project is provisionable on the local run path even
+    // without a lockfile (`provision_command_from_python_importer` falls back to
+    // `uv pip install`). The GitHub install/build path enforces fail-closed
+    // lockfiles separately; do not tighten the local `ato run .` gate here.
+    if resolve_python_requirements_path(&dep_root).is_some() {
+        return Ok(());
     }
 
     match probe_required_python_lockfile(&dep_root)? {
@@ -923,7 +915,7 @@ fn preflight_python_uv_lock_for_source_driver(
     }
 
     Err(AtoExecutionError::lock_incomplete(
-        "source/python target requires uv.lock for fail-closed provisioning",
+        "source/python target requires uv.lock or requirements.txt for fail-closed provisioning",
         Some("uv.lock"),
     )
     .into())
@@ -1606,7 +1598,6 @@ run_command = "pnpm worker"
         fs::create_dir_all(&backend).expect("create backend");
         fs::write(backend.join("requirements.txt"), "fastapi==0.115.6\n")
             .expect("write requirements");
-        fs::write(backend.join("uv.lock"), "# pip-compile lock\n").expect("write lock");
         fs::write(backend.join("serve.py"), "print('ok')\n").expect("write serve");
         let plan = build_plan(
             dir.path(),
@@ -1630,12 +1621,15 @@ run_command = "serve.py"
 
         assert_eq!(
             command,
-            "uv venv --python 3.11.10 --seed --clear && uv pip sync uv.lock"
+            "uv venv --python 3.11.10 --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
         );
     }
 
     #[test]
-    fn provision_command_rejects_requirements_without_uv_lock() {
+    fn provision_command_omits_python_pin_when_runtime_version_unset() {
+        // Local `ato run .` of a requirements-only project with no lockfile must
+        // keep provisioning via the `uv pip install` fallback. Fail-closed
+        // lockfile enforcement lives on the GitHub install/build path, not here.
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
             .expect("write requirements");
@@ -1653,11 +1647,14 @@ run_command = "main.py"
 "#,
         );
 
-        let err = plan_v03_provision_command(&plan)
-            .expect_err("requirements without uv.lock should fail closed");
+        let command = plan_v03_provision_command(&plan)
+            .expect("provision command")
+            .expect("python requirements should provision");
 
-        assert!(err.to_string().contains("missing uv.lock"));
-        assert!(err.to_string().contains("requirements.txt"));
+        assert_eq!(
+            command,
+            "uv venv --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
+        );
     }
 
     #[test]
