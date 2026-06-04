@@ -4,6 +4,7 @@ mod attest;
 mod binding;
 mod cache;
 mod config;
+mod console;
 mod engine;
 mod explain_hash;
 mod fetch;
@@ -751,6 +752,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::DesktopAuthHandoff => auth::desktop_auth_handoff(),
 
         Commands::Whoami => auth::status(),
+
+        Commands::Console { command } => console::execute_console_command(command),
 
         Commands::Community { command } => match command {
             crate::cli::community::CommunityCommands::Submit {
