@@ -854,9 +854,19 @@ pub(super) fn validate_add_capsule_source(raw: &str) -> Result<String, String> {
         }
         return Ok(source.to_string());
     }
-    // Accepted: publisher/slug[@version]
-    let slug_part = source.split('@').next().unwrap_or(source);
-    let parts: Vec<&str> = slug_part.splitn(2, '/').collect();
+    // Reject @version suffix for MVP: the idempotency check in
+    // read_default_profile_for_ref() strips @version when deriving the app_id,
+    // so `publisher/slug@v2` would incorrectly return already_installed if
+    // `publisher/slug` default profile already exists. Reject rather than silently
+    // truncate until version-aware idempotency is implemented.
+    if source.contains('@') {
+        return Err(
+            "source with @version is not supported; use publisher/slug or https://ato.run/s/<id>"
+                .to_string(),
+        );
+    }
+    // Accepted: publisher/slug
+    let parts: Vec<&str> = source.splitn(2, '/').collect();
     if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
         let valid = |s: &str| {
             s.chars()

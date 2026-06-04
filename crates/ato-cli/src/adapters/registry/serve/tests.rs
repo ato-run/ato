@@ -1735,6 +1735,14 @@ fn validate_add_capsule_source_accepts_publisher_slug() {
 }
 
 #[test]
+fn validate_add_capsule_source_rejects_version_suffix() {
+    // @version is rejected for MVP: idempotency check strips @version when
+    // looking up app_id, causing false already_installed on version mismatch.
+    assert!(validate_add_capsule_source("koh0920/adminer@v2").is_err());
+    assert!(validate_add_capsule_source("koh0920/adminer@1.0.0").is_err());
+}
+
+#[test]
 fn validate_add_capsule_source_accepts_share_url() {
     assert!(validate_add_capsule_source("https://ato.run/s/abc123").is_ok());
 }
