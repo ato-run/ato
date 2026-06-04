@@ -1916,6 +1916,76 @@ fn apply_runtime_optout_env(command: &mut Command) {
     }
 }
 
+/// A spawned `ato launch <ipk> -y` child plus the file its stdio is redirected
+/// to. The process blocks for the session's lifetime (a web/server capsule runs
+/// in the foreground), so its output is sent to a log file rather than a pipe —
+/// otherwise a full pipe buffer would stall the child — and the caller polls the
+/// child + the session store rather than awaiting completion.
+pub(crate) struct InstalledLaunchChild {
+    pub child: std::process::Child,
+    pub log_path: PathBuf,
+}
+
+/// Spawn `ato launch <install_profile_key> -y` using the **same helper plumbing**
+/// (`ato_helper_command`: `ATO_HOME` + runtime opt-out env + `no_console_window`)
+/// as every other Desktop→CLI subprocess. This guarantees the installed launch
+/// targets the exact store/runtime the Desktop itself uses — critical for
+/// isolated `ATO_HOME` runs, where a bare `Command::new` would resolve a
+/// different store and never produce a discoverable session.
+///
+/// Returns immediately with the running child; the caller observes the session
+/// store to know when the app is ready (and inspects the child for early exit).
+pub(crate) fn spawn_installed_launch(install_profile_key: &str) -> Result<InstalledLaunchChild> {
+    let ato_bin = resolve_ato_binary()?;
+    let mut cmd = ato_helper_command(&ato_bin);
+    cmd.args(
+        crate::install_lifecycle_dashboard::installed_launch_command_args(install_profile_key),
+    );
+    let log_path = installed_launch_log_path(install_profile_key);
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let stdout = std::fs::File::create(&log_path)
+        .with_context(|| format!("create installed launch log {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .context("clone installed launch log handle")?;
+    cmd.stdout(Stdio::from(stdout));
+    cmd.stderr(Stdio::from(stderr));
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("spawn `ato launch {install_profile_key} -y`"))?;
+    Ok(InstalledLaunchChild { child, log_path })
+}
+
+fn installed_launch_log_path(install_profile_key: &str) -> PathBuf {
+    let safe: String = install_profile_key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    capsule_core::common::paths::ato_path_or_workspace_tmp("logs")
+        .join(format!("installed-launch-{safe}.log"))
+}
+
+/// Read the last few lines of an installed-launch log, for surfacing a concise
+/// failure reason when `ato launch` exits before a session appears.
+pub(crate) fn read_installed_launch_log_tail(path: &Path) -> String {
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            let lines: Vec<&str> = contents.lines().collect();
+            let start = lines.len().saturating_sub(8);
+            lines[start..].join("\n").trim().to_string()
+        }
+        Err(_) => String::new(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PsJsonEntry {
     #[serde(default)]
