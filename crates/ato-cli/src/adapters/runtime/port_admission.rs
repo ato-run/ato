@@ -75,6 +75,12 @@ pub fn plan_port_admission_with(
     let (Some(ipk), Some(preferred)) = (install_profile_key, preferred_port) else {
         return Ok(None);
     };
+    if preferred == 0 {
+        // Port 0 means "auto-assign", not a concrete port claim. Leave the
+        // existing resolution untouched rather than fabricate an invalid claim
+        // (a port-0 PortClaim is rejected by the ledger, see #515).
+        return Ok(None);
+    }
     let endpoint = logical_endpoint(ipk, service_name);
     let decision =
         db.check_port_admission_with(ipk, &endpoint, protocol, preferred, policy, os_available)?;
@@ -162,6 +168,49 @@ mod tests {
         )
         .unwrap();
         assert!(plan.is_none());
+    }
+
+    #[test]
+    fn port_zero_skips_admission() {
+        let (_d, db) = temp_db();
+        // Port 0 ("auto-assign") must not produce an invalid (port-0) claim plan.
+        let plan = plan_port_admission_with(
+            &db,
+            Some("ipk_a"),
+            "main",
+            "tcp",
+            Some(0),
+            ConflictPolicy::Remap,
+            |_| true,
+        )
+        .unwrap();
+        assert!(
+            plan.is_none(),
+            "port 0 is auto-assign, not a concrete claim"
+        );
+    }
+
+    #[test]
+    fn fail_policy_conflict_returns_typed_port_conflict() {
+        let (_d, db) = temp_db();
+        // A different installed app holds 3000; under Fail policy the launch is
+        // rejected before binding with the typed error code.
+        db.record_port_claim(&claim("ipk_b", 3000)).unwrap();
+        let err = plan_port_admission_with(
+            &db,
+            Some("ipk_a"),
+            "main",
+            "tcp",
+            Some(3000),
+            ConflictPolicy::Fail,
+            |_| true,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(crate::utils::error::ATO_ERR_PORT_CONFLICT),
+            "rejection must carry the typed code: {err}"
+        );
     }
 
     #[test]
