@@ -907,26 +907,43 @@ mod tests {
     /// ambient `ATO_INSTALL_LIFECYCLE_*` env vars are set. This proves the
     /// materializer never stamps from process env (no spoofing) and that an
     /// ordinary `ato run` never carries installed-app metadata.
+    ///
+    /// `#[serial]` (sharing the `ato_install_lifecycle_env` key with
+    /// `session::tests::set_install_lifecycle_context_does_not_touch_process_env`)
+    /// because this test mutates process env, which is global.
     #[test]
+    #[serial_test::serial(ato_install_lifecycle_env)]
     fn stamp_install_lifecycle_ignores_process_env_when_request_has_no_context() {
-        // These would have been the spoofing vector under the old env-based
-        // implementation. Set them via a RAII guard so the process env is
-        // restored even if the assertion fails.
-        struct EnvGuard(&'static [&'static str]);
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                for key in self.0 {
-                    unsafe { std::env::remove_var(key) };
-                }
-            }
-        }
         const KEYS: &[&str] = &[
             "ATO_INSTALL_LIFECYCLE_APP_ID",
             "ATO_INSTALL_LIFECYCLE_PROFILE_ID",
             "ATO_INSTALL_LIFECYCLE_PROFILE_KEY",
             "ATO_INSTALL_LIFECYCLE_REVISION_ID",
         ];
-        let _guard = EnvGuard(KEYS);
+
+        // These would have been the spoofing vector under the old env-based
+        // implementation. Snapshot any pre-existing values and restore them on
+        // drop so the test leaves the process environment exactly as it found
+        // it (even if an assertion panics).
+        struct EnvGuard {
+            saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for (key, value) in &self.saved {
+                    match value {
+                        Some(v) => unsafe { std::env::set_var(key, v) },
+                        None => unsafe { std::env::remove_var(key) },
+                    }
+                }
+            }
+        }
+        let _guard = EnvGuard {
+            saved: KEYS
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect(),
+        };
         for key in KEYS {
             unsafe { std::env::set_var(key, "spoofed") };
         }
