@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"ok\":false,\"action\":\"NavigateToUrl\",\"url\":\"ato://app/ipk_does_not_exist\",\"reason\":\"installed_profile_not_found\"}"}],"isError":false}}
