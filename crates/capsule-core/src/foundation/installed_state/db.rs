@@ -19,6 +19,17 @@ use super::admission::{StorageAdmission, available_space, evaluate_storage_admis
 const DB_FILE_NAME: &str = "installed_state.sqlite3";
 const MIGRATION_0001: &str = "2026-06-05-0001-installed-state";
 
+/// Convert a byte count to SQLite's signed `INTEGER` (i64), failing instead of
+/// silently wrapping. A negative-on-overflow value would be read back as `0`
+/// via the `max(0)` clamps in the sum queries, which could make a too-large
+/// reservation under-count and wrongly admit an install — so storage accounting
+/// must never accept an out-of-range value.
+fn to_sql_i64_bytes(value: u64, field: &str) -> Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        CapsuleError::Runtime(format!("{field} exceeds SQLite INTEGER range: {value}"))
+    })
+}
+
 /// A materialized object recorded on this device — an artifact / dependency
 /// output / runtime tool / model / image, keyed by content hash. Minimal
 /// first-slice shape; GC and ref-count maintenance come later.
@@ -99,9 +110,9 @@ impl InstalledStateDb {
               object_hash  TEXT PRIMARY KEY,
               kind         TEXT NOT NULL,
               path         TEXT NOT NULL,
-              size_bytes   INTEGER NOT NULL,
-              ref_count    INTEGER NOT NULL DEFAULT 0,
-              pinned       INTEGER NOT NULL DEFAULT 0,
+              size_bytes   INTEGER NOT NULL CHECK(size_bytes >= 0),
+              ref_count    INTEGER NOT NULL DEFAULT 0 CHECK(ref_count >= 0),
+              pinned       INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0, 1)),
               created_at   TEXT NOT NULL,
               last_seen_at TEXT NOT NULL
             );
@@ -109,7 +120,7 @@ impl InstalledStateDb {
               id                  INTEGER PRIMARY KEY AUTOINCREMENT,
               install_profile_key TEXT NOT NULL,
               kind                TEXT NOT NULL,
-              reserved_bytes      INTEGER,
+              reserved_bytes      INTEGER CHECK(reserved_bytes IS NULL OR reserved_bytes >= 0),
               detail              TEXT,
               created_at          TEXT NOT NULL
             );
@@ -147,7 +158,7 @@ impl InstalledStateDb {
                 obj.object_hash,
                 obj.kind,
                 obj.path,
-                obj.size_bytes as i64,
+                to_sql_i64_bytes(obj.size_bytes, "materialized_objects.size_bytes")?,
                 obj.ref_count,
                 obj.pinned as i64,
                 now,
@@ -177,7 +188,11 @@ impl InstalledStateDb {
         conn.execute(
             "INSERT INTO resource_claims(install_profile_key, kind, reserved_bytes, detail, created_at)
              VALUES (?1, 'storage', ?2, NULL, ?3)",
-            params![claim.install_profile_key, claim.reserved_bytes as i64, now],
+            params![
+                claim.install_profile_key,
+                to_sql_i64_bytes(claim.reserved_bytes, "resource_claims.reserved_bytes")?,
+                now,
+            ],
         )
         .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
         Ok(())
@@ -199,6 +214,12 @@ impl InstalledStateDb {
     /// Storage **admission dry-run**: would `required_bytes` fit on the volume
     /// backing `target_path`, after the storage already claimed by installed
     /// capsules? Reads only; never writes.
+    ///
+    /// First-slice assumption: a **single local install volume**. All storage
+    /// claims are summed regardless of which volume/provider they belong to and
+    /// subtracted from `target_path`'s free space. Per-volume / per-provider
+    /// scoping (a `volume_key` / `provider_id` on `resource_claims`) is a
+    /// follow-up once cloud/external-runner or split-volume state is modeled.
     pub fn check_storage_admission(
         &self,
         required_bytes: u64,
@@ -314,6 +335,68 @@ mod tests {
         assert!(
             !decision.is_admitted(),
             "with free space fully claimed, a new install must be rejected: {decision:?}"
+        );
+    }
+
+    #[test]
+    fn record_storage_claim_rejects_values_above_i64_max() {
+        let (_dir, db) = temp_db();
+        let err = db.record_storage_claim(&StorageClaim {
+            install_profile_key: "huge".to_string(),
+            reserved_bytes: u64::MAX,
+        });
+        assert!(
+            err.is_err(),
+            "u64::MAX reserved_bytes must be rejected, not wrapped to a negative i64"
+        );
+        // Nothing was stored, so accounting stays at zero (no negative wrap).
+        assert_eq!(db.reserved_storage_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn record_materialized_object_rejects_size_above_i64_max() {
+        let (_dir, db) = temp_db();
+        let err = db.record_materialized_object(&MaterializedObject {
+            object_hash: "blake3:big".to_string(),
+            kind: "blob".to_string(),
+            path: "/x".to_string(),
+            size_bytes: u64::MAX,
+            ref_count: 1,
+            pinned: false,
+        });
+        assert!(
+            err.is_err(),
+            "u64::MAX size_bytes must be rejected, not wrapped to a negative i64"
+        );
+        assert_eq!(db.total_materialized_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn oversized_claim_does_not_wrap_and_underreserve() {
+        let (_dir, db) = temp_db();
+        // A valid claim at the i64 ceiling is counted exactly.
+        let big = i64::MAX as u64;
+        db.record_storage_claim(&StorageClaim {
+            install_profile_key: "near-max".to_string(),
+            reserved_bytes: big,
+        })
+        .unwrap();
+        assert_eq!(db.reserved_storage_bytes().unwrap(), big);
+
+        // An out-of-range claim is refused at write time rather than wrapping
+        // the reserved sum to a small/zero value that would wrongly admit a new
+        // install.
+        assert!(
+            db.record_storage_claim(&StorageClaim {
+                install_profile_key: "overflow".to_string(),
+                reserved_bytes: big + 1,
+            })
+            .is_err()
+        );
+        assert_eq!(
+            db.reserved_storage_bytes().unwrap(),
+            big,
+            "reserved sum must be unchanged by the rejected oversized claim"
         );
     }
 }
