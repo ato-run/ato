@@ -5,6 +5,7 @@ pub(crate) mod cache;
 pub(crate) mod commands;
 pub(crate) mod community;
 mod config;
+mod console;
 pub(crate) mod dispatch;
 mod import_cmd;
 mod inspect;

@@ -1523,3 +1523,182 @@ target = "/var/lib/app"
         serde_json::from_slice(&get_body).expect("parse get json");
     assert_eq!(fetched, registered);
 }
+
+// ─── CORS / PNA middleware integration tests ─────────────────────────────────
+
+mod cors_pna_tests {
+    use super::*;
+    use crate::adapters::registry::serve::cors_pna::{cors_pna_layer, parse_allowed_origins};
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+
+    fn make_router(token: Option<&str>) -> axum::Router {
+        let state = registry_test_state(token);
+        let allowed = parse_allowed_origins();
+        build_app_router(false)
+            .with_state(state)
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: axum::middleware::Next| {
+                    cors_pna_layer(Arc::clone(&allowed), req, next)
+                },
+            ))
+    }
+
+    fn preflight(origin: &str, pna: bool) -> Request<Body> {
+        let mut b = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/v1/runtime/providers")
+            .header("origin", origin)
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "authorization");
+        if pna {
+            b = b.header("access-control-request-private-network", "true");
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    fn get_req(origin: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v1/runtime/providers")
+            .header("origin", origin)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn get_req_no_auth(origin: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v1/runtime/sessions")
+            .header("origin", origin)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn allowed_origin_preflight_receives_acao() {
+        let app = make_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(preflight(origin, false))
+            .await
+            .expect("call router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let acao = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .expect("ACAO header missing");
+        assert_eq!(acao, origin);
+    }
+
+    #[tokio::test]
+    async fn disallowed_origin_preflight_receives_no_acao() {
+        let app = make_router(None);
+        let resp = app
+            .oneshot(preflight("https://evil.example.com", false))
+            .await
+            .expect("call router");
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not get ACAO header"
+        );
+    }
+
+    #[tokio::test]
+    async fn localhost_5173_preflight_succeeds() {
+        let app = make_router(None);
+        let origin = "http://localhost:5173";
+        let resp = app
+            .oneshot(preflight(origin, false))
+            .await
+            .expect("call router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO"),
+            origin
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_5173_preflight_succeeds() {
+        let app = make_router(None);
+        let origin = "http://127.0.0.1:5173";
+        let resp = app
+            .oneshot(preflight(origin, false))
+            .await
+            .expect("call router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO"),
+            origin
+        );
+    }
+
+    #[tokio::test]
+    async fn pna_preflight_receives_acapn_for_allowed_origin() {
+        let app = make_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(preflight(origin, true))
+            .await
+            .expect("call router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let acapn = resp
+            .headers()
+            .get("access-control-allow-private-network")
+            .expect("ACAPN header missing");
+        assert_eq!(acapn, "true");
+    }
+
+    #[tokio::test]
+    async fn pna_preflight_no_acapn_for_disallowed_origin() {
+        let app = make_router(None);
+        let resp = app
+            .oneshot(preflight("https://evil.example.com", true))
+            .await
+            .expect("call router");
+        assert!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .is_none(),
+            "disallowed origin must not get ACAPN"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_protected_endpoint_rejects_missing_bearer() {
+        let app = make_router(Some("secret-token"));
+        let resp = app
+            .oneshot(get_req_no_auth("https://app.ato.run"))
+            .await
+            .expect("call router");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "missing token must return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_bearer_token_with_allowed_origin_succeeds() {
+        let _guard = AtoHomeGuard::set("cors_pna_valid_token");
+        let app = make_router(Some("correct-token"));
+        let resp = app
+            .oneshot(get_req("https://app.ato.run", "correct-token"))
+            .await
+            .expect("call router");
+        // /v1/runtime/providers returns 200 even if no sessions/installs exist
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_some(),
+            "ACAO must be set for allowed origin"
+        );
+    }
+}
