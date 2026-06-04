@@ -21,7 +21,6 @@
 /// from a background task or action handler.
 use std::sync::Mutex;
 
-use crate::proc_util::CommandNoWindowExt;
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
@@ -279,7 +278,7 @@ pub fn list_app_revisions(
         .collect()
 }
 
-// ── Launch (called from GPUI background executor — Blocker 2 fix) ───────────
+// ── Launch command contract ─────────────────────────────────────────────────
 
 /// The argv (after the binary) for launching an installed profile.
 ///
@@ -287,35 +286,15 @@ pub fn list_app_revisions(
 /// install-owned, pre-consented entry point that runs the profile's pinned
 /// current revision — never `ato app session start <handle>` (the run-owned,
 /// consent-gated path). Exposed as a pure function so the command contract is
-/// unit-testable without spawning a process.
+/// unit-testable without spawning a process. The actual spawn (with the
+/// Desktop's `ATO_HOME` / runtime opt-out env) lives in
+/// [`crate::orchestrator::spawn_installed_launch`].
 pub fn installed_launch_command_args(install_profile_key: &str) -> Vec<String> {
     vec![
         "launch".to_string(),
         install_profile_key.to_string(),
         "-y".to_string(),
     ]
-}
-
-/// Run `ato launch <ipk> -y` synchronously.  Intended to be called from a
-/// GPUI background-executor spawn (not from the render thread or a raw
-/// `std::thread::spawn`).
-///
-/// NOTE: for a long-running (web/server) capsule this blocks for the lifetime
-/// of the session, so callers that need to keep working must run it on a
-/// dedicated/background thread and observe the resulting session record
-/// separately rather than awaiting this return.
-pub fn spawn_launch(ato_bin: &std::path::Path, install_profile_key: &str) -> Result<String> {
-    let mut command = std::process::Command::new(ato_bin);
-    command.no_console_window();
-    command.args(installed_launch_command_args(install_profile_key));
-    let output = command
-        .output()
-        .with_context(|| format!("spawn ato launch '{}'", install_profile_key))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("ato launch failed: {stderr}");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 // ── Session attachment (Blocker 4 fix: only alive sessions) ─────────────────
