@@ -1,0 +1,9 @@
+# Desktop log excerpt — ato://app handling (rebuilt origin/dev binary)
+# Valid ipk: routed to installed launch with explicit 'no consent wizard'.
+# Invalid/malformed ipk: intercepted by host_dispatch_action preflight at the
+#   automation-socket layer and returned {ok:false,...}; they produce NO
+#   focus-dispatcher 'NavigateToUrl' launch log line (no guest launch, no fallback).
+
+2026-06-04T13:23:06.811786Z  INFO focus dispatcher routes action action=NavigateToUrl
+2026-06-04T13:23:06.812241Z  INFO Focus-mode NavigateToUrl url=ato://app/ipk_82508d85640a941525c49106efdd4071
+2026-06-04T13:23:06.813167Z  INFO ato_start: opening installed app by ipk (no consent wizard) handle=ato-run/installed-relaunch-node install_profile_key=ipk_82508d85640a941525c49106efdd4071 app_url=ato://app/ipk_82508d85640a941525c49106efdd4071
