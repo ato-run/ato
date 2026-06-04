@@ -121,6 +121,16 @@ pub struct DependencyMaterializationRequest {
     pub platform: PlatformTriple,
     pub cache_strategy: CacheStrategy,
     pub attestation_strategy: AttestationStrategy,
+    /// Trusted install-lifecycle context, set only when this materialization is
+    /// driven by `ato launch`. When present, the materialized session record is
+    /// stamped with the installed app / profile / revision identity so Desktop
+    /// and replay tools can correlate the session with the installed instance.
+    ///
+    /// This is explicit, request-scoped data — the materializer never reads it
+    /// from ambient process state (env / globals), so an ordinary `ato run` (or
+    /// an externally-set `ATO_INSTALL_LIFECYCLE_*` env) can never spoof it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_lifecycle_context: Option<crate::cli::commands::run::InstallLifecycleContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +395,7 @@ fn node_run_materialization_request(
         platform: PlatformTriple::current(),
         cache_strategy: CacheStrategy::DerivationCache,
         attestation_strategy: AttestationStrategy::None,
+        install_lifecycle_context: None,
     })
 }
 
@@ -494,7 +505,7 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
                 "blob_hash": blob_hash_for_log,
             },
         });
-        stamp_install_lifecycle_from_env(&mut session);
+        stamp_install_lifecycle(&mut session, req.install_lifecycle_context.as_ref());
         write_json(&layout.session_json, &session)?;
         tracing::info!(
             capsule_id = %req.capsule_id,
@@ -549,34 +560,34 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
     }
 }
 
-fn stamp_install_lifecycle_from_env(session: &mut serde_json::Value) {
-    const APP_ID: &str = "ATO_INSTALL_LIFECYCLE_APP_ID";
-    const PROFILE_ID: &str = "ATO_INSTALL_LIFECYCLE_PROFILE_ID";
-    const PROFILE_KEY: &str = "ATO_INSTALL_LIFECYCLE_PROFILE_KEY";
-    const REVISION_ID: &str = "ATO_INSTALL_LIFECYCLE_REVISION_ID";
-
-    let (Ok(app_id), Ok(profile_id), Ok(profile_key), Ok(revision_id)) = (
-        std::env::var(APP_ID),
-        std::env::var(PROFILE_ID),
-        std::env::var(PROFILE_KEY),
-        std::env::var(REVISION_ID),
-    ) else {
+/// Stamp the materialized session record with install-lifecycle identity from
+/// the trusted, request-scoped context. When `ctx` is `None` (ordinary `ato run`)
+/// the record is left untouched — there is no fallback to ambient process state,
+/// so the stamp cannot be spoofed via the environment.
+fn stamp_install_lifecycle(
+    session: &mut serde_json::Value,
+    ctx: Option<&crate::cli::commands::run::InstallLifecycleContext>,
+) {
+    let Some(ctx) = ctx else {
         return;
     };
 
     if let Some(object) = session.as_object_mut() {
-        object.insert("installed_app_id".into(), serde_json::Value::String(app_id));
+        object.insert(
+            "installed_app_id".into(),
+            serde_json::Value::String(ctx.installed_app_id.clone()),
+        );
         object.insert(
             "install_profile_id".into(),
-            serde_json::Value::String(profile_id),
+            serde_json::Value::String(ctx.install_profile_id.clone()),
         );
         object.insert(
             "install_profile_key".into(),
-            serde_json::Value::String(profile_key),
+            serde_json::Value::String(ctx.install_profile_key.clone()),
         );
         object.insert(
             "install_revision_id".into(),
-            serde_json::Value::String(revision_id),
+            serde_json::Value::String(ctx.install_revision_id.clone()),
         );
     }
 }
@@ -793,6 +804,7 @@ mod tests {
             },
             cache_strategy: CacheStrategy::None,
             attestation_strategy: AttestationStrategy::None,
+            install_lifecycle_context: None,
         };
         let source = SourceResolutionRecord {
             authority: "github.com".to_string(),
@@ -865,6 +877,84 @@ mod tests {
                 .expect("plan")
                 .derivation_hash
         );
+    }
+
+    fn lifecycle_ctx(ipk: &str) -> crate::cli::commands::run::InstallLifecycleContext {
+        crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: format!("app_{ipk}"),
+            install_profile_id: "default".to_string(),
+            install_profile_key: ipk.to_string(),
+            install_revision_id: format!("rev_{ipk}"),
+        }
+    }
+
+    /// With a trusted request-scoped context, the materialized session record is
+    /// stamped with all four install-lifecycle identity fields.
+    #[test]
+    fn stamp_install_lifecycle_with_context_stamps_all_fields() {
+        let ctx = lifecycle_ctx("ipk_alpha");
+        let mut session = serde_json::json!({ "session_id": "run" });
+
+        stamp_install_lifecycle(&mut session, Some(&ctx));
+
+        assert_eq!(session["installed_app_id"], "app_ipk_alpha");
+        assert_eq!(session["install_profile_id"], "default");
+        assert_eq!(session["install_profile_key"], "ipk_alpha");
+        assert_eq!(session["install_revision_id"], "rev_ipk_alpha");
+    }
+
+    /// Without a request context, the record is left untouched — even if the
+    /// ambient `ATO_INSTALL_LIFECYCLE_*` env vars are set. This proves the
+    /// materializer never stamps from process env (no spoofing) and that an
+    /// ordinary `ato run` never carries installed-app metadata.
+    #[test]
+    fn stamp_install_lifecycle_ignores_process_env_when_request_has_no_context() {
+        // These would have been the spoofing vector under the old env-based
+        // implementation. Set them via a RAII guard so the process env is
+        // restored even if the assertion fails.
+        struct EnvGuard(&'static [&'static str]);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for key in self.0 {
+                    unsafe { std::env::remove_var(key) };
+                }
+            }
+        }
+        const KEYS: &[&str] = &[
+            "ATO_INSTALL_LIFECYCLE_APP_ID",
+            "ATO_INSTALL_LIFECYCLE_PROFILE_ID",
+            "ATO_INSTALL_LIFECYCLE_PROFILE_KEY",
+            "ATO_INSTALL_LIFECYCLE_REVISION_ID",
+        ];
+        let _guard = EnvGuard(KEYS);
+        for key in KEYS {
+            unsafe { std::env::set_var(key, "spoofed") };
+        }
+
+        let mut session = serde_json::json!({ "session_id": "run" });
+        stamp_install_lifecycle(&mut session, None);
+
+        assert!(session.get("installed_app_id").is_none());
+        assert!(session.get("install_profile_id").is_none());
+        assert!(session.get("install_profile_key").is_none());
+        assert!(session.get("install_revision_id").is_none());
+    }
+
+    /// Two distinct lifecycle contexts stamp their own identity onto their own
+    /// records — there is no shared/global state that could cross-stamp one
+    /// launch's record with another launch's IPK.
+    #[test]
+    fn stamp_install_lifecycle_does_not_cross_stamp_between_contexts() {
+        let ctx_a = lifecycle_ctx("ipk_aaa");
+        let ctx_b = lifecycle_ctx("ipk_bbb");
+
+        let mut session_a = serde_json::json!({ "session_id": "run" });
+        let mut session_b = serde_json::json!({ "session_id": "run" });
+        stamp_install_lifecycle(&mut session_a, Some(&ctx_a));
+        stamp_install_lifecycle(&mut session_b, Some(&ctx_b));
+
+        assert_eq!(session_a["install_profile_key"], "ipk_aaa");
+        assert_eq!(session_b["install_profile_key"], "ipk_bbb");
     }
 
     #[test]
