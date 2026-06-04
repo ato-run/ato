@@ -71,7 +71,7 @@ type RunPipelineState = run_phase::RunPipelineState;
 /// Note: `capsule_instance_key` is NOT stored here. The session writer derives
 /// it from `(install_profile_key + install_revision_id + session execution_id)`
 /// at record-write time so the CIK reflects the real receipt execution identity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstallLifecycleContext {
     pub installed_app_id: String,
     pub install_profile_id: String,
@@ -114,7 +114,6 @@ pub struct RunArgs {
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
     pub plan_only: bool,
-    #[allow(dead_code)]
     pub install_lifecycle_context: Option<InstallLifecycleContext>,
     pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
@@ -527,6 +526,7 @@ fn build_consumer_run_request(
         reporter: args.reporter.clone(),
         preview_mode: args.preview_mode,
         pinned_revision_output_dir: args.pinned_revision_output_dir.clone(),
+        install_lifecycle_context: args.install_lifecycle_context.clone(),
     }
 }
 
