@@ -652,4 +652,254 @@ mod tests {
             b.canonical_form(CanonicalGraphDomain::Declared).digest,
         );
     }
+
+    // -----------------------------------------------------------------
+    // #492 canonical contract coverage
+    //
+    // These tests lock the canonical graph contract: declared/resolved
+    // execution IDs are deterministic, insertion-order independent,
+    // sensitive to semantic launch-condition changes, and unaffected by
+    // session/receipt metadata (which is proven absent from the canonical
+    // graph input over in `launch_bundle.rs`, where that boundary lives).
+    // -----------------------------------------------------------------
+
+    /// Richer input than [`sample_input`] covering every semantic facet
+    /// the canonical form must react to: source, entrypoint + runtime,
+    /// a dependency provider/output pair, host filesystem/network/env/
+    /// state nodes, a resolved filesystem view-hash label, a runtime
+    /// constraint, and the network/capability policy hashes.
+    ///
+    /// Each `*_changes` test below clones this and mutates exactly one
+    /// semantic field so the assertion isolates that field's effect on
+    /// the canonical bytes and digest.
+    fn semantic_input() -> ExecutionGraphBuildInput {
+        ExecutionGraphBuildInput {
+            source: Some(GraphSourceInput {
+                identifier: "src://workspace".into(),
+            }),
+            targets: vec![GraphTargetInput {
+                identifier: "entry://main".into(),
+                runtime: "runtime://node".into(),
+            }],
+            dependencies: vec![GraphDependencyInput {
+                provider: "provider://npm".into(),
+                output: "output://lodash@1".into(),
+                ..Default::default()
+            }],
+            host: Some(GraphHostInput {
+                filesystem: Some("fs://workspace".into()),
+                network: Some("net://offline".into()),
+                env: Some("env://CONFIG".into()),
+                state: Some("state://session".into()),
+                filesystem_view_hash: Some("blake3:view-a".into()),
+                ..GraphHostInput::default()
+            }),
+            policy: Some(GraphPolicyInput {
+                constraints: vec![ExecutionGraphConstraint {
+                    kind: "runtime.constraint".into(),
+                    target: "cpu=2".into(),
+                }],
+                network_policy_hash: Some("blake3:net-a".into()),
+                capability_policy_hash: Some("blake3:cap-a".into()),
+                ..GraphPolicyInput::default()
+            }),
+        }
+    }
+
+    /// Assert that two graphs canonicalize to different bytes *and*
+    /// different digests in `domain`. The digest is the execution ID, so
+    /// both halves of the contract ("bytes change" and "id changes") are
+    /// pinned in one place.
+    fn assert_canonical_diff(a: &ExecutionGraph, b: &ExecutionGraph, domain: CanonicalGraphDomain) {
+        let fa = a.canonical_form(domain);
+        let fb = b.canonical_form(domain);
+        assert_ne!(
+            fa.bytes, fb.bytes,
+            "a semantic change must alter the canonical bytes in {domain:?}",
+        );
+        assert_ne!(
+            fa.digest, fb.digest,
+            "a semantic change must alter the execution id (digest) in {domain:?}",
+        );
+    }
+
+    /// Determinism: the canonical encoder re-sorts defensively, so the
+    /// *insertion order* of nodes, edges, and constraints in a
+    /// hand-held `ExecutionGraph` must not affect the bytes or digest.
+    ///
+    /// Deliberately stronger than a single forward-vs-reversed check:
+    /// each permutation perturbs a different collection (and some
+    /// perturb several at once) so the test fails if any one collection's
+    /// ordering leaks into the canonical form.
+    #[test]
+    fn canonical_graph_ignores_insertion_order() {
+        let base = ExecutionGraphBuilder::build(semantic_input());
+        // Give the base graph more than one edge/constraint/node so the
+        // permutations below are non-trivial.
+        let mut base = base;
+        base.nodes.push(ExecutionGraphNode::Service {
+            identifier: "service://db".into(),
+        });
+        base.edges.push(ExecutionGraphEdge {
+            source: "entry://main".into(),
+            target: "service://db".into(),
+            kind: ExecutionGraphEdgeKind::ConnectsTo,
+        });
+        base.constraints.push(ExecutionGraphConstraint {
+            kind: "network.deny".into(),
+            target: "net://offline".into(),
+        });
+
+        let reference = base.canonical_form(CanonicalGraphDomain::Declared);
+
+        // A spread of independent reorderings — not just `reverse()`.
+        let permutations: Vec<Box<dyn Fn(&mut ExecutionGraph)>> = vec![
+            Box::new(|g: &mut ExecutionGraph| g.nodes.reverse()),
+            Box::new(|g: &mut ExecutionGraph| g.edges.reverse()),
+            Box::new(|g: &mut ExecutionGraph| g.constraints.reverse()),
+            Box::new(|g: &mut ExecutionGraph| {
+                g.nodes.reverse();
+                g.edges.reverse();
+                g.constraints.reverse();
+            }),
+            Box::new(|g: &mut ExecutionGraph| g.nodes.rotate_left(1)),
+            Box::new(|g: &mut ExecutionGraph| {
+                let last = g.edges.len() - 1;
+                g.edges.swap(0, last);
+            }),
+            Box::new(|g: &mut ExecutionGraph| g.nodes.rotate_right(2)),
+        ];
+
+        for (i, perm) in permutations.iter().enumerate() {
+            let mut shuffled = base.clone();
+            perm(&mut shuffled);
+            let form = shuffled.canonical_form(CanonicalGraphDomain::Declared);
+            assert_eq!(
+                form.bytes, reference.bytes,
+                "permutation #{i} changed canonical bytes — insertion order leaked in",
+            );
+            assert_eq!(
+                form.digest, reference.digest,
+                "permutation #{i} changed the digest — insertion order leaked in",
+            );
+        }
+    }
+
+    /// Canonical schema version is asserted explicitly so a future bump
+    /// of [`CANONICAL_FORM_VERSION`] forces an intentional update of this
+    /// contract test (and everything that depends on the framing).
+    #[test]
+    fn canonical_graph_asserts_schema_version() {
+        assert_eq!(
+            CANONICAL_FORM_VERSION, 1,
+            "canonical form schema version changed; update dependent contracts intentionally",
+        );
+
+        // The asserted constant must also be the one embedded in the
+        // bytes (little-endian u32 directly after the 16-byte magic).
+        let graph = ExecutionGraphBuilder::build(semantic_input());
+        let form = graph.canonical_form(CanonicalGraphDomain::Declared);
+        let version_bytes: [u8; 4] = form.bytes[16..20].try_into().expect("version slice");
+        assert_eq!(
+            u32::from_le_bytes(version_bytes),
+            CANONICAL_FORM_VERSION,
+            "version embedded in the canonical bytes must equal CANONICAL_FORM_VERSION",
+        );
+    }
+
+    #[test]
+    fn canonical_graph_changes_when_entrypoint_changes() {
+        let base = ExecutionGraphBuilder::build(semantic_input());
+        let mut mutated = semantic_input();
+        mutated.targets[0].identifier = "entry://other".into();
+        let mutated = ExecutionGraphBuilder::build(mutated);
+        assert_canonical_diff(&base, &mutated, CanonicalGraphDomain::Declared);
+    }
+
+    #[test]
+    fn canonical_graph_changes_when_network_policy_changes() {
+        let base = ExecutionGraphBuilder::build(semantic_input());
+        let mut mutated = semantic_input();
+        mutated.policy.as_mut().unwrap().network_policy_hash = Some("blake3:net-b".into());
+        let mutated = ExecutionGraphBuilder::build(mutated);
+        assert_canonical_diff(&base, &mutated, CanonicalGraphDomain::Declared);
+    }
+
+    #[test]
+    fn canonical_graph_changes_when_runtime_constraint_changes() {
+        let base = ExecutionGraphBuilder::build(semantic_input());
+        let mut mutated = semantic_input();
+        // Single-field change: the runtime constraint's target only.
+        mutated.policy.as_mut().unwrap().constraints[0].target = "cpu=4".into();
+        let mutated = ExecutionGraphBuilder::build(mutated);
+        assert_canonical_diff(&base, &mutated, CanonicalGraphDomain::Declared);
+    }
+
+    #[test]
+    fn canonical_graph_changes_when_capability_policy_changes() {
+        let base = ExecutionGraphBuilder::build(semantic_input());
+        let mut mutated = semantic_input();
+        mutated.policy.as_mut().unwrap().capability_policy_hash = Some("blake3:cap-b".into());
+        let mutated = ExecutionGraphBuilder::build(mutated);
+        assert_canonical_diff(&base, &mutated, CanonicalGraphDomain::Declared);
+    }
+
+    #[test]
+    fn canonical_graph_changes_when_state_binding_changes() {
+        let base = ExecutionGraphBuilder::build(semantic_input());
+        let mut mutated = semantic_input();
+        mutated.host.as_mut().unwrap().state = Some("state://other".into());
+        let mutated = ExecutionGraphBuilder::build(mutated);
+        assert_canonical_diff(&base, &mutated, CanonicalGraphDomain::Declared);
+    }
+
+    #[test]
+    fn canonical_graph_changes_when_dependency_output_hash_changes() {
+        let base = ExecutionGraphBuilder::build(semantic_input());
+        let mut mutated = semantic_input();
+        // The dependency output identifier stands in for the dependency
+        // output hash: a different resolved output ⇒ a different id.
+        mutated.dependencies[0].output = "output://lodash@2".into();
+        let mutated = ExecutionGraphBuilder::build(mutated);
+        assert_canonical_diff(&base, &mutated, CanonicalGraphDomain::Declared);
+    }
+
+    #[test]
+    fn canonical_graph_changes_when_filesystem_view_changes() {
+        // The filesystem view hash is a *resolved*-domain fact, so the
+        // sensitivity is asserted under the Resolved domain.
+        let base = ExecutionGraphBuilder::build(semantic_input());
+        let mut mutated = semantic_input();
+        mutated.host.as_mut().unwrap().filesystem_view_hash = Some("blake3:view-b".into());
+        let mutated = ExecutionGraphBuilder::build(mutated);
+        assert_canonical_diff(&base, &mutated, CanonicalGraphDomain::Resolved);
+    }
+
+    #[test]
+    fn canonical_graph_changes_when_service_dependency_edge_changes() {
+        // Both graphs carry the same two service nodes; they differ only
+        // in which service the entrypoint connects to. The single
+        // semantic delta is the service-dependency edge target.
+        let mut a = ExecutionGraphBuilder::build(semantic_input());
+        let mut b = ExecutionGraphBuilder::build(semantic_input());
+        for g in [&mut a, &mut b] {
+            g.nodes.push(ExecutionGraphNode::Service {
+                identifier: "service://db".into(),
+            });
+            g.nodes.push(ExecutionGraphNode::Service {
+                identifier: "service://cache".into(),
+            });
+        }
+        a.edges.push(ExecutionGraphEdge {
+            source: "entry://main".into(),
+            target: "service://db".into(),
+            kind: ExecutionGraphEdgeKind::ConnectsTo,
+        });
+        b.edges.push(ExecutionGraphEdge {
+            source: "entry://main".into(),
+            target: "service://cache".into(),
+            kind: ExecutionGraphEdgeKind::ConnectsTo,
+        });
+        assert_canonical_diff(&a, &b, CanonicalGraphDomain::Declared);
+    }
 }
