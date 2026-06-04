@@ -49,7 +49,7 @@ resolves, verifies, places, and reconstructs them.
 | | Today | Ato |
 |---|---|---|
 | App | launch conditions scattered across README / Dockerfile / .env / CI / cloud config | one machine-readable execution contract |
-| User | hand-adapts the environment | nothing — Ato finds a place that satisfies the contract and launches |
+| User | hand-adapts the environment | no manual environment adaptation; may grant secrets, consent, or select placement |
 
 Infrastructure (servers, GPU) is only one category of those conditions.
 
@@ -169,8 +169,13 @@ user-facing URL stable while the actual backend port may remap. Relaunch reads
 the ledger, does cheap checks (ledger exists, state binding present, secret grant
 valid, provider available, port usable-or-remappable, runtime/tool cache
 marker), and launches immediately if all hold — otherwise it repairs / remaps /
-re-places the broken entry. Relaunch **verifies immutable nodes before launch**
-(never trust a cache whose hash differs).
+re-places the broken entry.
+
+Relaunch does not fully re-solve or re-hash every immutable node on every start.
+The fast path uses the Launch Resource Ledger and cheap invalidation markers.
+When a marker is missing, stale, corrupted, or strict/costly policy applies,
+Ato falls back to full verification, repair, remap, or re-placement before
+launch. Ato must never trust a cache once its identity marker is invalidated.
 
 > Ato guarantees that an installed/resolved capsule can be re-realized later, or
 > fails with a typed explanation of which condition is no longer satisfiable.
