@@ -139,13 +139,46 @@ pub(super) async fn handle_runtime_sessions(
     processes.sort_by_key(|process| std::cmp::Reverse(process.start_time));
 
     let stored_by_id = stored_sessions_by_id();
-    let rows = processes
+    let mut pid_session_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rows: Vec<RuntimeSessionResponse> = processes
         .into_iter()
         .map(|process| {
+            pid_session_ids.insert(process.id.clone());
             let stored = stored_by_id.get(&process.id);
             runtime_session_summary(process, stored)
         })
-        .collect::<Vec<_>>();
+        .collect();
+
+    // Include Desktop sessions (ato app session start) not tracked by ProcessManager.
+    // These sessions are written to ~/.ato/apps/ato-desktop/sessions/ and deleted on
+    // stop, so any file that still exists represents an active session.
+    for (id, stored) in &stored_by_id {
+        if pid_session_ids.contains(id) {
+            continue;
+        }
+        let local_runtime_url = stored.web.as_ref().map(|w| w.local_url.clone());
+        rows.push(RuntimeSessionResponse {
+            session: PlacedSessionSummary {
+                session_id: id.clone(),
+                status: "ready".to_string(),
+                placement: placement_identity_for(Some(stored)),
+                execution_id: stored.execution_id.clone(),
+                user_visible_url: stored.user_visible_url.clone(),
+                requested_by_client: stored
+                    .requested_by_client
+                    .clone()
+                    .or_else(|| Some("unknown".to_string())),
+                runtime_owner: stored
+                    .runtime_owner
+                    .clone()
+                    .or_else(|| Some("local_runtime".to_string())),
+                install_profile_key: stored.install_profile_key.clone(),
+                launch_profile_id: stored.install_profile_id.clone(),
+            },
+            local_runtime_url,
+        });
+    }
+
     (StatusCode::OK, Json(rows)).into_response()
 }
 
@@ -366,13 +399,39 @@ pub(super) fn runtime_session_summary(
     process: ProcessInfo,
     stored: Option<&StoredSessionInfo>,
 ) -> RuntimeSessionResponse {
-    let local_runtime_url = process
-        .requested_port
-        .map(|port| format!("http://127.0.0.1:{port}"));
+    // Prefer the stored session's web URL (actual host port) over the
+    // PID file's requested_port (internal container port). Desktop sessions
+    // written by `ato app session start` always have pid=0 and the PID file's
+    // requested_port is the capsule's internal port, not the mapped host port.
+    let local_runtime_url = stored
+        .and_then(|r| r.web.as_ref())
+        .map(|w| w.local_url.clone())
+        .or_else(|| {
+            process
+                .requested_port
+                .map(|port| format!("http://127.0.0.1:{port}"))
+        });
+
+    // Desktop OCI sessions use pid=0 in the PID file (the ato process exits
+    // after starting the container). Treat these as "ready" when the stored
+    // session file still exists — the file is deleted on stop, so presence
+    // means the session is active.
+    let status = if process.pid == 0
+        && matches!(
+            process.status,
+            ProcessStatus::Exited | ProcessStatus::Failed | ProcessStatus::Unknown
+        )
+        && stored.is_some()
+    {
+        "ready".to_string()
+    } else {
+        process_status_label(process.status).to_string()
+    };
+
     RuntimeSessionResponse {
         session: PlacedSessionSummary {
             session_id: process.id,
-            status: process_status_label(process.status).to_string(),
+            status,
             placement: placement_identity_for(stored),
             execution_id: stored.and_then(|record| record.execution_id.clone()),
             user_visible_url: stored.and_then(|record| record.user_visible_url.clone()),
@@ -698,18 +757,42 @@ pub(super) async fn handle_runtime_stop_session_post(
         }
     };
 
-    // Verify the session exists before attempting to stop it.
-    let processes = match pm.list_processes() {
-        Ok(p) => p,
-        Err(err) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "process_list_failed",
-                &err.to_string(),
-            );
+    // Best-effort: deregister the ephemeral ingress route if ato-netd is up.
+    if let Ok(mut client) = ato_net::control::Client::connect_default().await {
+        let session_key = format!("ephemeral:{session_id}");
+        let _ = client.deregister_ephemeral_ingress(&session_key).await;
+    }
+
+    // Check PID-tracked sessions first (ato run style).
+    let processes = pm.list_processes().unwrap_or_default();
+    let pid_process = processes.iter().find(|p| p.id == session_id);
+    if let Some(p) = pid_process {
+        // Desktop OCI sessions register with pid=0 (process exits after starting
+        // the container). Use `ato app session stop` for those; kill-by-pid for
+        // real long-running processes.
+        if p.pid != 0 {
+            return match pm.stop_process(&session_id, false) {
+                Ok(_) => (
+                    StatusCode::OK,
+                    Json(StopSessionResponse {
+                        session_id,
+                        status: "stopped".to_string(),
+                    }),
+                )
+                    .into_response(),
+                Err(err) => json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_stop_failed",
+                    &err.to_string(),
+                ),
+            };
         }
-    };
-    if !processes.iter().any(|p| p.id == session_id) {
+        // pid=0: fall through to Desktop stop path below.
+    }
+
+    // Desktop sessions (ato app session start): stop via `ato app session stop`.
+    let stored = stored_sessions_by_id();
+    if pid_process.is_none() && !stored.contains_key(&session_id) {
         return json_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -717,14 +800,22 @@ pub(super) async fn handle_runtime_stop_session_post(
         );
     }
 
-    // Best-effort: deregister the ephemeral ingress route if ato-netd is up.
-    if let Ok(mut client) = ato_net::control::Client::connect_default().await {
-        let session_key = format!("ephemeral:{session_id}");
-        let _ = client.deregister_ephemeral_ingress(&session_key).await;
-    }
-
-    match pm.stop_process(&session_id, false) {
-        Ok(_) => (
+    let ato_exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "exe_resolve_failed",
+                &err.to_string(),
+            );
+        }
+    };
+    let output = tokio::process::Command::new(&ato_exe)
+        .args(["app", "session", "stop", &session_id, "--json"])
+        .output()
+        .await;
+    match output {
+        Ok(out) if out.status.success() => (
             StatusCode::OK,
             Json(StopSessionResponse {
                 session_id,
@@ -732,6 +823,14 @@ pub(super) async fn handle_runtime_stop_session_post(
             }),
         )
             .into_response(),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_stop_failed",
+                &format!("stop exited {}: {}", out.status, stderr.trim()),
+            )
+        }
         Err(err) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "session_stop_failed",

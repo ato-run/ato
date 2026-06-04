@@ -1,0 +1,7 @@
+{
+  "_note": "POST /v1/runtime/install-profiles with source=koh0920/adminer: source validation passes (publisher/slug format accepted). Real ato install returns 500 install_failed because the capsule is not published on api.ato.run. Manual install profile used for launch/stop flow.",
+  "validation_passed": true,
+  "install_profile_key": "ipk_97e6008f519fe1961aa2bacb26ac65e2",
+  "publisher": "koh0920",
+  "slug": "adminer"
+}
