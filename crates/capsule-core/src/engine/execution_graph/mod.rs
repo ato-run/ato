@@ -1,29 +1,31 @@
-//! Phase 1 skeleton of the unified execution graph.
+//! Unified execution graph (declared / resolved layers).
 //!
 //! This module is part of the v0.6.0 graph-based core migration tracked
-//! by ato-run/ato#74 and partially addresses ato-run/ato#97
+//! by ato-run/ato#74 and lands ato-run/ato#97
 //! ([`ExecutionGraphBuilder`] canonicalization) and ato-run/ato#98
 //! (canonical form + domain-tagged digest).
 //!
-//! **Status — not load-bearing.** The types and builder here are
-//! deliberately minimal: only enough surface to be imported, exercised by
-//! a couple of unit tests, and extended by the staged plan.
-//! Specifically:
+//! **Status — load-bearing.** The builder produces a `LaunchGraphBundle`
+//! whose canonical `declared_execution_id` / `resolved_execution_id` are
+//! consumed by production call sites (validate / preflight, the run
+//! pipeline, and execution-receipt construction) and persisted to
+//! `SessionRecord`. Notes on the current boundaries:
 //!
 //! - The builder consumes a *decoupled* [`ExecutionGraphBuildInput`]
-//!   shape, **not** the real `Manifest` / `LockFile` / `Policy` types.
-//!   That boundary is intentionally not crossed yet.
+//!   shape rather than the raw `Manifest` / `LockFile` / `Policy` types;
+//!   an adapter feeds it from those sources. The decoupling is a
+//!   deliberate seam, not an unfinished one.
 //! - The canonical form (`canonical` submodule) produces deterministic
-//!   bytes and a SHA-256 digest under a [`CanonicalGraphDomain`], but is
-//!   not wired into any receipt or session call site. Plumbing
-//!   `declared_execution_id` / `resolved_execution_id` into the receipt
-//!   types lands in Wave 3 (PR-5a).
-//! - No production call site (session start, run pipeline, preflight)
-//!   uses this module yet. Migrating those is Wave 2 / 3 (PR-4a, PR-4b).
+//!   bytes and a SHA-256 digest under a [`CanonicalGraphDomain`]; this is
+//!   what backs the declared/resolved execution identities.
+//! - The **observed** layer (`G_observed` / `observed_execution_id`) is
+//!   not implemented yet — runtime observation, populated node/edge
+//!   receipt evidence, computed `GraphCompleteness`, and drift detection
+//!   are tracked by the Execution Graph Model RFC umbrella (ato-run/ato#490).
+//!   See `docs/rfcs/draft/EXECUTION_GRAPH_MODEL.md`.
 //!
-//! Consumers should treat [`ExecutionGraph`] as an internal staging
-//! ground; canonicalization is now stable for the kinds it knows about
-//! (see [`canonical::CANONICAL_FORM_VERSION`] and the spec at
+//! Canonicalization is stable for the kinds it knows about (see
+//! [`canonical::CANONICAL_FORM_VERSION`] and the spec at
 //! `docs/execution-identity.md`).
 
 mod builder;

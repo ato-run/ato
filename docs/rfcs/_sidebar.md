@@ -53,6 +53,7 @@
 - [Discussion Authority Schema Distribution](draft/DISCUSSION_AUTHORITY_SCHEMA_DISTRIBUTION.md)
 - [Draft ID](draft/DRAFT_ID.md)
 - [Engine and Workload Model](draft/ENGINE_AND_WORKLOAD_MODEL.md)
+- [Execution Graph Model](draft/EXECUTION_GRAPH_MODEL.md)
 - [Hash and Provenance Policy](draft/HASH_AND_PROVENANCE_POLICY.md)
 - [Host Panel Routing](draft/HOST_PANEL_ROUTING.md)
 - [License Spec](draft/LICENSE_SPEC.md)

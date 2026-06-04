@@ -48,9 +48,10 @@ pub struct StoredSessionInfo {
     pub dependency_contracts: Option<StoredDependencyContracts>,
 
     /// Persisted subset of the materialized `ExecutionGraph` that
-    /// teardown will reverse-traverse (umbrella #74 Phase 3). See
-    /// [`StoredExecutionGraph`] for the schema-versioning contract; this
-    /// field stays `None` until the Phase 3 implementation lands.
+    /// teardown reverse-traverses (umbrella #74 Phase 3). See
+    /// [`StoredExecutionGraph`] for the schema-versioning contract. This
+    /// field is populated for production launches; it is `None` only for
+    /// records that predate the field or when no graph was materialized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<StoredExecutionGraph>,
 
@@ -256,9 +257,9 @@ pub struct StoredOrchestrationService {
 }
 
 /// Persisted subset of the materialized `ExecutionGraph` (umbrella #74,
-/// Phase 3). The Phase 3 implementation will populate this field; until
-/// then it stays `None` on every record and v0.5.x records (without
-/// `graph`) continue to deserialize cleanly via `#[serde(default)]`.
+/// Phase 3). Populated for production launches and reverse-traversed at
+/// teardown; v0.5.x records (without `graph`) continue to deserialize
+/// cleanly via `#[serde(default)]`.
 ///
 /// SCHEMA_VERSION_NOTE: future `schema_version` bumps must keep
 /// deserialization of `schema_version: 1` records readable, by either

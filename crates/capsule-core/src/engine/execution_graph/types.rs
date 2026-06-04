@@ -121,11 +121,12 @@ pub struct ExecutionGraphEdge {
     pub kind: ExecutionGraphEdgeKind,
 }
 
-/// Placeholder constraint shape.
+/// Constraint shape with an open (string-typed) vocabulary.
 ///
-/// The constraint vocabulary is intentionally unspecified in this skeleton;
-/// later waves will replace `kind: String` with a structured enum once the
-/// canonicalization design (#98) firms up the constraint catalogue.
+/// The constraint vocabulary is intentionally left as `kind: String` for
+/// now; a structured enum can replace it once the node/edge taxonomy in
+/// the Execution Graph Model RFC (ato-run/ato#490) firms up the constraint
+/// catalogue.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExecutionGraphConstraint {
     pub kind: String,
