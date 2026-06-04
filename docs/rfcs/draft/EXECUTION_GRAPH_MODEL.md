@@ -49,12 +49,38 @@ success. Under this model a receipt is a *materialization proof*, not a log:
 each `NodeReceipt`/`EdgeReceipt` asserts that a component of the launch envelope
 is verified, not merely that it was observed.
 
-Analogy: **Nix makes build outputs reproducible; Ato makes launch envelopes
-reproducible.** Nix does not guarantee arbitrary program behavior either — it
-guarantees that the same build inputs realize the same store output and that
-undeclared dependencies are not silently tolerated. The Ato analogue of
-`nix-store --realise` is resolved-graph realization; the analogue of Nix's
+Analogy: **Nix realizes derivations into store outputs; Ato realizes capsules
+into launch envelopes.** Nix does not guarantee arbitrary program behavior
+either — it guarantees that the same build inputs realize the same store output
+and that undeclared dependencies are not silently tolerated. The Ato analogue of
+`nix-store --realise` is resolved-capsule realization; the analogue of Nix's
 undeclared-dependency failure is the strict-profile fail-closed behavior.
+
+### Capsule and ExecutionGraph
+
+The user/protocol-level abstraction is the **Capsule** — a reproducible launch
+closure (source identity, runtime identity, runtime tool identity, dependency
+derivation, dependency output, build artifact, filesystem view, environment
+closure, network policy, capability policy, entrypoint/argv/cwd, state binding
+contract). The **ExecutionGraph** is the internal canonical representation of a
+capsule realization, and a **Receipt** is the evidence of how a capsule was
+realized:
+
+```
+G_declared = Declared Capsule graph
+G_resolved = Resolved Capsule graph
+G_observed = Observed Capsule graph
+```
+
+Capsule lifecycle: `capsule.toml` / `capsule://` handle → Declared Capsule →
+*resolve* → Resolved Capsule → *realize* → Realized Capsule → *launch* →
+Running Capsule → *receipt* → Capsule Realization Receipt. The hash of the
+Resolved Capsule's canonical graph is `resolved_execution_id` (future alias:
+`capsule_realization_id`). *A capsule is to source-native launch what a
+derivation is to a Nix build.*
+
+The capsule-level guarantee: **Ato guarantees that a resolved capsule can either
+reconstruct an equivalent launch envelope or fail with a typed explanation.**
 
 Reproducibility is classified as a **class**, not a boolean: `pure`,
 `host-bound`, `state-bound`, `time-bound`, `network-bound`, `best-effort`.
