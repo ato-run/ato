@@ -26,8 +26,23 @@ pub(super) struct LaunchSessionRequest {
 #[derive(Debug, Serialize)]
 struct LaunchSessionResponse {
     session_id: String,
+    status: String,
+    install_profile_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch_profile_id: Option<String>,
+    placement: PlacementIdentity,
+    requested_by_client: String,
+    runtime_owner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_visible_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_runtime_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StopSessionResponse {
+    session_id: String,
+    status: String,
 }
 
 const LOCAL_DESKTOP_PROVIDER_ID: &str = "desktop:local";
@@ -605,11 +620,93 @@ pub(super) async fn handle_runtime_launch_session(
     (
         StatusCode::CREATED,
         Json(LaunchSessionResponse {
+            status: "starting".to_string(),
+            install_profile_key: key,
+            launch_profile_id: None,
+            placement: local_desktop_placement_identity(),
+            requested_by_client: "web_console".to_string(),
+            runtime_owner: "local_runtime".to_string(),
             session_id,
             user_visible_url,
+            local_runtime_url: web_local_url,
         }),
     )
         .into_response()
+}
+
+/// `POST /v1/runtime/sessions/:id/stop` — stop a running session, returning JSON.
+///
+/// Same semantics as `DELETE /v1/runtime/sessions/:id` but returns a JSON body
+/// and a 200 OK instead of 204 No Content, for PWA compatibility.
+pub(super) async fn handle_runtime_stop_session_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+        return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
+    }
+
+    let session_id = id.trim().to_string();
+    if session_id.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "session id is required",
+        );
+    }
+
+    let pm = match ProcessManager::new() {
+        Ok(pm) => pm,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "process_manager_error",
+                &err.to_string(),
+            );
+        }
+    };
+
+    // Verify the session exists before attempting to stop it.
+    let processes = match pm.list_processes() {
+        Ok(p) => p,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "process_list_failed",
+                &err.to_string(),
+            );
+        }
+    };
+    if !processes.iter().any(|p| p.id == session_id) {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            &format!("session '{}' not found", session_id),
+        );
+    }
+
+    // Best-effort: deregister the ephemeral ingress route if ato-netd is up.
+    if let Ok(mut client) = ato_net::control::Client::connect_default().await {
+        let session_key = format!("ephemeral:{session_id}");
+        let _ = client.deregister_ephemeral_ingress(&session_key).await;
+    }
+
+    match pm.stop_process(&session_id, false) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(StopSessionResponse {
+                session_id,
+                status: "stopped".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_stop_failed",
+            &err.to_string(),
+        ),
+    }
 }
 
 /// `DELETE /v1/runtime/sessions/:id` — stop a running session.

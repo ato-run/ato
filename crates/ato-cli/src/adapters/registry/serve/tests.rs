@@ -1334,6 +1334,63 @@ async fn runtime_stop_requires_write_auth() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_rejects_wrong_token() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_launch_session(
+        State(state),
+        bearer_headers("wrong"),
+        Json(LaunchSessionRequest {
+            install_profile_key: "k".to_string(),
+            target_label: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_post_requires_write_auth() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_stop_session_post(
+        State(state),
+        HeaderMap::new(),
+        AxumPath("sess-1".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_post_rejects_wrong_token() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_stop_session_post(
+        State(state),
+        bearer_headers("wrong"),
+        AxumPath("sess-1".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_post_unknown_session_returns_404() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _ato_home = AtoHomeGuard::set("stop-post-unknown");
+    let state = registry_test_state(None);
+    let response = handle_runtime_stop_session_post(
+        State(state),
+        HeaderMap::new(),
+        AxumPath("nonexistent-session-id".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn runtime_launch_empty_key_returns_400() {
     let _lock = env_lock().lock().expect("env lock");
     let _ato_home = AtoHomeGuard::set("launch-empty-key");
@@ -1852,6 +1909,113 @@ mod cors_pna_tests {
                 .get("access-control-allow-origin")
                 .expect("ACAO missing on actual GET"),
             origin
+        );
+    }
+
+    fn post_preflight(uri: &str, origin: &str, pna: bool) -> Request<Body> {
+        let mut b = Request::builder()
+            .method(Method::OPTIONS)
+            .uri(uri)
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                "authorization, content-type",
+            );
+        if pna {
+            b = b.header("access-control-request-private-network", "true");
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pwa_post_preflight_for_launch_returns_acao_and_acapn() {
+        let app = make_full_stack_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(post_preflight("/v1/runtime/sessions", origin, true))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing"),
+            origin
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .expect("ACAPN missing"),
+            "true"
+        );
+        let acam = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .expect("ACAM missing")
+            .to_str()
+            .unwrap();
+        assert!(
+            acam.contains("POST"),
+            "POST must be in allowed methods: {acam}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pwa_post_preflight_for_stop_returns_acao_and_acapn() {
+        let app = make_full_stack_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(post_preflight(
+                "/v1/runtime/sessions/sess-123/stop",
+                origin,
+                true,
+            ))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing"),
+            origin
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .expect("ACAPN missing"),
+            "true"
+        );
+    }
+
+    #[tokio::test]
+    async fn disallowed_post_preflight_omits_all_cors_allow_headers() {
+        let app = make_full_stack_router(None);
+        let resp = app
+            .oneshot(post_preflight(
+                "/v1/runtime/sessions",
+                "https://evil.example.com",
+                true,
+            ))
+            .await
+            .expect("call full-stack router");
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not get ACAO"
+        );
+        assert!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .is_none(),
+            "disallowed origin must not get ACAPN"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-methods").is_none(),
+            "disallowed origin must not get ACAM"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-headers").is_none(),
+            "disallowed origin must not get ACAH"
         );
     }
 }
