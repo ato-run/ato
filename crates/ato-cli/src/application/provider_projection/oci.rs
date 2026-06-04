@@ -33,12 +33,18 @@ pub(crate) enum OciImageDigest {
 }
 
 impl OciImageDigest {
+    // Boundary accessor exercised by tests; the first non-test consumer is the
+    // provider-evidence work in #493.
+    #[allow(dead_code)]
     pub(crate) fn is_pinned(&self) -> bool {
         matches!(self, Self::Pinned(_))
     }
 
     /// Stable label for canonical/identity rendering. Deliberately reveals the
     /// *state* (pinned vs unpinned) without elevating the digest to identity.
+    /// Only reached via [`OciProjectionPlan::canonical_identity`] (itself
+    /// test-only for now), so allow until that is wired in.
+    #[allow(dead_code)]
     fn label(&self) -> String {
         match self {
             Self::Pinned(digest) => format!("pinned({digest})"),
@@ -190,8 +196,18 @@ pub(crate) struct OciProjectionPlan {
     /// Environment projection, canonicalized (sorted) so the plan is the
     /// deterministic source of truth rather than HashMap iteration order.
     pub env_projection: BTreeMap<String, String>,
-    /// Labels projection, canonicalized (sorted).
-    pub labels: BTreeMap<String, String>,
+    /// Labels that are *launch conditions* — part of the resolved-Capsule
+    /// identity (e.g. `io.ato.target`, user-declared labels). Canonicalized
+    /// (sorted). Rendered to `--label` **and** included in
+    /// [`OciProjectionPlan::canonical_identity`].
+    pub launch_labels: BTreeMap<String, String>,
+    /// Provider bookkeeping / session-local labels (e.g. `io.ato.session_id`,
+    /// `io.ato.execution_id`, `io.ato.managed`, `io.ato.provider`). These are
+    /// how the provider tags and later reaps its own containers — **not** part
+    /// of the Capsule identity. Rendered to `--label` for behavior parity, but
+    /// deliberately excluded from [`OciProjectionPlan::canonical_identity`] so a
+    /// session id can never leak into identity (#501).
+    pub provider_metadata_labels: BTreeMap<String, String>,
     /// Mounts, including state bindings (see
     /// [`OciMountProjection::is_persistent_state_binding`]).
     pub mounts: Vec<OciMountProjection>,
@@ -225,9 +241,16 @@ impl OciProjectionPlan {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            labels: request
+            launch_labels: request
                 .labels
                 .iter()
+                .filter(|(k, _)| !is_provider_metadata_label(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            provider_metadata_labels: request
+                .labels
+                .iter()
+                .filter(|(k, _)| is_provider_metadata_label(k))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             mounts,
@@ -246,6 +269,8 @@ impl OciProjectionPlan {
     }
 
     /// Durable, engine-managed state bindings in this plan.
+    // Boundary accessor exercised by tests; consumed by placement (#509).
+    #[allow(dead_code)]
     pub(crate) fn state_bindings(&self) -> impl Iterator<Item = &OciMountProjection> {
         self.mounts
             .iter()
@@ -253,6 +278,8 @@ impl OciProjectionPlan {
     }
 
     /// The in-graph service edges (network aliases) this container answers to.
+    // Boundary accessor exercised by tests; consumed by edge-receipt work (#493).
+    #[allow(dead_code)]
     pub(crate) fn service_edges(&self) -> &[String] {
         &self.network.service_aliases
     }
@@ -260,13 +287,19 @@ impl OciProjectionPlan {
     /// A deterministic, session-independent rendering of the launch *identity*.
     ///
     /// This excludes session-local rendering inputs — the requested container
-    /// `name` — and contains no runtime evidence (container id, pid, log path):
-    /// those fields do not exist on the plan. The image digest appears only as
-    /// labeled evidence (`pinned`/`unpinned`), never as a standalone identity.
+    /// `name` and the [`OciProjectionPlan::provider_metadata_labels`] (e.g.
+    /// `io.ato.session_id`) — and contains no runtime evidence (container id,
+    /// pid, log path): those fields do not exist on the plan. Only
+    /// [`OciProjectionPlan::launch_labels`] (launch conditions) participate. The
+    /// image digest appears only as labeled evidence (`pinned`/`unpinned`),
+    /// never as a standalone identity.
     ///
     /// Until a canonical hashing scheme for projection plans exists, this is a
     /// stable serialization used for equality/snapshot tests (#501); it is not
     /// a permanent hash scheme.
+    // The projection-identity primitive: exercised by tests now, consumed by the
+    // realization contract / receipts (#498, #493) next. Allow until wired in.
+    #[allow(dead_code)]
     pub(crate) fn canonical_identity(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
@@ -282,7 +315,9 @@ impl OciProjectionPlan {
         for (k, v) in &self.env_projection {
             out.push_str(&format!("env[{k}]={v}\n"));
         }
-        for (k, v) in &self.labels {
+        // Only launch labels are identity-bearing; provider_metadata_labels
+        // (session id, managed flag, …) are deliberately excluded.
+        for (k, v) in &self.launch_labels {
             out.push_str(&format!("label[{k}]={v}\n"));
         }
         for m in &self.mounts {
@@ -303,6 +338,30 @@ impl OciProjectionPlan {
         out.push_str(&format!("caps={:?}\n", self.capabilities_required));
         out
     }
+}
+
+/// True when a label key is provider bookkeeping / session-local rather than a
+/// launch condition.
+///
+/// These are the labels the OCI executors stamp onto every container so the
+/// provider can find and reap *its own* containers — they encode the session,
+/// not the resolved Capsule. They must never enter the projection identity (a
+/// session id is not Capsule identity, #501). `io.ato.target` is intentionally
+/// **not** here: it names which target/service this container realizes, which
+/// is a genuine launch condition.
+///
+/// Keep this in sync with the labels stamped by the OCI executors
+/// (`adapters/runtime/executors/oci_*`); any new provider-bookkeeping label
+/// must be added here so it stays out of identity.
+fn is_provider_metadata_label(key: &str) -> bool {
+    matches!(
+        key,
+        "io.ato.session_id"
+            | "io.ato.session"
+            | "io.ato.execution_id"
+            | "io.ato.managed"
+            | "io.ato.provider"
+    )
 }
 
 /// Derive the capabilities a launch requires from its resolved conditions.
@@ -410,7 +469,16 @@ impl OciProjectionPlan {
                 args.push(format!("linux/{}", platform.architecture));
             }
         }
-        for (k, v) in &self.labels {
+        // Render both label sets (launch + provider bookkeeping) merged into a
+        // single sorted sequence, so the emitted `--label` flags are equivalent
+        // to the prior single-map behavior. The split only affects *identity*
+        // (canonical_identity), never what podman is told.
+        let all_labels: BTreeMap<&String, &String> = self
+            .launch_labels
+            .iter()
+            .chain(self.provider_metadata_labels.iter())
+            .collect();
+        for (k, v) in &all_labels {
             args.push("--label".into());
             args.push(format!("{k}={v}"));
         }
@@ -585,6 +653,61 @@ mod tests {
             identity,
             OciProjectionPlan::from_container_request(&renamed).canonical_identity(),
             "session-local name must not affect projection identity"
+        );
+    }
+
+    #[test]
+    fn oci_projection_identity_excludes_session_local_labels() {
+        // The OCI executors stamp `io.ato.session_id` (and friends) onto every
+        // container as provider bookkeeping. Two launches of the same Capsule in
+        // different sessions differ only by these labels — and must therefore
+        // share one projection identity.
+        let mut req = base_request();
+        req.labels
+            .insert("io.ato.session_id".into(), "session-a".into());
+        let a = OciProjectionPlan::from_container_request(&req).canonical_identity();
+
+        req.labels
+            .insert("io.ato.session_id".into(), "session-b".into());
+        let b = OciProjectionPlan::from_container_request(&req).canonical_identity();
+
+        assert_eq!(a, b, "session id label must not affect projection identity");
+        assert!(!a.contains("session-a"));
+        assert!(!b.contains("session-b"));
+
+        // The same applies to the other provider-bookkeeping labels.
+        let mut req = base_request();
+        req.labels.insert("io.ato.managed".into(), "true".into());
+        req.labels
+            .insert("io.ato.execution_id".into(), "exec-xyz".into());
+        req.labels.insert("io.ato.provider".into(), "podman".into());
+        let with_meta = OciProjectionPlan::from_container_request(&req).canonical_identity();
+        let baseline =
+            OciProjectionPlan::from_container_request(&base_request()).canonical_identity();
+        assert_eq!(with_meta, baseline);
+        assert!(!with_meta.contains("exec-xyz"));
+
+        // But these labels are still rendered to `podman create --label`, so the
+        // provider can find and reap its own containers (behavior parity).
+        let plan = OciProjectionPlan::from_container_request(&req);
+        let argv = plan.render_podman_create_argv(&host_arm64()).unwrap();
+        let labels = all_args_after(&argv, "--label");
+        assert!(labels.contains(&"io.ato.managed=true"));
+        assert!(labels.contains(&"io.ato.execution_id=exec-xyz"));
+        assert!(labels.contains(&"io.ato.provider=podman"));
+        // ...and the launch label is still rendered too.
+        assert!(labels.contains(&"ato.session=abc123"));
+
+        // `io.ato.target` is a launch condition, not bookkeeping: it DOES affect
+        // identity.
+        let mut req_a = base_request();
+        req_a.labels.insert("io.ato.target".into(), "app".into());
+        let mut req_b = base_request();
+        req_b.labels.insert("io.ato.target".into(), "db".into());
+        assert_ne!(
+            OciProjectionPlan::from_container_request(&req_a).canonical_identity(),
+            OciProjectionPlan::from_container_request(&req_b).canonical_identity(),
+            "io.ato.target is a launch condition and must affect identity"
         );
     }
 
