@@ -24,6 +24,6 @@ Scope: issue #480, deterministic installable fixture for installed-app relaunch.
 - The fixture is intentionally dependency-free except for Node itself; `package.json` declares `type = "commonjs"` so `server.js` runs deterministically.
 - The GitHub tarball shape used by the test has a fixed root prefix, fixed SHA, sorted entries, fixed mtime, uid/gid, and mode.
 - `port = 18880` is fixed by the fixture; the integration test is serial and checks port availability before running.
-- The Desktop smoke originally exposed a real relaunch blocker: provisional session records written during dependency materialization lacked install lifecycle fields. This change stamps lifecycle fields from the scoped `ato launch` context so Desktop can find the installed session by IPK.
+- The Desktop smoke originally exposed a real relaunch blocker: the provisional session record written during dependency materialization (on a tokio worker thread) lacked install lifecycle fields. The fix threads the trusted `ato launch` lifecycle context as **typed, request-scoped data** (`DependencyMaterializationRequest::install_lifecycle_context`, fed from `RunArgs` → `ConsumerRunRequest`) and stamps the record from that request only. No process-global slot and no `ATO_INSTALL_LIFECYCLE_*` process env vars are used, so concurrent launches cannot cross-stamp, the stamp cannot be spoofed from the ambient environment, and the metadata never leaks into guest/child processes. The same-thread `StoredSessionInfo` path remains thread-local.
 - #481 and #482 were not implemented.
 

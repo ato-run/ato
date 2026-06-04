@@ -62,6 +62,7 @@ fn cached_request() -> DependencyMaterializationRequest {
         },
         cache_strategy: CacheStrategy::DerivationCache,
         attestation_strategy: AttestationStrategy::None,
+        install_lifecycle_context: None,
     }
 }
 
