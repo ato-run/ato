@@ -29,6 +29,7 @@ use capsule_core::reporter::CapsuleReporter;
 use capsule_core::runtime_setup::{
     InstallPhase, InstallProgress, RecommendedAction, RuntimeSetupStatus, SUPPORTED_NODE_VERSION,
     SUPPORTED_PYTHON_VERSION, SUPPORTED_UV_VERSION, ToolKind, ToolSource, ToolStatus,
+    VirtualizationStatus, WindowsSubstrateStatus, WslStatus,
 };
 
 use capsule_core::podman::ATO_PODMAN_MACHINE_NAME;
@@ -49,7 +50,164 @@ pub(crate) fn collect_setup_status() -> RuntimeSetupStatus {
             detect_ato_helper(),
             detect_nacelle(),
         ],
+        windows_substrate: detect_windows_substrate(),
     }
+}
+
+/// Probe Windows WSL / virtualization substrate state for the local OCI engine
+/// (#460). Returns `None` on non-Windows hosts. Read-only: runs `wsl.exe
+/// --status` / `wsl.exe --list --verbose` and never mutates host state.
+fn detect_windows_substrate() -> Option<WindowsSubstrateStatus> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    // `wsl.exe` emits UTF-16LE; capture raw bytes and decode lossily after
+    // stripping interior NULs so the pure classifier sees plain text.
+    let probe = |args: &[&str]| -> Option<String> {
+        let out = Command::new("wsl.exe").args(args).output().ok()?;
+        let mut bytes = out.stdout;
+        bytes.extend_from_slice(&out.stderr);
+        Some(decode_wsl_output(&bytes))
+    };
+    let invocable = probe(&["--status"]).is_some();
+    let status_out = probe(&["--status"]);
+    let list_out = probe(&["--list", "--verbose"]);
+    Some(classify_windows_substrate(
+        invocable,
+        status_out.as_deref(),
+        list_out.as_deref(),
+    ))
+}
+
+/// Decode `wsl.exe` output, which is UTF-16LE on Windows. Drops NUL bytes so a
+/// naive UTF-8 lossy decode of UTF-16LE ASCII text reads cleanly.
+fn decode_wsl_output(bytes: &[u8]) -> String {
+    if bytes.iter().filter(|b| **b == 0).count() * 2 >= bytes.len() && !bytes.is_empty() {
+        // Looks like UTF-16LE (roughly half the bytes are NUL): decode as such.
+        let u16s: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// Pure classifier for the Windows substrate from `wsl.exe` probe output.
+///
+/// * `invocable` — whether `wsl.exe --status` could be executed at all.
+/// * `status_out` — `wsl --status` text (default version / distribution).
+/// * `list_out` — `wsl --list --verbose` text (per-distro VERSION column).
+fn classify_windows_substrate(
+    invocable: bool,
+    status_out: Option<&str>,
+    list_out: Option<&str>,
+) -> WindowsSubstrateStatus {
+    let combined = format!(
+        "{}\n{}",
+        status_out.unwrap_or_default(),
+        list_out.unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+
+    let reboot_required = combined.contains("restart") || combined.contains("reboot");
+
+    let virtualization = if (combined.contains("virtual machine platform")
+        || combined.contains("virtualization")
+        || combined.contains("hyper-v"))
+        && (combined.contains("disable")
+            || combined.contains("not enabled")
+            || combined.contains("enable")
+            || combined.contains("bios")
+            || combined.contains("firmware"))
+    {
+        VirtualizationStatus::UnavailableOrUnknown
+    } else {
+        VirtualizationStatus::Unknown
+    };
+
+    // "no installed distributions" means WSL *is* installed but has no distro —
+    // that is Wsl2Unavailable, not Missing — so it is intentionally excluded here.
+    let not_installed = combined.contains("not installed")
+        || combined.contains("is not installed")
+        || combined.contains("wsl --install")
+        || combined.contains("/install");
+
+    // A distro running on WSL2: the verbose list has a VERSION column whose
+    // value is 2, or `--status` reports default version 2 with a distro present.
+    let has_v2_distro = list_out.is_some_and(list_reports_version_2);
+    let default_version_2 = combined.contains("default version: 2");
+
+    let wsl = if !invocable {
+        WslStatus::Missing
+    } else if reboot_required {
+        WslStatus::RebootRequired
+    } else if has_v2_distro
+        || (default_version_2 && !combined.contains("no installed distributions"))
+    {
+        WslStatus::Ready
+    } else if not_installed {
+        WslStatus::Missing
+    } else if combined.contains("no installed distributions")
+        || combined.contains("default version: 1")
+        || list_reports_only_version_1(list_out)
+    {
+        WslStatus::Wsl2Unavailable
+    } else {
+        WslStatus::Unknown
+    };
+
+    let message = match wsl {
+        WslStatus::Missing => {
+            "WSL is not installed. Ato can guide installing it to run local containers.".to_string()
+        }
+        WslStatus::Wsl2Unavailable => {
+            "WSL is present but no WSL2 distribution is available; WSL2 is required.".to_string()
+        }
+        WslStatus::RebootRequired => {
+            "WSL setup needs a restart to finish before containers can run.".to_string()
+        }
+        WslStatus::Ready => "WSL2 is available.".to_string(),
+        WslStatus::Unknown => "WSL state could not be determined.".to_string(),
+        WslStatus::NotApplicable => "Not applicable on this host.".to_string(),
+    };
+
+    WindowsSubstrateStatus {
+        wsl,
+        virtualization,
+        reboot_required,
+        message,
+    }
+}
+
+/// True when `wsl --list --verbose` output has at least one distribution whose
+/// VERSION column is `2`.
+fn list_reports_version_2(list_out: &str) -> bool {
+    wsl_list_versions(list_out).any(|v| v == 2)
+}
+
+/// True when the list has distributions and every one is version 1.
+fn list_reports_only_version_1(list_out: Option<&str>) -> bool {
+    let Some(list_out) = list_out else {
+        return false;
+    };
+    let versions: Vec<u32> = wsl_list_versions(list_out).collect();
+    !versions.is_empty() && versions.iter().all(|v| *v == 1)
+}
+
+/// Extract the trailing VERSION integer from each distribution row of
+/// `wsl --list --verbose`. Skips the header row and the `*` default marker.
+fn wsl_list_versions(list_out: &str) -> impl Iterator<Item = u32> + '_ {
+    list_out.lines().filter_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("name") && lower.contains("version") {
+            return None; // header
+        }
+        line.split_whitespace()
+            .last()
+            .and_then(|tok| tok.parse::<u32>().ok())
+    })
 }
 
 /// List managed-language directories (`<tool>-<version>`) in the toolchain
@@ -1134,5 +1292,100 @@ mod tests {
                 status.message
             );
         }
+    }
+
+    // ── #460 Windows substrate (WSL) diagnostics ──────────────────────────────
+
+    #[test]
+    fn wsl_not_invocable_is_missing() {
+        let s = classify_windows_substrate(false, None, None);
+        assert_eq!(s.wsl, WslStatus::Missing);
+    }
+
+    #[test]
+    fn wsl_list_with_version_2_is_ready() {
+        let list = "  NAME                      STATE           VERSION\n\
+                     * podman-machine-default    Running         2\n";
+        let s = classify_windows_substrate(true, Some("Default Version: 2"), Some(list));
+        assert_eq!(s.wsl, WslStatus::Ready);
+    }
+
+    #[test]
+    fn wsl_default_version_2_without_distro_marker_is_ready() {
+        let s = classify_windows_substrate(true, Some("Default Version: 2"), Some(""));
+        assert_eq!(s.wsl, WslStatus::Ready);
+    }
+
+    #[test]
+    fn wsl_no_installed_distributions_is_wsl2_unavailable() {
+        let msg = "Windows Subsystem for Linux has no installed distributions.";
+        let s = classify_windows_substrate(true, Some(msg), Some(msg));
+        assert_eq!(s.wsl, WslStatus::Wsl2Unavailable);
+    }
+
+    #[test]
+    fn wsl_only_version_1_distro_is_wsl2_unavailable() {
+        let list = "  NAME            STATE           VERSION\n\
+                     * Legacy          Stopped         1\n";
+        let s = classify_windows_substrate(true, Some("Default Version: 1"), Some(list));
+        assert_eq!(s.wsl, WslStatus::Wsl2Unavailable);
+    }
+
+    #[test]
+    fn wsl_not_installed_text_is_missing() {
+        let msg = "Windows Subsystem for Linux is not installed. Use `wsl --install`.";
+        let s = classify_windows_substrate(true, Some(msg), None);
+        assert_eq!(s.wsl, WslStatus::Missing);
+    }
+
+    #[test]
+    fn wsl_reboot_required_is_detected() {
+        let msg = "The requested operation is successful. Restart your computer to finish.";
+        let s = classify_windows_substrate(true, Some(msg), None);
+        assert_eq!(s.wsl, WslStatus::RebootRequired);
+        assert!(s.reboot_required);
+    }
+
+    #[test]
+    fn wsl_virtualization_disabled_is_flagged() {
+        let msg = "Please enable the Virtual Machine Platform Windows feature and ensure \
+                   virtualization is enabled in the BIOS.";
+        let s = classify_windows_substrate(true, Some(msg), None);
+        assert_eq!(s.virtualization, VirtualizationStatus::UnavailableOrUnknown);
+    }
+
+    #[test]
+    fn wsl_ready_leaves_virtualization_unknown() {
+        let list = "  NAME    STATE     VERSION\n* d      Running   2\n";
+        let s = classify_windows_substrate(true, Some("Default Version: 2"), Some(list));
+        assert_eq!(s.virtualization, VirtualizationStatus::Unknown);
+        assert!(!s.reboot_required);
+    }
+
+    #[test]
+    fn wsl_list_version_parsing_skips_header_and_reads_version_column() {
+        let list = "  NAME                      STATE           VERSION\n\
+                     * podman-machine-default    Running         2\n\
+                       Other                     Stopped         1\n";
+        assert!(list_reports_version_2(list));
+        let versions: Vec<u32> = wsl_list_versions(list).collect();
+        assert_eq!(versions, vec![2, 1]);
+    }
+
+    #[test]
+    fn decode_wsl_output_handles_utf16le() {
+        // "Default Version: 2" as UTF-16LE.
+        let text = "Default Version: 2";
+        let mut bytes = Vec::new();
+        for u in text.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(decode_wsl_output(&bytes), text);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn windows_substrate_is_none_off_windows() {
+        assert!(detect_windows_substrate().is_none());
     }
 }
