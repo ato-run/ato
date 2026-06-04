@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 
 use capsule_core::router::ExecutionProfile;
 
-use capsule_core::runtime_setup::ToolKind;
+use capsule_core::runtime_setup::{ToolKind, WindowsSubstrateActionKind};
 
 use crate::adapters::runtime::process::ProcessManager;
 use crate::application::auth::consent_store::approve_execution_plan_consent;
@@ -60,7 +60,40 @@ fn execute_runtime_command(command: RuntimeInternalCommands) -> Result<()> {
             let parsed = parse_tool_tokens(&tools)?;
             prepare_tools(parsed, emit_json)
         }
+        RuntimeInternalCommands::RepairHostRuntime { emit_json } => {
+            crate::application::runtime_prepare::repair_host_runtime(emit_json)
+        }
+        RuntimeInternalCommands::ResumeAfterReboot { json } => {
+            crate::application::runtime_setup_resume::resume_after_reboot(json)
+        }
+        RuntimeInternalCommands::PrepareWindowsSubstrate {
+            action,
+            source_surface,
+            emit_json,
+        } => {
+            let kind = parse_substrate_action(&action)?;
+            crate::application::runtime_setup_resume::prepare_windows_substrate(
+                kind,
+                source_surface,
+                emit_json,
+            )
+        }
     }
+}
+
+/// Parse a `--action` token into a [`WindowsSubstrateActionKind`].
+fn parse_substrate_action(token: &str) -> Result<WindowsSubstrateActionKind> {
+    use WindowsSubstrateActionKind as K;
+    let kind = match token.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "install-wsl" => K::InstallWsl,
+        "enable-wsl2" => K::EnableWsl2,
+        "reboot-required" => K::RebootRequired,
+        "open-virtualization-instructions" => K::OpenVirtualizationInstructions,
+        "repair-podman-machine" => K::RepairPodmanMachine,
+        "none" => K::None,
+        other => return Err(anyhow!("unknown substrate action: {other}")),
+    };
+    Ok(kind)
 }
 
 /// Parse `--tools` tokens into [`ToolKind`]s, erroring on the first unknown one.

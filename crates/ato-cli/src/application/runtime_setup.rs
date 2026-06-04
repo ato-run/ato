@@ -29,7 +29,8 @@ use capsule_core::reporter::CapsuleReporter;
 use capsule_core::runtime_setup::{
     InstallPhase, InstallProgress, RecommendedAction, RuntimeSetupStatus, SUPPORTED_NODE_VERSION,
     SUPPORTED_PYTHON_VERSION, SUPPORTED_UV_VERSION, ToolKind, ToolSource, ToolStatus,
-    VirtualizationStatus, WindowsSubstrateStatus, WslStatus,
+    VirtualizationStatus, WindowsSubstrateAction, WindowsSubstrateActionKind,
+    WindowsSubstrateStatus, WslStatus,
 };
 
 use capsule_core::podman::ATO_PODMAN_MACHINE_NAME;
@@ -81,7 +82,7 @@ fn detect_windows_substrate() -> Option<WindowsSubstrateStatus> {
 
 /// Decode `wsl.exe` output, which is UTF-16LE on Windows. Drops NUL bytes so a
 /// naive UTF-8 lossy decode of UTF-16LE ASCII text reads cleanly.
-fn decode_wsl_output(bytes: &[u8]) -> String {
+pub(crate) fn decode_wsl_output(bytes: &[u8]) -> String {
     if bytes.iter().filter(|b| **b == 0).count() * 2 >= bytes.len() && !bytes.is_empty() {
         // Looks like UTF-16LE (roughly half the bytes are NUL): decode as such.
         let u16s: Vec<u16> = bytes
@@ -173,11 +174,38 @@ fn classify_windows_substrate(
         WslStatus::NotApplicable => "Not applicable on this host.".to_string(),
     };
 
+    let action = WindowsSubstrateAction::for_kind(substrate_action_kind(wsl, virtualization));
+
     WindowsSubstrateStatus {
         wsl,
         virtualization,
         reboot_required,
         message,
+        action,
+    }
+}
+
+/// The single substrate remediation to offer for a (`wsl`, `virtualization`)
+/// pair (#460). Podman *machine* health-error is intentionally **not** handled
+/// here — that stays on the Podman [`ToolStatus`] action; this owns only the
+/// WSL / virtualization / reboot substrate beneath Podman.
+fn substrate_action_kind(
+    wsl: WslStatus,
+    virtualization: VirtualizationStatus,
+) -> WindowsSubstrateActionKind {
+    use WindowsSubstrateActionKind as K;
+    match wsl {
+        // Finish a pending reboot before anything else.
+        WslStatus::RebootRequired => K::RebootRequired,
+        // A disabled VM platform blocks WSL2 itself — surface it before WSL steps.
+        _ if virtualization == VirtualizationStatus::UnavailableOrUnknown
+            && wsl != WslStatus::Ready =>
+        {
+            K::OpenVirtualizationInstructions
+        }
+        WslStatus::Missing => K::InstallWsl,
+        WslStatus::Wsl2Unavailable => K::EnableWsl2,
+        WslStatus::Ready | WslStatus::Unknown | WslStatus::NotApplicable => K::None,
     }
 }
 
@@ -1370,6 +1398,60 @@ mod tests {
         assert!(list_reports_version_2(list));
         let versions: Vec<u32> = wsl_list_versions(list).collect();
         assert_eq!(versions, vec![2, 1]);
+    }
+
+    // ── #460 PR2: substrate action classification ─────────────────────────────
+
+    #[test]
+    fn action_wsl_missing_is_install_wsl() {
+        let s = classify_windows_substrate(true, Some("is not installed. wsl --install"), None);
+        assert_eq!(s.wsl, WslStatus::Missing);
+        assert_eq!(s.action.kind, WindowsSubstrateActionKind::InstallWsl);
+        assert!(s.action.requires_admin && s.action.requires_reboot);
+        assert!(s.action.can_run_from_desktop);
+    }
+
+    #[test]
+    fn action_wsl2_unavailable_is_enable_wsl2() {
+        let s = classify_windows_substrate(
+            true,
+            Some("Windows Subsystem for Linux has no installed distributions."),
+            None,
+        );
+        assert_eq!(s.wsl, WslStatus::Wsl2Unavailable);
+        assert_eq!(s.action.kind, WindowsSubstrateActionKind::EnableWsl2);
+        assert!(!s.action.requires_reboot);
+    }
+
+    #[test]
+    fn action_reboot_required() {
+        let s = classify_windows_substrate(true, Some("Restart your computer to finish."), None);
+        assert_eq!(s.action.kind, WindowsSubstrateActionKind::RebootRequired);
+        assert!(s.action.requires_reboot);
+    }
+
+    #[test]
+    fn action_virtualization_disabled_opens_instructions_and_is_not_one_click() {
+        let s = classify_windows_substrate(
+            true,
+            Some(
+                "Please enable the Virtual Machine Platform; virtualization must be enabled in BIOS.",
+            ),
+            None,
+        );
+        assert_eq!(
+            s.action.kind,
+            WindowsSubstrateActionKind::OpenVirtualizationInstructions
+        );
+        // Firmware/BIOS cannot be fully automated → not a guaranteed one-click fix.
+        assert!(!s.action.can_run_from_desktop);
+    }
+
+    #[test]
+    fn action_ready_has_no_action() {
+        let list = "  NAME    STATE     VERSION\n* d      Running   2\n";
+        let s = classify_windows_substrate(true, Some("Default Version: 2"), Some(list));
+        assert_eq!(s.action.kind, WindowsSubstrateActionKind::None);
     }
 
     #[test]
