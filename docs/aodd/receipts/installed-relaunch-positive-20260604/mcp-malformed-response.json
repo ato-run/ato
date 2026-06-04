@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"ok\":false,\"action\":\"NavigateToUrl\",\"url\":\"ato://app/has/too/many/segments\",\"reason\":\"invalid_ato_app_url\",\"detail\":\"ato://app URL must be shaped as ato://app/<install_profile_key>\"}"}],"isError":false}}
