@@ -478,7 +478,7 @@ pub(crate) fn open_capsule_launch_gated(
                     .and_then(|value| serde_json::from_value::<RuntimeSetupStatus>(value).ok())
             })
             .await;
-        let _ = async_app.update(move |cx| {
+        async_app.update(move |cx| {
             match status.as_ref() {
                 // Status read AND host runtime not ready → divert to Runtime Setup.
                 Some(status) if !host_runtime_ready(status) => {
@@ -526,7 +526,7 @@ fn open_runtime_setup_for_pending_launch(
     let be = cx.background_executor().clone();
     fe.spawn(async move {
         crate::webview_init_guard::wait_until_idle(&be).await;
-        let _ = async_app.update(move |cx| {
+        async_app.update(move |cx| {
             push_runtime_setup(cx, &payload);
             super::status::spawn_runtime_setup_status(cx, None);
         });
