@@ -34,23 +34,61 @@ pub(super) struct RuntimeInstallUiEvent {
 /// keeps the two semantically distinct (managed-toolchain *install* vs.
 /// host-runtime *prepare*) even though both stream progress through the same
 /// `runtimeInstall*` hydrate fields and share the single-job guard.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum RuntimeJobKind {
     Install,
     Prepare,
+    /// Repair the Ato Podman machine (#460 PR2): restart + verify.
+    RepairHostRuntime,
+    /// Run a Windows substrate remediation (#460 PR2): the action token plus the
+    /// initiating surface, forwarded to `prepare-windows-substrate`.
+    PrepareWindowsSubstrate {
+        action: String,
+        source_surface: String,
+    },
 }
 
 impl RuntimeJobKind {
     /// The `ato internal runtime …` argv for this job. Install streams with
-    /// `--json`; prepare uses `--emit-json` (PR #440's flag).
-    fn cli_args<'a>(&self, tools_arg: &'a str) -> [&'a str; 6] {
+    /// `--json`; the host-runtime jobs use `--emit-json` (PR #440's flag).
+    fn cli_args(&self, tools_arg: &str) -> Vec<String> {
+        let s = |v: &str| v.to_string();
         match self {
-            RuntimeJobKind::Install => {
-                ["internal", "runtime", "install", "--tools", tools_arg, "--json"]
-            }
-            RuntimeJobKind::Prepare => {
-                ["internal", "runtime", "prepare", "--tools", tools_arg, "--emit-json"]
-            }
+            RuntimeJobKind::Install => vec![
+                s("internal"),
+                s("runtime"),
+                s("install"),
+                s("--tools"),
+                s(tools_arg),
+                s("--json"),
+            ],
+            RuntimeJobKind::Prepare => vec![
+                s("internal"),
+                s("runtime"),
+                s("prepare"),
+                s("--tools"),
+                s(tools_arg),
+                s("--emit-json"),
+            ],
+            RuntimeJobKind::RepairHostRuntime => vec![
+                s("internal"),
+                s("runtime"),
+                s("repair-host-runtime"),
+                s("--emit-json"),
+            ],
+            RuntimeJobKind::PrepareWindowsSubstrate {
+                action,
+                source_surface,
+            } => vec![
+                s("internal"),
+                s("runtime"),
+                s("prepare-windows-substrate"),
+                s("--action"),
+                action.clone(),
+                s("--source-surface"),
+                source_surface.clone(),
+                s("--emit-json"),
+            ],
         }
     }
 
@@ -59,6 +97,8 @@ impl RuntimeJobKind {
         match self {
             RuntimeJobKind::Install => "runtime install failed",
             RuntimeJobKind::Prepare => "Podman setup failed",
+            RuntimeJobKind::RepairHostRuntime => "Podman machine repair failed",
+            RuntimeJobKind::PrepareWindowsSubstrate { .. } => "Windows substrate setup failed",
         }
     }
 
@@ -67,15 +107,21 @@ impl RuntimeJobKind {
         match self {
             RuntimeJobKind::Install => "failed to start runtime install",
             RuntimeJobKind::Prepare => "failed to start Podman setup",
+            RuntimeJobKind::RepairHostRuntime => "failed to start Podman machine repair",
+            RuntimeJobKind::PrepareWindowsSubstrate { .. } => {
+                "failed to start Windows substrate setup"
+            }
         }
     }
 
     /// Cancellation message (only the foreground install path is cancellable
-    /// today, but prepare shares the same terminal-event plumbing).
+    /// today, but the other jobs share the same terminal-event plumbing).
     fn cancel_message(&self) -> &'static str {
         match self {
             RuntimeJobKind::Install => "runtime install cancelled",
             RuntimeJobKind::Prepare => "Podman setup cancelled",
+            RuntimeJobKind::RepairHostRuntime => "Podman machine repair cancelled",
+            RuntimeJobKind::PrepareWindowsSubstrate { .. } => "Windows substrate setup cancelled",
         }
     }
 }
