@@ -8,6 +8,7 @@ pub mod hardware;
 pub mod install_lifecycle;
 pub mod installed_state;
 pub mod interactive_resolution;
+pub mod interface;
 pub mod metrics;
 pub mod podman;
 pub mod reporter;
