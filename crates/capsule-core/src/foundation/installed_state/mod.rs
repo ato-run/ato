@@ -20,5 +20,7 @@
 mod admission;
 mod db;
 
-pub use admission::{StorageAdmission, available_space, evaluate_storage_admission};
+pub use admission::{
+    StorageAdmission, available_space, available_space_for_target, evaluate_storage_admission,
+};
 pub use db::{InstalledStateDb, MaterializedObject, StorageClaim};
