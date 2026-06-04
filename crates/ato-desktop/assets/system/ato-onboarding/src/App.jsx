@@ -38,7 +38,7 @@ export default function App() {
   // complete command tears down the window. `overrides` lets the Step 5 "Skip
   // Podman for now" path persist `podman_enabled: false` deterministically
   // without waiting on an async setState to flush.
-  const finish = (overrides = {}) => {
+  const finish = (overrides = {}, launchHandle = null) => {
     BRIDGE({
       kind: "save_runtime_setup_settings",
       podman_enabled: podmanEnabled,
@@ -47,7 +47,14 @@ export default function App() {
       python_install_enabled: pythonInstallEnabled,
       ...overrides,
     })
-    BRIDGE({ kind: "complete", version: ONBOARDING_VERSION, skipped: false })
+    // #460 PR3: `launchHandle` resumes straight into a sample capsule after
+    // onboarding closes ("Continue to sample app"); omitted → startup surface.
+    BRIDGE({
+      kind: "complete",
+      version: ONBOARDING_VERSION,
+      skipped: false,
+      ...(launchHandle ? { launch_handle: launchHandle } : {}),
+    })
   }
 
   useEffect(() => {

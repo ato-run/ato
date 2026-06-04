@@ -450,6 +450,64 @@ pub enum RuntimeSetupResumeStep {
 /// Current resume-marker schema version.
 pub const RUNTIME_SETUP_RESUME_SCHEMA_VERSION: u32 = 1;
 
+/// Persisted intent to resume a capsule launch once Runtime Setup completes
+/// (#460 PR3). When a launch is interrupted because the host runtime needs
+/// setup — or when setup needs a reboot — the Desktop records what the user was
+/// trying to open so it can return them there afterward, instead of stranding
+/// them on the setup screen.
+///
+/// Written under `~/.ato/runtime-setup/launch-intent.json`; consumed (and the
+/// marker cleared) once the substrate is ready. Advisory and self-healing: a
+/// missing, corrupt, or stale intent is treated as "nothing to resume".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSetupLaunchIntent {
+    pub schema_version: u32,
+    /// Unix-ms timestamp the intent was written (stamped by the caller).
+    pub created_at_unix_ms: u64,
+    /// Which surface recorded it (`"onboarding"` / `"settings"` / `"launch_flow"`).
+    pub source_surface: String,
+    pub intent_kind: LaunchIntentKind,
+    /// The launch input to replay — a capsule URL, sample slug, community recipe
+    /// id, or source URL, interpreted per `intent_kind`.
+    pub launch_input: String,
+    pub expected_next_step: LaunchIntentNextStep,
+    /// Correlates with the IPC request that recorded the intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Optional human-readable label for the pending launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<String>,
+}
+
+/// What kind of launch input a [`RuntimeSetupLaunchIntent`] carries (#460 PR3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchIntentKind {
+    /// A bundled sample capsule (onboarding smoke).
+    #[default]
+    SampleCapsule,
+    /// A `capsule://…` URL / handle.
+    CapsuleUrl,
+    /// A community recipe id (`ctoml_…`).
+    CommunityTomlId,
+    /// A source URL (e.g. a GitHub repo).
+    SourceUrl,
+}
+
+/// What to do with a launch intent once Runtime Setup is ready (#460 PR3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchIntentNextStep {
+    /// Resume the recorded capsule launch.
+    #[default]
+    ContinueLaunch,
+    /// Return the user to onboarding (no direct launch).
+    ReturnToOnboarding,
+}
+
+/// Current launch-intent schema version.
+pub const RUNTIME_SETUP_LAUNCH_INTENT_SCHEMA_VERSION: u32 = 1;
+
 /// Phases an install/prepare moves through. Emitted as a stream of JSON lines by
 /// `ato internal runtime install --json` and `ato internal runtime prepare
 /// --emit-json`.
