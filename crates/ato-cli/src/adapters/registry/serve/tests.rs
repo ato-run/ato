@@ -1524,6 +1524,33 @@ target = "/var/lib/app"
     assert_eq!(fetched, registered);
 }
 
+// ─── write_private_file permission tests ─────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn write_private_file_corrects_existing_loose_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join(".console-token");
+
+    // Create file with 0644 (simulating old std::fs::write behaviour).
+    std::fs::write(&path, b"old-token").expect("initial write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("set 0644");
+
+    // write_private_file must tighten the permission even on an existing file.
+    write_private_file(&path, b"new-token").expect("write_private_file");
+
+    let mode = std::fs::metadata(&path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "existing file must be tightened to 0600");
+
+    let contents = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(contents, "new-token");
+}
+
 // ─── CORS / PNA middleware integration tests ─────────────────────────────────
 
 mod cors_pna_tests {
