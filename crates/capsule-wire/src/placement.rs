@@ -34,6 +34,8 @@ pub struct PlacementCapabilities {
     pub supports_open_url: bool,
     #[serde(default)]
     pub supports_start_serve: bool,
+    #[serde(default)]
+    pub supports_add_capsule: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub isolation_classes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
