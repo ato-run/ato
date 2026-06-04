@@ -427,4 +427,62 @@ mod tests {
     fn parse_installable_tools_rejects_empty() {
         assert!(parse_installable_tools(&[]).is_err());
     }
+
+    // ── #460 PR2b: substrate job argv (the reboot_required CTA must route to
+    //    prepare-windows-substrate, NOT resume) ────────────────────────────────
+
+    #[test]
+    fn install_and_prepare_cli_args() {
+        assert_eq!(
+            RuntimeJobKind::Install.cli_args("node,uv"),
+            vec![
+                "internal", "runtime", "install", "--tools", "node,uv", "--json"
+            ]
+        );
+        assert_eq!(
+            RuntimeJobKind::Prepare.cli_args("podman"),
+            vec![
+                "internal",
+                "runtime",
+                "prepare",
+                "--tools",
+                "podman",
+                "--emit-json"
+            ]
+        );
+    }
+
+    #[test]
+    fn repair_cli_args() {
+        assert_eq!(
+            RuntimeJobKind::RepairHostRuntime.cli_args(""),
+            vec!["internal", "runtime", "repair-host-runtime", "--emit-json"]
+        );
+    }
+
+    #[test]
+    fn reboot_required_routes_through_prepare_windows_substrate() {
+        // Regression guard (#467 review): the reboot_required action persists the
+        // resume marker via prepare-windows-substrate; it must NOT be the
+        // read-only resume-after-reboot command.
+        let args = RuntimeJobKind::PrepareWindowsSubstrate {
+            action: "reboot_required".to_string(),
+            source_surface: "onboarding".to_string(),
+        }
+        .cli_args("");
+        assert_eq!(
+            args,
+            vec![
+                "internal",
+                "runtime",
+                "prepare-windows-substrate",
+                "--action",
+                "reboot_required",
+                "--source-surface",
+                "onboarding",
+                "--emit-json",
+            ]
+        );
+        assert!(!args.iter().any(|a| a == "resume-after-reboot"));
+    }
 }
