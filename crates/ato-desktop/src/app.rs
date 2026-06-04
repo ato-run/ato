@@ -1023,18 +1023,14 @@ pub fn run(skip_onboarding: bool) {
                             label,
                             community_toml_id,
                         };
-                        if let Err(err) =
-                            crate::window::launch_window::open_consent_window_for_route_with_client(
-                                cx,
-                                route,
-                                crate::state::session::SessionClientKind::OsBrowser,
-                            )
-                        {
-                            tracing::error!(
-                                error = %err,
-                                "NavigateToUrl(capsule, os-browser) open_consent_window_for_route failed"
-                            );
-                        }
+                        // #460 PR3b: route through Runtime Setup first if the host
+                        // OCI runtime is not ready, then resume this launch.
+                        crate::runtime_setup::launch_intent::open_capsule_launch_gated(
+                            cx,
+                            route,
+                            crate::state::session::SessionClientKind::OsBrowser,
+                            "launch_flow",
+                        );
                     }
                     crate::config::CapsuleOpenMode::Webviewer => {
                         tracing::warn!(
@@ -1046,16 +1042,12 @@ pub fn run(skip_onboarding: bool) {
                             label,
                             community_toml_id,
                         };
-                        if let Err(err) =
-                            crate::window::launch_window::open_consent_window_for_route(
-                                cx, route,
-                            )
-                        {
-                            tracing::error!(
-                                error = %err,
-                                "NavigateToUrl(capsule) open_consent_window_for_route failed"
-                            );
-                        }
+                        crate::runtime_setup::launch_intent::open_capsule_launch_gated(
+                            cx,
+                            route,
+                            crate::state::session::SessionClientKind::AtoWindow,
+                            "launch_flow",
+                        );
                     }
                     crate::config::CapsuleOpenMode::Window => {
                         let route = crate::state::GuestRoute::CapsuleHandle {
@@ -1066,16 +1058,15 @@ pub fn run(skip_onboarding: bool) {
                         // Gate every capsule launch on a pre-flight consent
                         // wizard. On Approve the broker spawns the real
                         // AppWindow + boot wizard; on Cancel nothing happens.
-                        if let Err(err) =
-                            crate::window::launch_window::open_consent_window_for_route(
-                                cx, route,
-                            )
-                        {
-                            tracing::error!(
-                                error = %err,
-                                "NavigateToUrl(capsule) open_consent_window_for_route failed"
-                            );
-                        }
+                        // #460 PR3b: if the host OCI runtime is not ready, this
+                        // first detours through Runtime Setup and resumes the
+                        // launch once it is ready instead of stranding the user.
+                        crate::runtime_setup::launch_intent::open_capsule_launch_gated(
+                            cx,
+                            route,
+                            crate::state::session::SessionClientKind::AtoWindow,
+                            "launch_flow",
+                        );
                     }
                 }
                 return;
