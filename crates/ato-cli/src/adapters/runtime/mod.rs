@@ -6,6 +6,7 @@ pub(crate) mod oci_provider;
 pub(crate) mod oci_session_store;
 pub(crate) mod overrides;
 pub(crate) mod podman_machine;
+pub(crate) mod port_admission;
 pub(crate) mod port_manager;
 pub(crate) mod process;
 pub(crate) mod provider_workspace;
