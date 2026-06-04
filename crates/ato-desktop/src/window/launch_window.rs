@@ -1425,21 +1425,64 @@ pub fn start_installed_launch(
         .detach();
 }
 
-/// Spawn `ato launch <ipk> -y` (which blocks for the session's lifetime) and
-/// poll until the desktop can see a reusable session record for `handle`.
+/// Log a diagnostic when a reused installed session's handle differs from the
+/// Start-entry handle. The `install_profile_key` is the canonical identity
+/// (#261), so a handle drift is expected and harmless — surface it rather than
+/// failing the launch.
+fn log_installed_handle_mismatch(
+    session: &crate::orchestrator::CapsuleLaunchSession,
+    start_handle: &str,
+    install_profile_key: &str,
+) {
+    if session.handle != start_handle && session.normalized_handle != start_handle {
+        tracing::info!(
+            start_handle = %start_handle,
+            session_handle = %session.handle,
+            install_profile_key,
+            "installed launch session handle differed from Start entry handle; using install_profile_key identity"
+        );
+    }
+}
+
+/// Ensure a backing session exists for an installed app, keyed by
+/// `install_profile_key` — the durable installed identity (#261), not the
+/// capsule handle. `handle` is the Start-entry handle, retained only to log a
+/// diagnostic when it differs from the session's handle.
 ///
-/// Returns the launched session on success. Returns `Err` if `ato launch` exits
-/// before a session appears, if the wait times out, or if the launch is aborted
-/// — the caller treats every `Err` as a fail-closed boot failure rather than
-/// falling back to a handle launch. On any non-success path the (possibly still
+/// If a compatible live session already exists it is reused immediately, with
+/// **no** new `ato launch` child spawned — this matters when an app is already
+/// running but the Start-entry handle has drifted from the session's handle.
+/// Otherwise it spawns `ato launch <ipk> -y` (which blocks for the session's
+/// lifetime) and polls until the matching session record appears.
+///
+/// Returns the session on success. Returns `Err` if `ato launch` exits before a
+/// session appears, if the wait times out, or if the launch is aborted — the
+/// caller treats every `Err` as a fail-closed boot failure rather than falling
+/// back to a handle launch. On any non-success path the (possibly still
 /// running) launch process is killed so it does not leak.
 fn ensure_installed_session(
     install_profile_key: &str,
     handle: &str,
     abort: &AtomicBool,
 ) -> Result<crate::orchestrator::CapsuleLaunchSession> {
-    // Uses the Desktop helper plumbing (ATO_HOME + runtime opt-out env), so the
-    // launch targets the same store/runtime the Desktop is using.
+    // 1. Reuse an already-live installed session before spawning anything. This
+    //    avoids a redundant `ato launch` child when the app is already running
+    //    (e.g. live session + drifted Start-entry handle). A read error here is
+    //    non-fatal: fall through and let the spawn path establish the session.
+    match crate::orchestrator::try_reuse_live_session_for_install_profile_key(install_profile_key) {
+        Ok(Some(session)) => {
+            log_installed_handle_mismatch(&session, handle, install_profile_key);
+            return Ok(session);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::debug!(error = %err, install_profile_key, "installed launch: pre-spawn session lookup errored; spawning ato launch")
+        }
+    }
+
+    // 2. No live session — spawn `ato launch`. Uses the Desktop helper plumbing
+    //    (ATO_HOME + runtime opt-out env), so the launch targets the same
+    //    store/runtime the Desktop is using.
     let mut launched = crate::orchestrator::spawn_installed_launch(install_profile_key)
         .map_err(|e| anyhow::anyhow!("start `ato launch` for installed app: {e:#}"))?;
 
@@ -1448,12 +1491,21 @@ fn ensure_installed_session(
         if abort.load(Ordering::Acquire) {
             break Err(anyhow::anyhow!("launch aborted"));
         }
-        match crate::orchestrator::try_reuse_live_session_for_click(handle) {
+        // #261: discover the backing session by its install_profile_key, not by
+        // capsule handle. The handle is display/legacy metadata only — matching
+        // on it could miss the session `ato launch <ipk>` just created if its
+        // canonical handle differs from the Start entry handle.
+        match crate::orchestrator::try_reuse_live_session_for_install_profile_key(
+            install_profile_key,
+        ) {
             // Success: leave the launch process running — it serves the app.
-            Ok(Some(session)) => return Ok(session),
+            Ok(Some(session)) => {
+                log_installed_handle_mismatch(&session, handle, install_profile_key);
+                return Ok(session);
+            }
             Ok(None) => {}
             Err(err) => {
-                tracing::debug!(error = %err, handle, "installed launch: session poll error")
+                tracing::debug!(error = %err, install_profile_key, "installed launch: session poll error")
             }
         }
         match launched.child.try_wait() {

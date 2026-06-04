@@ -984,6 +984,29 @@ pub fn run(skip_onboarding: bool) {
                     return;
                 }
 
+            // ato://app/<ipk> — the durable open identity of an installed app
+            // (#261). Route it straight to the install-owned, pre-consented
+            // launch path keyed by install_profile_key so deep links and the
+            // MCP `browser_navigate` / `NavigateToUrl` surface can reopen an
+            // installed app without re-showing the first-run consent wizard.
+            if raw.starts_with("ato://app/") {
+                match crate::system_capsule::ato_start::open_installed_app_by_ipk(cx, raw) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        // Unknown / degraded ipk or unreadable store. Fail
+                        // visibly rather than silently degrading to a handle
+                        // launch + consent wizard, which would lose the pinned
+                        // revision and install identity.
+                        tracing::warn!(
+                            error = %err,
+                            url = %raw,
+                            "NavigateToUrl(ato://app): no launchable installed profile — ignored"
+                        );
+                    }
+                }
+                return;
+            }
+
             if let Some(rest) = raw.strip_prefix("capsule://") {
                 // Extract optional ?ctoml=<id> query parameter.
                 let (rest_path, community_toml_id) = if let Some(q_pos) = rest.find('?') {

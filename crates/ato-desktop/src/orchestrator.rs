@@ -11,7 +11,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use ato_session_core::{
     RecordValidationOutcome, RecordValidationParams, StoredSessionInfo, compute_run_config_hash,
     materialized_launch_record_path, read_materialized_launch_record, read_session_records,
-    session_record_path, session_root as shared_session_root, validate_record_only,
+    session_record_path, session_root as shared_session_root,
+    validate_record_for_install_profile_key, validate_record_only,
 };
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path;
@@ -2544,6 +2545,81 @@ pub(crate) fn try_reuse_live_session_for_click(
     }
 }
 
+/// Try to reuse a live session for an **installed-app relaunch**, keyed by
+/// `install_profile_key` rather than capsule handle.
+///
+/// This is the durable identity for installed apps (#261): the session that
+/// `ato launch <ipk>` produced is matched by its stamped `install_profile_key`,
+/// so a clicked handle that has drifted from the record's canonical handle (or
+/// a session record indexed under a different handle normalization) does not
+/// cause a miss. The handle is intentionally not consulted here — it remains
+/// display / legacy-fallback metadata only.
+///
+/// Returns `Ok(Some(session))` when a live, healthy session whose record
+/// carries the requested `install_profile_key` is found. Returns `Ok(None)` on
+/// a clean miss (no matching record, or the match is stale/dead/unhealthy).
+/// Returns `Err` only for infrastructure failures (unreadable record dir) — the
+/// installed-launch caller treats every non-`Some` result as "keep polling /
+/// fail closed" and never falls back to a handle-based session start.
+pub(crate) fn try_reuse_live_session_for_install_profile_key(
+    install_profile_key: &str,
+) -> Result<Option<CapsuleLaunchSession>> {
+    let root = ato_session_core::session_root()?;
+    match try_session_record_fast_path_for_ipk_inner(
+        install_profile_key,
+        &root,
+        FAST_PATH_HEALTHCHECK_TIMEOUT,
+    )? {
+        Some(mut session) => {
+            session.click_origin = Some(ClickOrigin::now());
+            Ok(Some(session))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Inner helper for [`try_reuse_live_session_for_install_profile_key`] that
+/// takes the session root + healthcheck timeout explicitly so tests can inject
+/// a tempdir root. Walks the on-disk records and returns the first one whose
+/// `install_profile_key` matches and which passes the full liveness contract
+/// (schema, digest, pid alive, start-time, healthcheck). Among multiple live
+/// matches the first reusable record wins — the same "first reusable" rule the
+/// handle-keyed fast path uses.
+fn try_session_record_fast_path_for_ipk_inner(
+    install_profile_key: &str,
+    root: &Path,
+    healthcheck_timeout: Duration,
+) -> Result<Option<CapsuleLaunchSession>> {
+    let records = read_session_records(root)?;
+    if records.is_empty() {
+        return Ok(None);
+    }
+
+    let mut chosen: Option<StoredSessionInfo> = None;
+    for record in records {
+        if validate_record_for_install_profile_key(
+            &record,
+            install_profile_key,
+            healthcheck_timeout,
+        ) == RecordValidationOutcome::Reusable
+        {
+            chosen = Some(record);
+            break;
+        }
+    }
+
+    let Some(stored) = chosen else {
+        return Ok(None);
+    };
+    // The record's own handle is the canonical reusable identity; pass it as
+    // the requested handle (used only for logging inside the builder).
+    let requested_handle = stored.handle.clone();
+    Ok(Some(build_launch_session_from_stored(
+        &requested_handle,
+        stored,
+    )?))
+}
+
 /// The function emits two SURFACE-TIMING stages so Phase 0 logs can
 /// distinguish fast-path-hit (`session_record_lookup` +
 /// `session_record_validate` present, `*_subprocess` absent) from
@@ -2645,6 +2721,7 @@ fn validation_outcome_label(outcome: &RecordValidationOutcome) -> &'static str {
         RecordValidationOutcome::StaleSchema => "stale_schema",
         RecordValidationOutcome::MissingLaunchDigest => "missing_launch_digest",
         RecordValidationOutcome::HandleMismatch => "handle_mismatch",
+        RecordValidationOutcome::InstallProfileKeyMismatch => "install_profile_key_mismatch",
         RecordValidationOutcome::PidNotAlive => "pid_not_alive",
         RecordValidationOutcome::StartTimeMismatch => "start_time_mismatch",
         RecordValidationOutcome::HealthcheckFailed => "healthcheck_failed",
@@ -5759,6 +5836,62 @@ mod fast_path_tests {
         assert_eq!(session.capabilities, vec!["fs:read".to_string()]);
         // app_root is derived from manifest_path.parent().
         assert_eq!(session.app_root, PathBuf::from("/tmp"));
+    }
+
+    // ── install_profile_key-keyed lookup (#261) ─────────────────────────────
+
+    const TEST_IPK: &str = "ipk_abc00000000000000000000000000";
+
+    fn run_ipk_fast_path(root: &Path, ipk: &str) -> Option<CapsuleLaunchSession> {
+        try_session_record_fast_path_for_ipk_inner(ipk, root, TEST_HEALTHCHECK_TIMEOUT)
+            .expect("ipk fast path must not error on these fixtures")
+    }
+
+    #[test]
+    fn ipk_no_records_falls_back() {
+        let dir = TempDir::new().expect("tempdir");
+        assert!(run_ipk_fast_path(dir.path(), TEST_IPK).is_none());
+    }
+
+    #[test]
+    fn ipk_wrong_key_is_ignored() {
+        // A live session for a *different* install_profile_key must not match.
+        let dir = TempDir::new().expect("tempdir");
+        let mut record = base_record(TEST_HANDLE);
+        record.install_profile_key = Some("ipk_other000000000000000000000000".to_string());
+        write_record(dir.path(), &record);
+        assert!(run_ipk_fast_path(dir.path(), TEST_IPK).is_none());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn ipk_match_but_unhealthy_falls_back() {
+        // Matching ipk but the (port-1) healthcheck fails → no reuse.
+        let dir = TempDir::new().expect("tempdir");
+        let mut record = base_record(TEST_HANDLE);
+        record.install_profile_key = Some(TEST_IPK.to_string());
+        write_record(dir.path(), &record);
+        assert!(run_ipk_fast_path(dir.path(), TEST_IPK).is_none());
+    }
+
+    #[test]
+    fn ipk_match_session_builds_with_record_handle_and_ipk() {
+        // Core #261 guarantee, asserted at the assembly layer (no live HTTP
+        // server — those proved flaky under parallel load): once a record is
+        // selected by install_profile_key, the synthesized session keeps the
+        // record's own handle and propagates the install_profile_key, even when
+        // that handle differs from whatever the caller clicked. This is the
+        // builder half of `try_session_record_fast_path_for_ipk_inner`; the
+        // selection half (ipk match / mismatch / stale) is covered by the
+        // tests above.
+        let mut stored = base_record("capsule://unrelated/other-app");
+        stored.install_profile_key = Some(TEST_IPK.to_string());
+
+        let session = build_launch_session_from_stored(&stored.handle.clone(), stored)
+            .expect("synthesizing CapsuleLaunchSession from an ipk record must succeed");
+
+        assert_eq!(session.install_profile_key.as_deref(), Some(TEST_IPK));
+        assert_eq!(session.handle, "capsule://unrelated/other-app");
     }
 
     /// community_toml_id launches must never use the session-record fast path.
