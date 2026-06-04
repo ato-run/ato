@@ -140,6 +140,7 @@ mod tests {
             expected_next_step: LaunchIntentNextStep::ContinueLaunch,
             request_id: Some("req-1".to_string()),
             display_label: Some("pgweb".to_string()),
+            requested_client: None,
         }
     }
 

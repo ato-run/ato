@@ -327,6 +327,11 @@ export default function Step5({
   activeJobRef.current = activeJob
   const prepareQueuedRef = useRef(false)
   const startPrepareRef = useRef(() => {})
+  // #460 PR3b: a capsule launch the user attempted before Runtime Setup was
+  // ready. Once setup completes, the Desktop resumes it automatically; until
+  // then we show a banner so the user knows why they're here.
+  const [pendingLaunch, setPendingLaunch] = useState(null)
+  const [resumeError, setResumeError] = useState(null)
 
   useEffect(() => {
     const previousHydrate = window.__ATO_ONBOARDING_HYDRATE__
@@ -383,6 +388,17 @@ export default function Step5({
       }
       if (payload.runtimeInstallCancelled) {
         setInstallError('Cancelling runtime install...')
+      }
+      // #460 PR3b: pending interrupted-launch banner state. `pendingLaunch` is
+      // explicitly `null` when there is nothing to resume.
+      if ('pendingLaunch' in payload) {
+        setPendingLaunch(payload.pendingLaunch)
+      }
+      if (payload.pendingLaunchCancelled) {
+        setPendingLaunch(null)
+      }
+      if (payload.launchResumeFailed) {
+        setResumeError((payload.error && payload.error.message) || 'Could not resume the pending launch.')
       }
       if (payload.runtimeSetupResume) {
         // #460 PR2: resume-after-reboot carries a refreshed status snapshot.
@@ -558,6 +574,14 @@ export default function Step5({
     BRIDGE({ kind: 'resume_runtime_setup_after_reboot', request_id: nextRequestId() })
   }
 
+  // #460 PR3b: dismiss a pending interrupted-launch. Clears the launch-intent
+  // marker only — Runtime Setup itself keeps running.
+  const cancelPendingLaunch = () => {
+    setPendingLaunch(null)
+    setResumeError(null)
+    BRIDGE({ kind: 'cancel_pending_launch', request_id: nextRequestId() })
+  }
+
   const skipPodman = () => {
     // Explicit opt-out: disable Podman locally and persist false deterministically
     // (via the finish override) so a failed/unavailable prepare never traps the
@@ -629,6 +653,29 @@ export default function Step5({
           consistently. These are on by default — change them later in Settings.
         </p>
       </div>
+
+      {pendingLaunch && (
+        <div className="shrink-0 mb-3 rounded-xl border border-violet-200 bg-violet-50 px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-[13px] leading-snug text-violet-800">
+              After setup, Ato will continue opening{' '}
+              <span className="font-semibold">{pendingLaunch.label || 'your app'}</span>.
+            </p>
+            <button
+              type="button"
+              onClick={cancelPendingLaunch}
+              className="shrink-0 text-[12px] font-medium text-violet-600 hover:text-violet-800 underline"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {resumeError && (
+        <div className="shrink-0 mb-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3">
+          <p className="text-[13px] leading-snug text-rose-700">{resumeError}</p>
+        </div>
+      )}
 
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3">
         <p className="text-[12px] font-bold tracking-widest text-slate-400 uppercase">
