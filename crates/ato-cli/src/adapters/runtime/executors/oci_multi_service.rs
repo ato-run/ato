@@ -29,10 +29,10 @@ use capsule_core::execution_plan::model::OciPolicyMode;
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{
     OciContainerRequest, OciMountSourceKind, OciMountSpec, OciNetworkRequest, OciPortSpec,
-    engine_state_volume_name, is_ato_managed_state_source, is_ephemeral_state_source,
+    resolve_oci_mount,
 };
 use capsule_core::types::{
-    IngressConfig, Mount, OciImageResolution, OciProviderKind, OrchestrationPlan, ResolvedService,
+    IngressConfig, OciImageResolution, OciProviderKind, OrchestrationPlan, ResolvedService,
     ResolvedServiceRuntime, StateDurability,
 };
 
@@ -485,11 +485,11 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
             // (#444). Ownership is passed through so the provider (Podman: `:U`,
             // Docker-compatible: warn + no-op) can apply engine-delegated
             // ownership init. Host-side chown is not performed. See #428.
-            let provider_kind = provider.semantics().kind;
+            let is_podman = provider.semantics().kind == OciProviderKind::Podman;
             let mounts: Vec<OciMountSpec> = target_runtime
                 .mounts
                 .iter()
-                .map(|m| resolve_oci_mount(m, provider_kind, cfg!(target_os = "windows")))
+                .map(|m| resolve_oci_mount(m, is_podman, cfg!(target_os = "windows")))
                 .collect();
 
             // Track ephemeral engine volumes so cleanup can delete them; their
@@ -1396,56 +1396,6 @@ fn prepare_writable_ownership_mount_sources(
     Ok(())
 }
 
-/// Select the source strategy (host bind path vs engine-managed volume) for one
-/// state-binding mount and build the resulting [`OciMountSpec`].
-///
-/// On **Windows + Podman**, an Ato-managed *writable* state binding uses an
-/// engine-managed named volume instead of a host bind mount: the Windows host
-/// filesystem has no POSIX ownership/permission semantics, so a non-root
-/// container user (or `postgres initdb`) cannot `chmod`/`chown` a bind-mounted
-/// host directory and stateful recipes (node-red, blinko) fail to start. Named
-/// volumes live in the engine's own Linux filesystem, where copy-up and `:U`
-/// give the container user a writable, correctly-owned directory.
-///
-/// Everything else stays a bind mount, preserving existing behavior:
-/// * explicit user-supplied host paths (not Ato-managed) — honor the path,
-/// * read-only mounts — never re-homed to a volume,
-/// * non-Windows hosts and non-Podman providers — unchanged.
-///
-/// The engine volume name is derived from the source-path identity (not the
-/// session id) so persistent state maps to a stable volume across restarts;
-/// ephemeral state is marked `remove_on_stop` so cleanup deletes it. See #444.
-fn resolve_oci_mount(
-    mount: &Mount,
-    provider_kind: OciProviderKind,
-    is_windows_host: bool,
-) -> OciMountSpec {
-    let use_engine_volume = is_windows_host
-        && provider_kind == OciProviderKind::Podman
-        && !mount.readonly
-        && is_ato_managed_state_source(&mount.source);
-
-    if use_engine_volume {
-        OciMountSpec {
-            source: engine_state_volume_name(&mount.source),
-            target: mount.target.clone(),
-            readonly: mount.readonly,
-            ownership: mount.ownership.clone(),
-            source_kind: OciMountSourceKind::EngineVolume {
-                remove_on_stop: is_ephemeral_state_source(&mount.source),
-            },
-        }
-    } else {
-        OciMountSpec {
-            source: mount.source.clone(),
-            target: mount.target.clone(),
-            readonly: mount.readonly,
-            ownership: mount.ownership.clone(),
-            source_kind: OciMountSourceKind::BindPath,
-        }
-    }
-}
-
 /// Collect mount source directories that belong to `Ephemeral` state bindings.
 fn collect_ephemeral_mount_sources(plan: &ManifestData) -> HashSet<String> {
     let Ok(manifest) = plan.typed_manifest() else {
@@ -1729,9 +1679,9 @@ use std::io::Write;
 mod tests {
     use super::*;
     use crate::adapters::runtime::oci_provider::FakeOciProvider;
-    use capsule_core::runtime::oci::OciContainerInspect;
+    use capsule_core::runtime::oci::{OciContainerInspect, engine_state_volume_name};
     use capsule_core::types::{
-        OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
+        Mount, OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
         ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
         ServiceConnectionInfo,
     };
@@ -3597,129 +3547,9 @@ volumes:
         assert!(spec.readonly);
     }
 
-    // ── resolve_oci_mount: Windows/Podman engine-volume strategy (#444) ───────
-    mod windows_podman_volume_strategy {
-        use super::*;
-
-        fn managed_persistent_mount(target: &str) -> Mount {
-            // A path under the durable state root → Ato-managed, persistent.
-            let source = capsule_core::common::paths::ato_state_dir()
-                .join("blinko")
-                .join("pgdata")
-                .to_string_lossy()
-                .to_string();
-            Mount {
-                source,
-                target: target.to_string(),
-                readonly: false,
-                ownership: None,
-            }
-        }
-
-        fn managed_ephemeral_mount(target: &str) -> Mount {
-            // A path under the ephemeral state base → Ato-managed, ephemeral.
-            let base = capsule_core::types::default_ephemeral_state_base();
-            let source = format!("{}/node-red/data", base.trim_end_matches(['/', '\\']));
-            Mount {
-                source,
-                target: target.to_string(),
-                readonly: false,
-                ownership: None,
-            }
-        }
-
-        fn explicit_host_mount(target: &str) -> Mount {
-            // A path the user pinned explicitly, outside Ato-managed roots.
-            Mount {
-                source: "/explicit/user/data".to_string(),
-                target: target.to_string(),
-                readonly: false,
-                ownership: None,
-            }
-        }
-
-        #[test]
-        fn windows_podman_managed_persistent_is_persistent_engine_volume() {
-            let m = managed_persistent_mount("/var/lib/postgresql/data");
-            let spec = resolve_oci_mount(&m, OciProviderKind::Podman, true);
-            assert_eq!(
-                spec.source_kind,
-                OciMountSourceKind::EngineVolume {
-                    remove_on_stop: false
-                }
-            );
-            // Source becomes a sanitized, stable volume name — not the host path.
-            assert!(spec.source.starts_with("ato-state-"));
-            assert_ne!(spec.source, m.source);
-        }
-
-        #[test]
-        fn windows_podman_managed_ephemeral_removes_on_stop() {
-            let m = managed_ephemeral_mount("/data");
-            let spec = resolve_oci_mount(&m, OciProviderKind::Podman, true);
-            assert_eq!(
-                spec.source_kind,
-                OciMountSourceKind::EngineVolume {
-                    remove_on_stop: true
-                }
-            );
-        }
-
-        #[test]
-        fn windows_podman_explicit_host_path_stays_bind() {
-            let m = explicit_host_mount("/data");
-            let spec = resolve_oci_mount(&m, OciProviderKind::Podman, true);
-            assert_eq!(spec.source_kind, OciMountSourceKind::BindPath);
-            assert_eq!(spec.source, m.source);
-        }
-
-        #[test]
-        fn non_windows_podman_managed_stays_bind() {
-            let m = managed_persistent_mount("/data");
-            let spec = resolve_oci_mount(&m, OciProviderKind::Podman, false);
-            assert_eq!(spec.source_kind, OciMountSourceKind::BindPath);
-            assert_eq!(spec.source, m.source);
-        }
-
-        #[test]
-        fn windows_docker_managed_stays_bind() {
-            let m = managed_persistent_mount("/data");
-            let spec = resolve_oci_mount(&m, OciProviderKind::DockerCompatible, true);
-            assert_eq!(spec.source_kind, OciMountSourceKind::BindPath);
-        }
-
-        #[test]
-        fn windows_podman_readonly_managed_stays_bind() {
-            let mut m = managed_persistent_mount("/data");
-            m.readonly = true;
-            let spec = resolve_oci_mount(&m, OciProviderKind::Podman, true);
-            assert_eq!(spec.source_kind, OciMountSourceKind::BindPath);
-        }
-
-        #[test]
-        fn node_red_data_mount_is_engine_volume_on_windows() {
-            // node-red binds /data; ephemeral managed state → engine volume.
-            let m = managed_ephemeral_mount("/data");
-            let spec = resolve_oci_mount(&m, OciProviderKind::Podman, true);
-            assert!(spec.is_engine_volume());
-        }
-
-        #[test]
-        fn blinko_pgdata_mount_is_engine_volume_on_windows() {
-            // blinko's postgres binds /var/lib/postgresql/data; persistent
-            // managed state → engine volume, ownership preserved.
-            let mut m = managed_persistent_mount("/var/lib/postgresql/data");
-            m.ownership = Some(capsule_core::types::MountOwnership {
-                uid: Some(999),
-                gid: Some(999),
-                recursive: false,
-                mode: Some(0o700),
-            });
-            let spec = resolve_oci_mount(&m, OciProviderKind::Podman, true);
-            assert!(spec.is_engine_volume());
-            assert_eq!(spec.ownership.as_ref().unwrap().uid, Some(999));
-        }
-    }
+    // resolve_oci_mount strategy selection is unit-tested in capsule-core
+    // (`engine::runtime::oci::mount_source_tests`) since the helper now lives
+    // there and is shared by both the multi-service and orchestrator paths (#444).
 
     // ── cleanup_services: ephemeral engine volume removal (#444) ──────────────
 
