@@ -59,7 +59,7 @@ static HDR_ACMA: HeaderName = HeaderName::from_static("access-control-max-age");
 static HDR_ACAPN: HeaderName = HeaderName::from_static("access-control-allow-private-network");
 static HDR_ACRPN: HeaderName = HeaderName::from_static("access-control-request-private-network");
 
-const ALLOWED_METHODS: &str = "GET, OPTIONS";
+const ALLOWED_METHODS: &str = "GET, POST, OPTIONS";
 const ALLOWED_HEADERS: &str = "Authorization, Content-Type, Accept";
 const MAX_AGE_SECS: &str = "86400";
 
