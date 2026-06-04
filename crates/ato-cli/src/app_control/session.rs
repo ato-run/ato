@@ -3000,58 +3000,56 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         return Err(err);
     }
 
-    // Prune the OCI network created for this session (#273). Runs
-    // after all containers have been removed so the network is no
-    // longer in use. Returns an observable outcome so callers can
-    // surface failures rather than silently losing retryability.
-    let network_cleanup_warning: Option<String> = if stopped {
-        if let Some(network_name) = session_record
-            .as_ref()
-            .and_then(|r| r.orchestration_services.as_ref())
-            .and_then(|s| s.network_name.as_deref())
-        {
-            use crate::application::orchestration_teardown::{
-                NetworkRemovalOutcome, remove_network_if_present,
-            };
-            match remove_network_if_present(network_name) {
-                NetworkRemovalOutcome::Removed | NetworkRemovalOutcome::AlreadyGone => None,
-                NetworkRemovalOutcome::SkippedNotAtoManaged => None,
-                NetworkRemovalOutcome::Failed(err) => Some(format!(
-                    "network cleanup failed for {network_name}: {err}; \
-                     run `podman network rm {network_name}` to clean up manually"
-                )),
+    // Cleanup of OCI residue (containers → ephemeral volumes → network).
+    //
+    // Container teardown happened above. These steps are intentionally **not**
+    // gated on `stopped`: a session whose containers already exited reports
+    // `stopped == false`, but its `ato-*` network and ephemeral volumes can
+    // still be orphaned. Both removals are idempotent (not-found counts as
+    // success) and guarded by the `ato-` / `ato-state-` name prefixes, so
+    // running them unconditionally is safe and closes the leak where stop found
+    // nothing live to kill (#450). Persistent volumes are not listed on the
+    // record, so durable state survives stop (#444).
+    let orchestration_services = session_record
+        .as_ref()
+        .and_then(|r| r.orchestration_services.as_ref());
+
+    // Ephemeral engine-managed state volumes first — they are mounted by the
+    // (now-removed) containers and are independent of the network. Failures are
+    // logged, never fatal: a leaked ephemeral volume is less harmful than a
+    // session that refuses to stop.
+    if let Some(volumes) = orchestration_services.map(|s| s.ephemeral_volumes.as_slice()) {
+        use crate::application::orchestration_teardown::{
+            VolumeRemovalOutcome, remove_volume_if_present,
+        };
+        for volume in volumes {
+            if let VolumeRemovalOutcome::Failed(err) = remove_volume_if_present(volume) {
+                eprintln!(
+                    "ATO-WARN ephemeral volume cleanup failed for {volume}: {err}; \
+                     run `podman volume rm {volume}` to clean up manually"
+                );
             }
-        } else {
-            None
+        }
+    }
+
+    // Then the session-scoped network, once nothing is attached (#273, #450).
+    let network_cleanup_warning: Option<String> = if let Some(network_name) =
+        orchestration_services.and_then(|s| s.network_name.as_deref())
+    {
+        use crate::application::orchestration_teardown::{
+            NetworkRemovalOutcome, remove_network_if_present,
+        };
+        match remove_network_if_present(network_name) {
+            NetworkRemovalOutcome::Removed | NetworkRemovalOutcome::AlreadyGone => None,
+            NetworkRemovalOutcome::SkippedNotAtoManaged => None,
+            NetworkRemovalOutcome::Failed(err) => Some(format!(
+                "network cleanup failed for {network_name}: {err}; \
+                     run `podman network rm {network_name}` to clean up manually"
+            )),
         }
     } else {
         None
     };
-
-    // Delete ephemeral engine-managed state volumes (#444). Runs after the
-    // containers stop so the volumes are no longer in use. Persistent volumes
-    // are not listed on the record, so durable state survives stop. Failures
-    // are logged but never block teardown — a leaked ephemeral volume is far
-    // less harmful than a session that refuses to stop.
-    if stopped {
-        if let Some(volumes) = session_record
-            .as_ref()
-            .and_then(|r| r.orchestration_services.as_ref())
-            .map(|s| s.ephemeral_volumes.as_slice())
-        {
-            use crate::application::orchestration_teardown::{
-                VolumeRemovalOutcome, remove_volume_if_present,
-            };
-            for volume in volumes {
-                if let VolumeRemovalOutcome::Failed(err) = remove_volume_if_present(volume) {
-                    eprintln!(
-                        "ATO-WARN ephemeral volume cleanup failed for {volume}: {err}; \
-                         run `podman volume rm {volume}` to clean up manually"
-                    );
-                }
-            }
-        }
-    }
 
     if stopped && session_path.exists() {
         fs::remove_file(&session_path)
