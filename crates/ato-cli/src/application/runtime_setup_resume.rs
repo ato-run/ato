@@ -135,6 +135,17 @@ pub(crate) fn resume_after_reboot(json: bool) -> Result<()> {
         let _ = clear_resume_marker();
     }
 
+    // #460 PR3: alongside the reboot marker, surface any pending capsule
+    // launch-intent so the Desktop can resume the interrupted launch once the
+    // substrate is ready. Read-only here (the Desktop consumes it when it acts);
+    // the two markers are independent files.
+    let launch_intent = crate::application::runtime_setup_launch::read_launch_intent();
+    let launch = crate::application::runtime_setup_launch::decide_launch_continuation(
+        launch_intent,
+        substrate_ready,
+        now_unix_ms,
+    );
+
     if json {
         let (outcome_str, next) = match &outcome {
             ResumeOutcome::NothingToResume => ("nothing_to_resume", None),
@@ -142,11 +153,26 @@ pub(crate) fn resume_after_reboot(json: bool) -> Result<()> {
             ResumeOutcome::StillPending => ("still_pending", None),
             ResumeOutcome::Ready { next } => ("ready", Some(*next)),
         };
+        let launch_payload = match &launch {
+            crate::application::runtime_setup_launch::LaunchContinuation::Continue(intent) => {
+                serde_json::json!({ "status": "continue", "intent": intent })
+            }
+            crate::application::runtime_setup_launch::LaunchContinuation::Pending => {
+                serde_json::json!({ "status": "pending" })
+            }
+            crate::application::runtime_setup_launch::LaunchContinuation::Discard => {
+                serde_json::json!({ "status": "discard" })
+            }
+            crate::application::runtime_setup_launch::LaunchContinuation::None => {
+                serde_json::Value::Null
+            }
+        };
         let payload = serde_json::json!({
             "ok": true,
             "resumeOutcome": outcome_str,
             "nextStep": next,
             "runtimeSetupStatus": status,
+            "launchContinuation": launch_payload,
         });
         println!("{payload}");
     } else {

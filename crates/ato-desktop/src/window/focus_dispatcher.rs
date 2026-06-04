@@ -598,6 +598,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                     OnboardingCommand::Complete {
                                                         version: ONBOARDING_VERSION,
                                                         skipped,
+                                                        launch_handle: None,
                                                     },
                                                 )
                                                 .map_err(|err| err.to_string())
