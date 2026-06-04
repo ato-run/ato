@@ -133,7 +133,10 @@ mod tests {
             "control_token must be 64 hex chars"
         );
         assert!(
-            identity.control_token.chars().all(|c| c.is_ascii_hexdigit()),
+            identity
+                .control_token
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
             "control_token must be hex"
         );
     }
