@@ -239,6 +239,11 @@ pub(crate) struct ConsumerRunRequest {
     /// `run_install_phase` bypasses `resolve_run_target_or_install` and uses
     /// this frozen revision output dir directly as the run target.
     pub(crate) pinned_revision_output_dir: Option<std::path::PathBuf>,
+    /// Trusted install-lifecycle identity set by `ato launch`. Threaded into the
+    /// dependency materialization request so the session record is stamped with
+    /// installed app / profile / revision identity via explicit data flow.
+    pub(crate) install_lifecycle_context:
+        Option<crate::cli::commands::run::InstallLifecycleContext>,
 }
 
 impl ConsumerRunRequest {
@@ -1596,6 +1601,10 @@ fn dependency_request_for_run(
         platform: PlatformTriple::current(),
         cache_strategy: request.cache_strategy,
         attestation_strategy: AttestationStrategy::None,
+        // Trusted, request-scoped install-lifecycle identity (set only by
+        // `ato launch`). Threaded as typed data so the materialized session
+        // record is stamped without any reliance on process env / globals.
+        install_lifecycle_context: request.install_lifecycle_context.clone(),
     })
 }
 
@@ -4884,6 +4893,7 @@ url = "http://127.0.0.1:8787/health"
             reporter: Arc::new(CliReporter::new(false)),
             preview_mode: false,
             pinned_revision_output_dir: None,
+            install_lifecycle_context: None,
         }
     }
 

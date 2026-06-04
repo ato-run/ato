@@ -210,6 +210,7 @@ fn materialize_provider_dependency_boundary(
         platform: PlatformTriple::current(),
         cache_strategy: CacheStrategy::None,
         attestation_strategy: AttestationStrategy::None,
+        install_lifecycle_context: None,
     };
     let projection = materializer.materialize(&request)?;
     let verification = materializer.verify(&projection)?;
