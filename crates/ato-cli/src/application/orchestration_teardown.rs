@@ -534,6 +534,20 @@ pub(crate) fn is_ato_managed_network(name: &str) -> bool {
     name.starts_with("ato-")
 }
 
+/// Argument vector for `<cmd> network rm [...] <name>`.
+///
+/// Podman gets `--force` so a network that still has an attached endpoint at
+/// removal time is force-disconnected and removed rather than left orphaned
+/// (#450). Docker has no `--force` for `network rm`, so it stays plain to avoid
+/// an "unknown flag" error.
+fn network_rm_args<'a>(cmd: &str, network_name: &'a str) -> Vec<&'a str> {
+    if cmd == "podman" {
+        vec!["network", "rm", "--force", network_name]
+    } else {
+        vec!["network", "rm", network_name]
+    }
+}
+
 /// Returns `true` when `msg` indicates the network is already gone
 /// (not present) rather than a real removal failure.
 fn is_network_not_found(msg: &str) -> bool {
@@ -578,8 +592,14 @@ fn try_remove_network_subprocess(network_name: &str) -> NetworkRemovalOutcome {
     // `docker network rm` hangs on the unix socket with no internal
     // timeout, blocking session teardown indefinitely.
     for cmd in ato_session_core::process::oci_probe_runtimes() {
+        // `--force` (podman only) disconnects any lingering endpoints before
+        // removing the network. Without it, `network rm` fails with "network
+        // is being used" when a container is still attached at removal time —
+        // e.g. a teardown race, or a sidecar/proxy endpoint not in the service
+        // set — leaving the `ato-*` network orphaned (#450). `docker network rm`
+        // has no such flag, so it stays plain.
         let result = Command::new(cmd)
-            .args(["network", "rm", network_name])
+            .args(network_rm_args(cmd, network_name))
             .output();
         match result {
             Ok(out) if out.status.success() => return NetworkRemovalOutcome::Removed,
@@ -747,6 +767,27 @@ mod tests {
     fn remove_network_skips_non_ato_managed() {
         let outcome = remove_network_if_present("my-random-network");
         assert_eq!(outcome, NetworkRemovalOutcome::SkippedNotAtoManaged);
+    }
+
+    // --- #450 network rm --force argument tests ---
+
+    #[test]
+    fn network_rm_args_podman_uses_force() {
+        // `--force` disconnects lingering endpoints so a still-attached network
+        // does not leak (#450).
+        assert_eq!(
+            network_rm_args("podman", "ato-blinko-abc12345-42"),
+            vec!["network", "rm", "--force", "ato-blinko-abc12345-42"]
+        );
+    }
+
+    #[test]
+    fn network_rm_args_docker_stays_plain() {
+        // `docker network rm` has no `--force`; adding it would be an unknown flag.
+        assert_eq!(
+            network_rm_args("docker", "ato-blinko-abc12345-42"),
+            vec!["network", "rm", "ato-blinko-abc12345-42"]
+        );
     }
 
     #[test]
