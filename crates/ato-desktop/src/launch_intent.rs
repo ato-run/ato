@@ -171,6 +171,85 @@ pub fn installed_match_for_handle(
     }
 }
 
+/// A launchable installed target resolved by reverse-looking the install store
+/// up by `install_profile_key` — the durable identity behind `ato://app/<ipk>`.
+///
+/// The `handle` is carried only for route construction / display; it is never
+/// the launch identity. Two installs that share a handle are disambiguated by
+/// their distinct keys, so resolving by key (unlike resolving by handle) is
+/// never ambiguous.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledLaunchTarget {
+    pub install_profile_key: String,
+    pub handle: String,
+    pub app_url: String,
+}
+
+/// Reverse-resolve an `install_profile_key` to a launchable
+/// [`InstalledLaunchTarget`] against an already-open store. Only the `default`
+/// profile is considered (#261 slice 2). Returns `Ok(None)` when no installed
+/// app derives the requested key, or the single match is degraded (no
+/// resolvable current revision) — the same launchability bar as
+/// [`installed_match_for_handle`].
+pub fn installed_target_for_ipk(
+    store: &InstallInstanceStore,
+    install_profile_key: &str,
+) -> Result<Option<InstalledLaunchTarget>> {
+    let profile_id = ProfileId::new("default");
+    for app_id in store.list_installed_apps()? {
+        let derived = derive_install_profile_key(&app_id, &profile_id);
+        if derived.as_str() != install_profile_key {
+            continue;
+        }
+        // Degraded / incomplete install must not present as launchable.
+        if store.current_revision(&app_id, &profile_id).is_err() {
+            return Ok(None);
+        }
+        let record = store.read_app_record(&app_id)?;
+        let handle = canonical_handle(&record);
+        if handle.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(InstalledLaunchTarget {
+            install_profile_key: derived.as_str().to_string(),
+            handle,
+            app_url: derive_app_url(&derived),
+        }));
+    }
+    Ok(None)
+}
+
+/// Open the install store and resolve an `ato://app/<ipk>` URL (or a bare ipk)
+/// to a launchable target. Thin filesystem wrapper around
+/// [`installed_target_for_ipk`] for callers (e.g. the `NavigateToUrl` router)
+/// that only hold the URL.
+pub fn installed_target_for_app_url(app_url: &str) -> Result<Option<InstalledLaunchTarget>> {
+    let ipk = app_url
+        .strip_prefix("ato://app/")
+        .unwrap_or(app_url)
+        .trim_end_matches('/')
+        .trim();
+    if ipk.is_empty() {
+        return Ok(None);
+    }
+    let root = capsule_core::common::paths::ato_path_or_workspace_tmp("instances");
+    let store = InstallInstanceStore::new(&root)?;
+    installed_target_for_ipk(&store, ipk)
+}
+
+/// Canonical capsule handle for an installed record: prefer the stored
+/// `capsule_handle`, fall back to `publisher/slug`. Mirrors the comparison
+/// targets of [`handle_matches_record`].
+fn canonical_handle(record: &AppRecord) -> String {
+    if !record.capsule_handle.is_empty() {
+        record.capsule_handle.clone()
+    } else if !record.publisher.is_empty() {
+        format!("{}/{}", record.publisher, record.slug)
+    } else {
+        String::new()
+    }
+}
+
 /// Whether a clicked handle refers to the same capsule as an installed app
 /// record. Compares against the record's `capsule_handle` and, as a fallback,
 /// its `publisher/slug`, under a light normalization.
@@ -436,5 +515,103 @@ mod tests {
             installed_match_for_handle(&store, "capsule://acme/Hello/").unwrap(),
             InstalledMatch::One { .. }
         ));
+    }
+
+    // ── installed_target_for_ipk (ato://app/<ipk> reverse lookup) ───────────
+
+    #[test]
+    fn ipk_lookup_returns_target_with_canonical_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        let app_id = install_app(
+            &store,
+            "app_ipk0000000000000000000000000",
+            "acme",
+            "hello",
+            true,
+        );
+        let ipk = derive_install_profile_key(&app_id, &ProfileId::new("default"));
+
+        let target = installed_target_for_ipk(&store, ipk.as_str())
+            .unwrap()
+            .expect("known ipk must resolve to a launchable target");
+        assert_eq!(target.install_profile_key, ipk.as_str());
+        assert_eq!(target.handle, "acme/hello");
+        assert_eq!(target.app_url, format!("ato://app/{}", ipk.as_str()));
+    }
+
+    #[test]
+    fn ipk_lookup_unknown_key_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        install_app(
+            &store,
+            "app_ipk0000000000000000000000000",
+            "acme",
+            "hello",
+            true,
+        );
+        assert_eq!(
+            installed_target_for_ipk(&store, "ipk_does_not_exist00000000000000").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn ipk_lookup_degraded_install_is_none() {
+        // Matching key but no current revision → not launchable, same bar as
+        // installed_match_for_handle.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        let app_id = install_app(
+            &store,
+            "app_deg0000000000000000000000000",
+            "acme",
+            "hello",
+            false,
+        );
+        let ipk = derive_install_profile_key(&app_id, &ProfileId::new("default"));
+        assert_eq!(installed_target_for_ipk(&store, ipk.as_str()).unwrap(), None);
+    }
+
+    #[test]
+    fn ipk_lookup_disambiguates_shared_handle() {
+        // Two installs sharing a handle are Ambiguous by handle, but each ipk
+        // resolves to exactly one target — the whole point of ato://app/<ipk>.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        let a = install_app(
+            &store,
+            "app_dup1000000000000000000000000",
+            "acme",
+            "hello",
+            true,
+        );
+        let b = install_app(
+            &store,
+            "app_dup2000000000000000000000000",
+            "acme",
+            "hello",
+            true,
+        );
+        assert_eq!(
+            installed_match_for_handle(&store, "acme/hello").unwrap(),
+            InstalledMatch::Many,
+            "handle resolution is ambiguous"
+        );
+        let ipk_a = derive_install_profile_key(&a, &ProfileId::new("default"));
+        let ipk_b = derive_install_profile_key(&b, &ProfileId::new("default"));
+        assert_eq!(
+            installed_target_for_ipk(&store, ipk_a.as_str())
+                .unwrap()
+                .map(|t| t.install_profile_key),
+            Some(ipk_a.as_str().to_string())
+        );
+        assert_eq!(
+            installed_target_for_ipk(&store, ipk_b.as_str())
+                .unwrap()
+                .map(|t| t.install_profile_key),
+            Some(ipk_b.as_str().to_string())
+        );
     }
 }
