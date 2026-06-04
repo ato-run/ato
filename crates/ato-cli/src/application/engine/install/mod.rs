@@ -26,6 +26,7 @@ use capsule_core::foundation::install_lifecycle::{
     path_safe_app_id,
 };
 
+use capsule_core::installed_state::{InstalledStateDb, StorageAdmission, StorageClaim};
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::resource::cas::LocalCasIndex;
 use capsule_core::types::CapsuleManifest;
@@ -1176,6 +1177,17 @@ pub async fn install_app(
     )?;
     let target_version = target_version_owned.as_str();
     ensure_release_exists(&capsule.releases, target_version)?;
+
+    // Storage admission (#508): decide before downloading whether the declared
+    // disk requirement fits on the install volume after existing installed
+    // claims, so we fail up front instead of mid-download.
+    let storage_db = InstalledStateDb::open_default()?;
+    let storage_admission = enforce_storage_admission(
+        &storage_db,
+        capsule.manifest_toml.as_deref(),
+        &install_volume_probe(output_dir.as_deref()),
+    )?;
+
     let (bytes, normalized_file_name) = match install_manifest_delta_path(
         &client,
         &registry,
@@ -1212,7 +1224,7 @@ pub async fn install_app(
         }
     };
 
-    complete_install_from_bytes(
+    let result = complete_install_from_bytes(
         capsule.id,
         scoped_ref,
         capsule.slug,
@@ -1230,7 +1242,15 @@ pub async fn install_app(
         },
         InstallSource::Registry(registry),
     )
-    .await
+    .await?;
+
+    // Record the storage reservation for the installed capsule so subsequent
+    // installs account for it during admission (#508).
+    if let StorageAdmissionOutcome::Admitted { required_bytes } = storage_admission {
+        record_install_storage_claim(&storage_db, &result, required_bytes);
+    }
+
+    Ok(result)
 }
 
 pub(crate) async fn fetch_capsule_detail_record(
@@ -2231,6 +2251,111 @@ pub async fn suggest_scoped_capsules(
     suggestions.sort_by_key(|s: &_| std::cmp::Reverse(s.downloads));
     suggestions.truncate(3);
     Ok(suggestions)
+}
+
+// ── Storage admission (#508) ────────────────────────────────────────────────
+
+/// Outcome of the pre-download storage admission step.
+#[derive(Debug)]
+pub(crate) enum StorageAdmissionOutcome {
+    /// Admitted; carries the estimated required bytes so a storage claim can be
+    /// recorded after the install completes.
+    Admitted { required_bytes: u64 },
+    /// No declared disk requirement, so storage could not be estimated; the
+    /// check is skipped rather than blocking the install. A future slice can use
+    /// measured artifact sizes instead of the declared requirement.
+    Skipped,
+}
+
+/// Declared disk requirement (bytes) from a resolved manifest.
+///
+/// `Ok(None)` only when there is no manifest or no declared `requirements.disk`.
+/// A malformed manifest or a malformed disk value (e.g. `disk = "nonsense"`) is
+/// an **error**, not a silent skip — it must stop the install up front rather
+/// than weaken admission to "no requirement".
+fn declared_disk_requirement_bytes(manifest_toml: Option<&str>) -> Result<Option<u64>> {
+    let Some(toml) = manifest_toml else {
+        return Ok(None);
+    };
+    let manifest = CapsuleManifest::from_toml(toml)?;
+    Ok(manifest.requirements.disk_bytes()?)
+}
+
+/// Volume to probe for an install: the configured store root, or the default
+/// `~/.ato/store`. The leaf install dir does not exist yet, so admission probes
+/// the nearest existing ancestor of this path.
+fn install_volume_probe(output_dir: Option<&Path>) -> PathBuf {
+    output_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(capsule_core::common::paths::ato_store_dir)
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const GIB: f64 = (1u64 << 30) as f64;
+    const MIB: f64 = (1u64 << 20) as f64;
+    let f = n as f64;
+    if f >= GIB {
+        format!("{:.1} GiB", f / GIB)
+    } else if f >= MIB {
+        format!("{:.1} MiB", f / MIB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Pre-download storage admission (#508): reject before downloading if the
+/// declared disk requirement does not fit on the install volume after existing
+/// installed claims. Returns the estimated required bytes on admit so the caller
+/// can record a claim after a successful install.
+pub(crate) fn enforce_storage_admission(
+    db: &InstalledStateDb,
+    manifest_toml: Option<&str>,
+    install_volume: &Path,
+) -> Result<StorageAdmissionOutcome> {
+    let Some(required_bytes) = declared_disk_requirement_bytes(manifest_toml)? else {
+        debug!("storage admission skipped: no declared disk requirement");
+        return Ok(StorageAdmissionOutcome::Skipped);
+    };
+    match db.check_storage_admission(required_bytes, install_volume)? {
+        StorageAdmission::Admitted { .. } => {
+            Ok(StorageAdmissionOutcome::Admitted { required_bytes })
+        }
+        StorageAdmission::Rejected {
+            required_bytes,
+            available_bytes,
+            reserved_bytes,
+            free_after_claims,
+            shortfall_bytes,
+        } => bail!(
+            "{code}: not enough storage to install. required {req}, free after reservations {free} \
+             on {path} (volume free {avail}, {reserved} reserved by installed apps), short by {short}",
+            code = crate::utils::error::ATO_ERR_INSUFFICIENT_STORAGE,
+            req = fmt_bytes(required_bytes),
+            free = fmt_bytes(free_after_claims),
+            path = install_volume.display(),
+            avail = fmt_bytes(available_bytes),
+            reserved = fmt_bytes(reserved_bytes),
+            short = fmt_bytes(shortfall_bytes),
+        ),
+    }
+}
+
+/// Record a storage reservation for a freshly-installed capsule. Best-effort: a
+/// recording failure must not fail an already-completed install.
+fn record_install_storage_claim(
+    db: &InstalledStateDb,
+    result: &InstallResult,
+    required_bytes: u64,
+) {
+    let Some(lifecycle) = result.install_lifecycle.as_ref() else {
+        return;
+    };
+    if let Err(err) = db.record_storage_claim(&StorageClaim {
+        install_profile_key: lifecycle.install_profile_key.as_str().to_string(),
+        reserved_bytes: required_bytes,
+    }) {
+        tracing::warn!(error = %err, "failed to record installed-capsule storage claim");
+    }
 }
 
 #[cfg(test)]
