@@ -124,10 +124,13 @@ impl InstalledStateDb {
               detail              TEXT,
               created_at          TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_resource_claims_profile
-              ON resource_claims(install_profile_key);
             CREATE INDEX IF NOT EXISTS idx_resource_claims_kind
               ON resource_claims(kind);
+            -- One claim per (installed app, resource kind): reinstall/update
+            -- replaces the reservation rather than stacking a new row, so the
+            -- reserved sum cannot double-count the same app.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_claims_profile_kind
+              ON resource_claims(install_profile_key, kind);
             ",
         )
         .map_err(rt)?;
@@ -181,13 +184,21 @@ impl InstalledStateDb {
         Ok(total.max(0) as u64)
     }
 
-    /// Record a storage reservation for an installed capsule.
+    /// Record (upsert) a storage reservation for an installed capsule.
+    ///
+    /// Keyed by `(install_profile_key, 'storage')`: reinstalling or updating the
+    /// same app **replaces** its reservation instead of adding another row, so
+    /// the reserved sum never double-counts a single app.
     pub fn record_storage_claim(&self, claim: &StorageClaim) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.connect()?;
         conn.execute(
             "INSERT INTO resource_claims(install_profile_key, kind, reserved_bytes, detail, created_at)
-             VALUES (?1, 'storage', ?2, NULL, ?3)",
+             VALUES (?1, 'storage', ?2, NULL, ?3)
+             ON CONFLICT(install_profile_key, kind) DO UPDATE SET
+               reserved_bytes = excluded.reserved_bytes,
+               detail = excluded.detail,
+               created_at = excluded.created_at",
             params![
                 claim.install_profile_key,
                 to_sql_i64_bytes(claim.reserved_bytes, "resource_claims.reserved_bytes")?,
@@ -400,5 +411,46 @@ mod tests {
             big,
             "reserved sum must be unchanged by the rejected oversized claim"
         );
+    }
+
+    #[test]
+    fn record_storage_claim_is_idempotent_per_install_profile() {
+        let (_dir, db) = temp_db();
+        let claim = StorageClaim {
+            install_profile_key: "app".to_string(),
+            reserved_bytes: 1_000_000_000,
+        };
+        db.record_storage_claim(&claim).unwrap();
+        db.record_storage_claim(&claim).unwrap();
+        assert_eq!(
+            db.reserved_storage_bytes().unwrap(),
+            1_000_000_000,
+            "recording the same app's claim twice must not double-count"
+        );
+    }
+
+    #[test]
+    fn successful_reinstall_does_not_double_reserve_storage() {
+        let (_dir, db) = temp_db();
+        // First install reserves 1GB.
+        db.record_storage_claim(&StorageClaim {
+            install_profile_key: "app".to_string(),
+            reserved_bytes: 1_000_000_000,
+        })
+        .unwrap();
+        // Reinstall/update of the SAME app reserves 2GB → replaces, not adds.
+        db.record_storage_claim(&StorageClaim {
+            install_profile_key: "app".to_string(),
+            reserved_bytes: 2_000_000_000,
+        })
+        .unwrap();
+        assert_eq!(db.reserved_storage_bytes().unwrap(), 2_000_000_000);
+        // A different app adds its own reservation.
+        db.record_storage_claim(&StorageClaim {
+            install_profile_key: "other".to_string(),
+            reserved_bytes: 500_000_000,
+        })
+        .unwrap();
+        assert_eq!(db.reserved_storage_bytes().unwrap(), 2_500_000_000);
     }
 }

@@ -3533,3 +3533,16 @@ fn storage_admission_rejects_when_existing_claims_exhaust_the_volume() {
         "error must explain why: {msg}"
     );
 }
+
+#[test]
+fn storage_admission_errors_on_invalid_disk_requirement() {
+    let (dir, db) = admission_db();
+    // A malformed disk requirement must fail up front, not be treated as
+    // "no requirement" and silently skipped.
+    let manifest = admission_manifest_with_disk("not-a-size");
+    let result = enforce_storage_admission(&db, Some(&manifest), dir.path());
+    assert!(
+        result.is_err(),
+        "malformed requirements.disk must error, not skip: {result:?}"
+    );
+}
