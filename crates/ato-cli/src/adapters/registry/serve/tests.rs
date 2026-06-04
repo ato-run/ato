@@ -1756,6 +1756,65 @@ mod cors_pna_tests {
     }
 
     #[tokio::test]
+    async fn full_stack_disallowed_pna_preflight_omits_all_cors_allow_headers() {
+        let app = make_full_stack_router(None);
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/v1/runtime/sessions")
+            .header("origin", "https://evil.example.com")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "authorization")
+            .header("access-control-request-private-network", "true")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("call full-stack router");
+        // Preflight must be intercepted with a clean response.
+        assert!(
+            resp.status() == StatusCode::NO_CONTENT || resp.status().is_success(),
+            "expected non-error preflight status, got {}",
+            resp.status()
+        );
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not receive ACAO"
+        );
+        assert!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .is_none(),
+            "disallowed origin must not receive ACAPN"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-methods").is_none(),
+            "disallowed origin must not receive ACAM"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-headers").is_none(),
+            "disallowed origin must not receive ACAH"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_stack_disallowed_actual_get_omits_acao() {
+        let _guard = AtoHomeGuard::set("full_stack_disallowed_get");
+        let app = make_full_stack_router(Some("tok"));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/runtime/providers")
+            .header("origin", "https://evil.example.com")
+            .header("authorization", "Bearer tok")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("call full-stack router");
+        // Endpoint should still behave normally.
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not receive ACAO on actual request"
+        );
+    }
+
+    #[tokio::test]
     async fn full_stack_pwa_preflight_returns_acao_and_acapn() {
         let app = make_full_stack_router(None);
         let origin = "https://app.ato.run";
