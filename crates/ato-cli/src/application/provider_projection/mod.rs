@@ -40,8 +40,6 @@
 //! full NodeReceipt/EdgeReceipt evidence (#493), implement cross-device
 //! placement (#509), or change install admission (#508).
 
-#![allow(dead_code)]
-
 pub(crate) mod oci;
 
 use serde::Serialize;
@@ -50,6 +48,11 @@ use serde::Serialize;
 ///
 /// `kind` is coarse and stable; the concrete realizer (podman vs docker vs
 /// youki, …) lives in [`ProviderId::name`]. Many names share one kind.
+///
+/// Only `Oci` is constructed in this first slice; the remaining variants are
+/// the forward-looking provider taxonomy from #501 (consumed by placement,
+/// #509). The `allow` should be dropped once a second provider lands.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ProviderKind {
@@ -106,7 +109,9 @@ pub(crate) struct ProviderCapabilities {
 /// where output landed, not the resolved Capsule.
 ///
 /// This PR only models the boundary — it does not populate full
-/// NodeReceipt/EdgeReceipt evidence. That remains tracked by #493.
+/// NodeReceipt/EdgeReceipt evidence. That remains tracked by #493, which will
+/// be the first consumer of this shape; defined now so the boundary is explicit.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct ProviderProjectionEvidence {
     /// Runtime container id (e.g. stdout of `podman create`). NOT execution
