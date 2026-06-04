@@ -20,8 +20,8 @@ use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{
-    BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciMountSpec, OciNetworkRequest,
-    OciPortSpec, OciRuntimeClient,
+    BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciMountSourceKind,
+    OciNetworkRequest, OciPortSpec, OciRuntimeClient, resolve_oci_mount,
 };
 use capsule_core::types::{
     OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceRuntime,
@@ -197,6 +197,10 @@ pub struct DetachedServiceSnapshot {
 pub struct DetachedOrchestrationServices {
     pub services: Vec<DetachedServiceSnapshot>,
     pub network_name: Option<String>,
+    /// Ephemeral engine-managed volumes created this session (Windows + Podman).
+    /// Persisted on the session record so `stop_session` can delete them;
+    /// persistent volumes are intentionally excluded so they survive stop. #444
+    pub ephemeral_volumes: Vec<String>,
     /// Held privately so the caller cannot accidentally drop one provider
     /// while keeping the others. Both `mem::forget(handle)` (the v0.5.0
     /// PR-C pattern) and the future PR-D `BackgroundSessionOwner` consume
@@ -268,9 +272,21 @@ where
         .map(|(name, rs)| build_detached_snapshot(name, rs))
         .collect();
 
+    // Aggregate ephemeral engine volumes across all services so the session
+    // record can drive their removal on stop. See #444.
+    let ephemeral_volumes: Vec<String> = running
+        .values()
+        .filter_map(|rs| match &rs.handle {
+            RunningHandle::Oci(oci) => Some(oci.ephemeral_volumes.iter().cloned()),
+            RunningHandle::Local(_) => None,
+        })
+        .flatten()
+        .collect();
+
     Ok(DetachedOrchestrationServices {
         services,
         network_name,
+        ephemeral_volumes,
         inner: running,
     })
 }
@@ -313,6 +329,9 @@ where
     let graph = ServiceGraphPlan::from_orchestration(&orchestration)?;
     let session_id = session_id(plan);
     let client = Arc::new(client);
+    // Detect the engine once so the mount strategy (#444) is consistent across
+    // all services in this session.
+    let is_podman = client.is_podman().await;
     let network_name = if orchestration
         .services
         .iter()
@@ -343,6 +362,7 @@ where
         Arc::clone(&client),
         session_id,
         network_name.clone(),
+        is_podman,
         attempt.map(|attempt| attempt.cleanup_scope()),
     );
 
@@ -426,6 +446,10 @@ struct RunningOciService {
     container_id: String,
     log_task: Option<tokio::task::JoinHandle<()>>,
     host_ports: HashMap<u16, u16>,
+    /// Ephemeral engine-managed volumes created for this service (Windows +
+    /// Podman). Removed when the service is stopped; persistent volumes are not
+    /// tracked here so they survive stop. See #444.
+    ephemeral_volumes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,6 +479,9 @@ where
     client: Arc<C>,
     session_id: String,
     network_name: Option<String>,
+    /// Whether the engine is Podman — selects the Windows engine-managed-volume
+    /// mount strategy. Detected once at startup. See #444.
+    is_podman: bool,
     state: Arc<Mutex<OrchestratorStartupState>>,
     startup_cleanup: Arc<StdMutex<Option<CleanupScope>>>,
 }
@@ -474,6 +501,7 @@ where
         client: Arc<C>,
         session_id: String,
         network_name: Option<String>,
+        is_podman: bool,
         startup_cleanup: Option<CleanupScope>,
     ) -> Self {
         Self {
@@ -486,6 +514,7 @@ where
             client,
             session_id,
             network_name,
+            is_podman,
             state: Arc::new(Mutex::new(OrchestratorStartupState::default())),
             startup_cleanup: Arc::new(StdMutex::new(startup_cleanup)),
         }
@@ -543,6 +572,7 @@ where
             &self.session_id,
             self.network_name.as_deref(),
             &self.options,
+            self.is_podman,
         )
         .await?;
 
@@ -582,6 +612,7 @@ async fn launch_service<C: OciRuntimeClient>(
     session_id: &str,
     network_name: Option<&str>,
     options: &OrchestratorOptions,
+    is_podman: bool,
 ) -> Result<RunningService> {
     let handle = match &service.runtime {
         ResolvedServiceRuntime::Oci(runtime) => {
@@ -618,6 +649,34 @@ async fn launch_service<C: OciRuntimeClient>(
                 })
                 .unwrap_or_default();
 
+            // Source strategy (#444): on Windows + Podman, Ato-managed writable
+            // state becomes an engine-managed named volume instead of a host bind
+            // mount; everything else stays a bind mount. Ownership is carried
+            // through so the provider can apply engine-delegated ownership init.
+            // This is the same `resolve_oci_mount` strategy used by the
+            // multi-service executor, so the Desktop session path (which routes
+            // here) behaves identically to `ato run`.
+            let mounts: Vec<_> = runtime
+                .mounts
+                .iter()
+                .map(|mount| resolve_oci_mount(mount, is_podman, cfg!(target_os = "windows")))
+                .collect();
+
+            // Ephemeral engine volumes created for this service must be removed on
+            // stop; persistent volumes survive so durable state is preserved.
+            let ephemeral_volumes: Vec<String> = mounts
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m.source_kind,
+                        OciMountSourceKind::EngineVolume {
+                            remove_on_stop: true
+                        }
+                    )
+                })
+                .map(|m| m.source.clone())
+                .collect();
+
             let container_id = client
                 .create_container(&OciContainerRequest {
                     name: container_name(plan, &service.name, session_id),
@@ -626,16 +685,7 @@ async fn launch_service<C: OciRuntimeClient>(
                     env: env.clone(),
                     working_dir: runtime.working_dir.clone(),
                     labels: container_labels(plan, &service.name, session_id, &runtime.target),
-                    mounts: runtime
-                        .mounts
-                        .iter()
-                        .map(|mount| OciMountSpec {
-                            source: mount.source.clone(),
-                            target: mount.target.clone(),
-                            readonly: mount.readonly,
-                            ownership: None,
-                        })
-                        .collect(),
+                    mounts,
                     ports,
                     network: network_name.map(str::to_string),
                     aliases: service.network.aliases.clone(),
@@ -683,6 +733,7 @@ async fn launch_service<C: OciRuntimeClient>(
                 container_id,
                 log_task: Some(log_task),
                 host_ports: inspect.host_ports,
+                ephemeral_volumes,
             })
         }
         ResolvedServiceRuntime::Managed(runtime) => {
@@ -1282,6 +1333,11 @@ async fn stop_service<C: OciRuntimeClient>(service: &mut RunningService, client:
                 .stop_container(&oci.container_id, OCI_STOP_TIMEOUT_SECS)
                 .await;
             let _ = client.remove_container(&oci.container_id, true).await;
+            // Remove ephemeral engine-managed volumes after the container is
+            // gone; persistent volumes are not tracked here so they survive. #444
+            for volume in &oci.ephemeral_volumes {
+                let _ = client.remove_volume(volume).await;
+            }
         }
     }
     Ok(())
@@ -1925,6 +1981,69 @@ mod tests {
                 .push(format!("container:remove:{container_id}"));
             Ok(())
         }
+
+        async fn remove_volume(&self, volume_name: &str) -> capsule_core::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("volume:remove:{volume_name}"));
+            Ok(())
+        }
+    }
+
+    /// Build an OCI `RunningService` with the given ephemeral engine volumes,
+    /// reusing `oci_running_service` for the bulk of the shape (#444).
+    fn oci_running_service_with_volumes(
+        container_id: &str,
+        ephemeral_volumes: Vec<String>,
+    ) -> RunningService {
+        let mut service = oci_running_service(HashMap::new(), HashMap::new());
+        if let RunningHandle::Oci(oci) = &mut service.handle {
+            oci.container_id = container_id.to_string();
+            oci.ephemeral_volumes = ephemeral_volumes;
+        }
+        service
+    }
+
+    #[tokio::test]
+    async fn stop_service_removes_ephemeral_engine_volumes() {
+        // #444: an OCI service that created an ephemeral engine volume must have
+        // it removed on stop, after the container is stopped + removed.
+        let client = FakeClient::default();
+        let mut service = oci_running_service_with_volumes(
+            "cid-db",
+            vec!["ato-state-deadbeef0000-pgdata".to_string()],
+        );
+
+        stop_service(&mut service, &client).await.expect("stop ok");
+
+        let events = client.events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e == "volume:remove:ato-state-deadbeef0000-pgdata"),
+            "ephemeral volume must be removed on stop: {events:?}"
+        );
+        // Ordering: container removed before its volume.
+        let rm_container = events.iter().position(|e| e == "container:remove:cid-db");
+        let rm_volume = events
+            .iter()
+            .position(|e| e == "volume:remove:ato-state-deadbeef0000-pgdata");
+        assert!(rm_container < rm_volume, "container removed before volume");
+    }
+
+    #[tokio::test]
+    async fn stop_service_without_ephemeral_volumes_removes_none() {
+        let client = FakeClient::default();
+        let mut service = oci_running_service_with_volumes("cid-web", vec![]);
+
+        stop_service(&mut service, &client).await.expect("stop ok");
+
+        let events = client.events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| e.starts_with("volume:remove:")),
+            "no volume removal when there are no ephemeral volumes: {events:?}"
+        );
     }
 
     fn manifest_data(manifest_toml: &str) -> ManifestData {
@@ -2000,6 +2119,7 @@ mod tests {
                 container_id: "container-main".to_string(),
                 log_task: None,
                 host_ports,
+                ephemeral_volumes: Vec::new(),
             }),
         }
     }
