@@ -1327,9 +1327,12 @@ where
     }
 
     async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
+        // `--force` disconnects any lingering endpoint before removing the
+        // network so cleanup does not leave an orphaned `ato-*` network when a
+        // container is still attached at removal time (#450).
         let output = self
             .podman_command()
-            .args(["network", "rm", network_name])
+            .args(["network", "rm", "--force", network_name])
             .output()
             .await
             .map_err(|e| podman_async_io_error("podman network rm", e))?;
