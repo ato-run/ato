@@ -38,6 +38,19 @@ impl CapsuleManifest {
             errors.push(ValidationError::InvalidHostCapability(message));
         }
 
+        // Reject capabilities that have no production host execution path. These
+        // are schema-only (currently `open-editor`, see #468): declaring one
+        // would otherwise pass validation and convert into a grant that nothing
+        // ever executes — an inert capability. Fail closed in every mode rather
+        // than silently no-op. Remove this once host execution + consent exist.
+        for spec in &self.host_capabilities {
+            if !spec.name.is_host_supported() {
+                errors.push(ValidationError::UnsupportedHostCapability {
+                    name: spec.name.to_string(),
+                });
+            }
+        }
+
         let schema_is_v03 = self.schema_version.trim() == "0.3";
 
         if !is_supported_schema_version(&self.schema_version) {
@@ -1762,6 +1775,12 @@ pub enum ValidationError {
     },
     #[error("Invalid host capability: {0}")]
     InvalidHostCapability(String),
+    #[error(
+        "Unsupported host capability '{name}': this Ato build does not yet implement a host \
+         execution path or consent UI for it. Remove the [[host_capabilities]] entry or track \
+         https://github.com/ato-run/ato/issues/468 for implementation."
+    )]
+    UnsupportedHostCapability { name: String },
 }
 
 pub(crate) fn is_kebab_case(s: &str) -> bool {
