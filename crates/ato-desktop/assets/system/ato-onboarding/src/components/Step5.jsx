@@ -213,6 +213,75 @@ function SystemCheck({ icon: Icon, label, status, tone, detail }) {
   )
 }
 
+// #460 PR2: Windows substrate (WSL / virtualization / reboot / Podman machine
+// health) card with Desktop-driven CTAs. Renders only on Windows (where the
+// `windows_substrate` field is present). Never tells the user to open a shell.
+function WindowsSubstrateCard({ substrate, podmanTool, installing, onAction, onRepair, onResume }) {
+  if (!substrate) return null
+  const wsl = substrate.wsl
+  const action = substrate.action || { kind: 'none' }
+  const healthError = !!podmanTool && podmanTool.action === 'repair_host_runtime'
+
+  if (wsl === 'ready' && !healthError) {
+    return (
+      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+        <p className="text-[13px] font-bold text-emerald-800">Windows substrate ready</p>
+        <p className="text-[12px] leading-snug text-emerald-700">
+          {substrate.message || 'WSL2 is available.'}
+        </p>
+      </div>
+    )
+  }
+
+  const btn =
+    'self-start rounded-lg bg-[#8B5CF6] px-3 py-1.5 text-[12px] font-semibold text-white disabled:opacity-50'
+  let cta = null
+  if (action.kind === 'reboot_required') {
+    cta = (
+      <button type="button" disabled={installing} onClick={onResume} className={btn}>
+        Continue after restart
+      </button>
+    )
+  } else if (healthError || action.kind === 'repair_podman_machine') {
+    cta = (
+      <button type="button" disabled={installing} onClick={onRepair} className={btn}>
+        Repair Ato Podman machine
+      </button>
+    )
+  } else if (action.kind && action.kind !== 'none' && action.can_run_from_desktop) {
+    cta = (
+      <button
+        type="button"
+        disabled={installing}
+        onClick={() => onAction(action.kind)}
+        className={btn}
+      >
+        {action.label || 'Fix'}
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+      <p className="text-[13px] font-bold text-amber-800">Windows container substrate</p>
+      <p className="text-[12px] leading-snug text-amber-700">
+        {action.description || substrate.message}
+      </p>
+      {action.requires_admin ? (
+        <p className="text-[11px] leading-snug text-amber-600">
+          Needs administrator approval; Ato will request it.
+        </p>
+      ) : null}
+      {cta}
+      {action.kind === 'open_virtualization_instructions' ? (
+        <p className="text-[11px] leading-snug text-amber-600">
+          Some steps may require firmware/BIOS changes Ato can’t make for you.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 export default function Step5({
   onFinish,
   podmanEnabled,
@@ -295,6 +364,14 @@ export default function Step5({
       }
       if (payload.runtimeInstallCancelled) {
         setInstallError('Cancelling runtime install...')
+      }
+      if (payload.runtimeSetupResume) {
+        // #460 PR2: resume-after-reboot carries a refreshed status snapshot.
+        const resumed = payload.runtimeSetupResume.runtimeSetupStatus
+        if (resumed) {
+          setRuntimeStatus(resumed)
+          setChecking(false)
+        }
       }
       if (payload.error && !payload.runtimeInstallComplete) {
         setChecking(false)
@@ -430,6 +507,38 @@ export default function Step5({
     BRIDGE({ kind: 'cancel_runtime_install', request_id: nextRequestId() })
   }
 
+  // #460 PR2: Windows substrate remediations. These stream through the same
+  // runtimeInstall* progress/complete events as prepare, so they reuse the busy
+  // and error state — no shell required of the user.
+  const runSubstrateAction = (actionKind) => {
+    setInstalling(true)
+    setInstallError(null)
+    setActiveJob('substrate')
+    activeJobRef.current = 'substrate'
+    prepareQueuedRef.current = false
+    setProgressByTool((current) => ({ ...current, substrate: { phase: 'queued', message: 'Queued' } }))
+    BRIDGE({
+      kind: 'prepare_windows_runtime_substrate',
+      request_id: nextRequestId(),
+      action: actionKind,
+      source_surface: 'onboarding',
+    })
+  }
+
+  const runRepair = () => {
+    setInstalling(true)
+    setInstallError(null)
+    setActiveJob('repair')
+    activeJobRef.current = 'repair'
+    prepareQueuedRef.current = false
+    setProgressByTool((current) => ({ ...current, podman: { phase: 'queued', message: 'Queued' } }))
+    BRIDGE({ kind: 'repair_host_runtime', request_id: nextRequestId() })
+  }
+
+  const runResume = () => {
+    BRIDGE({ kind: 'resume_runtime_setup_after_reboot', request_id: nextRequestId() })
+  }
+
   const skipPodman = () => {
     // Explicit opt-out: disable Podman locally and persist false deterministically
     // (via the finish override) so a failed/unavailable prepare never traps the
@@ -539,6 +648,17 @@ export default function Step5({
           Ato can install Podman and create/start an Ato-managed machine named
           ato-podman after you confirm. This may download packages or a VM image.
         </ToggleCard>
+
+        {podmanEnabled && runtimeStatus?.windows_substrate ? (
+          <WindowsSubstrateCard
+            substrate={runtimeStatus.windows_substrate}
+            podmanTool={tools.podman}
+            installing={installing}
+            onAction={runSubstrateAction}
+            onRepair={runRepair}
+            onResume={runResume}
+          />
+        ) : null}
 
         <p className="mt-2 text-[12px] font-bold tracking-widest text-slate-400 uppercase">
           Ato-managed language runtimes

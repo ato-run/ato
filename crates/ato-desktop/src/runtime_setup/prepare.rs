@@ -34,6 +34,41 @@ pub(crate) fn start_runtime_prepare(cx: &mut App, request_id: Option<String>, to
     spawn_runtime_job(cx, request_id, tools, RuntimeJobKind::Prepare);
 }
 
+/// Kick off a repair of the Ato-managed Podman machine (#460 PR2). Streams the
+/// same progress/terminal events as prepare and refreshes status on completion.
+pub(crate) fn start_runtime_repair(cx: &mut App, request_id: Option<String>) {
+    spawn_runtime_job(
+        cx,
+        request_id,
+        Vec::new(),
+        RuntimeJobKind::RepairHostRuntime,
+    );
+}
+
+/// Kick off a Windows substrate remediation (#460 PR2). `action` is a
+/// `WindowsSubstrateActionKind` token; the CLI rejects unknown/`none` actions.
+pub(crate) fn start_windows_substrate(
+    cx: &mut App,
+    request_id: Option<String>,
+    action: String,
+    source_surface: Option<String>,
+) {
+    if action.trim().is_empty() {
+        ensure_install_global(cx);
+        push_runtime_setup_error(cx, request_id, "no substrate action specified");
+        return;
+    }
+    spawn_runtime_job(
+        cx,
+        request_id,
+        Vec::new(),
+        RuntimeJobKind::PrepareWindowsSubstrate {
+            action,
+            source_surface: source_surface.unwrap_or_else(|| "settings".to_string()),
+        },
+    );
+}
+
 /// Validate and normalise a `--tools` prepare request. Only *host runtimes*
 /// (Podman today) may be prepared through this path; managed toolchains go
 /// through [`super::install`] and detection-only/bundled tools are rejected
@@ -47,10 +82,7 @@ pub(crate) fn parse_prepareable_tools(tools: &[String]) -> AnyhowResult<Vec<Stri
         let kind =
             ToolKind::parse_tool(tool).ok_or_else(|| anyhow!("unknown runtime tool: {tool}"))?;
         if !kind.is_host_runtime_prepareable() {
-            bail!(
-                "{} is not a host runtime Ato can prepare",
-                kind.as_str()
-            );
+            bail!("{} is not a host runtime Ato can prepare", kind.as_str());
         }
         let token = kind.as_str().to_string();
         if !parsed.contains(&token) {
