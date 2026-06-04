@@ -24,10 +24,25 @@ pub(super) struct LaunchSessionRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct LaunchSessionResponse {
-    session_id: String,
+pub(super) struct LaunchSessionResponse {
+    pub(super) session_id: String,
+    pub(super) status: String,
+    pub(super) install_profile_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    user_visible_url: Option<String>,
+    pub(super) launch_profile_id: Option<String>,
+    pub(super) placement: PlacementIdentity,
+    pub(super) requested_by_client: String,
+    pub(super) runtime_owner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) user_visible_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) local_runtime_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StopSessionResponse {
+    session_id: String,
+    status: String,
 }
 
 const LOCAL_DESKTOP_PROVIDER_ID: &str = "desktop:local";
@@ -81,7 +96,7 @@ pub(super) async fn handle_runtime_providers(
             supports_stop: true,
             supports_logs: true,
             supports_open_url: true,
-            supports_start_serve: true,
+            supports_start_serve: false,
             isolation_classes: vec!["local".to_string()],
             storage_classes: vec!["local".to_string()],
             network_classes: vec!["loopback".to_string()],
@@ -480,8 +495,8 @@ pub(super) async fn handle_runtime_launch_session(
             );
         }
     };
-    // Resolve the capsule handle from the matching app record.
-    let mut capsule_handle: Option<String> = None;
+    // Resolve the capsule handle and profile_id from the matching app record.
+    let mut resolved: Option<(String, String)> = None; // (capsule_handle, profile_id)
     'outer: for app_id in &apps {
         let app_record = match store.read_app_record(app_id) {
             Ok(record) => record,
@@ -502,18 +517,33 @@ pub(super) async fn handle_runtime_launch_session(
                 } else {
                     app_record.capsule_handle.clone()
                 };
-                capsule_handle = Some(handle);
+                resolved = Some((handle, profile_id.as_str().to_string()));
                 break 'outer;
             }
         }
     }
-    let Some(capsule_handle) = capsule_handle else {
+    let Some((capsule_handle, profile_id)) = resolved else {
         return json_error(
             StatusCode::NOT_FOUND,
             "install_profile_not_found",
             &format!("install profile '{}' not found", key),
         );
     };
+
+    // `ato app session start` does not accept a --profile flag, so it always
+    // launches with the default profile. Reject non-default profiles explicitly
+    // to prevent silently running the wrong configuration.
+    if profile_id != "default" {
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "non_default_profile_not_supported",
+            &format!(
+                "install profile '{}' uses profile_id '{}'; only the 'default' profile can be \
+                 launched via the Runtime Control API at this time",
+                key, profile_id
+            ),
+        );
+    }
 
     // Resolve the `ato` executable path (same binary that is running).
     let ato_exe = match std::env::current_exe() {
@@ -593,23 +623,108 @@ pub(super) async fn handle_runtime_launch_session(
         );
     };
 
-    // Attempt to register an ephemeral ingress route for the new session.
-    // This is best-effort: if ato-netd is not running or no URL is available
-    // we skip it silently.
-    let user_visible_url = if let Some(ref upstream) = web_local_url {
-        try_register_ephemeral_ingress_with_url(&session_id, upstream).await
-    } else {
-        None
-    };
+    // Best-effort: register an ephemeral ingress route so the local port is
+    // reachable through ato-netd. The resulting URL is a loopback address and
+    // must NOT be used as user_visible_url (which is reserved for mobile-safe /
+    // externally-reachable URLs). It is not exposed in the response for now;
+    // StartServe integration is a future concern.
+    if let Some(ref upstream) = web_local_url {
+        try_register_ephemeral_ingress_with_url(&session_id, upstream).await;
+    }
 
     (
         StatusCode::CREATED,
         Json(LaunchSessionResponse {
+            status: "starting".to_string(),
+            install_profile_key: key,
+            launch_profile_id: None,
+            placement: local_desktop_placement_identity(),
+            requested_by_client: "web_console".to_string(),
+            runtime_owner: "local_runtime".to_string(),
             session_id,
-            user_visible_url,
+            // user_visible_url is reserved for mobile-safe / externally-reachable
+            // URLs (StartServe). Loopback addresses from ato-netd must not appear
+            // here, so this is None until StartServe integration lands.
+            user_visible_url: None,
+            local_runtime_url: web_local_url,
         }),
     )
         .into_response()
+}
+
+/// `POST /v1/runtime/sessions/:id/stop` — stop a running session, returning JSON.
+///
+/// Same semantics as `DELETE /v1/runtime/sessions/:id` but returns a JSON body
+/// and a 200 OK instead of 204 No Content, for PWA compatibility.
+pub(super) async fn handle_runtime_stop_session_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+        return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
+    }
+
+    let session_id = id.trim().to_string();
+    if session_id.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "session id is required",
+        );
+    }
+
+    let pm = match ProcessManager::new() {
+        Ok(pm) => pm,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "process_manager_error",
+                &err.to_string(),
+            );
+        }
+    };
+
+    // Verify the session exists before attempting to stop it.
+    let processes = match pm.list_processes() {
+        Ok(p) => p,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "process_list_failed",
+                &err.to_string(),
+            );
+        }
+    };
+    if !processes.iter().any(|p| p.id == session_id) {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            &format!("session '{}' not found", session_id),
+        );
+    }
+
+    // Best-effort: deregister the ephemeral ingress route if ato-netd is up.
+    if let Ok(mut client) = ato_net::control::Client::connect_default().await {
+        let session_key = format!("ephemeral:{session_id}");
+        let _ = client.deregister_ephemeral_ingress(&session_key).await;
+    }
+
+    match pm.stop_process(&session_id, false) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(StopSessionResponse {
+                session_id,
+                status: "stopped".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_stop_failed",
+            &err.to_string(),
+        ),
+    }
 }
 
 /// `DELETE /v1/runtime/sessions/:id` — stop a running session.
