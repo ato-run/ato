@@ -222,6 +222,14 @@ pub struct StoredOrchestrationServices {
     /// records written before this field was added).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_name: Option<String>,
+    /// Ephemeral engine-managed state volumes created for this session
+    /// (Windows + Podman, #444). Stored so `stop_session` can delete them
+    /// after the containers stop. Persistent volumes are intentionally
+    /// **not** listed here so durable state survives stop. Empty for
+    /// sessions that created no ephemeral volumes (the common case) and for
+    /// records written before this field was added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ephemeral_volumes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -509,6 +517,7 @@ mod tests {
                     },
                 ],
                 network_name: Some("ato-orch-abc12345-7777".to_string()),
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("b".repeat(64)),
@@ -556,6 +565,7 @@ mod tests {
             wrapper_pid: 42,
             services: vec![],
             network_name: None,
+            ephemeral_volumes: Vec::new(),
         };
         let json = serde_json::to_string(&services).expect("serialize");
         assert!(!json.contains("network_name"), "None must be omitted");

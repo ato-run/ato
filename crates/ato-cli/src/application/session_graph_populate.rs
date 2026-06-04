@@ -795,6 +795,7 @@ mod tests {
                 published_port: Some(3000),
             }],
             network_name: None,
+            ephemeral_volumes: Vec::new(),
         };
 
         let mut service_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -844,6 +845,7 @@ mod tests {
                 },
             ],
             network_name: None,
+            ephemeral_volumes: Vec::new(),
         };
         let mut service_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
         service_deps.insert("web".to_string(), vec!["main".to_string()]);
@@ -963,6 +965,7 @@ mod tests {
                         published_port: None,
                     }],
                     network_name: None,
+                    ephemeral_volumes: Vec::new(),
                 }),
                 schema_version: None,
                 launch_digest: None,
@@ -1195,6 +1198,7 @@ mod tests {
                     },
                 ],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: None,
             launch_digest: None,
@@ -1335,6 +1339,7 @@ mod tests {
                     published_port: None,
                 }],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: None,
             launch_digest: None,

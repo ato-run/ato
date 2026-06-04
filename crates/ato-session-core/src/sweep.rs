@@ -899,6 +899,7 @@ mod tests {
                     published_port: Some(5173),
                 }],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: None,
             launch_digest: None,
