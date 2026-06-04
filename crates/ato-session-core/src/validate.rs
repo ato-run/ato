@@ -41,6 +41,10 @@ pub enum RecordValidationOutcome {
     MissingLaunchDigest,
     /// The handle on the record doesn't match the requested handle.
     HandleMismatch,
+    /// The record's `install_profile_key` doesn't match the requested one
+    /// (or the record has none). Only produced by
+    /// [`validate_record_for_install_profile_key`].
+    InstallProfileKeyMismatch,
     /// The recorded PID is no longer alive.
     PidNotAlive,
     /// The platform reports a different process start time than the
@@ -95,6 +99,42 @@ pub fn validate_record_only(
     if !handle_matches_record(params.requested_handle, record) {
         return RecordValidationOutcome::HandleMismatch;
     }
+    validate_record_liveness(record, params.healthcheck_timeout)
+}
+
+/// Validate one record for reuse, keyed by `install_profile_key` instead of
+/// capsule handle. This is the identity contract for **installed-app
+/// relaunch** (#261): the durable identity of an installed entry is its
+/// `install_profile_key`, never the capsule handle. A session produced by
+/// `ato launch <install_profile_key>` is matched by its stamped
+/// `install_profile_key`, so a handle that has drifted from the record's
+/// canonical handle (after install, rename, or alias normalization) does not
+/// cause a miss.
+///
+/// Returns [`RecordValidationOutcome::InstallProfileKeyMismatch`] when the
+/// record carries a different `install_profile_key` (or none at all);
+/// otherwise it runs the identical liveness checks as [`validate_record_only`]
+/// (schema, digest, pid alive, start-time, healthcheck). The capsule handle is
+/// deliberately *not* consulted.
+pub fn validate_record_for_install_profile_key(
+    record: &StoredSessionInfo,
+    install_profile_key: &str,
+    healthcheck_timeout: Duration,
+) -> RecordValidationOutcome {
+    if record.install_profile_key.as_deref() != Some(install_profile_key) {
+        return RecordValidationOutcome::InstallProfileKeyMismatch;
+    }
+    validate_record_liveness(record, healthcheck_timeout)
+}
+
+/// Steps 2–6 of the reuse contract (everything after identity matching),
+/// shared by the handle-keyed ([`validate_record_only`]) and
+/// install-profile-key-keyed ([`validate_record_for_install_profile_key`])
+/// entry points. The caller has already confirmed the record's identity.
+fn validate_record_liveness(
+    record: &StoredSessionInfo,
+    healthcheck_timeout: Duration,
+) -> RecordValidationOutcome {
     if record.schema_version.unwrap_or(1) < SCHEMA_VERSION_V2 {
         return RecordValidationOutcome::StaleSchema;
     }
@@ -124,7 +164,7 @@ pub fn validate_record_only(
         Some(url) => url,
         None => return RecordValidationOutcome::HealthcheckFailed,
     };
-    match http_get_ok(url, params.healthcheck_timeout) {
+    match http_get_ok(url, healthcheck_timeout) {
         Ok(true) => RecordValidationOutcome::Reusable,
         Ok(false) | Err(_) => RecordValidationOutcome::HealthcheckFailed,
     }
@@ -304,4 +344,71 @@ mod tests {
             RecordValidationOutcome::HealthcheckFailed
         );
     }
+
+    // ── install_profile_key-keyed validation (#261) ─────────────────────────
+
+    const TEST_IPK: &str = "ipk_abc00000000000000000000000000";
+
+    fn ipk_record(ipk: Option<&str>) -> StoredSessionInfo {
+        let mut record = base_record();
+        record.install_profile_key = ipk.map(str::to_string);
+        record
+    }
+
+    #[test]
+    fn ipk_mismatch_when_record_key_differs() {
+        let record = ipk_record(Some("ipk_other000000000000000000000000"));
+        assert_eq!(
+            validate_record_for_install_profile_key(&record, TEST_IPK, Duration::from_millis(50)),
+            RecordValidationOutcome::InstallProfileKeyMismatch
+        );
+    }
+
+    #[test]
+    fn ipk_mismatch_when_record_has_no_key() {
+        let record = ipk_record(None);
+        assert_eq!(
+            validate_record_for_install_profile_key(&record, TEST_IPK, Duration::from_millis(50)),
+            RecordValidationOutcome::InstallProfileKeyMismatch
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn ipk_match_ignores_handle_and_reaches_liveness() {
+        // The capsule handle on the record is irrelevant once the
+        // install_profile_key matches: even with a completely different
+        // handle the validator does NOT short-circuit on identity. It runs
+        // the liveness checks instead — here the (unbound port-1) healthcheck
+        // is what stops reuse, proving the ipk match itself succeeded and the
+        // handle was never consulted.
+        let mut record = ipk_record(Some(TEST_IPK));
+        record.handle = "capsule://unrelated/other-app".to_string();
+        record.normalized_handle = "unrelated/other-app".to_string();
+        record.canonical_handle = Some("unrelated/other-app".to_string());
+        assert_eq!(
+            validate_record_for_install_profile_key(&record, TEST_IPK, Duration::from_millis(50)),
+            RecordValidationOutcome::HealthcheckFailed
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn ipk_match_dead_pid_returns_pid_not_alive() {
+        let mut record = ipk_record(Some(TEST_IPK));
+        record.pid = 0;
+        assert_eq!(
+            validate_record_for_install_profile_key(&record, TEST_IPK, Duration::from_millis(50)),
+            RecordValidationOutcome::PidNotAlive
+        );
+    }
+
+    // NOTE: the full success path (`Reusable` with a live 200 healthcheck) is
+    // intentionally not asserted here. It requires an in-process HTTP server,
+    // which this suite has found to be nondeterministic under parallel test
+    // load (the loopback probe can fail fast even with a multi-second budget).
+    // The identity contract this function changes is covered deterministically
+    // by the tests above; the shared liveness path (schema/digest/pid/start-
+    // time/healthcheck) is unchanged from `validate_record_only` and exercised
+    // by `ato_session_core::healthcheck::tests` plus the handle-keyed suite.
 }
