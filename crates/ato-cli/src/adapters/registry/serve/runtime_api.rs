@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 
 use super::*;
 
-use ato_session_core::{read_session_records, session_root, StoredSessionInfo};
+use ato_session_core::{StoredSessionInfo, read_session_records, session_root};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    derive_install_profile_key, InstallInstanceStore,
+    InstallInstanceStore, derive_install_profile_key,
 };
 use capsule_wire::placement::{
     PlacedSessionSummary, PlacementCapabilities, PlacementFacets, PlacementIdentity,
@@ -107,7 +107,7 @@ pub(super) async fn handle_runtime_sessions(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_manager_error",
                 &err.to_string(),
-            )
+            );
         }
     };
     let mut processes = match pm.list_processes() {
@@ -117,7 +117,7 @@ pub(super) async fn handle_runtime_sessions(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_list_failed",
                 &err.to_string(),
-            )
+            );
         }
     };
     processes.sort_by_key(|process| std::cmp::Reverse(process.start_time));
@@ -149,7 +149,7 @@ pub(super) async fn handle_runtime_install_profiles(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "install_profile_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
 
@@ -160,7 +160,7 @@ pub(super) async fn handle_runtime_install_profiles(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "install_profile_list_failed",
                 &err.to_string(),
-            )
+            );
         }
     };
 
@@ -232,7 +232,9 @@ pub(super) async fn handle_runtime_session_logs(
     let session_id = id.trim().to_string();
 
     if wants_sse {
-        return stream_session_logs_sse(session_id, state).await.into_response();
+        return stream_session_logs_sse(session_id, state)
+            .await
+            .into_response();
     }
 
     // Default: batch JSON response (original behaviour).
@@ -282,8 +284,9 @@ async fn stream_session_logs_sse(session_id: String, _state: AppState) -> axum::
         }
 
         // 2. Tail the file for new content.
-        let mut byte_offset: u64 =
-            std::fs::metadata(&log_path_clone).map(|m| m.len()).unwrap_or(0);
+        let mut byte_offset: u64 = std::fs::metadata(&log_path_clone)
+            .map(|m| m.len())
+            .unwrap_or(0);
         let mut last_heartbeat = std::time::Instant::now();
 
         loop {
@@ -459,7 +462,7 @@ pub(super) async fn handle_runtime_launch_session(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "install_profile_store_error",
                 &err.to_string(),
-            )
+            );
         }
     };
 
@@ -474,7 +477,7 @@ pub(super) async fn handle_runtime_launch_session(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "install_profile_list_failed",
                 &err.to_string(),
-            )
+            );
         }
     };
     // Resolve the capsule handle from the matching app record.
@@ -489,7 +492,11 @@ pub(super) async fn handle_runtime_launch_session(
             Err(_) => continue,
         };
         for profile_id in &profiles {
-            if derive_install_profile_key(app_id, profile_id).as_str().to_string() == key {
+            if derive_install_profile_key(app_id, profile_id)
+                .as_str()
+                .to_string()
+                == key
+            {
                 let handle = if app_record.capsule_handle.is_empty() {
                     format!("{}/{}", app_record.publisher, app_record.slug)
                 } else {
@@ -516,7 +523,7 @@ pub(super) async fn handle_runtime_launch_session(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "exe_resolve_failed",
                 &err.to_string(),
-            )
+            );
         }
     };
 
@@ -538,7 +545,7 @@ pub(super) async fn handle_runtime_launch_session(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "session_spawn_failed",
                 &err.to_string(),
-            )
+            );
         }
     };
 
@@ -547,7 +554,11 @@ pub(super) async fn handle_runtime_launch_session(
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "session_start_failed",
-            &format!("session start exited with {}: {}", output.status, stderr.trim()),
+            &format!(
+                "session start exited with {}: {}",
+                output.status,
+                stderr.trim()
+            ),
         );
     }
 
@@ -638,7 +649,7 @@ pub(super) async fn handle_runtime_stop_session(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "process_manager_error",
                 &err.to_string(),
-            )
+            );
         }
     };
 
