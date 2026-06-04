@@ -93,6 +93,14 @@ pub enum RuntimeSetupCommand {
         #[serde(default)]
         request_id: Option<String>,
     },
+    /// Cancel a pending interrupted-launch (#460 PR3b): clears the launch-intent
+    /// marker so Runtime Setup will no longer resume into it. Does not cancel
+    /// Runtime Setup itself. Clears a local advisory marker only, so it is gated
+    /// by [`Capability::RuntimeSetupRead`].
+    CancelPendingLaunch {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
 }
 
 impl RuntimeSetupCommand {
@@ -116,6 +124,8 @@ impl RuntimeSetupCommand {
             RuntimeSetupCommand::ResumeRuntimeSetupAfterReboot { .. } => {
                 Capability::RuntimeSetupRead
             }
+            // Cancelling a pending launch only clears a local advisory marker.
+            RuntimeSetupCommand::CancelPendingLaunch { .. } => Capability::RuntimeSetupRead,
         }
     }
 
@@ -134,6 +144,7 @@ impl RuntimeSetupCommand {
                 | "prepare_windows_runtime_substrate"
                 | "repair_host_runtime"
                 | "resume_runtime_setup_after_reboot"
+                | "cancel_pending_launch"
         )
     }
 }
@@ -180,9 +191,25 @@ mod tests {
             "prepare_windows_runtime_substrate",
             "repair_host_runtime",
             "resume_runtime_setup_after_reboot",
+            "cancel_pending_launch",
         ] {
             assert!(RuntimeSetupCommand::is_runtime_setup_kind(kind));
         }
+    }
+
+    #[test]
+    fn cancel_pending_launch_deserializes_and_is_read_gated() {
+        let cmd: RuntimeSetupCommand =
+            serde_json::from_str(r#"{"kind":"cancel_pending_launch"}"#).unwrap();
+        match &cmd {
+            RuntimeSetupCommand::CancelPendingLaunch { request_id } => {
+                assert_eq!(request_id.as_deref(), None)
+            }
+            other => panic!("expected CancelPendingLaunch, got {other:?}"),
+        }
+        // Clearing a local advisory marker is read-gated (available on both
+        // onboarding and settings surfaces).
+        assert_eq!(cmd.required_capability(), Capability::RuntimeSetupRead);
     }
 
     #[test]

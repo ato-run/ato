@@ -190,6 +190,15 @@ pub(super) fn spawn_runtime_job(
             let mut terminal = false;
             while let Ok(event) = rx.try_recv() {
                 terminal |= event.terminal;
+                // #460 PR3b: on a *successful* terminal event, the refreshed
+                // setup status rides along under `runtimeInstallComplete.status`.
+                // If the host runtime is now ready, this is where an interrupted
+                // capsule launch resumes.
+                let resume_status = if event.terminal {
+                    refreshed_status_if_successful(&event.payload)
+                } else {
+                    None
+                };
                 let payload = event.payload.to_string();
                 crate::webview_init_guard::wait_until_idle(&be).await;
                 async_app.update(move |cx| {
@@ -198,6 +207,9 @@ pub(super) fn spawn_runtime_job(
                         cx.global_mut::<ActiveRuntimeInstall>().0 = None;
                     }
                     push_runtime_setup(cx, &payload);
+                    if let Some(status) = resume_status {
+                        super::launch_intent::try_resume_launch_if_ready(cx, &status);
+                    }
                 });
             }
             if terminal {
@@ -383,6 +395,25 @@ pub(crate) fn open_runtime_setup_logs(cx: &mut App, request_id: Option<String>) 
     push_runtime_setup(cx, &response.to_string());
 }
 
+/// Extract the refreshed [`RuntimeSetupStatus`] from a terminal install/prepare
+/// event, but only when the job **succeeded**. Returns `None` on failure /
+/// cancellation or when no status snapshot rode along. Used by the foreground
+/// drain to decide whether to resume an interrupted capsule launch (#460 PR3b).
+fn refreshed_status_if_successful(
+    payload: &Value,
+) -> Option<capsule_core::runtime_setup::RuntimeSetupStatus> {
+    let complete = payload.get("runtimeInstallComplete")?;
+    if !complete
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let status = complete.get("status")?;
+    serde_json::from_value(status.clone()).ok()
+}
+
 fn send_terminal_install_event(
     tx: &std::sync::mpsc::Sender<RuntimeInstallUiEvent>,
     payload: Value,
@@ -458,6 +489,39 @@ mod tests {
             RuntimeJobKind::RepairHostRuntime.cli_args(""),
             vec!["internal", "runtime", "repair-host-runtime", "--emit-json"]
         );
+    }
+
+    // ── #460 PR3b: only a successful terminal event yields a resume status ──────
+
+    #[test]
+    fn refreshed_status_requires_success_and_a_status_snapshot() {
+        // Success + status snapshot → parsed status.
+        let ok = serde_json::json!({
+            "runtimeInstallComplete": {
+                "success": true,
+                "status": { "tools": [], "windows_substrate": null },
+            },
+        });
+        assert!(refreshed_status_if_successful(&ok).is_some());
+
+        // Failure → no resume status even if a snapshot is present.
+        let failed = serde_json::json!({
+            "runtimeInstallComplete": {
+                "success": false,
+                "status": { "tools": [], "windows_substrate": null },
+            },
+        });
+        assert!(refreshed_status_if_successful(&failed).is_none());
+
+        // Success but no snapshot (e.g. cancelled path) → none.
+        let no_status = serde_json::json!({
+            "runtimeInstallComplete": { "success": true, "status": null },
+        });
+        assert!(refreshed_status_if_successful(&no_status).is_none());
+
+        // Not a terminal completion payload at all → none.
+        let progress = serde_json::json!({ "runtimeInstallProgress": { "phase": "installing" } });
+        assert!(refreshed_status_if_successful(&progress).is_none());
     }
 
     #[test]
