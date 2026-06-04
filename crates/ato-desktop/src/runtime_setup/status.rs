@@ -29,6 +29,10 @@ pub(crate) fn spawn_runtime_setup_status(cx: &mut gpui::App, request_id: Option<
         crate::webview_init_guard::wait_until_idle(&be).await;
         async_app.update(move |cx| {
             push_runtime_setup(cx, &payload.to_string());
+            // #460 PR3b: keep the pending-launch banner in sync whenever a
+            // surface (re)loads its status — reflects any recorded launch intent.
+            let pending = super::launch_intent::peek_pending_launch();
+            super::launch_intent::push_pending_launch(cx, pending.as_ref());
         });
     })
     .detach();
@@ -66,6 +70,12 @@ pub(crate) fn spawn_runtime_setup_resume(cx: &mut gpui::App, request_id: Option<
         crate::webview_init_guard::wait_until_idle(&be).await;
         async_app.update(move |cx| {
             push_runtime_setup(cx, &payload.to_string());
+            // #460 PR3b: reboot→launch continuity. The CLI's read-only resume
+            // payload carries `launchContinuation`; the Desktop consumes its own
+            // marker and re-gates on host readiness before resuming the launch.
+            if let Some(inner) = payload.get("runtimeSetupResume") {
+                super::launch_intent::apply_reboot_resume_launch(cx, inner);
+            }
         });
     })
     .detach();
