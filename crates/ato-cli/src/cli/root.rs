@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use super::app::AppCommands;
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
+use super::console::ConsoleCommands;
 use super::import_cmd::ImportArgs;
 use super::inspect::InspectCommands;
 use super::ipc::IpcCommands;
@@ -1124,5 +1125,11 @@ pub(crate) enum Commands {
     Community {
         #[command(subcommand)]
         command: super::community::CommunityCommands,
+    },
+
+    #[command(about = "Open the Ato Web Console connected to the local Runtime")]
+    Console {
+        #[command(subcommand)]
+        command: ConsoleCommands,
     },
 }
