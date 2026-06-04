@@ -1684,3 +1684,63 @@ fn tool_artifact_roundtrips_through_full_lockfile() {
         Some("resolvedbinaryhash")
     );
 }
+
+// ── Deno is runtime-modeled, not a tool (#470) ───────────────────────────────
+
+#[test]
+fn deno_serializes_under_runtimes_not_tools() {
+    // Deno is a primary runtime: it belongs under `runtimes.deno`, never
+    // `tools.deno`. `ToolSection` has no `deno` field at all. See #470 and
+    // docs/dev-notes/runtime-vs-runtime-tools.md.
+    let lockfile = CapsuleLock {
+        version: "1".to_string(),
+        meta: LockMeta {
+            created_at: "2026-03-08T00:00:00Z".to_string(),
+            manifest_hash: "blake3:deadbeef".to_string(),
+        },
+        allowlist: None,
+        capsule_dependencies: Vec::new(),
+        injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
+        tools: None,
+        runtimes: Some(RuntimeSection {
+            python: None,
+            deno: Some(RuntimeEntry {
+                provider: "official".to_string(),
+                version: "1.46.3".to_string(),
+                targets: HashMap::from([(
+                    "aarch64-apple-darwin".to_string(),
+                    RuntimeArtifact {
+                        url: "https://example.com/deno.zip".to_string(),
+                        sha256: "deadbeef".to_string(),
+                    },
+                )]),
+            }),
+            node: None,
+            java: None,
+            dotnet: None,
+        }),
+        targets: HashMap::new(),
+    };
+
+    let value: serde_json::Value =
+        serde_json::to_value(&lockfile).expect("serialize lockfile to value");
+
+    // Deno appears under `runtimes`, not `tools`.
+    assert!(
+        value.get("runtimes").and_then(|r| r.get("deno")).is_some(),
+        "deno must serialize under runtimes.deno"
+    );
+    assert!(
+        value.get("tools").is_none(),
+        "no tools section expected for a deno-only lockfile"
+    );
+
+    // Round-trips back under runtimes.deno.
+    let parsed: CapsuleLock =
+        serde_json::from_value(value).expect("deserialize lockfile from value");
+    assert!(
+        parsed.runtimes.and_then(|r| r.deno).is_some(),
+        "deno must round-trip under runtimes.deno"
+    );
+}
