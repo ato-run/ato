@@ -20,14 +20,17 @@ use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{
-    BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciMountSpec, OciNetworkRequest,
-    OciPortSpec, OciRuntimeClient,
+    BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciMountSourceKind,
+    OciNetworkRequest, OciPortSpec, OciRuntimeClient, resolve_oci_mount,
 };
 use capsule_core::types::{
     OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceRuntime,
 };
 
 use super::launch_context::RuntimeLaunchContext;
+use super::oci_multi_service::{
+    OCI_EXIT_LOG_TAIL_LINES, OciExitedBeforeReadyError, collect_log_tail_from_rx,
+};
 use super::source::ExecuteMode;
 use super::target_runner::{self, TargetLaunchOptions};
 use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
@@ -194,6 +197,10 @@ pub struct DetachedServiceSnapshot {
 pub struct DetachedOrchestrationServices {
     pub services: Vec<DetachedServiceSnapshot>,
     pub network_name: Option<String>,
+    /// Ephemeral engine-managed volumes created this session (Windows + Podman).
+    /// Persisted on the session record so `stop_session` can delete them;
+    /// persistent volumes are intentionally excluded so they survive stop. #444
+    pub ephemeral_volumes: Vec<String>,
     /// Held privately so the caller cannot accidentally drop one provider
     /// while keeping the others. Both `mem::forget(handle)` (the v0.5.0
     /// PR-C pattern) and the future PR-D `BackgroundSessionOwner` consume
@@ -265,9 +272,21 @@ where
         .map(|(name, rs)| build_detached_snapshot(name, rs))
         .collect();
 
+    // Aggregate ephemeral engine volumes across all services so the session
+    // record can drive their removal on stop. See #444.
+    let ephemeral_volumes: Vec<String> = running
+        .values()
+        .filter_map(|rs| match &rs.handle {
+            RunningHandle::Oci(oci) => Some(oci.ephemeral_volumes.iter().cloned()),
+            RunningHandle::Local(_) => None,
+        })
+        .flatten()
+        .collect();
+
     Ok(DetachedOrchestrationServices {
         services,
         network_name,
+        ephemeral_volumes,
         inner: running,
     })
 }
@@ -310,6 +329,9 @@ where
     let graph = ServiceGraphPlan::from_orchestration(&orchestration)?;
     let session_id = session_id(plan);
     let client = Arc::new(client);
+    // Detect the engine once so the mount strategy (#444) is consistent across
+    // all services in this session.
+    let is_podman = client.is_podman().await;
     let network_name = if orchestration
         .services
         .iter()
@@ -340,6 +362,7 @@ where
         Arc::clone(&client),
         session_id,
         network_name.clone(),
+        is_podman,
         attempt.map(|attempt| attempt.cleanup_scope()),
     );
 
@@ -423,6 +446,10 @@ struct RunningOciService {
     container_id: String,
     log_task: Option<tokio::task::JoinHandle<()>>,
     host_ports: HashMap<u16, u16>,
+    /// Ephemeral engine-managed volumes created for this service (Windows +
+    /// Podman). Removed when the service is stopped; persistent volumes are not
+    /// tracked here so they survive stop. See #444.
+    ephemeral_volumes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,6 +479,9 @@ where
     client: Arc<C>,
     session_id: String,
     network_name: Option<String>,
+    /// Whether the engine is Podman — selects the Windows engine-managed-volume
+    /// mount strategy. Detected once at startup. See #444.
+    is_podman: bool,
     state: Arc<Mutex<OrchestratorStartupState>>,
     startup_cleanup: Arc<StdMutex<Option<CleanupScope>>>,
 }
@@ -471,6 +501,7 @@ where
         client: Arc<C>,
         session_id: String,
         network_name: Option<String>,
+        is_podman: bool,
         startup_cleanup: Option<CleanupScope>,
     ) -> Self {
         Self {
@@ -483,6 +514,7 @@ where
             client,
             session_id,
             network_name,
+            is_podman,
             state: Arc::new(Mutex::new(OrchestratorStartupState::default())),
             startup_cleanup: Arc::new(StdMutex::new(startup_cleanup)),
         }
@@ -540,6 +572,7 @@ where
             &self.session_id,
             self.network_name.as_deref(),
             &self.options,
+            self.is_podman,
         )
         .await?;
 
@@ -579,6 +612,7 @@ async fn launch_service<C: OciRuntimeClient>(
     session_id: &str,
     network_name: Option<&str>,
     options: &OrchestratorOptions,
+    is_podman: bool,
 ) -> Result<RunningService> {
     let handle = match &service.runtime {
         ResolvedServiceRuntime::Oci(runtime) => {
@@ -615,6 +649,34 @@ async fn launch_service<C: OciRuntimeClient>(
                 })
                 .unwrap_or_default();
 
+            // Source strategy (#444): on Windows + Podman, Ato-managed writable
+            // state becomes an engine-managed named volume instead of a host bind
+            // mount; everything else stays a bind mount. Ownership is carried
+            // through so the provider can apply engine-delegated ownership init.
+            // This is the same `resolve_oci_mount` strategy used by the
+            // multi-service executor, so the Desktop session path (which routes
+            // here) behaves identically to `ato run`.
+            let mounts: Vec<_> = runtime
+                .mounts
+                .iter()
+                .map(|mount| resolve_oci_mount(mount, is_podman, cfg!(target_os = "windows")))
+                .collect();
+
+            // Ephemeral engine volumes created for this service must be removed on
+            // stop; persistent volumes survive so durable state is preserved.
+            let ephemeral_volumes: Vec<String> = mounts
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m.source_kind,
+                        OciMountSourceKind::EngineVolume {
+                            remove_on_stop: true
+                        }
+                    )
+                })
+                .map(|m| m.source.clone())
+                .collect();
+
             let container_id = client
                 .create_container(&OciContainerRequest {
                     name: container_name(plan, &service.name, session_id),
@@ -623,16 +685,7 @@ async fn launch_service<C: OciRuntimeClient>(
                     env: env.clone(),
                     working_dir: runtime.working_dir.clone(),
                     labels: container_labels(plan, &service.name, session_id, &runtime.target),
-                    mounts: runtime
-                        .mounts
-                        .iter()
-                        .map(|mount| OciMountSpec {
-                            source: mount.source.clone(),
-                            target: mount.target.clone(),
-                            readonly: mount.readonly,
-                            ownership: None,
-                        })
-                        .collect(),
+                    mounts,
                     ports,
                     network: network_name.map(str::to_string),
                     aliases: service.network.aliases.clone(),
@@ -680,6 +733,7 @@ async fn launch_service<C: OciRuntimeClient>(
                 container_id,
                 log_task: Some(log_task),
                 host_ports: inspect.host_ports,
+                ephemeral_volumes,
             })
         }
         ResolvedServiceRuntime::Managed(runtime) => {
@@ -993,6 +1047,10 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                 match poll_local_readiness_events(local)? {
                     LocalReadinessState::Ready => return Ok(()),
                     LocalReadinessState::Exited(exit_code) => {
+                        // Local (source/native/managed) services keep the generic
+                        // orchestration error — the typed
+                        // `oci_container_exited_before_ready` diagnostic is for OCI
+                        // containers only (#445 review).
                         anyhow::bail!(
                             "service '{}' exited before readiness event was observed (exit code: {})",
                             service_name,
@@ -1004,11 +1062,33 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
             }
 
             if let Some(exit_code) = try_wait(&mut service, client).await? {
-                anyhow::bail!(
-                    "service '{}' exited before readiness check passed (exit code: {})",
-                    service_name,
-                    exit_code
-                );
+                // Only OCI containers get the typed exited-before-ready diagnostic
+                // (it carries a container log tail and OCI-specific hint); local
+                // services keep the generic orchestration error (#445 review).
+                // The container id is cloned out of the borrow before awaiting the
+                // log fetch so the future stays `Send` (RunningService is `!Sync`).
+                let oci_container_id = match &service.handle {
+                    RunningHandle::Oci(oci) => Some(oci.container_id.clone()),
+                    RunningHandle::Local(_) => None,
+                };
+                match oci_container_id {
+                    Some(container_id) => {
+                        let log_tail = oci_log_tail(client, &container_id).await;
+                        return Err(OciExitedBeforeReadyError {
+                            service_name: service_name.to_string(),
+                            exit_code: Some(exit_code as i64),
+                            log_tail,
+                        }
+                        .into());
+                    }
+                    None => {
+                        anyhow::bail!(
+                            "service '{}' exited before readiness check passed (exit code: {})",
+                            service_name,
+                            exit_code
+                        );
+                    }
+                }
             }
 
             if !uses_event_driven_readiness(&service) {
@@ -1018,9 +1098,10 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                         return Ok(());
                     }
                 } else if let Some(port) = resolve_probe_port(&service, &probe)?
-                    && readiness_probe_ok(&probe, port)? {
-                        return Ok(());
-                    }
+                    && readiness_probe_ok(&probe, port)?
+                {
+                    return Ok(());
+                }
             }
 
             if Instant::now() >= deadline {
@@ -1252,6 +1333,11 @@ async fn stop_service<C: OciRuntimeClient>(service: &mut RunningService, client:
                 .stop_container(&oci.container_id, OCI_STOP_TIMEOUT_SECS)
                 .await;
             let _ = client.remove_container(&oci.container_id, true).await;
+            // Remove ephemeral engine-managed volumes after the container is
+            // gone; persistent volumes are not tracked here so they survive. #444
+            for volume in &oci.ephemeral_volumes {
+                let _ = client.remove_volume(volume).await;
+            }
         }
     }
     Ok(())
@@ -1313,6 +1399,20 @@ async fn try_wait<C: OciRuntimeClient>(
                 Ok(Some(inspect.exit_code.unwrap_or(1) as i32))
             }
         }
+    }
+}
+
+/// Best-effort tail of an OCI service's container logs for an
+/// `oci_container_exited_before_ready` diagnostic, so the postgres / init output
+/// is attached to the diagnostic. Local services have already streamed their
+/// stdout/stderr to the console, so this is only called for OCI containers.
+///
+/// Takes an owned `container_id` rather than `&RunningService` so the future
+/// stays `Send` (a `RunningService` is `!Sync` due to its lifecycle channel).
+async fn oci_log_tail<C: OciRuntimeClient>(client: &C, container_id: &str) -> Vec<String> {
+    match client.logs(container_id, false).await {
+        Ok(rx) => collect_log_tail_from_rx(rx, OCI_EXIT_LOG_TAIL_LINES).await,
+        Err(_) => Vec::new(),
     }
 }
 
@@ -1881,6 +1981,69 @@ mod tests {
                 .push(format!("container:remove:{container_id}"));
             Ok(())
         }
+
+        async fn remove_volume(&self, volume_name: &str) -> capsule_core::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("volume:remove:{volume_name}"));
+            Ok(())
+        }
+    }
+
+    /// Build an OCI `RunningService` with the given ephemeral engine volumes,
+    /// reusing `oci_running_service` for the bulk of the shape (#444).
+    fn oci_running_service_with_volumes(
+        container_id: &str,
+        ephemeral_volumes: Vec<String>,
+    ) -> RunningService {
+        let mut service = oci_running_service(HashMap::new(), HashMap::new());
+        if let RunningHandle::Oci(oci) = &mut service.handle {
+            oci.container_id = container_id.to_string();
+            oci.ephemeral_volumes = ephemeral_volumes;
+        }
+        service
+    }
+
+    #[tokio::test]
+    async fn stop_service_removes_ephemeral_engine_volumes() {
+        // #444: an OCI service that created an ephemeral engine volume must have
+        // it removed on stop, after the container is stopped + removed.
+        let client = FakeClient::default();
+        let mut service = oci_running_service_with_volumes(
+            "cid-db",
+            vec!["ato-state-deadbeef0000-pgdata".to_string()],
+        );
+
+        stop_service(&mut service, &client).await.expect("stop ok");
+
+        let events = client.events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e == "volume:remove:ato-state-deadbeef0000-pgdata"),
+            "ephemeral volume must be removed on stop: {events:?}"
+        );
+        // Ordering: container removed before its volume.
+        let rm_container = events.iter().position(|e| e == "container:remove:cid-db");
+        let rm_volume = events
+            .iter()
+            .position(|e| e == "volume:remove:ato-state-deadbeef0000-pgdata");
+        assert!(rm_container < rm_volume, "container removed before volume");
+    }
+
+    #[tokio::test]
+    async fn stop_service_without_ephemeral_volumes_removes_none() {
+        let client = FakeClient::default();
+        let mut service = oci_running_service_with_volumes("cid-web", vec![]);
+
+        stop_service(&mut service, &client).await.expect("stop ok");
+
+        let events = client.events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| e.starts_with("volume:remove:")),
+            "no volume removal when there are no ephemeral volumes: {events:?}"
+        );
     }
 
     fn manifest_data(manifest_toml: &str) -> ManifestData {
@@ -1956,6 +2119,7 @@ mod tests {
                 container_id: "container-main".to_string(),
                 log_task: None,
                 host_ports,
+                ephemeral_volumes: Vec::new(),
             }),
         }
     }
@@ -1977,6 +2141,98 @@ mod tests {
         let port = resolve_probe_port(&service, &http_probe("APP_PORT"))
             .expect("env placeholder should resolve");
         assert_eq!(port, Some(49111));
+    }
+
+    /// Spawn a throwaway, immediately-exiting child so a `RunningLocalService`
+    /// can be constructed in tests without driving a real readiness lifecycle.
+    fn spawn_dummy_child() -> Child {
+        if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+                .expect("spawn cmd")
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .expect("spawn sh")
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_service_exit_before_ready_returns_typed_error() {
+        // An OCI container that exits before readiness must surface the typed
+        // `OciExitedBeforeReadyError` so diagnostics can map it to E306 (#445).
+        let client = FakeClient::default();
+        client.states.lock().unwrap().insert(
+            "container-main".to_string(),
+            FakeState {
+                service: "main".to_string(),
+                running: false,
+                exit_code: 1,
+                ..FakeState::default()
+            },
+        );
+
+        let mut service = oci_running_service(HashMap::new(), HashMap::new());
+        service.service.readiness_probe = Some(http_probe("1111"));
+
+        let state = Arc::new(tokio::sync::Mutex::new(OrchestratorStartupState::default()));
+        state
+            .lock()
+            .await
+            .running
+            .insert("main".to_string(), service);
+
+        let err = wait_until_ready_in_state("main", &state, &client)
+            .await
+            .expect_err("exited-before-ready must fail readiness");
+
+        let typed = err
+            .downcast_ref::<OciExitedBeforeReadyError>()
+            .expect("OCI exit must produce the typed error");
+        assert_eq!(typed.service_name, "main");
+        assert_eq!(typed.exit_code, Some(1));
+    }
+
+    #[tokio::test]
+    async fn local_service_exit_before_ready_is_not_oci_typed_error() {
+        // A local (source/native/managed) service that exits before readiness
+        // must keep the generic orchestration error — it must NOT be reclassified
+        // as the OCI-specific `oci_container_exited_before_ready` (#445 review).
+        let client = FakeClient::default();
+
+        let mut service = oci_running_service(HashMap::new(), HashMap::new());
+        service.service.readiness_probe = Some(http_probe("1111"));
+        service.handle = RunningHandle::Local(RunningLocalService {
+            child: spawn_dummy_child(),
+            stdout_thread: None,
+            stderr_thread: None,
+            cleanup_paths: Vec::new(),
+            exit_task: None,
+            event_rx: None,
+            readiness_state: LocalReadinessState::Exited(7),
+        });
+
+        let state = Arc::new(tokio::sync::Mutex::new(OrchestratorStartupState::default()));
+        state
+            .lock()
+            .await
+            .running
+            .insert("main".to_string(), service);
+
+        let err = wait_until_ready_in_state("main", &state, &client)
+            .await
+            .expect_err("local exit-before-ready must fail readiness");
+
+        assert!(
+            err.downcast_ref::<OciExitedBeforeReadyError>().is_none(),
+            "local service exit must not produce the OCI typed error: {err}"
+        );
+        assert!(
+            err.to_string().contains("exited before readiness"),
+            "local service must keep the generic orchestration error: {err}"
+        );
     }
 
     #[tokio::test]
