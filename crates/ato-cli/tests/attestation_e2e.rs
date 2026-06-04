@@ -64,6 +64,7 @@ fn sample_request() -> DependencyMaterializationRequest {
         },
         cache_strategy: CacheStrategy::DerivationCache,
         attestation_strategy: AttestationStrategy::LocalSign,
+        install_lifecycle_context: None,
     }
 }
 
