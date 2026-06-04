@@ -32,7 +32,8 @@
 //!
 //! - contains [`SatisfactionSource::ProvidedInterface`] → may match peer provides;
 //! - any non-peer source → if no peer provide matches, falls back to an external
-//!   requirement (this is how `State` degrades to a managed [`StateRequirement`]);
+//!   requirement (this is how `State` degrades to a managed
+//!   [`ExternalRequirement::StateBinding`]);
 //! - does **not** contain `ProvidedInterface` → never matched against peer
 //!   provides (Secret / Network / Capability / Hardware / Port /
 //!   ProviderCapability), always aggregated as an [`ExternalRequirement`].
@@ -243,6 +244,16 @@ impl CompositionIssue {
 /// [`CompositionIssue`], which yields a `Blocked` report rather than an error).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CompositionError {
+    #[error("capsule_id must not be empty")]
+    EmptyCapsuleId,
+
+    /// A `capsule_id` containing whitespace is rejected rather than trimmed.
+    /// The id is used downstream as a DB / placement-index / receipt key, so an
+    /// implicit `" app " -> "app"` normalization would silently collide or
+    /// mis-key; fail closed instead.
+    #[error("capsule_id '{capsule_id}' must not contain whitespace")]
+    InvalidCapsuleId { capsule_id: String },
+
     #[error("duplicate capsule_id '{capsule_id}' in composition input")]
     DuplicateCapsuleId { capsule_id: String },
 
@@ -268,6 +279,17 @@ pub fn compose(inputs: &[CapsuleInterfaceInput]) -> Result<CompositionReport, Co
     let mut normalized: Vec<CapsuleInterfaceInput> = Vec::with_capacity(inputs.len());
     let mut seen_ids = std::collections::BTreeSet::new();
     for input in inputs {
+        // Fail closed on bad ids: a missing or whitespace-bearing id would
+        // produce a materialized contract whose bindings / external
+        // requirements cannot be attributed to a Capsule. No implicit trim.
+        if input.capsule_id.trim().is_empty() {
+            return Err(CompositionError::EmptyCapsuleId);
+        }
+        if input.capsule_id.chars().any(char::is_whitespace) {
+            return Err(CompositionError::InvalidCapsuleId {
+                capsule_id: input.capsule_id.clone(),
+            });
+        }
         if !seen_ids.insert(input.capsule_id.clone()) {
             return Err(CompositionError::DuplicateCapsuleId {
                 capsule_id: input.capsule_id.clone(),
@@ -792,6 +814,28 @@ mod tests {
         ])
         .unwrap_err();
         assert!(matches!(err, CompositionError::DuplicateCapsuleId { .. }));
+    }
+
+    #[test]
+    fn composition_rejects_empty_capsule_id() {
+        let err = compose(&[input("", iface(vec![], vec![]))]).unwrap_err();
+        assert!(matches!(err, CompositionError::EmptyCapsuleId));
+        // Whitespace-only counts as empty.
+        let err = compose(&[input("   ", iface(vec![], vec![]))]).unwrap_err();
+        assert!(matches!(err, CompositionError::EmptyCapsuleId));
+    }
+
+    #[test]
+    fn composition_rejects_whitespace_capsule_id() {
+        // A non-empty id containing whitespace is rejected, NOT trimmed — so
+        // `" app "` never silently becomes `"app"`.
+        for id in [" app ", "a b", "app\t"] {
+            let err = compose(&[input(id, iface(vec![], vec![]))]).unwrap_err();
+            assert!(
+                matches!(err, CompositionError::InvalidCapsuleId { .. }),
+                "expected InvalidCapsuleId for {id:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]
