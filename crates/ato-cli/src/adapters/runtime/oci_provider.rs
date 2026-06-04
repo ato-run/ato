@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use capsule_core::CapsuleError;
 use capsule_core::runtime::oci::{
     BollardOciRuntimeClient, OciContainerInspect, OciContainerRequest, OciLogChunk,
-    OciNetworkRequest, OciRuntimeClient,
+    OciMountSourceKind, OciNetworkRequest, OciRuntimeClient,
 };
 use capsule_core::types::{
     OciImageResolution, OciPlatform, OciProviderKind, OciProviderMode, OciProviderSemantics,
@@ -383,6 +383,15 @@ pub(crate) trait OciProvider: Send + Sync {
         container_id: &str,
         force: bool,
     ) -> Result<(), OciProviderError>;
+
+    /// Remove an engine-managed named volume.
+    ///
+    /// Only meaningful for engines that manage volumes (Podman/Docker); the
+    /// default is a no-op so providers that never create volumes need not
+    /// implement it. Used by cleanup to delete ephemeral state volumes; see #444.
+    async fn remove_volume(&self, _volume_name: &str) -> Result<(), OciProviderError> {
+        Ok(())
+    }
 }
 
 pub(crate) trait OciProviderSelector: Send + Sync {
@@ -667,6 +676,23 @@ fn podman_mount_opts(mount: &capsule_core::runtime::oci::OciMountSpec) -> &'stat
         (false, true) => ":U",
         _ => "",
     }
+}
+
+/// Render an [`OciMountSpec`] into the value passed after `-v` to `podman create`.
+///
+/// * [`OciMountSourceKind::BindPath`] → `<host-path>:<target><opts>`, with the
+///   host path canonicalized to resolve symlinks (e.g. `/tmp` → `/private/tmp`).
+/// * [`OciMountSourceKind::EngineVolume`] → `<volume-name>:<target><opts>`. The
+///   source is a named volume, not a filesystem path, so it is **never**
+///   canonicalized; Podman auto-creates it on first use. See #444.
+fn podman_mount_arg(mount: &capsule_core::runtime::oci::OciMountSpec) -> String {
+    let source = match mount.source_kind {
+        OciMountSourceKind::EngineVolume { .. } => mount.source.clone(),
+        OciMountSourceKind::BindPath => std::fs::canonicalize(&mount.source)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| mount.source.clone()),
+    };
+    format!("{}:{}{}", source, mount.target, podman_mount_opts(mount))
 }
 
 /// Render an [`OciPortSpec`] into the argument value passed after `-p` to
@@ -1358,12 +1384,7 @@ where
                 });
             }
             args.push("-v".into());
-            // Canonicalize the source path to resolve symlinks (e.g. /tmp → /private/tmp on macOS).
-            let source = std::fs::canonicalize(&mount.source)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| mount.source.clone());
-            let opts = podman_mount_opts(mount);
-            args.push(format!("{}:{}{}", source, mount.target, opts));
+            args.push(podman_mount_arg(mount));
         }
         if let Some(net) = &request.network {
             args.push("--network".into());
@@ -1550,6 +1571,24 @@ where
         if !output.status.success() {
             return Err(OciProviderError::OciCleanupFailed {
                 operation: "remove_container".into(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn remove_volume(&self, volume_name: &str) -> Result<(), OciProviderError> {
+        // `--force` so removing a not-yet-created volume (e.g. a session that
+        // failed before the container started) is a no-op rather than an error.
+        let output = self
+            .podman_command()
+            .args(["volume", "rm", "--force", volume_name])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman volume rm", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciCleanupFailed {
+                operation: "remove_volume".into(),
                 message: String::from_utf8_lossy(&output.stderr).to_string(),
             });
         }
@@ -3027,6 +3066,14 @@ impl OciProvider for FakeOciProvider {
             .push(format!("remove:{}", container_id));
         self.remove_result.clone()
     }
+
+    async fn remove_volume(&self, volume_name: &str) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("remove_volume:{}", volume_name));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3498,6 +3545,7 @@ mod tests {
                     target: "/data".to_string(),
                     readonly: false,
                     ownership: None,
+                    source_kind: OciMountSourceKind::default(),
                 }],
                 ports: vec![OciPortSpec {
                     container_port: 3000,
@@ -4215,6 +4263,7 @@ mod tests {
             target: target.to_string(),
             readonly,
             ownership,
+            source_kind: OciMountSourceKind::default(),
         }
     }
 
@@ -4246,6 +4295,54 @@ mod tests {
         );
         // podman_mount_opts would return :U but the caller guards this before calling.
         assert_ne!(podman_mount_opts(&m), ":ro");
+    }
+
+    // ── podman_mount_arg: BindPath vs EngineVolume command builder (#444) ──────
+
+    #[test]
+    fn podman_mount_arg_bind_path_uses_source_path() {
+        // A non-existent host path can't be canonicalized, so the literal source
+        // is used — `source:target` with no extra options.
+        let m = OciMountSpec {
+            source: "/host/state".to_string(),
+            target: "/data".to_string(),
+            readonly: false,
+            ownership: None,
+            source_kind: OciMountSourceKind::BindPath,
+        };
+        assert_eq!(podman_mount_arg(&m), "/host/state:/data");
+    }
+
+    #[test]
+    fn podman_mount_arg_engine_volume_uses_volume_name_verbatim() {
+        // Engine volume source is a name, not a path: never canonicalized.
+        let m = OciMountSpec {
+            source: "ato-state-deadbeef0000-data".to_string(),
+            target: "/data".to_string(),
+            readonly: false,
+            ownership: None,
+            source_kind: OciMountSourceKind::EngineVolume {
+                remove_on_stop: false,
+            },
+        };
+        assert_eq!(podman_mount_arg(&m), "ato-state-deadbeef0000-data:/data");
+    }
+
+    #[test]
+    fn podman_mount_arg_engine_volume_with_ownership_appends_colon_u() {
+        let m = OciMountSpec {
+            source: "ato-state-deadbeef0000-pgdata".to_string(),
+            target: "/var/lib/postgresql/data".to_string(),
+            readonly: false,
+            ownership: Some(test_ownership()),
+            source_kind: OciMountSourceKind::EngineVolume {
+                remove_on_stop: true,
+            },
+        };
+        assert_eq!(
+            podman_mount_arg(&m),
+            "ato-state-deadbeef0000-pgdata:/var/lib/postgresql/data:U"
+        );
     }
 
     // ── Provider health diagnostics tests (#430) ──────────────────────────────
