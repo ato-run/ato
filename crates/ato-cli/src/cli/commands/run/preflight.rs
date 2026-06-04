@@ -2,7 +2,8 @@ use super::*;
 
 use crate::adapters::runtime::provisioning::{
     LifecyclePathPlan, LifecyclePhase, build_lifecycle_path_plan, dependency_root,
-    materialize_lifecycle_toolchains,
+    materialize_lifecycle_toolchains, python_requirements_lock_missing,
+    python_requirements_lock_sync_command,
 };
 use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
@@ -676,25 +677,31 @@ fn provision_command_from_python_importer(
     execution_working_directory: &Path,
     runtime_version: Option<&str>,
 ) -> Result<Option<String>> {
-    let python_pin = runtime_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!(" --python {value}"))
-        .unwrap_or_default();
+    let uv_lock = execution_working_directory.join("uv.lock");
+    let pyproject = execution_working_directory.join("pyproject.toml");
+    if pyproject.exists() {
+        return if uv_lock.exists() {
+            Ok(Some("uv sync --frozen".to_string()))
+        } else {
+            Err(AtoExecutionError::lock_incomplete(
+                "source/python target has pyproject.toml but is missing uv.lock for fail-closed provisioning",
+                Some("uv.lock"),
+            )
+            .into())
+        };
+    }
 
     if let Some(requirements_path) = resolve_python_requirements_path(execution_working_directory) {
-        let requirements_arg = requirements_path
-            .strip_prefix(execution_working_directory)
-            .unwrap_or(requirements_path.as_path())
-            .to_string_lossy()
-            .replace('\\', "/");
-        return Ok(Some(format!(
-            // setuptools>=72 dropped `pkg_resources`; pin <72 so legacy packages
-            // (e.g. gunicorn<21) that import pkg_resources still work.
-            // Apps that explicitly pin setuptools>=72 in requirements.txt will
-            // get a clear uv conflict error and can remove the implicit constraint.
-            "uv venv{python_pin} --seed --clear && uv pip install -r {requirements_arg} 'setuptools<72'"
-        )));
+        if uv_lock.exists() {
+            return Ok(Some(python_requirements_lock_sync_command(runtime_version)));
+        }
+        if !uv_lock.exists() {
+            return Err(python_requirements_lock_missing(format!(
+                "source/python target has {} but is missing uv.lock for fail-closed provisioning",
+                requirements_path.display()
+            ))
+            .into());
+        }
     }
 
     match probe_required_python_lockfile(execution_working_directory)? {
@@ -874,9 +881,35 @@ fn preflight_python_uv_lock_for_source_driver(
     // sync with `plan_v03_provision_command` instead of relying on a layout
     // accident.
     let dep_root = dependency_root(plan);
+    let uv_lock = dep_root.join("uv.lock");
+    let pyproject = dep_root.join("pyproject.toml");
 
-    if resolve_python_requirements_path(&dep_root).is_some() {
-        return Ok(());
+    if pyproject.exists() {
+        match probe_required_python_lockfile(&dep_root)? {
+            ProbeResult::Found(_) => return Ok(()),
+            ProbeResult::Missing(missing) => {
+                return Err(
+                    AtoExecutionError::lock_incomplete(missing.message, Some("uv.lock")).into(),
+                );
+            }
+            ProbeResult::Ambiguous(ambiguity) => {
+                return Err(
+                    AtoExecutionError::lock_incomplete(ambiguity.message, Some("uv.lock")).into(),
+                );
+            }
+            ProbeResult::NotApplicable => {}
+        }
+    }
+
+    if let Some(requirements_path) = resolve_python_requirements_path(&dep_root) {
+        if uv_lock.exists() {
+            return Ok(());
+        }
+        return Err(python_requirements_lock_missing(format!(
+            "source/python target has {} but is missing uv.lock for fail-closed provisioning",
+            requirements_path.display()
+        ))
+        .into());
     }
 
     match probe_required_python_lockfile(&dep_root)? {
@@ -890,7 +923,7 @@ fn preflight_python_uv_lock_for_source_driver(
     }
 
     Err(AtoExecutionError::lock_incomplete(
-        "source/python target requires uv.lock or requirements.txt for fail-closed provisioning",
+        "source/python target requires uv.lock for fail-closed provisioning",
         Some("uv.lock"),
     )
     .into())
@@ -1573,6 +1606,7 @@ run_command = "pnpm worker"
         fs::create_dir_all(&backend).expect("create backend");
         fs::write(backend.join("requirements.txt"), "fastapi==0.115.6\n")
             .expect("write requirements");
+        fs::write(backend.join("uv.lock"), "# pip-compile lock\n").expect("write lock");
         fs::write(backend.join("serve.py"), "print('ok')\n").expect("write serve");
         let plan = build_plan(
             dir.path(),
@@ -1596,12 +1630,12 @@ run_command = "serve.py"
 
         assert_eq!(
             command,
-            "uv venv --python 3.11.10 --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
+            "uv venv --python 3.11.10 --seed --clear && uv pip sync uv.lock"
         );
     }
 
     #[test]
-    fn provision_command_omits_python_pin_when_runtime_version_unset() {
+    fn provision_command_rejects_requirements_without_uv_lock() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
             .expect("write requirements");
@@ -1619,14 +1653,11 @@ run_command = "main.py"
 "#,
         );
 
-        let command = plan_v03_provision_command(&plan)
-            .expect("provision command")
-            .expect("python requirements should provision");
+        let err = plan_v03_provision_command(&plan)
+            .expect_err("requirements without uv.lock should fail closed");
 
-        assert_eq!(
-            command,
-            "uv venv --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
-        );
+        assert!(err.to_string().contains("missing uv.lock"));
+        assert!(err.to_string().contains("requirements.txt"));
     }
 
     #[test]
@@ -1634,6 +1665,7 @@ run_command = "main.py"
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
             .expect("write requirements");
+        fs::write(dir.path().join("uv.lock"), "# pip-compile lock\n").expect("write lock");
         let plan = build_plan(
             dir.path(),
             r#"
@@ -1657,7 +1689,39 @@ run_command = "main.py"
             command.starts_with("uv venv --python 3.11.10 --seed --clear &&"),
             "command={command}"
         );
-        assert!(command.contains("'setuptools<72'"), "command={command}");
+        assert!(command.contains("uv pip sync uv.lock"), "command={command}");
+    }
+
+    #[test]
+    fn provision_command_prefers_pyproject_uv_lock_over_requirements_lock() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write pyproject");
+        fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+        fs::write(dir.path().join("uv.lock"), "version = 1\n").expect("write lock");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+run_command = "main.py"
+"#,
+        );
+
+        let command = plan_v03_provision_command(&plan)
+            .expect("provision command")
+            .expect("python project lock should provision");
+
+        assert_eq!(command, "uv sync --frozen");
     }
 
     #[test]

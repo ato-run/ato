@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
-use crate::adapters::runtime::provisioning::dependency_root;
+use crate::adapters::runtime::provisioning::{
+    dependency_root, python_requirements_lock_missing, python_requirements_lock_sync_command,
+};
 use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::application::source_inventory::{
     OutputSpec, collect_source_files, native_lockfiles, normalize_outputs,
@@ -1080,15 +1082,42 @@ fn plan_v03_build_provision_command(
 
     if matches!(driver.as_str(), "python") {
         let uv_lock = execution_working_directory.join("uv.lock");
+        let pyproject = execution_working_directory.join("pyproject.toml");
+        let requirements = execution_working_directory.join("requirements.txt");
         debug!(
             phase = "build",
             runtime,
             driver,
             workspace_root = %workspace_root.display(),
             execution_working_directory = %execution_working_directory.display(),
-            lockfile_check_paths = ?vec![("uv.lock", uv_lock.clone(), uv_lock.exists())],
+            lockfile_check_paths = ?vec![
+                ("pyproject.toml", pyproject.clone(), pyproject.exists()),
+                ("requirements.txt", requirements.clone(), requirements.exists()),
+                ("uv.lock", uv_lock.clone(), uv_lock.exists()),
+            ],
             "Provision command path diagnostics"
         );
+        if pyproject.exists() {
+            return if uv_lock.exists() {
+                Ok(Some("uv sync --frozen".to_string()))
+            } else {
+                Err(AtoExecutionError::lock_incomplete(
+                    "source/python target has pyproject.toml but is missing uv.lock for fail-closed provisioning",
+                    Some("uv.lock"),
+                )
+                .into())
+            };
+        }
+        if requirements.exists() {
+            return if uv_lock.exists() {
+                Ok(Some(python_requirements_lock_sync_command(None)))
+            } else {
+                Err(python_requirements_lock_missing(
+                    "source/python target has requirements.txt but is missing uv.lock for fail-closed provisioning",
+                )
+                .into())
+            };
+        }
         return if uv_lock.exists() {
             Ok(Some("uv sync --frozen".to_string()))
         } else {
@@ -1494,6 +1523,87 @@ mod tests {
 
         let command = plan_v03_build_provision_command(&plan, true).expect("plan provision");
         assert_eq!(command.as_deref(), Some("yarn install --frozen-lockfile"));
+    }
+
+    #[test]
+    fn v03_build_provision_uses_requirements_uv_lock_with_pip_sync() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+        std::fs::write(tmp.path().join("uv.lock"), "# pip-compile lock\n").expect("write lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("python".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("python app.py".to_string()),
+                ),
+            ],
+        );
+
+        let command = plan_v03_build_provision_command(&plan, true).expect("plan provision");
+        assert_eq!(
+            command.as_deref(),
+            Some("uv venv --seed --clear && uv pip sync uv.lock")
+        );
+    }
+
+    #[test]
+    fn v03_build_provision_rejects_requirements_without_uv_lock() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("python".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("python app.py".to_string()),
+                ),
+            ],
+        );
+
+        let err = plan_v03_build_provision_command(&plan, true)
+            .expect_err("requirements without uv.lock should fail closed");
+        assert!(err.to_string().contains("missing uv.lock"));
+        assert!(err.to_string().contains("requirements.txt"));
+    }
+
+    #[test]
+    fn v03_build_provision_prefers_pyproject_uv_lock_over_requirements_lock() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("pyproject.toml"),
+            "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write pyproject");
+        std::fs::write(tmp.path().join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+        std::fs::write(tmp.path().join("uv.lock"), "version = 1\n").expect("write lock");
+
+        let plan = manifest_with_schema_and_target(
+            "0.3",
+            tmp.path().to_path_buf(),
+            vec![
+                ("runtime", toml::Value::String("source".to_string())),
+                ("driver", toml::Value::String("python".to_string())),
+                (
+                    "run_command",
+                    toml::Value::String("python app.py".to_string()),
+                ),
+            ],
+        );
+
+        let command = plan_v03_build_provision_command(&plan, true).expect("plan provision");
+        assert_eq!(command.as_deref(), Some("uv sync --frozen"));
     }
 
     #[test]

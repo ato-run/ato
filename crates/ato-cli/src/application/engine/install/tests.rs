@@ -20,6 +20,43 @@ use axum::{Json, Router};
 use ed25519_dalek::{Signer as _, SigningKey};
 use tokio::sync::Mutex;
 
+#[cfg(unix)]
+fn install_fake_uv(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("fake uv bin dir");
+    let uv = bin_dir.join("uv");
+    let log = temp.path().join("uv.log");
+    std::fs::write(
+        &uv,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$ATO_FAKE_UV_LOG"
+case "$*" in
+  "pip compile requirements.txt -o uv.lock")
+    printf '# fake pip-compile lock\n' > uv.lock
+    exit 0
+    ;;
+  "lock")
+    printf 'version = 1\n' > uv.lock
+    exit 0
+    ;;
+  *)
+    echo "unexpected uv args: $*" >&2
+    exit 9
+    ;;
+esac
+"#,
+    )
+    .expect("fake uv script");
+    let mut perms = std::fs::metadata(&uv)
+        .expect("fake uv metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&uv, perms).expect("fake uv permissions");
+    (bin_dir, log)
+}
+
 const TEST_SCOPED_ID: &str = "koh0920/sample";
 const TEST_VERSION: &str = "1.0.0";
 const TEST_LEASE_ID: &str = "lease-test-1";
@@ -469,6 +506,185 @@ port = 3000
 
     assert!((18000..=18999).contains(&port));
     assert_ne!(port, 3000);
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_all_generates_requirements_python_lock_and_includes_it() {
+    let _guard = test_env_lock().lock().expect("env lock");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    std::fs::write(checkout.join("requirements.txt"), "requests==2.32.0\n").expect("requirements");
+    std::fs::write(checkout.join("app.py"), "print('ok')\n").expect("app");
+    let (bin_dir, log) = install_fake_uv(&tmp);
+    let prior_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{prior_path}", bin_dir.display());
+    let _path_guard = EnvVarGuard::set("PATH", Some(&path));
+    let _log_guard = EnvVarGuard::set("ATO_FAKE_UV_LOG", Some(log.to_str().expect("log path")));
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "python app.py"
+
+[pack]
+include = ["app.py", "requirements.txt"]
+"#;
+
+    let result =
+        support::auto_fix_github_python_lockfiles_for_preview_toml(manifest, &checkout, true)
+            .expect("auto-fix python lock");
+
+    assert!(result.repaired);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("uv.lock")).expect("uv.lock"),
+        "# fake pip-compile lock\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("uv log"),
+        "pip compile requirements.txt -o uv.lock\n"
+    );
+    let parsed = result
+        .preview_toml
+        .parse::<toml::Value>()
+        .expect("parse normalized toml");
+    let include = parsed
+        .get("pack")
+        .and_then(|pack| pack.get("include"))
+        .and_then(toml::Value::as_array)
+        .expect("pack.include");
+    assert!(
+        include
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .any(|value| value == "uv.lock"),
+        "normalized preview should include generated uv.lock: {}",
+        result.preview_toml
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_all_prefers_pyproject_lock_over_requirements_compile() {
+    let _guard = test_env_lock().lock().expect("env lock");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    std::fs::write(
+        checkout.join("pyproject.toml"),
+        "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("pyproject");
+    std::fs::write(checkout.join("requirements.txt"), "requests==2.32.0\n").expect("requirements");
+    let (bin_dir, log) = install_fake_uv(&tmp);
+    let prior_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{prior_path}", bin_dir.display());
+    let _path_guard = EnvVarGuard::set("PATH", Some(&path));
+    let _log_guard = EnvVarGuard::set("ATO_FAKE_UV_LOG", Some(log.to_str().expect("log path")));
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "python app.py"
+
+[pack]
+include = ["pyproject.toml", "requirements.txt"]
+"#;
+
+    let result =
+        support::auto_fix_github_python_lockfiles_for_preview_toml(manifest, &checkout, true)
+            .expect("auto-fix python lock");
+
+    assert!(result.repaired);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("uv.lock")).expect("uv.lock"),
+        "version = 1\n"
+    );
+    assert_eq!(std::fs::read_to_string(&log).expect("uv log"), "lock\n");
+}
+
+#[test]
+fn auto_fix_rejects_absolute_python_working_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    let manifest = format!(
+        r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+working_dir = "{}"
+run = "python app.py"
+"#,
+        checkout.display()
+    );
+
+    let err = support::github_python_lock_repair_targets(&manifest, &checkout)
+        .expect_err("absolute working_dir should fail");
+
+    assert!(err.to_string().contains("absolute working_dir"));
+}
+
+#[test]
+fn auto_fix_rejects_parent_python_working_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+working_dir = "../outside"
+run = "python app.py"
+"#;
+
+    let err = support::github_python_lock_repair_targets(manifest, &checkout)
+        .expect_err("parent working_dir should fail");
+
+    assert!(err.to_string().contains("contains '..'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_rejects_symlink_escape_python_working_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    std::fs::create_dir_all(&outside).expect("outside");
+    std::os::unix::fs::symlink(&outside, checkout.join("linked")).expect("symlink");
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+working_dir = "linked"
+run = "python app.py"
+"#;
+
+    let err = support::github_python_lock_repair_targets(manifest, &checkout)
+        .expect_err("symlink escape should fail");
+
+    assert!(err.to_string().contains("outside checkout"));
 }
 
 #[test]
