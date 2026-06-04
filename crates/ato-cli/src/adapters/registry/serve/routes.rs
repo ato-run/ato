@@ -129,7 +129,7 @@ pub(super) fn build_app_router(ui_enabled: bool) -> Router<AppState> {
     );
     app = app.route(
         "/v1/runtime/install-profiles",
-        get(handle_runtime_install_profiles),
+        get(handle_runtime_install_profiles).post(handle_runtime_add_capsule),
     );
     app = app.route(
         "/v1/runtime/sessions/:id/logs",
