@@ -97,6 +97,17 @@ pub enum SecretProjection {
     File { path: String },
 }
 
+impl SecretProjection {
+    /// The projection target (env var name or file path). Used by validation to
+    /// reject empty projections — an empty target breaks injection at launch.
+    pub fn target(&self) -> &str {
+        match self {
+            SecretProjection::Env { name } => name,
+            SecretProjection::File { path } => path,
+        }
+    }
+}
+
 /// Coarse class of a hardware requirement. Intentionally small for #505.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -382,43 +393,43 @@ impl RequiredInterface {
         }
     }
 
-    /// The canonical source that *can* satisfy this requirement category.
+    /// Every source that *may* satisfy this requirement category.
     ///
-    /// This is the single source of truth for the provides/requires boundary:
-    /// only categories that return [`SatisfactionSource::ProvidedInterface`]
-    /// can be wired to a peer Capsule. Everything else is satisfied by the
-    /// host / platform / user.
-    pub fn satisfaction_source(&self) -> SatisfactionSource {
+    /// This is the single source of truth for the provides/requires boundary.
+    /// A category is peer-wirable iff its list contains
+    /// [`SatisfactionSource::ProvidedInterface`] — see [`Self::is_peer_satisfiable`],
+    /// which is defined in terms of this method so the two can never disagree.
+    ///
+    /// Note `State` returns **two** sources: it can be wired to a peer's
+    /// [`StateProvide`] *or* bound to a managed state surface. A caller (e.g.
+    /// #506) that only ever looked at a single "the" source would wrongly route
+    /// `State` to [`SatisfactionSource::StateBinding`] and miss the peer-wiring
+    /// path — which is exactly why this returns a slice rather than one value.
+    pub fn possible_satisfaction_sources(&self) -> &'static [SatisfactionSource] {
+        use SatisfactionSource::*;
         match self {
             RequiredInterface::Service(_)
             | RequiredInterface::Tool(_)
-            | RequiredInterface::Runtime(_) => SatisfactionSource::ProvidedInterface,
-            // State can be wired to a peer's StateProvide, but the default
-            // managed path is a state binding; the satisfaction predicate below
-            // still lets a peer StateProvide match it.
-            RequiredInterface::State(_) => SatisfactionSource::StateBinding,
-            RequiredInterface::Secret(_) => SatisfactionSource::UserSecretGrant,
-            RequiredInterface::Network(_) | RequiredInterface::Hardware(_) => {
-                SatisfactionSource::ManagedResource
-            }
-            RequiredInterface::Port(_) => SatisfactionSource::PortAllocation,
+            | RequiredInterface::Runtime(_) => &[ProvidedInterface],
+            // Peer StateProvide OR a managed state binding may satisfy state.
+            RequiredInterface::State(_) => &[ProvidedInterface, StateBinding],
+            RequiredInterface::Secret(_) => &[UserSecretGrant],
+            RequiredInterface::Network(_) | RequiredInterface::Hardware(_) => &[ManagedResource],
+            RequiredInterface::Port(_) => &[PortAllocation],
             RequiredInterface::Capability(_) | RequiredInterface::ProviderCapability(_) => {
-                SatisfactionSource::ProviderCapability
+                &[ProviderCapability]
             }
         }
     }
 
     /// Whether a peer Capsule's [`ProvidedInterface`] could *ever* satisfy this
-    /// requirement category. Secret/Network/Capability/Hardware/Port/
-    /// ProviderCapability always return `false`.
+    /// requirement category. Defined in terms of
+    /// [`Self::possible_satisfaction_sources`] so the boundary stays consistent.
+    /// Secret/Network/Capability/Hardware/Port/ProviderCapability always return
+    /// `false`.
     pub fn is_peer_satisfiable(&self) -> bool {
-        matches!(
-            self,
-            RequiredInterface::Service(_)
-                | RequiredInterface::Tool(_)
-                | RequiredInterface::Runtime(_)
-                | RequiredInterface::State(_)
-        )
+        self.possible_satisfaction_sources()
+            .contains(&SatisfactionSource::ProvidedInterface)
     }
 }
 
@@ -494,6 +505,15 @@ impl CapsuleInterface {
                     category: r.category(),
                 });
             }
+            // A secret's projection target (env var name / file path) must not
+            // be empty — an empty target silently breaks injection at launch.
+            if let RequiredInterface::Secret(s) = r {
+                if s.projection.target().trim().is_empty() {
+                    return Err(InterfaceError::EmptySecretProjection {
+                        name: s.name.clone(),
+                    });
+                }
+            }
             if !seen_requires.insert(r.dedup_key()) {
                 return Err(InterfaceError::DuplicateRequire {
                     category: r.category(),
@@ -529,6 +549,9 @@ pub enum InterfaceError {
         category: &'static str,
         name: String,
     },
+
+    #[error("secret requirement '{name}' has an empty projection target")]
+    EmptySecretProjection { name: String },
 }
 
 // ── Satisfaction predicate ─────────────────────────────────────────────────
@@ -747,6 +770,20 @@ mod tests {
         })
     }
 
+    fn state_req(name: &str) -> RequiredInterface {
+        RequiredInterface::State(StateRequirement {
+            name: name.to_string(),
+            version: None,
+        })
+    }
+
+    fn state_provide(name: &str) -> ProvidedInterface {
+        ProvidedInterface::State(StateProvide {
+            name: name.to_string(),
+            version: None,
+        })
+    }
+
     #[test]
     fn service_requirement_can_be_satisfied_by_matching_service_provide() {
         let req = svc_req("postgres", Some("tcp"));
@@ -771,6 +808,88 @@ mod tests {
         let prov = svc_provide("redis", None);
         let candidate = provided_interface_may_satisfy(&req, &prov);
         assert!(!candidate.compatible);
+    }
+
+    #[test]
+    fn state_requirement_can_be_satisfied_by_matching_state_provide() {
+        let req = state_req("session");
+        let prov = state_provide("session");
+        let candidate = provided_interface_may_satisfy(&req, &prov);
+        assert!(candidate.compatible, "{:?}", candidate.reason);
+        assert_eq!(candidate.source, SatisfactionSource::ProvidedInterface);
+        // A name mismatch is rejected.
+        assert!(!provided_interface_may_satisfy(&req, &state_provide("other")).compatible);
+        // A non-state provide cannot satisfy a state requirement.
+        assert!(!provided_interface_may_satisfy(&req, &svc_provide("session", None)).compatible);
+    }
+
+    #[test]
+    fn state_requirement_possible_sources_include_peer_and_state_binding() {
+        let req = state_req("session");
+        let sources = req.possible_satisfaction_sources();
+        // State is BOTH peer-wirable (StateProvide) AND bindable to a managed
+        // state surface — the boundary must expose both, never just one.
+        assert!(sources.contains(&SatisfactionSource::ProvidedInterface));
+        assert!(sources.contains(&SatisfactionSource::StateBinding));
+        assert!(req.is_peer_satisfiable());
+
+        // Cross-check: every category's peer-satisfiability agrees with whether
+        // ProvidedInterface is among its possible sources (no drift between the
+        // two methods).
+        for r in [
+            svc_req("s", None),
+            RequiredInterface::Tool(ToolRequirement {
+                name: "t".into(),
+                version: None,
+            }),
+            RequiredInterface::Runtime(RuntimeRequirement {
+                name: "rt".into(),
+                version: None,
+            }),
+            state_req("st"),
+            secret_req("SECRET"),
+            RequiredInterface::Network(NetworkRequirement {
+                logical_name: "n".into(),
+                egress: true,
+                hosts: vec![],
+            }),
+            RequiredInterface::Port(PortRequirement {
+                logical_name: "p".into(),
+                preferred_port: None,
+                can_remap: false,
+            }),
+            RequiredInterface::Hardware(HardwareRequirement {
+                kind: HardwareKind::Gpu,
+                constraint: None,
+            }),
+            RequiredInterface::Capability(CapabilityRequirement { name: "c".into() }),
+            RequiredInterface::ProviderCapability(ProviderCapabilityRequirement {
+                name: "pc".into(),
+            }),
+        ] {
+            assert_eq!(
+                r.is_peer_satisfiable(),
+                r.possible_satisfaction_sources()
+                    .contains(&SatisfactionSource::ProvidedInterface),
+                "boundary drift for {:?}",
+                r.category()
+            );
+        }
+    }
+
+    #[test]
+    fn secret_requirement_rejects_empty_projection_target() {
+        let mut iface = CapsuleInterface {
+            provides: vec![],
+            requires: vec![RequiredInterface::Secret(SecretRequirement {
+                name: "TOKEN".into(),
+                scope: SecretScope::CapsuleInstance,
+                projection: SecretProjection::Env { name: "".into() },
+                optional: false,
+            })],
+        };
+        let err = iface.validate().unwrap_err();
+        assert!(matches!(err, InterfaceError::EmptySecretProjection { .. }));
     }
 
     #[test]
