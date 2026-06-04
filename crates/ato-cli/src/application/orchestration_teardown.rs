@@ -534,6 +534,20 @@ pub(crate) fn is_ato_managed_network(name: &str) -> bool {
     name.starts_with("ato-")
 }
 
+/// Argument vector for `<cmd> network rm [...] <name>`.
+///
+/// Podman gets `--force` so a network that still has an attached endpoint at
+/// removal time is force-disconnected and removed rather than left orphaned
+/// (#450). Docker has no `--force` for `network rm`, so it stays plain to avoid
+/// an "unknown flag" error.
+fn network_rm_args<'a>(cmd: &str, network_name: &'a str) -> Vec<&'a str> {
+    if cmd == "podman" {
+        vec!["network", "rm", "--force", network_name]
+    } else {
+        vec!["network", "rm", network_name]
+    }
+}
+
 /// Returns `true` when `msg` indicates the network is already gone
 /// (not present) rather than a real removal failure.
 fn is_network_not_found(msg: &str) -> bool {
@@ -578,8 +592,14 @@ fn try_remove_network_subprocess(network_name: &str) -> NetworkRemovalOutcome {
     // `docker network rm` hangs on the unix socket with no internal
     // timeout, blocking session teardown indefinitely.
     for cmd in ato_session_core::process::oci_probe_runtimes() {
+        // `--force` (podman only) disconnects any lingering endpoints before
+        // removing the network. Without it, `network rm` fails with "network
+        // is being used" when a container is still attached at removal time —
+        // e.g. a teardown race, or a sidecar/proxy endpoint not in the service
+        // set — leaving the `ato-*` network orphaned (#450). `docker network rm`
+        // has no such flag, so it stays plain.
         let result = Command::new(cmd)
-            .args(["network", "rm", network_name])
+            .args(network_rm_args(cmd, network_name))
             .output();
         match result {
             Ok(out) if out.status.success() => return NetworkRemovalOutcome::Removed,
@@ -606,10 +626,91 @@ fn try_remove_network_subprocess(network_name: &str) -> NetworkRemovalOutcome {
     }
 }
 
+/// Outcome of a [`remove_volume_if_present`] call (#444). Mirrors
+/// [`NetworkRemovalOutcome`] so `stop_session` can surface failures.
+#[derive(Debug, PartialEq)]
+pub(crate) enum VolumeRemovalOutcome {
+    /// Volume was found and removed (or was already gone — `--force` makes
+    /// removing a missing volume a success).
+    Removed,
+    /// Name did not match the `ato-state-` prefix; removal skipped to avoid
+    /// touching volumes Ato did not create.
+    SkippedNotAtoManaged,
+    /// Removal was attempted but failed across all candidate CLIs.
+    Failed(String),
+}
+
+/// Returns `true` when `name` looks like an Ato-managed engine state volume.
+/// [`engine_state_volume_name`](capsule_core::runtime::oci::engine_state_volume_name)
+/// always prefixes `ato-state-`, so that prefix is a sufficient guard.
+fn is_ato_managed_volume(name: &str) -> bool {
+    name.starts_with("ato-state-")
+}
+
+/// Remove an ephemeral engine-managed state volume by name after its
+/// containers have stopped (#444).
+///
+/// * Only removes volumes whose name starts with `ato-state-` (guard against
+///   touching unrelated user volumes).
+/// * Tries each opted-in OCI CLI (`podman`, and `docker` when enabled),
+///   matching the network/container teardown candidate policy.
+/// * `--force` so an already-gone volume counts as removed (idempotent).
+pub(crate) fn remove_volume_if_present(volume_name: &str) -> VolumeRemovalOutcome {
+    if volume_name.is_empty() || !is_ato_managed_volume(volume_name) {
+        return VolumeRemovalOutcome::SkippedNotAtoManaged;
+    }
+
+    let mut last_error = String::new();
+    for cmd in ato_session_core::process::oci_probe_runtimes() {
+        let result = Command::new(cmd)
+            .args(["volume", "rm", "--force", volume_name])
+            .output();
+        match result {
+            Ok(out) if out.status.success() => return VolumeRemovalOutcome::Removed,
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let msg = stderr.trim().to_string();
+                if !msg.is_empty() {
+                    last_error = format!("{cmd} volume rm: {msg}");
+                }
+            }
+            Err(err) => {
+                last_error = format!("{cmd}: {err}");
+            }
+        }
+    }
+    if last_error.is_empty() {
+        VolumeRemovalOutcome::Failed("unknown error".to_string())
+    } else {
+        VolumeRemovalOutcome::Failed(last_error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn is_ato_managed_volume_requires_ato_state_prefix() {
+        assert!(is_ato_managed_volume("ato-state-deadbeef0000-pgdata"));
+        assert!(!is_ato_managed_volume("postgres-data"));
+        assert!(!is_ato_managed_volume("ato-net-abc")); // network-ish, not state
+        assert!(!is_ato_managed_volume(""));
+    }
+
+    #[test]
+    fn remove_volume_skips_non_ato_managed_names() {
+        // Guard: never shells out to remove a volume Ato did not create.
+        assert_eq!(
+            remove_volume_if_present("user-postgres-data"),
+            VolumeRemovalOutcome::SkippedNotAtoManaged
+        );
+        assert_eq!(
+            remove_volume_if_present(""),
+            VolumeRemovalOutcome::SkippedNotAtoManaged
+        );
+    }
 
     #[test]
     fn empty_record_signals_nothing() {
@@ -666,6 +767,27 @@ mod tests {
     fn remove_network_skips_non_ato_managed() {
         let outcome = remove_network_if_present("my-random-network");
         assert_eq!(outcome, NetworkRemovalOutcome::SkippedNotAtoManaged);
+    }
+
+    // --- #450 network rm --force argument tests ---
+
+    #[test]
+    fn network_rm_args_podman_uses_force() {
+        // `--force` disconnects lingering endpoints so a still-attached network
+        // does not leak (#450).
+        assert_eq!(
+            network_rm_args("podman", "ato-blinko-abc12345-42"),
+            vec!["network", "rm", "--force", "ato-blinko-abc12345-42"]
+        );
+    }
+
+    #[test]
+    fn network_rm_args_docker_stays_plain() {
+        // `docker network rm` has no `--force`; adding it would be an unknown flag.
+        assert_eq!(
+            network_rm_args("docker", "ato-blinko-abc12345-42"),
+            vec!["network", "rm", "ato-blinko-abc12345-42"]
+        );
     }
 
     #[test]

@@ -1400,6 +1400,7 @@ pub(super) fn start_orchestration_session_in_process(
         std::process::id() as i32,
         &detached.services,
         detached.network_name.clone(),
+        detached.ephemeral_volumes.clone(),
     );
     let graph =
         crate::application::session_graph_populate::append_orchestration_services_to_graph_with_deps(
@@ -1762,6 +1763,7 @@ fn orchestration_services_for_session_record(
     wrapper_pid: i32,
     snapshots: &[crate::executors::orchestrator::DetachedServiceSnapshot],
     network_name: Option<String>,
+    ephemeral_volumes: Vec<String>,
 ) -> Option<StoredOrchestrationServices> {
     if snapshots.is_empty() {
         return None;
@@ -1781,6 +1783,7 @@ fn orchestration_services_for_session_record(
         wrapper_pid,
         services,
         network_name,
+        ephemeral_volumes,
     })
 }
 
@@ -2651,6 +2654,7 @@ fn orchestration_services_from_graph(
         wrapper_pid: record.pid,
         services: services.into_iter().map(|(_, service)| service).collect(),
         network_name: None,
+        ephemeral_volumes: Vec::new(),
     })
 }
 
@@ -2996,29 +3000,52 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         return Err(err);
     }
 
-    // Prune the OCI network created for this session (#273). Runs
-    // after all containers have been removed so the network is no
-    // longer in use. Returns an observable outcome so callers can
-    // surface failures rather than silently losing retryability.
-    let network_cleanup_warning: Option<String> = if stopped {
-        if let Some(network_name) = session_record
-            .as_ref()
-            .and_then(|r| r.orchestration_services.as_ref())
-            .and_then(|s| s.network_name.as_deref())
-        {
-            use crate::application::orchestration_teardown::{
-                NetworkRemovalOutcome, remove_network_if_present,
-            };
-            match remove_network_if_present(network_name) {
-                NetworkRemovalOutcome::Removed | NetworkRemovalOutcome::AlreadyGone => None,
-                NetworkRemovalOutcome::SkippedNotAtoManaged => None,
-                NetworkRemovalOutcome::Failed(err) => Some(format!(
-                    "network cleanup failed for {network_name}: {err}; \
-                     run `podman network rm {network_name}` to clean up manually"
-                )),
+    // Cleanup of OCI residue (containers → ephemeral volumes → network).
+    //
+    // Container teardown happened above. These steps are intentionally **not**
+    // gated on `stopped`: a session whose containers already exited reports
+    // `stopped == false`, but its `ato-*` network and ephemeral volumes can
+    // still be orphaned. Both removals are idempotent (not-found counts as
+    // success) and guarded by the `ato-` / `ato-state-` name prefixes, so
+    // running them unconditionally is safe and closes the leak where stop found
+    // nothing live to kill (#450). Persistent volumes are not listed on the
+    // record, so durable state survives stop (#444).
+    let orchestration_services = session_record
+        .as_ref()
+        .and_then(|r| r.orchestration_services.as_ref());
+
+    // Ephemeral engine-managed state volumes first — they are mounted by the
+    // (now-removed) containers and are independent of the network. Failures are
+    // logged, never fatal: a leaked ephemeral volume is less harmful than a
+    // session that refuses to stop.
+    if let Some(volumes) = orchestration_services.map(|s| s.ephemeral_volumes.as_slice()) {
+        use crate::application::orchestration_teardown::{
+            VolumeRemovalOutcome, remove_volume_if_present,
+        };
+        for volume in volumes {
+            if let VolumeRemovalOutcome::Failed(err) = remove_volume_if_present(volume) {
+                eprintln!(
+                    "ATO-WARN ephemeral volume cleanup failed for {volume}: {err}; \
+                     run `podman volume rm {volume}` to clean up manually"
+                );
             }
-        } else {
-            None
+        }
+    }
+
+    // Then the session-scoped network, once nothing is attached (#273, #450).
+    let network_cleanup_warning: Option<String> = if let Some(network_name) =
+        orchestration_services.and_then(|s| s.network_name.as_deref())
+    {
+        use crate::application::orchestration_teardown::{
+            NetworkRemovalOutcome, remove_network_if_present,
+        };
+        match remove_network_if_present(network_name) {
+            NetworkRemovalOutcome::Removed | NetworkRemovalOutcome::AlreadyGone => None,
+            NetworkRemovalOutcome::SkippedNotAtoManaged => None,
+            NetworkRemovalOutcome::Failed(err) => Some(format!(
+                "network cleanup failed for {network_name}: {err}; \
+                     run `podman network rm {network_name}` to clean up manually"
+            )),
         }
     } else {
         None
@@ -4730,6 +4757,7 @@ mod tests {
                     },
                 ],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
@@ -4893,6 +4921,7 @@ mod tests {
                         },
                     ],
                     network_name: None,
+                    ephemeral_volumes: Vec::new(),
                 }),
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
@@ -5062,6 +5091,7 @@ mod tests {
                     published_port: Some(port),
                 }],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
@@ -5331,6 +5361,7 @@ mod tests {
                     published_port: Some(port),
                 }],
                 network_name: None,
+                ephemeral_volumes: Vec::new(),
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
