@@ -57,11 +57,18 @@ use super::guest_contract::GuestContract;
 use super::resolve::resolve_local_plan_with_state_overrides;
 
 // Thread-local install lifecycle context set by `ato launch` before calling
-// `execute_run_command`. Using thread-local (rather than process-global OnceLock)
-// means:
+// `execute_run_command`. Using a thread-local (rather than a process-global
+// slot or process env vars) means:
 // - Multiple sequential launches in the same process work correctly (daemon / Desktop)
-// - Test isolation: each test thread gets its own slot; no cross-test leakage
-// - The context is automatically cleared when the thread terminates
+// - Concurrent launches cannot cross-stamp each other's session records
+// - No control-plane metadata leaks into the process environment (and thus into
+//   guest / child processes)
+//
+// This thread-local only stamps records written on the same thread that called
+// `ato launch`. The cross-thread `ato launch` session record (written by the run
+// pipeline's dependency materializer on a tokio worker thread) is stamped from
+// the typed `DependencyMaterializationRequest::install_lifecycle_context` instead
+// — explicit data flow, not ambient process state.
 //
 // Always use [`ScopedInstallLifecycleGuard`] to set/clear the context so it is
 // guaranteed to be cleaned up on return, even if the run pipeline panics.
@@ -5514,6 +5521,83 @@ mod tests {
             record.capsule_instance_key.is_none(),
             "CIK should be None when execution_id has not been assigned yet"
         );
+    }
+
+    /// The install lifecycle context is thread-local: a context set on the
+    /// calling thread (via `ato launch`) must NOT be visible on any other
+    /// thread. This guards against the cross-launch / cross-thread record
+    /// cross-stamping that a process-global slot would allow.
+    #[test]
+    fn install_lifecycle_context_is_not_visible_to_other_threads() {
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_worker".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: "ipk_worker".to_string(),
+            install_revision_id: "rev_worker".to_string(),
+        };
+
+        let _guard = ScopedInstallLifecycleGuard::set(ctx);
+        let other_thread_saw_context =
+            std::thread::spawn(|| with_install_lifecycle_context(|ctx| ctx.is_some()))
+                .join()
+                .expect("worker thread joins");
+
+        assert!(
+            !other_thread_saw_context,
+            "thread-local lifecycle context must not leak to other threads; \
+             cross-thread stamping must use the typed materializer request"
+        );
+    }
+
+    /// Setting the lifecycle context must NOT mutate any `ATO_INSTALL_LIFECYCLE_*`
+    /// process environment variable. Process env is inherited by guest / child
+    /// processes and is externally settable, so control-plane metadata must never
+    /// travel through it.
+    ///
+    /// `#[serial]` because this test observes process env, which is global; it
+    /// must not overlap with any other test that mutates the same keys (see
+    /// `dependency_materializer::tests::stamp_install_lifecycle_ignores_process_env_when_request_has_no_context`).
+    #[test]
+    #[serial_test::serial(ato_install_lifecycle_env)]
+    fn set_install_lifecycle_context_does_not_touch_process_env() {
+        const ENV_KEYS: &[&str] = &[
+            "ATO_INSTALL_LIFECYCLE_APP_ID",
+            "ATO_INSTALL_LIFECYCLE_PROFILE_ID",
+            "ATO_INSTALL_LIFECYCLE_PROFILE_KEY",
+            "ATO_INSTALL_LIFECYCLE_REVISION_ID",
+        ];
+
+        // Snapshot whatever the env happens to be before the call so the
+        // assertion checks "unchanged", not "absent" — robust regardless of
+        // the ambient environment.
+        let before: Vec<Option<std::ffi::OsString>> =
+            ENV_KEYS.iter().map(|key| std::env::var_os(key)).collect();
+
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_env".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: "ipk_env".to_string(),
+            install_revision_id: "rev_env".to_string(),
+        };
+
+        {
+            let _guard = ScopedInstallLifecycleGuard::set(ctx);
+            for (key, prior) in ENV_KEYS.iter().zip(&before) {
+                assert_eq!(
+                    std::env::var_os(key).as_ref(),
+                    prior.as_ref(),
+                    "lifecycle context must not mutate process env var {key}"
+                );
+            }
+        }
+        // Dropping the guard must likewise leave process env untouched.
+        for (key, prior) in ENV_KEYS.iter().zip(&before) {
+            assert_eq!(
+                std::env::var_os(key).as_ref(),
+                prior.as_ref(),
+                "clearing lifecycle context must not mutate process env var {key}"
+            );
+        }
     }
 
     /// Verify `ScopedInstallLifecycleGuard` clears the context after it is dropped.
