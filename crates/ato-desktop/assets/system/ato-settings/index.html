@@ -582,6 +582,13 @@
           </div>
           <div id="runtime-status-msg" class="state-msg">Checking runtime tools…</div>
           <div id="runtime-tools-list"></div>
+          <!-- #460 PR3b: pending interrupted-launch banner. Shown when the user
+               started a capsule launch before the host runtime was ready; the
+               Desktop resumes it automatically once setup completes. -->
+          <div id="pending-launch-banner" class="row" style="display:none; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:8px 10px; border:1px solid var(--accent, #8B5CF6); border-radius:8px;">
+            <span id="pending-launch-msg" style="font-size:12px;"></span>
+            <button class="btn" id="pending-launch-cancel-btn" style="font-size:12px; padding:2px 10px;">Cancel</button>
+          </div>
         </div>
 
         <!-- Host runtimes -->
@@ -985,6 +992,13 @@ window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
     if (resumed) renderRuntimeStatus(resumed);
     runtimeTouched = true;
   }
+  // #460 PR3b: pending interrupted-launch banner (explicit null clears it).
+  if (payload && 'pendingLaunch' in payload) { renderPendingLaunch(payload.pendingLaunch); runtimeTouched = true; }
+  if (payload && payload.pendingLaunchCancelled) { renderPendingLaunch(null); runtimeTouched = true; }
+  if (payload && payload.launchResumeFailed) {
+    showRuntimeError((payload.error && payload.error.message) || 'Could not resume the pending launch.');
+    runtimeTouched = true;
+  }
 
   if (payload && !payload.ok && payload.error) {
     const msg = payload.error.message || String(payload.error);
@@ -1273,6 +1287,18 @@ function renderRuntimeStatus(status) {
   renderWindowsSubstrate(status.windows_substrate, (status.tools || []).find(t => t.kind === 'podman'));
 }
 
+// #460 PR3b: show/hide the pending interrupted-launch banner. `pending` is the
+// `{ label, launchInput, kind }` object, or null/undefined to clear it.
+function renderPendingLaunch(pending) {
+  const banner = document.getElementById('pending-launch-banner');
+  const msg = document.getElementById('pending-launch-msg');
+  if (!banner || !msg) return;
+  if (!pending) { banner.style.display = 'none'; msg.textContent = ''; return; }
+  const label = pending.label || pending.launchInput || 'your app';
+  msg.textContent = 'After setup, Ato will continue opening ' + label + '.';
+  banner.style.display = 'flex';
+}
+
 // #460 PR2: render the Windows substrate state + Desktop-driven CTA. The button
 // dispatches the new IPC commands; no PowerShell/WSL shell is ever shown.
 let _lastSubstrateAction = null;
@@ -1492,6 +1518,13 @@ document.getElementById('runtime-install-btn').addEventListener('click', () => {
 
 document.getElementById('runtime-logs-btn').addEventListener('click', () => {
   BRIDGE({ kind: 'open_runtime_setup_logs', request_id: nextReqId() });
+});
+
+// #460 PR3b: dismiss a pending interrupted-launch. Clears the launch-intent
+// marker only — Runtime Setup keeps running.
+document.getElementById('pending-launch-cancel-btn').addEventListener('click', () => {
+  renderPendingLaunch(null);
+  BRIDGE({ kind: 'cancel_pending_launch', request_id: nextReqId() });
 });
 
 // #460 PR2: Windows substrate remediation CTA (enable WSL / repair machine /
