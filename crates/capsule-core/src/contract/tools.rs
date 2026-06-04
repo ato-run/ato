@@ -174,6 +174,12 @@ pub static UV: RuntimeToolSpec = RuntimeToolSpec {
     },
 };
 
+// Deno is intentionally not a `RuntimeToolSpec` tool. It is a primary runtime,
+// modeled in `RuntimeSection` (`runtimes.deno` in the lockfile) and handled by
+// the Deno runtime path (`resolve_deno_runtime`, `generate_deno_lock`). This
+// registry is only for auxiliary package/runtime tools — uv, pnpm, yarn, bun.
+// Deno's absence here is not a bug and does not mean Deno is unsupported.
+// See docs/dev-notes/runtime-vs-runtime-tools.md and #470.
 const REGISTRY: &[&RuntimeToolSpec] = &[&PNPM, &YARN, &BUN, &UV];
 
 pub fn registry() -> &'static [&'static RuntimeToolSpec] {
@@ -1310,6 +1316,25 @@ mod tests {
         assert!(lookup("yarn").is_some());
         assert!(lookup("bun").is_some());
         assert!(lookup("uv").is_some());
+    }
+
+    #[test]
+    fn deno_is_runtime_modeled_not_runtime_tool_spec() {
+        // Deno is a primary runtime (modeled in RuntimeSection / `runtimes.deno`),
+        // not a RuntimeToolSpec tool. Its absence from REGISTRY is intentional and
+        // must not be read as "Deno unsupported". See #470 and
+        // docs/dev-notes/runtime-vs-runtime-tools.md.
+        assert!(
+            lookup("deno").is_none(),
+            "deno must not be a RuntimeToolSpec tool — it is runtime-modeled"
+        );
+        // The auxiliary runtime tools remain registry-modeled.
+        assert!(lookup("uv").is_some());
+        assert!(lookup("pnpm").is_some());
+        assert!(lookup("yarn").is_some());
+        assert!(lookup("bun").is_some());
+        // The registry is exactly these four tools.
+        assert_eq!(registry().len(), 4);
     }
 
     #[test]
