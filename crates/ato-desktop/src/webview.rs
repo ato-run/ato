@@ -1125,7 +1125,13 @@ impl WebViewManager {
                     ));
                     continue;
                 }
-                HostDispatchAction { action, .. } => {
+                HostDispatchAction { action, url } => {
+                    if let Some(response) =
+                        crate::app::navigate_to_url_mcp_preflight(action, url.as_deref())
+                    {
+                        req.send(Ok(response));
+                        continue;
+                    }
                     // Push onto the queue; `DesktopShell::render` drains
                     // it on the next paint and invokes the matching
                     // window::open_* helper. This bypasses macOS
