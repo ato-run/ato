@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gpui::{AnyWindowHandle, App};
 use serde::{Deserialize, Serialize};
 
@@ -875,6 +875,99 @@ fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
             }
         }
     }
+}
+
+/// Open an installed app by its durable `install_profile_key` — the identity
+/// behind an `ato://app/<ipk>` URL (#261). This is the deep-link / automation
+/// entry point that mirrors what a Start-window tile click does, but keyed by
+/// the unambiguous install identity rather than a capsule handle, so it never
+/// mis-resolves a handle shared by two installs.
+///
+/// Flow (same boundaries as [`open_capsule_from_start`], minus the consent
+/// wizard — an installed profile is pre-consented):
+/// 1. reverse-resolve the ipk to a launchable target (canonical handle + url);
+/// 2. live session for that ipk → reuse instantly (no relaunch);
+/// 3. otherwise record the durable identity, open the boot window, and run the
+///    install-owned `ato launch <ipk>` path via `start_installed_launch`.
+///
+/// Returns `Err` only when the ipk does not resolve to a launchable installed
+/// profile (unknown / degraded) or the store is unreadable — the caller surfaces
+/// that rather than silently degrading to a handle launch + consent wizard.
+pub(crate) fn open_installed_app_by_ipk(cx: &mut App, app_url_or_ipk: &str) -> Result<()> {
+    use crate::state::session::SessionRegistry;
+
+    // Accepts either an `ato://app/<ipk>` URL or a bare `ipk_…` — the resolver
+    // strips the prefix when present.
+    let target = crate::launch_intent::installed_target_for_app_url(app_url_or_ipk)
+        .context("resolve install_profile_key against install store")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no installed app matches '{app_url_or_ipk}' \
+                 (not installed, or the install is degraded)"
+            )
+        })?;
+
+    let label = target
+        .handle
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&target.handle)
+        .to_string();
+    let route = GuestRoute::CapsuleHandle {
+        handle: target.handle.clone(),
+        label,
+        community_toml_id: None,
+    };
+
+    // 1. Live session keyed by ipk → reuse instantly (no relaunch, no boot
+    //    window). Matches by install_profile_key, so a session whose handle has
+    //    drifted from the record is still found.
+    match crate::orchestrator::try_reuse_live_session_for_install_profile_key(
+        &target.install_profile_key,
+    ) {
+        Ok(Some(session)) => {
+            let launch_configs = cx
+                .global::<SessionRegistry>()
+                .get_session(&session.session_id)
+                .map(|s| s.launch_context.launch_configs.clone())
+                .unwrap_or_default();
+            crate::window::orchestrator::open_ready_capsule_window(
+                cx,
+                route,
+                session,
+                launch_configs,
+            )
+            .context("open ready window for reused installed session")?;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                install_profile_key = %target.install_profile_key,
+                "ato_start: ipk session fast-path failed; starting installed launch"
+            );
+        }
+    }
+
+    // 2. Not running → record durable identity, open boot window, launch.
+    record_installed_history(&route, &target.install_profile_key, &target.app_url);
+    tracing::info!(
+        handle = %target.handle,
+        install_profile_key = %target.install_profile_key,
+        app_url = %target.app_url,
+        "ato_start: opening installed app by ipk (no consent wizard)"
+    );
+    let boot_handle = crate::window::launch_window::open_boot_window(cx, Some(&route))
+        .context("open boot window for installed launch")?;
+    crate::window::launch_window::start_installed_launch(
+        cx,
+        route,
+        target.install_profile_key,
+        boot_handle,
+    );
+    Ok(())
 }
 
 /// Resolve the launch intent for a not-running handle by consulting Start
