@@ -153,6 +153,7 @@ fn build_materialization_request(
         cache_strategy: CacheStrategy::DerivationCache,
         attestation_strategy:
             crate::application::dependency_materializer::AttestationStrategy::None,
+        install_lifecycle_context: None,
     })
 }
 

@@ -57,6 +57,7 @@ fn sample_request(seed: &str) -> DependencyMaterializationRequest {
         },
         cache_strategy: CacheStrategy::DerivationCache,
         attestation_strategy: AttestationStrategy::None,
+        install_lifecycle_context: None,
     }
 }
 
