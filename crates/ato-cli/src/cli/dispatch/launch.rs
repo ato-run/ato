@@ -640,4 +640,42 @@ mod tests {
             .is_none()
         );
     }
+
+    /// Two installed apps sharing one capsule handle make the location ambiguous;
+    /// resolution must error (with guidance to launch by ipk), never pick one.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_capsule_location_errors_on_ambiguous_installed_target() {
+        let (_dir, store) = make_store();
+        let profile_id = ProfileId::new("default");
+        scaffold_app_with_profile(
+            &store,
+            &InstalledAppId::new("app_ambig_a_0000000000000001"),
+            &profile_id,
+            &InstallRevisionId::new("rev_ambig_a"),
+        );
+        scaffold_app_with_profile(
+            &store,
+            &InstalledAppId::new("app_ambig_b_0000000000000002"),
+            &profile_id,
+            &InstallRevisionId::new("rev_ambig_b"),
+        );
+
+        let err =
+            resolve_installed_launch_target_from_capsule_location(&store, "ato.run/acme/hello")
+                .expect_err("ambiguous installed target must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ambiguous"),
+            "error should mention ambiguity: {msg}"
+        );
+        assert!(
+            msg.contains("install profile key"),
+            "error should suggest launching by install profile key: {msg}"
+        );
+        assert!(
+            msg.contains("ato launch ipk_"),
+            "error should show an `ato launch <ipk>` command: {msg}"
+        );
+    }
 }
