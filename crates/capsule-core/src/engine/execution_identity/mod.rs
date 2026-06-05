@@ -382,6 +382,14 @@ pub struct ExecutionReceiptV2 {
     /// values, argv, container id, pid, or log path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_projections: Vec<OciProviderReceiptEvidence>,
+    /// Which execution-identity evidence layers this receipt observed
+    /// (refs #495). Distinguishes a declared/resolved-evidence receipt from a
+    /// runtime-observed one. `None` for receipts written before the field
+    /// existed (back-compat); populated as
+    /// [`ObservationScope::declared_resolved`] for graph-backed receipts. See
+    /// [`ObservationScope`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_scope: Option<ObservationScope>,
 }
 
 impl ExecutionReceiptV2 {
@@ -419,6 +427,9 @@ impl ExecutionReceiptV2 {
             node_receipts: Vec::new(),
             edge_receipts: Vec::new(),
             provider_projections: Vec::new(),
+            // Set by the graph-backed builder via `with_observation_scope`;
+            // `None` keeps non-graph / legacy paths back-compatible.
+            observation_scope: None,
         })
     }
 
@@ -510,6 +521,13 @@ impl ExecutionReceiptV2 {
         self
     }
 
+    /// Attach an [`ObservationScope`] describing which evidence layers this
+    /// receipt observed (refs #495).
+    pub fn with_observation_scope(mut self, scope: ObservationScope) -> Self {
+        self.observation_scope = Some(scope);
+        self
+    }
+
     /// Build a partial v2 receipt for a launch that failed before the
     /// full launch envelope was resolved (refs #74, #99).
     ///
@@ -557,6 +575,23 @@ impl ExecutionReceiptV2 {
 
         let untracked_string =
             || Tracked::untracked("partial receipt: launch envelope not resolved");
+
+        // Annotate evidence from whichever graph ids the boundary already
+        // had. Computed before the move into the struct fields below.
+        let observation_scope = ObservationScope {
+            declared: if declared_execution_id.is_some() {
+                LayerEvidence::Present
+            } else {
+                LayerEvidence::Absent
+            },
+            resolved: if resolved_execution_id.is_some() {
+                LayerEvidence::Present
+            } else {
+                LayerEvidence::Absent
+            },
+            // Runtime is never observed on a failed launch.
+            observed: RuntimeObservation::NotObserved,
+        };
 
         Self {
             schema_version: EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
@@ -646,6 +681,7 @@ impl ExecutionReceiptV2 {
             node_receipts: Vec::new(),
             edge_receipts: Vec::new(),
             provider_projections: Vec::new(),
+            observation_scope: Some(observation_scope),
         }
     }
 }
@@ -692,6 +728,115 @@ impl GraphCompleteness {
             GraphCompleteness::Partial => "partial",
             GraphCompleteness::Complete => "complete",
         }
+    }
+}
+
+/// Evidence state of a declared- or resolved-domain layer in a receipt
+/// (refs #495).
+///
+/// `Present` means the receipt carries that layer's identity evidence (the
+/// declared / resolved execution-id facets and the corresponding graph
+/// projection). `Absent` means it was not derived for this receipt (e.g. a
+/// preflight receipt that never reached host resolution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayerEvidence {
+    Present,
+    Absent,
+}
+
+impl LayerEvidence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LayerEvidence::Present => "present",
+            LayerEvidence::Absent => "absent",
+        }
+    }
+}
+
+/// Observation state of the runtime (`Observed`-domain) layer (refs #495).
+///
+/// There is **deliberately no `Observed` variant** in this slice: runtime
+/// observation — per-node / per-edge lifecycle observations (#521) and the
+/// realization classifier (#522) — is not captured yet. Encoding the absence
+/// as a typed reason (rather than implying it by an empty `observed_*` field)
+/// lets a receipt reader tell "we have declared/resolved evidence but did not
+/// observe the runtime" from "we observed the runtime". Because the variant
+/// space cannot say `Observed`, this type also makes it impossible for this
+/// slice to silently claim runtime evidence it does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeObservation {
+    /// Runtime was not observed for this receipt.
+    NotObserved,
+    /// Runtime observation is intentionally outside this receipt's scope.
+    OutOfScope,
+    /// Runtime observation is deferred to a later stage/wave (#521/#522).
+    Deferred,
+}
+
+impl RuntimeObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeObservation::NotObserved => "not-observed",
+            RuntimeObservation::OutOfScope => "out-of-scope",
+            RuntimeObservation::Deferred => "deferred",
+        }
+    }
+}
+
+/// What evidence a receipt actually observed, per execution-identity layer
+/// (refs #495).
+///
+/// A v2 receipt mixes facets derived at different stages: `declared`
+/// (manifest / lock / policy), `resolved` (after host resolution), and
+/// `observed` (runtime observation of the spawned workload). Before #521/#522
+/// land NodeReceipt/EdgeReceipt population and the realization classifier, a
+/// graph-backed receipt carries declared + resolved evidence only — it has not
+/// observed the runtime. `ObservationScope` records that explicitly so a
+/// reader never has to infer "runtime not observed" from an absent field.
+///
+/// This type does **not** synthesize `observed_execution_id` and does **not**
+/// upgrade [`GraphCompleteness`] to `Complete`; it only annotates what the
+/// receipt does and does not contain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationScope {
+    pub declared: LayerEvidence,
+    pub resolved: LayerEvidence,
+    pub observed: RuntimeObservation,
+}
+
+impl ObservationScope {
+    /// Scope for a graph-backed receipt that carries declared + resolved
+    /// evidence but did not observe the runtime. The runtime layer is
+    /// [`RuntimeObservation::NotObserved`]: there is no observation hook in
+    /// v0.6.0, so this is a statement of fact, not a promise.
+    pub fn declared_resolved() -> Self {
+        Self {
+            declared: LayerEvidence::Present,
+            resolved: LayerEvidence::Present,
+            observed: RuntimeObservation::NotObserved,
+        }
+    }
+
+    /// Scope for a receipt that only carries declared-domain evidence (e.g.
+    /// host resolution never ran). Runtime layer is `NotObserved`.
+    pub fn declared_only() -> Self {
+        Self {
+            declared: LayerEvidence::Present,
+            resolved: LayerEvidence::Absent,
+            observed: RuntimeObservation::NotObserved,
+        }
+    }
+
+    /// Whether this scope claims any runtime observation. Always `false` in
+    /// this slice — the type cannot represent runtime observation — but
+    /// exposed so call sites and tests can assert the invariant directly.
+    pub fn has_runtime_observation(&self) -> bool {
+        // `RuntimeObservation` has no `Observed` variant; runtime evidence is
+        // never claimed here. Kept as an explicit method so the contract is
+        // checkable rather than implied.
+        false
     }
 }
 
@@ -2931,6 +3076,146 @@ pub(in crate::engine::execution_identity) mod tests {
             graph_receipt.resolved_execution_id.as_deref(),
             Some("blake3:resolved")
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #495 ObservationScope
+    // -----------------------------------------------------------------
+
+    /// A graph-backed receipt fixture: declared + resolved evidence, no
+    /// runtime observation. Mirrors what the ato-cli graph-backed builder
+    /// attaches (`with_observation_scope(ObservationScope::declared_resolved)`).
+    fn observation_scope_fixture_receipt() -> ExecutionReceiptV2 {
+        ExecutionReceiptV2::partial_failure(
+            "2026-05-03T00:00:00Z".to_string(),
+            ReceiptResultClass::RecoverableFailure,
+            ReceiptFailureEnvelope {
+                kind: ReceiptFailureKind::Recoverable,
+                code: "E001".to_string(),
+                name: "fixture".to_string(),
+                phase: "manifest".to_string(),
+                message: "fixture".to_string(),
+                hint: None,
+                resource: None,
+                target: None,
+                retryable: false,
+                interactive_resolution_required: None,
+                classification: None,
+                cleanup_status: None,
+                cleanup_actions: Vec::new(),
+                manifest_suggestion: None,
+                details: None,
+            },
+            Some("blake3:declared".to_string()),
+            Some("blake3:resolved".to_string()),
+            None,
+        )
+        .with_graph_completeness(GraphCompleteness::Partial)
+        .with_observation_scope(ObservationScope::declared_resolved())
+    }
+
+    #[test]
+    fn observation_scope_declared_resolved_marks_declared_resolved_evidence_only() {
+        let scope = ObservationScope::declared_resolved();
+        assert_eq!(scope.declared, LayerEvidence::Present);
+        assert_eq!(scope.resolved, LayerEvidence::Present);
+        // The runtime layer is explicitly not observed — not implied by an
+        // absent field.
+        assert_eq!(scope.observed, RuntimeObservation::NotObserved);
+        assert!(!scope.has_runtime_observation());
+    }
+
+    #[test]
+    fn observation_scope_never_claims_runtime_observation() {
+        // Whatever reason the observed layer carries, it never asserts that
+        // the runtime was observed. The `RuntimeObservation` enum has no
+        // `Observed` variant, so this holds by construction for every value.
+        for observed in [
+            RuntimeObservation::NotObserved,
+            RuntimeObservation::OutOfScope,
+            RuntimeObservation::Deferred,
+        ] {
+            let scope = ObservationScope {
+                declared: LayerEvidence::Present,
+                resolved: LayerEvidence::Present,
+                observed,
+            };
+            assert!(!scope.has_runtime_observation());
+        }
+    }
+
+    #[test]
+    fn receipt_with_observation_scope_synthesizes_no_observed_id_and_no_complete() {
+        let receipt = observation_scope_fixture_receipt();
+
+        // The receipt carries the declared/resolved-only scope.
+        assert_eq!(
+            receipt.observation_scope,
+            Some(ObservationScope::declared_resolved())
+        );
+
+        // #495 invariants: no observed_execution_id is synthesized, and
+        // completeness is never upgraded to Complete.
+        assert!(
+            receipt.observed_execution_id.is_none(),
+            "observed_execution_id must not be synthesized in this slice"
+        );
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete),
+            "Complete must never be emitted in this slice"
+        );
+        assert_eq!(receipt.graph_completeness, Some(GraphCompleteness::Partial));
+    }
+
+    #[test]
+    fn observation_scope_serde_roundtrip_uses_kebab_strings() {
+        let scope = ObservationScope::declared_resolved();
+        let json = serde_json::to_string(&scope).expect("serialize scope");
+        // Layer/runtime states serialize as kebab-case strings.
+        assert!(json.contains("\"present\""));
+        assert!(json.contains("\"not-observed\""));
+        let parsed: ObservationScope = serde_json::from_str(&json).expect("deserialize scope");
+        assert_eq!(parsed, scope);
+
+        // declared_only differs only in the resolved layer.
+        let declared_only = ObservationScope::declared_only();
+        assert_eq!(declared_only.resolved, LayerEvidence::Absent);
+        assert_ne!(declared_only, scope);
+    }
+
+    #[test]
+    fn legacy_receipt_without_observation_scope_roundtrips_to_none() {
+        // Serialize a receipt, then strip `observation_scope` to model a
+        // receipt written before the field existed. It must still parse, with
+        // `observation_scope == None`, and the rest of the receipt intact.
+        let receipt = observation_scope_fixture_receipt();
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        let obj = value.as_object_mut().expect("receipt is a JSON object");
+        assert!(
+            obj.remove("observation_scope").is_some(),
+            "fixture receipt must serialize observation_scope so the strip is meaningful"
+        );
+
+        let legacy: ExecutionReceiptV2 = serde_json::from_value(value).expect("legacy parse");
+        assert!(
+            legacy.observation_scope.is_none(),
+            "missing observation_scope must deserialize to None (back-compat)"
+        );
+        // Other fields survive the roundtrip.
+        assert_eq!(legacy.execution_id, receipt.execution_id);
+        assert_eq!(legacy.graph_completeness, receipt.graph_completeness);
+        assert!(legacy.observed_execution_id.is_none());
+    }
+
+    #[test]
+    fn happy_path_receipt_defaults_observation_scope_to_none() {
+        // `from_input` (the non-graph / legacy construction path) leaves the
+        // scope unset; the graph-backed builder is what attaches it.
+        let receipt =
+            ExecutionReceiptV2::from_input(sample_input_v2(), "2026-05-03T00:00:00Z".to_string())
+                .unwrap();
+        assert!(receipt.observation_scope.is_none());
     }
 
     #[test]
