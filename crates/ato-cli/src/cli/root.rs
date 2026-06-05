@@ -12,6 +12,7 @@ use super::key::KeyCommands;
 use super::package::PackageCommands;
 use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
+use super::receipts::ReceiptsCommands;
 use super::registry::RegistryCommands;
 use super::shared::{
     CacheStrategyArg, CompatibilityFallbackBackend, EnforcementMode, GitMode, ProviderToolchain,
@@ -716,6 +717,12 @@ pub(crate) enum Commands {
         /// command will return a `not-implemented` error when this flag is passed.
         #[arg(long, hide = true)]
         execute: bool,
+    },
+
+    #[command(about = "Inspect and compare stored execution receipts")]
+    Receipts {
+        #[command(subcommand)]
+        command: ReceiptsCommands,
     },
 
     #[command(hide = true, about = "Search the store for packages")]

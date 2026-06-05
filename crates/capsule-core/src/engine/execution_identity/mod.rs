@@ -1,6 +1,7 @@
 #[path = "env_origin.rs"]
 mod env_origin;
 
+mod drift;
 mod filesystem_builder;
 mod policy_builder;
 
@@ -10,6 +11,9 @@ use std::collections::BTreeMap;
 use crate::engine::execution_graph::ExecutionGraph;
 use crate::error::{CapsuleError, Result};
 use crate::types::{OciLaunchEnvelope, StateSharing};
+pub use drift::{
+    DriftClass, DriftError, ReceiptDriftChange, ReceiptDriftReport, diff_receipt_documents,
+};
 pub use env_origin::{EnvOrigin, default_env_origin};
 pub use filesystem_builder::FilesystemIdentityBuilder;
 pub use policy_builder::PolicyIdentityBuilder;
