@@ -625,17 +625,28 @@ impl InstallInstanceStore {
     }
 
     /// Resolve a capsule handle (a `publisher/slug` scoped id, tolerant of a
-    /// `capsule://` prefix and ASCII case) to the installed profile that owns
-    /// it. Enumerates installed apps and matches each [`AppRecord`]'s
+    /// `capsule://` prefix and ASCII case) to the **single** installed profile
+    /// that owns it. Enumerates installed apps and matches each [`AppRecord`]'s
     /// `capsule_handle` (falling back to `publisher/slug`) under a light
-    /// normalization, returning the first match's
-    /// `(installed_app_id, profile_id, install_profile_key, install_revision_id)`.
+    /// normalization.
     ///
-    /// `capsule://` carries no profile selector, so the **default** launch
-    /// profile is preferred, falling back to any profile that has a current
-    /// revision. This is a pure identity lookup against the install ledger
+    /// `capsule://` carries **no profile selector**, so resolution must be
+    /// unambiguous:
+    /// - within one app the **default** launch profile is preferred; with no
+    ///   default, a single profile that has a current revision is accepted, but
+    ///   two or more non-default profiles with current revisions are ambiguous;
+    /// - if **multiple installed apps** match the same handle, that is ambiguous
+    ///   even when each has a default profile (they may be distinct installs /
+    ///   revisions / providers).
+    ///
+    /// Returns `Ok(None)` when nothing matches, `Ok(Some(..))` for exactly one
+    /// launch target, and `Err(..)` — actionable, listing the candidate `ipk`s —
+    /// when ambiguous, so relaunch query inputs are never applied to an
+    /// arbitrarily chosen installed app.
+    ///
+    /// This is a pure identity lookup against the install ledger
     /// (`app.json` + `current_revision`) — it never reads `capsule.toml`, the
-    /// artifact manifest, or a lockfile. Returns `Ok(None)` when nothing matches.
+    /// artifact manifest, or a lockfile.
     pub fn find_profile_by_capsule_handle(
         &self,
         capsule_handle: &str,
@@ -651,6 +662,8 @@ impl InstallInstanceStore {
         if target.is_empty() {
             return Ok(None);
         }
+        let mut candidates: Vec<CapsuleHandleProfileCandidate> = Vec::new();
+        let mut ambiguous_within_app: Vec<CapsuleHandleProfileCandidate> = Vec::new();
         for app_id in self.list_installed_apps()? {
             let Ok(record) = self.read_app_record(&app_id) else {
                 continue;
@@ -658,24 +671,94 @@ impl InstallInstanceStore {
             if !record_handle_matches(&record, &target) {
                 continue;
             }
-            // capsule:// has no profile selector → prefer the default launch
-            // profile, then any profile that has a current revision.
-            let profiles = self.list_profiles(&app_id)?;
-            let default_id = ProfileId::default();
-            let mut ordered: Vec<ProfileId> = Vec::with_capacity(profiles.len() + 1);
-            if profiles.iter().any(|p| *p == default_id) {
-                ordered.push(default_id.clone());
-            }
-            ordered.extend(profiles.into_iter().filter(|p| *p != default_id));
-            for profile_id in ordered {
-                if let Ok(rev_id) = self.current_revision(&app_id, &profile_id) {
-                    let ipk = derive_install_profile_key(&app_id, &profile_id);
-                    return Ok(Some((app_id, profile_id, ipk, rev_id)));
+            match self.select_profile_for_app(&app_id)? {
+                AppProfileSelection::None => {}
+                AppProfileSelection::Single(candidate) => candidates.push(candidate),
+                AppProfileSelection::Ambiguous(mut within) => {
+                    ambiguous_within_app.append(&mut within)
                 }
             }
         }
-        Ok(None)
+
+        // Fail closed on any ambiguity: more than one matching app target, or a
+        // single app whose non-default profiles cannot be narrowed to one.
+        if !ambiguous_within_app.is_empty() || candidates.len() > 1 {
+            let all_ipks: Vec<String> = candidates
+                .iter()
+                .chain(ambiguous_within_app.iter())
+                .map(|c| c.install_profile_key.as_str().to_string())
+                .collect();
+            let listing = all_ipks
+                .iter()
+                .map(|ipk| format!("  - {ipk}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let first = all_ipks.first().map(String::as_str).unwrap_or("ipk_…");
+            anyhow::bail!(
+                "ambiguous capsule relaunch target: capsule location '{capsule_handle}' \
+                 matches multiple installed profiles:\n{listing}\n\
+                 Launch by install profile key instead: ato launch {first}"
+            );
+        }
+
+        Ok(candidates
+            .into_iter()
+            .next()
+            .map(|c| (c.app_id, c.profile_id, c.install_profile_key, c.revision_id)))
     }
+
+    /// Select the single launch profile for one installed app, applying the
+    /// profile-resolution rules of [`find_profile_by_capsule_handle`]. Only
+    /// profiles that have a current revision are considered; the default profile
+    /// is preferred, otherwise a lone revisioned profile is accepted and two or
+    /// more (without a default) are reported ambiguous.
+    fn select_profile_for_app(&self, app_id: &InstalledAppId) -> Result<AppProfileSelection> {
+        let default_id = ProfileId::default();
+        let mut with_rev: Vec<(ProfileId, InstallRevisionId)> = Vec::new();
+        for profile_id in self.list_profiles(app_id)? {
+            if let Ok(rev_id) = self.current_revision(app_id, &profile_id) {
+                with_rev.push((profile_id, rev_id));
+            }
+        }
+        let make =
+            |profile_id: &ProfileId, rev_id: &InstallRevisionId| CapsuleHandleProfileCandidate {
+                app_id: app_id.clone(),
+                profile_id: profile_id.clone(),
+                install_profile_key: derive_install_profile_key(app_id, profile_id),
+                revision_id: rev_id.clone(),
+            };
+        if let Some(idx) = with_rev.iter().position(|(p, _)| *p == default_id) {
+            let (profile_id, rev_id) = &with_rev[idx];
+            return Ok(AppProfileSelection::Single(make(profile_id, rev_id)));
+        }
+        match with_rev.as_slice() {
+            [] => Ok(AppProfileSelection::None),
+            [(profile_id, rev_id)] => Ok(AppProfileSelection::Single(make(profile_id, rev_id))),
+            many => Ok(AppProfileSelection::Ambiguous(
+                many.iter().map(|(p, r)| make(p, r)).collect(),
+            )),
+        }
+    }
+}
+
+/// One concrete installed launch target matched by capsule handle (internal to
+/// [`InstallInstanceStore::find_profile_by_capsule_handle`]).
+struct CapsuleHandleProfileCandidate {
+    app_id: InstalledAppId,
+    profile_id: ProfileId,
+    install_profile_key: InstallProfileKey,
+    revision_id: InstallRevisionId,
+}
+
+/// Outcome of selecting a single launch profile within one installed app.
+enum AppProfileSelection {
+    /// No profile has a current revision — the app contributes no launch target.
+    None,
+    /// Exactly one launch target (default preferred, else the sole rev profile).
+    Single(CapsuleHandleProfileCandidate),
+    /// Two or more non-default profiles have current revisions and there is no
+    /// default — the app cannot be narrowed to a single target.
+    Ambiguous(Vec<CapsuleHandleProfileCandidate>),
 }
 
 /// Light normalization for capsule-handle matching: trim, drop a `capsule://`
@@ -940,6 +1023,144 @@ mod tests {
                 .is_none()
         );
         assert!(store.find_profile_by_capsule_handle("").unwrap().is_none());
+    }
+
+    /// Write an app record (and its instance dir) with no launch profile yet, so
+    /// a test can attach specific profiles itself.
+    #[cfg(unix)]
+    fn write_app_record_only(
+        store: &InstallInstanceStore,
+        installed_app_id: &str,
+        capsule_handle: &str,
+    ) -> InstalledAppId {
+        let app = InstalledAppId::new(installed_app_id);
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app.clone(),
+                publisher: "acme".into(),
+                slug: "multi".into(),
+                capsule_handle: capsule_handle.into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        app
+    }
+
+    /// Attach a profile with a current revision to an existing installed app.
+    #[cfg(unix)]
+    fn add_profile_with_rev(
+        store: &InstallInstanceStore,
+        app: &InstalledAppId,
+        profile: &str,
+        rev: &str,
+    ) -> (ProfileId, InstallRevisionId) {
+        let profile_id = ProfileId::new(profile);
+        let rev_id = InstallRevisionId::new(rev);
+        store
+            .write_profile(
+                app,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.scaffold_revision(&rev_id).unwrap();
+        store
+            .set_current_revision(app, &profile_id, &rev_id)
+            .unwrap();
+        (profile_id, rev_id)
+    }
+
+    /// CORE BLOCKER GUARD: two distinct installed apps sharing one capsule handle
+    /// (each with a default profile) must fail closed, never silently pick one.
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_capsule_handle_errors_on_duplicate_installed_apps() {
+        let (_dir, store) = temp_store();
+        scaffold_installed_app(
+            &store,
+            "app_dup_a_000000000000000000001",
+            "acme",
+            "widget",
+            "acme/widget",
+            "rev_dup_a",
+        );
+        scaffold_installed_app(
+            &store,
+            "app_dup_b_000000000000000000002",
+            "acme",
+            "widget",
+            "acme/widget",
+            "rev_dup_b",
+        );
+        let err = store
+            .find_profile_by_capsule_handle("acme/widget")
+            .expect_err("duplicate installed apps must be ambiguous");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ambiguous"), "msg: {msg}");
+        assert!(msg.contains("ato launch ipk_"), "msg: {msg}");
+    }
+
+    /// Within one app, the default profile is chosen even when other profiles
+    /// also have current revisions.
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_capsule_handle_prefers_default_profile_within_app() {
+        let (_dir, store) = temp_store();
+        let (app, default_profile, _rev) = scaffold_installed_app(
+            &store,
+            "app_prefer_default_00000000000001",
+            "acme",
+            "widget",
+            "acme/widget",
+            "rev_default",
+        );
+        add_profile_with_rev(&store, &app, "beta", "rev_beta");
+
+        let (a, p, ipk, _r) = store
+            .find_profile_by_capsule_handle("acme/widget")
+            .unwrap()
+            .expect("default profile should resolve");
+        assert_eq!(a, app);
+        assert_eq!(p, default_profile, "default profile must be preferred");
+        assert_eq!(ipk, derive_install_profile_key(&app, &default_profile));
+    }
+
+    /// No default + two non-default profiles with current revisions is ambiguous.
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_capsule_handle_errors_on_multiple_non_default_profiles_without_default() {
+        let (_dir, store) = temp_store();
+        let app = write_app_record_only(&store, "app_multi_nondefault_000000000001", "acme/widget");
+        add_profile_with_rev(&store, &app, "alpha", "rev_alpha");
+        add_profile_with_rev(&store, &app, "beta", "rev_beta");
+
+        let err = store
+            .find_profile_by_capsule_handle("acme/widget")
+            .expect_err("multiple non-default profiles without a default must be ambiguous");
+        assert!(format!("{err:#}").contains("ambiguous"));
+    }
+
+    /// No default but exactly one non-default profile with a current revision is
+    /// allowed (it is the only launch target).
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_capsule_handle_single_non_default_profile_is_allowed() {
+        let (_dir, store) = temp_store();
+        let app = write_app_record_only(&store, "app_single_nondefault_00000000001", "acme/widget");
+        let (solo, solo_rev) = add_profile_with_rev(&store, &app, "solo", "rev_solo");
+
+        let (a, p, ipk, r) = store
+            .find_profile_by_capsule_handle("acme/widget")
+            .unwrap()
+            .expect("a single non-default profile should resolve");
+        assert_eq!(a, app);
+        assert_eq!(p, solo);
+        assert_eq!(ipk, derive_install_profile_key(&app, &solo));
+        assert_eq!(r, solo_rev);
     }
 
     // ── rollback: current_revision reverts to previous revision ──────────────
