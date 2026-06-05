@@ -3517,7 +3517,7 @@ fn install_launch_ledger_records_storage_condition_in_db_sot() {
     // InstallResult.
     use capsule_core::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
     let (_dir, db) = admission_db();
-    let claims = install_launch_conditions("ipk_app", "rev1", Some(21_474_836_480));
+    let claims = install_launch_conditions("ipk_app", "rev1", Some(21_474_836_480), None);
     db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
         .expect("ledger write must succeed");
 
@@ -3543,11 +3543,11 @@ fn install_launch_ledger_records_baseline_even_without_disk_requirement() {
     // skipped) still gets a ledger: only the baseline marker, never empty (#508).
     use capsule_core::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
     let (_dir, db) = admission_db();
-    let claims = install_launch_conditions("ipk_app", "rev1", None);
+    let claims = install_launch_conditions("ipk_app", "rev1", None, None);
     assert_eq!(
         claims.len(),
         1,
-        "no disk requirement → only the baseline marker"
+        "no disk requirement and no manifest → only the baseline marker"
     );
     assert_eq!(claims[0].kind, LaunchConditionKind::Policy);
     assert_eq!(claims[0].condition_key, LEDGER_EXTRACTION_STATUS_KEY);
@@ -3561,6 +3561,193 @@ fn install_launch_ledger_records_baseline_even_without_disk_requirement() {
         "an installed revision must never have an empty ledger"
     );
     assert!(loaded[0].detail_json.contains("\"complete\":false"));
+}
+
+/// Parse a manifest TOML fixture into a `CapsuleManifest` for extractor tests.
+fn manifest_fixture(toml: &str) -> CapsuleManifest {
+    CapsuleManifest::from_toml(toml).expect("fixture manifest must parse")
+}
+
+fn extraction_status_detail(
+    claims: &[capsule_core::installed_state::LaunchConditionClaim],
+) -> serde_json::Value {
+    use capsule_core::installed_state::LEDGER_EXTRACTION_STATUS_KEY;
+    let marker = claims
+        .iter()
+        .find(|c| c.condition_key == LEDGER_EXTRACTION_STATUS_KEY)
+        .expect("baseline marker present");
+    serde_json::from_str(&marker.detail_json).expect("marker detail is JSON")
+}
+
+#[test]
+fn install_launch_conditions_records_env_condition_when_manifest_declares_env_projection() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "env-app"
+type = "app"
+default_target = "app"
+required_env = ["DATABASE_URL"]
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[targets.app.env]
+LOG_LEVEL = "info"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let env: Vec<_> = claims
+        .iter()
+        .filter(|c| c.kind == LaunchConditionKind::Env)
+        .collect();
+    // Declared env (LOG_LEVEL) → Satisfied; host-required (DATABASE_URL) → Unknown.
+    let declared = env
+        .iter()
+        .find(|c| c.condition_key == "LOG_LEVEL")
+        .expect("declared env extracted");
+    assert_eq!(declared.status, LaunchConditionStatus::Satisfied);
+    let required = env
+        .iter()
+        .find(|c| c.condition_key == "DATABASE_URL")
+        .expect("required env extracted");
+    assert_eq!(required.status, LaunchConditionStatus::Unknown);
+    // No raw value ("info") is ever stored.
+    assert!(claims.iter().all(|c| !c.detail_json.contains("info")));
+}
+
+#[test]
+fn install_launch_conditions_records_secret_condition_when_manifest_declares_secret_requirement() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "secret-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[dependencies.db]
+capsule = "capsule://ato/postgres@16"
+contract = "service@1"
+[dependencies.db.credentials]
+password = "{{env.PG_PASSWORD}}"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let secret = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::Secret)
+        .expect("secret condition extracted");
+    assert_eq!(secret.condition_key, "db.password");
+    assert_eq!(secret.status, LaunchConditionStatus::UserGrantRequired);
+    assert!(secret.detail_json.contains("\"grant_ref\":null"));
+    // The templated credential value is never stored.
+    assert!(
+        claims
+            .iter()
+            .all(|c| !c.detail_json.contains("PG_PASSWORD"))
+    );
+}
+
+#[test]
+fn install_launch_conditions_records_state_condition_when_manifest_declares_state_binding() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "state-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "user data"
+attach = "explicit"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let state = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::State)
+        .expect("state condition extracted");
+    assert_eq!(state.condition_key, "data");
+    assert_eq!(state.status, LaunchConditionStatus::UserGrantRequired);
+    assert!(state.detail_json.contains("\"durability\":\"persistent\""));
+}
+
+#[test]
+fn extraction_status_removes_env_secret_state_only_when_extractors_run() {
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "full-app"
+type = "app"
+default_target = "app"
+required_env = ["DATABASE_URL"]
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "user data"
+"#,
+    );
+    let detail = extraction_status_detail(&install_launch_conditions(
+        "ipk_app",
+        "rev1",
+        None,
+        Some(&manifest),
+    ));
+    let extracted: Vec<&str> = detail["extracted_kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for kind in ["storage", "env", "secret", "state"] {
+        assert!(extracted.contains(&kind), "{kind} should be extracted");
+    }
+    let missing: Vec<&str> = detail["missing_extractors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for kind in ["env", "secret", "state"] {
+        assert!(!missing.contains(&kind), "{kind} must not be missing");
+    }
+    // Port (and other not-yet-wired kinds) remain missing this slice.
+    assert!(missing.contains(&"port"));
+}
+
+#[test]
+fn no_supported_schema_keeps_kind_in_missing_extractors() {
+    // No manifest available → no kind beyond storage was examined; env/secret/
+    // state stay in missing_extractors (never claimed as extracted).
+    let detail =
+        extraction_status_detail(&install_launch_conditions("ipk_app", "rev1", None, None));
+    let extracted: Vec<&str> = detail["extracted_kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(extracted, vec!["storage"]);
+    let missing: Vec<&str> = detail["missing_extractors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for kind in ["env", "secret", "state"] {
+        assert!(missing.contains(&kind), "{kind} must remain missing");
+    }
 }
 
 #[test]

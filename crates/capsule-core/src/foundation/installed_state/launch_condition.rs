@@ -356,6 +356,133 @@ pub fn launch_condition_from_port_claim(claim: &super::port::PortClaim) -> Launc
     }
 }
 
+/// Project an environment-variable requirement into a launch condition.
+///
+/// `env_name` is the variable name (the `condition_key`, e.g. `PORT`,
+/// `DATABASE_URL`). `source` is a free provenance string for `detail.source`
+/// (e.g. `manifest.execution`, `manifest.required_env`). `projection_ref`, when
+/// set, is a redacted reference to where the value is projected from (e.g. a
+/// logical endpoint); it is **never** the value itself. The caller supplies
+/// `status` (e.g. `Satisfied` for a value declared in the manifest, `Unknown`
+/// for a name required from the host whose presence can't be confirmed at
+/// install).
+///
+/// The detail uses only [`ENV_DETAIL_ALLOWED_KEYS`], so a raw env value can
+/// never be recorded here.
+pub fn launch_condition_from_env_projection(
+    install_profile_key: &str,
+    install_revision_id: Option<&str>,
+    env_name: &str,
+    source: &str,
+    projection_ref: Option<&str>,
+    status: LaunchConditionStatus,
+) -> LaunchConditionClaim {
+    let mut detail = serde_json::Map::new();
+    detail.insert("source".to_string(), Value::String(source.to_string()));
+    if let Some(reference) = projection_ref {
+        detail.insert("ref".to_string(), Value::String(reference.to_string()));
+    }
+    LaunchConditionClaim {
+        install_profile_key: install_profile_key.to_string(),
+        install_revision_id: install_revision_id.map(str::to_string),
+        provider_id: None,
+        kind: LaunchConditionKind::Env,
+        condition_key: env_name.to_string(),
+        status,
+        required: true,
+        source: LaunchConditionSource::Manifest,
+        detail_json: Value::Object(detail).to_string(),
+        redacted: true,
+    }
+}
+
+/// Project a secret requirement into a launch condition. `secret_name` is the
+/// `condition_key` (e.g. a credential name). The detail records only a
+/// **redacted reference** — `projection` (how the value is delivered, e.g.
+/// `env`), an optional `grant_ref` (the grant locator, or `null` when not yet
+/// granted), and an optional `scope` — never the secret value.
+///
+/// Status is derived from the grant: `Satisfied` when a `grant_ref` is present,
+/// otherwise `UserGrantRequired`. The detail uses only
+/// [`SECRET_DETAIL_ALLOWED_KEYS`].
+pub fn launch_condition_from_secret_requirement(
+    install_profile_key: &str,
+    install_revision_id: Option<&str>,
+    secret_name: &str,
+    projection: &str,
+    grant_ref: Option<&str>,
+    scope: Option<&str>,
+) -> LaunchConditionClaim {
+    let mut detail = serde_json::Map::new();
+    detail.insert(
+        "projection".to_string(),
+        Value::String(projection.to_string()),
+    );
+    detail.insert(
+        "grant_ref".to_string(),
+        grant_ref.map_or(Value::Null, |g| Value::String(g.to_string())),
+    );
+    if let Some(scope) = scope {
+        detail.insert("scope".to_string(), Value::String(scope.to_string()));
+    }
+    let status = if grant_ref.is_some() {
+        LaunchConditionStatus::Satisfied
+    } else {
+        LaunchConditionStatus::UserGrantRequired
+    };
+    LaunchConditionClaim {
+        install_profile_key: install_profile_key.to_string(),
+        install_revision_id: install_revision_id.map(str::to_string),
+        provider_id: None,
+        kind: LaunchConditionKind::Secret,
+        condition_key: secret_name.to_string(),
+        status,
+        required: true,
+        source: LaunchConditionSource::Manifest,
+        detail_json: Value::Object(detail).to_string(),
+        redacted: true,
+    }
+}
+
+/// Project a state requirement / binding into a launch condition. `state_key` is
+/// the logical state name (the `condition_key`). The detail carries only logical
+/// metadata — an optional `binding_ref` (a logical state locator such as
+/// `ato-state://…`, never a raw host path) and an optional `durability`.
+pub fn launch_condition_from_state_binding(
+    install_profile_key: &str,
+    install_revision_id: Option<&str>,
+    state_key: &str,
+    binding_ref: Option<&str>,
+    durability: Option<&str>,
+    status: LaunchConditionStatus,
+) -> LaunchConditionClaim {
+    let mut detail = serde_json::Map::new();
+    if let Some(reference) = binding_ref {
+        detail.insert(
+            "binding_ref".to_string(),
+            Value::String(reference.to_string()),
+        );
+    }
+    if let Some(durability) = durability {
+        detail.insert(
+            "durability".to_string(),
+            Value::String(durability.to_string()),
+        );
+    }
+    LaunchConditionClaim {
+        install_profile_key: install_profile_key.to_string(),
+        install_revision_id: install_revision_id.map(str::to_string),
+        provider_id: None,
+        kind: LaunchConditionKind::State,
+        condition_key: state_key.to_string(),
+        status,
+        required: true,
+        source: LaunchConditionSource::Manifest,
+        detail_json: Value::Object(detail).to_string(),
+        redacted: true,
+    }
+}
+
 /// Build the ledger **baseline marker** for an installed revision: a
 /// non-required `Policy` condition (`condition_key =
 /// `[`LEDGER_EXTRACTION_STATUS_KEY`]`) recording which condition extractors have
@@ -567,6 +694,106 @@ mod tests {
         assert!(claim.detail_json.contains("\"preferred_port\":3000"));
         assert!(claim.detail_json.contains("\"last_actual_port\":49152"));
         validate_redacted_detail_json(claim.kind, &claim.detail_json).unwrap();
+    }
+
+    #[test]
+    fn env_projection_condition_uses_redacted_reference_shape() {
+        let c = launch_condition_from_env_projection(
+            "app",
+            Some("rev1"),
+            "DATABASE_URL",
+            "manifest.execution",
+            None,
+            LaunchConditionStatus::Satisfied,
+        );
+        assert_eq!(c.kind, LaunchConditionKind::Env);
+        assert_eq!(c.condition_key, "DATABASE_URL");
+        assert_eq!(c.status, LaunchConditionStatus::Satisfied);
+        assert!(c.detail_json.contains("\"source\":\"manifest.execution\""));
+        validate_redacted_detail_json(c.kind, &c.detail_json).unwrap();
+
+        // With a projection reference (e.g. a port endpoint), still no raw value.
+        let c2 = launch_condition_from_env_projection(
+            "app",
+            Some("rev1"),
+            "PORT",
+            "port_claim",
+            Some("ato://app/app/main"),
+            LaunchConditionStatus::Satisfied,
+        );
+        assert!(c2.detail_json.contains("\"ref\":\"ato://app/app/main\""));
+        validate_redacted_detail_json(c2.kind, &c2.detail_json).unwrap();
+    }
+
+    #[test]
+    fn secret_requirement_condition_uses_grant_ref_not_value() {
+        // No grant yet → UserGrantRequired, grant_ref null.
+        let pending = launch_condition_from_secret_requirement(
+            "app",
+            Some("rev1"),
+            "OPENAI_API_KEY",
+            "env",
+            None,
+            Some("capsule_instance"),
+        );
+        assert_eq!(pending.kind, LaunchConditionKind::Secret);
+        assert_eq!(pending.status, LaunchConditionStatus::UserGrantRequired);
+        assert!(pending.detail_json.contains("\"grant_ref\":null"));
+        validate_redacted_detail_json(pending.kind, &pending.detail_json).unwrap();
+
+        // Granted → Satisfied with a redacted grant locator, never the value.
+        let granted = launch_condition_from_secret_requirement(
+            "app",
+            Some("rev1"),
+            "OPENAI_API_KEY",
+            "env",
+            Some("ato-secret://store/openai"),
+            Some("capsule_instance"),
+        );
+        assert_eq!(granted.status, LaunchConditionStatus::Satisfied);
+        assert!(granted.detail_json.contains("ato-secret://store/openai"));
+        validate_redacted_detail_json(granted.kind, &granted.detail_json).unwrap();
+    }
+
+    #[test]
+    fn state_binding_condition_uses_binding_ref_not_raw_value() {
+        let c = launch_condition_from_state_binding(
+            "app",
+            Some("rev1"),
+            "data",
+            Some("ato-state://app/data"),
+            Some("persistent"),
+            LaunchConditionStatus::Satisfied,
+        );
+        assert_eq!(c.kind, LaunchConditionKind::State);
+        assert_eq!(c.condition_key, "data");
+        assert!(
+            c.detail_json
+                .contains("\"binding_ref\":\"ato-state://app/data\"")
+        );
+        assert!(c.detail_json.contains("\"durability\":\"persistent\""));
+        // Never a raw host path.
+        assert!(!c.detail_json.contains("/Users/"));
+        assert!(!c.detail_json.contains("/home/"));
+        validate_redacted_detail_json(c.kind, &c.detail_json).unwrap();
+    }
+
+    #[test]
+    fn env_projection_rejects_raw_env_value() {
+        // A raw env value under its name, or under a `value` key, is rejected by
+        // the Env allowlist — the helper never produces such a shape.
+        let raw = r#"{"DATABASE_URL":"postgres://user:pw@host/db"}"#;
+        assert!(validate_redacted_detail_json(LaunchConditionKind::Env, raw).is_err());
+        let with_value = r#"{"source":"manifest","value":"postgres://x"}"#;
+        assert!(validate_redacted_detail_json(LaunchConditionKind::Env, with_value).is_err());
+    }
+
+    #[test]
+    fn secret_requirement_rejects_raw_secret_value() {
+        let raw = r#"{"OPENAI_API_KEY":"sk-abc123"}"#;
+        assert!(validate_redacted_detail_json(LaunchConditionKind::Secret, raw).is_err());
+        let with_value = r#"{"projection":"env","value":"sk-abc123"}"#;
+        assert!(validate_redacted_detail_json(LaunchConditionKind::Secret, with_value).is_err());
     }
 
     #[test]
