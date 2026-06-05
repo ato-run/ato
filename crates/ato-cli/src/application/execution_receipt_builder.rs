@@ -378,7 +378,26 @@ fn declared_oci_provider_projections(
     let Some(oci) = &execution_plan.oci else {
         return Vec::new();
     };
+    oci_provider_projection_evidence(
+        oci,
+        plan.targets_oci_cmd(),
+        plan.targets_oci_env(),
+        plan.targets_oci_working_dir(),
+        plan.targets_oci_user(),
+    )
+}
 
+/// Pure core of [`declared_oci_provider_projections`]: project a resolved OCI
+/// policy envelope plus the plan-time launch facts into receipt-safe provider
+/// evidence with typed enforcement status. Split out so it can be tested without
+/// a full `ManifestData`/`ExecutionPlan` fixture.
+fn oci_provider_projection_evidence(
+    oci: &capsule_core::execution_plan::model::OciPolicyEnvelope,
+    cmd: Vec<String>,
+    env: std::collections::HashMap<String, String>,
+    working_dir: Option<String>,
+    user: Option<String>,
+) -> Vec<OciProviderReceiptEvidence> {
     // Prefer the locked digest (pinned) when the lock resolved one; otherwise
     // fall back to the declared tag (honestly unpinned).
     let image = match &oci.resolved_image {
@@ -409,9 +428,9 @@ fn declared_oci_provider_projections(
         // a declared placeholder keeps the projection session-independent.
         name: "ato-oci-declared".to_string(),
         image,
-        cmd: plan.targets_oci_cmd(),
-        env: plan.targets_oci_env(),
-        working_dir: plan.targets_oci_working_dir(),
+        cmd,
+        env,
+        working_dir,
         labels: std::collections::HashMap::new(),
         mounts: Vec::new(),
         ports,
@@ -419,10 +438,38 @@ fn declared_oci_provider_projections(
         aliases: Vec::new(),
         platform: None,
         extra_hosts: Vec::new(),
-        user: plan.targets_oci_user(),
+        user,
     };
 
-    vec![OciProjectionPlan::from_container_request(&request).receipt_evidence()]
+    // Record the selected provider's typed policy-enforcement status (#501): a
+    // declared egress allowlist is the canonical facet PodmanProvider cannot
+    // enforce, so it surfaces as `Unsupported` rather than implying enforcement.
+    let network_policy_required = !oci.egress_allow.is_empty();
+    let enforcement =
+        crate::application::provider_projection::strict_oci::OciProviderEnforcement::podman(
+            network_policy_required,
+        );
+    let mut evidence = OciProjectionPlan::from_container_request(&request)
+        .receipt_evidence_with(enforcement.network, enforcement.capability);
+
+    // The projection plan derives `network-policy` from the internal `--network`
+    // (absent on the declared request), but a declared egress allowlist is itself
+    // a required network policy. Reflect it so `capabilities_required` and
+    // `network_enforcement_status` agree: a launch whose network enforcement is
+    // `Unsupported` also *requires* network-policy.
+    if network_policy_required
+        && !evidence
+            .capabilities_required
+            .iter()
+            .any(|c| c == "network-policy")
+    {
+        evidence
+            .capabilities_required
+            .push("network-policy".to_string());
+        evidence.capabilities_required.sort();
+    }
+
+    vec![evidence]
 }
 
 /// Build the declared-domain `ExecutionGraph` for the receipt path.
@@ -1144,5 +1191,86 @@ fn classification_inputs_from_v2(
         runtime: runtime_v1,
         environment: env_v1,
         filesystem: fs_v1,
+    }
+}
+
+#[cfg(test)]
+mod oci_provider_evidence_tests {
+    use super::oci_provider_projection_evidence;
+    use capsule_core::execution_identity::{OciEnforcementStatus, OciImageDigestStatus};
+    use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
+    use std::collections::HashMap;
+
+    fn envelope(egress: Vec<String>) -> OciPolicyEnvelope {
+        OciPolicyEnvelope {
+            declared_image_ref: "docker.io/library/nginx:1.27".to_string(),
+            resolved_image: None,
+            port_exposure: Some(8080),
+            egress_allow: egress,
+            policy_mode: OciPolicyMode::Off,
+        }
+    }
+
+    #[test]
+    fn oci_projection_receipt_contains_provider_evidence() {
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        let evidence = oci_provider_projection_evidence(
+            &envelope(vec!["api.example.com".to_string()]),
+            vec!["nginx".to_string()],
+            env,
+            Some("/app".to_string()),
+            Some("1000:1000".to_string()),
+        );
+        assert_eq!(
+            evidence.len(),
+            1,
+            "an OCI launch must record provider evidence"
+        );
+        let ev = &evidence[0];
+        assert_eq!(ev.provider_kind, "oci");
+        assert_eq!(ev.provider_version.as_deref(), Some("oci-podman-v1"));
+        // Declared tag (no resolved digest) is honestly unpinned, never fabricated.
+        assert!(matches!(
+            ev.image_digest_status,
+            OciImageDigestStatus::Unpinned
+        ));
+        // A declared egress allowlist surfaces as Unsupported — podman cannot
+        // enforce it; the receipt states that honestly rather than implying it.
+        assert_eq!(
+            ev.network_enforcement_status,
+            OciEnforcementStatus::Unsupported
+        );
+        assert_eq!(
+            ev.capability_enforcement_status,
+            OciEnforcementStatus::Enforced
+        );
+        // ...and `capabilities_required` agrees: a declared egress allowlist is a
+        // required network policy (not derived from the internal `--network`).
+        assert!(
+            ev.capabilities_required
+                .contains(&"network-policy".to_string()),
+            "egress allowlist must surface as a required network policy: {:?}",
+            ev.capabilities_required
+        );
+        // env NAMES only — no values.
+        assert_eq!(ev.env_keys, vec!["PORT".to_string()]);
+        let json = serde_json::to_string(ev).expect("encode");
+        assert!(
+            !json.contains("\"8080\""),
+            "env value must not appear: {json}"
+        );
+    }
+
+    #[test]
+    fn non_oci_launch_has_no_provider_evidence() {
+        // No egress declared, but still an OCI envelope → evidence present with
+        // enforcement Enforced (nothing to downgrade). The empty case is when
+        // `execution_plan.oci` is None, exercised by `declared_oci_provider_projections`.
+        let evidence =
+            oci_provider_projection_evidence(&envelope(vec![]), vec![], HashMap::new(), None, None);
+        assert_eq!(
+            evidence[0].network_enforcement_status,
+            OciEnforcementStatus::Enforced
+        );
     }
 }
