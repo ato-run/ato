@@ -262,6 +262,10 @@ pub(crate) struct ConsumerRunRequest {
     /// installed app / profile / revision identity via explicit data flow.
     pub(crate) install_lifecycle_context:
         Option<crate::cli::commands::run::InstallLifecycleContext>,
+    /// Launch-condition inputs from a `capsule://…?<query>` launch URL, overlaid
+    /// onto the in-memory installed-state claims before the relaunch preflight
+    /// resolves them (inputs, not proof). Empty for `ato run` / `ato launch <ipk>`.
+    pub(crate) capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
 }
 
 impl ConsumerRunRequest {
@@ -1723,11 +1727,11 @@ where
     // Gated on the install identity, so `ato run` / non-installed launches are
     // untouched. Runs here in the prepare phase, before any executor.
     //
-    // `capsule://` query inputs (`&[]` here) overlay grants/bindings onto the
-    // in-memory claims before resolution; threading them from the launch URL is a
-    // follow-up (the dispatch currently drops the query, and the query +
-    // install-lifecycle identity don't co-occur in today's entrypoints — see the
-    // relaunch_preflight module docs).
+    // `capsule://…?<query>` launch URLs (`ato launch capsule://…`) supply
+    // launch-condition inputs (which grant/binding to try); they are overlaid
+    // onto the in-memory claims before resolution. They are inputs, not proof —
+    // the resolver still checks the DB registry before admission. Empty for
+    // `ato run` and `ato launch <ipk>`.
     crate::adapters::runtime::relaunch_preflight::run_relaunch_preflight(
         request.install_lifecycle_context.as_ref().map(|ctx| {
             (
@@ -1735,7 +1739,7 @@ where
                 ctx.install_revision_id.as_str(),
             )
         }),
-        &[],
+        &request.capsule_launch_inputs,
     )?;
     let state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
@@ -4975,6 +4979,7 @@ url = "http://127.0.0.1:8787/health"
             strict_realization: false,
             pinned_revision_output_dir: None,
             install_lifecycle_context: None,
+            capsule_launch_inputs: Vec::new(),
         }
     }
 
