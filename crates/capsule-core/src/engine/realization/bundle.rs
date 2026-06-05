@@ -32,7 +32,7 @@ use crate::engine::execution_graph::{ExecutionGraphNode, LaunchGraphBundle};
 use super::classify::{
     MountFact, RealizationNode, RealizationNodeFacts, RealizationRequest, classify,
 };
-use super::model::RealizationContract;
+use super::model::{RealizationContract, RedactedProjectionCommand};
 
 /// Realization evidence about a runtime toolchain.
 #[derive(Debug, Clone, Default)]
@@ -60,12 +60,21 @@ pub struct StateBindingEvidence {
 }
 
 /// Realization evidence about a provider projection (e.g. OCI).
+///
+/// `renderer` + `raw_argv` are a transient *input*: this struct is not
+/// serializable and never reaches the contract. The adapter redacts `raw_argv`
+/// into a [`RedactedProjectionCommand`] at projection time (#498-A review), so
+/// the raw command — which may embed env values, tokens, or URLs — cannot be
+/// persisted by the downstream receipt writeback (#493).
 #[derive(Debug, Clone, Default)]
 pub struct ProviderProjectionEvidence {
     /// Provider id (`"oci:podman"`, …). Used to derive the node id.
     pub provider: String,
-    /// Rendered provider invocation, derived from the plan. Evidence only.
-    pub projection_command: Option<String>,
+    /// Renderer label, e.g. `"podman-create"`. Value-free.
+    pub renderer: String,
+    /// Raw rendered argv. Redacted by the adapter; never stored on the
+    /// contract. Empty ⇒ no projection-command evidence is emitted.
+    pub raw_argv: Vec<String>,
     /// Runtime handle the provider returns. **Never** identity (#501); carried
     /// here only so the adapter can demonstrably ignore it.
     pub container_id: Option<String>,
@@ -224,14 +233,17 @@ pub fn realization_from_launch_bundle(
         ));
     }
 
-    // Provider projection — the rendered command is evidence, the container id
-    // is deliberately dropped (#501).
+    // Provider projection — the rendered command is redacted into evidence
+    // here, and the container id is deliberately dropped (#501, #498-A review).
     if let Some(projection) = &env.provider_projection {
+        let projection_command = (!projection.raw_argv.is_empty()).then(|| {
+            RedactedProjectionCommand::from_argv(&projection.renderer, &projection.raw_argv)
+        });
         nodes.push(RealizationNode::optional(
             format!("provider-projection:{}", projection.provider),
             RealizationNodeFacts::ProviderProjection {
                 provider: projection.provider.clone(),
-                projection_command: projection.projection_command.clone(),
+                projection_command,
             },
         ));
     }
@@ -255,7 +267,10 @@ fn first_source_identifier(bundle: &LaunchGraphBundle) -> Option<String> {
 }
 
 fn runtime_identifiers(bundle: &LaunchGraphBundle) -> Vec<String> {
-    let mut ids: Vec<String> = bundle
+    // BTreeSet (not `Vec::dedup`, which only collapses *adjacent* duplicates):
+    // the resolved graph does not guarantee Runtime nodes for the same id are
+    // emitted adjacently.
+    bundle
         .resolved_graph
         .nodes
         .iter()
@@ -263,7 +278,7 @@ fn runtime_identifiers(bundle: &LaunchGraphBundle) -> Vec<String> {
             ExecutionGraphNode::Runtime { identifier } => Some(identifier.clone()),
             _ => None,
         })
-        .collect();
-    ids.dedup();
-    ids
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
