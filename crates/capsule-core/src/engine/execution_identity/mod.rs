@@ -1080,6 +1080,12 @@ pub struct OciProviderReceiptEvidence {
     /// (#501). Optional/additive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub derived_command_redacted: Vec<String>,
+    /// Value-free service/target label identifying which orchestrated service
+    /// this evidence record describes. `None` for a single-target launch; set per
+    /// service for a multi-service launch so one receipt can carry one evidence
+    /// record per service. Never a host path or secret (#501). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_label: Option<String>,
 }
 
 /// Whether a provider can enforce a declared policy facet for a projection.
