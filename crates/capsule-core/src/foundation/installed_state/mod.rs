@@ -35,6 +35,7 @@ mod db;
 mod launch_condition;
 mod launch_input;
 mod launch_input_apply;
+mod launch_prompt_plan;
 mod port;
 mod relaunch_admission;
 mod relaunch_resolution;
@@ -57,6 +58,7 @@ pub use launch_input::{
     condition_key_kind, parse_capsule_launch_input, validate_condition_key,
 };
 pub use launch_input_apply::apply_capsule_launch_inputs_to_claims;
+pub use launch_prompt_plan::{LaunchConditionPromptRequest, plan_launch_condition_prompts};
 pub use port::{
     ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
 };
