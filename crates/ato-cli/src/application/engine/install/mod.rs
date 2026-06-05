@@ -26,7 +26,10 @@ use capsule_core::foundation::install_lifecycle::{
     path_safe_app_id,
 };
 
-use capsule_core::installed_state::{InstalledStateDb, StorageAdmission, StorageClaim};
+use capsule_core::installed_state::{
+    InstalledStateDb, LaunchConditionKind, StorageAdmission, StorageClaim,
+    launch_condition_extraction_status, launch_condition_from_storage_claim,
+};
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::resource::cas::LocalCasIndex;
 use capsule_core::types::CapsuleManifest;
@@ -1246,9 +1249,22 @@ pub async fn install_app(
 
     // Record the storage reservation for the installed capsule so subsequent
     // installs account for it during admission (#508).
-    if let StorageAdmissionOutcome::Admitted { required_bytes } = storage_admission {
-        record_install_storage_claim(&storage_db, &result, required_bytes);
-    }
+    let required_bytes = match storage_admission {
+        StorageAdmissionOutcome::Admitted { required_bytes } => {
+            record_install_storage_claim(&storage_db, &result, required_bytes);
+            Some(required_bytes)
+        }
+        StorageAdmissionOutcome::Skipped => None,
+    };
+
+    // Update the installed-app launch condition ledger (the SOT, #508). Always
+    // written on a successful install — even when there is no disk requirement —
+    // so an empty ledger is never read as "no launch conditions": a baseline
+    // extraction-status marker records that extraction is still incomplete.
+    // Strict: unlike the best-effort storage-claim projection above, a failure
+    // here means the SOT could not be recorded, so it fails the install rather
+    // than silently leaving the ledger stale.
+    record_install_launch_ledger(&storage_db, &result, required_bytes)?;
 
     Ok(result)
 }
@@ -2356,6 +2372,75 @@ fn record_install_storage_claim(
     }) {
         tracing::warn!(error = %err, "failed to record installed-capsule storage claim");
     }
+}
+
+/// Update the installed-app **launch condition ledger** — the device/provider-
+/// local source of truth for relaunch conditions (#508).
+///
+/// Strict by design: a failure propagates and fails the install, because a
+/// silently-stale SOT would let later relaunch/admission make decisions from an
+/// incomplete condition set. (Runtime observation updates such as a port's
+/// `last_actual_port` remain best-effort elsewhere — only the condition ledger
+/// is strict.)
+///
+/// Always writes a baseline marker (plus the storage requirement when declared),
+/// so a successful install never leaves an empty ledger that could be misread as
+/// "no launch conditions". Extracting the remaining condition kinds (port / env /
+/// secret / state / runtime / provider_capability / network / hardware / policy)
+/// from the manifest and lockfile is a follow-up; the model and DB API already
+/// represent them, and the baseline marker lists them as not-yet-extracted.
+fn record_install_launch_ledger(
+    db: &InstalledStateDb,
+    result: &InstallResult,
+    required_bytes: Option<u64>,
+) -> Result<()> {
+    let Some(lifecycle) = result.install_lifecycle.as_ref() else {
+        // Lifecycle registration is best-effort upstream; without an install
+        // identity there is no per-app key to anchor a ledger entry, so there is
+        // nothing to record (and nothing is silently lost — the identity itself
+        // was not established).
+        return Ok(());
+    };
+    let install_profile_key = lifecycle.install_profile_key.as_str();
+    let install_revision_id = lifecycle.install_revision_id.as_str();
+    let claims =
+        install_launch_conditions(install_profile_key, install_revision_id, required_bytes);
+    db.record_installed_launch_ledger(
+        install_profile_key,
+        Some(install_revision_id),
+        None,
+        &claims,
+    )
+    .map_err(anyhow::Error::from)
+}
+
+/// Build the launch condition set known at install time for an installed app
+/// revision. Pure (no I/O) so the install-side projection is testable without
+/// constructing a full `InstallResult`.
+///
+/// Always includes the ledger **baseline marker** (so the revision's ledger is
+/// never empty), plus the storage requirement when one was declared. The marker
+/// records that only the storage extractor has run this slice; the remaining
+/// kinds are listed as missing so later relaunch/admission can tell "absent"
+/// from "not yet extracted".
+fn install_launch_conditions(
+    install_profile_key: &str,
+    install_revision_id: &str,
+    required_bytes: Option<u64>,
+) -> Vec<capsule_core::installed_state::LaunchConditionClaim> {
+    let mut claims = vec![launch_condition_extraction_status(
+        install_profile_key,
+        Some(install_revision_id),
+        &[LaunchConditionKind::Storage],
+    )];
+    if let Some(required_bytes) = required_bytes {
+        claims.push(launch_condition_from_storage_claim(
+            install_profile_key,
+            Some(install_revision_id),
+            required_bytes,
+        ));
+    }
+    claims
 }
 
 #[cfg(test)]
