@@ -34,15 +34,19 @@
 //! ## Scope of this slice
 //!
 //! In: the redacted snapshot/request/receipt model, the in-memory index, the
-//! deterministic candidate filter, and [`model::PlacementDecisionReceipt`].
+//! deterministic candidate filter, [`model::PlacementDecisionReceipt`], and the
+//! [`publisher`] boundary that mints normalized, redacted snapshots from
+//! provider-local facts.
 //!
 //! Out (later PRs): #501 provider projection vocabulary, #508 installed-state
-//! DB integration, real desktop/cloud/mobile networking and sync, actual
-//! provider adapters, secret projection, host GPU probing, and any
-//! install/launch wiring. Nothing in production calls this module yet.
+//! DB integration (the DB becomes an *optional* summary input to the
+//! publisher), real desktop/cloud/mobile networking and sync, actual host
+//! probing, secret projection, and any install/launch wiring. Nothing in
+//! production calls this module yet.
 
 mod index;
 mod model;
+mod publisher;
 #[cfg(test)]
 mod tests;
 
@@ -54,4 +58,7 @@ pub use model::{
     PlacementRequest, PlatformSummary, ProviderCapabilityId, ProviderCapabilitySnapshot,
     ProviderId, ProviderKind, RedactedSecretRef, RejectedPlacementCandidate, RequiredProjection,
     ResourceSummary, RuntimeRequirement, RuntimeSummary, SecretProjectionSummary,
+};
+pub use publisher::{
+    ProviderSnapshotInput, SnapshotBuildError, build_provider_capability_snapshot,
 };
