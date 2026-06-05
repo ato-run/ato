@@ -8,8 +8,8 @@ use capsule_core::engine::execution_graph::{
 use capsule_core::execution_identity::{
     ExecutionIdentityInput, ExecutionIdentityInputV2, ExecutionReceipt, ExecutionReceiptDocument,
     ExecutionReceiptV2, ExecutionRunnerIdentity, FilesystemIdentityBuilder, FilesystemIdentityV2,
-    GraphCompleteness, GraphReceipt, LaunchIdentity, OciProviderReceiptEvidence, PolicyIdentity,
-    PolicyIdentityBuilder, PolicyIdentityV2, Tracked,
+    GraphCompleteness, GraphReceipt, LaunchIdentity, ObservationScope, OciProviderReceiptEvidence,
+    PolicyIdentity, PolicyIdentityBuilder, PolicyIdentityV2, Tracked,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
@@ -336,6 +336,11 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
         // declared/resolved graph only — there is no observed (post-spawn)
         // coverage yet (#494/#495). Emitting Complete would overclaim.
         .with_graph_completeness(GraphCompleteness::Partial)
+        // #495: this receipt carries declared + resolved evidence only; the
+        // runtime layer is not observed (NodeReceipt/EdgeReceipt population is
+        // #521, the realization classifier is #522). Make that explicit rather
+        // than implying it from the empty observed facets.
+        .with_observation_scope(ObservationScope::declared_resolved())
         .with_graph_receipt(GraphReceipt::launch_passed(
             declared_execution_id,
             resolved_execution_id,
