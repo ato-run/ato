@@ -531,6 +531,35 @@ impl ExecutionReceiptV2 {
         self
     }
 
+    /// Fold OCI provider-evidence facts into this receipt's assessment layer
+    /// (#501): append the value-free provider-gap completeness reasons and merge
+    /// the implied reproducibility causes, then recompute the class conservatively.
+    ///
+    /// Strictly additive and pre-observation: it never changes
+    /// `graph_completeness` (stays `Partial`), `observation_scope`, or
+    /// `observed_execution_id`, and merging causes can only *lower*
+    /// reproducibility, never raise it. A no-op when there is no provider
+    /// evidence (so source-native receipts are unaffected). Call this *after*
+    /// `provider_projections` are final.
+    pub fn with_oci_provider_assessment(mut self) -> Self {
+        if self.provider_projections.is_empty() {
+            return self;
+        }
+        let assessment = assess_oci_provider_projection_facts(&self.provider_projections);
+        self.graph_completeness_reasons
+            .extend(assessment.completeness_reasons);
+        if !assessment.reproducibility_causes.is_empty() {
+            self.reproducibility
+                .causes
+                .extend(assessment.reproducibility_causes);
+            self.reproducibility.causes.sort();
+            self.reproducibility.causes.dedup();
+            self.reproducibility.class =
+                ReproducibilityClass::from_causes(&self.reproducibility.causes);
+        }
+        self
+    }
+
     /// Attach an [`ObservationScope`] describing which evidence layers this
     /// receipt observed (refs #495).
     pub fn with_observation_scope(mut self, scope: ObservationScope) -> Self {
@@ -909,7 +938,9 @@ impl ObservationScope {
 /// [`GraphCompleteness::Complete`]. Runtime observation (#521 lifecycle
 /// observations, #522 realization classifier) is what would let a future
 /// wave clear these reasons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// `Copy` is intentionally dropped: the additive `ProviderProjectionIncomplete`
+// variant carries owned `String`s (a value-free provider kind + service label).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GraphCompletenessReason {
     /// The runtime was not observed (`ObservationScope.observed ==
@@ -923,6 +954,40 @@ pub enum GraphCompletenessReason {
     ResolvedLayerAbsent,
     /// The declared-domain layer was not derived for this receipt.
     DeclaredLayerAbsent,
+    /// A provider projection facet is incomplete before runtime observation
+    /// (#501): an unpinned image, an unenforceable declared policy, or a
+    /// host-bound mount. This is a declared/resolved-domain provider fact — it
+    /// does NOT imply the workload was observed running. All fields are
+    /// value-free (a coarse provider kind, an optional service label, and a typed
+    /// gap) — never a host path, env value, secret, or command.
+    ProviderProjectionIncomplete {
+        provider_kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_label: Option<String>,
+        gap: ProviderProjectionGap,
+    },
+}
+
+/// A specific way a provider projection is incomplete pre-observation (#501).
+/// Typed and value-free, suitable for a [`GraphCompletenessReason`] in a receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderProjectionGap {
+    /// The launch image is tag-only / unpinned: its immutable materialized
+    /// identity is not known at projection time.
+    ImageUnpinned,
+    /// A declared network policy is enforced only best-effort by the provider.
+    NetworkEnforcementDowngraded,
+    /// A declared network policy cannot be enforced by the provider at all
+    /// (e.g. podman + an egress allowlist).
+    NetworkEnforcementUnsupported,
+    /// Whether the provider can enforce the declared network policy is unknown.
+    NetworkEnforcementUnknown,
+    /// A declared capability/sandbox policy is not fully enforced by the provider.
+    CapabilityEnforcementIncomplete,
+    /// The projection depends on a host-path bind mount (a host-bound fallback),
+    /// rather than engine-managed state.
+    HostBoundMount,
 }
 
 impl GraphCompletenessReason {
@@ -935,6 +1000,11 @@ impl GraphCompletenessReason {
             }
             GraphCompletenessReason::ResolvedLayerAbsent => "resolved-layer-absent",
             GraphCompletenessReason::DeclaredLayerAbsent => "declared-layer-absent",
+            // Coarse label; the specific provider/service/gap live in the typed
+            // fields (and the serde representation).
+            GraphCompletenessReason::ProviderProjectionIncomplete { .. } => {
+                "provider-projection-incomplete"
+            }
         }
     }
 }
@@ -1119,6 +1189,104 @@ impl OciEnforcementStatus {
     /// "not enforced" for a fail-closed decision (#500/#501).
     pub fn is_enforced(&self) -> bool {
         matches!(self, Self::Enforced)
+    }
+}
+
+/// The receipt-assessment delta derived from OCI provider evidence (#501): the
+/// declared/resolved provider facts that keep a receipt's graph honestly
+/// `Partial` and its reproducibility conservative *before any runtime
+/// observation*. Pure data — carries no execution identity and never implies an
+/// observed run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OciProviderProjectionAssessment {
+    /// Additional, value-free reasons the graph is `Partial` (one per provider
+    /// gap). Appended to the receipt's existing reasons (e.g. `RuntimeNotObserved`).
+    pub completeness_reasons: Vec<GraphCompletenessReason>,
+    /// Reproducibility causes implied by the provider gaps. Merged into the
+    /// receipt's causes; the class is then recomputed conservatively.
+    pub reproducibility_causes: Vec<ReproducibilityCause>,
+}
+
+/// Assess OCI provider evidence into receipt-assessment facts (#501).
+///
+/// Pure and conservative: it classifies *declared/resolved* provider facts
+/// only — an unpinned image, an unenforceable/downgraded/unknown declared
+/// network or capability policy, and host-path bind mounts. It NEVER asserts
+/// runtime observation, never clears `Partial`, and never derives an execution
+/// identity. Each completeness reason is value-free and carries the service
+/// label so a multi-service receipt attributes the gap without a host path.
+pub fn assess_oci_provider_projection_facts(
+    projections: &[OciProviderReceiptEvidence],
+) -> OciProviderProjectionAssessment {
+    let mut completeness_reasons = Vec::new();
+    let mut reproducibility_causes = Vec::new();
+
+    for evidence in projections {
+        let reason =
+            |gap: ProviderProjectionGap| GraphCompletenessReason::ProviderProjectionIncomplete {
+                provider_kind: evidence.provider_kind.clone(),
+                service_label: evidence.service_label.clone(),
+                gap,
+            };
+
+        // An unpinned (tag-only) image has no known immutable materialized
+        // identity → the dependency output is unknown.
+        if matches!(evidence.image_digest_status, OciImageDigestStatus::Unpinned) {
+            completeness_reasons.push(reason(ProviderProjectionGap::ImageUnpinned));
+            reproducibility_causes.push(ReproducibilityCause::UnknownDependencyOutput);
+        }
+
+        // A declared network policy (e.g. an egress allowlist surfaced as the
+        // `network-policy` required capability) that the provider does not fully
+        // enforce. Any non-`Enforced` status leaves the launch network-bound.
+        let network_required = evidence
+            .capabilities_required
+            .iter()
+            .any(|cap| cap == "network-policy");
+        if network_required {
+            let gap = match evidence.network_enforcement_status {
+                OciEnforcementStatus::Enforced => None,
+                OciEnforcementStatus::Downgraded => {
+                    Some(ProviderProjectionGap::NetworkEnforcementDowngraded)
+                }
+                OciEnforcementStatus::Unsupported => {
+                    Some(ProviderProjectionGap::NetworkEnforcementUnsupported)
+                }
+                OciEnforcementStatus::Unknown => {
+                    Some(ProviderProjectionGap::NetworkEnforcementUnknown)
+                }
+            };
+            if let Some(gap) = gap {
+                completeness_reasons.push(reason(gap));
+                reproducibility_causes.push(ReproducibilityCause::NetworkBound);
+            }
+        }
+
+        // A declared capability/sandbox policy the provider only partially
+        // enforces or cannot enforce. (Unknown stays silent: it is the default
+        // when no capability policy is modeled.)
+        if matches!(
+            evidence.capability_enforcement_status,
+            OciEnforcementStatus::Downgraded | OciEnforcementStatus::Unsupported
+        ) {
+            completeness_reasons.push(reason(
+                ProviderProjectionGap::CapabilityEnforcementIncomplete,
+            ));
+        }
+
+        // A host-path bind mount (not an engine-managed volume) is a host-bound
+        // fallback → not host-portable.
+        if evidence.mounts.iter().any(|mount| !mount.engine_volume) {
+            completeness_reasons.push(reason(ProviderProjectionGap::HostBoundMount));
+            reproducibility_causes.push(ReproducibilityCause::HostBound);
+        }
+    }
+
+    reproducibility_causes.sort();
+    reproducibility_causes.dedup();
+    OciProviderProjectionAssessment {
+        completeness_reasons,
+        reproducibility_causes,
     }
 }
 
@@ -1729,6 +1897,37 @@ pub enum ReproducibilityClass {
     BestEffort,
 }
 
+impl ReproducibilityClass {
+    /// Derive the conservative reproducibility class from a set of typed causes.
+    ///
+    /// The canonical precedence used across the codebase: no causes ⇒ `Pure`;
+    /// any "unknown/untracked" cause ⇒ `BestEffort`; otherwise the most
+    /// constraining bound (`StateBound` → `TimeBound` → `NetworkBound` →
+    /// `HostBound`), falling back to `BestEffort`. Adding causes can only keep or
+    /// *lower* reproducibility — it never upgrades a class.
+    pub fn from_causes(causes: &[ReproducibilityCause]) -> Self {
+        if causes.is_empty() {
+            return Self::Pure;
+        }
+        if causes.iter().any(ReproducibilityCause::is_best_effort) {
+            return Self::BestEffort;
+        }
+        if causes.contains(&ReproducibilityCause::StateBound) {
+            return Self::StateBound;
+        }
+        if causes.contains(&ReproducibilityCause::TimeBound) {
+            return Self::TimeBound;
+        }
+        if causes.contains(&ReproducibilityCause::NetworkBound) {
+            return Self::NetworkBound;
+        }
+        if causes.contains(&ReproducibilityCause::HostBound) {
+            return Self::HostBound;
+        }
+        Self::BestEffort
+    }
+}
+
 /// Typed reason contributing to a [`ReproducibilityClass`] (refs #494).
 ///
 /// Each cause is derived pre-observation from declared/resolved facets. They
@@ -1750,6 +1949,23 @@ pub enum ReproducibilityCause {
     UntrackedFilesystemView,
     UntrackedDynamicDependency,
     LifecycleUnknown,
+}
+
+impl ReproducibilityCause {
+    /// Whether this cause reflects *unknown/untracked* evidence (as opposed to a
+    /// known-but-impure binding). Any such cause forces
+    /// [`ReproducibilityClass::BestEffort`].
+    pub fn is_best_effort(&self) -> bool {
+        matches!(
+            self,
+            Self::UnknownDependencyOutput
+                | Self::UnknownRuntimeIdentity
+                | Self::UntrackedEnvironment
+                | Self::UntrackedFilesystemView
+                | Self::UntrackedDynamicDependency
+                | Self::LifecycleUnknown
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -2818,6 +3034,306 @@ pub(in crate::engine::execution_identity) mod tests {
     fn base_receipt() -> ExecutionReceiptV2 {
         ExecutionReceiptV2::from_input(sample_input_v2(), "2026-05-03T00:00:00Z".to_string())
             .expect("receipt")
+    }
+
+    // ── #501: OCI provider facts → receipt assessment ──
+
+    #[allow(clippy::too_many_arguments)]
+    fn oci_evidence(
+        service: Option<&str>,
+        image_digest_status: OciImageDigestStatus,
+        network: OciEnforcementStatus,
+        capability: OciEnforcementStatus,
+        capabilities_required: &[&str],
+        host_bind_mount: bool,
+    ) -> OciProviderReceiptEvidence {
+        OciProviderReceiptEvidence {
+            provider_kind: "oci".to_string(),
+            provider_name: "podman".to_string(),
+            image_reference: "repo/app".to_string(),
+            image_digest_status,
+            platform: None,
+            env_keys: Vec::new(),
+            mounts: if host_bind_mount {
+                vec![OciMountReceiptEvidence {
+                    target: "/data".to_string(),
+                    readonly: false,
+                    engine_volume: false,
+                    persistent_state: false,
+                }]
+            } else {
+                Vec::new()
+            },
+            ports: Vec::new(),
+            network_aliases: Vec::new(),
+            capabilities_required: capabilities_required
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
+            provider_version: Some("oci-podman-v1".to_string()),
+            network_enforcement_status: network,
+            capability_enforcement_status: capability,
+            derived_command_redacted: Vec::new(),
+            service_label: service.map(|s| s.to_string()),
+        }
+    }
+
+    fn has_gap(reasons: &[GraphCompletenessReason], wanted: ProviderProjectionGap) -> bool {
+        reasons.iter().any(|r| {
+            matches!(
+                r,
+                GraphCompletenessReason::ProviderProjectionIncomplete { gap, .. } if *gap == wanted
+            )
+        })
+    }
+
+    #[test]
+    fn assess_unpinned_image_adds_materialization_reason() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Unpinned,
+            OciEnforcementStatus::Enforced,
+            OciEnforcementStatus::Enforced,
+            &[],
+            false,
+        )]);
+        assert!(has_gap(
+            &a.completeness_reasons,
+            ProviderProjectionGap::ImageUnpinned
+        ));
+        assert!(
+            a.reproducibility_causes
+                .contains(&ReproducibilityCause::UnknownDependencyOutput)
+        );
+    }
+
+    #[test]
+    fn assess_unsupported_network_enforcement_adds_policy_reason() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Pinned {
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            OciEnforcementStatus::Unsupported,
+            OciEnforcementStatus::Enforced,
+            &["network-policy"],
+            false,
+        )]);
+        assert!(has_gap(
+            &a.completeness_reasons,
+            ProviderProjectionGap::NetworkEnforcementUnsupported
+        ));
+        assert!(
+            a.reproducibility_causes
+                .contains(&ReproducibilityCause::NetworkBound)
+        );
+    }
+
+    #[test]
+    fn assess_unknown_network_enforcement_stays_conservative() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Pinned {
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            OciEnforcementStatus::Unknown,
+            OciEnforcementStatus::Enforced,
+            &["network-policy"],
+            false,
+        )]);
+        assert!(has_gap(
+            &a.completeness_reasons,
+            ProviderProjectionGap::NetworkEnforcementUnknown
+        ));
+        assert!(
+            a.reproducibility_causes
+                .contains(&ReproducibilityCause::NetworkBound)
+        );
+    }
+
+    #[test]
+    fn assess_pinned_enforced_no_mounts_is_clean() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Pinned {
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            OciEnforcementStatus::Enforced,
+            OciEnforcementStatus::Enforced,
+            &["network-policy"],
+            false,
+        )]);
+        assert!(a.completeness_reasons.is_empty());
+        assert!(a.reproducibility_causes.is_empty());
+    }
+
+    #[test]
+    fn assess_host_bound_mount_adds_host_bound() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Pinned {
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            OciEnforcementStatus::Enforced,
+            OciEnforcementStatus::Enforced,
+            &[],
+            true,
+        )]);
+        assert!(has_gap(
+            &a.completeness_reasons,
+            ProviderProjectionGap::HostBoundMount
+        ));
+        assert!(
+            a.reproducibility_causes
+                .contains(&ReproducibilityCause::HostBound)
+        );
+    }
+
+    #[test]
+    fn assess_multi_service_reasons_carry_value_free_service_label() {
+        let a = assess_oci_provider_projection_facts(&[
+            oci_evidence(
+                Some("web"),
+                OciImageDigestStatus::Unpinned,
+                OciEnforcementStatus::Enforced,
+                OciEnforcementStatus::Enforced,
+                &[],
+                false,
+            ),
+            oci_evidence(
+                Some("db"),
+                OciImageDigestStatus::Unpinned,
+                OciEnforcementStatus::Enforced,
+                OciEnforcementStatus::Enforced,
+                &[],
+                true,
+            ),
+        ]);
+        let labels: Vec<&str> = a
+            .completeness_reasons
+            .iter()
+            .filter_map(|r| match r {
+                GraphCompletenessReason::ProviderProjectionIncomplete { service_label, .. } => {
+                    service_label.as_deref()
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&"web") && labels.contains(&"db"));
+        // The reasons are value-free: no host path (e.g. the mount target) leaks.
+        let json = serde_json::to_string(&a.completeness_reasons).expect("serialize");
+        assert!(!json.contains("/data"), "no host path in reasons: {json}");
+    }
+
+    #[test]
+    fn with_oci_provider_assessment_keeps_partial_and_conservative() {
+        let receipt = base_receipt()
+            .with_graph_completeness(GraphCompleteness::Partial)
+            .with_graph_completeness_reasons(vec![GraphCompletenessReason::RuntimeNotObserved])
+            .with_observation_scope(ObservationScope::declared_resolved())
+            .with_provider_projections(vec![oci_evidence(
+                Some("web"),
+                OciImageDigestStatus::Unpinned,
+                OciEnforcementStatus::Unsupported,
+                OciEnforcementStatus::Enforced,
+                &["network-policy"],
+                true,
+            )])
+            .with_oci_provider_assessment();
+
+        // Graph stays Partial; the runtime-not-observed reason is preserved and
+        // the provider gaps are appended.
+        assert_eq!(receipt.graph_completeness, Some(GraphCompleteness::Partial));
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+        assert!(
+            receipt
+                .graph_completeness_reasons
+                .iter()
+                .any(|r| matches!(r, GraphCompletenessReason::RuntimeNotObserved))
+        );
+        assert!(has_gap(
+            &receipt.graph_completeness_reasons,
+            ProviderProjectionGap::ImageUnpinned
+        ));
+        assert!(has_gap(
+            &receipt.graph_completeness_reasons,
+            ProviderProjectionGap::NetworkEnforcementUnsupported
+        ));
+        assert!(has_gap(
+            &receipt.graph_completeness_reasons,
+            ProviderProjectionGap::HostBoundMount
+        ));
+
+        // Reproducibility is cause-bearing and conservative (unpinned image ⇒
+        // an unknown dependency output ⇒ BestEffort).
+        for cause in [
+            ReproducibilityCause::UnknownDependencyOutput,
+            ReproducibilityCause::NetworkBound,
+            ReproducibilityCause::HostBound,
+        ] {
+            assert!(receipt.reproducibility.causes.contains(&cause));
+        }
+        assert_eq!(
+            receipt.reproducibility.class,
+            ReproducibilityClass::BestEffort
+        );
+
+        // Pre-observation invariants: no observed id; scope stays declared/resolved.
+        assert!(receipt.observed_execution_id.is_none());
+        assert_eq!(
+            receipt.observation_scope,
+            Some(ObservationScope::declared_resolved())
+        );
+    }
+
+    #[test]
+    fn with_oci_provider_assessment_is_noop_without_provider_evidence() {
+        // Source-native receipts (no provider_projections) are unaffected.
+        let before = base_receipt()
+            .with_graph_completeness_reasons(vec![GraphCompletenessReason::RuntimeNotObserved]);
+        let reasons_before = before.graph_completeness_reasons.clone();
+        let class_before = before.reproducibility.class;
+        let causes_before = before.reproducibility.causes.clone();
+
+        let after = before.with_oci_provider_assessment();
+        assert_eq!(after.graph_completeness_reasons, reasons_before);
+        assert_eq!(after.reproducibility.class, class_before);
+        assert_eq!(after.reproducibility.causes, causes_before);
+    }
+
+    #[test]
+    fn provider_projections_are_never_used_as_resolved_execution_id() {
+        let pinned_digest = format!("sha256:{}", "d".repeat(64));
+        let input = sample_input_v2()
+            .with_resolved_execution_id(Some("graph:resolved-exec-id".to_string()));
+        let receipt = ExecutionReceiptV2::from_input(input, "2026-05-03T00:00:00Z".to_string())
+            .expect("receipt")
+            .with_provider_projections(vec![oci_evidence(
+                Some("web"),
+                OciImageDigestStatus::Pinned {
+                    digest: pinned_digest.clone(),
+                },
+                OciEnforcementStatus::Enforced,
+                OciEnforcementStatus::Enforced,
+                &[],
+                false,
+            )])
+            .with_oci_provider_assessment();
+
+        // The resolved execution id is the graph-derived id, never the image
+        // digest or any provider projection fact.
+        assert_eq!(
+            receipt.resolved_execution_id.as_deref(),
+            Some("graph:resolved-exec-id")
+        );
+        assert_ne!(
+            receipt.resolved_execution_id.as_deref(),
+            Some(pinned_digest.as_str())
+        );
+        assert!(receipt.observed_execution_id.is_none());
     }
 
     #[test]
