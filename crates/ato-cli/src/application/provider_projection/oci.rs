@@ -288,6 +288,10 @@ impl OciProjectionPlan {
     /// container name, and `provider_metadata_labels` (session id, managed
     /// flag, …) — all session-local provider data that must not become
     /// execution identity.
+    // Enforcement-unaware convenience used by tests; the launch/receipt paths use
+    // `receipt_evidence_with` so they always record the provider's enforcement
+    // status. Kept as the explicit `Unknown`-enforcement boundary.
+    #[allow(dead_code)]
     pub(crate) fn receipt_evidence(&self) -> OciProviderReceiptEvidence {
         // Without provider enforcement facts the status is honestly `Unknown`
         // (treated as not-enforced by strict mode). The enforcement-aware path
@@ -341,28 +345,18 @@ impl OciProjectionPlan {
             provider_version: Some(self.provider_id.family()),
             network_enforcement_status: network_enforcement,
             capability_enforcement_status: capability_enforcement,
-            // A leak-free identity fingerprint: a hash of the full canonical
-            // identity (which itself contains env values / mount sources and is
-            // therefore NEVER serialized into a receipt). The hash is stable and
-            // session-independent, and changes whenever any launch condition
-            // changes — without exposing any raw value.
-            projection_identity_summary: Some(self.identity_fingerprint()),
             // Derived projection evidence: the rendered argv reduced to a value-
             // free shape (flags survive, every value becomes `<redacted>`). Never
             // identity, never a raw command.
+            //
+            // Note: no hashed identity *summary* is recorded here. The plan's
+            // `canonical_identity` embeds env values and mount source paths, and
+            // even a digest of those is a correlation/guessing oracle — secrets,
+            // env values, and host paths must never enter receipt evidence in any
+            // form (#501). A receipt-safe projection fingerprint can be added in a
+            // later slice, computed strictly from the redaction-safe fields below.
             derived_command_redacted: self.redacted_derived_command(),
         }
-    }
-
-    /// A leak-free `sha256:<hex>` fingerprint of the projection identity. The
-    /// underlying [`Self::canonical_identity`] embeds env values and mount source
-    /// paths and must never reach a receipt; this hash carries the same identity
-    /// sensitivity with none of the raw values.
-    pub(crate) fn identity_fingerprint(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(self.canonical_identity().as_bytes());
-        format!("sha256:{:x}", hasher.finalize())
     }
 
     /// The derived `podman create` argv reduced to a redacted, value-free shape.
@@ -875,26 +869,28 @@ mod tests {
         req.env.insert("PORT".into(), "8080".into());
         let ev = OciProjectionPlan::from_container_request(&req).receipt_evidence();
 
-        // The identity summary is a content hash, never the argv/values.
-        let summary = ev.projection_identity_summary.as_deref().expect("summary");
+        // The podman argv lives ONLY as redacted, value-free derived evidence —
+        // never as an identity field. The receipt evidence carries no identity
+        // summary at all (a hash of the value-bearing canonical identity would be
+        // a correlation oracle); the image identity is a separate digest-status
+        // field, not the argv.
+        assert!(!ev.derived_command_redacted.is_empty());
+        let argv_json = serde_json::to_string(&ev.derived_command_redacted).expect("encode");
         assert!(
-            summary.starts_with("sha256:"),
-            "identity must be a hash: {summary}"
+            argv_json.contains("<redacted>"),
+            "argv values must be redacted"
         );
-        assert!(!summary.contains("create"), "argv must not be the identity");
         assert!(
-            !summary.contains("PORT=8080"),
-            "env value must not be the identity"
+            !argv_json.contains("PORT=8080"),
+            "env value must not survive in argv"
         );
 
-        // The identity summary changes when a launch condition changes — but the
-        // hash never exposes the raw value.
-        let mut req2 = base_request();
-        req2.env.insert("PORT".into(), "9090".into());
-        let ev2 = OciProjectionPlan::from_container_request(&req2).receipt_evidence();
-        assert_ne!(
-            ev.projection_identity_summary,
-            ev2.projection_identity_summary
+        // The whole serialized evidence never carries a raw `create … <image> …`
+        // command line; only flags + redacted placeholders.
+        let json = serde_json::to_string(&ev).expect("encode");
+        assert!(
+            !json.contains("daemon off"),
+            "raw command tail must not appear: {json}"
         );
     }
 
