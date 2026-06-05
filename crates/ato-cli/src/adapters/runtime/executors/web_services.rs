@@ -422,6 +422,13 @@ fn build_service_env(
 
     env.extend(launch_ctx.injected_env().clone());
 
+    // SecretStore-backed launch-condition grants (#508). Applied at the service
+    // env-build boundary only and kept off the receipt-observed `merged_env`; last
+    // so a secret wins for its exact env key.
+    for secret in launch_ctx.secret_env() {
+        env.insert(secret.name.clone(), secret.value.expose().to_string());
+    }
+
     Ok(env)
 }
 
