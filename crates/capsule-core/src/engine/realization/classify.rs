@@ -452,6 +452,8 @@ fn classify_hashed(
             Some(UnrealizableReason::MismatchedImmutableInput {
                 node_id: node_id.to_string(),
                 node_kind: kind,
+                expected: expected.to_string(),
+                actual: actual.to_string(),
             }),
         ),
         (Some(expected), None) => (

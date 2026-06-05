@@ -168,6 +168,8 @@ fn realization_contract_does_not_verify_hash_mismatch() {
             vec![UnrealizableReason::MismatchedImmutableInput {
                 node_id: "source".into(),
                 node_kind: RealizationNodeKind::Source,
+                expected: "sha256:declared".into(),
+                actual: "sha256:actual-different".into(),
             }]
         ),
         RealizationResult::Realized => panic!("hash mismatch must be unrealizable"),
