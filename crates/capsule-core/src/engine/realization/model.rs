@@ -216,10 +216,14 @@ pub enum UnrealizableReason {
         node_kind: RealizationNodeKind,
     },
     /// A required immutable input is present but its materialized hash does not
-    /// match its declared identity, so it cannot be trusted.
+    /// match its declared identity, so it cannot be trusted. Carries the
+    /// declared and actual content hashes (safe to persist — never a path or
+    /// secret) so a reader can see exactly what diverged.
     MismatchedImmutableInput {
         node_id: String,
         node_kind: RealizationNodeKind,
+        expected: String,
+        actual: String,
     },
     /// A runtime tool's `binary_sha256` is not populated, so it cannot be
     /// verified. Until cross-platform lockfile population lands it must be
