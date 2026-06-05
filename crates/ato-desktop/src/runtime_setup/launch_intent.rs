@@ -195,9 +195,14 @@ pub(crate) fn intent_from_route(
                 return None;
             }
             match community_toml_id.as_ref().map(|c| c.trim()) {
+                // Record the *original* community launch URL
+                // (`capsule://<handle>?ctoml=<id>`) rather than the bare id, so
+                // replay can reconstruct both the handle and the recipe id (the
+                // handle alone is the launch target — the id without it cannot be
+                // resumed). Mirrors how `app.rs` received this launch (#484).
                 Some(ctoml) if !ctoml.is_empty() => (
                     LaunchIntentKind::CommunityTomlId,
-                    ctoml.to_string(),
+                    format!("capsule://{handle}?ctoml={ctoml}"),
                     Some(label.clone()),
                 ),
                 _ => (
@@ -248,7 +253,54 @@ fn is_valid_capsule_handle(handle: &str) -> bool {
     is_trusted_launch_input(handle) && (handle.starts_with("capsule://") || handle.contains('/'))
 }
 
+/// Whether `input` looks like a replayable source-repository reference (a
+/// GitHub repo URL or `host/owner/repo`-style ref). Source refs always carry a
+/// path; a bare token with no `/` is rejected so we never resume the wrong
+/// thing.
+fn is_valid_source_url(input: &str) -> bool {
+    is_trusted_launch_input(input)
+        && (input.starts_with("https://") || input.starts_with("http://") || input.contains('/'))
+}
+
+/// Split a recorded community launch input (`capsule://<handle>?ctoml=<id>`)
+/// back into its `(handle, community_toml_id)`. Mirrors the `capsule://` parser
+/// in `app.rs` so the replayed route matches the original launch exactly.
+/// Returns `None` when the handle is not a valid capsule handle or the `ctoml`
+/// query param is absent/empty — so a malformed or legacy id-only marker fails
+/// safely instead of resuming the wrong app.
+fn parse_community_launch_input(input: &str) -> Option<(String, String)> {
+    let rest = input
+        .trim()
+        .strip_prefix("capsule://")
+        .unwrap_or(input.trim());
+    let (path, query) = match rest.find('?') {
+        Some(pos) => (&rest[..pos], &rest[pos + 1..]),
+        None => (rest, ""),
+    };
+    let handle = path.trim_end_matches('/').to_string();
+    let community_toml_id = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("ctoml="))
+        .filter(|v| !v.is_empty())?
+        .to_string();
+    if !is_valid_capsule_handle(&handle) {
+        return None;
+    }
+    Some((handle, community_toml_id))
+}
+
 fn capsule_handle_route(handle: String, label: Option<String>) -> GuestRoute {
+    capsule_handle_route_with_community(handle, label, None)
+}
+
+/// Build a `CapsuleHandle` route, threading an optional `community_toml_id` so a
+/// community-recipe launch resumes against the same pre-selected recipe. The
+/// label falls back to the handle's last path segment when none was recorded.
+fn capsule_handle_route_with_community(
+    handle: String,
+    label: Option<String>,
+    community_toml_id: Option<String>,
+) -> GuestRoute {
     let label = label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| {
         // Derive a friendly label from the last path segment.
         handle
@@ -261,16 +313,25 @@ fn capsule_handle_route(handle: String, label: Option<String>) -> GuestRoute {
     GuestRoute::CapsuleHandle {
         handle,
         label,
-        community_toml_id: None,
+        community_toml_id,
     }
 }
 
 /// Map a recorded launch intent back to a concrete [`GuestRoute`] to replay.
 ///
-/// Supported today (PR3b): `CapsuleUrl` handles and the bundled `SampleCapsule`
-/// (pgweb). `CommunityTomlId` and `SourceUrl` are recorded but not yet
-/// replayable — they fail safely with a user-visible message rather than
-/// launching the wrong thing.
+/// All four `LaunchIntentKind`s map onto the Desktop's existing capsule-launch
+/// route ([`GuestRoute::CapsuleHandle`]) so the resumed launch reuses the same
+/// consent / guest-route / open machinery the original launch would have used:
+///
+/// * `SampleCapsule` → the bundled pgweb handle.
+/// * `CapsuleUrl` → the recorded `capsule://…` handle.
+/// * `CommunityTomlId` → the recorded `capsule://<handle>?ctoml=<id>`, with the
+///   recipe id threaded back into `community_toml_id` (#484).
+/// * `SourceUrl` → the recorded source-repository ref as the launch handle
+///   (#484); `ato app session start <ref>` resolves the source build.
+///
+/// A malformed, stale, or otherwise unresolvable input fails safely with a
+/// user-visible message rather than launching the wrong thing.
 pub(crate) fn launch_intent_to_guest_route(
     intent: &RuntimeSetupLaunchIntent,
 ) -> Result<GuestRoute, UnsupportedLaunchIntent> {
@@ -299,12 +360,35 @@ pub(crate) fn launch_intent_to_guest_route(
                 Err(unsupported(format!("invalid capsule handle '{handle}'")))
             }
         }
-        LaunchIntentKind::CommunityTomlId => Err(unsupported(
-            "resuming a community-recipe launch after Runtime Setup is not supported yet",
-        )),
-        LaunchIntentKind::SourceUrl => Err(unsupported(
-            "resuming a source-URL launch after Runtime Setup is not supported yet",
-        )),
+        LaunchIntentKind::CommunityTomlId => {
+            // Reconstruct the same community launch the user started: the recipe
+            // id threaded back into a CapsuleHandle route, exactly as `app.rs`
+            // builds it from `capsule://<handle>?ctoml=<id>` (#484).
+            match parse_community_launch_input(&intent.launch_input) {
+                Some((handle, community_toml_id)) => Ok(capsule_handle_route_with_community(
+                    handle,
+                    intent.display_label.clone(),
+                    Some(community_toml_id),
+                )),
+                None => Err(unsupported(format!(
+                    "invalid community launch input '{}'",
+                    intent.launch_input
+                ))),
+            }
+        }
+        LaunchIntentKind::SourceUrl => {
+            // Resume the source-repository launch through the same handle route;
+            // never silently downgrade it to a plain capsule URL launch (#484).
+            let source = intent.launch_input.trim();
+            if is_valid_source_url(source) {
+                Ok(capsule_handle_route(
+                    source.to_string(),
+                    intent.display_label.clone(),
+                ))
+            } else {
+                Err(unsupported(format!("invalid source URL '{source}'")))
+            }
+        }
     }
 }
 
@@ -684,7 +768,13 @@ mod tests {
         let intent = intent_from_route(&route, "omnibar", SessionClientKind::AtoWindow, 5_000)
             .expect("intent");
         assert_eq!(intent.intent_kind, LaunchIntentKind::CommunityTomlId);
-        assert_eq!(intent.launch_input, "ctoml_abc");
+        // The full community launch URL is recorded (handle + recipe id), not the
+        // bare id, so replay can reconstruct the original launch (#484).
+        assert_eq!(
+            intent.launch_input,
+            "capsule://github.com/acme/chat?ctoml=ctoml_abc"
+        );
+        assert_eq!(intent.display_label.as_deref(), Some("chat"));
     }
 
     #[test]
@@ -825,8 +915,100 @@ mod tests {
         assert!(launch_intent_to_guest_route(&intent).is_err());
     }
 
+    // ── #484: CommunityTomlId / SourceUrl replay ───────────────────────────────
+
     #[test]
-    fn community_and_source_kinds_are_unsupported_for_now() {
+    fn community_toml_id_launch_intent_replays_to_community_route() {
+        // A recorded community launch (handle + recipe id, as written by
+        // `intent_from_route`) resumes the *same* recipe on the same handle.
+        let recorded = intent_from_route(
+            &GuestRoute::CapsuleHandle {
+                handle: "github.com/acme/chat".to_string(),
+                label: "chat".to_string(),
+                community_toml_id: Some("ctoml_abc".to_string()),
+            },
+            "omnibar",
+            SessionClientKind::AtoWindow,
+            5_000,
+        )
+        .expect("intent");
+        assert_eq!(recorded.intent_kind, LaunchIntentKind::CommunityTomlId);
+
+        match launch_intent_to_guest_route(&recorded).expect("route") {
+            GuestRoute::CapsuleHandle {
+                handle,
+                label,
+                community_toml_id,
+            } => {
+                assert_eq!(handle, "github.com/acme/chat");
+                assert_eq!(label, "chat");
+                assert_eq!(community_toml_id.as_deref(), Some("ctoml_abc"));
+            }
+            other => panic!("expected CapsuleHandle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_url_launch_intent_replays_to_source_route() {
+        // A recorded source-repo launch resumes through the same handle route;
+        // the source ref is preserved (never downgraded to a capsule URL).
+        let intent = capsule_intent(LaunchIntentKind::SourceUrl, "github.com/acme/widget");
+        match launch_intent_to_guest_route(&intent).expect("route") {
+            GuestRoute::CapsuleHandle {
+                handle,
+                community_toml_id,
+                ..
+            } => {
+                assert_eq!(handle, "github.com/acme/widget");
+                assert_eq!(
+                    community_toml_id, None,
+                    "source launch is not a community recipe"
+                );
+            }
+            other => panic!("expected CapsuleHandle, got {other:?}"),
+        }
+
+        // An https GitHub URL is also a valid source ref.
+        let https = capsule_intent(
+            LaunchIntentKind::SourceUrl,
+            "https://github.com/acme/widget",
+        );
+        assert!(launch_intent_to_guest_route(&https).is_ok());
+    }
+
+    #[test]
+    fn requested_client_is_preserved_for_community_toml_replay() {
+        // The original open mode (OS browser) survives the Runtime Setup detour
+        // for a community launch, just as it does for CapsuleUrl.
+        let intent = intent_from_route(
+            &GuestRoute::CapsuleHandle {
+                handle: "github.com/acme/chat".to_string(),
+                label: "chat".to_string(),
+                community_toml_id: Some("ctoml_abc".to_string()),
+            },
+            "omnibar",
+            SessionClientKind::OsBrowser,
+            5_000,
+        )
+        .expect("intent");
+        assert_eq!(intent.requested_client, Some(LaunchClientKind::OsBrowser));
+        assert_eq!(resume_client_kind(&intent), SessionClientKind::OsBrowser);
+        // …and the intent still maps to a replayable community route.
+        assert!(launch_intent_to_guest_route(&intent).is_ok());
+    }
+
+    #[test]
+    fn requested_client_is_preserved_for_source_url_replay() {
+        let mut intent = capsule_intent(LaunchIntentKind::SourceUrl, "github.com/acme/widget");
+        intent.requested_client = Some(LaunchClientKind::OsBrowser);
+        assert_eq!(resume_client_kind(&intent), SessionClientKind::OsBrowser);
+        assert!(launch_intent_to_guest_route(&intent).is_ok());
+    }
+
+    #[test]
+    fn malformed_community_and_source_inputs_fail_safely() {
+        // A legacy id-only community marker (no handle) cannot be reconstructed
+        // and must fail safely rather than launch the wrong thing.
         assert!(
             launch_intent_to_guest_route(&capsule_intent(
                 LaunchIntentKind::CommunityTomlId,
@@ -834,10 +1016,19 @@ mod tests {
             ))
             .is_err()
         );
+        // A community URL missing the ctoml query is not a community launch.
+        assert!(
+            launch_intent_to_guest_route(&capsule_intent(
+                LaunchIntentKind::CommunityTomlId,
+                "capsule://github.com/acme/chat"
+            ))
+            .is_err()
+        );
+        // A source input with no path component is not a resolvable source ref.
         assert!(
             launch_intent_to_guest_route(&capsule_intent(
                 LaunchIntentKind::SourceUrl,
-                "https://github.com/x/y"
+                "notasource"
             ))
             .is_err()
         );
