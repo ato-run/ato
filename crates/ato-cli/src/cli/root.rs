@@ -217,6 +217,13 @@ pub(crate) enum Commands {
         #[arg(long = "plan-only", default_value_t = false)]
         plan_only: bool,
 
+        /// Fail-closed realization profile (#500): block the launch before
+        /// execution if any required launch input cannot be verified, instead
+        /// of launching with a conservative warning. Opt-in; the default
+        /// profile is unchanged.
+        #[arg(long = "strict-realization", default_value_t = false)]
+        strict_realization: bool,
+
         /// Import from docker-compose.yml and run as an Ato OCI service graph
         /// through PodmanProvider (experimental, requires Podman)
         #[arg(long = "oci-compose", default_value_t = false, hide = true)]
