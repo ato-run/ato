@@ -19,6 +19,7 @@ mod package;
 mod profile;
 mod project;
 pub(crate) mod publish;
+mod receipts;
 mod reconstruct;
 pub(crate) mod registry;
 mod replay;
@@ -60,6 +61,7 @@ use self::package::execute_package_command;
 use self::profile::execute_profile_command;
 use self::project::{execute_project_command, execute_unproject_command};
 use self::publish::execute_publish_command;
+use self::receipts::execute_receipts_command;
 use self::replay::execute_replay_command;
 use self::scaffold::execute_scaffold_command;
 use self::source::execute_source_command;
@@ -424,6 +426,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             json: command_json,
             execute,
         } => reconstruct::execute_reconstruct_command(id, json || command_json, execute),
+
+        Commands::Receipts { command } => execute_receipts_command(command, json),
 
         Commands::Keygen {
             out,
