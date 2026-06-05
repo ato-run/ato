@@ -1074,11 +1074,6 @@ pub struct OciProviderReceiptEvidence {
     /// policy. `Unknown` by default for back-compat (#501).
     #[serde(default, skip_serializing_if = "OciEnforcementStatus::is_unknown")]
     pub capability_enforcement_status: OciEnforcementStatus,
-    /// A deterministic, session-independent summary of the projection *identity*
-    /// (the resolved launch conditions). Never the requested container name,
-    /// session id, container id, pid, or log path (#501). Optional/additive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projection_identity_summary: Option<String>,
     /// The derived provider invocation (e.g. `podman create` argv) reduced to a
     /// **redacted** shape: flags survive, every value becomes `<redacted>`. This
     /// is derived projection evidence, never identity and never a raw command

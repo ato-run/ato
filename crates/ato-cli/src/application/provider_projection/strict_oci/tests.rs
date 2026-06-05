@@ -4,7 +4,8 @@ use super::*;
 use capsule_core::execution_identity::OciEnforcementStatus;
 use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
 
-const RID: &str = "sha256:oci-test";
+/// A stand-in graph-derived resolved execution id (value-free) for tests.
+const RID: Option<&str> = Some("graph-resolved-exec-id-test");
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 /// Facts for a fully-pinned image with no policy/mount concerns (the pass case).
@@ -101,6 +102,28 @@ fn normal_oci_policy_downgrade_does_not_block() {
         )
         .is_ok(),
         "normal mode must never newly block an OCI launch"
+    );
+}
+
+#[test]
+fn unbound_graph_execution_id_is_not_fabricated() {
+    // With no graph-derived resolved execution id, the gate must NOT substitute a
+    // provider fingerprint. It still blocks correctly, and the value-free
+    // placeholder never surfaces in the redacted error payload.
+    let mut facts = clean_facts();
+    facts.image_digest = None;
+    let err = enforce_strict_oci(
+        &facts,
+        &OciProviderEnforcement::podman(false),
+        LaunchProfile::Strict,
+        None,
+    )
+    .expect_err("unpinned image blocks");
+    assert_eq!(first_reason(&err), "materialization_missing");
+    let serialized = serde_json::to_string(&err.details).expect("serialize");
+    assert!(
+        !serialized.contains("graph-execution-id-unbound"),
+        "placeholder id must not leak into the error payload: {serialized}"
     );
 }
 

@@ -449,10 +449,27 @@ fn oci_provider_projection_evidence(
         crate::application::provider_projection::strict_oci::OciProviderEnforcement::podman(
             network_policy_required,
         );
-    vec![
-        OciProjectionPlan::from_container_request(&request)
-            .receipt_evidence_with(enforcement.network, enforcement.capability),
-    ]
+    let mut evidence = OciProjectionPlan::from_container_request(&request)
+        .receipt_evidence_with(enforcement.network, enforcement.capability);
+
+    // The projection plan derives `network-policy` from the internal `--network`
+    // (absent on the declared request), but a declared egress allowlist is itself
+    // a required network policy. Reflect it so `capabilities_required` and
+    // `network_enforcement_status` agree: a launch whose network enforcement is
+    // `Unsupported` also *requires* network-policy.
+    if network_policy_required
+        && !evidence
+            .capabilities_required
+            .iter()
+            .any(|c| c == "network-policy")
+    {
+        evidence
+            .capabilities_required
+            .push("network-policy".to_string());
+        evidence.capabilities_required.sort();
+    }
+
+    vec![evidence]
 }
 
 /// Build the declared-domain `ExecutionGraph` for the receipt path.
@@ -1226,6 +1243,14 @@ mod oci_provider_evidence_tests {
         assert_eq!(
             ev.capability_enforcement_status,
             OciEnforcementStatus::Enforced
+        );
+        // ...and `capabilities_required` agrees: a declared egress allowlist is a
+        // required network policy (not derived from the internal `--network`).
+        assert!(
+            ev.capabilities_required
+                .contains(&"network-policy".to_string()),
+            "egress allowlist must surface as a required network policy: {:?}",
+            ev.capabilities_required
         );
         // env NAMES only — no values.
         assert_eq!(ev.env_keys, vec!["PORT".to_string()]);
