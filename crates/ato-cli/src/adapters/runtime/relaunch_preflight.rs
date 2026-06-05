@@ -28,21 +28,30 @@ use capsule_core::installed_state::{
 
 use crate::utils::error::ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED;
 
-/// The production resolver probes.
+/// The production resolver probes, backed by the installed-state DB registries.
 ///
 /// - **env**: real host-env presence (`std::env::var_os`), value never read.
-/// - **secret grant**: conservatively `false` — no existence-only secret-grant
-///   lookup exists yet (the secret store only exposes value-returning `get`), so
-///   a real grant resolver is a follow-up; reporting `false` avoids fake
-///   satisfaction.
-/// - **state binding**: conservatively `false` — no logical state-binding
-///   existence check exists yet without raw-path leakage; a real state-binding
-///   registry resolver is a follow-up.
-fn production_resolution_context() -> RelaunchResolutionContext {
+/// - **secret grant**: existence-only lookup in `secret_grant_refs` — checks a
+///   redacted grant id, never reads/decrypts a secret value or calls the
+///   value-returning secret store. A DB error resolves to `false` (conservative
+///   unresolved beats fake satisfaction).
+/// - **state binding**: existence-only lookup in `state_binding_refs` — checks a
+///   logical binding id, never a raw host path. Errors resolve to `false`.
+fn production_resolution_context(db: &InstalledStateDb) -> RelaunchResolutionContext {
+    let secret_db = db.clone();
+    let state_db = db.clone();
     RelaunchResolutionContext {
         env_present: Box::new(|name| std::env::var_os(name).is_some()),
-        secret_grant_exists: Box::new(|_grant_ref| false),
-        state_binding_exists: Box::new(|_binding_ref| false),
+        secret_grant_exists: Box::new(move |grant_ref| {
+            secret_db
+                .secret_grant_ref_exists(grant_ref)
+                .unwrap_or(false)
+        }),
+        state_binding_exists: Box::new(move |binding_ref| {
+            state_db
+                .state_binding_ref_exists(binding_ref)
+                .unwrap_or(false)
+        }),
     }
 }
 
@@ -93,7 +102,7 @@ pub fn preflight_installed_relaunch_decision(
         db,
         install_profile_key,
         install_revision_id,
-        &production_resolution_context(),
+        &production_resolution_context(db),
     )
 }
 
@@ -513,5 +522,97 @@ mod tests {
             result.is_ok(),
             "a persistence failure must not block the launch: {result:?}"
         );
+    }
+
+    // ── Production probes are DB-backed (no longer constant false) ───────────
+
+    #[test]
+    fn production_secret_probe_lifts_user_grant_when_grant_recorded() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"projection":"env","grant_ref":"openai-default"}"#,
+            )],
+        );
+        // Existence-only metadata row — no secret value involved.
+        db.record_secret_grant_ref(
+            "ipk_app",
+            "capsule://ato.run/x#condition/secret/OPENAI_API_KEY",
+            "openai-default",
+        )
+        .unwrap();
+        // The PRODUCTION decision (DB-backed probe) must now admit.
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+            .expect("recorded grant lifts the secret → admit");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !matches!(w, RelaunchAdmissionReason::UserGrantRequired { .. }))
+        );
+    }
+
+    #[test]
+    fn production_secret_probe_keeps_user_grant_when_grant_absent() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"grant_ref":"missing-grant"}"#,
+            )],
+        );
+        // No grant recorded → production probe returns false → still blocks.
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+            .expect_err("absent grant must still block");
+        assert!(
+            err.to_string()
+                .contains(ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED)
+        );
+    }
+
+    #[test]
+    fn production_state_probe_lifts_user_grant_when_binding_recorded() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::State,
+                "data",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"binding_ref":"user-data","durability":"persistent"}"#,
+            )],
+        );
+        db.record_state_binding_ref(
+            "ipk_app",
+            "capsule://ato.run/x#condition/state/data",
+            "data",
+            "user-data",
+        )
+        .unwrap();
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+            .expect("recorded binding lifts the state → admit");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !matches!(w, RelaunchAdmissionReason::UserGrantRequired { .. }))
+        );
+    }
+
+    #[test]
+    fn secret_grant_probe_uses_metadata_id_not_secret_value() {
+        // The grant registry stores only a logical id; presence is decided from
+        // that id alone — no secret value is ever recorded or consulted.
+        let (_d, db) = temp_db();
+        db.record_secret_grant_ref("ipk_app", "capsule://x#condition/secret/K", "g1")
+            .unwrap();
+        assert!(db.secret_grant_ref_exists("g1").unwrap());
+        // The stored row carries no secret value (only the id / ref / status).
+        assert!(!db.secret_grant_ref_exists("sk-anything").unwrap());
     }
 }
