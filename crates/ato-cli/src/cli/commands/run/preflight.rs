@@ -1427,6 +1427,7 @@ mod tests {
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: None,
         }
     }
 
