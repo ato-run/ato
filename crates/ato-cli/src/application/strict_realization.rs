@@ -322,4 +322,33 @@ mod tests {
         let details = err.details.expect("details present");
         assert_eq!(details["blocked"][0]["reason_code"], "identity_mismatch");
     }
+
+    #[test]
+    fn launch_path_trusts_verified_overlay_on_declared_only_node() {
+        // A declared-only (#498-Materializable) node with an authoritative #499
+        // Verified verdict must pass through the launch adapter — the verifier
+        // already proved the materialized identity matched.
+        let contract = contract_with(
+            RealizationNodeStatus {
+                node_id: "dep".to_string(),
+                node_kind: RealizationNodeKind::DependencyOutput,
+                status: RealizationStatus::Materializable,
+                evidence: vec![RealizationEvidence::DeclaredHash {
+                    label: "dependency-output".to_string(),
+                    hash: HASH_A.to_string(),
+                }],
+            },
+            RealizationResult::Realized,
+        );
+        let materializations = vec![capsule_core::realization::MaterializationVerification {
+            node_id: "dep".to_string(),
+            node_kind: RealizationNodeKind::DependencyOutput,
+            result: capsule_core::realization::MaterializationVerificationResult::Verified,
+            evidence: vec![],
+        }];
+        assert!(
+            evaluate_contract(&contract, &materializations, launch_profile(true)).is_ok(),
+            "a #499 Verified overlay must not be treated as false-verified",
+        );
+    }
 }

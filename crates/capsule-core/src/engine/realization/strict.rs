@@ -224,19 +224,6 @@ pub struct StrictGateNodeInput {
     pub policy_enforcement: Option<PolicyEnforcement>,
 }
 
-impl StrictGateNodeInput {
-    /// Whether this input *claims* to be verified (via either layer). A verified
-    /// claim is only honored when a declared identity exists and the materialized
-    /// identity matches it — a materialized object on its own is never enough.
-    fn claims_verified(&self) -> bool {
-        self.realization_status == RealizationStatus::Verified
-            || matches!(
-                self.materialization,
-                Some(MaterializationVerificationResult::Verified)
-            )
-    }
-}
-
 /// The strict fail-closed realization gate.
 pub struct StrictRealizationGate;
 
@@ -260,6 +247,16 @@ impl StrictRealizationGate {
         let kind = input.node_kind;
         let declared = input.declared_identity.as_deref();
         let materialized = input.materialized_identity.as_deref();
+
+        // The #499 verifier returns `Verified` only when a declared and a
+        // materialized identity both exist, are well-formed content hashes, and
+        // match. That verdict is therefore *itself* proof of a matching
+        // declared+materialized pair — the strict gate trusts it as authoritative
+        // and never re-demands a contract-side materialized identity for it.
+        let materialization_verified = matches!(
+            input.materialization,
+            Some(MaterializationVerificationResult::Verified)
+        );
 
         // 1. The #499 materialization verifier is the highest authority for the
         //    cases it covers; honor its verdict first.
@@ -328,22 +325,18 @@ impl StrictRealizationGate {
             }
         }
 
-        // 4. False-`Verified` guard (regression invariant): a `Verified` claim is
-        //    only honored when a declared identity exists AND the materialized
-        //    identity matches it. A materialized object existing by itself is not
-        //    enough. This blocks regardless of `required` — a false verified
-        //    claim is dangerous either way.
-        if input.claims_verified() {
-            if declared.is_none() {
-                return Err(StrictRealizationGateError::block(
-                    id,
-                    kind,
-                    StrictGateReasonCode::MaterializationMissing,
-                    declared,
-                    materialized,
-                ));
-            }
-            if materialized.is_none() {
+        // 4. False-`Verified` guard (regression invariant): a node whose *#498
+        //    status* claims `Verified` is only honored when a declared identity
+        //    exists AND a materialized identity is present (step 3 already proved
+        //    equality when both are present). A materialized object existing by
+        //    itself is not enough. This blocks regardless of `required` — a false
+        //    verified claim is dangerous either way.
+        //
+        //    An authoritative #499 `Verified` verdict is *exempt*: the verifier
+        //    has already proved the declared/materialized pair matches, so the
+        //    contract is not required to carry a separate materialized identity.
+        if input.realization_status == RealizationStatus::Verified && !materialization_verified {
+            if declared.is_none() || materialized.is_none() {
                 return Err(StrictRealizationGateError::block(
                     id,
                     kind,
@@ -353,8 +346,7 @@ impl StrictRealizationGate {
                 ));
             }
             // declared == materialized (step 3) and both are content hashes
-            // (step 2): a genuine verified node. Apply policy/state refinements
-            // below, then accept.
+            // (step 2): a genuine verified node.
         }
 
         // 5. Absent / can't-verify / downgraded facts only block a *required*
@@ -386,6 +378,12 @@ impl StrictRealizationGate {
 
         // 6. Status-driven blocks for required nodes.
         match input.realization_status {
+            // A #498 `Unavailable` is a materialization/identity failure. An
+            // authoritative #499 `Verified` verdict contradicts and supersedes it
+            // — the artifact was found and its identity matched. (Host-binding and
+            // policy downgrades are not materialization facts and keep their own
+            // arms below.)
+            RealizationStatus::Unavailable if materialization_verified => Ok(()),
             RealizationStatus::Unavailable => Err(StrictRealizationGateError::block(
                 id,
                 kind,
