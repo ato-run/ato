@@ -11,4 +11,5 @@ pub(crate) mod port_manager;
 pub(crate) mod process;
 pub(crate) mod provider_workspace;
 pub(crate) mod provisioning;
+pub(crate) mod relaunch_preflight;
 pub(crate) mod tree;
