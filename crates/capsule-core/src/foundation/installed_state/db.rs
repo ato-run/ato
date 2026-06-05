@@ -20,6 +20,7 @@ use super::launch_condition::{
     LOCAL_PROVIDER_ID, LaunchConditionClaim, LaunchConditionKind, LaunchConditionSource,
     LaunchConditionStatus, validate_redacted_detail_json,
 };
+use super::launch_input::{validate_condition_key, validate_locator_id};
 use super::port::{
     ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
 };
@@ -207,13 +208,16 @@ impl InstalledStateDb {
             CREATE INDEX IF NOT EXISTS idx_launch_condition_claims_kind
               ON launch_condition_claims(install_profile_key, kind);
             -- Existence-only registry of secret grants (#508). Records *that* a
-            -- grant exists for a condition, by a redacted grant id — never the
-            -- secret value. The relaunch resolver checks presence here instead of
-            -- calling a value-returning secret store.
+            -- grant exists for a launch condition, identified by the reserved
+            -- launch-condition key (e.g. 'secret.OPENAI_API_KEY') — the same
+            -- vocabulary as the capsule:// query, not a URI. Stores a redacted
+            -- grant id, never the secret value. The relaunch resolver checks
+            -- presence here instead of calling a value-returning secret store.
             CREATE TABLE IF NOT EXISTS secret_grant_refs(
               grant_id            TEXT PRIMARY KEY,
               install_profile_key TEXT NOT NULL,
-              condition_ref       TEXT NOT NULL,
+              capsule_location    TEXT NOT NULL DEFAULT '',
+              condition_key       TEXT NOT NULL,
               status              TEXT NOT NULL,
               redacted            INTEGER NOT NULL DEFAULT 1,
               created_at          INTEGER NOT NULL,
@@ -224,11 +228,13 @@ impl InstalledStateDb {
             CREATE INDEX IF NOT EXISTS idx_secret_grant_refs_profile
               ON secret_grant_refs(install_profile_key);
             -- Existence-only registry of logical state bindings (#508). Records a
-            -- logical binding id for a condition — never a raw host path.
+            -- logical binding id for a launch condition, identified by its
+            -- reserved condition key (e.g. 'state.data') — never a raw host path.
             CREATE TABLE IF NOT EXISTS state_binding_refs(
               binding_id          TEXT PRIMARY KEY,
               install_profile_key TEXT NOT NULL,
-              condition_ref       TEXT NOT NULL,
+              capsule_location    TEXT NOT NULL DEFAULT '',
+              condition_key       TEXT NOT NULL,
               state_key           TEXT NOT NULL,
               status              TEXT NOT NULL,
               redacted            INTEGER NOT NULL DEFAULT 1,
@@ -798,34 +804,57 @@ impl InstalledStateDb {
     // value or raw host path. They never store a value or a path.
 
     /// Record (upsert) a secret grant reference as `granted`. `grant_id` is a
-    /// short logical id (never a secret value); `condition_ref` is a
-    /// `capsule://…#condition/…` reference (validated by the caller).
+    /// short logical id (never a secret value); `condition_key` is the reserved
+    /// launch-condition key (e.g. `secret.OPENAI_API_KEY`) — the same vocabulary
+    /// as the `capsule://` query, **not** a URI. `capsule_location` is an
+    /// optional capsule-location label.
+    ///
+    /// Validation is enforced **here**, at the SOT boundary — callers are not
+    /// trusted: a URI/fragment/path-like condition key or a path/token/scheme-like
+    /// grant id is rejected, so a raw secret/token can never enter the registry
+    /// (and thus can never make a condition spuriously satisfied).
     pub fn record_secret_grant_ref(
         &self,
         install_profile_key: &str,
-        condition_ref: &str,
+        capsule_location: Option<&str>,
+        condition_key: &str,
         grant_id: &str,
     ) -> Result<()> {
+        validate_condition_key(condition_key)?;
+        validate_locator_id(grant_id, "grant")?;
         let now = Utc::now().timestamp_millis();
         let conn = self.connect()?;
         conn.execute(
             "INSERT INTO secret_grant_refs(
-               grant_id, install_profile_key, condition_ref, status, redacted, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'granted', 1, ?4, ?4)
+               grant_id, install_profile_key, capsule_location, condition_key,
+               status, redacted, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'granted', 1, ?5, ?5)
              ON CONFLICT(grant_id) DO UPDATE SET
                install_profile_key = excluded.install_profile_key,
-               condition_ref = excluded.condition_ref,
+               capsule_location = excluded.capsule_location,
+               condition_key = excluded.condition_key,
                status = 'granted',
                updated_at = excluded.updated_at",
-            params![grant_id, install_profile_key, condition_ref, now],
+            params![
+                grant_id,
+                install_profile_key,
+                capsule_location.unwrap_or(""),
+                condition_key,
+                now
+            ],
         )
         .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
         Ok(())
     }
 
     /// Existence-only probe: is there a `granted` secret grant for `grant_id`?
-    /// Reads no secret value.
+    /// Reads no secret value. An invalid `grant_id` (path/token/scheme-like)
+    /// resolves to `Ok(false)` — a malformed id can never satisfy a condition
+    /// (conservative-false beats propagating an error into the launch path).
     pub fn secret_grant_ref_exists(&self, grant_id: &str) -> Result<bool> {
+        if validate_locator_id(grant_id, "grant").is_err() {
+            return Ok(false);
+        }
         let conn = self.connect()?;
         let exists = conn
             .query_row(
@@ -840,31 +869,42 @@ impl InstalledStateDb {
     }
 
     /// Record (upsert) a logical state binding reference as `bound`. `binding_id`
-    /// is a short logical id (never a host path).
+    /// is a short logical id (never a host path); `condition_key` is the reserved
+    /// launch-condition key (e.g. `state.data`). `capsule_location` is an optional
+    /// capsule-location label.
+    ///
+    /// Validation is enforced **here**, at the SOT boundary — a URI/path-like
+    /// condition key or a path/scheme-like binding id is rejected, so a raw host
+    /// path can never enter the registry.
     pub fn record_state_binding_ref(
         &self,
         install_profile_key: &str,
-        condition_ref: &str,
+        capsule_location: Option<&str>,
+        condition_key: &str,
         state_key: &str,
         binding_id: &str,
     ) -> Result<()> {
+        validate_condition_key(condition_key)?;
+        validate_locator_id(binding_id, "binding")?;
         let now = Utc::now().timestamp_millis();
         let conn = self.connect()?;
         conn.execute(
             "INSERT INTO state_binding_refs(
-               binding_id, install_profile_key, condition_ref, state_key, status,
-               redacted, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'bound', 1, ?5, ?5)
+               binding_id, install_profile_key, capsule_location, condition_key,
+               state_key, status, redacted, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'bound', 1, ?6, ?6)
              ON CONFLICT(binding_id) DO UPDATE SET
                install_profile_key = excluded.install_profile_key,
-               condition_ref = excluded.condition_ref,
+               capsule_location = excluded.capsule_location,
+               condition_key = excluded.condition_key,
                state_key = excluded.state_key,
                status = 'bound',
                updated_at = excluded.updated_at",
             params![
                 binding_id,
                 install_profile_key,
-                condition_ref,
+                capsule_location.unwrap_or(""),
+                condition_key,
                 state_key,
                 now
             ],
@@ -874,8 +914,12 @@ impl InstalledStateDb {
     }
 
     /// Existence-only probe: is there a `bound` state binding for `binding_id`?
-    /// Reads no host path.
+    /// Reads no host path. An invalid `binding_id` (path/scheme-like) resolves to
+    /// `Ok(false)` — a malformed id can never satisfy a condition.
     pub fn state_binding_ref_exists(&self, binding_id: &str) -> Result<bool> {
+        if validate_locator_id(binding_id, "binding").is_err() {
+            return Ok(false);
+        }
         let conn = self.connect()?;
         let exists = conn
             .query_row(
@@ -1749,12 +1793,13 @@ mod tests {
     }
 
     #[test]
-    fn secret_grant_ref_records_and_exists_by_id_only() {
+    fn record_secret_grant_ref_accepts_secret_condition_key() {
         let (_dir, db) = temp_db();
         assert!(!db.secret_grant_ref_exists("openai-default").unwrap());
         db.record_secret_grant_ref(
             "app",
-            "capsule://ato.run/x#condition/secret/OPENAI_API_KEY",
+            Some("ato.run/koh0920/hello"),
+            "secret.OPENAI_API_KEY",
             "openai-default",
         )
         .unwrap();
@@ -1765,26 +1810,95 @@ mod tests {
     #[test]
     fn secret_grant_ref_upserts_same_id() {
         let (_dir, db) = temp_db();
-        db.record_secret_grant_ref("app", "capsule://x#condition/secret/K", "g1")
+        db.record_secret_grant_ref("app", None, "secret.K", "g1")
             .unwrap();
-        db.record_secret_grant_ref("app", "capsule://x#condition/secret/K", "g1")
+        db.record_secret_grant_ref("app", None, "secret.K", "g1")
             .unwrap();
         // Upsert, not duplicate; still exists.
         assert!(db.secret_grant_ref_exists("g1").unwrap());
     }
 
     #[test]
-    fn state_binding_ref_records_and_exists_by_id_only() {
+    fn record_state_binding_ref_accepts_state_condition_key() {
         let (_dir, db) = temp_db();
         assert!(!db.state_binding_ref_exists("user-data").unwrap());
         db.record_state_binding_ref(
             "app",
-            "capsule://ato.run/x#condition/state/data",
+            Some("ato.run/koh0920/hello"),
+            "state.data",
             "data",
             "user-data",
         )
         .unwrap();
         assert!(db.state_binding_ref_exists("user-data").unwrap());
         assert!(!db.state_binding_ref_exists("other").unwrap());
+    }
+
+    // The registry validates at its own boundary — callers are not trusted. The
+    // condition is identified by the reserved condition key, never a URI fragment.
+
+    #[test]
+    fn record_secret_grant_ref_rejects_condition_fragment_ref() {
+        let (_dir, db) = temp_db();
+        // The retired `capsule://…#condition/…` fragment form is not a condition
+        // key and must be rejected; so must any foreign-scheme URI.
+        assert!(
+            db.record_secret_grant_ref(
+                "app",
+                None,
+                "capsule://x#condition/secret/OPENAI_API_KEY",
+                "g1"
+            )
+            .is_err(),
+            "a #condition fragment ref is not a valid condition key"
+        );
+        assert!(
+            db.record_secret_grant_ref("app", None, "ato-secret://store/openai", "g1")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn record_secret_grant_ref_rejects_raw_token_id() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_secret_grant_ref("app", None, "secret.K", "sk-abc123def456")
+                .is_err(),
+            "a raw token-like grant id must be rejected at the DB boundary"
+        );
+    }
+
+    #[test]
+    fn record_state_binding_ref_rejects_condition_fragment_ref() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_state_binding_ref("app", None, "ato-state://app/data", "data", "b1")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn record_state_binding_ref_rejects_raw_host_path_id() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_state_binding_ref("app", None, "state.data", "data", "/Users/koh/data")
+                .is_err(),
+            "a raw host path binding id must be rejected at the DB boundary"
+        );
+    }
+
+    #[test]
+    fn secret_grant_ref_exists_returns_false_for_invalid_id() {
+        let (_dir, db) = temp_db();
+        // Invalid ids resolve to false (never error into the launch path).
+        assert!(!db.secret_grant_ref_exists("sk-abc123def456").unwrap());
+        assert!(!db.secret_grant_ref_exists("ato-secret://x").unwrap());
+    }
+
+    #[test]
+    fn state_binding_ref_exists_returns_false_for_invalid_id() {
+        let (_dir, db) = temp_db();
+        assert!(!db.state_binding_ref_exists("/home/koh/data").unwrap());
+        assert!(!db.state_binding_ref_exists("file:///x").unwrap());
     }
 }
