@@ -27,10 +27,18 @@
 //!
 //! A condition records *that* a requirement exists and *its status* — never the
 //! satisfying value. Secrets, auth tokens, API keys and raw credentials must
-//! never reach `detail_json`. [`validate_redacted_detail_json`] rejects detail
-//! payloads that look like they embed a value for the value-bearing kinds
-//! ([`LaunchConditionKind::Secret`] / [`LaunchConditionKind::Env`]), and a
-//! `Secret` condition must carry `redacted == true`.
+//! never reach `detail_json`.
+//!
+//! For the value-bearing kinds ([`LaunchConditionKind::Secret`] /
+//! [`LaunchConditionKind::Env`]) [`validate_redacted_detail_json`] enforces a
+//! strict **allowlist**: only redacted-reference metadata keys are permitted
+//! (see [`SECRET_DETAIL_ALLOWED_KEYS`] / [`ENV_DETAIL_ALLOWED_KEYS`]) and every
+//! value must be a scalar or array of scalars. So an arbitrary key — e.g. an
+//! env-var name carrying its value, `{"OPENAI_API_KEY": "sk-..."}` — is
+//! rejected, and no nested object can smuggle a value one level down. A
+//! `Secret` condition must additionally carry `redacted == true`. A denylist was
+//! deliberately *not* used: it would pass any key it didn't enumerate, which is
+//! exactly how a raw value under an env-var name slips through.
 
 use serde_json::Value;
 
@@ -200,60 +208,106 @@ pub struct LaunchConditionClaim {
 /// Default provider scope for a device-local condition.
 pub const LOCAL_PROVIDER_ID: &str = "local";
 
-/// Detail-object keys that strongly imply an embedded secret value and are
-/// therefore rejected from `detail_json` for value-bearing kinds.
-pub const FORBIDDEN_DETAIL_KEYS: &[&str] = &[
-    "value",
-    "secret",
-    "token",
-    "api_key",
-    "password",
-    "credential",
-    "private_key",
+/// All launch condition kinds in declaration order. Used to compute which
+/// extractors are still missing for the ledger baseline marker.
+pub const ALL_LAUNCH_CONDITION_KINDS: &[LaunchConditionKind] = &[
+    LaunchConditionKind::Storage,
+    LaunchConditionKind::Port,
+    LaunchConditionKind::Env,
+    LaunchConditionKind::Secret,
+    LaunchConditionKind::State,
+    LaunchConditionKind::Runtime,
+    LaunchConditionKind::RuntimeTool,
+    LaunchConditionKind::ProviderCapability,
+    LaunchConditionKind::Network,
+    LaunchConditionKind::Hardware,
+    LaunchConditionKind::Policy,
 ];
 
-/// Reject a `detail_json` that looks like it embeds a satisfying value, for the
-/// value-bearing kinds ([`LaunchConditionKind::Secret`] /
-/// [`LaunchConditionKind::Env`]). The check is recursive over nested objects and
-/// case-insensitive on keys, so a forbidden key cannot hide one level down.
+/// `condition_key` of the ledger baseline marker written for every installed
+/// revision (see [`launch_condition_extraction_status`]).
+pub const LEDGER_EXTRACTION_STATUS_KEY: &str = "ledger.extraction_status";
+
+/// The only `detail_json` keys permitted for a [`LaunchConditionKind::Secret`]
+/// condition — all redacted-reference metadata, never a value.
+pub const SECRET_DETAIL_ALLOWED_KEYS: &[&str] = &[
+    "projection",
+    "grant_ref",
+    "scope",
+    "store",
+    "required",
+    "projectable_to",
+];
+
+/// The only `detail_json` keys permitted for a [`LaunchConditionKind::Env`]
+/// condition — projection metadata pointing at where the value comes from,
+/// never the value itself.
+pub const ENV_DETAIL_ALLOWED_KEYS: &[&str] = &[
+    "source",
+    "projection",
+    "ref",
+    "logical_endpoint",
+    "condition_ref",
+];
+
+/// Validate that `detail_json` is a redacted JSON object suitable for storage.
 ///
-/// Non-value-bearing kinds are not key-checked (their detail describes
-/// requirements, e.g. `required_bytes`), but every kind must still carry a
-/// syntactically valid JSON object as detail.
+/// Every kind must carry a syntactically valid JSON object. For the
+/// value-bearing kinds ([`LaunchConditionKind::Secret`] /
+/// [`LaunchConditionKind::Env`]) an **allowlist** is enforced: each top-level
+/// key must be one of the kind's permitted redacted-reference keys, and each
+/// value must be a scalar (or array of scalars) — never a nested object/array
+/// that could hide a value. This rejects an arbitrary env-var-name key bearing a
+/// raw value (the failure mode a denylist cannot catch).
+///
+/// Non-value-bearing kinds describe requirements (e.g. `required_bytes`), carry
+/// no credential, and so are not key-restricted.
 pub fn validate_redacted_detail_json(kind: LaunchConditionKind, detail_json: &str) -> Result<()> {
     let parsed: Value = serde_json::from_str(detail_json).map_err(|e| {
         CapsuleError::Runtime(format!(
             "launch condition detail_json is not valid JSON: {e}"
         ))
     })?;
-    if !parsed.is_object() {
+    let Value::Object(map) = &parsed else {
         return Err(CapsuleError::Runtime(
             "launch condition detail_json must be a JSON object".to_string(),
         ));
-    }
-    if matches!(kind, LaunchConditionKind::Secret | LaunchConditionKind::Env) {
-        reject_forbidden_keys(&parsed)?;
+    };
+    let allowed = match kind {
+        LaunchConditionKind::Secret => SECRET_DETAIL_ALLOWED_KEYS,
+        LaunchConditionKind::Env => ENV_DETAIL_ALLOWED_KEYS,
+        _ => return Ok(()),
+    };
+    for (key, value) in map {
+        if !allowed.contains(&key.as_str()) {
+            return Err(CapsuleError::Runtime(format!(
+                "{kind} launch condition detail_json key '{key}' is not allowed; only \
+                 redacted-reference keys {allowed:?} are permitted — store a reference such as a \
+                 grant_ref, never a value",
+                kind = kind.as_str(),
+            )));
+        }
+        if !is_redacted_scalar(value) {
+            return Err(CapsuleError::Runtime(format!(
+                "{kind} launch condition detail_json key '{key}' must be a scalar or array of \
+                 scalars; a nested object/array could smuggle a value",
+                kind = kind.as_str(),
+            )));
+        }
     }
     Ok(())
 }
 
-fn reject_forbidden_keys(value: &Value) -> Result<()> {
+/// A value safe to store in a redacted detail: a scalar, or an array of scalars.
+/// Nested objects (and arrays containing objects/arrays) are rejected because
+/// they could embed a value under an unchecked key.
+fn is_redacted_scalar(value: &Value) -> bool {
     match value {
-        Value::Object(map) => {
-            for (key, child) in map {
-                let lowered = key.to_ascii_lowercase();
-                if FORBIDDEN_DETAIL_KEYS.contains(&lowered.as_str()) {
-                    return Err(CapsuleError::Runtime(format!(
-                        "launch condition detail_json must not embed a value: forbidden key '{key}' \
-                         (store a redacted reference such as a grant_ref instead)"
-                    )));
-                }
-                reject_forbidden_keys(child)?;
-            }
-            Ok(())
-        }
-        Value::Array(items) => items.iter().try_for_each(reject_forbidden_keys),
-        _ => Ok(()),
+        Value::Object(_) => false,
+        Value::Array(items) => items
+            .iter()
+            .all(|item| !matches!(item, Value::Object(_) | Value::Array(_))),
+        _ => true,
     }
 }
 
@@ -297,6 +351,55 @@ pub fn launch_condition_from_port_claim(claim: &super::port::PortClaim) -> Launc
         status: LaunchConditionStatus::Satisfied,
         required: true,
         source: LaunchConditionSource::PortClaim,
+        detail_json: detail.to_string(),
+        redacted: true,
+    }
+}
+
+/// Build the ledger **baseline marker** for an installed revision: a
+/// non-required `Policy` condition (`condition_key =
+/// `[`LEDGER_EXTRACTION_STATUS_KEY`]`) recording which condition extractors have
+/// run and which are still missing.
+///
+/// Writing this on every install guarantees an installed revision *always* has a
+/// ledger, so an **empty** ledger is never mistaken for "this app has no launch
+/// conditions" — empty unambiguously means "nothing recorded". Consumers read
+/// `complete` / `missing_extractors` to tell "no such condition" apart from "not
+/// yet extracted".
+///
+/// `extracted_kinds` are the kinds whose extractors ran; the missing set is the
+/// complement against [`ALL_LAUNCH_CONDITION_KINDS`]. Status is `Satisfied` once
+/// nothing is missing, else `Unknown`.
+pub fn launch_condition_extraction_status(
+    install_profile_key: &str,
+    install_revision_id: Option<&str>,
+    extracted_kinds: &[LaunchConditionKind],
+) -> LaunchConditionClaim {
+    let extracted: Vec<&str> = extracted_kinds.iter().map(|k| k.as_str()).collect();
+    let missing: Vec<&str> = ALL_LAUNCH_CONDITION_KINDS
+        .iter()
+        .filter(|k| !extracted_kinds.contains(k))
+        .map(|k| k.as_str())
+        .collect();
+    let complete = missing.is_empty();
+    let detail = serde_json::json!({
+        "complete": complete,
+        "extracted_kinds": extracted,
+        "missing_extractors": missing,
+    });
+    LaunchConditionClaim {
+        install_profile_key: install_profile_key.to_string(),
+        install_revision_id: install_revision_id.map(str::to_string),
+        provider_id: None,
+        kind: LaunchConditionKind::Policy,
+        condition_key: LEDGER_EXTRACTION_STATUS_KEY.to_string(),
+        status: if complete {
+            LaunchConditionStatus::Satisfied
+        } else {
+            LaunchConditionStatus::Unknown
+        },
+        required: false,
+        source: LaunchConditionSource::InstalledState,
         detail_json: detail.to_string(),
         redacted: true,
     }
@@ -358,41 +461,67 @@ mod tests {
     }
 
     #[test]
-    fn secret_detail_with_raw_value_is_rejected() {
-        // A raw API key under its env name must be rejected.
+    fn secret_launch_condition_rejects_env_name_raw_value() {
+        // The core guarantee: a raw value under an arbitrary env-var-name key is
+        // rejected. A denylist would pass this; the allowlist does not.
         let detail = r#"{"OPENAI_API_KEY":"sk-abc123"}"#;
-        // `OPENAI_API_KEY` is not a forbidden key by name, but a Secret/Env
-        // detail must use a redacted reference shape; the forbidden-key guard
-        // catches the common credential keys. Here assert the explicit
-        // `value`/`token` style is rejected.
-        assert!(validate_redacted_detail_json(LaunchConditionKind::Secret, detail).is_ok());
-        let with_value = r#"{"projection":"env","value":"sk-abc123"}"#;
-        assert!(
-            validate_redacted_detail_json(LaunchConditionKind::Secret, with_value).is_err(),
-            "a `value` key in a Secret detail must be rejected"
-        );
-    }
-
-    #[test]
-    fn env_detail_with_api_key_is_rejected() {
-        let detail = r#"{"projection":"env","api_key":"sk-abc"}"#;
-        assert!(validate_redacted_detail_json(LaunchConditionKind::Env, detail).is_err());
-    }
-
-    #[test]
-    fn nested_forbidden_key_is_rejected() {
-        let detail = r#"{"projection":"env","grant":{"token":"abc"}}"#;
         assert!(
             validate_redacted_detail_json(LaunchConditionKind::Secret, detail).is_err(),
-            "a forbidden key nested one level down must still be rejected"
+            "a raw secret value under its env-var name must be rejected"
+        );
+        // Explicit value-bearing keys are likewise rejected.
+        assert!(
+            validate_redacted_detail_json(
+                LaunchConditionKind::Secret,
+                r#"{"projection":"env","value":"sk-abc123"}"#
+            )
+            .is_err()
         );
     }
 
     #[test]
-    fn redacted_reference_detail_is_accepted() {
-        let detail =
-            r#"{"projection":"env","grant_ref":"ato-secret://x","scope":"capsule_instance"}"#;
+    fn env_launch_condition_rejects_env_name_raw_value() {
+        let detail = r#"{"OPENAI_API_KEY":"sk-abc123"}"#;
+        assert!(
+            validate_redacted_detail_json(LaunchConditionKind::Env, detail).is_err(),
+            "a raw value under its env-var name must be rejected for Env too"
+        );
+        // An api_key key is not in the Env allowlist either.
+        assert!(
+            validate_redacted_detail_json(
+                LaunchConditionKind::Env,
+                r#"{"projection":"env","api_key":"sk-abc"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn secret_launch_condition_accepts_redacted_grant_ref_shape() {
+        let detail = r#"{"projection":"env","grant_ref":"ato-secret://x","scope":"capsule_instance","store":"local_keychain"}"#;
         assert!(validate_redacted_detail_json(LaunchConditionKind::Secret, detail).is_ok());
+        // grant_ref may be null (not yet granted) and projectable_to an array.
+        let pending = r#"{"projection":"env","grant_ref":null,"scope":"capsule_instance","projectable_to":["env","file"]}"#;
+        assert!(validate_redacted_detail_json(LaunchConditionKind::Secret, pending).is_ok());
+    }
+
+    #[test]
+    fn env_launch_condition_accepts_projection_ref_shape() {
+        let detail = r#"{"source":"port_claim","logical_endpoint":"ato://app/x/main"}"#;
+        assert!(validate_redacted_detail_json(LaunchConditionKind::Env, detail).is_ok());
+    }
+
+    #[test]
+    fn secret_detail_nested_object_value_is_rejected() {
+        // An allowed key whose value is a nested object could smuggle a value.
+        let detail = r#"{"projection":{"nested":"x"}}"#;
+        assert!(
+            validate_redacted_detail_json(LaunchConditionKind::Secret, detail).is_err(),
+            "a nested object under an allowed key must be rejected"
+        );
+        // ...and an unknown key holding a nested object is rejected too.
+        let nested = r#"{"grant":{"token":"abc"}}"#;
+        assert!(validate_redacted_detail_json(LaunchConditionKind::Secret, nested).is_err());
     }
 
     #[test]
@@ -438,5 +567,62 @@ mod tests {
         assert!(claim.detail_json.contains("\"preferred_port\":3000"));
         assert!(claim.detail_json.contains("\"last_actual_port\":49152"));
         validate_redacted_detail_json(claim.kind, &claim.detail_json).unwrap();
+    }
+
+    #[test]
+    fn ledger_extraction_status_marks_incomplete_kinds() {
+        let marker = launch_condition_extraction_status(
+            "app",
+            Some("rev1"),
+            &[LaunchConditionKind::Storage],
+        );
+        assert_eq!(marker.kind, LaunchConditionKind::Policy);
+        assert_eq!(marker.condition_key, LEDGER_EXTRACTION_STATUS_KEY);
+        assert_eq!(marker.status, LaunchConditionStatus::Unknown);
+        assert!(
+            !marker.required,
+            "the baseline marker is not a launch requirement"
+        );
+        assert_eq!(marker.source, LaunchConditionSource::InstalledState);
+
+        let detail: Value = serde_json::from_str(&marker.detail_json).unwrap();
+        assert_eq!(detail["complete"], Value::Bool(false));
+        let extracted: Vec<&str> = detail["extracted_kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(extracted, vec!["storage"]);
+        let missing: Vec<&str> = detail["missing_extractors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        // Everything except the one extracted kind is reported missing.
+        assert!(!missing.contains(&"storage"));
+        for kind in [
+            "port",
+            "env",
+            "secret",
+            "state",
+            "provider_capability",
+            "hardware",
+        ] {
+            assert!(missing.contains(&kind), "{kind} must be reported missing");
+        }
+        // The marker itself is a valid, redacted detail.
+        validate_redacted_detail_json(marker.kind, &marker.detail_json).unwrap();
+    }
+
+    #[test]
+    fn ledger_extraction_status_is_complete_when_all_kinds_extracted() {
+        let marker =
+            launch_condition_extraction_status("app", Some("rev1"), ALL_LAUNCH_CONDITION_KINDS);
+        assert_eq!(marker.status, LaunchConditionStatus::Satisfied);
+        let detail: Value = serde_json::from_str(&marker.detail_json).unwrap();
+        assert_eq!(detail["complete"], Value::Bool(true));
+        assert!(detail["missing_extractors"].as_array().unwrap().is_empty());
     }
 }
