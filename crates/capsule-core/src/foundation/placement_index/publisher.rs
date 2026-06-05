@@ -263,11 +263,12 @@ fn reject_if_pathlike(field: &str, value: &str) -> Result<(), SnapshotBuildError
     Ok(())
 }
 
-/// A short, non-leaking hint for error messages — never echoes the full
-/// suspect value (which might itself be a secret/path) into logs.
+/// A non-leaking hint for error messages. Emits **only** the length — never
+/// any fragment of the suspect value/path, not even a prefix, since even a
+/// prefix (`sk-l…`, `/Use…`) of a secret or path is sensitive and could land
+/// in logs.
 fn redacted_hint(value: &str) -> String {
-    let prefix: String = value.chars().take(4).collect();
-    format!("{prefix}… (len {})", value.len())
+    format!("value redacted; len={}", value.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +409,52 @@ mod tests {
         }
     }
 
+    /// Secret/path fragments that must never appear in a build error — not in
+    /// `Display`, not in `Debug`. A prefix is as sensitive as the whole value.
+    const ERROR_LEAK_FRAGMENTS: &[&str] = &[
+        "sk-live",
+        "AKIA",
+        "ghp_",
+        "-----BEGIN",
+        "/Users/",
+        "C:\\Users\\",
+        "/home/",
+        "id_rsa",
+        ".env",
+    ];
+
+    fn assert_error_does_not_leak(err: &SnapshotBuildError) {
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        for fragment in ERROR_LEAK_FRAGMENTS {
+            assert!(
+                !display.contains(fragment),
+                "error Display leaked fragment {fragment:?}: {display}"
+            );
+            assert!(
+                !debug.contains(fragment),
+                "error Debug leaked fragment {fragment:?}: {debug}"
+            );
+        }
+    }
+
+    #[test]
+    fn publisher_error_hints_do_not_echo_secret_or_path_fragments() {
+        // A secret-value rejection.
+        let mut secret_input = cloud_gpu_input();
+        secret_input.secret_refs[0].secret_ref = RedactedSecretRef::new("sk-live-secret-abc123xyz");
+        let secret_err = build_provider_capability_snapshot(secret_input).unwrap_err();
+
+        // A raw-path rejection (path also contains .aws/credentials).
+        let mut path_input = cloud_gpu_input();
+        path_input.materialized_objects.object_hashes =
+            vec!["/Users/alice/.aws/credentials".to_string()];
+        let path_err = build_provider_capability_snapshot(path_input).unwrap_err();
+
+        assert_error_does_not_leak(&secret_err);
+        assert_error_does_not_leak(&path_err);
+    }
+
     #[test]
     fn publisher_sorts_and_dedups_snapshot_fields() {
         let snap = build_provider_capability_snapshot(cloud_gpu_input()).expect("valid input");
@@ -451,6 +498,8 @@ mod tests {
             err,
             SnapshotBuildError::SuspectedSecretValue { .. }
         ));
+        // The rejection itself must not echo the secret fragment.
+        assert_error_does_not_leak(&err);
 
         // A clean build emits no secret value either.
         let snap = build_provider_capability_snapshot(cloud_gpu_input()).expect("valid input");
@@ -468,14 +517,15 @@ mod tests {
             vec!["/Users/alice/.cache/ato/objects/abc".to_string()];
         let err = build_provider_capability_snapshot(input).unwrap_err();
         assert!(matches!(err, SnapshotBuildError::SuspectedRawPath { .. }));
+        // The rejection itself must not echo the path fragment.
+        assert_error_does_not_leak(&err);
 
         // A path smuggled through network egress is rejected too.
         let mut input2 = cloud_gpu_input();
         input2.network.egress_allowed = vec!["/home/bob/socket".to_string()];
-        assert!(matches!(
-            build_provider_capability_snapshot(input2).unwrap_err(),
-            SnapshotBuildError::SuspectedRawPath { .. }
-        ));
+        let err2 = build_provider_capability_snapshot(input2).unwrap_err();
+        assert!(matches!(err2, SnapshotBuildError::SuspectedRawPath { .. }));
+        assert_error_does_not_leak(&err2);
 
         // Clean build emits no path.
         let snap = build_provider_capability_snapshot(cloud_gpu_input()).expect("valid input");
