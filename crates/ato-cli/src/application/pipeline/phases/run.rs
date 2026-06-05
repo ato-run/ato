@@ -1937,6 +1937,33 @@ where
     .with_workspace_root(prepared.workspace_root.clone())
     .with_injected_env(injected_data.env)
     .with_injected_mounts(injected_data.mounts);
+
+    // #508: resolve SecretStore-backed launch-condition grants into a dedicated,
+    // receipt-excluded secret env channel — after relaunch preflight admission and
+    // before spawn. Gated on an installed identity plus at least one
+    // `secret.*=grant:<id>` input, so `ato run` and `ato launch <ipk>` open no DB.
+    // A grant that exists but has no stored value blocks the launch (typed).
+    if let Some(lifecycle) = request.install_lifecycle_context.as_ref() {
+        let has_secret_grant = request.capsule_launch_inputs.iter().any(|input| {
+            input.kind == capsule_core::installed_state::LaunchConditionInputKind::Secret
+                && matches!(
+                    input.value,
+                    capsule_core::installed_state::LaunchConditionInputValue::Grant(_)
+                )
+        });
+        if has_secret_grant {
+            let db = capsule_core::installed_state::InstalledStateDb::open_default()
+                .context("open installed-state DB for secret injection")?;
+            let secret_env = crate::adapters::runtime::secret_injection::resolve_secret_injection(
+                &db,
+                &lifecycle.install_profile_key,
+                Some(&lifecycle.install_revision_id),
+                &request.capsule_launch_inputs,
+                &crate::adapters::runtime::secret_injection::SecretStoreValueStore,
+            )?;
+            launch_ctx = launch_ctx.with_secret_env(secret_env);
+        }
+    }
     if let Some(external_capsules) = external_capsules.as_ref() {
         for (dependency, env) in external_capsules.caller_envs() {
             launch_ctx = launch_ctx.with_injected_env_with_origin(
