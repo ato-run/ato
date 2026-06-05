@@ -447,6 +447,71 @@ fn oci_projection_command_is_derived_evidence_not_identity() {
 }
 
 #[test]
+fn materialization_request_only_verifies_materialized_artifacts() {
+    let bundle = minimal_bundle();
+
+    // Default (conservative) evidence: nothing is materialized yet (#501), so the
+    // verifier request is empty — strict mode does not over-block declared-only
+    // re-derivable inputs.
+    let empty =
+        materialization_request_from_launch_bundle(&bundle, &RealizationEnvironment::default());
+    assert!(
+        empty.nodes.is_empty(),
+        "no materialized artifacts ⇒ empty verifier request, got {:?}",
+        empty.nodes,
+    );
+
+    let source_hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    // A declared-only source (no materialized hash) is still omitted: it is
+    // #498-Materializable, not a #499 verifier concern, until #501 grounds it.
+    let declared_only = RealizationEnvironment {
+        declared_source_hash: Some(source_hash.into()),
+        ..Default::default()
+    };
+    assert!(
+        materialization_request_from_launch_bundle(&bundle, &declared_only)
+            .nodes
+            .is_empty(),
+        "declared-only source must not be handed to the verifier",
+    );
+
+    // Once a materialized source hash exists, the source is verified; a runtime
+    // tool is always emitted so its missing binary_sha256 surfaces (#473).
+    let materialized = RealizationEnvironment {
+        declared_source_hash: Some(source_hash.into()),
+        materialized_source_hash: Some(source_hash.into()),
+        runtime_tools: BTreeMap::from([(
+            "pnpm".to_string(),
+            RuntimeToolEvidence {
+                binary_sha256: None,
+                materialized_match: false,
+            },
+        )]),
+        ..Default::default()
+    };
+    let results = verify_materialization(materialization_request_from_launch_bundle(
+        &bundle,
+        &materialized,
+    ));
+    let source = results
+        .iter()
+        .find(|r| r.node_kind == RealizationNodeKind::Source)
+        .expect("source verified");
+    assert!(source.result.is_verified());
+    let tool = results
+        .iter()
+        .find(|r| r.node_id == "runtime-tool:pnpm")
+        .expect("runtime tool present");
+    assert_eq!(
+        tool.result,
+        MaterializationVerificationResult::Unavailable {
+            reason: MaterializationUnavailableReason::RuntimeToolBinaryHashUnpopulated,
+        },
+    );
+}
+
+#[test]
 fn realization_contract_does_not_serialize_raw_projection_command_or_secrets() {
     let bundle = minimal_bundle();
     let env = RealizationEnvironment {

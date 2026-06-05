@@ -32,7 +32,10 @@ use crate::engine::execution_graph::{ExecutionGraphNode, LaunchGraphBundle};
 use super::classify::{
     MountFact, RealizationNode, RealizationNodeFacts, RealizationRequest, classify,
 };
-use super::model::{RealizationContract, RedactedProjectionCommand};
+use super::model::{RealizationContract, RealizationNodeKind, RedactedProjectionCommand};
+use super::verify::{
+    MaterializationVerificationRequest, MaterializedNodeInput, MaterializedNodeSource,
+};
 
 /// Realization evidence about a runtime toolchain.
 #[derive(Debug, Clone, Default)]
@@ -253,6 +256,112 @@ pub fn realization_from_launch_bundle(
         nodes,
         edges: Vec::new(),
     })
+}
+
+/// Project a launch bundle + host/provider evidence into a #499
+/// [`MaterializationVerificationRequest`], using the *same* node ids as
+/// [`realization_from_launch_bundle`] so a [`super::verify::verify_materialization`]
+/// result overlays cleanly onto the #498 contract (matched by node id).
+///
+/// The rule that keeps strict mode honest rather than over-eager: a node is
+/// only handed to the verifier when there is *something materialized to check*
+/// (`actual_hash` is present), or it is a runtime tool (whose missing
+/// `binary_sha256` is itself the #473 finding the verifier must surface). A
+/// declared-only node is `Materializable` under #498 — re-derivable, not yet
+/// built — and must **not** be escalated to a verifier "missing object" block
+/// here; that judgment waits on the materialized-hash producer (#501).
+///
+/// Consequently, with today's conservative (default) evidence this request is
+/// empty and the overlay is a no-op; the moment #501 grounds materialized
+/// hashes the same projection starts carrying real verifications.
+pub fn materialization_request_from_launch_bundle(
+    bundle: &LaunchGraphBundle,
+    env: &RealizationEnvironment,
+) -> MaterializationVerificationRequest {
+    let mut nodes: Vec<MaterializedNodeInput> = Vec::new();
+
+    if let Some(source_id) = first_source_identifier(bundle) {
+        push_when_materialized(
+            &mut nodes,
+            source_id,
+            RealizationNodeKind::Source,
+            MaterializedNodeSource::SourceTree,
+            env.declared_source_hash.clone(),
+            env.materialized_source_hash.clone(),
+        );
+    }
+
+    for runtime_id in runtime_identifiers(bundle) {
+        let evidence = env.runtimes.get(&runtime_id).cloned().unwrap_or_default();
+        push_when_materialized(
+            &mut nodes,
+            runtime_id,
+            RealizationNodeKind::Runtime,
+            MaterializedNodeSource::RuntimeBinary,
+            evidence.declared_identity,
+            evidence.materialized_binary_hash,
+        );
+    }
+
+    // Runtime tools always emit: a tool with no `binary_sha256` must surface as
+    // the typed unpopulated-binary reason (#473), never be silently skipped.
+    for (tool_id, evidence) in &env.runtime_tools {
+        let actual = evidence
+            .materialized_match
+            .then(|| evidence.binary_sha256.clone())
+            .flatten();
+        nodes.push(MaterializedNodeInput {
+            node_id: format!("runtime-tool:{tool_id}"),
+            node_kind: RealizationNodeKind::RuntimeTool,
+            expected_hash: evidence.binary_sha256.clone(),
+            actual_hash: actual,
+            required: true,
+            source: MaterializedNodeSource::RuntimeTool,
+            materialized_path: None,
+        });
+    }
+
+    // Dependency outputs: only verify a materialized artifact. A declared-only
+    // output is #498-Materializable and is deferred (no actual hash yet → #501).
+    for provider in &bundle.derived.dependency_contracts.providers {
+        let expected = env.dependency_output_hashes.get(&provider.alias).cloned();
+        push_when_materialized(
+            &mut nodes,
+            format!("dependency-output:{}", provider.output_identifier),
+            RealizationNodeKind::DependencyOutput,
+            MaterializedNodeSource::DependencyOutput,
+            expected,
+            // No materialized dependency-output hash exists without #501.
+            None,
+        );
+    }
+
+    MaterializationVerificationRequest { nodes }
+}
+
+/// Push a verifier input only when a materialized artifact actually exists
+/// (`actual` is `Some`). Declared-only nodes are intentionally omitted so the
+/// #499 overlay never escalates a #498-`Materializable` node to a block.
+fn push_when_materialized(
+    nodes: &mut Vec<MaterializedNodeInput>,
+    node_id: impl Into<String>,
+    node_kind: RealizationNodeKind,
+    source: MaterializedNodeSource,
+    expected: Option<String>,
+    actual: Option<String>,
+) {
+    if actual.is_none() {
+        return;
+    }
+    nodes.push(MaterializedNodeInput {
+        node_id: node_id.into(),
+        node_kind,
+        expected_hash: expected,
+        actual_hash: actual,
+        required: true,
+        source,
+        materialized_path: None,
+    });
 }
 
 fn first_source_identifier(bundle: &LaunchGraphBundle) -> Option<String> {

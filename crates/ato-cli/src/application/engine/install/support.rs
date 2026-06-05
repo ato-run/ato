@@ -2612,6 +2612,7 @@ pub(crate) fn execute_run_command(
     build_policy: crate::application::build_materialization::BuildPolicy,
     cache_strategy_arg: crate::cli::shared::CacheStrategyArg,
     plan_only: bool,
+    strict_realization: bool,
     install_lifecycle_context: Option<crate::cli::commands::run::InstallLifecycleContext>,
     pinned_revision_output_dir: Option<std::path::PathBuf>,
     reporter: std::sync::Arc<reporters::CliReporter>,
@@ -2658,6 +2659,7 @@ pub(crate) fn execute_run_command(
         reporter,
         preview_mode: false,
         plan_only,
+        strict_realization,
         install_lifecycle_context,
         pinned_revision_output_dir,
     }))
