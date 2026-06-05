@@ -1218,6 +1218,10 @@ pub(super) fn start_orchestration_session_in_process(
         validation_mode: capsule_core::types::ValidationMode::Strict,
         engine_override_declared: false,
         compatibility_legacy_lock: None,
+        // Capture the install identity synchronously, on this (guard-bearing)
+        // thread, and thread it explicitly via the prepared context — the async
+        // launch-context resolution must not read the thread-local itself (#508).
+        install_profile_key: current_install_profile_key(),
     };
 
     // Runtime that hosts both `block_on` calls AND the long-lived tokio tasks
@@ -2229,6 +2233,9 @@ fn prepare_session_execution(
         validation_mode: capsule_core::types::ValidationMode::Strict,
         engine_override_declared: false,
         compatibility_legacy_lock: None,
+        // Synchronous capture on the guard-bearing thread; threaded explicitly
+        // so the async launch-context resolution never reads the thread-local (#508).
+        install_profile_key: current_install_profile_key(),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
