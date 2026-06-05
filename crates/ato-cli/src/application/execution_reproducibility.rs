@@ -179,6 +179,45 @@ mod tests {
         );
     }
 
+    /// #494: `NetworkBound` is an *egress-allowed capability* verdict, not an
+    /// observation of traffic. The classifier's network input is a single
+    /// boolean derived from policy (`!allow_hosts.is_empty()` in
+    /// `classify_execution`); there is no observed-traffic input. Flipping the
+    /// capability bool — with every other facet held known — is the sole
+    /// difference between `Pure` and `NetworkBound`.
+    #[test]
+    fn network_bound_means_egress_allowed_not_observed_traffic() {
+        let egress_allowed = classify_observations(
+            true,
+            &known_dependencies(),
+            &known_runtime(Tracked::known("glibc:stable".to_string())),
+            &known_environment(),
+            &known_filesystem(Vec::new()),
+        );
+        assert_eq!(egress_allowed.class, ReproducibilityClass::NetworkBound);
+        assert_eq!(
+            egress_allowed.causes,
+            vec![ReproducibilityCause::NetworkBound]
+        );
+
+        // Same execution, egress NOT permitted by policy ⇒ the cause is gone
+        // and the class is Pure. The verdict tracks the policy capability, not
+        // any observed network activity (of which the classifier sees none).
+        let egress_denied = classify_observations(
+            false,
+            &known_dependencies(),
+            &known_runtime(Tracked::known("glibc:stable".to_string())),
+            &known_environment(),
+            &known_filesystem(Vec::new()),
+        );
+        assert_eq!(egress_denied.class, ReproducibilityClass::Pure);
+        assert!(
+            !egress_denied
+                .causes
+                .contains(&ReproducibilityCause::NetworkBound)
+        );
+    }
+
     #[test]
     fn untracked_dynamic_linkage_is_best_effort_not_host_bound() {
         let result = classify_observations(
