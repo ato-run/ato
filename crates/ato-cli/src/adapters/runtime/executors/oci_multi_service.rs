@@ -36,6 +36,8 @@ use capsule_core::types::{
     ResolvedServiceRuntime, StateDurability,
 };
 
+use capsule_core::execution_identity::OciProviderReceiptEvidence;
+
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::ingress_router;
 use crate::adapters::runtime::oci_provider::{
@@ -48,6 +50,11 @@ use crate::adapters::runtime::oci_session_store::{
 };
 use crate::application::preflight::{
     OciProviderReadinessMode, OciProviderReadinessRequirements, preflight_oci_provider_readiness,
+};
+use crate::application::provider_projection::oci::OciProjectionPlan;
+use crate::application::provider_projection::strict_oci::{
+    OciProviderEnforcement, OciServiceStrict, OciStrictFacts, enforce_strict_oci_services,
+    provider_receipt_evidence,
 };
 use crate::reporters::CliReporter;
 
@@ -76,6 +83,7 @@ pub(crate) async fn execute_multi_service(
     plan: &ManifestData,
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
+    strict_realization: bool,
 ) -> Result<i32> {
     // Validate all services are OCI before proceeding.
     if !plan.all_services_are_oci() {
@@ -200,6 +208,35 @@ pub(crate) async fn execute_multi_service(
 
     let ingress_config = plan.typed_manifest().ok().and_then(|m| m.ingress);
 
+    // ── Gate 5: strict realization profile (#500/#501) ───────────────────────
+    // Opt-in `--strict-realization`. Runs BEFORE `execute_service_graph_with_provider`,
+    // which owns every provider side effect (network creation, image pull,
+    // container create, container start). In strict mode it blocks the whole
+    // launch with a typed error when any service has an unenforceable required
+    // policy, an unpinned image, or a host-bound mount fallback. Normal mode is a
+    // no-op. Distinct from the always-on `enforce_multi_service_policy_gate`.
+    let is_podman = provider.semantics().kind == OciProviderKind::Podman;
+    enforce_strict_oci_orchestration(
+        &orch_plan,
+        &images,
+        &egress_allow,
+        is_podman,
+        strict_realization,
+    )?;
+
+    // Per-service, receipt-safe provider evidence (#501). Not persisted to disk
+    // yet (the OCI launch-receipt path is the next slice); emitted as a stable
+    // diagnostic line so it is observable and testable.
+    for (service_label, evidence) in
+        oci_orchestration_provider_evidence(&orch_plan, &images, &egress_allow, is_podman)
+    {
+        if let Ok(json) = serde_json::to_string(&evidence) {
+            reporter
+                .notify(format!("PROVIDER_EVIDENCE [{service_label}]: {json}"))
+                .await?;
+        }
+    }
+
     execute_service_graph_with_provider(
         &orch_plan,
         &images,
@@ -218,6 +255,123 @@ pub(crate) async fn execute_multi_service(
         launch_ctx,
     )
     .await
+}
+
+/// Project each OCI service in the orchestration plan into an [`OciProjectionPlan`]
+/// (no provider side effects). Shared by the strict gate and provider evidence so
+/// both read the same source of truth. The image is pinned when its lock-resolved
+/// digest is present; otherwise it is honestly unpinned. Mounts are resolved to
+/// bind vs engine-volume form so the gate can tell host-bound from managed state.
+fn build_oci_service_projections(
+    orch_plan: &OrchestrationPlan,
+    images: &HashMap<String, OciImageResolution>,
+    is_podman: bool,
+) -> Vec<(String, OciProjectionPlan)> {
+    let mut out: Vec<(String, OciProjectionPlan)> = Vec::new();
+    for service in &orch_plan.services {
+        let ResolvedServiceRuntime::Oci(rt) = &service.runtime else {
+            continue;
+        };
+        let resolution = images.get(&rt.target);
+        let image_ref = match resolution {
+            Some(img) if !img.resolved_digest.is_empty() => build_digest_pull_ref(img),
+            Some(img) => img.declared_ref.clone(),
+            None => rt.image.clone().unwrap_or_default(),
+        };
+        let mounts: Vec<OciMountSpec> = rt
+            .mounts
+            .iter()
+            .map(|m| resolve_oci_mount(m, is_podman, cfg!(target_os = "windows")))
+            .collect();
+        let ports = rt
+            .port
+            .map(|container_port| {
+                vec![OciPortSpec {
+                    container_port,
+                    host_port: None,
+                    protocol: "tcp".to_string(),
+                    host_ip: Some("127.0.0.1".to_string()),
+                }]
+            })
+            .unwrap_or_default();
+        // A declared request: launch conditions known before any side effect.
+        // env values are present but the projection records env *keys* only; the
+        // session-local container name and internal network are excluded.
+        let request = OciContainerRequest {
+            name: "ato-oci-orchestrated".to_string(),
+            image: image_ref,
+            cmd: rt.cmd.clone(),
+            env: rt.env.clone(),
+            working_dir: rt.working_dir.clone(),
+            labels: HashMap::new(),
+            mounts,
+            ports,
+            network: None,
+            aliases: service.network.aliases.clone(),
+            platform: resolution.map(|img| img.platform.clone()),
+            extra_hosts: Vec::new(),
+            user: rt.user.clone(),
+        };
+        out.push((
+            service.name.clone(),
+            OciProjectionPlan::from_container_request(&request),
+        ));
+    }
+    out
+}
+
+/// Strict realization gate for the OCI service graph (#501).
+///
+/// Reuses the single-target gate building blocks ([`OciStrictFacts`],
+/// [`OciProviderEnforcement`], [`enforce_strict_oci_services`]) — no strict-gate
+/// logic is duplicated here. In strict mode it blocks with a typed error that
+/// names the offending service; in normal mode it is a no-op. The graph-derived
+/// resolved execution id is not threaded into the OCI path yet, so `None` is
+/// passed rather than fabricating one from projection data.
+fn enforce_strict_oci_orchestration(
+    orch_plan: &OrchestrationPlan,
+    images: &HashMap<String, OciImageResolution>,
+    egress_allow: &[String],
+    is_podman: bool,
+    strict_realization: bool,
+) -> Result<()> {
+    let profile = if strict_realization {
+        capsule_core::realization::LaunchProfile::Strict
+    } else {
+        capsule_core::realization::LaunchProfile::Normal
+    };
+    let network_policy_required = !egress_allow.is_empty();
+    let inputs: Vec<OciServiceStrict> = build_oci_service_projections(orch_plan, images, is_podman)
+        .iter()
+        .map(|(service_label, plan)| OciServiceStrict {
+            service_label: service_label.clone(),
+            facts: OciStrictFacts::from_projection(plan, network_policy_required),
+            enforcement: OciProviderEnforcement::podman(network_policy_required),
+        })
+        .collect();
+    enforce_strict_oci_services(&inputs, profile, None).map_err(anyhow::Error::new)
+}
+
+/// Receipt-safe provider evidence for each OCI service (#501). Not persisted to
+/// disk yet — that is the next #501 slice; produced here so it is observable and
+/// testable. Carries only receipt-safe fields (env keys, mount targets, ports,
+/// aliases, capabilities, enforcement status, redacted argv) — never a raw env
+/// value, secret, host source path, container id, pid, or log path.
+fn oci_orchestration_provider_evidence(
+    orch_plan: &OrchestrationPlan,
+    images: &HashMap<String, OciImageResolution>,
+    egress_allow: &[String],
+    is_podman: bool,
+) -> Vec<(String, OciProviderReceiptEvidence)> {
+    let network_policy_required = !egress_allow.is_empty();
+    let enforcement = OciProviderEnforcement::podman(network_policy_required);
+    build_oci_service_projections(orch_plan, images, is_podman)
+        .into_iter()
+        .map(|(service_label, plan)| {
+            let evidence = provider_receipt_evidence(&plan, &enforcement, network_policy_required);
+            (service_label, evidence)
+        })
+        .collect()
 }
 
 /// Try to start the ingress router.
@@ -3723,5 +3877,142 @@ volumes:
         // Should succeed without touching the filesystem.
         prepare_writable_ownership_mount_sources("svc", &mounts).unwrap();
         // No directory created (named volume is not a path on the host).
+    }
+
+    // ── #501: orchestration strict gate + per-service provider evidence ──
+
+    use capsule_core::execution_identity::{OciEnforcementStatus, OciImageDigestStatus};
+    use capsule_core::execution_plan::error::AtoExecutionError;
+
+    #[test]
+    fn orchestration_provider_evidence_is_produced_per_service() {
+        let web = make_service("web", "web-image", vec![], true, Some(8080), vec![]);
+        let db = make_service("db", "db-image", vec![], false, Some(5432), vec![]);
+        let plan = OrchestrationPlan {
+            startup_order: vec!["db".to_string(), "web".to_string()],
+            services: vec![web, db],
+        };
+        let mut images = HashMap::new();
+        images.insert("web-image".to_string(), make_image("web-image:1"));
+        images.insert("db-image".to_string(), make_image("db-image:1"));
+
+        // No egress → network "enforced" (nothing to downgrade); image pinned.
+        let evidence = oci_orchestration_provider_evidence(&plan, &images, &[], true);
+        assert_eq!(evidence.len(), 2, "one evidence record per OCI service");
+        for (svc, ev) in &evidence {
+            assert_eq!(ev.provider_kind, "oci");
+            assert_eq!(ev.provider_version.as_deref(), Some("oci-podman-v1"));
+            assert!(
+                matches!(ev.image_digest_status, OciImageDigestStatus::Pinned { .. }),
+                "service {svc} image must be pinned"
+            );
+            assert_eq!(
+                ev.network_enforcement_status,
+                OciEnforcementStatus::Enforced
+            );
+        }
+
+        // A declared egress allowlist: Unsupported enforcement + required policy.
+        let evidence = oci_orchestration_provider_evidence(
+            &plan,
+            &images,
+            &["api.example.com".to_string()],
+            true,
+        );
+        for (_svc, ev) in &evidence {
+            assert_eq!(
+                ev.network_enforcement_status,
+                OciEnforcementStatus::Unsupported
+            );
+            assert!(
+                ev.capabilities_required
+                    .contains(&"network-policy".to_string()),
+                "egress allowlist must surface as a required network policy"
+            );
+        }
+    }
+
+    #[test]
+    fn orchestration_provider_evidence_has_env_keys_but_no_values() {
+        let mut web = make_service("web", "web-image", vec![], true, Some(8080), vec![]);
+        if let ResolvedServiceRuntime::Oci(rt) = &mut web.runtime {
+            rt.env
+                .insert("OPENAI_API_KEY".to_string(), "sk-do-not-leak".to_string());
+        }
+        let plan = OrchestrationPlan {
+            startup_order: vec!["web".to_string()],
+            services: vec![web],
+        };
+        let mut images = HashMap::new();
+        images.insert("web-image".to_string(), make_image("web-image:1"));
+
+        let evidence = oci_orchestration_provider_evidence(&plan, &images, &[], true);
+        let (_svc, ev) = &evidence[0];
+        assert!(ev.env_keys.contains(&"OPENAI_API_KEY".to_string()));
+        let json = serde_json::to_string(ev).unwrap();
+        assert!(!json.contains("sk-do-not-leak"), "env value leaked: {json}");
+    }
+
+    #[test]
+    fn strict_orchestration_blocks_unpinned_image_and_names_service_normal_passes() {
+        // A service whose image is absent from the resolution map → unpinned.
+        let web = make_service("web", "missing-image", vec![], true, Some(8080), vec![]);
+        let plan = OrchestrationPlan {
+            startup_order: vec!["web".to_string()],
+            services: vec![web],
+        };
+        let images: HashMap<String, OciImageResolution> = HashMap::new();
+
+        // Strict blocks (before any provider side effect); normal is non-breaking.
+        let err = enforce_strict_oci_orchestration(&plan, &images, &[], true, true)
+            .expect_err("unpinned image must block in strict mode");
+        let ato = err
+            .downcast_ref::<AtoExecutionError>()
+            .expect("typed strict realization error");
+        assert_eq!(ato.code, "ATO_ERR_STRICT_REALIZATION_BLOCKED");
+        let details = ato.details.clone().expect("details");
+        let node_id = details["blocked"][0]["node_id"].as_str().unwrap();
+        assert!(
+            node_id.contains("web"),
+            "error names the service: {node_id}"
+        );
+
+        assert!(
+            enforce_strict_oci_orchestration(&plan, &images, &[], true, false).is_ok(),
+            "normal mode must not block"
+        );
+    }
+
+    #[test]
+    fn strict_orchestration_error_has_no_observed_id_or_completeness_claim() {
+        let web = make_service("web", "web-image", vec![], true, Some(8080), vec![]);
+        let plan = OrchestrationPlan {
+            startup_order: vec!["web".to_string()],
+            services: vec![web],
+        };
+        let mut images = HashMap::new();
+        images.insert("web-image".to_string(), make_image("web-image:1"));
+        // Force a block via an unenforceable egress policy, then inspect payload.
+        let err = enforce_strict_oci_orchestration(
+            &plan,
+            &images,
+            &["x.example.com".to_string()],
+            true,
+            true,
+        )
+        .expect_err("egress block");
+        let ato = err.downcast_ref::<AtoExecutionError>().unwrap();
+        let serialized = serde_json::to_string(&ato.details).unwrap();
+        for forbidden in [
+            "observed_execution_id",
+            "GraphCompleteness",
+            "Complete",
+            "graph-execution-id-unbound",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "strict error must not contain '{forbidden}': {serialized}"
+            );
+        }
     }
 }
