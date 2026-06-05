@@ -124,13 +124,14 @@ pub async fn resolve_launch_context(
         reporter.warn(warning.clone()).await?;
     }
 
-    // Thread the install profile key (if this is an installed-app launch)
-    // explicitly through the launch context. Captured here, on the synchronous
-    // run thread, because the thread-local install lifecycle context does not
-    // reliably survive the async executor boundary downstream.
-    let install_profile_key = crate::app_control::session::current_install_profile_key();
-
-    Ok(RuntimeLaunchContext::from_ipc(ipc_ctx).with_install_profile_key(install_profile_key))
+    // Stamp the install profile key (installed-app launches only) from the
+    // explicitly-threaded prepared context. The value originates from the
+    // trusted install-lifecycle identity captured on the synchronous run thread
+    // (the request, or a synchronous thread-local capture at context build) — we
+    // deliberately do *not* read the thread-local here, since this runs past an
+    // async boundary where it does not reliably propagate (#508).
+    Ok(RuntimeLaunchContext::from_ipc(ipc_ctx)
+        .with_install_profile_key(prepared.install_profile_key.clone()))
 }
 
 pub fn prepare_target_execution(
@@ -577,6 +578,7 @@ entrypoint = "index.js"
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: None,
         };
 
         let launch_ctx =
@@ -585,6 +587,71 @@ entrypoint = "index.js"
                 .expect("resolve launch context without reading manifest file");
 
         assert!(launch_ctx.ipc().is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_launch_context_stamps_explicit_install_profile_key() {
+        // The install identity must come from the explicitly-threaded prepared
+        // context — never the thread-local — so this test sets it directly on
+        // PreparedRunContext and asserts it reaches RuntimeLaunchContext (#508).
+        let temp_dir = tempdir().expect("tempdir");
+        let manifest_path = temp_dir.path().join("missing-capsule.toml");
+        let manifest_dir = temp_dir.path().to_path_buf();
+
+        let raw_manifest = toml::from_str::<toml::Value>(
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "node"
+entrypoint = "index.js"
+"#,
+        )
+        .expect("parse manifest");
+
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            raw_manifest.clone(),
+            manifest_path,
+            manifest_dir.clone(),
+            ExecutionProfile::Dev,
+            Some("default"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor");
+
+        let make_prepared = |install_profile_key: Option<String>| PreparedRunContext {
+            authoritative_lock: None,
+            lock_path: None,
+            workspace_root: manifest_dir.clone(),
+            effective_state: None,
+            execution_override: None,
+            bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                raw_manifest.clone(),
+            ),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: None,
+            install_profile_key,
+        };
+
+        // Installed-app launch: explicit identity flows through to the context.
+        let installed = make_prepared(Some("ipk_app".to_string()));
+        let launch_ctx =
+            resolve_launch_context(&plan, &installed, &Arc::new(CliReporter::new(false)))
+                .await
+                .expect("resolve launch context");
+        assert_eq!(launch_ctx.install_profile_key(), Some("ipk_app"));
+
+        // Ephemeral `ato run`: no install identity → None.
+        let ephemeral = make_prepared(None);
+        let launch_ctx =
+            resolve_launch_context(&plan, &ephemeral, &Arc::new(CliReporter::new(false)))
+                .await
+                .expect("resolve launch context");
+        assert_eq!(launch_ctx.install_profile_key(), None);
     }
 
     #[tokio::test]
@@ -635,6 +702,7 @@ from = "./missing-service"
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: None,
         };
 
         let err = resolve_launch_context(&plan, &prepared, &Arc::new(CliReporter::new(false)))
@@ -722,6 +790,7 @@ run = "node server.js"
                 path: lock_path,
                 lock,
             }),
+            install_profile_key: None,
         };
 
         let execution = prepare_target_execution(
@@ -786,6 +855,7 @@ run = "python3 tool.py --from-target""#;
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: None,
         };
 
         let execution = prepare_target_execution(
@@ -872,6 +942,7 @@ run = "python3 default.py --from-default""#;
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: None,
         };
 
         let execution = prepare_target_execution(
