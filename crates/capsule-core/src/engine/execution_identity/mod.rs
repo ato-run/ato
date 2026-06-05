@@ -1062,6 +1062,63 @@ pub struct OciProviderReceiptEvidence {
     /// sorted (e.g. `"persistent-state"`, `"network-policy"`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities_required: Vec<String>,
+    /// Provider version/family when known (e.g. `"oci-podman-v1"`). Coarse and
+    /// value-free; never a host path or machine handle. Additive (#501).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_version: Option<String>,
+    /// Whether the selected provider can enforce the *declared* network policy
+    /// (e.g. an egress allowlist). `Unknown` by default for back-compat (#501).
+    #[serde(default, skip_serializing_if = "OciEnforcementStatus::is_unknown")]
+    pub network_enforcement_status: OciEnforcementStatus,
+    /// Whether the selected provider can enforce the declared capability/sandbox
+    /// policy. `Unknown` by default for back-compat (#501).
+    #[serde(default, skip_serializing_if = "OciEnforcementStatus::is_unknown")]
+    pub capability_enforcement_status: OciEnforcementStatus,
+    /// A deterministic, session-independent summary of the projection *identity*
+    /// (the resolved launch conditions). Never the requested container name,
+    /// session id, container id, pid, or log path (#501). Optional/additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_identity_summary: Option<String>,
+    /// The derived provider invocation (e.g. `podman create` argv) reduced to a
+    /// **redacted** shape: flags survive, every value becomes `<redacted>`. This
+    /// is derived projection evidence, never identity and never a raw command
+    /// (#501). Optional/additive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived_command_redacted: Vec<String>,
+}
+
+/// Whether a provider can enforce a declared policy facet for a projection.
+///
+/// Recorded as typed provider evidence (#501) so a receipt states honestly
+/// whether a required policy is actually enforced, downgraded to best-effort, or
+/// unsupported by the selected provider — rather than implying enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OciEnforcementStatus {
+    /// The provider fully enforces the declared policy facet.
+    Enforced,
+    /// The provider enforces it only partially / best-effort.
+    Downgraded,
+    /// The provider fundamentally cannot enforce it (e.g. podman + egress
+    /// allowlist).
+    Unsupported,
+    /// Enforcement capability is not determined. The conservative default: an
+    /// `Unknown` facet is treated as *not* enforced by strict mode.
+    #[default]
+    Unknown,
+}
+
+impl OciEnforcementStatus {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    /// Whether the declared policy facet is actually enforced. Only
+    /// [`Self::Enforced`] counts — `Downgraded`/`Unsupported`/`Unknown` are all
+    /// "not enforced" for a fail-closed decision (#500/#501).
+    pub fn is_enforced(&self) -> bool {
+        matches!(self, Self::Enforced)
+    }
 }
 
 /// Pinned/unpinned status of an OCI image in a receipt. The digest is recorded

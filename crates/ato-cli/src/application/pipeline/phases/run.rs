@@ -3142,6 +3142,7 @@ where
             &decision.plan,
             request.reporter.clone(),
             &launch_ctx,
+            request.strict_realization,
         )
         .await?;
         if exit != 0 {
