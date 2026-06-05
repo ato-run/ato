@@ -317,6 +317,34 @@ pub fn validate_condition_key(condition_key: &str) -> Result<()> {
     }
 }
 
+/// Validate a reserved condition key and return its kind. Validates via
+/// [`validate_condition_key`] first (so URIs / fragments / paths / forbidden
+/// namespaces are rejected), then classifies the namespace.
+pub fn condition_key_kind(condition_key: &str) -> Result<LaunchConditionInputKind> {
+    validate_condition_key(condition_key)?;
+    let namespace = condition_key
+        .split_once('.')
+        .map(|(ns, _)| ns)
+        .unwrap_or(condition_key);
+    let kind = match namespace {
+        "port" => LaunchConditionInputKind::Port,
+        "env" => LaunchConditionInputKind::Env,
+        "secret" => LaunchConditionInputKind::Secret,
+        "state" => LaunchConditionInputKind::State,
+        "network" => LaunchConditionInputKind::Network,
+        "hardware" => LaunchConditionInputKind::Hardware,
+        "capability" => LaunchConditionInputKind::Capability,
+        "policy" => LaunchConditionInputKind::Policy,
+        // validate_condition_key already rejected anything else.
+        other => {
+            return Err(parse_err(format!(
+                "unknown condition key namespace '{other}'"
+            )));
+        }
+    };
+    Ok(kind)
+}
+
 /// A logical locator id (grant id / binding id): non-empty, no whitespace, not a
 /// host path, not a scheme URL, not a token-like raw value. Public so the DB
 /// registry can enforce it at its boundary (callers are not trusted).
@@ -574,6 +602,38 @@ mod tests {
             "secret needs a name"
         );
         assert!(validate_condition_key("bogus.key").is_err());
+    }
+
+    #[test]
+    fn condition_key_kind_classifies_reserved_keys() {
+        assert_eq!(
+            condition_key_kind("port").unwrap(),
+            LaunchConditionInputKind::Port
+        );
+        assert_eq!(
+            condition_key_kind("port.main").unwrap(),
+            LaunchConditionInputKind::Port
+        );
+        assert_eq!(
+            condition_key_kind("env.LOG_LEVEL").unwrap(),
+            LaunchConditionInputKind::Env
+        );
+        assert_eq!(
+            condition_key_kind("secret.OPENAI_API_KEY").unwrap(),
+            LaunchConditionInputKind::Secret
+        );
+        assert_eq!(
+            condition_key_kind("state.data").unwrap(),
+            LaunchConditionInputKind::State
+        );
+        assert_eq!(
+            condition_key_kind("network.egress").unwrap(),
+            LaunchConditionInputKind::Network
+        );
+        // Invalid keys are rejected (delegated to validate_condition_key).
+        assert!(condition_key_kind("capsule://x#condition/secret/K").is_err());
+        assert!(condition_key_kind("condition.secret.K").is_err());
+        assert!(condition_key_kind("bogus.key").is_err());
     }
 
     #[test]
