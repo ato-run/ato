@@ -56,7 +56,14 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     strict_realization: bool,
 ) -> Result<i32> {
     // ── Gate 1: OCI policy envelope from the lock-compiled execution plan ────
-    let oci_envelope = resolve_oci_envelope(plan)?;
+    // Compile the full plan once; it is reused for the launch receipt so the
+    // receipt records exactly the plan the gates evaluated.
+    let execution_plan = compile_oci_execution_plan(plan)?;
+    let oci_envelope = execution_plan
+        .oci
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("{}", OciProviderError::OciPolicyEnvelopeMissing))
+        .context("OCI execution plan missing policy envelope; ensure target has runtime=\"oci\"")?;
 
     // ── Gate 2: resolved image digest required ───────────────────────────────
     let resolved_image = oci_envelope
@@ -178,6 +185,12 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     // no-op here. This is distinct from Gate 4 (`OciPolicyMode::Strict`).
     enforce_strict_oci_launch(&oci_envelope, &container_request, strict_realization)?;
 
+    // Persist a durable prelaunch receipt with the OCI provider evidence (#501),
+    // BEFORE any pull/create, so the resolved launch envelope is recorded
+    // independent of the live container. Best-effort: a receipt issue must never
+    // regress an OCI launch.
+    persist_oci_launch_receipt(plan, &execution_plan, launch_ctx, None, &reporter).await;
+
     reporter
         .notify(format!(
             "⬇  Pulling OCI image: {}",
@@ -264,8 +277,13 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     Ok(exit_code as i32)
 }
 
-/// Compile the `OciPolicyEnvelope` from the lock-derived execution plan.
-fn resolve_oci_envelope(plan: &ManifestData) -> Result<OciPolicyEnvelope> {
+/// Compile the full lock-derived `ExecutionPlan` for the selected OCI target.
+///
+/// Shared by the policy-envelope gate and the launch-receipt builder so both read
+/// the same compiled plan (the receipt records exactly what the gate evaluated).
+pub(crate) fn compile_oci_execution_plan(
+    plan: &ManifestData,
+) -> Result<capsule_core::execution_plan::model::ExecutionPlan> {
     use capsule_core::contract::lock_runtime;
     use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
 
@@ -273,18 +291,13 @@ fn resolve_oci_envelope(plan: &ManifestData) -> Result<OciPolicyEnvelope> {
         lock_runtime::resolve_lock_runtime_model(&plan.lock, Some(plan.selected_target_label()))
             .context("failed to resolve lock runtime model for OCI target")?;
 
-    let execution_plan = derive::compile_execution_plan_from_lock(
+    derive::compile_execution_plan_from_lock(
         &plan.lock,
         &resolved,
         &Default::default(),
         &PlatformSnapshot::current(),
     )
-    .context("failed to compile OCI execution plan from lock")?;
-
-    execution_plan
-        .oci
-        .ok_or_else(|| anyhow::anyhow!("{}", OciProviderError::OciPolicyEnvelopeMissing))
-        .context("OCI execution plan missing policy envelope; ensure target has runtime=\"oci\"")
+    .context("failed to compile OCI execution plan from lock")
 }
 
 /// Check that the policy mode can be honoured by the PodmanProvider.
@@ -352,6 +365,51 @@ fn enforce_strict_oci_launch(
     // path yet (a remaining #501 slice), so pass `None` rather than substituting
     // the provider projection fingerprint — which is not an execution identity.
     enforce_strict_oci(&facts, &enforcement, profile, None).map_err(anyhow::Error::new)
+}
+
+/// Persist a durable launch receipt carrying OCI provider evidence (#501).
+///
+/// Shared by the single-target and multi-service OCI paths. Builds the v2 receipt
+/// (which already includes `provider_projections`) via the shared receipt builder
+/// and writes it to the executions store, emitting the stable `RECEIPT: <path>`
+/// line on success (parity with the source-native launch path).
+///
+/// **Best-effort:** on any build/write failure it warns and returns — a receipt
+/// issue must never regress an OCI launch. `provider_projections_override` lets the
+/// multi-service path supply one evidence record per service; `None` keeps the
+/// builder's single declared projection (single-target).
+pub(crate) async fn persist_oci_launch_receipt(
+    plan: &ManifestData,
+    execution_plan: &capsule_core::execution_plan::model::ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    provider_projections_override: Option<
+        Vec<capsule_core::execution_identity::OciProviderReceiptEvidence>,
+    >,
+    reporter: &Arc<CliReporter>,
+) {
+    let result = crate::application::execution_receipt_builder::build_oci_launch_receipt(
+        plan,
+        execution_plan,
+        launch_ctx,
+        provider_projections_override,
+    )
+    .and_then(|document| {
+        crate::application::execution_receipts::write_receipt_document_atomic(&document)
+    });
+    match result {
+        Ok(path) => {
+            let _ = reporter
+                .notify(format!("RECEIPT: {}", path.display()))
+                .await;
+        }
+        Err(err) => {
+            let _ = reporter
+                .notify(format!(
+                    "⚠  failed to persist OCI launch receipt (continuing): {err}"
+                ))
+                .await;
+        }
+    }
 }
 
 fn print_log_chunk(service_name: &str, chunk: &OciLogChunk) -> std::io::Result<()> {

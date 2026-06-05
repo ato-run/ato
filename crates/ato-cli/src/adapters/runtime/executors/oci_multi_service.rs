@@ -224,16 +224,33 @@ pub(crate) async fn execute_multi_service(
         strict_realization,
     )?;
 
-    // Per-service, receipt-safe provider evidence (#501). Not persisted to disk
-    // yet (the OCI launch-receipt path is the next slice); emitted as a stable
-    // diagnostic line so it is observable and testable.
-    for (service_label, evidence) in
+    // Persist a durable launch receipt with one receipt-safe provider-evidence
+    // record per service (#501), BEFORE `execute_service_graph_with_provider`
+    // runs any side effect. The receipt's identity/graph come from the selected
+    // target's compiled plan; its `provider_projections` carry every service.
+    // Best-effort: a receipt issue never regresses the launch.
+    let provider_evidence: Vec<_> =
         oci_orchestration_provider_evidence(&orch_plan, &images, &egress_allow, is_podman)
-    {
-        if let Ok(json) = serde_json::to_string(&evidence) {
-            reporter
-                .notify(format!("PROVIDER_EVIDENCE [{service_label}]: {json}"))
-                .await?;
+            .into_iter()
+            .map(|(_label, evidence)| evidence)
+            .collect();
+    match crate::executors::oci_single_target::compile_oci_execution_plan(plan) {
+        Ok(execution_plan) => {
+            crate::executors::oci_single_target::persist_oci_launch_receipt(
+                plan,
+                &execution_plan,
+                launch_ctx,
+                Some(provider_evidence),
+                &reporter,
+            )
+            .await;
+        }
+        Err(err) => {
+            let _ = reporter
+                .notify(format!(
+                    "⚠  skipped OCI launch receipt (could not compile execution plan): {err}"
+                ))
+                .await;
         }
     }
 
@@ -368,7 +385,11 @@ fn oci_orchestration_provider_evidence(
     build_oci_service_projections(orch_plan, images, is_podman)
         .into_iter()
         .map(|(service_label, plan)| {
-            let evidence = provider_receipt_evidence(&plan, &enforcement, network_policy_required);
+            let mut evidence =
+                provider_receipt_evidence(&plan, &enforcement, network_policy_required);
+            // Stamp the value-free service label so a single receipt can carry one
+            // evidence record per service.
+            evidence.service_label = Some(service_label.clone());
             (service_label, evidence)
         })
         .collect()
@@ -3902,6 +3923,9 @@ volumes:
         for (svc, ev) in &evidence {
             assert_eq!(ev.provider_kind, "oci");
             assert_eq!(ev.provider_version.as_deref(), Some("oci-podman-v1"));
+            // Each record carries its own value-free service label (so a single
+            // receipt's provider_projections can be attributed per service).
+            assert_eq!(ev.service_label.as_deref(), Some(svc.as_str()));
             assert!(
                 matches!(ev.image_digest_status, OciImageDigestStatus::Pinned { .. }),
                 "service {svc} image must be pinned"
