@@ -46,7 +46,8 @@ mod tests;
 
 pub use bundle::{
     ProviderProjectionEvidence, RealizationEnvironment, RuntimeEvidence, RuntimeToolEvidence,
-    StateBindingEvidence, realization_from_launch_bundle,
+    StateBindingEvidence, materialization_request_from_launch_bundle,
+    realization_from_launch_bundle,
 };
 pub use classify::{
     MountFact, RealizationEdge, RealizationNode, RealizationNodeFacts, RealizationRequest, classify,
