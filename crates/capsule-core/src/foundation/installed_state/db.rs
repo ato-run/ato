@@ -726,6 +726,32 @@ impl InstalledStateDb {
         })
     }
 
+    /// Persist the resolved condition set for a revision after relaunch
+    /// resolution. Delegates to [`Self::replace_launch_conditions_for_revision`]
+    /// (the same transactional all-or-nothing replace).
+    ///
+    /// Unlike the **install-time** ledger write (strict — a failure fails the
+    /// install), this relaunch-time write-through is intended to be used
+    /// **best-effort** by the caller: the in-memory resolved claims are
+    /// authoritative for the current launch, so a persistence failure should warn
+    /// and continue, not abort the launch. Callers pass only durable resolutions
+    /// (see `RelaunchResolution::durable_persist_claims`); transient
+    /// host-env-presence resolutions must not be persisted.
+    pub fn record_resolved_launch_conditions(
+        &self,
+        install_profile_key: &str,
+        install_revision_id: Option<&str>,
+        provider_id: Option<&str>,
+        claims: &[LaunchConditionClaim],
+    ) -> Result<()> {
+        self.replace_launch_conditions_for_revision(
+            install_profile_key,
+            install_revision_id,
+            provider_id,
+            claims,
+        )
+    }
+
     /// Map one row into the intermediate tuple of raw column values.
     #[allow(clippy::type_complexity)]
     fn map_condition_row(
