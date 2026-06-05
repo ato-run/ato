@@ -76,43 +76,11 @@ fn classify_observations(
     causes.sort();
     causes.dedup();
 
-    let class = classify_causes(&causes);
+    // The class-from-causes precedence lives in capsule-core so the OCI provider
+    // assessment (#501) recomputes the class identically when it merges its causes.
+    let class = ReproducibilityClass::from_causes(&causes);
 
     ReproducibilityIdentity { class, causes }
-}
-
-fn classify_causes(causes: &[ReproducibilityCause]) -> ReproducibilityClass {
-    if causes.is_empty() {
-        return ReproducibilityClass::Pure;
-    }
-    if causes.iter().any(is_best_effort_cause) {
-        return ReproducibilityClass::BestEffort;
-    }
-    if causes.contains(&ReproducibilityCause::StateBound) {
-        return ReproducibilityClass::StateBound;
-    }
-    if causes.contains(&ReproducibilityCause::TimeBound) {
-        return ReproducibilityClass::TimeBound;
-    }
-    if causes.contains(&ReproducibilityCause::NetworkBound) {
-        return ReproducibilityClass::NetworkBound;
-    }
-    if causes.contains(&ReproducibilityCause::HostBound) {
-        return ReproducibilityClass::HostBound;
-    }
-    ReproducibilityClass::BestEffort
-}
-
-fn is_best_effort_cause(cause: &ReproducibilityCause) -> bool {
-    matches!(
-        cause,
-        ReproducibilityCause::UnknownDependencyOutput
-            | ReproducibilityCause::UnknownRuntimeIdentity
-            | ReproducibilityCause::UntrackedEnvironment
-            | ReproducibilityCause::UntrackedFilesystemView
-            | ReproducibilityCause::UntrackedDynamicDependency
-            | ReproducibilityCause::LifecycleUnknown
-    )
 }
 
 #[cfg(test)]
