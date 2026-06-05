@@ -541,7 +541,8 @@ mod tests {
         // Existence-only metadata row — no secret value involved.
         db.record_secret_grant_ref(
             "ipk_app",
-            "capsule://ato.run/x#condition/secret/OPENAI_API_KEY",
+            Some("ato.run/koh0920/hello"),
+            "secret.OPENAI_API_KEY",
             "openai-default",
         )
         .unwrap();
@@ -590,7 +591,8 @@ mod tests {
         );
         db.record_state_binding_ref(
             "ipk_app",
-            "capsule://ato.run/x#condition/state/data",
+            Some("ato.run/koh0920/hello"),
+            "state.data",
             "data",
             "user-data",
         )
@@ -609,10 +611,61 @@ mod tests {
         // The grant registry stores only a logical id; presence is decided from
         // that id alone — no secret value is ever recorded or consulted.
         let (_d, db) = temp_db();
-        db.record_secret_grant_ref("ipk_app", "capsule://x#condition/secret/K", "g1")
+        db.record_secret_grant_ref("ipk_app", None, "secret.K", "g1")
             .unwrap();
         assert!(db.secret_grant_ref_exists("g1").unwrap());
         // The stored row carries no secret value (only the id / ref / status).
         assert!(!db.secret_grant_ref_exists("sk-anything").unwrap());
+    }
+
+    #[test]
+    fn production_secret_probe_does_not_satisfy_raw_token_id_even_if_attempted() {
+        let (_d, db) = temp_db();
+        // A secret condition whose grant_ref is a raw token. Even if some caller
+        // tried to record it, the registry boundary rejects it, so the probe
+        // returns false and the condition stays blocked.
+        assert!(
+            db.record_secret_grant_ref("ipk_app", None, "secret.K", "sk-raw-token")
+                .is_err()
+        );
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"grant_ref":"sk-raw-token"}"#,
+            )],
+        );
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+            .expect_err("a raw-token grant_ref must never satisfy a secret condition");
+        assert!(
+            err.to_string()
+                .contains(ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED)
+        );
+    }
+
+    #[test]
+    fn production_state_probe_does_not_satisfy_raw_path_id_even_if_attempted() {
+        let (_d, db) = temp_db();
+        assert!(
+            db.record_state_binding_ref("ipk_app", None, "state.data", "data", "/Users/koh/data")
+                .is_err()
+        );
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::State,
+                "data",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"binding_ref":"/Users/koh/data"}"#,
+            )],
+        );
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+            .expect_err("a raw-path binding_ref must never satisfy a state condition");
+        assert!(
+            err.to_string()
+                .contains(ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED)
+        );
     }
 }
