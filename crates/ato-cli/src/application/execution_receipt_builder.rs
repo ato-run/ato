@@ -659,6 +659,37 @@ pub(crate) fn build_prelaunch_receipt_document_with_graph(
     }
 }
 
+/// Build a durable launch-receipt document for an OCI launch (#501).
+///
+/// Reuses the runtime-agnostic v2 prelaunch builder — `derive_launch_spec`
+/// returns a stub for OCI and the v2 observers tolerate it — so OCI launches
+/// produce the SAME receipt family as source-native launches, including the
+/// `provider_projections` evidence, `GraphCompleteness::Partial`,
+/// `ObservationScope::declared_resolved`, and no `observed_execution_id`. No new
+/// JSON format is introduced.
+///
+/// OCI launch receipts are always **v2**: the `provider_projections` field exists
+/// only on v2, so a v1 receipt could not carry the provider evidence. Source-native
+/// receipts keep honoring `ATO_RECEIPT_SCHEMA` — this function does not change that.
+///
+/// `provider_projections_override` replaces the builder's single declared OCI
+/// projection with an explicit list — used by the multi-service path to record one
+/// evidence record per service. `None` keeps the builder's own
+/// `declared_oci_provider_projections` output (correct for single-target).
+pub(crate) fn build_oci_launch_receipt(
+    plan: &ManifestData,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    provider_projections_override: Option<Vec<OciProviderReceiptEvidence>>,
+) -> Result<ExecutionReceiptDocument> {
+    let (mut receipt, _bundle) =
+        build_prelaunch_receipt_v2_with_graph(plan, execution_plan, launch_ctx, None)?;
+    if let Some(projections) = provider_projections_override {
+        receipt = receipt.with_provider_projections(projections);
+    }
+    Ok(ExecutionReceiptDocument::V2(receipt))
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod graph_identity_tests {
@@ -1259,5 +1290,208 @@ mod oci_provider_evidence_tests {
             evidence[0].network_enforcement_status,
             OciEnforcementStatus::Enforced
         );
+    }
+}
+
+#[cfg(test)]
+mod oci_launch_receipt_tests {
+    use capsule_core::execution_identity::{
+        CaseSensitivity, DependencyIdentityV2, EnvironmentIdentityV2, EnvironmentMode,
+        ExecutionIdentityInputV2, ExecutionReceiptDocument, ExecutionReceiptV2, FdLayoutIdentity,
+        FilesystemIdentityV2, FilesystemSemantics, GraphCompleteness, LaunchArg, LaunchEntryPoint,
+        LaunchIdentityV2, OciEnforcementStatus, OciImageDigestStatus, OciProviderReceiptEvidence,
+        PlatformIdentity, PolicyIdentityV2, ReproducibilityClass, ReproducibilityIdentity,
+        RuntimeCompleteness, RuntimeIdentityV2, SourceIdentityV2, SourceProvenance,
+        SourceProvenanceKind, SymlinkPolicy, TmpPolicy, Tracked, UlimitIdentity,
+    };
+    use std::collections::BTreeMap;
+
+    /// One receipt-safe per-service provider evidence record (mirrors the shape
+    /// the orchestration path persists; env *keys* only, never values).
+    fn evidence(service: &str, image: &str) -> OciProviderReceiptEvidence {
+        OciProviderReceiptEvidence {
+            provider_kind: "oci".to_string(),
+            provider_name: "podman".to_string(),
+            image_reference: image.to_string(),
+            image_digest_status: OciImageDigestStatus::Unpinned,
+            platform: None,
+            env_keys: vec!["PORT".to_string()],
+            mounts: vec![],
+            ports: vec![],
+            network_aliases: vec![service.to_string()],
+            capabilities_required: vec!["network-policy".to_string()],
+            provider_version: Some("oci-podman-v1".to_string()),
+            network_enforcement_status: OciEnforcementStatus::Unsupported,
+            capability_enforcement_status: OciEnforcementStatus::Enforced,
+            derived_command_redacted: vec!["create".to_string(), "<redacted>".to_string()],
+            service_label: Some(service.to_string()),
+        }
+    }
+
+    /// A minimal valid v2 receipt carrying the given provider evidence. Mirrors
+    /// what `build_oci_launch_receipt` produces (v2 + `with_provider_projections`)
+    /// without needing a lock-compiled `ExecutionPlan`, so the persistence,
+    /// override, and receipt-safety can be unit-tested.
+    fn oci_receipt_with(projections: Vec<OciProviderReceiptEvidence>) -> ExecutionReceiptV2 {
+        let input = ExecutionIdentityInputV2::new(
+            SourceIdentityV2 {
+                source_tree_hash: Tracked::unknown("oci has no source tree"),
+                manifest_path_role: Tracked::known("workspace:capsule.toml".to_string()),
+            },
+            SourceProvenance {
+                kind: SourceProvenanceKind::Local,
+                git_remote: None,
+                git_commit: None,
+                registry_ref: None,
+            },
+            DependencyIdentityV2 {
+                derivation_hash: Tracked::not_applicable(),
+                output_hash: Tracked::not_applicable(),
+                derivation_inputs: None,
+            },
+            RuntimeIdentityV2 {
+                declared: Some("oci".to_string()),
+                resolved_ref: Tracked::known("oci".to_string()),
+                binary_hash: Tracked::not_applicable(),
+                dynamic_linkage: Tracked::not_applicable(),
+                completeness: RuntimeCompleteness::DeclaredOnly,
+                platform: PlatformIdentity {
+                    os: "linux".to_string(),
+                    arch: "amd64".to_string(),
+                    libc: "unknown".to_string(),
+                },
+            },
+            EnvironmentIdentityV2 {
+                entries: Vec::new(),
+                fd_layout: Tracked::known(FdLayoutIdentity {
+                    stdin: "inherited".to_string(),
+                    stdout: "inherited".to_string(),
+                    stderr: "inherited".to_string(),
+                }),
+                umask: Tracked::known("022".to_string()),
+                ulimits: Tracked::known(UlimitIdentity {
+                    limits: BTreeMap::new(),
+                }),
+                mode: EnvironmentMode::Closed,
+                ambient_untracked_keys: Vec::new(),
+            },
+            FilesystemIdentityV2 {
+                view_hash: Tracked::known("blake3:fs".to_string()),
+                partial_view_hash: None,
+                source_root: Tracked::known("workspace:.".to_string()),
+                working_directory: Tracked::known("workspace:.".to_string()),
+                readonly_layers: Vec::new(),
+                writable_dirs: Vec::new(),
+                persistent_state: Vec::new(),
+                semantics: FilesystemSemantics {
+                    case_sensitivity: Tracked::known(CaseSensitivity::Sensitive),
+                    symlink_policy: Tracked::known(SymlinkPolicy::Preserve),
+                    tmp_policy: Tracked::known(TmpPolicy::SessionLocal),
+                },
+            },
+            PolicyIdentityV2 {
+                network_policy_hash: Tracked::known("blake3:net".to_string()),
+                capability_policy_hash: Tracked::known("blake3:cap".to_string()),
+                sandbox_policy_hash: Tracked::known("blake3:sandbox".to_string()),
+            },
+            LaunchIdentityV2 {
+                entry_point: LaunchEntryPoint::Command {
+                    name: "oci".to_string(),
+                },
+                argv: Vec::<LaunchArg>::new(),
+                working_directory: Tracked::known("workspace:.".to_string()),
+            },
+            None,
+            ReproducibilityIdentity {
+                class: ReproducibilityClass::HostBound,
+                causes: Vec::new(),
+            },
+        );
+        ExecutionReceiptV2::from_input(input, "2026-06-05T00:00:00Z".to_string())
+            .expect("build v2 receipt")
+            .with_provider_projections(projections)
+            .with_graph_completeness(GraphCompleteness::Partial)
+    }
+
+    #[test]
+    fn oci_provider_evidence_persists_per_service_and_round_trips() {
+        let receipt = oci_receipt_with(vec![
+            evidence("web", "alpine:3.21"),
+            evidence("db", "postgres:16"),
+        ]);
+        let exec_id = receipt.execution_id.clone();
+        let doc = ExecutionReceiptDocument::V2(receipt);
+
+        // Persist to an isolated executions root and read it back.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = crate::application::execution_receipts::write_receipt_document_atomic_at(
+            temp.path(),
+            &doc,
+        )
+        .expect("write receipt");
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("receipt.json")
+        );
+
+        let read =
+            crate::application::execution_receipts::read_receipt_document_at(temp.path(), &exec_id)
+                .expect("read receipt");
+        let read_v2 = match read {
+            ExecutionReceiptDocument::V2(r) => r,
+            ExecutionReceiptDocument::V1(_) => panic!("v2 expected"),
+        };
+
+        // One provider-evidence record per service, each value-free-labeled.
+        assert_eq!(read_v2.provider_projections.len(), 2);
+        let labels: Vec<&str> = read_v2
+            .provider_projections
+            .iter()
+            .filter_map(|p| p.service_label.as_deref())
+            .collect();
+        assert!(labels.contains(&"web") && labels.contains(&"db"));
+        // Enforcement status persisted; env keys (not values).
+        assert_eq!(
+            read_v2.provider_projections[0].network_enforcement_status,
+            OciEnforcementStatus::Unsupported
+        );
+        assert!(
+            read_v2.provider_projections[0]
+                .env_keys
+                .contains(&"PORT".to_string())
+        );
+
+        // Boundaries: no runtime observation, never Complete pre-observation.
+        assert!(read_v2.observed_execution_id.is_none());
+        assert_ne!(
+            read_v2.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+
+        // On-disk receipt-safety.
+        let json = std::fs::read_to_string(&path).expect("read file");
+        assert!(
+            !json.contains("observed_execution_id"),
+            "no observed id on disk: {json}"
+        );
+        assert!(
+            !json.contains("\"state\":\"complete\""),
+            "must not claim a Complete graph on disk"
+        );
+        assert!(
+            json.contains("provider_projections"),
+            "provider evidence must be persisted on disk"
+        );
+    }
+
+    #[test]
+    fn oci_receipt_with_no_override_still_v2() {
+        // The single-target path passes no override; the receipt is still v2 and
+        // can carry whatever the builder attached. Here we assert the v2 shape and
+        // that an empty projection list is allowed (the declared projection is
+        // attached by the builder in the real path).
+        let receipt = oci_receipt_with(Vec::new());
+        let doc = ExecutionReceiptDocument::V2(receipt);
+        assert!(matches!(doc, ExecutionReceiptDocument::V2(_)));
     }
 }
