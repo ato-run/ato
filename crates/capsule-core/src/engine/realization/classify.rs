@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use super::model::{
     RealizationContract, RealizationEdgeState, RealizationEdgeStatus, RealizationEvidence,
     RealizationNodeKind, RealizationNodeStatus, RealizationResult, RealizationStatus,
-    UnrealizableReason,
+    RedactedProjectionCommand, UnrealizableReason,
 };
 
 /// A request to classify whether a resolved capsule can be realized.
@@ -129,9 +129,11 @@ pub enum RealizationNodeFacts {
     },
     ProviderProjection {
         provider: String,
-        /// Rendered provider invocation (e.g. `podman run …`). Carried as
-        /// evidence only — never identity (#501).
-        projection_command: Option<String>,
+        /// Redacted rendered provider invocation. Carried as evidence only —
+        /// never identity (#501) and never the raw command (#498-A review).
+        /// Already redacted before it reaches the classifier; see
+        /// [`RedactedProjectionCommand::from_argv`].
+        projection_command: Option<RedactedProjectionCommand>,
     },
 }
 
@@ -352,6 +354,8 @@ fn classify_node(node: &RealizationNode) -> RealizationNodeStatus {
                 });
             }
             (RealizationStatus::Materializable, evidence)
+            // Note: `command` is already a RedactedProjectionCommand — the raw
+            // argv never reaches this layer, so it cannot enter the contract.
         }
     };
 

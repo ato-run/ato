@@ -105,12 +105,73 @@ impl RealizationStatus {
     }
 }
 
+/// Redacted, receipt-safe representation of a rendered provider invocation.
+///
+/// This holds the *shape* of an OCI/provider argv — flags and structural
+/// tokens — with every value reduced to a `<redacted>` placeholder. It
+/// deliberately never holds the raw command: an OCI invocation can embed env
+/// values, tokens, DB URLs, or absolute paths, and a [`RealizationContract`]
+/// is declared serde-ready and is the input the future receipt writeback
+/// (#493) will persist. Fixing the redaction boundary here — in the core model
+/// — means a raw command can never reach a serialized contract by construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactedProjectionCommand {
+    /// Renderer label, e.g. `"podman-create"`, `"docker-run"`. Caller-supplied
+    /// and value-free.
+    pub renderer: String,
+    /// Argv tokens with all values redacted: flags are preserved, every
+    /// positional or `KEY=VALUE` token becomes `<redacted>`, and a long flag
+    /// carrying an inline value (`--name=app`) becomes `--name=<redacted>`.
+    pub argv_shape: Vec<String>,
+    /// Always `true` once built via [`Self::from_argv`]; present so a reader
+    /// can assert the evidence is redacted before persisting it.
+    pub redacted: bool,
+}
+
+impl RedactedProjectionCommand {
+    /// Placeholder substituted for every redacted value.
+    pub const PLACEHOLDER: &'static str = "<redacted>";
+
+    /// Build redacted evidence from a renderer label and a raw argv. The raw
+    /// argv is consumed here and never stored: only the value-free shape
+    /// survives.
+    pub fn from_argv(renderer: impl Into<String>, argv: &[String]) -> Self {
+        Self {
+            renderer: renderer.into(),
+            argv_shape: argv.iter().map(|token| redact_token(token)).collect(),
+            redacted: true,
+        }
+    }
+}
+
+/// Reduce a single argv token to its value-free shape. A bare flag survives; a
+/// flag with an inline value keeps the flag name only; everything else (a
+/// positional argument or a `KEY=VALUE` assignment) is fully redacted, since it
+/// may carry an env value, token, URL, or path.
+fn redact_token(token: &str) -> String {
+    let placeholder = RedactedProjectionCommand::PLACEHOLDER;
+    if let Some(rest) = token.strip_prefix("--") {
+        match rest.split_once('=') {
+            Some((key, _value)) => format!("--{key}={placeholder}"),
+            None => token.to_string(),
+        }
+    } else if token.starts_with('-') && token.len() > 1 {
+        match token.split_once('=') {
+            Some((key, _value)) => format!("{key}={placeholder}"),
+            None => token.to_string(),
+        }
+    } else {
+        placeholder.to_string()
+    }
+}
+
 /// A typed piece of evidence backing a node's status.
 ///
 /// Evidence never contains resolved secret values. The
 /// [`Self::DerivedProjectionCommand`] variant is the explicit home for a
-/// rendered provider invocation (e.g. an OCI `podman run …` string): it is
-/// derived *from* the graph and recorded as evidence, never promoted to
+/// rendered provider invocation (e.g. an OCI `podman run …`): it is derived
+/// *from* the graph and recorded as **redacted** evidence
+/// ([`RedactedProjectionCommand`]), never the raw command and never promoted to
 /// identity (#501).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "evidence", rename_all = "kebab-case")]
@@ -125,9 +186,13 @@ pub enum RealizationEvidence {
     StateBinding { reference: String },
     /// A gap between a required policy and provider enforcement.
     PolicyEnforcementGap { policy: String, detail: String },
-    /// A rendered provider invocation, derived from the graph. Evidence only —
-    /// explicitly **not** identity (#501).
-    DerivedProjectionCommand { provider: String, command: String },
+    /// A rendered provider invocation, derived from the graph and redacted.
+    /// Evidence only — explicitly **not** identity (#501), and never the raw
+    /// command (#498-A review).
+    DerivedProjectionCommand {
+        provider: String,
+        command: RedactedProjectionCommand,
+    },
     /// Free-form note for facts that do not yet have a typed variant.
     Note { detail: String },
 }
