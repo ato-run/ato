@@ -2614,6 +2614,7 @@ pub(crate) fn execute_run_command(
     plan_only: bool,
     strict_realization: bool,
     install_lifecycle_context: Option<crate::cli::commands::run::InstallLifecycleContext>,
+    capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
     pinned_revision_output_dir: Option<std::path::PathBuf>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
@@ -2661,6 +2662,7 @@ pub(crate) fn execute_run_command(
         plan_only,
         strict_realization,
         install_lifecycle_context,
+        capsule_launch_inputs,
         pinned_revision_output_dir,
     }))
 }
