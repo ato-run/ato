@@ -363,13 +363,13 @@ pub struct ExecutionReceiptV2 {
     /// readiness gate). See [`GraphReceipt`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_receipt: Option<GraphReceipt>,
-    /// Per-node observations for the launch graph. Reserved — emitted
-    /// as `[]` today so future waves can populate it without a schema
-    /// bump.
+    /// Per-node projection of the launch graph (#493): one entry per graph
+    /// node, populated by [`Self::with_graph_projection`] from the
+    /// declared/resolved graph. Empty only for legacy/no-graph launches. See
+    /// [`NodeReceipt`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub node_receipts: Vec<NodeReceipt>,
-    /// Per-edge observations for the launch graph. Reserved — see
-    /// `node_receipts`.
+    /// Per-edge projection of the launch graph (#493); see `node_receipts`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_receipts: Vec<EdgeReceipt>,
     /// Receipt-safe provider projection evidence for OCI launches (#493,
@@ -745,10 +745,15 @@ impl GraphReceipt {
     }
 }
 
-/// Per-node receipt entry. Reserved for future waves that attach
-/// per-node lifecycle pass/fail observations. Today emitted as an empty
-/// list so the schema is forward-compatible: downstream consumers can
-/// already iterate `node_receipts` without a schema bump.
+/// Per-node receipt entry: one node of the launch graph projected into the
+/// receipt (#493).
+///
+/// Populated by [`ExecutionReceiptV2::with_graph_projection`] from the
+/// declared/resolved launch graph — `node_identifier` and `kind` come from the
+/// graph node, never from runtime command strings or session-local data.
+/// `status` stays `None`: this is a declared/resolved-graph projection, not a
+/// runtime observation; per-node lifecycle pass/fail status remains future work
+/// (#495). Legacy paths with no graph available emit an empty list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeReceipt {
     pub node_identifier: String,
@@ -757,7 +762,9 @@ pub struct NodeReceipt {
     pub status: Option<String>,
 }
 
-/// Per-edge receipt entry. Reserved for future waves; see `NodeReceipt`.
+/// Per-edge receipt entry: one edge of the launch graph projected into the
+/// receipt (#493). See [`NodeReceipt`] for the declared/resolved-vs-observed
+/// distinction — `status` is likewise `None` until observation lands (#495).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeReceipt {
     pub source: String,
@@ -2531,6 +2538,54 @@ pub(in crate::engine::execution_identity) mod tests {
             receipt.graph_completeness,
             Some(GraphCompleteness::Complete)
         );
+    }
+
+    #[test]
+    fn graph_backed_receipt_json_has_non_empty_node_and_edge_receipts() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        // A representative launch graph projected into a receipt the same way
+        // the production builder does (`with_graph_projection`).
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+            ],
+            edges: vec![ExecutionGraphEdge {
+                source: "src:app".to_string(),
+                target: "dep:db".to_string(),
+                kind: ExecutionGraphEdgeKind::DependsOn,
+            }],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+        let receipt = base_receipt().with_graph_projection(&graph);
+
+        // #493 acceptance: the *serialized* receipt JSON carries non-empty
+        // node_receipts / edge_receipts arrays — not just the in-memory struct.
+        let json = serde_json::to_value(&receipt).expect("receipt json");
+        assert!(
+            json["node_receipts"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "serialized receipt must carry a non-empty node_receipts array; got: {json}"
+        );
+        assert!(
+            json["edge_receipts"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "serialized receipt must carry a non-empty edge_receipts array; got: {json}"
+        );
+        // The graph-derived identity + kind contract is visible in the JSON.
+        assert_eq!(json["node_receipts"][0]["node_identifier"], "src:app");
+        assert_eq!(json["edge_receipts"][0]["kind"], "depends-on");
+        // No observed status is fabricated in the wire bytes.
+        assert!(json["node_receipts"][0].get("status").is_none());
     }
 
     #[test]
