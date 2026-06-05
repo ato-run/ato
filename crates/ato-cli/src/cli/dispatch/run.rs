@@ -225,6 +225,7 @@ fn execute_standard_run_with_env_assistance(
             args.plan_only,
             args.strict_realization,
             /* install_lifecycle_context */ None,
+            /* capsule_launch_inputs */ Vec::new(),
             /* pinned_revision_output_dir */ None,
             args.reporter.clone(),
         )

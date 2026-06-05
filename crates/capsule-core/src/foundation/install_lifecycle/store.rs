@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::ids::{InstallRevisionId, InstalledAppId, ProfileId};
+use super::ids::{
+    InstallProfileKey, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
+};
 
 // ── AppRecord ──────────────────────────────────────────────────────────────
 
@@ -621,6 +623,89 @@ impl InstallInstanceStore {
         }
         Ok(profiles)
     }
+
+    /// Resolve a capsule handle (a `publisher/slug` scoped id, tolerant of a
+    /// `capsule://` prefix and ASCII case) to the installed profile that owns
+    /// it. Enumerates installed apps and matches each [`AppRecord`]'s
+    /// `capsule_handle` (falling back to `publisher/slug`) under a light
+    /// normalization, returning the first match's
+    /// `(installed_app_id, profile_id, install_profile_key, install_revision_id)`.
+    ///
+    /// `capsule://` carries no profile selector, so the **default** launch
+    /// profile is preferred, falling back to any profile that has a current
+    /// revision. This is a pure identity lookup against the install ledger
+    /// (`app.json` + `current_revision`) — it never reads `capsule.toml`, the
+    /// artifact manifest, or a lockfile. Returns `Ok(None)` when nothing matches.
+    pub fn find_profile_by_capsule_handle(
+        &self,
+        capsule_handle: &str,
+    ) -> Result<
+        Option<(
+            InstalledAppId,
+            ProfileId,
+            InstallProfileKey,
+            InstallRevisionId,
+        )>,
+    > {
+        let target = normalize_handle_for_match(capsule_handle);
+        if target.is_empty() {
+            return Ok(None);
+        }
+        for app_id in self.list_installed_apps()? {
+            let Ok(record) = self.read_app_record(&app_id) else {
+                continue;
+            };
+            if !record_handle_matches(&record, &target) {
+                continue;
+            }
+            // capsule:// has no profile selector → prefer the default launch
+            // profile, then any profile that has a current revision.
+            let profiles = self.list_profiles(&app_id)?;
+            let default_id = ProfileId::default();
+            let mut ordered: Vec<ProfileId> = Vec::with_capacity(profiles.len() + 1);
+            if profiles.iter().any(|p| *p == default_id) {
+                ordered.push(default_id.clone());
+            }
+            ordered.extend(profiles.into_iter().filter(|p| *p != default_id));
+            for profile_id in ordered {
+                if let Ok(rev_id) = self.current_revision(&app_id, &profile_id) {
+                    let ipk = derive_install_profile_key(&app_id, &profile_id);
+                    return Ok(Some((app_id, profile_id, ipk, rev_id)));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Light normalization for capsule-handle matching: trim, drop a `capsule://`
+/// prefix and a trailing `/`, then lowercase. Mirrors the comparison used by the
+/// Desktop launch-intent resolver so `ato launch` and Desktop agree on which
+/// installed app a handle refers to.
+fn normalize_handle_for_match(handle: &str) -> String {
+    handle
+        .trim()
+        .trim_start_matches("capsule://")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+/// Whether an [`AppRecord`] refers to the same capsule as `target` (an
+/// already-normalized handle). Compares the stored `capsule_handle` and, as a
+/// fallback, the record's `publisher/slug`.
+fn record_handle_matches(record: &AppRecord, target: &str) -> bool {
+    if !record.capsule_handle.is_empty()
+        && normalize_handle_for_match(&record.capsule_handle) == target
+    {
+        return true;
+    }
+    if !record.publisher.is_empty() {
+        let publisher_slug = format!("{}/{}", record.publisher, record.slug);
+        if normalize_handle_for_match(&publisher_slug) == target {
+            return true;
+        }
+    }
+    false
 }
 
 // ── Atomic write helper ────────────────────────────────────────────────────
@@ -739,6 +824,122 @@ mod tests {
             .set_current_revision(&app, &profile_id, &rev2)
             .unwrap();
         assert_eq!(store.current_revision(&app, &profile_id).unwrap(), rev2);
+    }
+
+    // ── find_profile_by_capsule_handle: reverse lookup (location → identity) ──
+
+    #[cfg(unix)]
+    fn scaffold_installed_app(
+        store: &InstallInstanceStore,
+        installed_app_id: &str,
+        publisher: &str,
+        slug: &str,
+        capsule_handle: &str,
+        rev: &str,
+    ) -> (InstalledAppId, ProfileId, InstallRevisionId) {
+        let app = InstalledAppId::new(installed_app_id);
+        let profile_id = ProfileId::default();
+        let rev_id = InstallRevisionId::new(rev);
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app.clone(),
+                publisher: publisher.into(),
+                slug: slug.into(),
+                capsule_handle: capsule_handle.into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        store
+            .write_profile(
+                &app,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.scaffold_revision(&rev_id).unwrap();
+        store
+            .set_current_revision(&app, &profile_id, &rev_id)
+            .unwrap();
+        (app, profile_id, rev_id)
+    }
+
+    /// Resolves a stored `capsule_handle` to its profile identity, tolerant of a
+    /// `capsule://` prefix and ASCII case.
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_capsule_handle_resolves_stored_handle() {
+        let (_dir, store) = temp_store();
+        let (app, profile_id, rev_id) = scaffold_installed_app(
+            &store,
+            "app_handle_lookup_0000000000000001",
+            "koh0920",
+            "hello-capsule",
+            "koh0920/hello-capsule",
+            "rev_handle1",
+        );
+        let expected_ipk = derive_install_profile_key(&app, &profile_id);
+
+        for handle in [
+            "koh0920/hello-capsule",
+            "capsule://koh0920/hello-capsule",
+            "KOH0920/Hello-Capsule",
+            "koh0920/hello-capsule/",
+        ] {
+            let (a, p, ipk, r) = store
+                .find_profile_by_capsule_handle(handle)
+                .unwrap()
+                .unwrap_or_else(|| panic!("handle '{handle}' should resolve"));
+            assert_eq!(a, app);
+            assert_eq!(p, profile_id);
+            assert_eq!(ipk, expected_ipk);
+            assert_eq!(r, rev_id);
+        }
+    }
+
+    /// Falls back to `publisher/slug` when `capsule_handle` was not persisted.
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_capsule_handle_falls_back_to_publisher_slug() {
+        let (_dir, store) = temp_store();
+        let (app, _profile, _rev) = scaffold_installed_app(
+            &store,
+            "app_handle_lookup_0000000000000002",
+            "acme",
+            "widget",
+            "", // capsule_handle intentionally empty
+            "rev_handle2",
+        );
+        let (a, _, _, _) = store
+            .find_profile_by_capsule_handle("acme/widget")
+            .unwrap()
+            .expect("publisher/slug fallback should resolve");
+        assert_eq!(a, app);
+    }
+
+    /// Unknown / empty handles resolve to `None`, never a wrong app.
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_capsule_handle_returns_none_for_unknown() {
+        let (_dir, store) = temp_store();
+        scaffold_installed_app(
+            &store,
+            "app_handle_lookup_0000000000000003",
+            "acme",
+            "hello",
+            "acme/hello",
+            "rev_handle3",
+        );
+        assert!(
+            store
+                .find_profile_by_capsule_handle("acme/not-installed")
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.find_profile_by_capsule_handle("").unwrap().is_none());
     }
 
     // ── rollback: current_revision reverts to previous revision ──────────────
