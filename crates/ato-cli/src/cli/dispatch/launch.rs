@@ -18,7 +18,8 @@ use capsule_core::installed_state::{
 };
 
 use crate::adapters::runtime::launch_condition_prompt::{
-    CliSecretPromptProvider, SecretStoreGrantStore, resolve_prompt_launch_inputs,
+    CliLaunchConditionPromptProvider, DbStateBindingTargetStore, SecretStoreGrantStore,
+    resolve_prompt_launch_inputs,
 };
 use crate::app_control::session::ScopedInstallLifecycleGuard;
 use crate::cli::commands::run::InstallLifecycleContext;
@@ -114,8 +115,9 @@ pub(crate) fn execute_launch_command(
             Some(rev_id.as_str()),
             capsule_location.as_deref(),
             capsule_launch_inputs,
-            &CliSecretPromptProvider::new(non_interactive),
+            &CliLaunchConditionPromptProvider::new(non_interactive),
             &SecretStoreGrantStore,
+            &DbStateBindingTargetStore { db: &db },
         )?
     } else {
         capsule_launch_inputs
