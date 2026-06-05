@@ -72,6 +72,14 @@ pub enum LaunchConditionInputValue {
     Binding(String),
     /// A non-sensitive literal value (e.g. a port number, a plain env value).
     Literal(String),
+    /// The user asked to be prompted to create/select the secret grant or state
+    /// binding interactively (`secret.<name>=prompt` / `state.<key>=prompt`).
+    ///
+    /// This is **not** a proof and carries no locator: the interactive creation
+    /// flow (a later slice) must run and rewrite it to `grant:<id>` /
+    /// `binding:<id>` before it can satisfy a condition. Until then it overlays
+    /// nothing, so a `=prompt` condition stays unsatisfied (fail-closed).
+    Prompt,
 }
 
 /// Env-var names that imply a secret/credential (case-insensitive substring).
@@ -137,10 +145,19 @@ fn parse_condition_input(key: &str, value: &str) -> Result<LaunchConditionInput>
              query keys are condition keys directly (port/env/secret/state)"
         )));
     }
-    if value == "auto" || value == "prompt" {
+    if value == "auto" {
         return Err(parse_err(format!(
-            "'{value}' is not allowed as an explicit query value for '{key}'; \
-             omit the input to let the runtime resolve or prompt"
+            "'auto' is not allowed as an explicit query value for '{key}'; \
+             omit the input to let the runtime resolve automatically"
+        )));
+    }
+    // `prompt` requests interactive create/select of a secret grant or state
+    // binding — valid only for `secret.*` / `state.*` (handled by their value
+    // parsers). Reject it everywhere else so `port=prompt`, `env.X=prompt`, etc.
+    // stay invalid. `prompt` is a request, not a proof (see LaunchConditionInputValue::Prompt).
+    if value == "prompt" && !matches!(namespace, "secret" | "state") {
+        return Err(parse_err(format!(
+            "'prompt' is only valid for secret.* / state.* conditions, not '{key}'"
         )));
     }
 
@@ -205,6 +222,9 @@ fn parse_port_value(value: &str) -> Result<u16> {
 }
 
 fn parse_secret_value(value: &str) -> Result<LaunchConditionInputValue> {
+    if value == "prompt" {
+        return Ok(LaunchConditionInputValue::Prompt);
+    }
     if value == "required" {
         return Ok(LaunchConditionInputValue::Required);
     }
@@ -213,13 +233,14 @@ fn parse_secret_value(value: &str) -> Result<LaunchConditionInputValue> {
         return Ok(LaunchConditionInputValue::Grant(id.to_string()));
     }
     Err(parse_err(
-        "secret input must be 'required' or 'grant:<id>'; \
+        "secret input must be 'prompt', 'required', or 'grant:<id>'; \
          raw secret values / tokens are never accepted in a URL",
     ))
 }
 
 fn parse_state_value(value: &str) -> Result<LaunchConditionInputValue> {
     match value {
+        "prompt" => Ok(LaunchConditionInputValue::Prompt),
         "required" => Ok(LaunchConditionInputValue::Required),
         "use-existing" => Ok(LaunchConditionInputValue::UseExisting),
         _ if value.starts_with("binding:") => {
@@ -236,7 +257,7 @@ fn parse_state_value(value: &str) -> Result<LaunchConditionInputValue> {
             "raw host paths are not allowed in state input; use 'use-existing' or 'binding:<id>'",
         )),
         _ => Err(parse_err(
-            "state input must be 'required', 'use-existing', or 'binding:<id>'",
+            "state input must be 'prompt', 'required', 'use-existing', or 'binding:<id>'",
         )),
     }
 }
@@ -493,10 +514,37 @@ mod tests {
     }
 
     #[test]
-    fn capsule_launch_input_rejects_prompt_value() {
-        assert!(
-            parse_capsule_launch_input(&format!("{BASE}?secret.OPENAI_API_KEY=prompt")).is_err()
-        );
+    fn capsule_launch_input_accepts_secret_prompt() {
+        let input = parse(&format!("{BASE}?secret.OPENAI_API_KEY=prompt"));
+        let c = &input.conditions[0];
+        assert_eq!(c.kind, LaunchConditionInputKind::Secret);
+        assert_eq!(c.key, "OPENAI_API_KEY");
+        assert_eq!(c.value, LaunchConditionInputValue::Prompt);
+    }
+
+    #[test]
+    fn capsule_launch_input_accepts_state_prompt() {
+        let input = parse(&format!("{BASE}?state.data=prompt"));
+        let c = &input.conditions[0];
+        assert_eq!(c.kind, LaunchConditionInputKind::State);
+        assert_eq!(c.key, "data");
+        assert_eq!(c.value, LaunchConditionInputValue::Prompt);
+    }
+
+    #[test]
+    fn capsule_launch_input_rejects_prompt_for_non_secret_state() {
+        // `prompt` is only valid for secret.* / state.*; port/env stay invalid.
+        assert!(parse_capsule_launch_input(&format!("{BASE}?port=prompt")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?port.admin=prompt")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.LOG_LEVEL=prompt")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.MY_TOKEN=prompt")).is_err());
+    }
+
+    #[test]
+    fn capsule_launch_input_rejects_auto_for_secret_and_state() {
+        // Narrowing `prompt` must not also let `auto` through anywhere.
+        assert!(parse_capsule_launch_input(&format!("{BASE}?secret.OPENAI_API_KEY=auto")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?state.data=auto")).is_err());
     }
 
     #[test]
