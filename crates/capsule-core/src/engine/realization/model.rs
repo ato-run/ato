@@ -225,6 +225,14 @@ pub enum UnrealizableReason {
         expected: String,
         actual: String,
     },
+    /// A required immutable input presented a declared or materialized identity
+    /// that is not a well-formed content hash (e.g. a raw path or an env
+    /// assignment). It is rejected rather than trusted, so an unvalidated value
+    /// never reaches a persisted reason (#499-A review).
+    InvalidImmutableInputIdentity {
+        node_id: String,
+        node_kind: RealizationNodeKind,
+    },
     /// A runtime tool's `binary_sha256` is not populated, so it cannot be
     /// verified. Until cross-platform lockfile population lands it must be
     /// `Unavailable`, never `Verified` (#473).
