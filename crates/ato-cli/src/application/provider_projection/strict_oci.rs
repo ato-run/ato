@@ -107,13 +107,31 @@ impl OciStrictFacts {
     }
 }
 
+/// Placeholder used for [`RealizationContract::resolved_execution_id`] when the
+/// graph-derived resolved execution id is not yet threaded into the OCI launch
+/// path.
+///
+/// The single identity field of a realization contract is the *graph-derived*
+/// resolved execution id (#501); a provider projection fingerprint is **not**
+/// that id and must never be substituted for it. The OCI launch path does not
+/// build a `LaunchGraphBundle` today (it returns before the source/host receipt
+/// path), so the id is honestly unbound. This is a value-free constant — never a
+/// digest, container id, pid, or command — and never surfaces in the per-node
+/// strict-gate error payload.
+const GRAPH_EXECUTION_ID_UNBOUND: &str = "oci-strict-gate:graph-execution-id-unbound";
+
 /// Build a #498 [`RealizationContract`] from normalized OCI facts + the
 /// provider's enforcement capability. The strict gate (#500) then decides.
+///
+/// `graph_resolved_execution_id` is the genuine graph-derived resolved execution
+/// id when available; `None` records [`GRAPH_EXECUTION_ID_UNBOUND`] rather than
+/// fabricating one from a provider projection fingerprint.
 fn oci_realization_contract(
     facts: &OciStrictFacts,
     enforcement: &OciProviderEnforcement,
-    resolved_execution_id: &str,
+    graph_resolved_execution_id: Option<&str>,
 ) -> RealizationContract {
+    let resolved_execution_id = graph_resolved_execution_id.unwrap_or(GRAPH_EXECUTION_ID_UNBOUND);
     let mut nodes: Vec<RealizationNode> = Vec::new();
 
     nodes.push(RealizationNode::required(
@@ -175,12 +193,12 @@ pub(crate) fn enforce_strict_oci(
     facts: &OciStrictFacts,
     enforcement: &OciProviderEnforcement,
     profile: LaunchProfile,
-    resolved_execution_id: &str,
+    graph_resolved_execution_id: Option<&str>,
 ) -> Result<(), AtoExecutionError> {
     if !profile.is_strict() {
         return Ok(());
     }
-    let contract = oci_realization_contract(facts, enforcement, resolved_execution_id);
+    let contract = oci_realization_contract(facts, enforcement, graph_resolved_execution_id);
     crate::application::strict_realization::evaluate_contract(&contract, &[], profile)
 }
 
