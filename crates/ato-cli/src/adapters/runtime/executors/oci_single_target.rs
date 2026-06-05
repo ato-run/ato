@@ -31,14 +31,19 @@ use crate::reporters::CliReporter;
 const OCI_STOP_TIMEOUT_SECS: i64 = 10;
 
 /// Execute a single OCI target through the official `PodmanProvider` path.
+///
+/// `strict_realization` is the opt-in `--strict-realization` profile (#500/#501):
+/// when set, Gate 5 blocks the launch before any pull/create if a required policy
+/// facet cannot be enforced.
 pub(crate) async fn execute_single_target(
     plan: &ManifestData,
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
+    strict_realization: bool,
 ) -> Result<i32> {
     let selector = DefaultOciProviderSelector;
     let provider = selector.select_provider();
-    execute_with_provider(plan, reporter, launch_ctx, &provider).await
+    execute_with_provider(plan, reporter, launch_ctx, &provider, strict_realization).await
 }
 
 /// Core execution logic, accepting any `OciProvider` implementation.
@@ -48,6 +53,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     provider: &P,
+    strict_realization: bool,
 ) -> Result<i32> {
     // ── Gate 1: OCI policy envelope from the lock-compiled execution plan ────
     let oci_envelope = resolve_oci_envelope(plan)?;
@@ -143,6 +149,35 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
         })
         .collect();
 
+    // Assemble the launch request up front so the strict realization gate can
+    // inspect the full projection BEFORE any image pull or container creation.
+    let container_request = OciContainerRequest {
+        name: container_name.clone(),
+        image: pull_ref,
+        cmd,
+        env,
+        working_dir: plan.targets_oci_working_dir(),
+        labels,
+        mounts,
+        ports,
+        network: None,
+        aliases: Vec::new(),
+        platform: None,
+        extra_hosts: if launch_ctx.egress_proxy_port().is_some() {
+            vec![crate::common::proxy::OCI_HOST_GATEWAY_ENTRY.to_string()]
+        } else {
+            vec![]
+        },
+        user: plan.targets_oci_user(),
+    };
+
+    // ── Gate 5: strict realization profile (#500/#501) ───────────────────────
+    // Opt-in `--strict-realization`. Blocks before any pull/create when a
+    // required policy facet cannot be enforced by PodmanProvider, the image is
+    // unpinned, or a host-bound mount fallback is required. Normal mode is a
+    // no-op here. This is distinct from Gate 4 (`OciPolicyMode::Strict`).
+    enforce_strict_oci_launch(&oci_envelope, &container_request, strict_realization)?;
+
     reporter
         .notify(format!(
             "⬇  Pulling OCI image: {}",
@@ -156,25 +191,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
         .context("failed to pull OCI image")?;
 
     let container_id = provider
-        .create_container(&OciContainerRequest {
-            name: container_name.clone(),
-            image: pull_ref,
-            cmd,
-            env,
-            working_dir: plan.targets_oci_working_dir(),
-            labels,
-            mounts,
-            ports,
-            network: None,
-            aliases: Vec::new(),
-            platform: None,
-            extra_hosts: if launch_ctx.egress_proxy_port().is_some() {
-                vec![crate::common::proxy::OCI_HOST_GATEWAY_ENTRY.to_string()]
-            } else {
-                vec![]
-            },
-            user: plan.targets_oci_user(),
-        })
+        .create_container(&container_request)
         .await
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))
         .context("failed to create OCI container")?;
@@ -300,6 +317,41 @@ fn enforce_policy_gate(envelope: &OciPolicyEnvelope) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// Gate 5 (#500/#501): apply the opt-in strict realization profile to an OCI
+/// launch *before* any pull/create.
+///
+/// Routes the resolved policy envelope + projection plan through the strict
+/// realization gate: in strict mode it blocks (typed
+/// `ATO_ERR_STRICT_REALIZATION_BLOCKED`) when a required policy facet cannot be
+/// enforced by PodmanProvider, the image is unpinned, or a host-bound mount
+/// fallback is required. In normal mode it is a no-op, so existing OCI launches
+/// are never newly blocked. The typed error is surfaced through anyhow and stays
+/// downcastable for structured output.
+fn enforce_strict_oci_launch(
+    envelope: &OciPolicyEnvelope,
+    request: &OciContainerRequest,
+    strict_realization: bool,
+) -> Result<()> {
+    use crate::application::provider_projection::oci::OciProjectionPlan;
+    use crate::application::provider_projection::strict_oci::{
+        OciProviderEnforcement, OciStrictFacts, enforce_strict_oci,
+    };
+    use capsule_core::realization::LaunchProfile;
+
+    let profile = if strict_realization {
+        LaunchProfile::Strict
+    } else {
+        LaunchProfile::Normal
+    };
+    let projection = OciProjectionPlan::from_container_request(request);
+    let facts = OciStrictFacts::from_launch(envelope, &projection);
+    let enforcement = OciProviderEnforcement::podman(facts.network_policy_required);
+    // The graph-derived resolved execution id is not threaded into the OCI launch
+    // path yet (a remaining #501 slice), so pass `None` rather than substituting
+    // the provider projection fingerprint — which is not an execution identity.
+    enforce_strict_oci(&facts, &enforcement, profile, None).map_err(anyhow::Error::new)
 }
 
 fn print_log_chunk(service_name: &str, chunk: &OciLogChunk) -> std::io::Result<()> {
