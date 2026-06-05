@@ -105,11 +105,24 @@ pub struct SecretGrantRefRecord {
 /// `launch_condition_claims`, receipts, logs, or any cross-device index — it is
 /// only reachable via the typed record/read/exists state-binding-target methods,
 /// which exist precisely so the path cannot leak by accident.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StateBindingTargetRecord {
     pub binding_id: String,
     pub install_profile_key: String,
     pub target_path: String,
+}
+
+// Redact the raw host path from Debug: `{:?}` must never leak `target_path`
+// (mirrors SecretValue's redacted Debug). The real path is reachable only via the
+// `target_path` field, read at the local-private materialization point.
+impl std::fmt::Debug for StateBindingTargetRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateBindingTargetRecord")
+            .field("binding_id", &self.binding_id)
+            .field("install_profile_key", &self.install_profile_key)
+            .field("target_path", &"***redacted***")
+            .finish()
+    }
 }
 
 /// Device/provider-local installed-state database.
@@ -2278,5 +2291,37 @@ mod tests {
         );
         assert!(db.read_state_binding_target("/home/koh/data").unwrap().is_none());
         assert!(db.read_state_binding_target("file:///x").unwrap().is_none());
+    }
+
+    #[test]
+    fn state_binding_target_record_debug_redacts_target_path() {
+        let rec = StateBindingTargetRecord {
+            binding_id: "user-data".to_string(),
+            install_profile_key: "app".to_string(),
+            target_path: "/Users/koh/.local/share/app/secret-path".to_string(),
+        };
+        let rendered = format!("{rec:?}");
+        assert!(
+            !rendered.contains("/Users/koh/.local/share/app/secret-path"),
+            "raw target_path must be redacted in Debug output"
+        );
+        assert!(rendered.contains("***redacted***"));
+        // The non-sensitive logical identity may still appear.
+        assert!(rendered.contains("user-data"));
+    }
+
+    #[test]
+    fn read_state_binding_target_error_or_debug_does_not_expose_target_path() {
+        let (_dir, db) = temp_db();
+        let raw = "/Users/koh/.local/share/app/private-state";
+        db.record_state_binding_target("user-data", "app", raw).unwrap();
+        let rec = db.read_state_binding_target("user-data").unwrap().unwrap();
+        // The value is reachable via the typed field (the runtime needs it) but the
+        // Debug surface of the read record must not expose it.
+        assert_eq!(rec.target_path, raw, "typed field still returns the real path");
+        assert!(
+            !format!("{rec:?}").contains(raw),
+            "Debug of the read record must not expose the raw target_path"
+        );
     }
 }
