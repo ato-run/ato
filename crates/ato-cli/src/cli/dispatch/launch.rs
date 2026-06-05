@@ -148,6 +148,7 @@ pub(crate) fn execute_launch_command(
         /* build_policy */ crate::application::build_materialization::BuildPolicy::IfStale,
         /* cache_strategy_arg */ crate::cli::shared::CacheStrategyArg::Auto,
         /* plan_only */ false,
+        /* strict_realization */ false,
         Some(lifecycle_ctx),
         /* pinned_revision_output_dir */ Some(pinned_capsule_path),
         reporter,

@@ -247,6 +247,12 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) cache_strategy: CacheStrategy,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
+    /// #500 — opt-in strict fail-closed realization profile. When `true`, the
+    /// execute phase consults the strict realization gate before any process or
+    /// container is created and blocks the launch with a typed error if a
+    /// required input cannot be verified. `false` (default) keeps the
+    /// conservative, non-breaking behavior.
+    pub(crate) strict_realization: bool,
     /// Revision-pinned output directory set by `ato launch`. When `Some`,
     /// `run_install_phase` bypasses `resolve_run_target_or_install` and uses
     /// this frozen revision output dir directly as the run target.
@@ -3272,6 +3278,29 @@ where
         .notify(format!("RECEIPT: {}", execution_receipt_path.display()))
         .await?;
 
+    // #500 — strict fail-closed realization gate. Opt-in via
+    // `--strict-realization`. This runs at the prelaunch boundary: the resolved
+    // launch graph is built and the prelaunch receipt is persisted, but no guest
+    // process, runtime process, or container has been created yet. In the
+    // default profile this is a no-op; in strict mode it blocks the launch with
+    // a typed `AtoExecutionError` (recoverable downstream via downcast) when a
+    // required input cannot be verified. The host/provider realization-evidence
+    // producer is #501, so until it lands strict mode is conservatively
+    // fail-closed — see `application::strict_realization`.
+    if request.strict_realization
+        && let Some(launch_graph) = receipt_output.launch_graph.as_ref()
+    {
+        let profile = crate::application::strict_realization::launch_profile(
+            request.strict_realization,
+        );
+        let env = crate::application::strict_realization::launch_environment();
+        crate::application::strict_realization::enforce_strict_realization(
+            launch_graph,
+            &env,
+            profile,
+        )?;
+    }
+
     let run_command_uses_specialized_executor = decision
         .plan
         .execution_driver()
@@ -4920,6 +4949,7 @@ url = "http://127.0.0.1:8787/health"
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(false)),
             preview_mode: false,
+            strict_realization: false,
             pinned_revision_output_dir: None,
             install_lifecycle_context: None,
         }
