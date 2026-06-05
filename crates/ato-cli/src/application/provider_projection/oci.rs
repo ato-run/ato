@@ -9,6 +9,10 @@
 
 use std::collections::BTreeMap;
 
+use capsule_core::execution_identity::{
+    OciImageDigestStatus, OciMountReceiptEvidence, OciPortReceiptEvidence,
+    OciProviderReceiptEvidence,
+};
 use capsule_core::runtime::oci::{
     OciContainerRequest, OciMountSourceKind, OciMountSpec, OciPortSpec,
 };
@@ -268,6 +272,61 @@ impl OciProjectionPlan {
         }
     }
 
+    /// Project this plan into receipt-safe OCI provider evidence (#493).
+    ///
+    /// This is the bridge from the #516 provider projection boundary to a
+    /// persisted receipt. It carries only receipt-safe facts:
+    ///
+    /// * env variable **names** (`env_projection` keys) — never values;
+    /// * the image reference + a pinned/unpinned digest *status*;
+    /// * mount *targets* and flags — never source host paths;
+    /// * declared container ports, network aliases, and required capability
+    ///   flags.
+    ///
+    /// Deliberately excluded: resolved env values, argv, the requested
+    /// container name, and `provider_metadata_labels` (session id, managed
+    /// flag, …) — all session-local provider data that must not become
+    /// execution identity.
+    pub(crate) fn receipt_evidence(&self) -> OciProviderReceiptEvidence {
+        OciProviderReceiptEvidence {
+            provider_kind: self.provider_id.kind.label().to_string(),
+            provider_name: self.provider_id.name.clone(),
+            image_reference: self.image.reference.clone(),
+            image_digest_status: match &self.image.digest {
+                OciImageDigest::Pinned(digest) => OciImageDigestStatus::Pinned {
+                    digest: digest.clone(),
+                },
+                OciImageDigest::Unpinned => OciImageDigestStatus::Unpinned,
+            },
+            platform: self
+                .platform
+                .as_ref()
+                .map(|p| format!("{}/{}", p.os, p.architecture)),
+            // BTreeMap keys are already sorted; values are never read.
+            env_keys: self.env_projection.keys().cloned().collect(),
+            mounts: self
+                .mounts
+                .iter()
+                .map(|m| OciMountReceiptEvidence {
+                    target: m.target.clone(),
+                    readonly: m.readonly,
+                    engine_volume: m.engine_volume,
+                    persistent_state: m.is_persistent_state_binding(),
+                })
+                .collect(),
+            ports: self
+                .ports
+                .iter()
+                .map(|p| OciPortReceiptEvidence {
+                    container_port: p.container_port,
+                    protocol: p.protocol.clone(),
+                })
+                .collect(),
+            network_aliases: self.service_edges().to_vec(),
+            capabilities_required: self.capabilities_required.enabled_labels(),
+        }
+    }
+
     /// Durable, engine-managed state bindings in this plan.
     // Boundary accessor exercised by tests; consumed by placement (#509).
     #[allow(dead_code)]
@@ -278,8 +337,6 @@ impl OciProjectionPlan {
     }
 
     /// The in-graph service edges (network aliases) this container answers to.
-    // Boundary accessor exercised by tests; consumed by edge-receipt work (#493).
-    #[allow(dead_code)]
     pub(crate) fn service_edges(&self) -> &[String] {
         &self.network.service_aliases
     }
@@ -561,6 +618,102 @@ mod tests {
             extra_hosts: vec!["host.containers.internal:host-gateway".to_string()],
             user: Some("1000:1000".to_string()),
         }
+    }
+
+    // ── #493: receipt-safe provider evidence derived from the #516 boundary ──
+
+    #[test]
+    fn oci_provider_projection_evidence_is_not_container_started_only() {
+        let ev = OciProjectionPlan::from_container_request(&base_request()).receipt_evidence();
+        assert_eq!(ev.provider_kind, "oci");
+        assert_eq!(ev.provider_name, "podman");
+        assert_eq!(ev.image_reference, "docker.io/library/nginx:1.27");
+        // tag-only → unpinned (honest), not fabricated as resolved.
+        assert!(matches!(
+            ev.image_digest_status,
+            OciImageDigestStatus::Unpinned
+        ));
+        assert_eq!(ev.env_keys, vec!["PORT".to_string()]);
+        assert_eq!(ev.mounts.len(), 1);
+        assert_eq!(ev.mounts[0].target, "/data");
+        assert_eq!(ev.ports.len(), 1);
+        assert_eq!(ev.ports[0].container_port, 8080);
+        assert_eq!(ev.ports[0].protocol, "tcp");
+        assert_eq!(ev.network_aliases, vec!["web".to_string()]);
+        // Real provider detail — not merely "container started".
+        assert!(!ev.capabilities_required.is_empty());
+        assert!(
+            ev.capabilities_required
+                .contains(&"env-projection".to_string())
+        );
+        assert!(
+            ev.capabilities_required
+                .contains(&"network-policy".to_string())
+        );
+
+        // A pinned image surfaces the digest as evidence.
+        let mut req = base_request();
+        req.image = format!("repo/app@sha256:{}", "a".repeat(64));
+        let ev = OciProjectionPlan::from_container_request(&req).receipt_evidence();
+        match ev.image_digest_status {
+            OciImageDigestStatus::Pinned { digest } => {
+                assert_eq!(digest, format!("sha256:{}", "a".repeat(64)))
+            }
+            OciImageDigestStatus::Unpinned => panic!("expected pinned digest evidence"),
+        }
+    }
+
+    #[test]
+    fn oci_session_local_provider_metadata_does_not_enter_identity() {
+        // The #516 label split keeps provider bookkeeping out of identity; the
+        // receipt evidence inherits that — changing session-local metadata must
+        // not change the evidence.
+        let with_session = |session: &str, exec: &str| {
+            let mut req = base_request();
+            req.labels
+                .insert("io.ato.session_id".into(), session.into());
+            req.labels.insert("io.ato.execution_id".into(), exec.into());
+            req.labels.insert("io.ato.managed".into(), "true".into());
+            req.labels.insert("io.ato.provider".into(), "podman".into());
+            OciProjectionPlan::from_container_request(&req).receipt_evidence()
+        };
+        let ev_a = with_session("session-a", "exec-a");
+        let ev_b = with_session("session-b", "exec-b");
+        assert_eq!(
+            ev_a, ev_b,
+            "session-local provider metadata must not change receipt evidence"
+        );
+
+        let json = serde_json::to_string(&ev_a).expect("encode");
+        assert!(!json.contains("session-a"));
+        assert!(!json.contains("exec-a"));
+        // Container name and argv are session-local; they must not appear.
+        assert!(!json.contains("ato-sess-abc123-web"));
+        assert!(!json.contains("daemon off"));
+    }
+
+    #[test]
+    fn receipt_does_not_leak_secret_or_env_values() {
+        let mut req = base_request();
+        req.env
+            .insert("OPENAI_API_KEY".into(), "sk-test-secret".into());
+        req.env.insert(
+            "DATABASE_URL".into(),
+            "postgres://user:password@host/db".into(),
+        );
+        let ev = OciProjectionPlan::from_container_request(&req).receipt_evidence();
+
+        // Env var NAMES are recorded...
+        assert!(ev.env_keys.contains(&"OPENAI_API_KEY".to_string()));
+        assert!(ev.env_keys.contains(&"DATABASE_URL".to_string()));
+        // ...but the raw VALUES never appear in the serialized receipt evidence.
+        let json = serde_json::to_string(&ev).expect("encode");
+        assert!(
+            !json.contains("sk-test-secret"),
+            "secret value leaked: {json}"
+        );
+        assert!(!json.contains("password"), "db password leaked: {json}");
+        assert!(!json.contains("postgres://"), "db url leaked: {json}");
     }
 
     #[test]
