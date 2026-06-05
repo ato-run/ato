@@ -427,3 +427,76 @@ fn evaluate_contract_with_materialization_overlay() {
         StrictGateReasonCode::IdentityMismatch
     );
 }
+
+#[test]
+fn materialization_verified_overlay_passes_declared_only_contract() {
+    // #498 classifies the node as Materializable (only a declared hash is in the
+    // contract evidence — the materialized identity is not separately present).
+    // #499 returns Verified, which is itself proof the declared/materialized pair
+    // matched. The strict gate must trust that verdict and pass — not block it as
+    // a false-verified "materialization_missing".
+    let contract = RealizationContract {
+        resolved_execution_id: "rid-3".to_string(),
+        node_statuses: vec![node_status(
+            "dep",
+            RealizationNodeKind::DependencyOutput,
+            RealizationStatus::Materializable,
+            vec![RealizationEvidence::DeclaredHash {
+                label: "dependency-output".into(),
+                hash: HASH_A.into(),
+            }],
+        )],
+        edge_statuses: vec![],
+        result: RealizationResult::Realized,
+    };
+
+    let materializations = vec![MaterializationVerification {
+        node_id: "dep".to_string(),
+        node_kind: RealizationNodeKind::DependencyOutput,
+        result: MaterializationVerificationResult::Verified,
+        evidence: vec![],
+    }];
+
+    assert!(
+        evaluate_strict_gate_with_materialization(
+            &contract,
+            &materializations,
+            LaunchProfile::Strict,
+        )
+        .is_ok(),
+        "a #499 Verified verdict must pass a declared-only contract node",
+    );
+}
+
+#[test]
+fn strict_trusts_materialization_verified_verdict() {
+    // Direct per-node form: a Verified #499 verdict is authoritative even when the
+    // contract carries only a declared identity (no separate materialized one)...
+    let mut declared_only = node(
+        RealizationNodeKind::Runtime,
+        RealizationStatus::Materializable,
+    );
+    declared_only.declared_identity = Some(HASH_A.to_string());
+    declared_only.materialized_identity = None;
+    declared_only.materialization = Some(MaterializationVerificationResult::Verified);
+    assert!(evaluate_strict(&declared_only).is_ok());
+
+    // ...and it supersedes a #498 `Unavailable` materialization classification
+    // (the verifier found and matched the artifact the contract thought missing).
+    let mut unavailable_but_verified =
+        node(RealizationNodeKind::Source, RealizationStatus::Unavailable);
+    unavailable_but_verified.declared_identity = Some(HASH_A.to_string());
+    unavailable_but_verified.materialization = Some(MaterializationVerificationResult::Verified);
+    assert!(evaluate_strict(&unavailable_but_verified).is_ok());
+
+    // But it does NOT override an orthogonal host-binding block.
+    let mut verified_yet_host_bound = node(
+        RealizationNodeKind::FilesystemView,
+        RealizationStatus::HostBound,
+    );
+    verified_yet_host_bound.declared_identity = Some(HASH_A.to_string());
+    verified_yet_host_bound.materialization = Some(MaterializationVerificationResult::Verified);
+    let err = evaluate_strict(&verified_yet_host_bound)
+        .expect_err("a verified content hash does not waive a host-fallback block");
+    assert_eq!(err.reason_code, StrictGateReasonCode::HostBoundDisallowed);
+}
