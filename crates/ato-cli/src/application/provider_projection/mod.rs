@@ -41,6 +41,7 @@
 //! placement (#509), or change install admission (#508).
 
 pub(crate) mod oci;
+pub(crate) mod strict_oci;
 
 use serde::Serialize;
 
@@ -93,6 +94,12 @@ impl ProviderId {
             kind,
             name: name.into(),
         }
+    }
+
+    /// Coarse provider version/family label, e.g. `"oci-podman-v1"`. Value-free
+    /// (no host path or machine handle); suitable for receipt evidence (#501).
+    pub(crate) fn family(&self) -> String {
+        format!("{}-{}-v1", self.kind.label(), self.name)
     }
 }
 
