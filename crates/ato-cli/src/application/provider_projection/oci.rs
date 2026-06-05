@@ -10,9 +10,10 @@
 use std::collections::BTreeMap;
 
 use capsule_core::execution_identity::{
-    OciImageDigestStatus, OciMountReceiptEvidence, OciPortReceiptEvidence,
+    OciEnforcementStatus, OciImageDigestStatus, OciMountReceiptEvidence, OciPortReceiptEvidence,
     OciProviderReceiptEvidence,
 };
+use capsule_core::realization::RedactedProjectionCommand;
 use capsule_core::runtime::oci::{
     OciContainerRequest, OciMountSourceKind, OciMountSpec, OciPortSpec,
 };
@@ -288,6 +289,19 @@ impl OciProjectionPlan {
     /// flag, …) — all session-local provider data that must not become
     /// execution identity.
     pub(crate) fn receipt_evidence(&self) -> OciProviderReceiptEvidence {
+        // Without provider enforcement facts the status is honestly `Unknown`
+        // (treated as not-enforced by strict mode). The enforcement-aware path
+        // is `receipt_evidence_with`.
+        self.receipt_evidence_with(OciEnforcementStatus::Unknown, OciEnforcementStatus::Unknown)
+    }
+
+    /// As [`Self::receipt_evidence`], but records the selected provider's typed
+    /// enforcement status for the declared network and capability policy (#501).
+    pub(crate) fn receipt_evidence_with(
+        &self,
+        network_enforcement: OciEnforcementStatus,
+        capability_enforcement: OciEnforcementStatus,
+    ) -> OciProviderReceiptEvidence {
         OciProviderReceiptEvidence {
             provider_kind: self.provider_id.kind.label().to_string(),
             provider_name: self.provider_id.name.clone(),
@@ -324,6 +338,47 @@ impl OciProjectionPlan {
                 .collect(),
             network_aliases: self.service_edges().to_vec(),
             capabilities_required: self.capabilities_required.enabled_labels(),
+            provider_version: Some(self.provider_id.family()),
+            network_enforcement_status: network_enforcement,
+            capability_enforcement_status: capability_enforcement,
+            // A leak-free identity fingerprint: a hash of the full canonical
+            // identity (which itself contains env values / mount sources and is
+            // therefore NEVER serialized into a receipt). The hash is stable and
+            // session-independent, and changes whenever any launch condition
+            // changes — without exposing any raw value.
+            projection_identity_summary: Some(self.identity_fingerprint()),
+            // Derived projection evidence: the rendered argv reduced to a value-
+            // free shape (flags survive, every value becomes `<redacted>`). Never
+            // identity, never a raw command.
+            derived_command_redacted: self.redacted_derived_command(),
+        }
+    }
+
+    /// A leak-free `sha256:<hex>` fingerprint of the projection identity. The
+    /// underlying [`Self::canonical_identity`] embeds env values and mount source
+    /// paths and must never reach a receipt; this hash carries the same identity
+    /// sensitivity with none of the raw values.
+    pub(crate) fn identity_fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.canonical_identity().as_bytes());
+        format!("sha256:{:x}", hasher.finalize())
+    }
+
+    /// The derived `podman create` argv reduced to a redacted, value-free shape.
+    /// Rendered with a neutral host (so `--platform` emulation does not depend on
+    /// the running machine) and redacted via [`RedactedProjectionCommand`]. A
+    /// render error (e.g. a read-only-ownership conflict) yields an empty shape —
+    /// the evidence is best-effort and never blocks on its own.
+    pub(crate) fn redacted_derived_command(&self) -> Vec<String> {
+        let host = self.platform.clone().unwrap_or_else(|| OciPlatform {
+            os: "linux".to_string(),
+            architecture: "amd64".to_string(),
+            variant: None,
+        });
+        match self.render_podman_create_argv(&host) {
+            Ok(argv) => RedactedProjectionCommand::from_argv("podman-create", &argv).argv_shape,
+            Err(_) => Vec::new(),
         }
     }
 
@@ -714,6 +769,133 @@ mod tests {
         );
         assert!(!json.contains("password"), "db password leaked: {json}");
         assert!(!json.contains("postgres://"), "db url leaked: {json}");
+    }
+
+    // ── #501: typed provider enforcement status + redacted derived command ──
+
+    #[test]
+    fn oci_provider_evidence_records_image_digest_status() {
+        // Tag-only → unpinned (honest), pinned digest surfaces as evidence.
+        let ev = OciProjectionPlan::from_container_request(&base_request()).receipt_evidence();
+        assert!(matches!(
+            ev.image_digest_status,
+            OciImageDigestStatus::Unpinned
+        ));
+        assert_eq!(ev.provider_version.as_deref(), Some("oci-podman-v1"));
+
+        let mut req = base_request();
+        req.image = format!("repo/app@sha256:{}", "b".repeat(64));
+        let ev = OciProjectionPlan::from_container_request(&req).receipt_evidence();
+        assert!(matches!(
+            ev.image_digest_status,
+            OciImageDigestStatus::Pinned { .. }
+        ));
+    }
+
+    #[test]
+    fn oci_provider_evidence_records_enforcement_status() {
+        let ev = OciProjectionPlan::from_container_request(&base_request()).receipt_evidence_with(
+            OciEnforcementStatus::Unsupported,
+            OciEnforcementStatus::Enforced,
+        );
+        assert_eq!(
+            ev.network_enforcement_status,
+            OciEnforcementStatus::Unsupported
+        );
+        assert_eq!(
+            ev.capability_enforcement_status,
+            OciEnforcementStatus::Enforced
+        );
+        let json = serde_json::to_string(&ev).expect("encode");
+        // Typed + visible in the serialized receipt evidence.
+        assert!(
+            json.contains("unsupported"),
+            "network enforcement status: {json}"
+        );
+    }
+
+    #[test]
+    fn oci_provider_evidence_redacts_derived_argv() {
+        let mut req = base_request();
+        req.env
+            .insert("OPENAI_API_KEY".into(), "sk-secret-xyz".into());
+        let ev = OciProjectionPlan::from_container_request(&req).receipt_evidence();
+
+        // The derived command is present as evidence — flags survive, every
+        // value (including positional subcommands like `create`) is redacted. It
+        // is NEVER the raw command.
+        assert!(!ev.derived_command_redacted.is_empty());
+        assert!(ev.derived_command_redacted.contains(&"--env".to_string()));
+        assert!(ev.derived_command_redacted.contains(&"--name".to_string()));
+        let argv_json = serde_json::to_string(&ev.derived_command_redacted).expect("encode");
+        // No raw value survives: not the env value/secret, container name, or
+        // command tail.
+        assert!(
+            argv_json.contains("<redacted>"),
+            "values must be redacted: {argv_json}"
+        );
+        assert!(
+            !argv_json.contains("sk-secret-xyz"),
+            "secret leaked: {argv_json}"
+        );
+        assert!(!argv_json.contains("8080"), "env value leaked: {argv_json}");
+        assert!(
+            !argv_json.contains("daemon off"),
+            "argv value leaked: {argv_json}"
+        );
+        assert!(
+            !argv_json.contains("ato-sess-abc123-web"),
+            "container name leaked: {argv_json}"
+        );
+    }
+
+    #[test]
+    fn oci_provider_evidence_excludes_container_id_pid_log_path_from_identity() {
+        // The receipt evidence has no field for these at all; assert they cannot
+        // appear in the serialized evidence nor the identity summary.
+        let ev = OciProjectionPlan::from_container_request(&base_request()).receipt_evidence();
+        let json = serde_json::to_string(&ev).expect("encode");
+        for forbidden in [
+            "container_id",
+            "provider_pid",
+            "log_path",
+            "c0ffee",
+            "424242",
+        ] {
+            assert!(
+                !json.contains(forbidden),
+                "evidence leaked {forbidden}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn oci_projection_receipt_does_not_treat_podman_argv_as_identity() {
+        let mut req = base_request();
+        req.env.insert("PORT".into(), "8080".into());
+        let ev = OciProjectionPlan::from_container_request(&req).receipt_evidence();
+
+        // The identity summary is a content hash, never the argv/values.
+        let summary = ev.projection_identity_summary.as_deref().expect("summary");
+        assert!(
+            summary.starts_with("sha256:"),
+            "identity must be a hash: {summary}"
+        );
+        assert!(!summary.contains("create"), "argv must not be the identity");
+        assert!(
+            !summary.contains("PORT=8080"),
+            "env value must not be the identity"
+        );
+
+        // The identity summary changes when a launch condition changes — but the
+        // hash never exposes the raw value.
+        let mut req2 = base_request();
+        req2.env.insert("PORT".into(), "9090".into());
+        let ev2 = OciProjectionPlan::from_container_request(&req2).receipt_evidence();
+        assert_ne!(
+            ev.projection_identity_summary,
+            ev2.projection_identity_summary
+        );
     }
 
     #[test]
