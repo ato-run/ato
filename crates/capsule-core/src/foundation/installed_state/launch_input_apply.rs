@@ -316,6 +316,39 @@ mod tests {
     }
 
     #[test]
+    fn prompt_input_is_not_proof_and_makes_no_change() {
+        // Until the interactive creation flow rewrites it to `grant:<id>`, a
+        // `=prompt` input overlays nothing: the condition stays UserGrantRequired.
+        let claims = vec![claim(LaunchConditionKind::Secret, "OPENAI_API_KEY", "{}")];
+        let out = apply_capsule_launch_inputs_to_claims(
+            &claims,
+            &[input(
+                LaunchConditionInputKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionInputValue::Prompt,
+            )],
+        )
+        .unwrap();
+        assert_eq!(out, claims, "`prompt` is a request, not a proof");
+    }
+
+    #[test]
+    fn prompt_input_for_unknown_condition_errors() {
+        let claims = vec![claim(LaunchConditionKind::State, "other", "{}")];
+        assert!(
+            apply_capsule_launch_inputs_to_claims(
+                &claims,
+                &[input(
+                    LaunchConditionInputKind::State,
+                    "data",
+                    LaunchConditionInputValue::Prompt,
+                )],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn required_input_for_unknown_condition_errors() {
         let claims = vec![claim(LaunchConditionKind::Secret, "OTHER", "{}")];
         assert!(
