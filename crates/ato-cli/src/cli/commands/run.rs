@@ -117,6 +117,12 @@ pub struct RunArgs {
     /// #500 — opt-in strict fail-closed realization profile.
     pub strict_realization: bool,
     pub install_lifecycle_context: Option<InstallLifecycleContext>,
+    /// Launch-condition inputs parsed from a `capsule://…?<query>` launch URL
+    /// (`ato launch capsule://…`). Overlaid onto the in-memory installed-state
+    /// claims before the relaunch preflight resolves them — these are *inputs*
+    /// (which grant/binding to try), never proof; the resolver still checks the
+    /// DB registry before admission. Empty for `ato run` and `ato launch <ipk>`.
+    pub capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
     pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
 
@@ -530,6 +536,7 @@ fn build_consumer_run_request(
         strict_realization: args.strict_realization,
         pinned_revision_output_dir: args.pinned_revision_output_dir.clone(),
         install_lifecycle_context: args.install_lifecycle_context.clone(),
+        capsule_launch_inputs: args.capsule_launch_inputs.clone(),
     }
 }
 
@@ -2083,6 +2090,7 @@ run = "node server.js""#,
             plan_only: false,
             strict_realization: false,
             install_lifecycle_context: None,
+            capsule_launch_inputs: vec![],
             pinned_revision_output_dir: None,
         };
 
@@ -2192,6 +2200,7 @@ run = "main.py""#,
             plan_only: false,
             strict_realization: false,
             install_lifecycle_context: None,
+            capsule_launch_inputs: vec![],
             pinned_revision_output_dir: None,
         };
 
@@ -2298,6 +2307,7 @@ run = "main.py""#,
             plan_only: false,
             strict_realization: false,
             install_lifecycle_context: None,
+            capsule_launch_inputs: vec![],
             pinned_revision_output_dir: None,
         };
 
@@ -2392,6 +2402,7 @@ run = "node index.js"
             plan_only: true,
             strict_realization: false,
             install_lifecycle_context: None,
+            capsule_launch_inputs: vec![],
             pinned_revision_output_dir: None,
         };
 

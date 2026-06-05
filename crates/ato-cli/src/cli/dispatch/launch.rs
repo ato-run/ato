@@ -10,8 +10,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    InstallInstanceStore, InstalledAppId, ProfileId, derive_install_profile_key,
+    InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
 };
+use capsule_core::installed_state::{LaunchConditionInput, parse_capsule_launch_input};
 
 use crate::app_control::session::ScopedInstallLifecycleGuard;
 use crate::cli::commands::run::InstallLifecycleContext;
@@ -35,14 +36,49 @@ pub(crate) fn execute_launch_command(
     let store =
         InstallInstanceStore::new(&instances_root).context("open install instance store")?;
 
-    // Resolve profile key → (installed_app_id, profile_id, capsule_handle, rev_id).
-    let (app_id, profile_id, capsule_handle, rev_id) =
-        find_profile_by_key(&store, &args.install_profile_key).with_context(|| {
-            format!(
-                "install profile key '{}' not found — run `ato install` first",
-                args.install_profile_key
-            )
-        })?;
+    // The positional target is either a stable install profile key (`ipk_…`) or
+    // a `capsule://<location>?<query>` URL. A capsule URL is an installed
+    // *relaunch* entrypoint: identity is resolved from the install ledger and the
+    // query supplies launch-condition *inputs* (which grant/binding to try —
+    // inputs, not proof) threaded into the relaunch preflight. `ato launch <ipk>`
+    // carries no such inputs.
+    let target = args.install_profile_key.trim().to_string();
+    let (app_id, profile_id, capsule_handle, rev_id, capsule_launch_inputs): (
+        InstalledAppId,
+        ProfileId,
+        String,
+        InstallRevisionId,
+        Vec<LaunchConditionInput>,
+    ) = if target.starts_with("capsule://") {
+        let parsed = parse_capsule_launch_input(&target)
+            .with_context(|| format!("parse capsule launch URL '{target}'"))?;
+        let (app_id, profile_id, capsule_handle, rev_id) =
+            resolve_installed_launch_target_from_capsule_location(
+                &store,
+                &parsed.capsule_location,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "capsule '{}' is not installed on this device/provider — run \
+                         `ato install` first. `ato launch capsule://…` relaunches an \
+                         already-installed app; it does not install or run from source.",
+                    parsed.capsule_location
+                )
+            })?;
+        (
+            app_id,
+            profile_id,
+            capsule_handle,
+            rev_id,
+            parsed.conditions,
+        )
+    } else {
+        let (app_id, profile_id, capsule_handle, rev_id) = find_profile_by_key(&store, &target)
+            .with_context(|| {
+                format!("install profile key '{target}' not found — run `ato install` first")
+            })?;
+        (app_id, profile_id, capsule_handle, rev_id, Vec::new())
+    };
 
     // Compute the stable profile key for the session record.
     let ipk = derive_install_profile_key(&app_id, &profile_id);
@@ -64,6 +100,7 @@ pub(crate) fn execute_launch_command(
             "install_profile_key": ipk.as_str(),
             "install_revision_id": rev_id.as_str(),
             "capsule_handle": capsule_handle,
+            "capsule_launch_inputs": capsule_launch_inputs.len(),
         });
         if args.json {
             println!("{}", serde_json::to_string_pretty(&info)?);
@@ -150,6 +187,7 @@ pub(crate) fn execute_launch_command(
         /* plan_only */ false,
         /* strict_realization */ false,
         Some(lifecycle_ctx),
+        /* capsule_launch_inputs */ capsule_launch_inputs,
         /* pinned_revision_output_dir */ Some(pinned_capsule_path),
         reporter,
     )
@@ -217,6 +255,68 @@ fn find_profile_by_key(
         }
     }
     None
+}
+
+/// Resolve a `capsule://` *location* (the `host/path` portion — scheme and query
+/// already stripped by [`parse_capsule_launch_input`]) to an installed app
+/// identity, mirroring [`find_profile_by_key`]'s tuple shape:
+/// `(installed_app_id, profile_id, capsule_handle, install_revision_id)`.
+///
+/// This is a pure identity lookup against the install ledger
+/// (`app.json` + `current_revision`) — it does **not** fetch `capsule.toml` or
+/// re-read the artifact manifest / lockfile. Returns `Ok(None)` when no installed
+/// app matches; the caller raises a typed "not installed" error rather than
+/// silently falling back to `ato run` or install.
+fn resolve_installed_launch_target_from_capsule_location(
+    store: &InstallInstanceStore,
+    capsule_location: &str,
+) -> Result<Option<(InstalledAppId, ProfileId, String, InstallRevisionId)>> {
+    let handle = canonical_scoped_handle(capsule_location);
+    let Some((app_id, profile_id, _ipk, rev_id)) = store.find_profile_by_capsule_handle(&handle)?
+    else {
+        return Ok(None);
+    };
+    // Surface the record's stored handle for the verbose/JSON resolution dump.
+    let capsule_handle = store
+        .read_app_record(&app_id)
+        .ok()
+        .map(|r| {
+            if r.capsule_handle.is_empty() {
+                format!("{}/{}", r.publisher, r.slug)
+            } else {
+                r.capsule_handle
+            }
+        })
+        .unwrap_or(handle);
+    Ok(Some((app_id, profile_id, capsule_handle, rev_id)))
+}
+
+/// Canonicalize a `capsule://` location to the stored `publisher/slug` handle
+/// form via the shared capsule-handle parser, so registry-authority
+/// (`ato.run/…`), `github.com/…`, loopback, and bare `publisher/slug` forms all
+/// normalize consistently before matching. Any `@version` suffix is dropped
+/// (stored handles are version-less). Falls back to the raw location when the
+/// parser cannot canonicalize it (the store's own light normalization can still
+/// match a bare `publisher/slug`).
+fn canonical_scoped_handle(capsule_location: &str) -> String {
+    let with_scheme = if capsule_location.starts_with("capsule://") {
+        capsule_location.to_string()
+    } else {
+        format!("capsule://{capsule_location}")
+    };
+    match capsule_core::handle::normalize_capsule_handle(&with_scheme) {
+        Ok(canonical) => canonical
+            .to_cli_ref()
+            .map(|cli_ref| {
+                cli_ref
+                    .split('@')
+                    .next()
+                    .unwrap_or(cli_ref.as_str())
+                    .to_string()
+            })
+            .unwrap_or_else(|| capsule_location.to_string()),
+        Err(_) => capsule_location.to_string(),
+    }
 }
 
 /// Read the `LaunchProfile` and extract launch-time config supported by the run pipeline.
@@ -480,6 +580,64 @@ mod tests {
         assert!(
             found.is_none(),
             "missing directory should return None (not panic)"
+        );
+    }
+
+    /// `canonical_scoped_handle` drops registry authority + `@version`, leaving the
+    /// version-less `publisher/slug` that install persists as `capsule_handle`.
+    #[test]
+    fn canonical_scoped_handle_normalizes_authority_and_strips_version() {
+        assert_eq!(
+            canonical_scoped_handle("ato.run/koh0920/hello"),
+            "koh0920/hello"
+        );
+        assert_eq!(
+            canonical_scoped_handle("ato.run/koh0920/hello@1.2.3"),
+            "koh0920/hello"
+        );
+        // A bare publisher/slug normalizes to itself.
+        assert_eq!(canonical_scoped_handle("acme/widget"), "acme/widget");
+    }
+
+    /// A `capsule://` location resolves to the installed identity even when given
+    /// with the registry authority (the stored handle is `publisher/slug`).
+    #[cfg(unix)]
+    #[test]
+    fn resolve_capsule_location_resolves_installed_app() {
+        let (_dir, store) = make_store();
+        let app_id = InstalledAppId::new("app_caps_loc_resolve_0000000001");
+        let profile_id = ProfileId::new("default");
+        let rev_id = InstallRevisionId::new("rev_capsloc1");
+        scaffold_app_with_profile(&store, &app_id, &profile_id, &rev_id);
+
+        let (a, p, handle, r) =
+            resolve_installed_launch_target_from_capsule_location(&store, "ato.run/acme/hello")
+                .unwrap()
+                .expect("installed capsule should resolve");
+        assert_eq!(a, app_id);
+        assert_eq!(p, profile_id);
+        assert_eq!(handle, "acme/hello");
+        assert_eq!(r, rev_id);
+    }
+
+    /// A location that is not installed resolves to `None` (caller raises a typed
+    /// "not installed" error — never a silent fallback to a different app).
+    #[cfg(unix)]
+    #[test]
+    fn resolve_capsule_location_returns_none_when_not_installed() {
+        let (_dir, store) = make_store();
+        let app_id = InstalledAppId::new("app_caps_loc_none_00000000000001");
+        let profile_id = ProfileId::new("default");
+        let rev_id = InstallRevisionId::new("rev_capsloc2");
+        scaffold_app_with_profile(&store, &app_id, &profile_id, &rev_id);
+
+        assert!(
+            resolve_installed_launch_target_from_capsule_location(
+                &store,
+                "ato.run/acme/not-installed"
+            )
+            .unwrap()
+            .is_none()
         );
     }
 }
