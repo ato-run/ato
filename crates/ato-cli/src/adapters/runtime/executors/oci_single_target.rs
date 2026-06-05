@@ -348,13 +348,10 @@ fn enforce_strict_oci_launch(
     let projection = OciProjectionPlan::from_container_request(request);
     let facts = OciStrictFacts::from_launch(envelope, &projection);
     let enforcement = OciProviderEnforcement::podman(facts.network_policy_required);
-    enforce_strict_oci(
-        &facts,
-        &enforcement,
-        profile,
-        &projection.identity_fingerprint(),
-    )
-    .map_err(anyhow::Error::new)
+    // The graph-derived resolved execution id is not threaded into the OCI launch
+    // path yet (a remaining #501 slice), so pass `None` rather than substituting
+    // the provider projection fingerprint — which is not an execution identity.
+    enforce_strict_oci(&facts, &enforcement, profile, None).map_err(anyhow::Error::new)
 }
 
 fn print_log_chunk(service_name: &str, chunk: &OciLogChunk) -> std::io::Result<()> {
