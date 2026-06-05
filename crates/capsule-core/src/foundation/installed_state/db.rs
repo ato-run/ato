@@ -30,6 +30,7 @@ const DB_FILE_NAME: &str = "installed_state.sqlite3";
 const MIGRATION_0001: &str = "2026-06-05-0001-installed-state";
 const MIGRATION_0002: &str = "2026-06-05-0002-launch-condition-ledger";
 const MIGRATION_0003: &str = "2026-06-05-0003-grant-binding-refs";
+const MIGRATION_0004: &str = "2026-06-06-0004-state-binding-targets";
 
 /// Convert a byte count to SQLite's signed `INTEGER` (i64), failing instead of
 /// silently wrapping. A negative-on-overflow value would be read back as `0`
@@ -95,6 +96,33 @@ pub struct SecretGrantRefRecord {
     pub capsule_location: Option<String>,
     pub condition_key: String,
     pub status: String,
+}
+
+/// Metadata row for a recorded state binding **target** (#508): the
+/// provider-local target a logical `binding_id` resolves to. Unlike the
+/// existence-only `state_binding_refs` proof ledger, this row carries the raw,
+/// **local-private** `target_path`. It is therefore never joined into
+/// `launch_condition_claims`, receipts, logs, or any cross-device index — it is
+/// only reachable via the typed record/read/exists state-binding-target methods,
+/// which exist precisely so the path cannot leak by accident.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StateBindingTargetRecord {
+    pub binding_id: String,
+    pub install_profile_key: String,
+    pub target_path: String,
+}
+
+// Redact the raw host path from Debug: `{:?}` must never leak `target_path`
+// (mirrors SecretValue's redacted Debug). The real path is reachable only via the
+// `target_path` field, read at the local-private materialization point.
+impl std::fmt::Debug for StateBindingTargetRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateBindingTargetRecord")
+            .field("binding_id", &self.binding_id)
+            .field("install_profile_key", &self.install_profile_key)
+            .field("target_path", &"***redacted***")
+            .finish()
+    }
 }
 
 /// Device/provider-local installed-state database.
@@ -280,6 +308,23 @@ impl InstalledStateDb {
             );
             CREATE INDEX IF NOT EXISTS idx_state_binding_refs_profile
               ON state_binding_refs(install_profile_key);
+            -- Local-private state binding **target** store (#508). Maps a logical
+            -- `binding_id` (the same id recorded in state_binding_refs) to the
+            -- provider-local target it resolves to. Holds the raw host
+            -- `target_path`: this table is the device-local value store for state
+            -- bindings, the analogue of the SecretStore for secret grants, and is
+            -- NEVER surfaced into launch_condition_claims / receipts / logs. No FK
+            -- to state_binding_refs — the target is recorded before the proof ref
+            -- (a ref without a real target would forge proof).
+            CREATE TABLE IF NOT EXISTS state_binding_targets(
+              binding_id          TEXT PRIMARY KEY,
+              install_profile_key TEXT NOT NULL,
+              target_path         TEXT NOT NULL,
+              created_at          INTEGER NOT NULL,
+              updated_at          INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_state_binding_targets_profile
+              ON state_binding_targets(install_profile_key);
             ",
         )
         .map_err(rt)?;
@@ -297,6 +342,11 @@ impl InstalledStateDb {
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(id, applied_at) VALUES (?1, ?2)",
             params![MIGRATION_0003, now],
+        )
+        .map_err(rt)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(id, applied_at) VALUES (?1, ?2)",
+            params![MIGRATION_0004, now],
         )
         .map_err(rt)?;
         Ok(())
@@ -1004,6 +1054,94 @@ impl InstalledStateDb {
             .map_err(|e| CapsuleError::Runtime(e.to_string()))?
             .is_some();
         Ok(exists)
+    }
+
+    /// Record (upsert) the local-private **target** a state binding resolves to.
+    /// `binding_id` is the same short logical id recorded in `state_binding_refs`
+    /// (never a host path); `target_path` is the raw, local-private host path the
+    /// binding materializes to.
+    ///
+    /// Validation is enforced **here**, at the SOT boundary: a path/scheme-like
+    /// `binding_id` is rejected, so the key can never itself be a leaked path. The
+    /// `target_path` is intentionally **not** validated — it is the trusted local
+    /// value being stored — and must never be logged, surfaced in an error, or
+    /// written to `launch_condition_claims` / receipts. Recording a target does not
+    /// by itself prove a binding: callers write the `state_binding_ref` proof only
+    /// after this target write succeeds.
+    pub fn record_state_binding_target(
+        &self,
+        binding_id: &str,
+        install_profile_key: &str,
+        target_path: &str,
+    ) -> Result<()> {
+        validate_locator_id(binding_id, "binding")?;
+        let now = Utc::now().timestamp_millis();
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO state_binding_targets(
+               binding_id, install_profile_key, target_path, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(binding_id) DO UPDATE SET
+               install_profile_key = excluded.install_profile_key,
+               target_path = excluded.target_path,
+               updated_at = excluded.updated_at",
+            params![binding_id, install_profile_key, target_path, now],
+        )
+        .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Existence-only probe: is there a recorded target for `binding_id`? Reads no
+    /// host path. An invalid `binding_id` (path/scheme-like) resolves to `Ok(false)`
+    /// — conservative, exactly like [`Self::state_binding_ref_exists`].
+    pub fn state_binding_target_exists(&self, binding_id: &str) -> Result<bool> {
+        if validate_locator_id(binding_id, "binding").is_err() {
+            return Ok(false);
+        }
+        let conn = self.connect()?;
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM state_binding_targets WHERE binding_id = ?1",
+                params![binding_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?
+            .is_some();
+        Ok(exists)
+    }
+
+    /// Read the target row for a state binding by id, for runtime materialization.
+    ///
+    /// Returns `Ok(None)` for an unknown id OR a malformed (path/scheme-like) id —
+    /// conservative, exactly like [`Self::read_secret_grant_ref`]. The returned
+    /// [`StateBindingTargetRecord`] carries the raw `target_path`: use it only
+    /// inside the local-private materialization path; never log it, surface it in
+    /// an error, or write it to a claim / receipt.
+    pub fn read_state_binding_target(
+        &self,
+        binding_id: &str,
+    ) -> Result<Option<StateBindingTargetRecord>> {
+        if validate_locator_id(binding_id, "binding").is_err() {
+            return Ok(None);
+        }
+        let conn = self.connect()?;
+        let row = conn
+            .query_row(
+                "SELECT binding_id, install_profile_key, target_path
+                 FROM state_binding_targets WHERE binding_id = ?1",
+                params![binding_id],
+                |row| {
+                    Ok(StateBindingTargetRecord {
+                        binding_id: row.get(0)?,
+                        install_profile_key: row.get(1)?,
+                        target_path: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(row)
     }
 
     /// Map one row into the intermediate tuple of raw column values.
@@ -2083,5 +2221,107 @@ mod tests {
         let (_dir, db) = temp_db();
         assert!(!db.state_binding_ref_exists("/home/koh/data").unwrap());
         assert!(!db.state_binding_ref_exists("file:///x").unwrap());
+    }
+
+    // state_binding_targets: the local-private value store mirroring the
+    // secret-grant value store. binding_id is validated at the boundary;
+    // target_path is the trusted local value and never leaves the typed API.
+
+    #[test]
+    fn record_state_binding_target_roundtrips_exists_and_read() {
+        let (_dir, db) = temp_db();
+        assert!(!db.state_binding_target_exists("user-data").unwrap());
+        db.record_state_binding_target("user-data", "app", "/Users/koh/.local/share/app/data")
+            .unwrap();
+        assert!(db.state_binding_target_exists("user-data").unwrap());
+        assert!(!db.state_binding_target_exists("other").unwrap());
+        let rec = db.read_state_binding_target("user-data").unwrap().unwrap();
+        assert_eq!(rec.binding_id, "user-data");
+        assert_eq!(rec.install_profile_key, "app");
+        assert_eq!(rec.target_path, "/Users/koh/.local/share/app/data");
+    }
+
+    #[test]
+    fn record_state_binding_target_upserts_same_id() {
+        let (_dir, db) = temp_db();
+        db.record_state_binding_target("user-data", "app", "/Users/koh/data-v1")
+            .unwrap();
+        db.record_state_binding_target("user-data", "app", "/Users/koh/data-v2")
+            .unwrap();
+        let rec = db.read_state_binding_target("user-data").unwrap().unwrap();
+        assert_eq!(
+            rec.target_path, "/Users/koh/data-v2",
+            "same binding_id upserts the target rather than stacking rows"
+        );
+    }
+
+    #[test]
+    fn record_state_binding_target_rejects_path_like_binding_id() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_state_binding_target("/Users/koh/data", "app", "/Users/koh/data")
+                .is_err(),
+            "a raw host path binding id must be rejected at the DB boundary"
+        );
+    }
+
+    #[test]
+    fn record_state_binding_target_rejects_scheme_like_binding_id() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_state_binding_target("file:///x", "app", "/Users/koh/data")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn state_binding_target_exists_returns_false_for_invalid_id() {
+        let (_dir, db) = temp_db();
+        assert!(!db.state_binding_target_exists("/home/koh/data").unwrap());
+        assert!(!db.state_binding_target_exists("file:///x").unwrap());
+    }
+
+    #[test]
+    fn read_state_binding_target_unknown_or_invalid_returns_none() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.read_state_binding_target("never-recorded")
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.read_state_binding_target("/home/koh/data").unwrap().is_none());
+        assert!(db.read_state_binding_target("file:///x").unwrap().is_none());
+    }
+
+    #[test]
+    fn state_binding_target_record_debug_redacts_target_path() {
+        let rec = StateBindingTargetRecord {
+            binding_id: "user-data".to_string(),
+            install_profile_key: "app".to_string(),
+            target_path: "/Users/koh/.local/share/app/secret-path".to_string(),
+        };
+        let rendered = format!("{rec:?}");
+        assert!(
+            !rendered.contains("/Users/koh/.local/share/app/secret-path"),
+            "raw target_path must be redacted in Debug output"
+        );
+        assert!(rendered.contains("***redacted***"));
+        // The non-sensitive logical identity may still appear.
+        assert!(rendered.contains("user-data"));
+    }
+
+    #[test]
+    fn read_state_binding_target_error_or_debug_does_not_expose_target_path() {
+        let (_dir, db) = temp_db();
+        let raw = "/Users/koh/.local/share/app/private-state";
+        db.record_state_binding_target("user-data", "app", raw).unwrap();
+        let rec = db.read_state_binding_target("user-data").unwrap().unwrap();
+        // The value is reachable via the typed field (the runtime needs it) but the
+        // Debug surface of the read record must not expose it.
+        assert_eq!(rec.target_path, raw, "typed field still returns the real path");
+        assert!(
+            !format!("{rec:?}").contains(raw),
+            "Debug of the read record must not expose the raw target_path"
+        );
     }
 }
