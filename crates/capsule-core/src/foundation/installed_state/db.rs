@@ -23,6 +23,7 @@ use super::launch_condition::{
 use super::port::{
     ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
 };
+use super::relaunch_admission::RelaunchAdmissionInput;
 
 const DB_FILE_NAME: &str = "installed_state.sqlite3";
 const MIGRATION_0001: &str = "2026-06-05-0001-installed-state";
@@ -695,6 +696,34 @@ impl InstalledStateDb {
             )
             .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
         Self::collect_condition_rows(rows)
+    }
+
+    /// Load the relaunch admission input for an installed app revision: the
+    /// recorded launch conditions plus the identity, ready for
+    /// [`evaluate_relaunch_admission`](super::relaunch_admission::evaluate_relaunch_admission).
+    ///
+    /// Reads the **revision-specific** ledger only (v1). An empty result is
+    /// returned verbatim (empty `claims`) — the evaluator, not this method,
+    /// decides what an empty ledger means (a `LedgerMissing` warning, never "no
+    /// conditions"). Profile-wide fallback for legacy installs is left to the
+    /// caller.
+    pub fn load_relaunch_admission_input(
+        &self,
+        install_profile_key: &str,
+        install_revision_id: Option<&str>,
+        provider_id: Option<&str>,
+    ) -> Result<RelaunchAdmissionInput> {
+        let claims = self.list_launch_condition_claims_for_revision(
+            install_profile_key,
+            install_revision_id,
+            provider_id,
+        )?;
+        Ok(RelaunchAdmissionInput {
+            install_profile_key: install_profile_key.to_string(),
+            install_revision_id: install_revision_id.map(str::to_string),
+            provider_id: provider_id.map(str::to_string),
+            claims,
+        })
     }
 
     /// Map one row into the intermediate tuple of raw column values.
@@ -1521,5 +1550,38 @@ mod tests {
             .list_launch_condition_claims_for_revision("app", Some("rev1"), Some("runner-east"))
             .unwrap();
         assert_eq!(loaded, vec![c], "stored condition must round-trip exactly");
+    }
+
+    #[test]
+    fn load_relaunch_admission_input_reads_revision_claims() {
+        let (_dir, db) = temp_db();
+        let mut c = condition(
+            "app",
+            LaunchConditionKind::Secret,
+            "OPENAI_API_KEY",
+            LaunchConditionStatus::UserGrantRequired,
+        );
+        c.install_revision_id = Some("rev1".to_string());
+        db.record_installed_launch_ledger("app", Some("rev1"), None, &[c])
+            .unwrap();
+        let input = db
+            .load_relaunch_admission_input("app", Some("rev1"), None)
+            .unwrap();
+        assert_eq!(input.install_profile_key, "app");
+        assert_eq!(input.install_revision_id.as_deref(), Some("rev1"));
+        assert_eq!(input.claims.len(), 1);
+        assert_eq!(input.claims[0].condition_key, "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn load_relaunch_admission_input_empty_revision_returns_empty_claims_for_evaluator() {
+        let (_dir, db) = temp_db();
+        // No conditions recorded for this revision → empty claims (the evaluator,
+        // not the DB, decides what "empty" means).
+        let input = db
+            .load_relaunch_admission_input("ghost", Some("rev9"), None)
+            .unwrap();
+        assert!(input.claims.is_empty());
+        assert_eq!(input.install_profile_key, "ghost");
     }
 }
