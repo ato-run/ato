@@ -16,12 +16,17 @@ use crate::common::paths::ato_state_dir;
 use crate::error::{CapsuleError, Result};
 
 use super::admission::{StorageAdmission, available_space_for_target, evaluate_storage_admission};
+use super::launch_condition::{
+    LOCAL_PROVIDER_ID, LaunchConditionClaim, LaunchConditionKind, LaunchConditionSource,
+    LaunchConditionStatus, validate_redacted_detail_json,
+};
 use super::port::{
     ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
 };
 
 const DB_FILE_NAME: &str = "installed_state.sqlite3";
 const MIGRATION_0001: &str = "2026-06-05-0001-installed-state";
+const MIGRATION_0002: &str = "2026-06-05-0002-launch-condition-ledger";
 
 /// Convert a byte count to SQLite's signed `INTEGER` (i64), failing instead of
 /// silently wrapping. A negative-on-overflow value would be read back as `0`
@@ -151,12 +156,66 @@ impl InstalledStateDb {
               ON port_claims(install_profile_key, logical_endpoint);
             CREATE INDEX IF NOT EXISTS idx_port_claims_preferred
               ON port_claims(preferred_port);
+            -- Canonical per-installed-app launch condition ledger (#508). The
+            -- device/provider-local source of truth for installed-app relaunch
+            -- conditions; resource_claims/port_claims are fast projections of it.
+            CREATE TABLE IF NOT EXISTS launch_condition_claims(
+              id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+              install_profile_key TEXT NOT NULL,
+              install_revision_id TEXT NOT NULL DEFAULT '',
+              provider_id         TEXT NOT NULL DEFAULT 'local',
+              kind                TEXT NOT NULL,
+              condition_key       TEXT NOT NULL,
+              status              TEXT NOT NULL,
+              required            INTEGER NOT NULL DEFAULT 1,
+              source              TEXT NOT NULL,
+              detail_json         TEXT NOT NULL DEFAULT '{}',
+              redacted            INTEGER NOT NULL DEFAULT 1,
+              created_at          INTEGER NOT NULL,
+              updated_at          INTEGER NOT NULL,
+              CHECK (kind IN (
+                'storage', 'port', 'env', 'secret', 'state', 'runtime',
+                'runtime_tool', 'provider_capability', 'network', 'hardware',
+                'policy'
+              )),
+              CHECK (status IN (
+                'satisfied', 'missing', 'stale', 'unavailable',
+                'user_grant_required', 'provider_required', 'unknown'
+              )),
+              CHECK (source IN (
+                'manifest', 'lockfile', 'installed_state', 'storage_claim',
+                'port_claim', 'secret_store', 'provider_snapshot',
+                'runtime_resolution', 'manual'
+              )),
+              CHECK (required IN (0, 1)),
+              CHECK (redacted IN (0, 1))
+            );
+            -- Identity of a condition: app + revision + provider + kind + key.
+            -- install_revision_id/provider_id are non-NULL ('' / 'local') so the
+            -- UNIQUE index treats them as concrete (SQLite UNIQUE ignores NULLs).
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_launch_condition_claim_unique
+              ON launch_condition_claims(
+                install_profile_key, install_revision_id, provider_id,
+                kind, condition_key
+              );
+            CREATE INDEX IF NOT EXISTS idx_launch_condition_claims_profile
+              ON launch_condition_claims(install_profile_key);
+            CREATE INDEX IF NOT EXISTS idx_launch_condition_claims_status
+              ON launch_condition_claims(install_profile_key, status);
+            CREATE INDEX IF NOT EXISTS idx_launch_condition_claims_kind
+              ON launch_condition_claims(install_profile_key, kind);
             ",
+        )
+        .map_err(rt)?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(id, applied_at) VALUES (?1, ?2)",
+            params![MIGRATION_0001, now],
         )
         .map_err(rt)?;
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(id, applied_at) VALUES (?1, ?2)",
-            params![MIGRATION_0001, Utc::now().to_rfc3339()],
+            params![MIGRATION_0002, now],
         )
         .map_err(rt)?;
         Ok(())
@@ -427,6 +486,306 @@ impl InstalledStateDb {
         let taken = self.contending_ports(requesting_app, logical_endpoint, protocol)?;
         let is_available = |port: u16| !taken.contains(&port) && os_available(port);
         Ok(evaluate_port_admission(preferred, policy, is_available))
+    }
+
+    // ── Launch condition ledger (#508) ──────────────────────────────────────
+    //
+    // The canonical per-installed-app condition ledger. `resource_claims` and
+    // `port_claims` above remain query-optimized projections for admission;
+    // `launch_condition_claims` is the full condition model and the SOT for
+    // installed-app relaunch.
+
+    /// Validate a claim before writing: detail must be redacted JSON (no
+    /// embedded secret values) and a `Secret` condition must be marked redacted.
+    fn validate_claim(claim: &LaunchConditionClaim) -> Result<()> {
+        validate_redacted_detail_json(claim.kind, &claim.detail_json)?;
+        if claim.kind == LaunchConditionKind::Secret && !claim.redacted {
+            return Err(CapsuleError::Runtime(
+                "secret launch condition must be stored redacted (redacted = true)".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn revision_sentinel(install_revision_id: Option<&str>) -> &str {
+        install_revision_id.unwrap_or("")
+    }
+
+    fn provider_sentinel(provider_id: Option<&str>) -> &str {
+        provider_id.unwrap_or(LOCAL_PROVIDER_ID)
+    }
+
+    /// Upsert one launch condition. Keyed by `(install_profile_key,
+    /// install_revision_id, provider_id, kind, condition_key)`: re-recording the
+    /// same condition replaces it (preserving `created_at`) rather than stacking.
+    pub fn record_launch_condition_claim(&self, claim: &LaunchConditionClaim) -> Result<()> {
+        let conn = self.connect()?;
+        Self::record_launch_condition_claim_conn(&conn, claim)
+    }
+
+    fn record_launch_condition_claim_conn(
+        conn: &Connection,
+        claim: &LaunchConditionClaim,
+    ) -> Result<()> {
+        Self::validate_claim(claim)?;
+        let now = Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT INTO launch_condition_claims(
+               install_profile_key, install_revision_id, provider_id, kind,
+               condition_key, status, required, source, detail_json, redacted,
+               created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+             ON CONFLICT(install_profile_key, install_revision_id, provider_id, kind, condition_key)
+             DO UPDATE SET
+               status = excluded.status,
+               required = excluded.required,
+               source = excluded.source,
+               detail_json = excluded.detail_json,
+               redacted = excluded.redacted,
+               updated_at = excluded.updated_at",
+            params![
+                claim.install_profile_key,
+                Self::revision_sentinel(claim.install_revision_id.as_deref()),
+                Self::provider_sentinel(claim.provider_id.as_deref()),
+                claim.kind.as_str(),
+                claim.condition_key,
+                claim.status.as_str(),
+                claim.required as i64,
+                claim.source.as_str(),
+                claim.detail_json,
+                claim.redacted as i64,
+                now,
+            ],
+        )
+        .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Upsert several launch conditions atomically (all-or-nothing).
+    pub fn record_launch_condition_claims(&self, claims: &[LaunchConditionClaim]) -> Result<()> {
+        for claim in claims {
+            Self::validate_claim(claim)?;
+        }
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        for claim in claims {
+            Self::record_launch_condition_claim_conn(&tx, claim)?;
+        }
+        tx.commit()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Replace the full condition set for `(install_profile_key,
+    /// install_revision_id, provider_id)` atomically: delete the prior rows and
+    /// insert `claims` in one transaction, so a partial write can never leave the
+    /// SOT in a torn state. All `claims` must match the given identity scope.
+    pub fn replace_launch_conditions_for_revision(
+        &self,
+        install_profile_key: &str,
+        install_revision_id: Option<&str>,
+        provider_id: Option<&str>,
+        claims: &[LaunchConditionClaim],
+    ) -> Result<()> {
+        let revision = Self::revision_sentinel(install_revision_id);
+        let provider = Self::provider_sentinel(provider_id);
+        for claim in claims {
+            Self::validate_claim(claim)?;
+            if claim.install_profile_key != install_profile_key
+                || Self::revision_sentinel(claim.install_revision_id.as_deref()) != revision
+                || Self::provider_sentinel(claim.provider_id.as_deref()) != provider
+            {
+                return Err(CapsuleError::Runtime(format!(
+                    "launch condition claim '{}' does not match the replacement scope \
+                     (app={install_profile_key}, revision={revision}, provider={provider})",
+                    claim.condition_key
+                )));
+            }
+        }
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM launch_condition_claims
+             WHERE install_profile_key = ?1 AND install_revision_id = ?2 AND provider_id = ?3",
+            params![install_profile_key, revision, provider],
+        )
+        .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        for claim in claims {
+            Self::record_launch_condition_claim_conn(&tx, claim)?;
+        }
+        tx.commit()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(())
+    }
+
+    /// High-level SOT entry point: record the full known launch condition set for
+    /// an installed app revision, replacing any prior set for that revision.
+    ///
+    /// This is **strict** — a failure here means the installed-state SOT could
+    /// not be updated, and the caller (install / revision activation) must treat
+    /// it as a failure rather than swallow it. (Runtime observation updates such
+    /// as `last_actual_port` may be best-effort; recording the condition ledger
+    /// is not.)
+    pub fn record_installed_launch_ledger(
+        &self,
+        install_profile_key: &str,
+        install_revision_id: Option<&str>,
+        provider_id: Option<&str>,
+        claims: &[LaunchConditionClaim],
+    ) -> Result<()> {
+        self.replace_launch_conditions_for_revision(
+            install_profile_key,
+            install_revision_id,
+            provider_id,
+            claims,
+        )
+    }
+
+    /// All launch conditions recorded for an installed app (across revisions and
+    /// providers).
+    pub fn list_launch_condition_claims(
+        &self,
+        install_profile_key: &str,
+    ) -> Result<Vec<LaunchConditionClaim>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT install_profile_key, install_revision_id, provider_id, kind,
+                        condition_key, status, required, source, detail_json, redacted
+                 FROM launch_condition_claims
+                 WHERE install_profile_key = ?1
+                 ORDER BY kind, condition_key",
+            )
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![install_profile_key], Self::map_condition_row)
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Self::collect_condition_rows(rows)
+    }
+
+    /// Launch conditions for a specific `(app, revision, provider)` scope.
+    pub fn list_launch_condition_claims_for_revision(
+        &self,
+        install_profile_key: &str,
+        install_revision_id: Option<&str>,
+        provider_id: Option<&str>,
+    ) -> Result<Vec<LaunchConditionClaim>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT install_profile_key, install_revision_id, provider_id, kind,
+                        condition_key, status, required, source, detail_json, redacted
+                 FROM launch_condition_claims
+                 WHERE install_profile_key = ?1 AND install_revision_id = ?2 AND provider_id = ?3
+                 ORDER BY kind, condition_key",
+            )
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                params![
+                    install_profile_key,
+                    Self::revision_sentinel(install_revision_id),
+                    Self::provider_sentinel(provider_id),
+                ],
+                Self::map_condition_row,
+            )
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Self::collect_condition_rows(rows)
+    }
+
+    /// Map one row into the intermediate tuple of raw column values.
+    #[allow(clippy::type_complexity)]
+    fn map_condition_row(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        i64,
+    )> {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+        ))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn collect_condition_rows(
+        rows: impl Iterator<
+            Item = rusqlite::Result<(
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                String,
+                String,
+                i64,
+            )>,
+        >,
+    ) -> Result<Vec<LaunchConditionClaim>> {
+        let mut claims = Vec::new();
+        for row in rows {
+            let (
+                install_profile_key,
+                revision,
+                provider,
+                kind,
+                condition_key,
+                status,
+                required,
+                source,
+                detail_json,
+                redacted,
+            ) = row.map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+            let kind = LaunchConditionKind::from_str_opt(&kind).ok_or_else(|| {
+                CapsuleError::Runtime(format!("invalid kind in launch_condition_claims: {kind}"))
+            })?;
+            let status = LaunchConditionStatus::from_str_opt(&status).ok_or_else(|| {
+                CapsuleError::Runtime(format!(
+                    "invalid status in launch_condition_claims: {status}"
+                ))
+            })?;
+            let source = LaunchConditionSource::from_str_opt(&source).ok_or_else(|| {
+                CapsuleError::Runtime(format!(
+                    "invalid source in launch_condition_claims: {source}"
+                ))
+            })?;
+            claims.push(LaunchConditionClaim {
+                install_profile_key,
+                // Sentinels collapse back to None (the default scope).
+                install_revision_id: (!revision.is_empty()).then_some(revision),
+                provider_id: (provider != LOCAL_PROVIDER_ID).then_some(provider),
+                kind,
+                condition_key,
+                status,
+                required: required != 0,
+                source,
+                detail_json,
+                redacted: redacted != 0,
+            });
+        }
+        Ok(claims)
     }
 }
 
@@ -776,5 +1135,391 @@ mod tests {
             .check_port_admission_with("app-a", "http", "tcp", 3000, ConflictPolicy::Fail, |_| true)
             .unwrap();
         assert_eq!(decision, PortAdmission::Admitted { port: 3000 });
+    }
+
+    // ── Launch condition ledger (#508) ──────────────────────────────────────
+
+    use super::super::launch_condition::{
+        LEDGER_EXTRACTION_STATUS_KEY, launch_condition_extraction_status,
+        launch_condition_from_port_claim, launch_condition_from_storage_claim,
+    };
+
+    fn condition(
+        app: &str,
+        kind: LaunchConditionKind,
+        condition_key: &str,
+        status: LaunchConditionStatus,
+    ) -> LaunchConditionClaim {
+        LaunchConditionClaim {
+            install_profile_key: app.to_string(),
+            install_revision_id: None,
+            provider_id: None,
+            kind,
+            condition_key: condition_key.to_string(),
+            status,
+            required: true,
+            source: LaunchConditionSource::Manifest,
+            detail_json: "{}".to_string(),
+            redacted: true,
+        }
+    }
+
+    fn table_exists(db: &InstalledStateDb, name: &str) -> bool {
+        let conn = db.connect().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            params![name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn launch_condition_claims_schema_is_created() {
+        let (_dir, db) = temp_db();
+        assert!(table_exists(&db, "launch_condition_claims"));
+        assert!(
+            db.list_launch_condition_claims("nobody")
+                .unwrap()
+                .is_empty(),
+            "a fresh ledger has no conditions"
+        );
+    }
+
+    #[test]
+    fn record_launch_condition_claim_upserts_same_key() {
+        let (_dir, db) = temp_db();
+        let mut c = condition(
+            "app",
+            LaunchConditionKind::Runtime,
+            "deno",
+            LaunchConditionStatus::Missing,
+        );
+        db.record_launch_condition_claim(&c).unwrap();
+        c.status = LaunchConditionStatus::Satisfied;
+        db.record_launch_condition_claim(&c).unwrap();
+        let claims = db.list_launch_condition_claims("app").unwrap();
+        assert_eq!(claims.len(), 1, "same key must upsert, not duplicate");
+        assert_eq!(claims[0].status, LaunchConditionStatus::Satisfied);
+    }
+
+    #[test]
+    fn replace_launch_conditions_for_revision_replaces_atomically() {
+        let (_dir, db) = temp_db();
+        // Initial set: two conditions for rev1.
+        let mut a = condition(
+            "app",
+            LaunchConditionKind::Storage,
+            "requirements.disk",
+            LaunchConditionStatus::Satisfied,
+        );
+        a.install_revision_id = Some("rev1".to_string());
+        let mut b = condition(
+            "app",
+            LaunchConditionKind::Port,
+            "main.tcp",
+            LaunchConditionStatus::Satisfied,
+        );
+        b.install_revision_id = Some("rev1".to_string());
+        db.record_installed_launch_ledger("app", Some("rev1"), None, &[a, b])
+            .unwrap();
+        assert_eq!(
+            db.list_launch_condition_claims_for_revision("app", Some("rev1"), None)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Replace rev1 with a single different condition → old ones are gone.
+        let mut c = condition(
+            "app",
+            LaunchConditionKind::Env,
+            "PORT",
+            LaunchConditionStatus::Satisfied,
+        );
+        c.install_revision_id = Some("rev1".to_string());
+        db.record_installed_launch_ledger("app", Some("rev1"), None, &[c])
+            .unwrap();
+        let after = db
+            .list_launch_condition_claims_for_revision("app", Some("rev1"), None)
+            .unwrap();
+        assert_eq!(after.len(), 1, "replace must delete the prior revision set");
+        assert_eq!(after[0].condition_key, "PORT");
+    }
+
+    #[test]
+    fn replace_rejects_claims_outside_the_scope() {
+        let (_dir, db) = temp_db();
+        let mut wrong = condition(
+            "app",
+            LaunchConditionKind::Storage,
+            "requirements.disk",
+            LaunchConditionStatus::Satisfied,
+        );
+        wrong.install_revision_id = Some("other-rev".to_string());
+        let err = db.replace_launch_conditions_for_revision("app", Some("rev1"), None, &[wrong]);
+        assert!(
+            err.is_err(),
+            "a claim whose revision differs from the replacement scope must be rejected"
+        );
+    }
+
+    #[test]
+    fn list_launch_condition_claims_returns_profile_claims() {
+        let (_dir, db) = temp_db();
+        db.record_launch_condition_claims(&[
+            condition(
+                "app",
+                LaunchConditionKind::Storage,
+                "requirements.disk",
+                LaunchConditionStatus::Satisfied,
+            ),
+            condition(
+                "app",
+                LaunchConditionKind::ProviderCapability,
+                "gpu.nvidia.cuda",
+                LaunchConditionStatus::ProviderRequired,
+            ),
+            condition(
+                "other",
+                LaunchConditionKind::Runtime,
+                "deno",
+                LaunchConditionStatus::Satisfied,
+            ),
+        ])
+        .unwrap();
+        let app = db.list_launch_condition_claims("app").unwrap();
+        assert_eq!(
+            app.len(),
+            2,
+            "only the queried app's conditions are returned"
+        );
+        assert!(app.iter().all(|c| c.install_profile_key == "app"));
+    }
+
+    #[test]
+    fn installed_launch_conditions_are_loaded_from_db_not_lockfile() {
+        // SOT semantics: the installed app's condition set is reconstructed from
+        // the DB ledger alone — no lockfile/manifest is consulted here.
+        let (_dir, db) = temp_db();
+        let with_rev = |mut c: LaunchConditionClaim| {
+            c.install_revision_id = Some("rev1".to_string());
+            c
+        };
+        let claims = vec![
+            with_rev(condition(
+                "app",
+                LaunchConditionKind::Storage,
+                "requirements.disk",
+                LaunchConditionStatus::Satisfied,
+            )),
+            with_rev(condition(
+                "app",
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+            )),
+        ];
+        db.record_installed_launch_ledger("app", Some("rev1"), None, &claims)
+            .unwrap();
+
+        let loaded = db.list_launch_condition_claims("app").unwrap();
+        assert_eq!(loaded.len(), 2);
+        let secret = loaded
+            .iter()
+            .find(|c| c.kind == LaunchConditionKind::Secret)
+            .expect("secret condition present in ledger");
+        assert_eq!(secret.status, LaunchConditionStatus::UserGrantRequired);
+        assert_eq!(secret.condition_key, "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn empty_ledger_is_not_used_to_mean_no_conditions() {
+        let (_dir, db) = temp_db();
+        // A never-installed app has a genuinely empty ledger.
+        assert!(
+            db.list_launch_condition_claims("ghost").unwrap().is_empty(),
+            "a never-installed app records nothing"
+        );
+
+        // An installed revision always carries the baseline marker, so its ledger
+        // is non-empty even with no extracted requirements — "empty" can only mean
+        // "nothing recorded", never "this app has no launch conditions".
+        let baseline = launch_condition_extraction_status(
+            "app",
+            Some("rev1"),
+            &[LaunchConditionKind::Storage],
+        );
+        db.record_installed_launch_ledger("app", Some("rev1"), None, &[baseline])
+            .unwrap();
+        let loaded = db.list_launch_condition_claims("app").unwrap();
+        assert_eq!(loaded.len(), 1);
+        let marker = &loaded[0];
+        assert_eq!(marker.condition_key, LEDGER_EXTRACTION_STATUS_KEY);
+        assert_eq!(marker.kind, LaunchConditionKind::Policy);
+        assert!(!marker.required);
+        assert!(
+            marker.detail_json.contains("\"complete\":false"),
+            "the baseline marks the ledger as incomplete: {}",
+            marker.detail_json
+        );
+    }
+
+    #[test]
+    fn storage_claim_can_be_projected_to_launch_condition() {
+        let (_dir, db) = temp_db();
+        let condition = launch_condition_from_storage_claim("app", Some("rev1"), 21474836480);
+        db.record_launch_condition_claim(&condition).unwrap();
+        let loaded = db.list_launch_condition_claims("app").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].kind, LaunchConditionKind::Storage);
+        assert_eq!(loaded[0].condition_key, "requirements.disk");
+        assert!(loaded[0].detail_json.contains("21474836480"));
+    }
+
+    #[test]
+    fn port_claim_can_be_projected_to_launch_condition() {
+        let (_dir, db) = temp_db();
+        let port = PortClaim {
+            install_profile_key: "app".to_string(),
+            logical_endpoint: "ato://app/app/main".to_string(),
+            preferred_port: 3000,
+            last_actual_port: Some(49152),
+            protocol: "tcp".to_string(),
+            conflict_policy: ConflictPolicy::Remap,
+        };
+        let condition = launch_condition_from_port_claim(&port);
+        db.record_launch_condition_claim(&condition).unwrap();
+        let loaded = db.list_launch_condition_claims("app").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].kind, LaunchConditionKind::Port);
+        assert!(loaded[0].detail_json.contains("\"preferred_port\":3000"));
+    }
+
+    #[test]
+    fn secret_launch_condition_rejects_raw_value() {
+        let (_dir, db) = temp_db();
+        let mut c = condition(
+            "app",
+            LaunchConditionKind::Secret,
+            "OPENAI_API_KEY",
+            LaunchConditionStatus::Satisfied,
+        );
+        c.detail_json = r#"{"value":"sk-abc123"}"#.to_string();
+        assert!(
+            db.record_launch_condition_claim(&c).is_err(),
+            "a secret condition embedding a raw value must be rejected at write time"
+        );
+        assert!(db.list_launch_condition_claims("app").unwrap().is_empty());
+    }
+
+    #[test]
+    fn secret_launch_condition_requires_redacted_detail() {
+        let (_dir, db) = temp_db();
+        let mut c = condition(
+            "app",
+            LaunchConditionKind::Secret,
+            "OPENAI_API_KEY",
+            LaunchConditionStatus::UserGrantRequired,
+        );
+        c.redacted = false;
+        assert!(
+            db.record_launch_condition_claim(&c).is_err(),
+            "a secret condition must be marked redacted"
+        );
+    }
+
+    #[test]
+    fn env_launch_condition_rejects_api_key_value() {
+        let (_dir, db) = temp_db();
+        let mut c = condition(
+            "app",
+            LaunchConditionKind::Env,
+            "PORT",
+            LaunchConditionStatus::Satisfied,
+        );
+        c.detail_json = r#"{"api_key":"sk-abc"}"#.to_string();
+        assert!(db.record_launch_condition_claim(&c).is_err());
+    }
+
+    #[test]
+    fn same_profile_kind_condition_provider_is_upserted_not_duplicated() {
+        let (_dir, db) = temp_db();
+        let c = condition(
+            "app",
+            LaunchConditionKind::Runtime,
+            "deno",
+            LaunchConditionStatus::Missing,
+        );
+        db.record_launch_condition_claim(&c).unwrap();
+        db.record_launch_condition_claim(&c).unwrap();
+        assert_eq!(
+            db.list_launch_condition_claims("app").unwrap().len(),
+            1,
+            "identical identity must upsert, not duplicate"
+        );
+    }
+
+    #[test]
+    fn different_provider_keeps_separate_claims() {
+        let (_dir, db) = temp_db();
+        let mut local = condition(
+            "app",
+            LaunchConditionKind::ProviderCapability,
+            "gpu.nvidia.cuda",
+            LaunchConditionStatus::ProviderRequired,
+        );
+        local.provider_id = None; // → 'local'
+        let mut remote = local.clone();
+        remote.provider_id = Some("runner-east".to_string());
+        db.record_launch_condition_claim(&local).unwrap();
+        db.record_launch_condition_claim(&remote).unwrap();
+        assert_eq!(
+            db.list_launch_condition_claims("app").unwrap().len(),
+            2,
+            "the same condition on a different provider is a distinct claim"
+        );
+    }
+
+    #[test]
+    fn different_revision_keeps_separate_claims() {
+        let (_dir, db) = temp_db();
+        let mut r1 = condition(
+            "app",
+            LaunchConditionKind::Storage,
+            "requirements.disk",
+            LaunchConditionStatus::Satisfied,
+        );
+        r1.install_revision_id = Some("rev1".to_string());
+        let mut r2 = r1.clone();
+        r2.install_revision_id = Some("rev2".to_string());
+        db.record_launch_condition_claim(&r1).unwrap();
+        db.record_launch_condition_claim(&r2).unwrap();
+        assert_eq!(
+            db.list_launch_condition_claims("app").unwrap().len(),
+            2,
+            "the same condition on a different revision is a distinct claim"
+        );
+    }
+
+    #[test]
+    fn condition_claim_round_trips_through_db() {
+        let (_dir, db) = temp_db();
+        let mut c = condition(
+            "app",
+            LaunchConditionKind::Network,
+            "egress.api.openai.com",
+            LaunchConditionStatus::Satisfied,
+        );
+        c.install_revision_id = Some("rev1".to_string());
+        c.provider_id = Some("runner-east".to_string());
+        c.required = false;
+        c.source = LaunchConditionSource::ProviderSnapshot;
+        c.detail_json = r#"{"host":"api.openai.com","port":443}"#.to_string();
+        db.record_launch_condition_claim(&c).unwrap();
+        let loaded = db
+            .list_launch_condition_claims_for_revision("app", Some("rev1"), Some("runner-east"))
+            .unwrap();
+        assert_eq!(loaded, vec![c], "stored condition must round-trip exactly");
     }
 }
