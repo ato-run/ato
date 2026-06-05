@@ -69,8 +69,8 @@ secret.K=prompt
 
 | Deferred item | Tracking | Why deferred |
 |---|---|---|
-| OCI executor secret injection | branch `feat/oci-secret-grant-injection` (in flight) | #546 scoped to web/source relaunch; OCI is a separate spawn boundary. |
-| Manifest-free state-binding **target store** | branch `feat/manifest-free-state-binding-target-store` (in flight) | Prerequisite for real `state.*=prompt`; today's `ensure_registered_state_binding` is manifest-coupled. |
+| OCI executor secret injection | #553 (in review) | #546 scoped to web/source relaunch; OCI is a separate spawn boundary. |
+| Manifest-free state-binding **target store** | #552 (in review) | Prerequisite for real `state.*=prompt`; today's `ensure_registered_state_binding` is manifest-coupled. |
 | `state.*=prompt` real creation (CLI/core) | #547 | Depends on the target store landing; writing a `state_binding_ref` without a real target would forge proof. |
 | capsule:// `?port=` query → launch-time PortClaim | #548 | Port admission exists (#519/#515/#523); wiring the query inputs to it is distinct. |
 | env-via-grant (`env.K=grant:<id>`) | #549 | Registry already accepts `env.*` (#537); planner/injection extension remains. |
@@ -83,9 +83,9 @@ the desktop counterpart of the CLI/core `state.*=prompt` flow (#547).
 
 ## Recommendation
 
-Close #508 once the two in-flight branches above merge (they complete the
-"secret has a real path everywhere" and "state has a target store" guarantees),
-and track the rest via #547–#551 and #509. The device-local installed-state
+Close #508 once #553 (OCI secret injection) and #552 (state target store) merge
+(they complete the "secret has a real path everywhere" and "state has a target
+store" guarantees), and track the rest via #547–#551 and #509. The device-local installed-state
 contract — SOT DB, ledger-driven relaunch admission, real storage/port/secret
 paths, closed secret-prompt loop, typed not-implemented for unsafe state — is met.
 
