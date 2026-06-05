@@ -3515,19 +3515,52 @@ fn install_launch_ledger_records_storage_condition_in_db_sot() {
     // exercises the install-side `install_launch_conditions` builder + the
     // strict `record_installed_launch_ledger` write without constructing a full
     // InstallResult.
+    use capsule_core::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
     let (_dir, db) = admission_db();
-    let claims = install_launch_conditions("ipk_app", "rev1", 21_474_836_480);
+    let claims = install_launch_conditions("ipk_app", "rev1", Some(21_474_836_480));
     db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
         .expect("ledger write must succeed");
 
     let loaded = db.list_launch_condition_claims("ipk_app").unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(
-        loaded[0].kind,
-        capsule_core::installed_state::LaunchConditionKind::Storage
+    // Baseline marker + storage condition.
+    let storage = loaded
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::Storage)
+        .expect("storage condition present");
+    assert_eq!(storage.install_revision_id.as_deref(), Some("rev1"));
+    assert!(storage.detail_json.contains("21474836480"));
+    assert!(
+        loaded
+            .iter()
+            .any(|c| c.condition_key == LEDGER_EXTRACTION_STATUS_KEY),
+        "the baseline extraction-status marker is always recorded"
     );
-    assert_eq!(loaded[0].install_revision_id.as_deref(), Some("rev1"));
-    assert!(loaded[0].detail_json.contains("21474836480"));
+}
+
+#[test]
+fn install_launch_ledger_records_baseline_even_without_disk_requirement() {
+    // An installed app with no declared disk requirement (storage admission
+    // skipped) still gets a ledger: only the baseline marker, never empty (#508).
+    use capsule_core::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
+    let (_dir, db) = admission_db();
+    let claims = install_launch_conditions("ipk_app", "rev1", None);
+    assert_eq!(
+        claims.len(),
+        1,
+        "no disk requirement → only the baseline marker"
+    );
+    assert_eq!(claims[0].kind, LaunchConditionKind::Policy);
+    assert_eq!(claims[0].condition_key, LEDGER_EXTRACTION_STATUS_KEY);
+
+    db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
+        .expect("ledger write must succeed");
+    let loaded = db.list_launch_condition_claims("ipk_app").unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(
+        !loaded.is_empty(),
+        "an installed revision must never have an empty ledger"
+    );
+    assert!(loaded[0].detail_json.contains("\"complete\":false"));
 }
 
 #[test]
