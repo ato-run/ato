@@ -341,6 +341,13 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
         // #521, the realization classifier is #522). Make that explicit rather
         // than implying it from the empty observed facets.
         .with_observation_scope(ObservationScope::declared_resolved())
+        // #494: spell out WHY the graph is Partial — runtime not observed —
+        // as typed reasons derived from the scope. Non-empty even though
+        // node/edge receipts are populated: a declared/resolved projection is
+        // not runtime observation, so this never becomes Complete.
+        .with_graph_completeness_reasons(
+            ObservationScope::declared_resolved().graph_completeness_reasons(),
+        )
         .with_graph_receipt(GraphReceipt::launch_passed(
             declared_execution_id,
             resolved_execution_id,
