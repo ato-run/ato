@@ -17,9 +17,7 @@
 //! a follow-up; this module returns a plan that a retry loop can re-run.
 
 use anyhow::{Result, bail};
-use capsule_core::installed_state::{
-    ConflictPolicy, InstalledStateDb, PortAdmission, PortClaim, os_port_is_free,
-};
+use capsule_core::installed_state::{ConflictPolicy, InstalledStateDb, PortAdmission, PortClaim};
 
 /// Resolved port + the claim to record after a successful launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,30 +36,13 @@ pub fn logical_endpoint(install_profile_key: &str, service_name: &str) -> String
     format!("ato://app/{install_profile_key}/{service_name}")
 }
 
-/// Compute a port admission plan for an installed-app service launch, using the
-/// real OS availability probe. `Ok(None)` when admission does not apply (no
-/// install identity or no preferred port → existing resolution is left alone).
-pub fn plan_port_admission(
-    db: &InstalledStateDb,
-    install_profile_key: Option<&str>,
-    service_name: &str,
-    protocol: &str,
-    preferred_port: Option<u16>,
-    policy: ConflictPolicy,
-) -> Result<Option<PortAdmissionPlan>> {
-    plan_port_admission_with(
-        db,
-        install_profile_key,
-        service_name,
-        protocol,
-        preferred_port,
-        policy,
-        os_port_is_free,
-    )
-}
-
-/// Like [`plan_port_admission`] but with an injectable OS-availability probe so
-/// the decision can be exercised deterministically in tests.
+/// Compute a port admission plan for an installed-app service launch.
+///
+/// `Ok(None)` when admission does not apply (no install identity or no preferred
+/// port → existing resolution is left alone). `os_available` is the OS-port
+/// availability probe — pass
+/// [`os_port_is_free`](capsule_core::installed_state::os_port_is_free) in
+/// production; inject a deterministic closure in tests.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_port_admission_with(
     db: &InstalledStateDb,
