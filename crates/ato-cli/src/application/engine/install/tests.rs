@@ -3509,6 +3509,28 @@ fn storage_admission_admits_when_space_available_and_returns_required() {
 }
 
 #[test]
+fn install_launch_ledger_records_storage_condition_in_db_sot() {
+    // The install-side projection writes the storage requirement into the
+    // launch-condition ledger (the SOT), keyed by app + revision (#508). This
+    // exercises the install-side `install_launch_conditions` builder + the
+    // strict `record_installed_launch_ledger` write without constructing a full
+    // InstallResult.
+    let (_dir, db) = admission_db();
+    let claims = install_launch_conditions("ipk_app", "rev1", 21_474_836_480);
+    db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
+        .expect("ledger write must succeed");
+
+    let loaded = db.list_launch_condition_claims("ipk_app").unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(
+        loaded[0].kind,
+        capsule_core::installed_state::LaunchConditionKind::Storage
+    );
+    assert_eq!(loaded[0].install_revision_id.as_deref(), Some("rev1"));
+    assert!(loaded[0].detail_json.contains("21474836480"));
+}
+
+#[test]
 fn storage_admission_rejects_when_existing_claims_exhaust_the_volume() {
     let (dir, db) = admission_db();
     // Reserve more than the free space (wide margin so the result is stable),
