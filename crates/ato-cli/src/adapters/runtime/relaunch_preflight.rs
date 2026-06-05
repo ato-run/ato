@@ -2,10 +2,18 @@
 //!
 //! Before relaunching an installed app, read its launch conditions from the
 //! Installed-State DB **ledger** (the SOT, #527) — not from the manifest /
-//! lockfile — and turn them into a typed pass / warn / block decision via
+//! lockfile — **resolve** the ones that depend on local device facts (host env
+//! presence, a confirmed secret grant, a confirmed state binding), then turn the
+//! resolved conditions into a typed pass / warn / block decision via
 //! [`evaluate_relaunch_admission`]. A blocked decision aborts the launch with
 //! [`ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED`]; warnings are logged and the launch
 //! continues.
+//!
+//! Resolution never reads/stores a value: it checks host-env *presence*, a
+//! *redacted grant reference*, or a *logical binding reference* — never an env
+//! value, secret value, token, or raw host path. The in-memory resolved claims
+//! are authoritative for the current launch; durable resolutions are written
+//! back best-effort (a persistence failure never blocks the launch).
 //!
 //! Scope: installed-app launches only (an install profile key + revision is
 //! available). `ato run .` / non-installed launches skip this entirely. The
@@ -14,10 +22,29 @@
 
 use anyhow::{Result, bail};
 use capsule_core::installed_state::{
-    InstalledStateDb, RelaunchAdmission, RelaunchAdmissionReason, evaluate_relaunch_admission,
+    InstalledStateDb, RelaunchAdmission, RelaunchAdmissionReason, RelaunchResolutionContext,
+    evaluate_relaunch_admission, resolve_relaunch_conditions,
 };
 
 use crate::utils::error::ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED;
+
+/// The production resolver probes.
+///
+/// - **env**: real host-env presence (`std::env::var_os`), value never read.
+/// - **secret grant**: conservatively `false` — no existence-only secret-grant
+///   lookup exists yet (the secret store only exposes value-returning `get`), so
+///   a real grant resolver is a follow-up; reporting `false` avoids fake
+///   satisfaction.
+/// - **state binding**: conservatively `false` — no logical state-binding
+///   existence check exists yet without raw-path leakage; a real state-binding
+///   registry resolver is a follow-up.
+fn production_resolution_context() -> RelaunchResolutionContext {
+    RelaunchResolutionContext {
+        env_present: Box::new(|name| std::env::var_os(name).is_some()),
+        secret_grant_exists: Box::new(|_grant_ref| false),
+        state_binding_exists: Box::new(|_binding_ref| false),
+    }
+}
 
 /// Run relaunch preflight for an installed-app launch, gated on the install
 /// identity. `identity` is `Some((install_profile_key, install_revision_id))`
@@ -54,17 +81,88 @@ pub fn run_relaunch_preflight(identity: Option<(&str, &str)>) -> Result<()> {
     Ok(())
 }
 
-/// Core seam: load the ledger for `(install_profile_key, install_revision_id)`,
-/// evaluate relaunch admission, and either return the (non-blocking) warnings or
-/// fail with a typed error. Takes the DB explicitly so it is testable with a
-/// temporary ledger.
+/// Load the ledger, resolve conditions against the **production** probes, and
+/// return the admission decision. Wrapper over
+/// [`preflight_installed_relaunch_decision_with_resolver`].
 pub fn preflight_installed_relaunch_decision(
     db: &InstalledStateDb,
     install_profile_key: &str,
     install_revision_id: Option<&str>,
 ) -> Result<Vec<RelaunchAdmissionReason>> {
+    preflight_installed_relaunch_decision_with_resolver(
+        db,
+        install_profile_key,
+        install_revision_id,
+        &production_resolution_context(),
+    )
+}
+
+/// Core seam: load the ledger for `(install_profile_key, install_revision_id)`,
+/// **resolve** its conditions against the given local-fact probes, best-effort
+/// persist the durable resolutions, then evaluate admission and either return the
+/// (non-blocking) warnings or fail with a typed error. Takes the DB and resolver
+/// context explicitly so it is testable with a temporary ledger and injected
+/// probes.
+pub fn preflight_installed_relaunch_decision_with_resolver(
+    db: &InstalledStateDb,
+    install_profile_key: &str,
+    install_revision_id: Option<&str>,
+    resolver: &RelaunchResolutionContext,
+) -> Result<Vec<RelaunchAdmissionReason>> {
+    preflight_with_persist(
+        db,
+        install_profile_key,
+        install_revision_id,
+        resolver,
+        |claims| {
+            db.record_resolved_launch_conditions(
+                install_profile_key,
+                install_revision_id,
+                None,
+                claims,
+            )
+            .map_err(anyhow::Error::from)
+        },
+    )
+}
+
+/// As [`preflight_installed_relaunch_decision_with_resolver`], but with the
+/// durable write-through injected so the best-effort persistence path is
+/// deterministically testable. The write-through is **best-effort**: a `persist`
+/// error is logged and the launch continues on the in-memory resolved claims.
+fn preflight_with_persist(
+    db: &InstalledStateDb,
+    install_profile_key: &str,
+    install_revision_id: Option<&str>,
+    resolver: &RelaunchResolutionContext,
+    persist: impl FnOnce(&[capsule_core::installed_state::LaunchConditionClaim]) -> Result<()>,
+) -> Result<Vec<RelaunchAdmissionReason>> {
     let input = db.load_relaunch_admission_input(install_profile_key, install_revision_id, None)?;
-    match evaluate_relaunch_admission(input) {
+    let resolution = resolve_relaunch_conditions(input.into(), resolver);
+
+    // Best-effort write-through of *durable* resolutions only (transient host-env
+    // presence is excluded). The in-memory resolved claims remain authoritative
+    // for this launch, so a persistence failure warns and continues.
+    if let Some(persist_claims) = resolution.durable_persist_claims() {
+        if let Err(err) = persist(&persist_claims) {
+            tracing::warn!(
+                error = %err,
+                install_profile_key,
+                "failed to persist resolved launch conditions; \
+                 using in-memory resolution for this launch"
+            );
+        }
+    }
+    for update in &resolution.updates {
+        tracing::debug!(
+            kind = update.kind.as_str(),
+            condition_key = %update.condition_key,
+            source = ?update.source,
+            "resolved installed launch condition"
+        );
+    }
+
+    match evaluate_relaunch_admission(resolution.to_admission_input()) {
         RelaunchAdmission::Admitted { warnings } => Ok(warnings),
         RelaunchAdmission::Blocked { reasons, .. } => bail!(
             "{}",
@@ -210,5 +308,210 @@ mod tests {
     fn non_installed_run_skips_relaunch_ledger_preflight() {
         // No install identity → no DB read, no preflight, immediate Ok.
         assert!(run_relaunch_preflight(None).is_ok());
+    }
+
+    // ── Resolver-driven preflight (#508) ─────────────────────────────────────
+
+    use capsule_core::installed_state::RelaunchResolutionContext;
+
+    fn resolver(env: bool, grant: bool, binding: bool) -> RelaunchResolutionContext {
+        RelaunchResolutionContext {
+            env_present: Box::new(move |_| env),
+            secret_grant_exists: Box::new(move |_| grant),
+            state_binding_exists: Box::new(move |_| binding),
+        }
+    }
+
+    fn claim_detail(
+        kind: LaunchConditionKind,
+        condition_key: &str,
+        status: LaunchConditionStatus,
+        detail_json: &str,
+    ) -> LaunchConditionClaim {
+        let mut c = claim(kind, condition_key, status);
+        c.detail_json = detail_json.to_string();
+        c
+    }
+
+    #[test]
+    fn installed_relaunch_preflight_allows_secret_when_grant_probe_satisfies() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"projection":"env","grant_ref":"ato-secret://store/openai"}"#,
+            )],
+        );
+        let warnings = preflight_installed_relaunch_decision_with_resolver(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &resolver(false, true, false),
+        )
+        .expect("a confirmed grant must lift the secret to Satisfied → admit");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !matches!(w, RelaunchAdmissionReason::UserGrantRequired { .. }))
+        );
+        // The durable resolution is written back: a reload shows Satisfied.
+        let reloaded = db.list_launch_condition_claims("ipk_app").unwrap();
+        let secret = reloaded
+            .iter()
+            .find(|c| c.condition_key == "OPENAI_API_KEY")
+            .unwrap();
+        assert_eq!(secret.status, LaunchConditionStatus::Satisfied);
+    }
+
+    #[test]
+    fn installed_relaunch_preflight_still_blocks_secret_without_grant() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"grant_ref":"ato-secret://store/openai"}"#,
+            )],
+        );
+        // Grant ref present but the probe says it does not exist → still blocks.
+        let err = preflight_installed_relaunch_decision_with_resolver(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &resolver(false, false, false),
+        )
+        .expect_err("no confirmed grant → block");
+        assert!(
+            err.to_string()
+                .contains(ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED)
+        );
+    }
+
+    #[test]
+    fn installed_relaunch_preflight_allows_explicit_state_when_binding_probe_satisfies() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::State,
+                "data",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"binding_ref":"ato-state://app/data","durability":"persistent"}"#,
+            )],
+        );
+        let warnings = preflight_installed_relaunch_decision_with_resolver(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &resolver(false, false, true),
+        )
+        .expect("a confirmed binding must lift the state to Satisfied → admit");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !matches!(w, RelaunchAdmissionReason::UserGrantRequired { .. }))
+        );
+    }
+
+    #[test]
+    fn installed_relaunch_preflight_env_present_lifts_unknown_to_satisfied() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Env,
+                "DATABASE_URL",
+                LaunchConditionStatus::Unknown,
+                r#"{"source":"manifest.required_env"}"#,
+            )],
+        );
+        let warnings = preflight_installed_relaunch_decision_with_resolver(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &resolver(true, false, false),
+        )
+        .expect("present host env lifts Unknown → Satisfied");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !matches!(w, RelaunchAdmissionReason::Unknown { .. })),
+            "resolved env must not surface as an Unknown warning"
+        );
+        // Transient env presence must NOT be persisted (would fake-satisfy a
+        // future launch where the env is absent).
+        let reloaded = db.list_launch_condition_claims("ipk_app").unwrap();
+        let env = reloaded
+            .iter()
+            .find(|c| c.condition_key == "DATABASE_URL")
+            .unwrap();
+        assert_eq!(
+            env.status,
+            LaunchConditionStatus::Unknown,
+            "transient env-presence resolution must not be persisted"
+        );
+    }
+
+    #[test]
+    fn installed_relaunch_preflight_unknown_port_still_warns_not_blocks() {
+        let (_d, db) = temp_db();
+        let endpoint = app_service_endpoint("ipk_app", "main");
+        let mut port = launch_condition_from_port_declaration(
+            "ipk_app",
+            Some("rev1"),
+            &endpoint,
+            "tcp",
+            Some(3000),
+            "manifest.targets.port",
+            Some("remap"),
+            LaunchConditionStatus::Unknown,
+        );
+        port.install_revision_id = Some("rev1".to_string());
+        record(&db, &[port]);
+        // Even with all probes generous, the port is never resolved this slice.
+        let warnings = preflight_installed_relaunch_decision_with_resolver(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &resolver(true, true, true),
+        )
+        .expect("unknown port stays a warning, never a block");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, RelaunchAdmissionReason::Unknown { .. }))
+        );
+    }
+
+    #[test]
+    fn resolver_writeback_failure_warns_but_uses_in_memory_resolution() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"grant_ref":"ato-secret://store/openai"}"#,
+            )],
+        );
+        // The grant is confirmed (durable resolution) but persistence fails. The
+        // launch must still be admitted on the in-memory resolution.
+        let result = preflight_with_persist(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &resolver(false, true, false),
+            |_claims| anyhow::bail!("simulated write-through failure"),
+        );
+        assert!(
+            result.is_ok(),
+            "a persistence failure must not block the launch: {result:?}"
+        );
     }
 }
