@@ -104,6 +104,14 @@ pub(crate) struct PreparedRunContext {
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
+    /// Install profile key for an installed-app launch (`ato launch`), `None`
+    /// for ephemeral `ato run`. Captured from the trusted install-lifecycle
+    /// identity on the synchronous run thread and threaded explicitly into
+    /// [`resolve_launch_context`] so the launch path never reads the
+    /// thread-local install context across an async executor boundary (#508).
+    ///
+    /// [`resolve_launch_context`]: crate::adapters::runtime::executors::target_runner::resolve_launch_context
+    pub(crate) install_profile_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +173,9 @@ impl PreparedRunContext {
                 .is_some_and(|decision| decision.plan.manifest.get("engine").is_some()),
             compatibility_legacy_lock: authoritative_input
                 .and_then(|input| input.compatibility_legacy_lock.clone()),
+            // Stamped explicitly by the caller from the request's trusted
+            // install-lifecycle identity (see the run pipeline below).
+            install_profile_key: None,
         })
     }
 
@@ -184,6 +195,7 @@ impl PreparedRunContext {
             validation_mode,
             engine_override_declared,
             compatibility_legacy_lock: self.compatibility_legacy_lock.clone(),
+            install_profile_key: self.install_profile_key.clone(),
         }
     }
 }
@@ -1691,6 +1703,15 @@ where
         validation_mode,
         effective_target_label,
     )?;
+    // Source of truth for installed-app launch identity: the explicit
+    // install-lifecycle context `ato launch` passes through the request — not
+    // the thread-local. Threaded onto the prepared context so the (async)
+    // launch-context resolution stamps it without crossing a thread-local
+    // boundary (#508).
+    prepared.install_profile_key = request
+        .install_lifecycle_context
+        .as_ref()
+        .map(|ctx| ctx.install_profile_key.clone());
     let state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
             authoritative_input
@@ -4558,6 +4579,7 @@ run = "/usr/bin/true"
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: Some("ipk_authority".to_string()),
         };
 
         let rerouted = prepared.with_bridge_manifest(
@@ -4579,6 +4601,12 @@ run = "/usr/bin/true"
             capsule_core::types::ValidationMode::Preview
         );
         assert!(rerouted.engine_override_declared);
+        // Install identity must survive the reroute so the rerouted launch
+        // context resolution still stamps it (#508).
+        assert_eq!(
+            rerouted.install_profile_key.as_deref(),
+            Some("ipk_authority")
+        );
     }
 
     #[test]
