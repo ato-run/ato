@@ -44,5 +44,5 @@ pub use classify::{
 pub use model::{
     RealizationContract, RealizationEdgeState, RealizationEdgeStatus, RealizationEvidence,
     RealizationNodeKind, RealizationNodeStatus, RealizationResult, RealizationStatus,
-    UnrealizableReason,
+    RedactedProjectionCommand, UnrealizableReason,
 };
