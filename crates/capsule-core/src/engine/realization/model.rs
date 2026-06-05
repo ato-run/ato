@@ -47,9 +47,9 @@ pub enum RealizationNodeKind {
     FilesystemView,
     /// The closed set of environment values required at launch.
     EnvClosure,
-    /// A network policy facet (deny-by-default, allow-list, …).
-    CapabilityPolicy,
     /// A capability/sandbox policy facet (mount readonly, dropped caps, …).
+    CapabilityPolicy,
+    /// A network policy facet (deny-by-default, allow-list, …).
     NetworkPolicy,
     /// A binding to persistent/prior state.
     StateBinding,
@@ -178,8 +178,17 @@ fn redact_token(token: &str) -> String {
 pub enum RealizationEvidence {
     /// A declared content/identity hash that makes a node materializable.
     DeclaredHash { label: String, hash: String },
-    /// A present artifact verified against its declared identity.
+    /// A present artifact verified against its declared identity (the declared
+    /// and materialized hashes both exist and match).
     VerifiedArtifact { label: String, hash: String },
+    /// A present artifact whose materialized hash does **not** match the
+    /// declared identity. Content/identity hashes are safe to record. This
+    /// makes the node `Unavailable`, never `Verified`.
+    HashMismatch {
+        label: String,
+        declared: String,
+        actual: String,
+    },
     /// A host-specific binding (e.g. an absolute host path role).
     HostBinding { detail: String },
     /// A persistent-state binding reference (never a secret value).
@@ -203,6 +212,12 @@ pub enum RealizationEvidence {
 pub enum UnrealizableReason {
     /// A required immutable input node cannot be reconstructed or verified.
     MissingImmutableInput {
+        node_id: String,
+        node_kind: RealizationNodeKind,
+    },
+    /// A required immutable input is present but its materialized hash does not
+    /// match its declared identity, so it cannot be trusted.
+    MismatchedImmutableInput {
         node_id: String,
         node_kind: RealizationNodeKind,
     },
