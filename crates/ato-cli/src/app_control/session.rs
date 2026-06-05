@@ -128,6 +128,14 @@ where
     })
 }
 
+/// Return the install profile key of the active install lifecycle context, if
+/// any. Captured at launch time (while still on the synchronous run thread) so
+/// it can be threaded explicitly into [`RuntimeLaunchContext`]; the thread-local
+/// itself does not reliably survive the async executor boundary.
+pub(crate) fn current_install_profile_key() -> Option<String> {
+    with_install_lifecycle_context(|ctx| ctx.map(|c| c.install_profile_key.clone()))
+}
+
 /// Stamp install lifecycle IDs onto `record` if a lifecycle context was set
 /// (i.e., we are running via `ato launch`).
 ///
