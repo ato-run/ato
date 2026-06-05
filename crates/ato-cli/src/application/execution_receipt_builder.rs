@@ -687,6 +687,11 @@ pub(crate) fn build_oci_launch_receipt(
     if let Some(projections) = provider_projections_override {
         receipt = receipt.with_provider_projections(projections);
     }
+    // Fold the (now final) provider facts into the assessment layer (#501):
+    // value-free provider-gap completeness reasons + conservative reproducibility
+    // causes. Strictly additive and pre-observation — graph stays `Partial`,
+    // ObservationScope stays declared/resolved, no observed_execution_id.
+    receipt = receipt.with_oci_provider_assessment();
     Ok(ExecutionReceiptDocument::V2(receipt))
 }
 
@@ -1298,11 +1303,12 @@ mod oci_launch_receipt_tests {
     use capsule_core::execution_identity::{
         CaseSensitivity, DependencyIdentityV2, EnvironmentIdentityV2, EnvironmentMode,
         ExecutionIdentityInputV2, ExecutionReceiptDocument, ExecutionReceiptV2, FdLayoutIdentity,
-        FilesystemIdentityV2, FilesystemSemantics, GraphCompleteness, LaunchArg, LaunchEntryPoint,
-        LaunchIdentityV2, OciEnforcementStatus, OciImageDigestStatus, OciProviderReceiptEvidence,
-        PlatformIdentity, PolicyIdentityV2, ReproducibilityClass, ReproducibilityIdentity,
-        RuntimeCompleteness, RuntimeIdentityV2, SourceIdentityV2, SourceProvenance,
-        SourceProvenanceKind, SymlinkPolicy, TmpPolicy, Tracked, UlimitIdentity,
+        FilesystemIdentityV2, FilesystemSemantics, GraphCompleteness, GraphCompletenessReason,
+        LaunchArg, LaunchEntryPoint, LaunchIdentityV2, OciEnforcementStatus, OciImageDigestStatus,
+        OciProviderReceiptEvidence, PlatformIdentity, PolicyIdentityV2, ProviderProjectionGap,
+        ReproducibilityClass, ReproducibilityIdentity, RuntimeCompleteness, RuntimeIdentityV2,
+        SourceIdentityV2, SourceProvenance, SourceProvenanceKind, SymlinkPolicy, TmpPolicy,
+        Tracked, UlimitIdentity,
     };
     use std::collections::BTreeMap;
 
@@ -1493,5 +1499,50 @@ mod oci_launch_receipt_tests {
         let receipt = oci_receipt_with(Vec::new());
         let doc = ExecutionReceiptDocument::V2(receipt);
         assert!(matches!(doc, ExecutionReceiptDocument::V2(_)));
+    }
+
+    #[test]
+    fn persisted_oci_receipt_reflects_provider_assessment() {
+        // A receipt built like the OCI launch path (provider evidence + the #501
+        // assessment) persists the provider-gap reasons and a conservative,
+        // cause-bearing reproducibility — without ever claiming observation.
+        let receipt =
+            oci_receipt_with(vec![evidence("web", "alpine:3.21")]).with_oci_provider_assessment();
+        let exec_id = receipt.execution_id.clone();
+        let doc = ExecutionReceiptDocument::V2(receipt);
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::application::execution_receipts::write_receipt_document_atomic_at(temp.path(), &doc)
+            .expect("write");
+        let read =
+            crate::application::execution_receipts::read_receipt_document_at(temp.path(), &exec_id)
+                .expect("read");
+        let read_v2 = match read {
+            ExecutionReceiptDocument::V2(r) => r,
+            ExecutionReceiptDocument::V1(_) => panic!("v2"),
+        };
+
+        // The `evidence` helper is unpinned + egress-unsupported → both gaps
+        // persist as value-free reasons.
+        let has = |gap| {
+            read_v2.graph_completeness_reasons.iter().any(|r| {
+                matches!(
+                    r,
+                    GraphCompletenessReason::ProviderProjectionIncomplete { gap: g, .. } if *g == gap
+                )
+            })
+        };
+        assert!(has(ProviderProjectionGap::ImageUnpinned));
+        assert!(has(ProviderProjectionGap::NetworkEnforcementUnsupported));
+        // Conservative reproducibility; never Complete; never observed.
+        assert_eq!(
+            read_v2.reproducibility.class,
+            ReproducibilityClass::BestEffort
+        );
+        assert_ne!(
+            read_v2.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+        assert!(read_v2.observed_execution_id.is_none());
     }
 }
