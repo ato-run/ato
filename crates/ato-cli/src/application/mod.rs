@@ -48,6 +48,7 @@ pub(crate) mod source_inference;
 pub(crate) mod source_inventory;
 pub(crate) mod source_projection;
 pub(crate) mod state_bindings;
+pub(crate) mod strict_realization;
 pub(crate) mod tool_artifact;
 pub(crate) mod types;
 pub(crate) mod warm_launch;

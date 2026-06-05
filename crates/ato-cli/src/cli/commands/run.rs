@@ -114,6 +114,8 @@ pub struct RunArgs {
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
     pub plan_only: bool,
+    /// #500 — opt-in strict fail-closed realization profile.
+    pub strict_realization: bool,
     pub install_lifecycle_context: Option<InstallLifecycleContext>,
     pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
@@ -525,6 +527,7 @@ fn build_consumer_run_request(
         cache_strategy: args.cache_strategy,
         reporter: args.reporter.clone(),
         preview_mode: args.preview_mode,
+        strict_realization: args.strict_realization,
         pinned_revision_output_dir: args.pinned_revision_output_dir.clone(),
         install_lifecycle_context: args.install_lifecycle_context.clone(),
     }
@@ -2078,6 +2081,7 @@ run = "node server.js""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            strict_realization: false,
             install_lifecycle_context: None,
             pinned_revision_output_dir: None,
         };
@@ -2186,6 +2190,7 @@ run = "main.py""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            strict_realization: false,
             install_lifecycle_context: None,
             pinned_revision_output_dir: None,
         };
@@ -2291,6 +2296,7 @@ run = "main.py""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            strict_realization: false,
             install_lifecycle_context: None,
             pinned_revision_output_dir: None,
         };
@@ -2384,6 +2390,7 @@ run = "node index.js"
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: true,
+            strict_realization: false,
             install_lifecycle_context: None,
             pinned_revision_output_dir: None,
         };
