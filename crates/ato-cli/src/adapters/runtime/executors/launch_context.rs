@@ -5,6 +5,7 @@ use std::process::Command;
 use anyhow::Result;
 use capsule_core::execution_identity::EnvOrigin;
 
+use crate::adapters::runtime::secret_injection::RuntimeSecretEnv;
 use crate::ipc::inject::IpcContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,18 @@ pub struct RuntimeLaunchContext {
     /// installed apps that both prefer the same port get deterministically
     /// remapped instead of colliding.
     install_profile_key: Option<String>,
+    /// SecretStore-backed launch-condition grants resolved for this installed
+    /// relaunch (#508), injected into the spawned process env.
+    ///
+    /// Deliberately a **separate** channel from `injected_env`: secret values must
+    /// reach the process but must NOT be observed by the execution receipt /
+    /// session record, which read `merged_env*`. This field is therefore excluded
+    /// from `merged_env`, `merged_env_with_origins`, and `env_permission_keys`, and
+    /// is applied only at the final spawn-env construction points
+    /// (`apply_allowlisted_env`, the nacelle payload, and the web-service env map).
+    /// `RuntimeLaunchContext` does not derive `Serialize`, and `RuntimeSecretEnv`'s
+    /// `Debug` redacts the value, so values never reach logs or serialized state.
+    secret_env: Vec<RuntimeSecretEnv>,
 }
 
 impl RuntimeLaunchContext {
@@ -83,6 +96,7 @@ impl RuntimeLaunchContext {
                 dep_endpoints: Vec::new(),
                 egress_proxy_port: None,
                 install_profile_key: None,
+                secret_env: Vec::new(),
             }
         } else {
             Self::empty()
@@ -193,6 +207,18 @@ impl RuntimeLaunchContext {
         self.install_profile_key.as_deref()
     }
 
+    /// Attach SecretStore-backed launch-condition grants resolved for this
+    /// installed relaunch (#508). These are injected into the spawned process env
+    /// but excluded from receipt/session env observation — see [`Self::secret_env`].
+    pub fn with_secret_env(mut self, secret_env: Vec<RuntimeSecretEnv>) -> Self {
+        self.secret_env = secret_env;
+        self
+    }
+
+    pub fn secret_env(&self) -> &[RuntimeSecretEnv] {
+        &self.secret_env
+    }
+
     pub fn ipc(&self) -> Option<&IpcContext> {
         self.ipc.as_ref()
     }
@@ -266,6 +292,12 @@ impl RuntimeLaunchContext {
             cmd.env(key, value);
         }
 
+        // Secret grants last so they win for their exact env key. Applied here at
+        // the spawn boundary only; never merged into the receipt-observed env.
+        for secret in &self.secret_env {
+            cmd.env(&secret.name, secret.value.expose());
+        }
+
         Ok(())
     }
 }
@@ -323,6 +355,57 @@ mod tests {
 
         assert_eq!(value, "127.0.0.1");
         assert_eq!(ctx.env_permission_keys(), vec!["ATO_SERVICE_DB_HOST"]);
+    }
+
+    #[test]
+    fn secret_env_reaches_command_but_is_excluded_from_receipt_env() {
+        use crate::adapters::runtime::secret_injection::{RuntimeSecretEnv, SecretValue};
+        let ctx = RuntimeLaunchContext::empty().with_secret_env(vec![RuntimeSecretEnv {
+            name: "OPENAI_API_KEY".to_string(),
+            value: SecretValue::new("sk-secret-value".to_string()),
+        }]);
+
+        // Excluded from every env surface the receipt / session observer reads.
+        assert!(
+            ctx.merged_env().is_empty(),
+            "secret must not be in merged_env"
+        );
+        assert!(
+            ctx.merged_env_with_origins().is_empty(),
+            "secret must not be in the receipt-observed env"
+        );
+        assert!(ctx.env_permission_keys().is_empty());
+        assert!(ctx.injected_env().is_empty());
+
+        // But applied to the spawned command at the boundary.
+        let mut cmd = std::process::Command::new("echo");
+        ctx.apply_allowlisted_env(&mut cmd).unwrap();
+        let value = cmd.get_envs().find_map(|(k, v)| {
+            if k == "OPENAI_API_KEY" {
+                v.map(|v| v.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(value.as_deref(), Some("sk-secret-value"));
+    }
+
+    #[test]
+    fn secret_env_value_is_redacted_in_context_debug() {
+        use crate::adapters::runtime::secret_injection::{RuntimeSecretEnv, SecretValue};
+        let ctx = RuntimeLaunchContext::empty().with_secret_env(vec![RuntimeSecretEnv {
+            name: "OPENAI_API_KEY".to_string(),
+            value: SecretValue::new("sk-secret-xyz".to_string()),
+        }]);
+        let rendered = format!("{ctx:?}");
+        assert!(
+            !rendered.contains("sk-secret-xyz"),
+            "debug leaked the value"
+        );
+        assert!(
+            rendered.contains("OPENAI_API_KEY"),
+            "name should be visible"
+        );
     }
 
     #[test]
