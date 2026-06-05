@@ -166,8 +166,15 @@ pub struct RealizationEdge {
 
 /// Classify a request into a [`RealizationContract`].
 pub fn classify(request: RealizationRequest) -> RealizationContract {
-    let node_statuses: Vec<RealizationNodeStatus> =
-        request.nodes.iter().map(classify_node).collect();
+    let mut node_statuses: Vec<RealizationNodeStatus> = Vec::with_capacity(request.nodes.len());
+    let mut reasons: Vec<UnrealizableReason> = Vec::new();
+    for node in &request.nodes {
+        let (status, reason) = classify_node(node);
+        if let Some(reason) = reason {
+            reasons.push(reason);
+        }
+        node_statuses.push(status);
+    }
 
     let status_by_id: BTreeMap<&str, RealizationStatus> = node_statuses
         .iter()
@@ -193,14 +200,6 @@ pub fn classify(request: RealizationRequest) -> RealizationContract {
         })
         .collect();
 
-    let reasons: Vec<UnrealizableReason> = request
-        .nodes
-        .iter()
-        .zip(node_statuses.iter())
-        .filter(|(_, status)| status.status.is_blocking())
-        .map(|(node, status)| unrealizable_reason(node, status.node_kind))
-        .collect();
-
     let result = if reasons.is_empty() {
         RealizationResult::Realized
     } else {
@@ -219,31 +218,28 @@ fn endpoint_unavailable(status_by_id: &BTreeMap<&str, RealizationStatus>, id: &s
     matches!(status_by_id.get(id), Some(RealizationStatus::Unavailable))
 }
 
-/// Map an `Unavailable` node onto its typed reason.
-fn unrealizable_reason(node: &RealizationNode, kind: RealizationNodeKind) -> UnrealizableReason {
-    match kind {
-        RealizationNodeKind::RuntimeTool => UnrealizableReason::RuntimeToolBinaryHashUnavailable {
-            node_id: node.node_id.clone(),
-        },
-        RealizationNodeKind::DependencyOutput => UnrealizableReason::MissingDependencyOutput {
-            node_id: node.node_id.clone(),
-        },
-        RealizationNodeKind::StateBinding => UnrealizableReason::MissingStateBinding {
-            node_id: node.node_id.clone(),
-        },
-        RealizationNodeKind::EnvClosure => UnrealizableReason::UndeclaredEnvRequired {
-            node_id: node.node_id.clone(),
-        },
-        other => UnrealizableReason::MissingImmutableInput {
-            node_id: node.node_id.clone(),
-            node_kind: other,
-        },
+/// Default reason for an `Unavailable` node whose arm did not produce a more
+/// specific one: a required immutable input that could not be reconstructed.
+fn missing_immutable_reason(node_id: &str, kind: RealizationNodeKind) -> UnrealizableReason {
+    UnrealizableReason::MissingImmutableInput {
+        node_id: node_id.to_string(),
+        node_kind: kind,
     }
 }
 
-fn classify_node(node: &RealizationNode) -> RealizationNodeStatus {
+fn classify_node(node: &RealizationNode) -> (RealizationNodeStatus, Option<UnrealizableReason>) {
     let kind = node.facts.kind();
-    let (status, evidence) = match &node.facts {
+    let node_id = node.node_id.as_str();
+
+    // Each arm yields (status, evidence, explicit_reason). `explicit_reason` is
+    // set only when the correct reason is *not* the generic "missing immutable
+    // input" — a hash mismatch, or a kind with its own typed reason. Any other
+    // `Unavailable` falls back to MissingImmutableInput below.
+    let (status, evidence, explicit_reason): (
+        RealizationStatus,
+        Vec<RealizationEvidence>,
+        Option<UnrealizableReason>,
+    ) = match &node.facts {
         RealizationNodeFacts::Source {
             declared_tree_hash,
             materialized_tree_hash,
@@ -252,6 +248,8 @@ fn classify_node(node: &RealizationNode) -> RealizationNodeStatus {
             declared_tree_hash.as_deref(),
             materialized_tree_hash.as_deref(),
             node.required,
+            node_id,
+            kind,
         ),
         RealizationNodeFacts::Runtime {
             declared_identity,
@@ -261,16 +259,29 @@ fn classify_node(node: &RealizationNode) -> RealizationNodeStatus {
             declared_identity.as_deref(),
             materialized_binary_hash.as_deref(),
             node.required,
+            node_id,
+            kind,
         ),
         RealizationNodeFacts::RuntimeTool {
             binary_sha256,
             materialized_match,
-        } => classify_runtime_tool(binary_sha256.as_deref(), *materialized_match),
+        } => {
+            let (status, evidence) =
+                classify_runtime_tool(binary_sha256.as_deref(), *materialized_match);
+            let reason = (status == RealizationStatus::Unavailable).then(|| {
+                UnrealizableReason::RuntimeToolBinaryHashUnavailable {
+                    node_id: node_id.to_string(),
+                }
+            });
+            (status, evidence, reason)
+        }
         RealizationNodeFacts::DependencyDerivation { declared_hash } => classify_hashed(
             "dependency-derivation",
             declared_hash.as_deref(),
             None,
             node.required,
+            node_id,
+            kind,
         ),
         RealizationNodeFacts::DependencyOutput {
             dependency_output_hash,
@@ -281,22 +292,35 @@ fn classify_node(node: &RealizationNode) -> RealizationNodeStatus {
                     label: "dependency-output".into(),
                     hash: hash.to_string(),
                 }],
+                None,
             ),
-            None if node.required => (RealizationStatus::Unavailable, vec![]),
-            None => (RealizationStatus::Unknown, vec![]),
+            None if node.required => (
+                RealizationStatus::Unavailable,
+                vec![],
+                Some(UnrealizableReason::MissingDependencyOutput {
+                    node_id: node_id.to_string(),
+                }),
+            ),
+            None => (RealizationStatus::Unknown, vec![], None),
         },
-        RealizationNodeFacts::FilesystemView { mounts } => classify_filesystem(mounts),
+        RealizationNodeFacts::FilesystemView { mounts } => {
+            let (status, evidence) = classify_filesystem(mounts);
+            (status, evidence, None)
+        }
         RealizationNodeFacts::EnvClosure {
             undeclared_required,
         } => {
             if undeclared_required.is_empty() {
-                (RealizationStatus::Materializable, vec![])
+                (RealizationStatus::Materializable, vec![], None)
             } else {
                 (
                     RealizationStatus::Unavailable,
                     vec![RealizationEvidence::Note {
                         detail: format!("undeclared env: {}", undeclared_required.join(", ")),
                     }],
+                    Some(UnrealizableReason::UndeclaredEnvRequired {
+                        node_id: node_id.to_string(),
+                    }),
                 )
             }
         }
@@ -304,43 +328,58 @@ fn classify_node(node: &RealizationNode) -> RealizationNodeStatus {
             required,
             provider_can_enforce,
             policy_ref,
-        } => classify_policy(
-            "network",
-            *required,
-            *provider_can_enforce,
-            policy_ref.as_deref(),
-        ),
+        } => {
+            let (status, evidence) = classify_policy(
+                "network",
+                *required,
+                *provider_can_enforce,
+                policy_ref.as_deref(),
+            );
+            (status, evidence, None)
+        }
         RealizationNodeFacts::CapabilityPolicy {
             required,
             provider_can_enforce,
             policy_ref,
-        } => classify_policy(
-            "capability",
-            *required,
-            *provider_can_enforce,
-            policy_ref.as_deref(),
-        ),
+        } => {
+            let (status, evidence) = classify_policy(
+                "capability",
+                *required,
+                *provider_can_enforce,
+                policy_ref.as_deref(),
+            );
+            (status, evidence, None)
+        }
         RealizationNodeFacts::StateBinding {
             binding_present,
             has_creation_policy,
             reference,
-        } => classify_state(
-            *binding_present,
-            *has_creation_policy,
-            reference.as_deref(),
-            node.required,
-        ),
+        } => {
+            let (status, evidence) = classify_state(
+                *binding_present,
+                *has_creation_policy,
+                reference.as_deref(),
+                node.required,
+            );
+            let reason = (status == RealizationStatus::Unavailable).then(|| {
+                UnrealizableReason::MissingStateBinding {
+                    node_id: node_id.to_string(),
+                }
+            });
+            (status, evidence, reason)
+        }
         RealizationNodeFacts::Entrypoint {
             argv_declared,
             cwd_declared,
         } => {
-            if *argv_declared && *cwd_declared {
-                (RealizationStatus::Materializable, vec![])
+            let status = if *argv_declared && *cwd_declared {
+                RealizationStatus::Materializable
             } else if node.required {
-                (RealizationStatus::Unavailable, vec![])
+                RealizationStatus::Unavailable
             } else {
-                (RealizationStatus::Unknown, vec![])
-            }
+                RealizationStatus::Unknown
+            };
+            (status, vec![], None)
         }
         RealizationNodeFacts::ProviderProjection {
             provider,
@@ -348,56 +387,85 @@ fn classify_node(node: &RealizationNode) -> RealizationNodeStatus {
         } => {
             let mut evidence = Vec::new();
             if let Some(command) = projection_command {
+                // `command` is already a RedactedProjectionCommand — the raw
+                // argv never reaches this layer, so it cannot enter the contract.
                 evidence.push(RealizationEvidence::DerivedProjectionCommand {
                     provider: provider.clone(),
                     command: command.clone(),
                 });
             }
-            (RealizationStatus::Materializable, evidence)
-            // Note: `command` is already a RedactedProjectionCommand — the raw
-            // argv never reaches this layer, so it cannot enter the contract.
+            (RealizationStatus::Materializable, evidence, None)
         }
     };
 
-    RealizationNodeStatus {
-        node_id: node.node_id.clone(),
-        node_kind: kind,
-        status,
-        evidence,
-    }
+    let reason = explicit_reason.or_else(|| {
+        (status == RealizationStatus::Unavailable).then(|| missing_immutable_reason(node_id, kind))
+    });
+
+    (
+        RealizationNodeStatus {
+            node_id: node.node_id.clone(),
+            node_kind: kind,
+            status,
+            evidence,
+        },
+        reason,
+    )
 }
 
 /// Shared rule for nodes backed by a declared identity hash plus an optional
-/// present/materialized hash: present ⇒ `Verified`, declared-only ⇒
-/// `Materializable`, neither ⇒ `Unavailable`/`Unknown`.
+/// present/materialized hash.
+///
+/// `Verified` requires **both** the declared identity and the materialized hash
+/// to exist *and match*. A mismatch is `Unavailable` with typed mismatch
+/// evidence + reason; a materialized hash with no declared identity is never
+/// `Verified` (there is nothing to verify against); declared-only is
+/// `Materializable` (#498-A review). Returns `(status, evidence, reason)`.
 fn classify_hashed(
     label: &str,
     declared: Option<&str>,
     materialized: Option<&str>,
     required: bool,
-) -> (RealizationStatus, Vec<RealizationEvidence>) {
-    if let Some(hash) = materialized {
-        return (
+    node_id: &str,
+    kind: RealizationNodeKind,
+) -> (
+    RealizationStatus,
+    Vec<RealizationEvidence>,
+    Option<UnrealizableReason>,
+) {
+    match (declared, materialized) {
+        (Some(expected), Some(actual)) if expected == actual => (
             RealizationStatus::Verified,
             vec![RealizationEvidence::VerifiedArtifact {
                 label: label.to_string(),
-                hash: hash.to_string(),
+                hash: actual.to_string(),
             }],
-        );
-    }
-    if let Some(hash) = declared {
-        return (
+            None,
+        ),
+        (Some(expected), Some(actual)) => (
+            RealizationStatus::Unavailable,
+            vec![RealizationEvidence::HashMismatch {
+                label: label.to_string(),
+                declared: expected.to_string(),
+                actual: actual.to_string(),
+            }],
+            Some(UnrealizableReason::MismatchedImmutableInput {
+                node_id: node_id.to_string(),
+                node_kind: kind,
+            }),
+        ),
+        (Some(expected), None) => (
             RealizationStatus::Materializable,
             vec![RealizationEvidence::DeclaredHash {
                 label: label.to_string(),
-                hash: hash.to_string(),
+                hash: expected.to_string(),
             }],
-        );
-    }
-    if required {
-        (RealizationStatus::Unavailable, vec![])
-    } else {
-        (RealizationStatus::Unknown, vec![])
+            None,
+        ),
+        // A materialized hash with no declared identity cannot be verified —
+        // there is nothing to check it against, so do not claim `Verified`.
+        (None, _) if required => (RealizationStatus::Unavailable, vec![], None),
+        (None, _) => (RealizationStatus::Unknown, vec![], None),
     }
 }
 
