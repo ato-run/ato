@@ -880,6 +880,14 @@ impl NacelleExecAdapter {
             }
         }
 
+        // SecretStore-backed launch-condition grants (#508). Applied at the nacelle
+        // payload boundary only — the payload is written to nacelle's stdin, never a
+        // log/receipt — and kept off the receipt-observed `merged_env`. Last so a
+        // secret wins for its exact env key.
+        for secret in launch_ctx.secret_env() {
+            env.push((secret.name.clone(), secret.value.expose().to_string()));
+        }
+
         if let Some(selected_python_runtime) =
             normalized_python_runtime_version(plan.execution_runtime_version().as_deref())
         {
