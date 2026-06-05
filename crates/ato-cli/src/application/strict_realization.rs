@@ -31,8 +31,9 @@ use capsule_core::engine::execution_graph::LaunchGraphBundle;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::realization::bundle::RealizationEnvironment;
 use capsule_core::realization::{
-    LaunchProfile, RealizationContract, StrictRealizationGateError, evaluate_strict_gate,
-    realization_from_launch_bundle,
+    LaunchProfile, MaterializationVerification, RealizationContract, StrictRealizationGateError,
+    evaluate_strict_gate_with_materialization, materialization_request_from_launch_bundle,
+    realization_from_launch_bundle, verify_materialization,
 };
 
 /// Map the `--strict-realization` flag onto a launch profile. `false` (the
@@ -58,9 +59,15 @@ pub(crate) fn launch_environment() -> RealizationEnvironment {
 /// Enforce the strict realization gate over a launch bundle before execution.
 ///
 /// In [`LaunchProfile::Normal`] this is a no-op (`Ok`). In
-/// [`LaunchProfile::Strict`] it builds the #498 realization contract and blocks
-/// the launch with a typed [`AtoExecutionError`] if any required input cannot be
-/// verified.
+/// [`LaunchProfile::Strict`] it consumes **both** upstream layers — it builds the
+/// #498 realization contract and runs the #499 materialization verifier over the
+/// bundle's materialized evidence — then blocks the launch with a typed
+/// [`AtoExecutionError`] if any required input cannot be verified.
+///
+/// Today the #499 overlay is conservative/empty because the materialized-hash
+/// producer is #501; the same call path carries real verifier verdicts the
+/// moment that evidence exists (see
+/// [`materialization_request_from_launch_bundle`]).
 pub(crate) fn enforce_strict_realization(
     bundle: &LaunchGraphBundle,
     env: &RealizationEnvironment,
@@ -69,21 +76,46 @@ pub(crate) fn enforce_strict_realization(
     if !profile.is_strict() {
         return Ok(());
     }
+    // #498 — classify the resolved graph into a realization contract.
     let contract = realization_from_launch_bundle(bundle, env);
-    evaluate_contract(&contract, profile)
+    // #499 — verify the materialized evidence and overlay its verdicts (matched
+    // by node id) so a mismatch/invalid/unpopulated artifact is caught even when
+    // the #498 classification alone would deem the node materializable.
+    let materializations =
+        verify_materialization(materialization_request_from_launch_bundle(bundle, env));
+    evaluate_contract(&contract, &materializations, profile)
 }
 
-/// Run the core gate over an already-built [`RealizationContract`] and convert a
-/// block into a typed launch error. Split out from [`enforce_strict_realization`]
-/// so it can be unit-tested against hand-built contracts without a bundle.
+/// Run the core gate over an already-built #498 contract plus #499 verifier
+/// verdicts, and convert a block into a typed launch error. Split out from
+/// [`enforce_strict_realization`] so it can be unit-tested against hand-built
+/// contracts/verdicts without a bundle.
 pub(crate) fn evaluate_contract(
     contract: &RealizationContract,
+    materializations: &[MaterializationVerification],
     profile: LaunchProfile,
 ) -> Result<(), AtoExecutionError> {
-    match evaluate_strict_gate(contract, profile) {
+    match evaluate_strict_gate_with_materialization(contract, materializations, profile) {
         Ok(()) => Ok(()),
         Err(errors) => Err(to_execution_error(&errors)),
     }
+}
+
+/// #500 — strict mode could not obtain a resolved launch graph to verify. This
+/// is an integration-level fail-closed block (deliberately **not** one of the
+/// per-node [`capsule_core::realization::StrictGateReasonCode`] values): strict
+/// mode must refuse to launch what it cannot even inspect, rather than silently
+/// proceeding when the graph is absent.
+pub(crate) fn missing_launch_graph_error() -> AtoExecutionError {
+    AtoExecutionError::strict_realization_blocked(
+        "strict realization gate blocked launch: no resolved launch graph was available to verify",
+        serde_json::json!({
+            "profile": "strict",
+            "reason_code": "launch_graph_missing",
+            "explanation": "strict mode requires a resolved launch graph before execution; \
+                            none was produced for this launch path",
+        }),
+    )
 }
 
 /// Collapse the per-node gate failures into one typed launch error. The message
@@ -158,8 +190,8 @@ mod tests {
                 }],
             },
         );
-        assert!(evaluate_contract(&contract, LaunchProfile::Normal).is_ok());
-        assert!(evaluate_contract(&contract, launch_profile(false)).is_ok());
+        assert!(evaluate_contract(&contract, &[], LaunchProfile::Normal).is_ok());
+        assert!(evaluate_contract(&contract, &[], launch_profile(false)).is_ok());
     }
 
     #[test]
@@ -178,7 +210,7 @@ mod tests {
             },
         );
 
-        let err = evaluate_contract(&contract, launch_profile(true))
+        let err = evaluate_contract(&contract, &[], launch_profile(true))
             .expect_err("strict must block the unavailable dependency");
         assert_eq!(err.code, "ATO_ERR_STRICT_REALIZATION_BLOCKED");
         assert_eq!(err.phase, "execution");
@@ -210,7 +242,7 @@ mod tests {
             },
             RealizationResult::Realized,
         );
-        assert!(evaluate_contract(&contract, launch_profile(true)).is_ok());
+        assert!(evaluate_contract(&contract, &[], launch_profile(true)).is_ok());
     }
 
     #[test]
@@ -229,7 +261,7 @@ mod tests {
             RealizationResult::Realized,
         );
         let err =
-            evaluate_contract(&contract, launch_profile(true)).expect_err("host-bound blocks");
+            evaluate_contract(&contract, &[], launch_profile(true)).expect_err("host-bound blocks");
         let serialized = serde_json::to_string(&err.details).expect("serialize details");
         assert!(
             !serialized.contains("/home/alice"),
@@ -239,5 +271,55 @@ mod tests {
             !serialized.contains("secret"),
             "no evidence detail leak: {serialized}"
         );
+    }
+
+    #[test]
+    fn missing_launch_graph_fails_closed_with_typed_error() {
+        // Blocker-1 invariant: strict mode with no resolved launch graph must
+        // block, not silently proceed. The reason code is an integration-level
+        // `launch_graph_missing`, kept out of the per-node reason-code set.
+        let err = missing_launch_graph_error();
+        assert_eq!(err.code, "ATO_ERR_STRICT_REALIZATION_BLOCKED");
+        assert_eq!(err.phase, "execution");
+        let details = err.details.expect("details present");
+        assert_eq!(details["profile"], "strict");
+        assert_eq!(details["reason_code"], "launch_graph_missing");
+    }
+
+    #[test]
+    fn launch_path_consumes_materialization_overlay() {
+        // The #498 contract alone classifies the dependency output as
+        // materializable (declared hash present) and would pass strict. The #499
+        // verifier verdict — supplied through the same launch entry point —
+        // catches the materialized mismatch and blocks the launch.
+        let contract = contract_with(
+            RealizationNodeStatus {
+                node_id: "dep".to_string(),
+                node_kind: RealizationNodeKind::DependencyOutput,
+                status: RealizationStatus::Materializable,
+                evidence: vec![RealizationEvidence::DeclaredHash {
+                    label: "dependency-output".to_string(),
+                    hash: HASH_A.to_string(),
+                }],
+            },
+            RealizationResult::Realized,
+        );
+        let hash_b = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        let materializations = vec![capsule_core::realization::MaterializationVerification {
+            node_id: "dep".to_string(),
+            node_kind: RealizationNodeKind::DependencyOutput,
+            result: capsule_core::realization::MaterializationVerificationResult::Mismatch {
+                expected: HASH_A.to_string(),
+                actual: hash_b.to_string(),
+            },
+            evidence: vec![],
+        }];
+
+        // #498 alone: passes. With the #499 overlay: blocked on identity mismatch.
+        assert!(evaluate_contract(&contract, &[], launch_profile(true)).is_ok());
+        let err = evaluate_contract(&contract, &materializations, launch_profile(true))
+            .expect_err("the #499 mismatch overlay must block");
+        let details = err.details.expect("details present");
+        assert_eq!(details["blocked"][0]["reason_code"], "identity_mismatch");
     }
 }
