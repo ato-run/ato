@@ -85,6 +85,18 @@ pub struct StorageClaim {
     pub reserved_bytes: u64,
 }
 
+/// Metadata row for a recorded secret grant (no secret value — only logical
+/// identity). Read at runtime to confirm a grant belongs to the launching
+/// install profile before injecting its stored value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretGrantRefRecord {
+    pub grant_id: String,
+    pub install_profile_key: String,
+    pub capsule_location: Option<String>,
+    pub condition_key: String,
+    pub status: String,
+}
+
 /// Device/provider-local installed-state database.
 ///
 /// This is the local truth (#508): what has been materialized here and what is
@@ -889,6 +901,44 @@ impl InstalledStateDb {
             .map_err(|e| CapsuleError::Runtime(e.to_string()))?
             .is_some();
         Ok(exists)
+    }
+
+    /// Read the metadata row for a secret grant by id, for runtime injection.
+    ///
+    /// Returns `Ok(None)` for an unknown id OR a malformed (path/token/scheme-like)
+    /// id — conservative, exactly like [`Self::secret_grant_ref_exists`]. The row
+    /// carries **no** secret value (only logical metadata: which install profile and
+    /// condition the grant belongs to, and its status), so it is safe to surface
+    /// into the launch path. Callers must still confirm `status == "granted"` and
+    /// that the value exists in the secure store before injecting.
+    pub fn read_secret_grant_ref(&self, grant_id: &str) -> Result<Option<SecretGrantRefRecord>> {
+        if validate_locator_id(grant_id, "grant").is_err() {
+            return Ok(None);
+        }
+        let conn = self.connect()?;
+        let row = conn
+            .query_row(
+                "SELECT grant_id, install_profile_key, capsule_location, condition_key, status
+                 FROM secret_grant_refs WHERE grant_id = ?1",
+                params![grant_id],
+                |row| {
+                    let capsule_location: String = row.get(2)?;
+                    Ok(SecretGrantRefRecord {
+                        grant_id: row.get(0)?,
+                        install_profile_key: row.get(1)?,
+                        capsule_location: if capsule_location.is_empty() {
+                            None
+                        } else {
+                            Some(capsule_location)
+                        },
+                        condition_key: row.get(3)?,
+                        status: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(row)
     }
 
     /// Record (upsert) a logical state binding reference as `bound`. `binding_id`
@@ -1839,6 +1889,58 @@ mod tests {
             .unwrap();
         // Upsert, not duplicate; still exists.
         assert!(db.secret_grant_ref_exists("g1").unwrap());
+    }
+
+    #[test]
+    fn read_secret_grant_ref_returns_metadata_without_value() {
+        let (_dir, db) = temp_db();
+        db.record_secret_grant_ref(
+            "ipk_app",
+            Some("ato.run/koh0920/hello"),
+            "secret.OPENAI_API_KEY",
+            "openai-default",
+        )
+        .unwrap();
+        let rec = db
+            .read_secret_grant_ref("openai-default")
+            .unwrap()
+            .expect("recorded grant is readable");
+        assert_eq!(rec.grant_id, "openai-default");
+        assert_eq!(rec.install_profile_key, "ipk_app");
+        assert_eq!(
+            rec.capsule_location.as_deref(),
+            Some("ato.run/koh0920/hello")
+        );
+        assert_eq!(rec.condition_key, "secret.OPENAI_API_KEY");
+        assert_eq!(rec.status, "granted");
+        // The struct has no value field — metadata only (structural guarantee).
+    }
+
+    #[test]
+    fn read_secret_grant_ref_unknown_or_invalid_returns_none() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.read_secret_grant_ref("never-recorded")
+                .unwrap()
+                .is_none()
+        );
+        // Malformed ids resolve to None (conservative, like the existence probe).
+        assert!(
+            db.read_secret_grant_ref("/Users/x/secret")
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.read_secret_grant_ref("sk-abc123").unwrap().is_none());
+        assert!(db.read_secret_grant_ref("").unwrap().is_none());
+    }
+
+    #[test]
+    fn read_secret_grant_ref_empty_capsule_location_is_none() {
+        let (_dir, db) = temp_db();
+        db.record_secret_grant_ref("ipk_app", None, "secret.K", "g1")
+            .unwrap();
+        let rec = db.read_secret_grant_ref("g1").unwrap().unwrap();
+        assert_eq!(rec.capsule_location, None);
     }
 
     #[test]
