@@ -53,7 +53,7 @@ pub use launch_condition::{
 };
 pub use launch_input::{
     CapsuleLaunchInput, LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
-    parse_capsule_launch_input, validate_condition_key,
+    condition_key_kind, parse_capsule_launch_input, validate_condition_key,
 };
 pub use port::{
     ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,

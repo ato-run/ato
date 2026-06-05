@@ -20,7 +20,7 @@ use super::launch_condition::{
     LOCAL_PROVIDER_ID, LaunchConditionClaim, LaunchConditionKind, LaunchConditionSource,
     LaunchConditionStatus, validate_redacted_detail_json,
 };
-use super::launch_input::{validate_condition_key, validate_locator_id};
+use super::launch_input::{LaunchConditionInputKind, condition_key_kind, validate_locator_id};
 use super::port::{
     ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
 };
@@ -40,6 +40,29 @@ fn to_sql_i64_bytes(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).map_err(|_| {
         CapsuleError::Runtime(format!("{field} exceeds SQLite INTEGER range: {value}"))
     })
+}
+
+/// A secret grant may only reference a `secret.*` condition (a secret
+/// requirement) or an `env.*` condition (a sensitive env projected as a grant).
+/// A `port.*` / `state.*` / capability / … key is rejected.
+fn validate_secret_grant_condition_key(condition_key: &str) -> Result<()> {
+    match condition_key_kind(condition_key)? {
+        LaunchConditionInputKind::Secret | LaunchConditionInputKind::Env => Ok(()),
+        other => Err(CapsuleError::Runtime(format!(
+            "secret grant condition key must be secret.* or env.* (got {other:?} kind \
+             '{condition_key}')"
+        ))),
+    }
+}
+
+/// A state binding may only reference a `state.*` condition.
+fn validate_state_binding_condition_key(condition_key: &str) -> Result<()> {
+    match condition_key_kind(condition_key)? {
+        LaunchConditionInputKind::State => Ok(()),
+        other => Err(CapsuleError::Runtime(format!(
+            "state binding condition key must be state.* (got {other:?} kind '{condition_key}')"
+        ))),
+    }
 }
 
 /// A materialized object recorded on this device — an artifact / dependency
@@ -820,7 +843,7 @@ impl InstalledStateDb {
         condition_key: &str,
         grant_id: &str,
     ) -> Result<()> {
-        validate_condition_key(condition_key)?;
+        validate_secret_grant_condition_key(condition_key)?;
         validate_locator_id(grant_id, "grant")?;
         let now = Utc::now().timestamp_millis();
         let conn = self.connect()?;
@@ -884,7 +907,7 @@ impl InstalledStateDb {
         state_key: &str,
         binding_id: &str,
     ) -> Result<()> {
-        validate_condition_key(condition_key)?;
+        validate_state_binding_condition_key(condition_key)?;
         validate_locator_id(binding_id, "binding")?;
         let now = Utc::now().timestamp_millis();
         let conn = self.connect()?;
@@ -1884,6 +1907,64 @@ mod tests {
             db.record_state_binding_ref("app", None, "state.data", "data", "/Users/koh/data")
                 .is_err(),
             "a raw host path binding id must be rejected at the DB boundary"
+        );
+    }
+
+    // A registry only accepts condition keys of its own kind.
+
+    #[test]
+    fn record_secret_grant_ref_accepts_env_condition_key() {
+        let (_dir, db) = temp_db();
+        // A sensitive env projected as a grant references an env.* condition.
+        db.record_secret_grant_ref("app", None, "env.MY_TOKEN", "tok-1")
+            .unwrap();
+        assert!(db.secret_grant_ref_exists("tok-1").unwrap());
+    }
+
+    #[test]
+    fn record_secret_grant_ref_rejects_port_condition_key() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_secret_grant_ref("app", None, "port.main", "g1")
+                .is_err(),
+            "a secret grant must not reference a port condition"
+        );
+    }
+
+    #[test]
+    fn record_secret_grant_ref_rejects_state_condition_key() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_secret_grant_ref("app", None, "state.data", "g1")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn record_state_binding_ref_rejects_secret_condition_key() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_state_binding_ref("app", None, "secret.OPENAI_API_KEY", "data", "b1")
+                .is_err(),
+            "a state binding must not reference a secret condition"
+        );
+    }
+
+    #[test]
+    fn record_state_binding_ref_rejects_env_condition_key() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_state_binding_ref("app", None, "env.LOG_LEVEL", "data", "b1")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn record_state_binding_ref_rejects_port_condition_key() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.record_state_binding_ref("app", None, "port.main", "data", "b1")
+                .is_err()
         );
     }
 
