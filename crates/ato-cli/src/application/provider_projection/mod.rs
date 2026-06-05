@@ -64,6 +64,20 @@ pub(crate) enum ProviderKind {
     ExternalRunner,
 }
 
+impl ProviderKind {
+    /// Stable kebab label, matching the serde representation.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::SourceNative => "source-native",
+            Self::Oci => "oci",
+            Self::Web => "web",
+            Self::Wasm => "wasm",
+            Self::ManagedCloud => "managed-cloud",
+            Self::ExternalRunner => "external-runner",
+        }
+    }
+}
+
 /// Identifies the provider that projects a Capsule: a coarse [`ProviderKind`]
 /// plus the concrete realizer name (`podman`, `docker`, `youki`, `containerd`,
 /// `ato-cloud`, …).
@@ -99,6 +113,33 @@ pub(crate) struct ProviderCapabilities {
     pub uid_gid_control: bool,
     pub readiness_probe: bool,
     pub service_network_alias: bool,
+}
+
+impl ProviderCapabilities {
+    /// Kebab labels of the enabled capabilities, sorted. Suitable for a
+    /// receipt-safe summary (flags only, no launch values).
+    pub(crate) fn enabled_labels(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        let entries = [
+            (self.filesystem_projection, "filesystem-projection"),
+            (self.read_only_mounts, "read-only-mounts"),
+            (self.persistent_state, "persistent-state"),
+            (self.network_policy, "network-policy"),
+            (self.ingress_routing, "ingress-routing"),
+            (self.env_projection, "env-projection"),
+            (self.secret_projection, "secret-projection"),
+            (self.uid_gid_control, "uid-gid-control"),
+            (self.readiness_probe, "readiness-probe"),
+            (self.service_network_alias, "service-network-alias"),
+        ];
+        for (enabled, label) in entries {
+            if enabled {
+                labels.push(label.to_string());
+            }
+        }
+        labels.sort();
+        labels
+    }
 }
 
 /// Provider-side *evidence* produced when a plan is realized.
