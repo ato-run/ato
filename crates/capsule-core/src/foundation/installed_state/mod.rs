@@ -33,6 +33,7 @@
 mod admission;
 mod db;
 mod launch_condition;
+mod launch_input;
 mod port;
 mod relaunch_admission;
 mod relaunch_resolution;
@@ -49,6 +50,10 @@ pub use launch_condition::{
     launch_condition_from_port_claim, launch_condition_from_port_declaration,
     launch_condition_from_secret_requirement, launch_condition_from_state_binding,
     launch_condition_from_storage_claim, validate_redacted_detail_json,
+};
+pub use launch_input::{
+    CapsuleLaunchInput, LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+    capsule_condition_ref, parse_capsule_launch_input, validate_condition_ref,
 };
 pub use port::{
     ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
