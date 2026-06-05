@@ -27,13 +27,15 @@ use capsule_core::foundation::install_lifecycle::{
 };
 
 use capsule_core::installed_state::{
-    InstalledStateDb, LaunchConditionKind, StorageAdmission, StorageClaim,
-    launch_condition_extraction_status, launch_condition_from_storage_claim,
+    InstalledStateDb, LaunchConditionClaim, LaunchConditionKind, LaunchConditionStatus,
+    StorageAdmission, StorageClaim, launch_condition_extraction_status,
+    launch_condition_from_env_projection, launch_condition_from_secret_requirement,
+    launch_condition_from_state_binding, launch_condition_from_storage_claim,
 };
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::resource::cas::LocalCasIndex;
-use capsule_core::types::CapsuleManifest;
 use capsule_core::types::identity::public_key_to_did;
+use capsule_core::types::{CapsuleManifest, StateAttach, StateDurability};
 
 use crate::artifact_hash::{
     compute_blake3_label as compute_blake3, compute_sha256_hex as compute_sha256, equals_hash,
@@ -1264,7 +1266,12 @@ pub async fn install_app(
     // Strict: unlike the best-effort storage-claim projection above, a failure
     // here means the SOT could not be recorded, so it fails the install rather
     // than silently leaving the ledger stale.
-    record_install_launch_ledger(&storage_db, &result, required_bytes)?;
+    record_install_launch_ledger(
+        &storage_db,
+        &result,
+        required_bytes,
+        capsule.manifest_toml.as_deref(),
+    )?;
 
     Ok(result)
 }
@@ -2385,14 +2392,15 @@ fn record_install_storage_claim(
 ///
 /// Always writes a baseline marker (plus the storage requirement when declared),
 /// so a successful install never leaves an empty ledger that could be misread as
-/// "no launch conditions". Extracting the remaining condition kinds (port / env /
-/// secret / state / runtime / provider_capability / network / hardware / policy)
-/// from the manifest and lockfile is a follow-up; the model and DB API already
-/// represent them, and the baseline marker lists them as not-yet-extracted.
+/// "no launch conditions". When the manifest is available, env / secret / state
+/// conditions are extracted from it too (#508). The remaining kinds (port /
+/// runtime / provider_capability / network / hardware / policy) are a follow-up;
+/// the baseline marker lists them as not-yet-extracted.
 fn record_install_launch_ledger(
     db: &InstalledStateDb,
     result: &InstallResult,
     required_bytes: Option<u64>,
+    manifest_toml: Option<&str>,
 ) -> Result<()> {
     let Some(lifecycle) = result.install_lifecycle.as_ref() else {
         // Lifecycle registration is best-effort upstream; without an install
@@ -2403,8 +2411,18 @@ fn record_install_launch_ledger(
     };
     let install_profile_key = lifecycle.install_profile_key.as_str();
     let install_revision_id = lifecycle.install_revision_id.as_str();
-    let claims =
-        install_launch_conditions(install_profile_key, install_revision_id, required_bytes);
+    // Parse the manifest for env/secret/state extraction. It was already
+    // validated upstream (storage admission parsed it); if it somehow fails to
+    // parse here, degrade to baseline + storage (env/secret/state stay marked
+    // missing) rather than failing an otherwise-successful install — the DB
+    // write itself remains strict.
+    let manifest = manifest_toml.and_then(|toml| CapsuleManifest::from_toml(toml).ok());
+    let claims = install_launch_conditions(
+        install_profile_key,
+        install_revision_id,
+        required_bytes,
+        manifest.as_ref(),
+    );
     db.record_installed_launch_ledger(
         install_profile_key,
         Some(install_revision_id),
@@ -2419,20 +2437,20 @@ fn record_install_launch_ledger(
 /// constructing a full `InstallResult`.
 ///
 /// Always includes the ledger **baseline marker** (so the revision's ledger is
-/// never empty), plus the storage requirement when one was declared. The marker
-/// records that only the storage extractor has run this slice; the remaining
-/// kinds are listed as missing so later relaunch/admission can tell "absent"
-/// from "not yet extracted".
+/// never empty) plus the storage requirement when declared. When `manifest` is
+/// `Some`, the env / secret / state schemas are fully examined and their
+/// conditions extracted — and only then are those kinds added to the baseline's
+/// `extracted_kinds`. When `manifest` is `None` (unparseable) those kinds stay in
+/// `missing_extractors`, so the marker never claims a kind was examined when it
+/// wasn't.
 fn install_launch_conditions(
     install_profile_key: &str,
     install_revision_id: &str,
     required_bytes: Option<u64>,
-) -> Vec<capsule_core::installed_state::LaunchConditionClaim> {
-    let mut claims = vec![launch_condition_extraction_status(
-        install_profile_key,
-        Some(install_revision_id),
-        &[LaunchConditionKind::Storage],
-    )];
+    manifest: Option<&CapsuleManifest>,
+) -> Vec<LaunchConditionClaim> {
+    let mut extracted_kinds = vec![LaunchConditionKind::Storage];
+    let mut claims = Vec::new();
     if let Some(required_bytes) = required_bytes {
         claims.push(launch_condition_from_storage_claim(
             install_profile_key,
@@ -2440,7 +2458,169 @@ fn install_launch_conditions(
             required_bytes,
         ));
     }
+    if let Some(manifest) = manifest {
+        claims.extend(extract_env_conditions(
+            manifest,
+            install_profile_key,
+            install_revision_id,
+        ));
+        extracted_kinds.push(LaunchConditionKind::Env);
+        claims.extend(extract_secret_conditions(
+            manifest,
+            install_profile_key,
+            install_revision_id,
+        ));
+        extracted_kinds.push(LaunchConditionKind::Secret);
+        claims.extend(extract_state_conditions(
+            manifest,
+            install_profile_key,
+            install_revision_id,
+        ));
+        extracted_kinds.push(LaunchConditionKind::State);
+    }
+    // Baseline marker first, built once extracted_kinds is final.
+    let mut all = vec![launch_condition_extraction_status(
+        install_profile_key,
+        Some(install_revision_id),
+        &extracted_kinds,
+    )];
+    all.extend(claims);
+    all
+}
+
+/// Extract **Env** launch conditions from the manifest. Records env-var *names*
+/// only — never values. Env declared with a value in the manifest
+/// (`[execution].env`, per-target `env`, `[services.*].env`) is `Satisfied`; env
+/// required from the host (`required_env`, per-target `required_env`,
+/// `[isolation].allow_env`) is `Unknown`, since its presence can't be confirmed
+/// at install. One condition per unique name; declared takes precedence over
+/// host-required.
+fn extract_env_conditions(
+    manifest: &CapsuleManifest,
+    install_profile_key: &str,
+    install_revision_id: &str,
+) -> Vec<LaunchConditionClaim> {
+    // name -> (source, status). Declared (Satisfied) env is collected before
+    // host-required (Unknown), so `or_insert` makes declared win a name clash.
+    use LaunchConditionStatus::{Satisfied, Unknown};
+    let mut envs: std::collections::BTreeMap<String, (&'static str, LaunchConditionStatus)> =
+        std::collections::BTreeMap::new();
+
+    // Declared with a value in the manifest → Satisfied (value never stored).
+    for name in manifest.execution.env.keys() {
+        envs.entry(name.clone())
+            .or_insert(("manifest.execution", Satisfied));
+    }
+    if let Some(targets) = &manifest.targets {
+        for name in targets.env.keys() {
+            envs.entry(name.clone())
+                .or_insert(("manifest.targets", Satisfied));
+        }
+        for target in targets.named.values() {
+            for name in target.env.keys() {
+                envs.entry(name.clone())
+                    .or_insert(("manifest.targets.named", Satisfied));
+            }
+            for name in &target.required_env {
+                envs.entry(name.clone())
+                    .or_insert(("manifest.targets.named.required_env", Unknown));
+            }
+        }
+    }
+    if let Some(services) = &manifest.services {
+        for service in services.values() {
+            for name in service.env.iter().flat_map(|env| env.keys()) {
+                envs.entry(name.clone())
+                    .or_insert(("manifest.services", Satisfied));
+            }
+        }
+    }
+    // Required from the host → Unknown (presence unconfirmed at install).
+    for name in &manifest.required_env {
+        envs.entry(name.clone())
+            .or_insert(("manifest.required_env", Unknown));
+    }
+    if let Some(isolation) = &manifest.isolation {
+        for name in &isolation.allow_env {
+            envs.entry(name.clone())
+                .or_insert(("manifest.isolation.allow_env", Unknown));
+        }
+    }
+
+    envs.into_iter()
+        .map(|(name, (source, status))| {
+            launch_condition_from_env_projection(
+                install_profile_key,
+                Some(install_revision_id),
+                &name,
+                source,
+                None,
+                status,
+            )
+        })
+        .collect()
+}
+
+/// Extract **Secret** launch conditions from the manifest's dependency
+/// credential declarations (`[dependencies.<alias>].credentials`). Records the
+/// credential *name* only (keyed `<alias>.<credential>`) as a redacted reference
+/// — the templated value is never read. Status is `UserGrantRequired` (no grant
+/// is confirmed at install time).
+fn extract_secret_conditions(
+    manifest: &CapsuleManifest,
+    install_profile_key: &str,
+    install_revision_id: &str,
+) -> Vec<LaunchConditionClaim> {
+    let mut claims = Vec::new();
+    for (alias, dependency) in &manifest.dependencies {
+        for credential_name in dependency.credentials.keys() {
+            let condition_key = format!("{alias}.{credential_name}");
+            claims.push(launch_condition_from_secret_requirement(
+                install_profile_key,
+                Some(install_revision_id),
+                &condition_key,
+                "dependency_credential",
+                None,
+                Some("capsule_instance"),
+            ));
+        }
+    }
     claims
+}
+
+/// Extract **State** launch conditions from the manifest's `[state.*]`
+/// requirements. Records the logical state key + durability + attach status —
+/// never a raw host path. Auto-attached state is `Satisfied` (Ato provisions it);
+/// explicit-attach state is `UserGrantRequired` (the user must bind it).
+fn extract_state_conditions(
+    manifest: &CapsuleManifest,
+    install_profile_key: &str,
+    install_revision_id: &str,
+) -> Vec<LaunchConditionClaim> {
+    manifest
+        .state
+        .iter()
+        .map(|(state_key, requirement)| {
+            let durability = match requirement.durability {
+                StateDurability::Ephemeral => "ephemeral",
+                StateDurability::Persistent => "persistent",
+            };
+            let status = match requirement.attach {
+                StateAttach::Auto => LaunchConditionStatus::Satisfied,
+                StateAttach::Explicit => LaunchConditionStatus::UserGrantRequired,
+            };
+            // No resolved binding ref at install; logical metadata only — the
+            // service binding's host mount path is intentionally not stored.
+            launch_condition_from_state_binding(
+                install_profile_key,
+                Some(install_revision_id),
+                state_key,
+                None,
+                Some(durability),
+                status,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
