@@ -5,6 +5,10 @@ use std::path::Path;
 use super::*;
 use crate::engine::realization::{RealizationNodeKind, RealizationStatus, UnrealizableReason};
 
+// Well-formed `algo:hexdigest` content hashes used across the tests.
+const HASH_A: &str = "sha256:deadbeefcafef00d";
+const HASH_B: &str = "sha256:0badc0debaadf00d";
+
 fn node(
     source: MaterializedNodeSource,
     expected: Option<&str>,
@@ -30,8 +34,8 @@ fn verify_one(node: MaterializedNodeInput) -> MaterializationVerification {
 fn materialization_verifier_marks_matching_hash_verified() {
     let v = verify_one(node(
         MaterializedNodeSource::RuntimeBinary,
-        Some("sha256:abc"),
-        Some("sha256:abc"),
+        Some(HASH_A),
+        Some(HASH_A),
     ));
     assert_eq!(v.result, MaterializationVerificationResult::Verified);
     assert!(
@@ -46,14 +50,14 @@ fn materialization_verifier_marks_matching_hash_verified() {
 fn materialization_verifier_marks_hash_mismatch() {
     let v = verify_one(node(
         MaterializedNodeSource::DependencyOutput,
-        Some("sha256:expected"),
-        Some("sha256:actual"),
+        Some(HASH_A),
+        Some(HASH_B),
     ));
     assert_eq!(
         v.result,
         MaterializationVerificationResult::Mismatch {
-            expected: "sha256:expected".into(),
-            actual: "sha256:actual".into(),
+            expected: HASH_A.into(),
+            actual: HASH_B.into(),
         }
     );
 }
@@ -63,7 +67,7 @@ fn materialization_verifier_marks_missing_expected_hash_unavailable() {
     let v = verify_one(node(
         MaterializedNodeSource::DependencyOutput,
         None,
-        Some("sha256:actual"),
+        Some(HASH_A),
     ));
     assert_eq!(
         v.result,
@@ -78,7 +82,7 @@ fn materialization_verifier_marks_missing_expected_hash_unavailable() {
 fn materialization_verifier_marks_missing_actual_hash_unavailable() {
     let v = verify_one(node(
         MaterializedNodeSource::BuildArtifact,
-        Some("sha256:expected"),
+        Some(HASH_A),
         None,
     ));
     assert_eq!(
@@ -103,12 +107,106 @@ fn materialization_verifier_marks_runtime_tool_without_binary_sha256_unavailable
     assert!(!v.result.is_verified());
 }
 
+// --- content-hash validation (#499-A review) ------------------------------
+
+#[test]
+fn materialization_verifier_rejects_non_hash_expected_identity() {
+    let v = verify_one(node(
+        MaterializedNodeSource::SourceTree,
+        Some("/Users/alice/project/.env"),
+        Some(HASH_A),
+    ));
+    assert_eq!(
+        v.result,
+        MaterializationVerificationResult::Unavailable {
+            reason: MaterializationUnavailableReason::InvalidExpectedHashIdentity,
+        }
+    );
+    assert!(!v.result.is_verified());
+}
+
+#[test]
+fn materialization_verifier_rejects_non_hash_actual_identity() {
+    let v = verify_one(node(
+        MaterializedNodeSource::DependencyOutput,
+        Some(HASH_A),
+        Some("OPENAI_API_KEY=sk-test-secret"),
+    ));
+    assert_eq!(
+        v.result,
+        MaterializationVerificationResult::Unavailable {
+            reason: MaterializationUnavailableReason::InvalidActualHashIdentity,
+        }
+    );
+}
+
+#[test]
+fn materialization_verifier_does_not_echo_invalid_expected_or_actual_identity() {
+    // Invalid expected: a raw host path.
+    let v1 = verify_one(node(
+        MaterializedNodeSource::FilesystemView,
+        Some("/Users/alice/secret-proj/.env"),
+        Some(HASH_A),
+    ));
+    let j1 = serde_json::to_string(&v1).expect("serialize");
+    for leaked in ["/Users/alice", "secret-proj", ".env"] {
+        assert!(
+            !j1.contains(leaked),
+            "`{leaked}` echoed from invalid expected"
+        );
+    }
+
+    // Invalid actual: an env assignment carrying a secret.
+    let v2 = verify_one(node(
+        MaterializedNodeSource::DependencyOutput,
+        Some(HASH_A),
+        Some("OPENAI_API_KEY=sk-test-secret"),
+    ));
+    let j2 = serde_json::to_string(&v2).expect("serialize");
+    for leaked in ["sk-test-secret", "OPENAI_API_KEY"] {
+        assert!(
+            !j2.contains(leaked),
+            "`{leaked}` echoed from invalid actual"
+        );
+    }
+}
+
+#[test]
+fn materialization_verifier_does_not_map_invalid_hash_to_mismatch_reason() {
+    let invalid_actual = verify_one(node(
+        MaterializedNodeSource::DependencyOutput,
+        Some(HASH_A),
+        Some("/var/run/secret"),
+    ))
+    .result;
+    let reason = materialization_result_to_unrealizable_reason(
+        "dep",
+        RealizationNodeKind::DependencyOutput,
+        &invalid_actual,
+    );
+    // Must NOT be a mismatch reason (which would carry the value), but the
+    // typed invalid-identity reason instead.
+    assert!(!matches!(
+        reason,
+        Some(UnrealizableReason::MismatchedImmutableInput { .. })
+    ));
+    assert_eq!(
+        reason,
+        Some(UnrealizableReason::InvalidImmutableInputIdentity {
+            node_id: "dep".into(),
+            node_kind: RealizationNodeKind::DependencyOutput,
+        })
+    );
+}
+
+// --- redaction of materialized_path ---------------------------------------
+
 #[test]
 fn materialization_verifier_does_not_emit_unredacted_host_paths() {
     let mut n = node(
         MaterializedNodeSource::FilesystemView,
-        Some("sha256:x"),
-        Some("sha256:x"),
+        Some(HASH_A),
+        Some(HASH_A),
     );
     n.materialized_path = Some("/Users/alice/secret-proj/.env".into());
     let v = verify_one(n);
@@ -131,8 +229,8 @@ fn materialization_verifier_does_not_emit_secret_values() {
     // A path that embeds a secret-looking token must not survive into output.
     let mut n = node(
         MaterializedNodeSource::SourceTree,
-        Some("sha256:declared"),
-        Some("sha256:materialized-different"),
+        Some(HASH_A),
+        Some(HASH_B),
     );
     n.materialized_path = Some("/home/u/app/OPENAI_API_KEY=sk-test-secret".into());
     let v = verify_one(n);
@@ -145,9 +243,11 @@ fn materialization_verifier_does_not_emit_secret_values() {
         );
     }
     // The content hashes (safe) are still present in the typed mismatch.
-    assert!(json.contains("sha256:declared"));
-    assert!(json.contains("sha256:materialized-different"));
+    assert!(json.contains(HASH_A));
+    assert!(json.contains(HASH_B));
 }
+
+// --- #498 mapping ---------------------------------------------------------
 
 #[test]
 fn materialization_verifier_maps_verified_to_realization_verified() {
@@ -165,8 +265,8 @@ fn materialization_verifier_maps_verified_to_realization_verified() {
 #[test]
 fn materialization_verifier_maps_mismatch_to_realization_unavailable() {
     let result = MaterializationVerificationResult::Mismatch {
-        expected: "sha256:a".into(),
-        actual: "sha256:b".into(),
+        expected: HASH_A.into(),
+        actual: HASH_B.into(),
     };
     assert_eq!(
         materialization_result_to_realization_status(&result),
@@ -181,8 +281,8 @@ fn materialization_verifier_maps_mismatch_to_realization_unavailable() {
         Some(UnrealizableReason::MismatchedImmutableInput {
             node_id: "runtime".into(),
             node_kind: RealizationNodeKind::Runtime,
-            expected: "sha256:a".into(),
-            actual: "sha256:b".into(),
+            expected: HASH_A.into(),
+            actual: HASH_B.into(),
         }),
     );
 }
@@ -208,13 +308,13 @@ fn materialization_verifier_maps_runtime_tool_unavailable_to_typed_reason() {
 fn materialization_verifier_serializes_typed_mismatch() {
     let v = verify_one(node(
         MaterializedNodeSource::RuntimeBinary,
-        Some("sha256:expected"),
-        Some("sha256:actual"),
+        Some(HASH_A),
+        Some(HASH_B),
     ));
     let json = serde_json::to_string(&v).expect("serialize");
     assert!(json.contains("\"result\":\"mismatch\""));
-    assert!(json.contains("sha256:expected"));
-    assert!(json.contains("sha256:actual"));
+    assert!(json.contains(HASH_A));
+    assert!(json.contains(HASH_B));
 
     let round_trip: MaterializationVerification = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(round_trip, v);
@@ -235,13 +335,9 @@ impl MaterializedHashProvider for FakeHashProvider {
 #[test]
 fn materialization_verifier_provider_fills_actual_hash() {
     let provider = FakeHashProvider {
-        hash: Some("sha256:expected".into()),
+        hash: Some(HASH_A.into()),
     };
-    let mut n = node(
-        MaterializedNodeSource::BuildArtifact,
-        Some("sha256:expected"),
-        None,
-    );
+    let mut n = node(MaterializedNodeSource::BuildArtifact, Some(HASH_A), None);
     n.materialized_path = Some("/tmp/whatever".into());
 
     let out = verify_materialization_with_provider(
@@ -257,11 +353,7 @@ fn materialization_verifier_provider_fills_actual_hash() {
 #[test]
 fn materialization_verifier_provider_error_is_hash_computation_unavailable() {
     let provider = FakeHashProvider { hash: None };
-    let mut n = node(
-        MaterializedNodeSource::BuildArtifact,
-        Some("sha256:expected"),
-        None,
-    );
+    let mut n = node(MaterializedNodeSource::BuildArtifact, Some(HASH_A), None);
     n.materialized_path = Some("/secret/path/token".into());
 
     let out = verify_materialization_with_provider(
