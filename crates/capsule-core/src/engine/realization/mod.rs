@@ -17,6 +17,9 @@
 //! - [`bundle`] — an adapter from a real
 //!   [`crate::engine::execution_graph::LaunchGraphBundle`] plus host/provider
 //!   evidence onto a [`classify::RealizationRequest`].
+//! - [`verify`] — the pure materialization verifier (#499-A): compares declared
+//!   vs actual content identity and maps the typed result back into the
+//!   contract. It changes no launch behavior (strict fail-closed is #500).
 //!
 //! ## Boundaries this module keeps (#473, #501)
 //!
@@ -30,6 +33,7 @@
 pub mod bundle;
 pub mod classify;
 pub mod model;
+pub mod verify;
 
 #[cfg(test)]
 mod tests;
@@ -45,4 +49,12 @@ pub use model::{
     RealizationContract, RealizationEdgeState, RealizationEdgeStatus, RealizationEvidence,
     RealizationNodeKind, RealizationNodeStatus, RealizationResult, RealizationStatus,
     RedactedProjectionCommand, UnrealizableReason,
+};
+pub use verify::{
+    MaterializationHashError, MaterializationUnavailableReason, MaterializationVerification,
+    MaterializationVerificationEvidence, MaterializationVerificationRequest,
+    MaterializationVerificationResult, MaterializedHashProvider, MaterializedNodeInput,
+    MaterializedNodeSource, materialization_result_to_realization_status,
+    materialization_result_to_unrealizable_reason, verify_materialization,
+    verify_materialization_with_provider,
 };

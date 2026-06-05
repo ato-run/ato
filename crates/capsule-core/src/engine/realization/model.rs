@@ -216,8 +216,20 @@ pub enum UnrealizableReason {
         node_kind: RealizationNodeKind,
     },
     /// A required immutable input is present but its materialized hash does not
-    /// match its declared identity, so it cannot be trusted.
+    /// match its declared identity, so it cannot be trusted. Carries the
+    /// declared and actual content hashes (safe to persist — never a path or
+    /// secret) so a reader can see exactly what diverged.
     MismatchedImmutableInput {
+        node_id: String,
+        node_kind: RealizationNodeKind,
+        expected: String,
+        actual: String,
+    },
+    /// A required immutable input presented a declared or materialized identity
+    /// that is not a well-formed content hash (e.g. a raw path or an env
+    /// assignment). It is rejected rather than trusted, so an unvalidated value
+    /// never reaches a persisted reason (#499-A review).
+    InvalidImmutableInputIdentity {
         node_id: String,
         node_kind: RealizationNodeKind,
     },
