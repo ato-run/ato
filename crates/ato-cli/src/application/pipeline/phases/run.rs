@@ -3287,17 +3287,19 @@ where
     // required input cannot be verified. The host/provider realization-evidence
     // producer is #501, so until it lands strict mode is conservatively
     // fail-closed — see `application::strict_realization`.
-    if request.strict_realization
-        && let Some(launch_graph) = receipt_output.launch_graph.as_ref()
-    {
-        let profile = crate::application::strict_realization::launch_profile(
-            request.strict_realization,
-        );
+    if request.strict_realization {
+        // Fail-closed: strict mode must refuse to launch anything it cannot even
+        // inspect. A missing resolved launch graph is a block, not a skip.
+        let Some(launch_graph) = receipt_output.launch_graph.as_ref() else {
+            return Err(
+                crate::application::strict_realization::missing_launch_graph_error().into(),
+            );
+        };
         let env = crate::application::strict_realization::launch_environment();
         crate::application::strict_realization::enforce_strict_realization(
             launch_graph,
             &env,
-            profile,
+            crate::application::strict_realization::launch_profile(true),
         )?;
     }
 
