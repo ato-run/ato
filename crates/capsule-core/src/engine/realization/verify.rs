@@ -76,7 +76,10 @@ pub struct MaterializedNodeInput {
     /// Actual materialized content identity. `None` ⇒ the object was not
     /// materialized (or its hash was not computed).
     pub actual_hash: Option<String>,
-    /// Whether this object is a required immutable input.
+    /// Whether this object is a required immutable input. The verifier itself
+    /// returns a result for every node regardless of this flag; aggregation and
+    /// strict handling of required vs optional nodes is the caller's
+    /// responsibility (#498 `classify` / strict profile #500).
     pub required: bool,
     pub source: MaterializedNodeSource,
     /// Optional raw path the actual hash was computed from. Transient; redacted
@@ -96,6 +99,11 @@ pub struct MaterializationVerificationRequest {
 pub enum MaterializationUnavailableReason {
     /// No declared/expected hash exists to verify against.
     MissingExpectedHash,
+    /// The declared/expected identity is not a well-formed content hash, so it
+    /// is rejected rather than trusted as one (#499-A review).
+    InvalidExpectedHashIdentity,
+    /// The actual materialized identity is not a well-formed content hash.
+    InvalidActualHashIdentity,
     /// An expected hash exists but the object was not materialized.
     MissingMaterializedObject,
     /// A runtime tool's `binary_sha256` is not populated yet (#469/#473). Until
@@ -103,7 +111,9 @@ pub enum MaterializationUnavailableReason {
     RuntimeToolBinaryHashUnpopulated,
     /// The actual hash could not be computed (e.g. the hash provider failed).
     HashComputationUnavailable,
-    /// This node kind/source is not supported by the verifier.
+    /// This node kind/source is not supported by the verifier. Reserved for
+    /// future source kinds; not emitted by the current verifier (every
+    /// [`MaterializedNodeSource`] is handled).
     UnsupportedNodeKind,
 }
 
@@ -168,31 +178,48 @@ pub fn verify_node(node: &MaterializedNodeInput) -> MaterializationVerification 
         });
     }
 
-    let result = match (node.expected_hash.as_deref(), node.actual_hash.as_deref()) {
-        (Some(expected), Some(actual)) => {
-            evidence.push(MaterializationVerificationEvidence::HashCompared {
-                algorithm: hash_algorithm(expected),
-            });
-            if expected == actual {
-                MaterializationVerificationResult::Verified
-            } else {
-                MaterializationVerificationResult::Mismatch {
-                    expected: expected.to_string(),
-                    actual: actual.to_string(),
-                }
-            }
-        }
-        (Some(_), None) => MaterializationVerificationResult::Unavailable {
-            reason: MaterializationUnavailableReason::MissingMaterializedObject,
-        },
+    // Validate hashes *before* anything is copied into a result. A caller that
+    // mistakenly passes a raw path or `KEY=VALUE` is rejected with a typed
+    // reason, so an unvalidated value can never be echoed into a persisted
+    // `Mismatch`/reason or evidence (#499-A review).
+    let result = match node.expected_hash.as_deref() {
         // No expected hash. A runtime tool reports the #469/#473-specific reason
         // so a missing `binary_sha256` is never silently treated as verified.
-        (None, _) => MaterializationVerificationResult::Unavailable {
+        None => MaterializationVerificationResult::Unavailable {
             reason: if node.source == MaterializedNodeSource::RuntimeTool {
                 MaterializationUnavailableReason::RuntimeToolBinaryHashUnpopulated
             } else {
                 MaterializationUnavailableReason::MissingExpectedHash
             },
+        },
+        Some(expected) if !is_content_hash(expected) => {
+            MaterializationVerificationResult::Unavailable {
+                reason: MaterializationUnavailableReason::InvalidExpectedHashIdentity,
+            }
+        }
+        Some(expected) => match node.actual_hash.as_deref() {
+            None => MaterializationVerificationResult::Unavailable {
+                reason: MaterializationUnavailableReason::MissingMaterializedObject,
+            },
+            Some(actual) if !is_content_hash(actual) => {
+                MaterializationVerificationResult::Unavailable {
+                    reason: MaterializationUnavailableReason::InvalidActualHashIdentity,
+                }
+            }
+            Some(actual) => {
+                // Both are validated content hashes — safe to record.
+                evidence.push(MaterializationVerificationEvidence::HashCompared {
+                    algorithm: hash_algorithm(expected),
+                });
+                if expected == actual {
+                    MaterializationVerificationResult::Verified
+                } else {
+                    MaterializationVerificationResult::Mismatch {
+                        expected: expected.to_string(),
+                        actual: actual.to_string(),
+                    }
+                }
+            }
         },
     };
 
@@ -204,7 +231,28 @@ pub fn verify_node(node: &MaterializedNodeInput) -> MaterializationVerification 
     }
 }
 
-/// Derive a coarse algorithm label from a hash string's `algo:` prefix.
+/// Whether `value` is a well-formed `algo:digest` content hash. This is the
+/// guard that keeps a caller's mistake — a raw host path, an env assignment, a
+/// secret — out of any persisted result (#499-A review): such values are not
+/// content hashes and are rejected before they can be echoed.
+fn is_content_hash(value: &str) -> bool {
+    let Some((algo, digest)) = value.split_once(':') else {
+        return false;
+    };
+    !algo.is_empty()
+        && !digest.is_empty()
+        && algo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-' || c == '_' || c == '.')
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('=')
+}
+
+/// Derive a coarse algorithm label from a validated hash's `algo:` prefix.
 fn hash_algorithm(hash: &str) -> String {
     match hash.split_once(':') {
         Some((algo, _)) if !algo.is_empty() => algo.to_string(),
@@ -251,6 +299,13 @@ pub fn materialization_result_to_unrealizable_reason(
             MaterializationUnavailableReason::RuntimeToolBinaryHashUnpopulated => {
                 UnrealizableReason::RuntimeToolBinaryHashUnavailable {
                     node_id: node_id.to_string(),
+                }
+            }
+            MaterializationUnavailableReason::InvalidExpectedHashIdentity
+            | MaterializationUnavailableReason::InvalidActualHashIdentity => {
+                UnrealizableReason::InvalidImmutableInputIdentity {
+                    node_id: node_id.to_string(),
+                    node_kind,
                 }
             }
             MaterializationUnavailableReason::MissingExpectedHash
