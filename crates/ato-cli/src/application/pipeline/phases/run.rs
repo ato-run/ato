@@ -1722,6 +1722,12 @@ where
     // (the SOT) and block before launch if a required condition is unsatisfied.
     // Gated on the install identity, so `ato run` / non-installed launches are
     // untouched. Runs here in the prepare phase, before any executor.
+    //
+    // `capsule://` query inputs (`&[]` here) overlay grants/bindings onto the
+    // in-memory claims before resolution; threading them from the launch URL is a
+    // follow-up (the dispatch currently drops the query, and the query +
+    // install-lifecycle identity don't co-occur in today's entrypoints — see the
+    // relaunch_preflight module docs).
     crate::adapters::runtime::relaunch_preflight::run_relaunch_preflight(
         request.install_lifecycle_context.as_ref().map(|ctx| {
             (
@@ -1729,6 +1735,7 @@ where
                 ctx.install_revision_id.as_str(),
             )
         }),
+        &[],
     )?;
     let state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
