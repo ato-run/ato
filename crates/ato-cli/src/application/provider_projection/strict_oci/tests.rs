@@ -189,3 +189,99 @@ fn facts_derive_network_required_from_egress_allowlist() {
     );
     assert!(facts.network_policy_required);
 }
+
+// ── multi-service / orchestration gate ──
+
+fn service(label: &str, facts: OciStrictFacts) -> OciServiceStrict {
+    let enforcement = OciProviderEnforcement::podman(facts.network_policy_required);
+    OciServiceStrict {
+        service_label: label.to_string(),
+        facts,
+        enforcement,
+    }
+}
+
+fn strict_services(services: &[OciServiceStrict]) -> Result<(), AtoExecutionError> {
+    enforce_strict_oci_services(services, LaunchProfile::Strict, None)
+}
+
+#[test]
+fn strict_multi_service_passes_when_all_services_clean() {
+    let services = vec![service("web", clean_facts()), service("db", clean_facts())];
+    assert!(strict_services(&services).is_ok());
+}
+
+#[test]
+fn strict_multi_service_blocks_and_names_the_offending_service() {
+    // Two clean services + one with a host-bound mount → blocked, and the error
+    // node id carries the offending service label.
+    let mut bad = clean_facts();
+    bad.host_bound_mount_targets = vec!["/data".to_string()];
+    let services = vec![
+        service("web", clean_facts()),
+        service("worker", bad),
+        service("db", clean_facts()),
+    ];
+    let err = strict_services(&services).expect_err("host-bound service must block");
+    let details = err.details.clone().expect("details");
+    let blocked = details["blocked"].as_array().expect("array");
+    // Exactly the offending service is blocked, identified by its node id.
+    assert_eq!(blocked.len(), 1);
+    let node_id = blocked[0]["node_id"].as_str().unwrap();
+    assert!(
+        node_id.contains("worker"),
+        "node id names the service: {node_id}"
+    );
+    assert_eq!(blocked[0]["reason_code"], "host_bound_disallowed");
+}
+
+#[test]
+fn strict_multi_service_blocks_required_egress_unsupported_by_podman() {
+    let mut net = clean_facts();
+    net.network_policy_required = true;
+    let services = vec![service("web", net)];
+    let err = strict_services(&services).expect_err("egress unsupported must block");
+    let details = err.details.clone().expect("details");
+    assert_eq!(details["blocked"][0]["reason_code"], "policy_downgraded");
+}
+
+#[test]
+fn strict_multi_service_blocks_unpinned_required_image() {
+    let mut unpinned = clean_facts();
+    unpinned.image_digest = None;
+    let services = vec![service("web", clean_facts()), service("api", unpinned)];
+    let err = strict_services(&services).expect_err("unpinned image must block");
+    let details = err.details.clone().expect("details");
+    let node_id = details["blocked"][0]["node_id"].as_str().unwrap();
+    assert!(node_id.contains("api"));
+    assert_eq!(
+        details["blocked"][0]["reason_code"],
+        "materialization_missing"
+    );
+}
+
+#[test]
+fn normal_multi_service_does_not_block() {
+    let mut bad = clean_facts();
+    bad.network_policy_required = true;
+    bad.host_bound_mount_targets = vec!["/data".to_string()];
+    bad.image_digest = None;
+    let services = vec![service("web", bad)];
+    assert!(
+        enforce_strict_oci_services(&services, LaunchProfile::Normal, None).is_ok(),
+        "normal mode must never block a multi-service launch"
+    );
+}
+
+#[test]
+fn strict_multi_service_error_leaks_no_host_path() {
+    let mut bad = clean_facts();
+    bad.host_bound_mount_targets = vec!["/home/alice/project/secret".to_string()];
+    let services = vec![service("web", bad)];
+    let err = strict_services(&services).expect_err("blocks");
+    let serialized = serde_json::to_string(&err.details).expect("serialize");
+    assert!(
+        !serialized.contains("/home/alice"),
+        "no raw host path: {serialized}"
+    );
+}
