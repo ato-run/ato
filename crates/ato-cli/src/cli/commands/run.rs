@@ -1979,6 +1979,7 @@ run = "node server.js""#,
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: None,
         };
         for preview_mode in [false, true] {
             let launch_ctx = RuntimeLaunchContext::empty()
