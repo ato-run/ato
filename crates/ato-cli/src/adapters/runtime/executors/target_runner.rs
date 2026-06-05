@@ -124,7 +124,13 @@ pub async fn resolve_launch_context(
         reporter.warn(warning.clone()).await?;
     }
 
-    Ok(RuntimeLaunchContext::from_ipc(ipc_ctx))
+    // Thread the install profile key (if this is an installed-app launch)
+    // explicitly through the launch context. Captured here, on the synchronous
+    // run thread, because the thread-local install lifecycle context does not
+    // reliably survive the async executor boundary downstream.
+    let install_profile_key = crate::app_control::session::current_install_profile_key();
+
+    Ok(RuntimeLaunchContext::from_ipc(ipc_ctx).with_install_profile_key(install_profile_key))
 }
 
 pub fn prepare_target_execution(
