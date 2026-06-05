@@ -473,10 +473,12 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
-        about = "Launch an installed app by its stable install profile key"
+        about = "Launch an installed app by its install profile key or capsule:// URL"
     )]
     Launch {
-        /// Install profile key (`ipk_<32hex>`) from `ato install` output
+        /// Install profile key (`ipk_<32hex>`) from `ato install`, or a
+        /// `capsule://<location>?<query>` URL to relaunch an installed app with
+        /// launch-condition query inputs.
         install_profile_key: String,
 
         /// Skip interactive prompts and assume yes
