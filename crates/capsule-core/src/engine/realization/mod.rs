@@ -3,11 +3,12 @@
 //! > Ato guarantees that a resolved capsule can either reconstruct an
 //! > equivalent launch envelope or fail with a typed explanation.
 //!
-//! This module is the *typed core* of that guarantee. It does not launch
-//! anything and does not verify content hashes end-to-end (#499) or enforce a
-//! strict fail-closed launch profile (#500); it classifies whether each node of
-//! a resolved capsule can be **materialized, verified, or only conditionally
-//! realized**, and explains — with typed reasons — when it cannot.
+//! This module is the *typed core* of that guarantee. It classifies whether
+//! each node of a resolved capsule can be **materialized, verified, or only
+//! conditionally realized**, explains — with typed reasons — when it cannot,
+//! and (under an explicit strict profile) turns an unverifiable required node
+//! into a launch that fails before execution rather than a silent or
+//! merely-warned one.
 //!
 //! ## Layers
 //!
@@ -19,7 +20,11 @@
 //!   evidence onto a [`classify::RealizationRequest`].
 //! - [`verify`] — the pure materialization verifier (#499-A): compares declared
 //!   vs actual content identity and maps the typed result back into the
-//!   contract. It changes no launch behavior (strict fail-closed is #500).
+//!   contract. It changes no launch behavior on its own.
+//! - [`strict`] — the strict fail-closed launch gate (#500): consumes the
+//!   `classify`/`verify` outputs and, in [`strict::LaunchProfile::Strict`],
+//!   blocks a launch *before execution* with a typed, redacted error. The
+//!   default [`strict::LaunchProfile::Normal`] never newly blocks a launch.
 //!
 //! ## Boundaries this module keeps (#473, #501)
 //!
@@ -33,6 +38,7 @@
 pub mod bundle;
 pub mod classify;
 pub mod model;
+pub mod strict;
 pub mod verify;
 
 #[cfg(test)]
@@ -49,6 +55,11 @@ pub use model::{
     RealizationContract, RealizationEdgeState, RealizationEdgeStatus, RealizationEvidence,
     RealizationNodeKind, RealizationNodeStatus, RealizationResult, RealizationStatus,
     RedactedProjectionCommand, UnrealizableReason,
+};
+pub use strict::{
+    LaunchProfile, PolicyEnforcement, StateBindingCompatibility, StrictGateNodeInput,
+    StrictGateReasonCode, StrictRealizationGate, StrictRealizationGateError, evaluate_strict_gate,
+    evaluate_strict_gate_with_materialization,
 };
 pub use verify::{
     MaterializationHashError, MaterializationUnavailableReason, MaterializationVerification,
