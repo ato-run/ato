@@ -234,8 +234,10 @@ pub fn verify_node(node: &MaterializedNodeInput) -> MaterializationVerification 
 /// Whether `value` is a well-formed `algo:digest` content hash. This is the
 /// guard that keeps a caller's mistake — a raw host path, an env assignment, a
 /// secret — out of any persisted result (#499-A review): such values are not
-/// content hashes and are rejected before they can be echoed.
-fn is_content_hash(value: &str) -> bool {
+/// content hashes and are rejected before they can be echoed. Shared with the
+/// strict gate (#500), which uses it both to reject invalid identities and to
+/// decide whether an identity is safe to summarize into an error payload.
+pub(crate) fn is_content_hash(value: &str) -> bool {
     let Some((algo, digest)) = value.split_once(':') else {
         return false;
     };
