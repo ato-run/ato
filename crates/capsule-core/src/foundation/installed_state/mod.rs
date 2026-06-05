@@ -35,6 +35,7 @@ mod db;
 mod launch_condition;
 mod port;
 mod relaunch_admission;
+mod relaunch_resolution;
 
 pub use admission::{
     StorageAdmission, available_space, available_space_for_target, evaluate_storage_admission,
@@ -54,4 +55,8 @@ pub use port::{
 };
 pub use relaunch_admission::{
     RelaunchAdmission, RelaunchAdmissionInput, RelaunchAdmissionReason, evaluate_relaunch_admission,
+};
+pub use relaunch_resolution::{
+    LaunchConditionUpdate, RelaunchResolution, RelaunchResolutionContext, RelaunchResolutionInput,
+    RelaunchResolutionSource, RelaunchResolutionWarning, resolve_relaunch_conditions,
 };
