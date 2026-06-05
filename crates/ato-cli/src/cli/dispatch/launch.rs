@@ -4,6 +4,7 @@
 //! lifecycle layer: it resolves the profile key → app + profile → current revision →
 //! capsule handle, then bridges into the existing run pipeline with profile args applied.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,8 +13,13 @@ use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
     InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
 };
-use capsule_core::installed_state::{LaunchConditionInput, parse_capsule_launch_input};
+use capsule_core::installed_state::{
+    InstalledStateDb, LaunchConditionInput, LaunchConditionInputValue, parse_capsule_launch_input,
+};
 
+use crate::adapters::runtime::launch_condition_prompt::{
+    CliSecretPromptProvider, SecretStoreGrantStore, resolve_prompt_launch_inputs,
+};
 use crate::app_control::session::ScopedInstallLifecycleGuard;
 use crate::cli::commands::run::InstallLifecycleContext;
 use crate::install::support::execute_run_command;
@@ -43,12 +49,13 @@ pub(crate) fn execute_launch_command(
     // inputs, not proof) threaded into the relaunch preflight. `ato launch <ipk>`
     // carries no such inputs.
     let target = args.install_profile_key.trim().to_string();
-    let (app_id, profile_id, capsule_handle, rev_id, capsule_launch_inputs): (
+    let (app_id, profile_id, capsule_handle, rev_id, capsule_launch_inputs, capsule_location): (
         InstalledAppId,
         ProfileId,
         String,
         InstallRevisionId,
         Vec<LaunchConditionInput>,
+        Option<String>,
     ) = if target.starts_with("capsule://") {
         let parsed = parse_capsule_launch_input(&target)
             .with_context(|| format!("parse capsule launch URL '{target}'"))?;
@@ -71,17 +78,48 @@ pub(crate) fn execute_launch_command(
             capsule_handle,
             rev_id,
             parsed.conditions,
+            Some(parsed.capsule_location),
         )
     } else {
         let (app_id, profile_id, capsule_handle, rev_id) = find_profile_by_key(&store, &target)
             .with_context(|| {
                 format!("install profile key '{target}' not found — run `ato install` first")
             })?;
-        (app_id, profile_id, capsule_handle, rev_id, Vec::new())
+        (app_id, profile_id, capsule_handle, rev_id, Vec::new(), None)
     };
 
     // Compute the stable profile key for the session record.
     let ipk = derive_install_profile_key(&app_id, &profile_id);
+
+    // Resolve any `secret.*=prompt` / `state.*=prompt` query inputs into concrete
+    // grants BEFORE the run pipeline's relaunch preflight (#508). This is the only
+    // place a `=prompt` becomes a real grant: hidden value → secure secret store →
+    // `secret_grant_ref` → rewrite to `grant:<id>`. A `=prompt` alone is never a
+    // proof. The DB is opened only when a prompt input is actually present, so
+    // `ato launch <ipk>` and `?secret.X=grant:…` pay nothing here.
+    let capsule_launch_inputs = if capsule_launch_inputs
+        .iter()
+        .any(|i| matches!(i.value, LaunchConditionInputValue::Prompt))
+    {
+        let db = InstalledStateDb::open_default()
+            .context("open installed-state DB for launch-condition prompts")?;
+        let non_interactive = args.yes
+            || args.json
+            || crate::application::secrets::is_ci_environment()
+            || !std::io::stdin().is_terminal()
+            || !std::io::stderr().is_terminal();
+        resolve_prompt_launch_inputs(
+            &db,
+            ipk.as_str(),
+            Some(rev_id.as_str()),
+            capsule_location.as_deref(),
+            capsule_launch_inputs,
+            &CliSecretPromptProvider::new(non_interactive),
+            &SecretStoreGrantStore,
+        )?
+    } else {
+        capsule_launch_inputs
+    };
 
     // CapsuleInstanceKey is NOT derived here — the run pipeline assigns the real
     // execution_id from its receipt, and the session writer derives CIK from
