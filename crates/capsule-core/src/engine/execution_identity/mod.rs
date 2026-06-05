@@ -390,6 +390,13 @@ pub struct ExecutionReceiptV2 {
     /// [`ObservationScope`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_scope: Option<ObservationScope>,
+    /// Typed reasons the launch graph is [`GraphCompleteness::Partial`] rather
+    /// than `Complete` (refs #494). A `Partial` graph-backed receipt always
+    /// carries at least one reason — chiefly that the runtime layer was not
+    /// observed. Empty (and omitted) for legacy / non-graph receipts written
+    /// before the field existed. See [`GraphCompletenessReason`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graph_completeness_reasons: Vec<GraphCompletenessReason>,
 }
 
 impl ExecutionReceiptV2 {
@@ -430,6 +437,9 @@ impl ExecutionReceiptV2 {
             // Set by the graph-backed builder via `with_observation_scope`;
             // `None` keeps non-graph / legacy paths back-compatible.
             observation_scope: None,
+            // Populated by the graph-backed builder once the scope is known;
+            // empty keeps legacy receipts back-compatible.
+            graph_completeness_reasons: Vec::new(),
         })
     }
 
@@ -528,6 +538,18 @@ impl ExecutionReceiptV2 {
         self
     }
 
+    /// Attach typed [`GraphCompletenessReason`]s explaining why the launch
+    /// graph is `Partial` (refs #494). Typically derived from the receipt's
+    /// [`ObservationScope`] via
+    /// [`ObservationScope::graph_completeness_reasons`].
+    pub fn with_graph_completeness_reasons(
+        mut self,
+        reasons: Vec<GraphCompletenessReason>,
+    ) -> Self {
+        self.graph_completeness_reasons = reasons;
+        self
+    }
+
     /// Build a partial v2 receipt for a launch that failed before the
     /// full launch envelope was resolved (refs #74, #99).
     ///
@@ -592,6 +614,9 @@ impl ExecutionReceiptV2 {
             // Runtime is never observed on a failed launch.
             observed: RuntimeObservation::NotObserved,
         };
+        // Diagnostic reasons the (incomplete) graph evidence is not Complete,
+        // derived from the scope before it is moved into the struct below.
+        let graph_completeness_reasons = observation_scope.graph_completeness_reasons();
 
         Self {
             schema_version: EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
@@ -682,6 +707,7 @@ impl ExecutionReceiptV2 {
             edge_receipts: Vec::new(),
             provider_projections: Vec::new(),
             observation_scope: Some(observation_scope),
+            graph_completeness_reasons,
         }
     }
 }
@@ -837,6 +863,79 @@ impl ObservationScope {
         // never claimed here. Kept as an explicit method so the contract is
         // checkable rather than implied.
         false
+    }
+
+    /// Conservative reasons the graph attached to a receipt is
+    /// [`GraphCompleteness::Partial`] rather than `Complete` (refs #494),
+    /// derived purely from which evidence layers this scope carries.
+    ///
+    /// The runtime layer always contributes a reason — `RuntimeObservation`
+    /// cannot say `Observed` — so the result is **never empty** while the
+    /// runtime is unobserved. That is the structural reason a graph-backed
+    /// receipt with this scope can never be `Complete`, *even when its
+    /// `node_receipts` / `edge_receipts` are non-empty*: a populated
+    /// declared/resolved projection is not runtime observation.
+    pub fn graph_completeness_reasons(&self) -> Vec<GraphCompletenessReason> {
+        let mut reasons = Vec::new();
+        match self.observed {
+            RuntimeObservation::NotObserved => {
+                reasons.push(GraphCompletenessReason::RuntimeNotObserved)
+            }
+            RuntimeObservation::Deferred => {
+                reasons.push(GraphCompletenessReason::RuntimeObservationDeferred)
+            }
+            RuntimeObservation::OutOfScope => {
+                reasons.push(GraphCompletenessReason::RuntimeObservationOutOfScope)
+            }
+        }
+        if self.resolved == LayerEvidence::Absent {
+            reasons.push(GraphCompletenessReason::ResolvedLayerAbsent);
+        }
+        if self.declared == LayerEvidence::Absent {
+            reasons.push(GraphCompletenessReason::DeclaredLayerAbsent);
+        }
+        reasons
+    }
+}
+
+/// Why a receipt's launch graph is [`GraphCompleteness::Partial`] (refs #494).
+///
+/// Typed — never a free-form string — so receipt readers can branch on the
+/// reason. A `Partial` receipt always carries at least one of these. The
+/// runtime-observation reasons mirror [`RuntimeObservation`]; the
+/// layer-absent reasons mirror an `Absent` [`LayerEvidence`].
+///
+/// There is deliberately no "complete" reason: this slice never emits
+/// [`GraphCompleteness::Complete`]. Runtime observation (#521 lifecycle
+/// observations, #522 realization classifier) is what would let a future
+/// wave clear these reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphCompletenessReason {
+    /// The runtime was not observed (`ObservationScope.observed ==
+    /// NotObserved`): the graph is a declared/resolved projection only.
+    RuntimeNotObserved,
+    /// Runtime observation is deferred to a later wave (#521/#522).
+    RuntimeObservationDeferred,
+    /// Runtime observation is intentionally outside this receipt's scope.
+    RuntimeObservationOutOfScope,
+    /// The resolved-domain layer was not derived for this receipt.
+    ResolvedLayerAbsent,
+    /// The declared-domain layer was not derived for this receipt.
+    DeclaredLayerAbsent,
+}
+
+impl GraphCompletenessReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GraphCompletenessReason::RuntimeNotObserved => "runtime-not-observed",
+            GraphCompletenessReason::RuntimeObservationDeferred => "runtime-observation-deferred",
+            GraphCompletenessReason::RuntimeObservationOutOfScope => {
+                "runtime-observation-out-of-scope"
+            }
+            GraphCompletenessReason::ResolvedLayerAbsent => "resolved-layer-absent",
+            GraphCompletenessReason::DeclaredLayerAbsent => "declared-layer-absent",
+        }
     }
 }
 
@@ -1547,6 +1646,18 @@ pub struct ReproducibilityIdentity {
     pub causes: Vec<ReproducibilityCause>,
 }
 
+/// Conservative, **pre-observation** reproducibility classification of an
+/// execution (refs #494).
+///
+/// The class is derived from declared/resolved identity facets (manifest,
+/// lock, policy, host resolution) — never from runtime observation, which this
+/// slice does not perform. It is conservative: any uncertainty downgrades to
+/// [`ReproducibilityClass::BestEffort`] rather than overclaiming. The
+/// accompanying [`ReproducibilityCause`] list is the typed "why".
+///
+/// In particular, [`ReproducibilityClass::NetworkBound`] means the policy
+/// **permits egress** (see [`ReproducibilityCause::NetworkBound`]); it does
+/// **not** assert that the workload actually performed any network access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReproducibilityClass {
@@ -1554,16 +1665,26 @@ pub enum ReproducibilityClass {
     HostBound,
     StateBound,
     TimeBound,
+    /// Reproducibility may depend on network egress that policy permits. A
+    /// *capability* statement (egress allowed), not an observation of traffic.
     NetworkBound,
     BestEffort,
 }
 
+/// Typed reason contributing to a [`ReproducibilityClass`] (refs #494).
+///
+/// Each cause is derived pre-observation from declared/resolved facets. They
+/// are diagnostic and never imply runtime observation occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReproducibilityCause {
     HostBound,
     StateBound,
     TimeBound,
+    /// Policy permits network egress (e.g. a non-empty allow-hosts list), so
+    /// the result may depend on external services. This is an **egress-allowed
+    /// capability** statement derived from policy — it does NOT mean the
+    /// workload was observed making any network request.
     NetworkBound,
     UnknownDependencyOutput,
     UnknownRuntimeIdentity,
@@ -3216,6 +3337,179 @@ pub(in crate::engine::execution_identity) mod tests {
             ExecutionReceiptV2::from_input(sample_input_v2(), "2026-05-03T00:00:00Z".to_string())
                 .unwrap();
         assert!(receipt.observation_scope.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // #494 GraphCompleteness reasons
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn declared_resolved_scope_reasons_are_runtime_not_observed_only() {
+        let reasons = ObservationScope::declared_resolved().graph_completeness_reasons();
+        // declared + resolved present ⇒ the only reason is the unobserved
+        // runtime layer. Never empty (so the receipt can never be Complete).
+        assert_eq!(reasons, vec![GraphCompletenessReason::RuntimeNotObserved]);
+    }
+
+    #[test]
+    fn declared_only_scope_reasons_include_resolved_absent() {
+        let reasons = ObservationScope::declared_only().graph_completeness_reasons();
+        assert!(reasons.contains(&GraphCompletenessReason::RuntimeNotObserved));
+        assert!(reasons.contains(&GraphCompletenessReason::ResolvedLayerAbsent));
+    }
+
+    #[test]
+    fn every_observation_scope_yields_at_least_one_reason() {
+        // Exhaustive over the runtime-observation variants and both
+        // resolved-layer states: a scope is never "Complete" (empty reasons)
+        // while runtime is unobserved.
+        for observed in [
+            RuntimeObservation::NotObserved,
+            RuntimeObservation::OutOfScope,
+            RuntimeObservation::Deferred,
+        ] {
+            for resolved in [LayerEvidence::Present, LayerEvidence::Absent] {
+                let scope = ObservationScope {
+                    declared: LayerEvidence::Present,
+                    resolved,
+                    observed,
+                };
+                assert!(
+                    !scope.graph_completeness_reasons().is_empty(),
+                    "scope {scope:?} must yield >= 1 partial reason"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn graph_backed_receipt_is_partial_because_runtime_not_observed() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        // Mirror the ato-cli builder: Partial + scope + reasons derived from
+        // the scope, with populated node/edge receipts.
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+            ],
+            edges: vec![ExecutionGraphEdge {
+                source: "src:app".to_string(),
+                target: "dep:db".to_string(),
+                kind: ExecutionGraphEdgeKind::DependsOn,
+            }],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+        let receipt = observation_scope_fixture_receipt()
+            .with_graph_projection(&graph)
+            .with_graph_completeness_reasons(
+                ObservationScope::declared_resolved().graph_completeness_reasons(),
+            );
+
+        // Acceptance: Partial always carries >= 1 reason, and the reason is
+        // the unobserved runtime.
+        assert_eq!(receipt.graph_completeness, Some(GraphCompleteness::Partial));
+        assert!(!receipt.graph_completeness_reasons.is_empty());
+        assert!(
+            receipt
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::RuntimeNotObserved)
+        );
+
+        // Acceptance: non-empty node/edge receipts must NOT promote to Complete.
+        assert!(
+            !receipt.node_receipts.is_empty() || !receipt.edge_receipts.is_empty(),
+            "fixture graph should populate node/edge receipts"
+        );
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete),
+            "Complete must never be emitted in this slice"
+        );
+        // And no observed id is synthesized.
+        assert!(receipt.observed_execution_id.is_none());
+    }
+
+    #[test]
+    fn partial_failure_receipt_carries_graph_completeness_reasons() {
+        // No graph ids ⇒ declared/resolved absent ⇒ reasons include the
+        // absent layers plus the unobserved runtime.
+        let receipt = ExecutionReceiptV2::partial_failure(
+            "2026-05-03T00:00:00Z".to_string(),
+            ReceiptResultClass::RecoverableFailure,
+            ReceiptFailureEnvelope {
+                kind: ReceiptFailureKind::Recoverable,
+                code: "E001".to_string(),
+                name: "fixture".to_string(),
+                phase: "manifest".to_string(),
+                message: "fixture".to_string(),
+                hint: None,
+                resource: None,
+                target: None,
+                retryable: false,
+                interactive_resolution_required: None,
+                classification: None,
+                cleanup_status: None,
+                cleanup_actions: Vec::new(),
+                manifest_suggestion: None,
+                details: None,
+            },
+            None,
+            None,
+            None,
+        );
+        assert!(
+            receipt
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::RuntimeNotObserved)
+        );
+        assert!(
+            receipt
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::ResolvedLayerAbsent)
+        );
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+        assert!(receipt.observed_execution_id.is_none());
+    }
+
+    #[test]
+    fn graph_completeness_reasons_serde_uses_kebab_and_roundtrips() {
+        let receipt = observation_scope_fixture_receipt().with_graph_completeness_reasons(vec![
+            GraphCompletenessReason::RuntimeNotObserved,
+            GraphCompletenessReason::ResolvedLayerAbsent,
+        ]);
+        let json = serde_json::to_string(&receipt).expect("serialize");
+        assert!(json.contains("\"runtime-not-observed\""));
+        assert!(json.contains("\"resolved-layer-absent\""));
+        let parsed: ExecutionReceiptV2 = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            parsed.graph_completeness_reasons,
+            receipt.graph_completeness_reasons
+        );
+    }
+
+    #[test]
+    fn legacy_receipt_without_graph_completeness_reasons_roundtrips_to_empty() {
+        // A receipt written before #494 has no `graph_completeness_reasons`
+        // key; it must still parse, with the field defaulting to empty.
+        let receipt = observation_scope_fixture_receipt()
+            .with_graph_completeness_reasons(vec![GraphCompletenessReason::RuntimeNotObserved]);
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        let obj = value.as_object_mut().expect("object");
+        assert!(obj.remove("graph_completeness_reasons").is_some());
+
+        let legacy: ExecutionReceiptV2 = serde_json::from_value(value).expect("legacy parse");
+        assert!(legacy.graph_completeness_reasons.is_empty());
+        assert_eq!(legacy.graph_completeness, receipt.graph_completeness);
     }
 
     #[test]
