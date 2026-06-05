@@ -29,8 +29,6 @@ use url::Url;
 
 use crate::error::{CapsuleError, Result};
 
-use super::launch_condition::LaunchConditionKind;
-
 /// A parsed `capsule://` launch-condition query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapsuleLaunchInput {
@@ -266,45 +264,63 @@ fn parse_env_value(name: &str, value: &str) -> Result<LaunchConditionInputValue>
     Ok(LaunchConditionInputValue::Literal(value.to_string()))
 }
 
-/// Build the canonical condition reference for a capsule's launch condition:
-/// `capsule://<location>#condition/<kind>/<condition_key>`. Uses the `capsule`
-/// scheme + a fragment — no new scheme is introduced.
-pub fn capsule_condition_ref(
-    capsule_location: &str,
-    kind: LaunchConditionKind,
-    condition_key: &str,
-) -> String {
-    format!(
-        "capsule://{capsule_location}#condition/{}/{condition_key}",
-        kind.as_str()
-    )
-}
-
-/// Validate that a string is an acceptable condition reference: a `capsule://`
-/// URL with a `#condition/...` fragment. Rejects foreign schemes
-/// (`ato-secret://`, `ato-state://`, `file://`, …), raw host paths, and raw
-/// token-like strings.
-pub fn validate_condition_ref(reference: &str) -> Result<()> {
-    let parsed =
-        Url::parse(reference).map_err(|e| parse_err(format!("invalid condition ref: {e}")))?;
-    if parsed.scheme() != "capsule" {
+/// Validate a **reserved launch-condition key** — the same vocabulary as a
+/// `capsule://` query key: `port`, `port.<endpoint>`, `env.<name>`,
+/// `secret.<name>`, `state.<key>`, or a reserved
+/// `network`/`hardware`/`capability`/`policy` key.
+///
+/// A condition key is **not** a URI and does not use a `#condition/...`
+/// fragment: condition identity is the reserved key itself, exactly as written
+/// in the `capsule://` query. `://`, `::`, path separators, and the forbidden
+/// namespaces (condition/placement/runtime/c/p/r) are rejected — so an
+/// `ato-secret://…`, `capsule://…#condition/…`, raw host path, or raw token can
+/// never be used as a condition key.
+pub fn validate_condition_key(condition_key: &str) -> Result<()> {
+    if condition_key.is_empty() {
+        return Err(parse_err("condition key must not be empty"));
+    }
+    if condition_key.contains("::") {
         return Err(parse_err(format!(
-            "condition ref must use the capsule:// scheme (got '{}://'); \
-             no ato-secret/ato-state/file schemes",
-            parsed.scheme()
+            "'::' is not allowed in a condition key (got '{condition_key}')"
         )));
     }
-    match parsed.fragment() {
-        Some(fragment) if fragment.starts_with("condition/") => Ok(()),
-        _ => Err(parse_err(
-            "condition ref must carry a '#condition/<kind>/<key>' fragment",
-        )),
+    if condition_key.contains("://") {
+        return Err(parse_err(format!(
+            "condition key must be a reserved key (e.g. secret.OPENAI_API_KEY), not a URI \
+             (got '{condition_key}')"
+        )));
+    }
+    if condition_key.contains('/') || condition_key.contains('\\') {
+        return Err(parse_err(format!(
+            "condition key must not contain a path separator (got '{condition_key}')"
+        )));
+    }
+    let (namespace, rest) = condition_key.split_once('.').unwrap_or((condition_key, ""));
+    if FORBIDDEN_NAMESPACES.contains(&namespace) {
+        return Err(parse_err(format!(
+            "'{namespace}.*' is not a launch-condition namespace; condition keys are reserved \
+             keys directly (port/env/secret/state/…)"
+        )));
+    }
+    match namespace {
+        // `port` (main endpoint) or `port.<endpoint>`.
+        "port" => Ok(()),
+        "env" | "secret" | "state" | "network" | "hardware" | "capability" | "policy" => {
+            if rest.is_empty() {
+                return Err(parse_err(format!("'{namespace}.<name>' requires a name")));
+            }
+            Ok(())
+        }
+        _ => Err(parse_err(format!(
+            "unknown condition key '{condition_key}'"
+        ))),
     }
 }
 
 /// A logical locator id (grant id / binding id): non-empty, no whitespace, not a
-/// host path, not a scheme URL, not a token-like raw value.
-fn validate_locator_id(id: &str, what: &str) -> Result<()> {
+/// host path, not a scheme URL, not a token-like raw value. Public so the DB
+/// registry can enforce it at its boundary (callers are not trusted).
+pub fn validate_locator_id(id: &str, what: &str) -> Result<()> {
     if id.is_empty() {
         return Err(parse_err(format!("{what} id must not be empty")));
     }
@@ -529,37 +545,44 @@ mod tests {
     }
 
     #[test]
-    fn capsule_condition_ref_uses_capsule_scheme() {
-        let reference = capsule_condition_ref(
-            "ato.run/koh0920/hello-capsule",
-            LaunchConditionKind::Secret,
-            "OPENAI_API_KEY",
+    fn condition_key_accepts_reserved_keys() {
+        for key in [
+            "port",
+            "port.main",
+            "env.LOG_LEVEL",
+            "secret.OPENAI_API_KEY",
+            "state.data",
+            "network.egress",
+        ] {
+            validate_condition_key(key).unwrap_or_else(|e| panic!("'{key}' should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn condition_key_rejects_uris_fragments_paths_and_namespaces() {
+        // The previous `#condition/...` fragment form is no longer a condition
+        // identity — a condition key is the reserved key itself, not a URI.
+        assert!(validate_condition_key("capsule://x#condition/secret/K").is_err());
+        assert!(validate_condition_key("ato-secret://store/openai").is_err());
+        assert!(validate_condition_key("ato-state://app/data").is_err());
+        assert!(validate_condition_key("file:///Users/koh/secret").is_err());
+        assert!(validate_condition_key("/Users/koh/secret").is_err());
+        assert!(validate_condition_key("condition.secret.K").is_err());
+        assert!(validate_condition_key("secret::K").is_err());
+        assert!(
+            validate_condition_key("secret").is_err(),
+            "secret needs a name"
         );
-        assert_eq!(
-            reference,
-            "capsule://ato.run/koh0920/hello-capsule#condition/secret/OPENAI_API_KEY"
-        );
-        validate_condition_ref(&reference).unwrap();
+        assert!(validate_condition_key("bogus.key").is_err());
     }
 
     #[test]
-    fn condition_ref_rejects_ato_secret_scheme() {
-        assert!(validate_condition_ref("ato-secret://store/openai").is_err());
-    }
-
-    #[test]
-    fn condition_ref_rejects_ato_state_scheme() {
-        assert!(validate_condition_ref("ato-state://app/data").is_err());
-    }
-
-    #[test]
-    fn condition_ref_rejects_raw_host_path() {
-        assert!(validate_condition_ref("/Users/koh/secret").is_err());
-        assert!(validate_condition_ref("file:///Users/koh/secret").is_err());
-    }
-
-    #[test]
-    fn condition_ref_rejects_raw_token() {
-        assert!(validate_condition_ref("sk-abc123def456").is_err());
+    fn validate_locator_id_rejects_paths_tokens_and_schemes() {
+        assert!(validate_locator_id("openai-default", "grant").is_ok());
+        assert!(validate_locator_id("", "grant").is_err());
+        assert!(validate_locator_id("sk-abc123", "grant").is_err());
+        assert!(validate_locator_id("/Users/x", "binding").is_err());
+        assert!(validate_locator_id("ato-secret://x", "grant").is_err());
+        assert!(validate_locator_id("has space", "grant").is_err());
     }
 }
