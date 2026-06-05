@@ -9,6 +9,7 @@
 //! The legacy Bollard/Docker-compatible execution path is in `oci.rs`.
 //! New code must NOT route through that path.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -44,6 +45,38 @@ pub(crate) async fn execute_single_target(
     let selector = DefaultOciProviderSelector;
     let provider = selector.select_provider();
     execute_with_provider(plan, reporter, launch_ctx, &provider, strict_realization).await
+}
+
+/// Assemble the env map handed to `create_container`, in precedence order: the
+/// OCI target's manifest env (`base`), then the launch context's injected env,
+/// then the container proxy override, then SecretStore-backed launch-condition
+/// grants (#508) last so a secret wins for its exact key.
+///
+/// Secret values reach **only** this map (the in-memory `OciContainerRequest.env`).
+/// They are taken from `launch_ctx.secret_env()` — a channel deliberately excluded
+/// from `merged_env`/`merged_env_with_origins`/`env_permission_keys` — so the
+/// prelaunch receipt, session record, and logs never observe a raw value.
+fn build_oci_container_env(
+    base: HashMap<String, String>,
+    launch_ctx: &RuntimeLaunchContext,
+) -> HashMap<String, String> {
+    let mut env = base;
+    env.extend(launch_ctx.merged_env());
+    // Override proxy env for containers: 127.0.0.1 is unreachable from inside a
+    // container; use host.containers.internal instead.
+    if let Some(port) = launch_ctx.egress_proxy_port() {
+        let container_proxy = crate::common::proxy::proxy_env_for_oci_container(port, &[]);
+        for (k, v) in crate::common::proxy::proxy_env_to_pairs(&container_proxy) {
+            env.insert(k, v);
+        }
+    }
+    // SecretStore-backed launch-condition grants (#508). Applied at the OCI
+    // container-creation boundary only; the value reaches only this map. Last so a
+    // secret wins for its exact env key.
+    for secret in launch_ctx.secret_env() {
+        env.insert(secret.name.clone(), secret.value.expose().to_string());
+    }
+    env
 }
 
 /// Core execution logic, accepting any `OciProvider` implementation.
@@ -109,17 +142,11 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
 
     let pull_ref = build_digest_pull_ref(resolved_image);
 
-    // Env: merge OCI target env with launch context env.
-    let mut env = plan.targets_oci_env();
-    env.extend(launch_ctx.merged_env());
-    // Override proxy env for containers: 127.0.0.1 is unreachable from inside a
-    // container; use host.containers.internal instead.
-    if let Some(port) = launch_ctx.egress_proxy_port() {
-        let container_proxy = crate::common::proxy::proxy_env_for_oci_container(port, &[]);
-        for (k, v) in crate::common::proxy::proxy_env_to_pairs(&container_proxy) {
-            env.insert(k, v);
-        }
-    }
+    // Env: OCI target manifest env overlaid with launch-context injected env, the
+    // container proxy override, and SecretStore-backed grants (#508). Secret values
+    // reach only this `OciContainerRequest.env`, never the receipt/session/logs —
+    // see `build_oci_container_env`.
+    let env = build_oci_container_env(plan.targets_oci_env(), launch_ctx);
 
     // Cmd: prefer targets_oci_cmd, fall back to entrypoint/run command.
     let mut cmd = plan.targets_oci_cmd();
@@ -495,6 +522,96 @@ mod tests {
             egress_allow: egress,
             policy_mode,
         }
+    }
+
+    // ── Secret env injection (#508) ───────────────────────────────────────────
+    // OCI secret grants must reach the container env but never the receipt /
+    // session / logs. These exercise `build_oci_container_env`, the single seam
+    // where the env handed to `create_container` is assembled.
+    use crate::adapters::runtime::secret_injection::{RuntimeSecretEnv, SecretValue};
+
+    fn secret(name: &str, value: &str) -> RuntimeSecretEnv {
+        RuntimeSecretEnv {
+            name: name.to_string(),
+            value: SecretValue::new(value.to_string()),
+        }
+    }
+
+    #[test]
+    fn oci_secret_env_reaches_container_env() {
+        let ctx = RuntimeLaunchContext::default()
+            .with_secret_env(vec![secret("OPENAI_API_KEY", "sk-live-secret")]);
+        let env = build_oci_container_env(HashMap::new(), &ctx);
+        assert_eq!(
+            env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-live-secret"),
+            "secret grant must reach the container env"
+        );
+    }
+
+    #[test]
+    fn oci_secret_env_wins_over_base_env_key() {
+        let mut base = HashMap::new();
+        base.insert("OPENAI_API_KEY".to_string(), "placeholder".to_string());
+        let ctx = RuntimeLaunchContext::default()
+            .with_secret_env(vec![secret("OPENAI_API_KEY", "sk-live-secret")]);
+        let env = build_oci_container_env(base, &ctx);
+        assert_eq!(
+            env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-live-secret"),
+            "a secret is applied last so it wins for its exact key"
+        );
+    }
+
+    #[test]
+    fn oci_secret_env_not_in_receipt_or_session_env() {
+        let ctx = RuntimeLaunchContext::default()
+            .with_secret_env(vec![secret("OPENAI_API_KEY", "sk-live-secret")]);
+        // Receipt/session observe `merged_env*`, which must exclude `secret_env`.
+        assert!(
+            !ctx.merged_env().contains_key("OPENAI_API_KEY"),
+            "secret_env must not appear in merged_env (receipt-observed)"
+        );
+        assert!(
+            !ctx.merged_env_with_origins().contains_key("OPENAI_API_KEY"),
+            "secret_env must not appear in merged_env_with_origins (receipt-observed)"
+        );
+    }
+
+    #[test]
+    fn oci_secret_env_not_in_generated_log_output() {
+        // The launch context is what may be Debug-logged; the raw secret value must
+        // not appear in its Debug rendering (RuntimeSecretEnv redacts the value).
+        let ctx = RuntimeLaunchContext::default()
+            .with_secret_env(vec![secret("OPENAI_API_KEY", "sk-live-secret")]);
+        let rendered = format!("{ctx:?}");
+        assert!(
+            !rendered.contains("sk-live-secret"),
+            "raw secret value must not appear in launch-context Debug output"
+        );
+    }
+
+    #[test]
+    fn oci_secret_env_debug_redacted() {
+        let entry = secret("OPENAI_API_KEY", "sk-live-secret");
+        let rendered = format!("{entry:?}");
+        assert!(!rendered.contains("sk-live-secret"), "value must be redacted");
+        assert!(
+            rendered.contains("OPENAI_API_KEY"),
+            "the env name is not sensitive and may appear"
+        );
+    }
+
+    #[test]
+    fn oci_secret_injection_does_not_affect_non_installed_run() {
+        // Transient `ato run` carries no secret_env; the env map must be untouched
+        // by the secret loop (only the base env, no secret keys added).
+        let mut base = HashMap::new();
+        base.insert("FOO".to_string(), "bar".to_string());
+        let ctx = RuntimeLaunchContext::default();
+        assert!(ctx.secret_env().is_empty());
+        let env = build_oci_container_env(base.clone(), &ctx);
+        assert_eq!(env, base, "no secret_env means env is unchanged by injection");
     }
 
     // ── Policy gate tests ─────────────────────────────────────────────────────
