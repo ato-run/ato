@@ -34,6 +34,7 @@ mod admission;
 mod db;
 mod launch_condition;
 mod port;
+mod relaunch_admission;
 
 pub use admission::{
     StorageAdmission, available_space, available_space_for_target, evaluate_storage_admission,
@@ -50,4 +51,7 @@ pub use launch_condition::{
 };
 pub use port::{
     ConflictPolicy, PortAdmission, PortClaim, evaluate_port_admission, os_port_is_free,
+};
+pub use relaunch_admission::{
+    RelaunchAdmission, RelaunchAdmissionInput, RelaunchAdmissionReason, evaluate_relaunch_admission,
 };
