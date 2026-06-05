@@ -356,6 +356,67 @@ pub fn launch_condition_from_port_claim(claim: &super::port::PortClaim) -> Launc
     }
 }
 
+/// The canonical logical endpoint string for an installed app's service:
+/// `ato://app/<install_profile_key>/<service>`. Matches the form used by the
+/// launch-time port admission (`#523`) so an install-time port *declaration* and
+/// the launch-time port *claim* share the same `condition_key`.
+pub fn app_service_endpoint(install_profile_key: &str, service_name: &str) -> String {
+    format!("ato://app/{install_profile_key}/{service_name}")
+}
+
+/// Project an install-time **port declaration** into a launch condition.
+///
+/// Unlike [`launch_condition_from_port_claim`] (a launch-time *claim* recording
+/// the resolved/actual port), this records a *declaration*: "this app requires
+/// this logical endpoint / preferred port / protocol". Status defaults to
+/// `Unknown` because OS availability and the final remap are only known at
+/// launch — a launch-time port claim later supersedes it with `Satisfied`.
+///
+/// `preferred_port` of `Some(0)` (auto-assign) is not a concrete port and is
+/// stored as absent. The `condition_key` is `<logical_endpoint>.<protocol>`,
+/// matching the port-claim projection so the two never diverge.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_condition_from_port_declaration(
+    install_profile_key: &str,
+    install_revision_id: Option<&str>,
+    logical_endpoint: &str,
+    protocol: &str,
+    preferred_port: Option<u16>,
+    source: &str,
+    conflict_policy: Option<&str>,
+    status: LaunchConditionStatus,
+) -> LaunchConditionClaim {
+    let mut detail = serde_json::Map::new();
+    detail.insert(
+        "logical_endpoint".to_string(),
+        Value::String(logical_endpoint.to_string()),
+    );
+    detail.insert("protocol".to_string(), Value::String(protocol.to_string()));
+    // Port 0 = "auto-assign", not a concrete declared port — store as absent.
+    if let Some(port) = preferred_port.filter(|&p| p != 0) {
+        detail.insert("preferred_port".to_string(), Value::from(port));
+    }
+    detail.insert("source".to_string(), Value::String(source.to_string()));
+    if let Some(policy) = conflict_policy {
+        detail.insert(
+            "conflict_policy".to_string(),
+            Value::String(policy.to_string()),
+        );
+    }
+    LaunchConditionClaim {
+        install_profile_key: install_profile_key.to_string(),
+        install_revision_id: install_revision_id.map(str::to_string),
+        provider_id: None,
+        kind: LaunchConditionKind::Port,
+        condition_key: format!("{logical_endpoint}.{protocol}"),
+        status,
+        required: true,
+        source: LaunchConditionSource::Manifest,
+        detail_json: Value::Object(detail).to_string(),
+        redacted: true,
+    }
+}
+
 /// Project an environment-variable requirement into a launch condition.
 ///
 /// `env_name` is the variable name (the `condition_key`, e.g. `PORT`,
@@ -694,6 +755,99 @@ mod tests {
         assert!(claim.detail_json.contains("\"preferred_port\":3000"));
         assert!(claim.detail_json.contains("\"last_actual_port\":49152"));
         validate_redacted_detail_json(claim.kind, &claim.detail_json).unwrap();
+    }
+
+    #[test]
+    fn port_declaration_condition_uses_logical_endpoint_shape() {
+        let endpoint = app_service_endpoint("ipk_a", "main");
+        let c = launch_condition_from_port_declaration(
+            "ipk_a",
+            Some("rev1"),
+            &endpoint,
+            "tcp",
+            Some(3000),
+            "manifest.targets.port",
+            Some("remap"),
+            LaunchConditionStatus::Unknown,
+        );
+        assert_eq!(c.kind, LaunchConditionKind::Port);
+        assert_eq!(c.condition_key, "ato://app/ipk_a/main.tcp");
+        assert_eq!(c.status, LaunchConditionStatus::Unknown);
+        assert_eq!(c.source, LaunchConditionSource::Manifest);
+        assert!(
+            c.detail_json
+                .contains("\"logical_endpoint\":\"ato://app/ipk_a/main\"")
+        );
+        assert!(c.detail_json.contains("\"protocol\":\"tcp\""));
+        assert!(c.detail_json.contains("\"preferred_port\":3000"));
+        assert!(c.detail_json.contains("\"conflict_policy\":\"remap\""));
+        validate_redacted_detail_json(c.kind, &c.detail_json).unwrap();
+    }
+
+    #[test]
+    fn port_declaration_without_preferred_port_is_allowed() {
+        let endpoint = app_service_endpoint("ipk_a", "worker");
+        let c = launch_condition_from_port_declaration(
+            "ipk_a",
+            Some("rev1"),
+            &endpoint,
+            "tcp",
+            None,
+            "manifest.services.worker.expose",
+            None,
+            LaunchConditionStatus::Unknown,
+        );
+        assert_eq!(c.condition_key, "ato://app/ipk_a/worker.tcp");
+        assert!(!c.detail_json.contains("preferred_port"));
+        validate_redacted_detail_json(c.kind, &c.detail_json).unwrap();
+    }
+
+    #[test]
+    fn port_declaration_rejects_zero_or_omits_preferred_port() {
+        // Port 0 ("auto-assign") is not a concrete declared port → stored absent.
+        let endpoint = app_service_endpoint("ipk_a", "main");
+        let c = launch_condition_from_port_declaration(
+            "ipk_a",
+            None,
+            &endpoint,
+            "tcp",
+            Some(0),
+            "manifest.targets.port",
+            Some("remap"),
+            LaunchConditionStatus::Unknown,
+        );
+        assert!(
+            !c.detail_json.contains("preferred_port"),
+            "port 0 must not be stored as a concrete port: {}",
+            c.detail_json
+        );
+    }
+
+    #[test]
+    fn port_declaration_condition_key_matches_port_claim_projection_shape() {
+        // An install-time declaration and a launch-time claim for the same
+        // endpoint+protocol must produce the same condition_key, so they address
+        // the same ledger row.
+        let endpoint = app_service_endpoint("ipk_a", "main");
+        let declaration = launch_condition_from_port_declaration(
+            "ipk_a",
+            Some("rev1"),
+            &endpoint,
+            "tcp",
+            Some(3000),
+            "manifest.targets.port",
+            Some("remap"),
+            LaunchConditionStatus::Unknown,
+        );
+        let claim = launch_condition_from_port_claim(&super::super::port::PortClaim {
+            install_profile_key: "ipk_a".to_string(),
+            logical_endpoint: endpoint,
+            preferred_port: 3000,
+            last_actual_port: Some(49152),
+            protocol: "tcp".to_string(),
+            conflict_policy: super::super::port::ConflictPolicy::Remap,
+        });
+        assert_eq!(declaration.condition_key, claim.condition_key);
     }
 
     #[test]

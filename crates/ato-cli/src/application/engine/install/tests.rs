@@ -3710,7 +3710,7 @@ purpose = "user data"
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    for kind in ["storage", "env", "secret", "state"] {
+    for kind in ["storage", "port", "env", "secret", "state"] {
         assert!(extracted.contains(&kind), "{kind} should be extracted");
     }
     let missing: Vec<&str> = detail["missing_extractors"]
@@ -3719,11 +3719,11 @@ purpose = "user data"
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    for kind in ["env", "secret", "state"] {
+    for kind in ["port", "env", "secret", "state"] {
         assert!(!missing.contains(&kind), "{kind} must not be missing");
     }
-    // Port (and other not-yet-wired kinds) remain missing this slice.
-    assert!(missing.contains(&"port"));
+    // Not-yet-wired kinds remain missing this slice.
+    assert!(missing.contains(&"runtime"));
 }
 
 #[test]
@@ -3745,9 +3745,183 @@ fn no_supported_schema_keeps_kind_in_missing_extractors() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    for kind in ["env", "secret", "state"] {
+    for kind in ["port", "env", "secret", "state"] {
         assert!(missing.contains(&kind), "{kind} must remain missing");
     }
+}
+
+#[test]
+fn install_launch_conditions_records_port_condition_when_target_declares_port() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionSource};
+    // `[execution]` is rejected in schema 0.3, so the listening port is declared
+    // on the target; the extractor resolves it like `execution_port()`.
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "port-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+port = 3000
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let port = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::Port)
+        .expect("port condition extracted");
+    assert_eq!(port.condition_key, "ato://app/ipk_app/main.tcp");
+    assert_eq!(port.status, LaunchConditionStatus::Unknown);
+    assert_eq!(port.source, LaunchConditionSource::Manifest);
+    assert!(port.detail_json.contains("\"preferred_port\":3000"));
+    assert!(port.detail_json.contains("\"protocol\":\"tcp\""));
+    assert!(port.detail_json.contains("\"conflict_policy\":\"remap\""));
+}
+
+#[test]
+fn install_launch_conditions_records_service_port_condition_when_service_declares_expose() {
+    use capsule_core::installed_state::LaunchConditionKind;
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "svc-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[services.worker]
+entrypoint = "node worker.js"
+expose = ["http"]
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let worker = claims
+        .iter()
+        .find(|c| {
+            c.kind == LaunchConditionKind::Port && c.condition_key == "ato://app/ipk_app/worker.tcp"
+        })
+        .expect("service port condition extracted");
+    // A service exposure has no concrete port at install time.
+    assert!(!worker.detail_json.contains("preferred_port"));
+    assert_eq!(worker.status, LaunchConditionStatus::Unknown);
+}
+
+#[test]
+fn install_launch_conditions_marks_port_extracted_even_when_manifest_has_no_port() {
+    use capsule_core::installed_state::LaunchConditionKind;
+    // No port declared anywhere, but the manifest *was* examined → Port is
+    // extracted (zero port conditions), not left in missing_extractors.
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "no-port-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    assert!(
+        !claims.iter().any(|c| c.kind == LaunchConditionKind::Port),
+        "no port declaration → no port condition"
+    );
+    let detail = extraction_status_detail(&claims);
+    let extracted: Vec<&str> = detail["extracted_kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        extracted.contains(&"port"),
+        "port extractor ran → extracted"
+    );
+    let missing: Vec<&str> = detail["missing_extractors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(!missing.contains(&"port"));
+}
+
+#[test]
+fn no_manifest_keeps_port_in_missing_extractors() {
+    let detail =
+        extraction_status_detail(&install_launch_conditions("ipk_app", "rev1", None, None));
+    let missing: Vec<&str> = detail["missing_extractors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        missing.contains(&"port"),
+        "no manifest → port stays missing"
+    );
+}
+
+#[test]
+fn port_extraction_does_not_write_port_claims() {
+    // Recording the ledger must not touch the launch-time port_claims projection.
+    let (_dir, db) = admission_db();
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "port-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+port = 3000
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
+        .expect("ledger write must succeed");
+    assert!(
+        db.port_claims().unwrap().is_empty(),
+        "install-time port declarations must not reserve / write port_claims"
+    );
+}
+
+#[test]
+fn port_condition_uses_same_logical_endpoint_as_launch_port_admission() {
+    use capsule_core::installed_state::LaunchConditionKind;
+    // The install-time declaration and #523's launch-time admission must address
+    // the same logical endpoint, so they converge on one ledger condition_key.
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "port-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+port = 3000
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let port = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::Port)
+        .expect("port condition");
+    let launch_endpoint =
+        crate::adapters::runtime::port_admission::logical_endpoint("ipk_app", "main");
+    assert!(
+        port.detail_json
+            .contains(&format!("\"logical_endpoint\":\"{launch_endpoint}\"")),
+        "install endpoint must match launch-time admission endpoint {launch_endpoint}: {}",
+        port.detail_json
+    );
+    assert_eq!(port.condition_key, format!("{launch_endpoint}.tcp"));
 }
 
 #[test]
