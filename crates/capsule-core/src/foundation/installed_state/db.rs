@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::common::paths::ato_state_dir;
 use crate::error::{CapsuleError, Result};
@@ -28,6 +28,7 @@ use super::relaunch_admission::RelaunchAdmissionInput;
 const DB_FILE_NAME: &str = "installed_state.sqlite3";
 const MIGRATION_0001: &str = "2026-06-05-0001-installed-state";
 const MIGRATION_0002: &str = "2026-06-05-0002-launch-condition-ledger";
+const MIGRATION_0003: &str = "2026-06-05-0003-grant-binding-refs";
 
 /// Convert a byte count to SQLite's signed `INTEGER` (i64), failing instead of
 /// silently wrapping. A negative-on-overflow value would be read back as `0`
@@ -205,6 +206,39 @@ impl InstalledStateDb {
               ON launch_condition_claims(install_profile_key, status);
             CREATE INDEX IF NOT EXISTS idx_launch_condition_claims_kind
               ON launch_condition_claims(install_profile_key, kind);
+            -- Existence-only registry of secret grants (#508). Records *that* a
+            -- grant exists for a condition, by a redacted grant id — never the
+            -- secret value. The relaunch resolver checks presence here instead of
+            -- calling a value-returning secret store.
+            CREATE TABLE IF NOT EXISTS secret_grant_refs(
+              grant_id            TEXT PRIMARY KEY,
+              install_profile_key TEXT NOT NULL,
+              condition_ref       TEXT NOT NULL,
+              status              TEXT NOT NULL,
+              redacted            INTEGER NOT NULL DEFAULT 1,
+              created_at          INTEGER NOT NULL,
+              updated_at          INTEGER NOT NULL,
+              CHECK (status IN ('granted', 'missing', 'revoked', 'stale')),
+              CHECK (redacted IN (0, 1))
+            );
+            CREATE INDEX IF NOT EXISTS idx_secret_grant_refs_profile
+              ON secret_grant_refs(install_profile_key);
+            -- Existence-only registry of logical state bindings (#508). Records a
+            -- logical binding id for a condition — never a raw host path.
+            CREATE TABLE IF NOT EXISTS state_binding_refs(
+              binding_id          TEXT PRIMARY KEY,
+              install_profile_key TEXT NOT NULL,
+              condition_ref       TEXT NOT NULL,
+              state_key           TEXT NOT NULL,
+              status              TEXT NOT NULL,
+              redacted            INTEGER NOT NULL DEFAULT 1,
+              created_at          INTEGER NOT NULL,
+              updated_at          INTEGER NOT NULL,
+              CHECK (status IN ('bound', 'missing', 'stale')),
+              CHECK (redacted IN (0, 1))
+            );
+            CREATE INDEX IF NOT EXISTS idx_state_binding_refs_profile
+              ON state_binding_refs(install_profile_key);
             ",
         )
         .map_err(rt)?;
@@ -217,6 +251,11 @@ impl InstalledStateDb {
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(id, applied_at) VALUES (?1, ?2)",
             params![MIGRATION_0002, now],
+        )
+        .map_err(rt)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(id, applied_at) VALUES (?1, ?2)",
+            params![MIGRATION_0003, now],
         )
         .map_err(rt)?;
         Ok(())
@@ -750,6 +789,104 @@ impl InstalledStateDb {
             provider_id,
             claims,
         )
+    }
+
+    // ── Secret grant / state binding existence registries (#508) ────────────
+    //
+    // These record *that* a grant / binding exists (by a redacted logical id),
+    // so the relaunch resolver can confirm presence without reading any secret
+    // value or raw host path. They never store a value or a path.
+
+    /// Record (upsert) a secret grant reference as `granted`. `grant_id` is a
+    /// short logical id (never a secret value); `condition_ref` is a
+    /// `capsule://…#condition/…` reference (validated by the caller).
+    pub fn record_secret_grant_ref(
+        &self,
+        install_profile_key: &str,
+        condition_ref: &str,
+        grant_id: &str,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO secret_grant_refs(
+               grant_id, install_profile_key, condition_ref, status, redacted, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'granted', 1, ?4, ?4)
+             ON CONFLICT(grant_id) DO UPDATE SET
+               install_profile_key = excluded.install_profile_key,
+               condition_ref = excluded.condition_ref,
+               status = 'granted',
+               updated_at = excluded.updated_at",
+            params![grant_id, install_profile_key, condition_ref, now],
+        )
+        .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Existence-only probe: is there a `granted` secret grant for `grant_id`?
+    /// Reads no secret value.
+    pub fn secret_grant_ref_exists(&self, grant_id: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM secret_grant_refs WHERE grant_id = ?1 AND status = 'granted'",
+                params![grant_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?
+            .is_some();
+        Ok(exists)
+    }
+
+    /// Record (upsert) a logical state binding reference as `bound`. `binding_id`
+    /// is a short logical id (never a host path).
+    pub fn record_state_binding_ref(
+        &self,
+        install_profile_key: &str,
+        condition_ref: &str,
+        state_key: &str,
+        binding_id: &str,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO state_binding_refs(
+               binding_id, install_profile_key, condition_ref, state_key, status,
+               redacted, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'bound', 1, ?5, ?5)
+             ON CONFLICT(binding_id) DO UPDATE SET
+               install_profile_key = excluded.install_profile_key,
+               condition_ref = excluded.condition_ref,
+               state_key = excluded.state_key,
+               status = 'bound',
+               updated_at = excluded.updated_at",
+            params![
+                binding_id,
+                install_profile_key,
+                condition_ref,
+                state_key,
+                now
+            ],
+        )
+        .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Existence-only probe: is there a `bound` state binding for `binding_id`?
+    /// Reads no host path.
+    pub fn state_binding_ref_exists(&self, binding_id: &str) -> Result<bool> {
+        let conn = self.connect()?;
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM state_binding_refs WHERE binding_id = ?1 AND status = 'bound'",
+                params![binding_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?
+            .is_some();
+        Ok(exists)
     }
 
     /// Map one row into the intermediate tuple of raw column values.
@@ -1609,5 +1746,45 @@ mod tests {
             .unwrap();
         assert!(input.claims.is_empty());
         assert_eq!(input.install_profile_key, "ghost");
+    }
+
+    #[test]
+    fn secret_grant_ref_records_and_exists_by_id_only() {
+        let (_dir, db) = temp_db();
+        assert!(!db.secret_grant_ref_exists("openai-default").unwrap());
+        db.record_secret_grant_ref(
+            "app",
+            "capsule://ato.run/x#condition/secret/OPENAI_API_KEY",
+            "openai-default",
+        )
+        .unwrap();
+        assert!(db.secret_grant_ref_exists("openai-default").unwrap());
+        assert!(!db.secret_grant_ref_exists("unknown-grant").unwrap());
+    }
+
+    #[test]
+    fn secret_grant_ref_upserts_same_id() {
+        let (_dir, db) = temp_db();
+        db.record_secret_grant_ref("app", "capsule://x#condition/secret/K", "g1")
+            .unwrap();
+        db.record_secret_grant_ref("app", "capsule://x#condition/secret/K", "g1")
+            .unwrap();
+        // Upsert, not duplicate; still exists.
+        assert!(db.secret_grant_ref_exists("g1").unwrap());
+    }
+
+    #[test]
+    fn state_binding_ref_records_and_exists_by_id_only() {
+        let (_dir, db) = temp_db();
+        assert!(!db.state_binding_ref_exists("user-data").unwrap());
+        db.record_state_binding_ref(
+            "app",
+            "capsule://ato.run/x#condition/state/data",
+            "data",
+            "user-data",
+        )
+        .unwrap();
+        assert!(db.state_binding_ref_exists("user-data").unwrap());
+        assert!(!db.state_binding_ref_exists("other").unwrap());
     }
 }
