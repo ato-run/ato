@@ -21,7 +21,7 @@
 //! the (content-hash) image digest as a *materialization* input. The strict-gate
 //! error payload is already redacted by construction (see #500).
 
-use capsule_core::execution_identity::OciEnforcementStatus;
+use capsule_core::execution_identity::{OciEnforcementStatus, OciProviderReceiptEvidence};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::model::OciPolicyEnvelope;
 use capsule_core::realization::{
@@ -83,14 +83,16 @@ pub(crate) struct OciStrictFacts {
 }
 
 impl OciStrictFacts {
-    /// Derive strict facts from the resolved policy envelope and projection plan.
-    pub(crate) fn from_launch(envelope: &OciPolicyEnvelope, plan: &OciProjectionPlan) -> Self {
+    /// Derive strict facts from a projection plan plus whether a network policy
+    /// (e.g. an egress allowlist) is declared. This is the shared core used by
+    /// both the single-target and orchestration paths.
+    pub(crate) fn from_projection(plan: &OciProjectionPlan, network_policy_required: bool) -> Self {
         let image_digest = match &plan.image.digest {
             OciImageDigest::Pinned(digest) => Some(digest.clone()),
             OciImageDigest::Unpinned => None,
         };
         Self {
-            network_policy_required: !envelope.egress_allow.is_empty(),
+            network_policy_required,
             // No OCI-specific capability/sandbox policy facet is modeled on the
             // envelope today; podman applies a default sandbox. Capability
             // blocking is still supported by the gate for providers that report
@@ -104,6 +106,11 @@ impl OciStrictFacts {
                 .map(|m| m.target.clone())
                 .collect(),
         }
+    }
+
+    /// Derive strict facts from the resolved policy envelope and projection plan.
+    pub(crate) fn from_launch(envelope: &OciPolicyEnvelope, plan: &OciProjectionPlan) -> Self {
+        Self::from_projection(plan, !envelope.egress_allow.is_empty())
     }
 }
 
@@ -131,11 +138,28 @@ fn oci_realization_contract(
     enforcement: &OciProviderEnforcement,
     graph_resolved_execution_id: Option<&str>,
 ) -> RealizationContract {
-    let resolved_execution_id = graph_resolved_execution_id.unwrap_or(GRAPH_EXECUTION_ID_UNBOUND);
+    classify(RealizationRequest {
+        resolved_execution_id: graph_resolved_execution_id
+            .unwrap_or(GRAPH_EXECUTION_ID_UNBOUND)
+            .to_string(),
+        nodes: oci_realization_nodes("oci-", facts, enforcement),
+        edges: Vec::new(),
+    })
+}
+
+/// Build the realization nodes for one OCI projection. `node_id_prefix` scopes
+/// the node ids so a multi-service contract can identify the blocked service
+/// (e.g. `"oci-"` for single-target, `"oci-<service>-"` for orchestration). The
+/// prefix is a value-free service/node label — never a host path or secret.
+fn oci_realization_nodes(
+    node_id_prefix: &str,
+    facts: &OciStrictFacts,
+    enforcement: &OciProviderEnforcement,
+) -> Vec<RealizationNode> {
     let mut nodes: Vec<RealizationNode> = Vec::new();
 
     nodes.push(RealizationNode::required(
-        "oci-network-policy",
+        format!("{node_id_prefix}network-policy"),
         RealizationNodeFacts::NetworkPolicy {
             required: facts.network_policy_required,
             provider_can_enforce: enforcement.network.is_enforced(),
@@ -143,7 +167,7 @@ fn oci_realization_contract(
         },
     ));
     nodes.push(RealizationNode::required(
-        "oci-capability-policy",
+        format!("{node_id_prefix}capability-policy"),
         RealizationNodeFacts::CapabilityPolicy {
             required: facts.capability_policy_required,
             provider_can_enforce: enforcement.capability.is_enforced(),
@@ -154,7 +178,7 @@ fn oci_realization_contract(
     // materializable; an unpinned (tag-only) reference is a missing required
     // immutable input. The digest is a content hash here — never identity.
     nodes.push(RealizationNode::required(
-        "oci-image",
+        format!("{node_id_prefix}image"),
         RealizationNodeFacts::DependencyOutput {
             dependency_output_hash: facts.image_digest.clone(),
         },
@@ -170,16 +194,12 @@ fn oci_realization_contract(
             })
             .collect();
         nodes.push(RealizationNode::required(
-            "oci-filesystem-view",
+            format!("{node_id_prefix}filesystem-view"),
             RealizationNodeFacts::FilesystemView { mounts },
         ));
     }
 
-    classify(RealizationRequest {
-        resolved_execution_id: resolved_execution_id.to_string(),
-        nodes,
-        edges: Vec::new(),
-    })
+    nodes
 }
 
 /// Enforce the strict realization profile for an OCI launch.
@@ -200,6 +220,79 @@ pub(crate) fn enforce_strict_oci(
     }
     let contract = oci_realization_contract(facts, enforcement, graph_resolved_execution_id);
     crate::application::strict_realization::evaluate_contract(&contract, &[], profile)
+}
+
+/// One orchestrated OCI service's strict input: a value-free service label plus
+/// its normalized facts and the provider's enforcement capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciServiceStrict {
+    /// Stable service/node label used to scope the realization node ids so a
+    /// blocked service is identifiable in the error payload. Value-free — never a
+    /// host path, env value, or secret.
+    pub service_label: String,
+    pub facts: OciStrictFacts,
+    pub enforcement: OciProviderEnforcement,
+}
+
+/// Enforce the strict realization profile across an OCI **service graph**.
+///
+/// Builds one realization contract whose nodes are scoped per service (so a
+/// block names the offending service), classifies it, and runs the #500 strict
+/// gate once — reusing the exact same node-building and gate as the single-target
+/// path. In [`LaunchProfile::Normal`] it is a no-op; in strict mode it blocks the
+/// launch *before* any provider side effect, reporting every blocked service.
+pub(crate) fn enforce_strict_oci_services(
+    services: &[OciServiceStrict],
+    profile: LaunchProfile,
+    graph_resolved_execution_id: Option<&str>,
+) -> Result<(), AtoExecutionError> {
+    if !profile.is_strict() {
+        return Ok(());
+    }
+    let mut nodes: Vec<RealizationNode> = Vec::new();
+    for service in services {
+        let prefix = format!("oci-{}-", service.service_label);
+        nodes.extend(oci_realization_nodes(
+            &prefix,
+            &service.facts,
+            &service.enforcement,
+        ));
+    }
+    let contract = classify(RealizationRequest {
+        resolved_execution_id: graph_resolved_execution_id
+            .unwrap_or(GRAPH_EXECUTION_ID_UNBOUND)
+            .to_string(),
+        nodes,
+        edges: Vec::new(),
+    });
+    crate::application::strict_realization::evaluate_contract(&contract, &[], profile)
+}
+
+/// Build receipt-safe provider evidence for one projection, recording the
+/// provider's enforcement status and reflecting a declared network policy (egress
+/// allowlist) as a required `network-policy` capability — so
+/// `capabilities_required` and `network_enforcement_status` always agree.
+///
+/// Shared by the single-target receipt builder and the orchestration path so the
+/// capability/enforcement alignment lives in exactly one place (#501 review).
+pub(crate) fn provider_receipt_evidence(
+    plan: &OciProjectionPlan,
+    enforcement: &OciProviderEnforcement,
+    network_policy_required: bool,
+) -> OciProviderReceiptEvidence {
+    let mut evidence = plan.receipt_evidence_with(enforcement.network, enforcement.capability);
+    if network_policy_required
+        && !evidence
+            .capabilities_required
+            .iter()
+            .any(|c| c == "network-policy")
+    {
+        evidence
+            .capabilities_required
+            .push("network-policy".to_string());
+        evidence.capabilities_required.sort();
+    }
+    evidence
 }
 
 #[cfg(test)]

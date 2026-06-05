@@ -449,27 +449,14 @@ fn oci_provider_projection_evidence(
         crate::application::provider_projection::strict_oci::OciProviderEnforcement::podman(
             network_policy_required,
         );
-    let mut evidence = OciProjectionPlan::from_container_request(&request)
-        .receipt_evidence_with(enforcement.network, enforcement.capability);
-
-    // The projection plan derives `network-policy` from the internal `--network`
-    // (absent on the declared request), but a declared egress allowlist is itself
-    // a required network policy. Reflect it so `capabilities_required` and
-    // `network_enforcement_status` agree: a launch whose network enforcement is
-    // `Unsupported` also *requires* network-policy.
-    if network_policy_required
-        && !evidence
-            .capabilities_required
-            .iter()
-            .any(|c| c == "network-policy")
-    {
-        evidence
-            .capabilities_required
-            .push("network-policy".to_string());
-        evidence.capabilities_required.sort();
-    }
-
-    vec![evidence]
+    let plan = OciProjectionPlan::from_container_request(&request);
+    vec![
+        crate::application::provider_projection::strict_oci::provider_receipt_evidence(
+            &plan,
+            &enforcement,
+            network_policy_required,
+        ),
+    ]
 }
 
 /// Build the declared-domain `ExecutionGraph` for the receipt path.
