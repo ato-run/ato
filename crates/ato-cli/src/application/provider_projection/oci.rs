@@ -356,6 +356,8 @@ impl OciProjectionPlan {
             // form (#501). A receipt-safe projection fingerprint can be added in a
             // later slice, computed strictly from the redaction-safe fields below.
             derived_command_redacted: self.redacted_derived_command(),
+            // Set per-service by the orchestration path; `None` for single-target.
+            service_label: None,
         }
     }
 
