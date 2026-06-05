@@ -7,6 +7,7 @@ mod policy_builder;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::engine::execution_graph::ExecutionGraph;
 use crate::error::{CapsuleError, Result};
 use crate::types::{OciLaunchEnvelope, StateSharing};
 pub use env_origin::{EnvOrigin, default_env_origin};
@@ -362,15 +363,25 @@ pub struct ExecutionReceiptV2 {
     /// readiness gate). See [`GraphReceipt`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_receipt: Option<GraphReceipt>,
-    /// Per-node observations for the launch graph. Reserved — emitted
-    /// as `[]` today so future waves can populate it without a schema
-    /// bump.
+    /// Per-node projection of the launch graph (#493): one entry per graph
+    /// node, populated by [`Self::with_graph_projection`] from the
+    /// declared/resolved graph. Empty only for legacy/no-graph launches. See
+    /// [`NodeReceipt`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub node_receipts: Vec<NodeReceipt>,
-    /// Per-edge observations for the launch graph. Reserved — see
-    /// `node_receipts`.
+    /// Per-edge projection of the launch graph (#493); see `node_receipts`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_receipts: Vec<EdgeReceipt>,
+    /// Receipt-safe provider projection evidence for OCI launches (#493,
+    /// derived from the #516 provider projection boundary). One entry per
+    /// realized service/target. Diagnostic only: like `runner` and
+    /// `node_receipts`, this is attached after `from_input` and is **not** part
+    /// of the JCS projection, so it never feeds `execution_id`. Carries only
+    /// receipt-safe fields (env var *names*, image ref/digest status, mount
+    /// targets, ports, network aliases, capability flags) — never resolved env
+    /// values, argv, container id, pid, or log path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_projections: Vec<OciProviderReceiptEvidence>,
 }
 
 impl ExecutionReceiptV2 {
@@ -407,6 +418,7 @@ impl ExecutionReceiptV2 {
             graph_receipt: None,
             node_receipts: Vec::new(),
             edge_receipts: Vec::new(),
+            provider_projections: Vec::new(),
         })
     }
 
@@ -450,6 +462,51 @@ impl ExecutionReceiptV2 {
     /// Attach a [`GraphReceipt`] lifecycle-pass record.
     pub fn with_graph_receipt(mut self, receipt: GraphReceipt) -> Self {
         self.graph_receipt = Some(receipt);
+        self
+    }
+
+    /// Populate `node_receipts` and `edge_receipts` from a launch
+    /// [`ExecutionGraph`] (#493).
+    ///
+    /// The receipts are a faithful projection of the declared/resolved launch
+    /// graph: one [`NodeReceipt`] per graph node (its identifier + kind) and one
+    /// [`EdgeReceipt`] per graph edge (source + target + kind). `status` is left
+    /// `None` — this PR derives receipts from the *declared/resolved* graph only;
+    /// it does **not** observe runtime lifecycle pass/fail, so claiming a status
+    /// would be fabricated evidence. Observed status is future work (#495).
+    ///
+    /// Node identity comes from the graph (manifest/lock/policy-derived), never
+    /// from runtime command strings, container ids, or session-local data — so
+    /// re-running the same launch in a new session yields identical receipts.
+    pub fn with_graph_projection(mut self, graph: &ExecutionGraph) -> Self {
+        self.node_receipts = graph
+            .nodes
+            .iter()
+            .map(|node| NodeReceipt {
+                node_identifier: node.identifier().to_string(),
+                kind: node.kind_label().to_string(),
+                status: None,
+            })
+            .collect();
+        self.edge_receipts = graph
+            .edges
+            .iter()
+            .map(|edge| EdgeReceipt {
+                source: edge.source.clone(),
+                target: edge.target.clone(),
+                kind: edge.kind.kind_label().to_string(),
+                status: None,
+            })
+            .collect();
+        self
+    }
+
+    /// Attach receipt-safe OCI provider projection evidence (#493, #516).
+    pub fn with_provider_projections(
+        mut self,
+        projections: Vec<OciProviderReceiptEvidence>,
+    ) -> Self {
+        self.provider_projections = projections;
         self
     }
 
@@ -588,6 +645,7 @@ impl ExecutionReceiptV2 {
             graph_receipt: None,
             node_receipts: Vec::new(),
             edge_receipts: Vec::new(),
+            provider_projections: Vec::new(),
         }
     }
 }
@@ -687,10 +745,15 @@ impl GraphReceipt {
     }
 }
 
-/// Per-node receipt entry. Reserved for future waves that attach
-/// per-node lifecycle pass/fail observations. Today emitted as an empty
-/// list so the schema is forward-compatible: downstream consumers can
-/// already iterate `node_receipts` without a schema bump.
+/// Per-node receipt entry: one node of the launch graph projected into the
+/// receipt (#493).
+///
+/// Populated by [`ExecutionReceiptV2::with_graph_projection`] from the
+/// declared/resolved launch graph — `node_identifier` and `kind` come from the
+/// graph node, never from runtime command strings or session-local data.
+/// `status` stays `None`: this is a declared/resolved-graph projection, not a
+/// runtime observation; per-node lifecycle pass/fail status remains future work
+/// (#495). Legacy paths with no graph available emit an empty list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeReceipt {
     pub node_identifier: String,
@@ -699,7 +762,9 @@ pub struct NodeReceipt {
     pub status: Option<String>,
 }
 
-/// Per-edge receipt entry. Reserved for future waves; see `NodeReceipt`.
+/// Per-edge receipt entry: one edge of the launch graph projected into the
+/// receipt (#493). See [`NodeReceipt`] for the declared/resolved-vs-observed
+/// distinction — `status` is likewise `None` until observation lands (#495).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeReceipt {
     pub source: String,
@@ -707,6 +772,85 @@ pub struct EdgeReceipt {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+}
+
+/// Receipt-safe provider projection evidence for one OCI service/target (#493).
+///
+/// This is the receipt-facing summary of the #516 provider projection boundary:
+/// it records *what the provider was asked to realize* for a Capsule, without
+/// claiming runtime observation and without leaking secrets. Producers
+/// (`ato-cli`'s `OciProjectionPlan::receipt_evidence`) MUST keep this
+/// receipt-safe:
+///
+/// * env vars appear as **names only** ([`Self::env_keys`]) — never values;
+/// * the image is recorded as a reference + a pinned/unpinned digest *status*;
+/// * mounts record their *target* and flags, never source host paths;
+/// * **excluded entirely**: resolved env values, argv/command strings, the
+///   requested container name, container id, provider pid, and log paths.
+///   Those are session-local provider evidence, not Capsule identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciProviderReceiptEvidence {
+    /// Provider class, e.g. `"oci"`.
+    pub provider_kind: String,
+    /// Concrete realizer name, e.g. `"podman"`.
+    pub provider_name: String,
+    /// The image reference as launched (`repo:tag` or `repo@sha256:…`).
+    pub image_reference: String,
+    /// How well the image is pinned. A digest is image evidence, not identity.
+    pub image_digest_status: OciImageDigestStatus,
+    /// Target platform, e.g. `"linux/amd64"`, when an override is declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Environment variable **names** projected into the container, sorted.
+    /// Values are never recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_keys: Vec<String>,
+    /// Mount projections — target + flags only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<OciMountReceiptEvidence>,
+    /// Published container ports (declared container port + protocol).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<OciPortReceiptEvidence>,
+    /// Service network aliases this container answers to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_aliases: Vec<String>,
+    /// Names of the provider capabilities these launch conditions require,
+    /// sorted (e.g. `"persistent-state"`, `"network-policy"`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities_required: Vec<String>,
+}
+
+/// Pinned/unpinned status of an OCI image in a receipt. The digest is recorded
+/// as image evidence; an unpinned (tag-only) reference is represented honestly
+/// rather than fabricated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "state")]
+pub enum OciImageDigestStatus {
+    /// Fully pinned: `repo@sha256:<64 hex>`.
+    Pinned { digest: String },
+    /// Tag-only / unresolved at projection time.
+    Unpinned,
+}
+
+/// Receipt-safe mount projection: target path and flags only (no source host
+/// path, which could leak user filesystem layout).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciMountReceiptEvidence {
+    pub target: String,
+    pub readonly: bool,
+    /// `true` when backed by an engine-managed volume rather than a host bind.
+    pub engine_volume: bool,
+    /// `true` when this is durable engine-managed state (survives restarts).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub persistent_state: bool,
+}
+
+/// Receipt-safe port projection: declared container port + protocol. The
+/// host-side port is runtime-allocated and is not recorded as identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciPortReceiptEvidence {
+    pub container_port: u16,
+    pub protocol: String,
 }
 
 /// Outcome class for an execution receipt (refs #74, #99).
@@ -2343,6 +2487,219 @@ pub(in crate::engine::execution_identity) mod tests {
         let decoded: ExecutionReceiptV2 = serde_json::from_str(&json).expect("decode");
         assert_eq!(decoded.result, ReceiptResultClass::Passed);
         assert!(decoded.failure_envelope.is_none());
+    }
+
+    // ── #493: non-empty NodeReceipt / EdgeReceipt from the launch graph ──────
+
+    fn base_receipt() -> ExecutionReceiptV2 {
+        ExecutionReceiptV2::from_input(sample_input_v2(), "2026-05-03T00:00:00Z".to_string())
+            .expect("receipt")
+    }
+
+    #[test]
+    fn graph_backed_receipt_has_non_empty_node_and_edge_receipts() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+                ExecutionGraphNode::Provider {
+                    identifier: "provider:podman".to_string(),
+                },
+            ],
+            edges: vec![ExecutionGraphEdge {
+                source: "src:app".to_string(),
+                target: "dep:db".to_string(),
+                kind: ExecutionGraphEdgeKind::DependsOn,
+            }],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+
+        let receipt = base_receipt().with_graph_projection(&graph);
+        assert!(
+            !receipt.node_receipts.is_empty(),
+            "graph-backed launch must emit node receipts"
+        );
+        assert!(
+            !receipt.edge_receipts.is_empty(),
+            "graph-backed launch must emit edge receipts"
+        );
+        assert_eq!(receipt.node_receipts.len(), 3);
+        assert_eq!(receipt.edge_receipts.len(), 1);
+        // Completeness must NOT be auto-promoted to Complete by projection.
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+    }
+
+    #[test]
+    fn graph_backed_receipt_json_has_non_empty_node_and_edge_receipts() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        // A representative launch graph projected into a receipt the same way
+        // the production builder does (`with_graph_projection`).
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+            ],
+            edges: vec![ExecutionGraphEdge {
+                source: "src:app".to_string(),
+                target: "dep:db".to_string(),
+                kind: ExecutionGraphEdgeKind::DependsOn,
+            }],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+        let receipt = base_receipt().with_graph_projection(&graph);
+
+        // #493 acceptance: the *serialized* receipt JSON carries non-empty
+        // node_receipts / edge_receipts arrays — not just the in-memory struct.
+        let json = serde_json::to_value(&receipt).expect("receipt json");
+        assert!(
+            json["node_receipts"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "serialized receipt must carry a non-empty node_receipts array; got: {json}"
+        );
+        assert!(
+            json["edge_receipts"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "serialized receipt must carry a non-empty edge_receipts array; got: {json}"
+        );
+        // The graph-derived identity + kind contract is visible in the JSON.
+        assert_eq!(json["node_receipts"][0]["node_identifier"], "src:app");
+        assert_eq!(json["edge_receipts"][0]["kind"], "depends-on");
+        // No observed status is fabricated in the wire bytes.
+        assert!(json["node_receipts"][0].get("status").is_none());
+    }
+
+    #[test]
+    fn node_receipts_are_derived_from_launch_graph_not_runtime_command() {
+        use crate::engine::execution_graph::{ExecutionGraph, ExecutionGraphNode};
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Service {
+                    identifier: "service:web".to_string(),
+                },
+                ExecutionGraphNode::State {
+                    identifier: "state:pgdata".to_string(),
+                },
+            ],
+            edges: Vec::new(),
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+
+        let receipt = base_receipt().with_graph_projection(&graph);
+        // Node identity == graph node identifier + kind — never a runtime
+        // command, container id, or session-local string.
+        let ids: Vec<&str> = receipt
+            .node_receipts
+            .iter()
+            .map(|n| n.node_identifier.as_str())
+            .collect();
+        assert_eq!(ids, vec!["service:web", "state:pgdata"]);
+        let kinds: Vec<&str> = receipt
+            .node_receipts
+            .iter()
+            .map(|n| n.kind.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["service", "state"]);
+        // No observed status is claimed — receipts derive from declared/resolved
+        // graph only.
+        assert!(receipt.node_receipts.iter().all(|n| n.status.is_none()));
+
+        // The projection is a pure function of the graph: identical graph ⇒
+        // identical receipts, independent of any other (runtime) receipt state.
+        let again = base_receipt().with_graph_projection(&graph);
+        assert_eq!(receipt.node_receipts, again.node_receipts);
+    }
+
+    #[test]
+    fn edge_receipts_include_declared_dependency_edges() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+                ExecutionGraphNode::State {
+                    identifier: "state:pgdata".to_string(),
+                },
+            ],
+            edges: vec![
+                ExecutionGraphEdge {
+                    source: "src:app".to_string(),
+                    target: "dep:db".to_string(),
+                    kind: ExecutionGraphEdgeKind::DependsOn,
+                },
+                ExecutionGraphEdge {
+                    source: "dep:db".to_string(),
+                    target: "state:pgdata".to_string(),
+                    kind: ExecutionGraphEdgeKind::Mounts,
+                },
+            ],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+
+        let receipt = base_receipt().with_graph_projection(&graph);
+        assert!(
+            receipt
+                .edge_receipts
+                .iter()
+                .any(|e| e.kind == "depends-on" && e.source == "src:app" && e.target == "dep:db"),
+            "declared dependency edge must produce a matching EdgeReceipt"
+        );
+        assert!(receipt.edge_receipts.iter().any(|e| e.kind == "mounts"));
+        assert!(receipt.edge_receipts.iter().all(|e| e.status.is_none()));
+    }
+
+    #[test]
+    fn legacy_or_incomplete_graph_receipt_stays_partial_without_panic() {
+        use crate::engine::execution_graph::ExecutionGraph;
+        // A receipt built without a graph projection (legacy path / graph
+        // genuinely unavailable) keeps empty node/edge receipts and never panics.
+        let base = base_receipt();
+        assert!(base.node_receipts.is_empty());
+        assert!(base.edge_receipts.is_empty());
+        assert!(base.provider_projections.is_empty());
+
+        // Projecting an empty graph is a no-op, not a panic.
+        let projected = base.with_graph_projection(&ExecutionGraph::default());
+        assert!(projected.node_receipts.is_empty());
+        assert!(projected.edge_receipts.is_empty());
+
+        // A pre-#493 receipt JSON (no node/edge/provider keys) round-trips with
+        // serde defaults, and completeness is never silently Complete.
+        let json = serde_json::to_string(&projected).expect("encode");
+        let decoded: ExecutionReceiptV2 = serde_json::from_str(&json).expect("decode");
+        assert!(decoded.node_receipts.is_empty());
+        assert!(decoded.provider_projections.is_empty());
+        assert_ne!(
+            decoded.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
     }
 
     #[test]
