@@ -1140,6 +1140,7 @@ mod tests {
     // ── Launch condition ledger (#508) ──────────────────────────────────────
 
     use super::super::launch_condition::{
+        LEDGER_EXTRACTION_STATUS_KEY, launch_condition_extraction_status,
         launch_condition_from_port_claim, launch_condition_from_storage_claim,
     };
 
@@ -1330,6 +1331,38 @@ mod tests {
             .expect("secret condition present in ledger");
         assert_eq!(secret.status, LaunchConditionStatus::UserGrantRequired);
         assert_eq!(secret.condition_key, "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn empty_ledger_is_not_used_to_mean_no_conditions() {
+        let (_dir, db) = temp_db();
+        // A never-installed app has a genuinely empty ledger.
+        assert!(
+            db.list_launch_condition_claims("ghost").unwrap().is_empty(),
+            "a never-installed app records nothing"
+        );
+
+        // An installed revision always carries the baseline marker, so its ledger
+        // is non-empty even with no extracted requirements — "empty" can only mean
+        // "nothing recorded", never "this app has no launch conditions".
+        let baseline = launch_condition_extraction_status(
+            "app",
+            Some("rev1"),
+            &[LaunchConditionKind::Storage],
+        );
+        db.record_installed_launch_ledger("app", Some("rev1"), None, &[baseline])
+            .unwrap();
+        let loaded = db.list_launch_condition_claims("app").unwrap();
+        assert_eq!(loaded.len(), 1);
+        let marker = &loaded[0];
+        assert_eq!(marker.condition_key, LEDGER_EXTRACTION_STATUS_KEY);
+        assert_eq!(marker.kind, LaunchConditionKind::Policy);
+        assert!(!marker.required);
+        assert!(
+            marker.detail_json.contains("\"complete\":false"),
+            "the baseline marks the ledger as incomplete: {}",
+            marker.detail_json
+        );
     }
 
     #[test]
