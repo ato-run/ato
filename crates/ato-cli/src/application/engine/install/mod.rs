@@ -28,9 +28,10 @@ use capsule_core::foundation::install_lifecycle::{
 
 use capsule_core::installed_state::{
     InstalledStateDb, LaunchConditionClaim, LaunchConditionKind, LaunchConditionStatus,
-    StorageAdmission, StorageClaim, launch_condition_extraction_status,
-    launch_condition_from_env_projection, launch_condition_from_secret_requirement,
-    launch_condition_from_state_binding, launch_condition_from_storage_claim,
+    StorageAdmission, StorageClaim, app_service_endpoint, launch_condition_extraction_status,
+    launch_condition_from_env_projection, launch_condition_from_port_declaration,
+    launch_condition_from_secret_requirement, launch_condition_from_state_binding,
+    launch_condition_from_storage_claim,
 };
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::resource::cas::LocalCasIndex;
@@ -2459,6 +2460,12 @@ fn install_launch_conditions(
         ));
     }
     if let Some(manifest) = manifest {
+        claims.extend(extract_port_conditions(
+            manifest,
+            install_profile_key,
+            install_revision_id,
+        ));
+        extracted_kinds.push(LaunchConditionKind::Port);
         claims.extend(extract_env_conditions(
             manifest,
             install_profile_key,
@@ -2486,6 +2493,93 @@ fn install_launch_conditions(
     )];
     all.extend(claims);
     all
+}
+
+/// Extract install-time **Port** launch conditions from the manifest.
+///
+/// Records port *declarations* — "this app requires this logical endpoint /
+/// preferred port" — **not** reservations. Status is `Unknown`: OS availability
+/// and the final (possibly remapped) port are only known at launch, where #523's
+/// port admission records the resolved `PortClaim`. This function never writes
+/// `port_claims` and never probes the OS.
+///
+/// Two sources are read:
+/// - the canonical main-service port (resolved like `execution_port()`:
+///   per-default-target port → global targets port → legacy `execution.port`),
+///   keyed to the `main` endpoint;
+/// - each `[services.<name>]` that exposes ports, keyed to its own endpoint
+///   (the concrete port is allocated at runtime, so it is absent here).
+///
+/// Logical endpoints use [`app_service_endpoint`] so an install-time declaration
+/// and a launch-time claim share the same `condition_key`.
+fn extract_port_conditions(
+    manifest: &CapsuleManifest,
+    install_profile_key: &str,
+    install_revision_id: &str,
+) -> Vec<LaunchConditionClaim> {
+    const PROTOCOL: &str = "tcp";
+    const CONFLICT_POLICY: &str = "remap";
+
+    // endpoint -> (preferred_port, source). The concrete main port is inserted
+    // first, so a same-named service's exposure can't downgrade it to portless.
+    let mut ports: std::collections::BTreeMap<String, (Option<u16>, &'static str)> =
+        std::collections::BTreeMap::new();
+
+    let (main_port, main_source) = resolve_main_port(manifest);
+    if let Some(port) = main_port {
+        ports.insert(
+            app_service_endpoint(install_profile_key, "main"),
+            (Some(port), main_source),
+        );
+    }
+    if let Some(services) = &manifest.services {
+        for (name, service) in services {
+            let exposes = service.expose.as_ref().is_some_and(|e| !e.is_empty());
+            if exposes {
+                ports
+                    .entry(app_service_endpoint(install_profile_key, name))
+                    .or_insert((None, "manifest.services.expose"));
+            }
+        }
+    }
+
+    ports
+        .into_iter()
+        .map(|(endpoint, (preferred, source))| {
+            launch_condition_from_port_declaration(
+                install_profile_key,
+                Some(install_revision_id),
+                &endpoint,
+                PROTOCOL,
+                preferred,
+                source,
+                Some(CONFLICT_POLICY),
+                LaunchConditionStatus::Unknown,
+            )
+        })
+        .collect()
+}
+
+/// Resolve the app's canonical main listening port from the manifest, mirroring
+/// `ManifestData::execution_port` (per-default-target port → global targets port
+/// → legacy `execution.port`). Returns the port and a provenance string.
+fn resolve_main_port(manifest: &CapsuleManifest) -> (Option<u16>, &'static str) {
+    if let Some(targets) = &manifest.targets {
+        if let Some(port) = targets
+            .named
+            .get(&manifest.default_target)
+            .and_then(|target| target.port)
+        {
+            return (Some(port), "manifest.targets.named.port");
+        }
+        if let Some(port) = targets.port {
+            return (Some(port), "manifest.targets.port");
+        }
+    }
+    if let Some(port) = manifest.execution.port {
+        return (Some(port), "manifest.execution.port");
+    }
+    (None, "")
 }
 
 /// Extract **Env** launch conditions from the manifest. Records env-var *names*
