@@ -142,6 +142,88 @@ fn realization_contract_marks_runtime_tool_without_binary_sha256_unavailable() {
 }
 
 #[test]
+fn realization_contract_does_not_verify_hash_mismatch() {
+    let contract = classify(request(vec![RealizationNode::required(
+        "source",
+        RealizationNodeFacts::Source {
+            declared_tree_hash: Some("sha256:declared".into()),
+            materialized_tree_hash: Some("sha256:actual-different".into()),
+        },
+    )]));
+
+    let status = status_of(&contract, "source");
+    assert_eq!(
+        status.status,
+        RealizationStatus::Unavailable,
+        "a declared/materialized hash mismatch must never Verify",
+    );
+    assert_ne!(status.status, RealizationStatus::Verified);
+    assert!(matches!(
+        status.evidence.first(),
+        Some(RealizationEvidence::HashMismatch { .. })
+    ));
+    match contract.result {
+        RealizationResult::Unrealizable { reasons } => assert_eq!(
+            reasons,
+            vec![UnrealizableReason::MismatchedImmutableInput {
+                node_id: "source".into(),
+                node_kind: RealizationNodeKind::Source,
+            }]
+        ),
+        RealizationResult::Realized => panic!("hash mismatch must be unrealizable"),
+    }
+}
+
+#[test]
+fn realization_contract_does_not_verify_materialized_hash_without_declared_identity() {
+    // Required: a materialized hash with no declared identity has nothing to be
+    // checked against, so it must be Unavailable — never Verified.
+    let contract = classify(request(vec![RealizationNode::required(
+        "runtime",
+        RealizationNodeFacts::Runtime {
+            declared_identity: None,
+            materialized_binary_hash: Some("sha256:actual".into()),
+        },
+    )]));
+
+    let status = status_of(&contract, "runtime");
+    assert_ne!(
+        status.status,
+        RealizationStatus::Verified,
+        "no declared identity ⇒ nothing to verify against",
+    );
+    assert_eq!(status.status, RealizationStatus::Unavailable);
+    match contract.result {
+        RealizationResult::Unrealizable { reasons } => assert_eq!(
+            reasons,
+            vec![UnrealizableReason::MissingImmutableInput {
+                node_id: "runtime".into(),
+                node_kind: RealizationNodeKind::Runtime,
+            }]
+        ),
+        RealizationResult::Realized => panic!("must be unrealizable"),
+    }
+
+    // Optional variant: Unknown, not Verified, and not blocking.
+    let optional = classify(RealizationRequest {
+        resolved_execution_id: EXEC_ID.to_string(),
+        nodes: vec![RealizationNode::optional(
+            "runtime",
+            RealizationNodeFacts::Runtime {
+                declared_identity: None,
+                materialized_binary_hash: Some("sha256:actual".into()),
+            },
+        )],
+        edges: Vec::new(),
+    });
+    assert_eq!(
+        status_of(&optional, "runtime").status,
+        RealizationStatus::Unknown,
+    );
+    assert!(optional.result.is_realized());
+}
+
+#[test]
 fn realization_contract_marks_state_binding_as_state_bound() {
     let contract = classify(request(vec![RealizationNode::required(
         "state-binding:pgdata",
