@@ -270,7 +270,18 @@ fn oci_environment() -> RealizationEnvironment {
         )]),
         provider_projection: Some(ProviderProjectionEvidence {
             provider: "oci:podman".into(),
-            projection_command: Some("podman run --rm app@sha256:img node server.js".into()),
+            renderer: "podman-create".into(),
+            raw_argv: [
+                "create",
+                "--rm",
+                "--name",
+                "app-prod",
+                "app@sha256:img",
+                "server.js",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
             container_id: Some("container-abc123def".into()),
         }),
         ..Default::default()
@@ -322,13 +333,81 @@ fn oci_projection_command_is_derived_evidence_not_identity() {
     assert_eq!(projection.node_id, "provider-projection:oci:podman");
     assert_eq!(projection.status, RealizationStatus::Materializable);
 
-    // The rendered command lives in evidence, and only in evidence.
-    let command = "podman run --rm app@sha256:img node server.js";
-    assert!(matches!(
-        projection.evidence.first(),
-        Some(RealizationEvidence::DerivedProjectionCommand { command: c, .. }) if c == command
-    ));
-    assert_ne!(projection.node_id, command);
-    assert_ne!(contract.resolved_execution_id, command);
-    assert!(contract.node_statuses.iter().all(|n| n.node_id != command),);
+    // The command lives in evidence only, and only as redacted shape: flags
+    // survive, positional/value tokens (the image ref, container name) do not.
+    let Some(RealizationEvidence::DerivedProjectionCommand { command, .. }) =
+        projection.evidence.first()
+    else {
+        panic!("expected a DerivedProjectionCommand evidence item");
+    };
+    assert!(command.redacted);
+    assert_eq!(command.renderer, "podman-create");
+    assert!(command.argv_shape.contains(&"--rm".to_string()));
+    assert!(command.argv_shape.contains(&"--name".to_string()));
+    assert!(
+        !command
+            .argv_shape
+            .iter()
+            .any(|t| t.contains("app@sha256:img")),
+        "image ref (a value) must be redacted out of argv_shape",
+    );
+    assert!(
+        !command.argv_shape.iter().any(|t| t.contains("app-prod")),
+        "container name (a value) must be redacted out of argv_shape",
+    );
+
+    // The raw image ref must not survive serialization anywhere.
+    let json = serde_json::to_string(&contract).expect("serialize");
+    assert!(!json.contains("app@sha256:img"));
+    assert_ne!(contract.resolved_execution_id, "app@sha256:img");
+}
+
+#[test]
+fn realization_contract_does_not_serialize_raw_projection_command_or_secrets() {
+    let bundle = minimal_bundle();
+    let env = RealizationEnvironment {
+        declared_source_hash: Some("sha256:src".into()),
+        provider_projection: Some(ProviderProjectionEvidence {
+            provider: "oci:podman".into(),
+            renderer: "podman-create".into(),
+            // A rendered argv embedding env values, a token, and a DB URL —
+            // exactly the shape that must never reach a serde-ready contract.
+            raw_argv: [
+                "create",
+                "--rm",
+                "--env",
+                "OPENAI_API_KEY=sk-test-secret",
+                "-e",
+                "DATABASE_URL=postgres://user:password@host/db",
+                "--env=TOKEN=secret-token",
+                "app@sha256:img",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            container_id: None,
+        }),
+        ..Default::default()
+    };
+
+    let contract = realization_from_launch_bundle(&bundle, &env);
+    let json = serde_json::to_string(&contract).expect("serialize");
+
+    for leaked in [
+        "sk-test-secret",
+        "postgres://user:password@host/db",
+        "password",
+        "secret-token",
+        "OPENAI_API_KEY=sk-test-secret",
+        "TOKEN=secret-token",
+        "app@sha256:img",
+    ] {
+        assert!(
+            !json.contains(leaked),
+            "raw value `{leaked}` leaked into the serialized contract",
+        );
+    }
+
+    // The redaction placeholder is present — the evidence is preserved in shape.
+    assert!(json.contains(RedactedProjectionCommand::PLACEHOLDER));
 }
