@@ -52,6 +52,16 @@ pub struct RuntimeLaunchContext {
     /// `http://host.containers.internal:<port>` (the loopback `127.0.0.1` used
     /// by source-native env injection cannot be reached from inside containers).
     egress_proxy_port: Option<u16>,
+    /// Install profile key when this launch is an installed-app launch
+    /// (`ato app run`/desktop relaunch), `None` for ephemeral `ato run`.
+    ///
+    /// Threaded explicitly (rather than read from the thread-local install
+    /// lifecycle context) because the launch path crosses async executor
+    /// boundaries where the thread-local does not reliably propagate. Used by
+    /// `web_services` to scope per-install port admission claims so two
+    /// installed apps that both prefer the same port get deterministically
+    /// remapped instead of colliding.
+    install_profile_key: Option<String>,
 }
 
 impl RuntimeLaunchContext {
@@ -72,6 +82,7 @@ impl RuntimeLaunchContext {
                 workspace_root: None,
                 dep_endpoints: Vec::new(),
                 egress_proxy_port: None,
+                install_profile_key: None,
             }
         } else {
             Self::empty()
@@ -169,6 +180,17 @@ impl RuntimeLaunchContext {
 
     pub fn egress_proxy_port(&self) -> Option<u16> {
         self.egress_proxy_port
+    }
+
+    /// Mark this launch as an installed-app launch identified by
+    /// `install_profile_key`. `None` keeps it ephemeral (`ato run`).
+    pub fn with_install_profile_key(mut self, key: Option<String>) -> Self {
+        self.install_profile_key = key;
+        self
+    }
+
+    pub fn install_profile_key(&self) -> Option<&str> {
+        self.install_profile_key.as_deref()
     }
 
     pub fn ipc(&self) -> Option<&IpcContext> {
