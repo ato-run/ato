@@ -22,8 +22,9 @@
 
 use anyhow::{Result, bail};
 use capsule_core::installed_state::{
-    InstalledStateDb, RelaunchAdmission, RelaunchAdmissionReason, RelaunchResolutionContext,
-    evaluate_relaunch_admission, resolve_relaunch_conditions,
+    InstalledStateDb, LaunchConditionInput, RelaunchAdmission, RelaunchAdmissionReason,
+    RelaunchResolutionContext, apply_capsule_launch_inputs_to_claims, evaluate_relaunch_admission,
+    resolve_relaunch_conditions,
 };
 
 use crate::utils::error::ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED;
@@ -63,7 +64,10 @@ fn production_resolution_context(db: &InstalledStateDb) -> RelaunchResolutionCon
 /// Best-effort on infrastructure: if the installed-state DB can't be opened, the
 /// preflight is skipped (warn + continue) rather than blocking the launch. A
 /// genuine unsatisfied required condition still returns a typed error.
-pub fn run_relaunch_preflight(identity: Option<(&str, &str)>) -> Result<()> {
+pub fn run_relaunch_preflight(
+    identity: Option<(&str, &str)>,
+    inputs: &[LaunchConditionInput],
+) -> Result<()> {
     let Some((install_profile_key, install_revision_id)) = identity else {
         return Ok(());
     };
@@ -77,8 +81,12 @@ pub fn run_relaunch_preflight(identity: Option<(&str, &str)>) -> Result<()> {
             return Ok(());
         }
     };
-    let warnings =
-        preflight_installed_relaunch_decision(&db, install_profile_key, Some(install_revision_id))?;
+    let warnings = preflight_installed_relaunch_decision(
+        &db,
+        install_profile_key,
+        Some(install_revision_id),
+        inputs,
+    )?;
     for warning in &warnings {
         tracing::warn!(
             install_profile_key,
@@ -90,39 +98,44 @@ pub fn run_relaunch_preflight(identity: Option<(&str, &str)>) -> Result<()> {
     Ok(())
 }
 
-/// Load the ledger, resolve conditions against the **production** probes, and
-/// return the admission decision. Wrapper over
-/// [`preflight_installed_relaunch_decision_with_resolver`].
+/// Overlay `capsule://` query `inputs`, resolve against the **production** probes,
+/// and return the admission decision. The inputs are **not** proofs — the
+/// resolver still confirms grant/binding existence against the DB registries; an
+/// absent grant/binding stays blocked. Pass `&[]` for no query inputs.
 pub fn preflight_installed_relaunch_decision(
     db: &InstalledStateDb,
     install_profile_key: &str,
     install_revision_id: Option<&str>,
+    inputs: &[LaunchConditionInput],
 ) -> Result<Vec<RelaunchAdmissionReason>> {
     preflight_installed_relaunch_decision_with_resolver(
         db,
         install_profile_key,
         install_revision_id,
         &production_resolution_context(db),
+        inputs,
     )
 }
 
 /// Core seam: load the ledger for `(install_profile_key, install_revision_id)`,
-/// **resolve** its conditions against the given local-fact probes, best-effort
-/// persist the durable resolutions, then evaluate admission and either return the
-/// (non-blocking) warnings or fail with a typed error. Takes the DB and resolver
-/// context explicitly so it is testable with a temporary ledger and injected
-/// probes.
+/// **overlay** the `capsule://` query inputs, **resolve** against the given
+/// local-fact probes, best-effort persist the durable resolutions, then evaluate
+/// admission and either return the (non-blocking) warnings or fail with a typed
+/// error. Takes the DB, resolver context, and inputs explicitly so it is testable
+/// with a temporary ledger, injected probes, and parsed inputs.
 pub fn preflight_installed_relaunch_decision_with_resolver(
     db: &InstalledStateDb,
     install_profile_key: &str,
     install_revision_id: Option<&str>,
     resolver: &RelaunchResolutionContext,
+    inputs: &[LaunchConditionInput],
 ) -> Result<Vec<RelaunchAdmissionReason>> {
     preflight_with_persist(
         db,
         install_profile_key,
         install_revision_id,
         resolver,
+        inputs,
         |claims| {
             db.record_resolved_launch_conditions(
                 install_profile_key,
@@ -135,8 +148,8 @@ pub fn preflight_installed_relaunch_decision_with_resolver(
     )
 }
 
-/// As [`preflight_installed_relaunch_decision_with_resolver`], but with the
-/// durable write-through injected so the best-effort persistence path is
+/// As [`preflight_installed_relaunch_decision_with_resolver`], but
+/// with the durable write-through injected so the best-effort persistence path is
 /// deterministically testable. The write-through is **best-effort**: a `persist`
 /// error is logged and the launch continues on the in-memory resolved claims.
 fn preflight_with_persist(
@@ -144,9 +157,17 @@ fn preflight_with_persist(
     install_profile_key: &str,
     install_revision_id: Option<&str>,
     resolver: &RelaunchResolutionContext,
+    inputs: &[LaunchConditionInput],
     persist: impl FnOnce(&[capsule_core::installed_state::LaunchConditionClaim]) -> Result<()>,
 ) -> Result<Vec<RelaunchAdmissionReason>> {
-    let input = db.load_relaunch_admission_input(install_profile_key, install_revision_id, None)?;
+    let mut input =
+        db.load_relaunch_admission_input(install_profile_key, install_revision_id, None)?;
+    // Overlay the capsule:// query inputs onto the in-memory claims before
+    // resolution. These select grants/bindings to try; they are not proofs (the
+    // resolver still confirms existence against the DB registries) and never
+    // write the registries.
+    input.claims = apply_capsule_launch_inputs_to_claims(&input.claims, inputs)
+        .map_err(anyhow::Error::from)?;
     let resolution = resolve_relaunch_conditions(input.into(), resolver);
 
     // Best-effort write-through of *durable* resolutions only (transient host-env
@@ -252,7 +273,7 @@ mod tests {
                 LaunchConditionStatus::UserGrantRequired,
             )],
         );
-        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect_err("must block");
         let msg = err.to_string();
         assert!(msg.contains(ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED));
@@ -273,7 +294,7 @@ mod tests {
                 LaunchConditionStatus::UserGrantRequired,
             )],
         );
-        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect_err("explicit state binding must block");
         assert!(err.to_string().contains("state data requires user grant"));
     }
@@ -294,7 +315,7 @@ mod tests {
         );
         port.install_revision_id = Some("rev1".to_string());
         record(&db, &[port]);
-        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect("unknown port must not block");
         // The port surfaces as a (non-blocking) Unknown warning.
         assert!(
@@ -308,7 +329,7 @@ mod tests {
     fn installed_relaunch_preflight_warns_but_continues_when_ledger_missing() {
         let (_d, db) = temp_db();
         // No ledger recorded for this revision → LedgerMissing warning, not block.
-        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect("missing ledger must not block");
         assert_eq!(warnings, vec![RelaunchAdmissionReason::LedgerMissing]);
     }
@@ -316,7 +337,7 @@ mod tests {
     #[test]
     fn non_installed_run_skips_relaunch_ledger_preflight() {
         // No install identity → no DB read, no preflight, immediate Ok.
-        assert!(run_relaunch_preflight(None).is_ok());
+        assert!(run_relaunch_preflight(None, &[]).is_ok());
     }
 
     // ── Resolver-driven preflight (#508) ─────────────────────────────────────
@@ -359,6 +380,7 @@ mod tests {
             "ipk_app",
             Some("rev1"),
             &resolver(false, true, false),
+            &[],
         )
         .expect("a confirmed grant must lift the secret to Satisfied → admit");
         assert!(
@@ -393,6 +415,7 @@ mod tests {
             "ipk_app",
             Some("rev1"),
             &resolver(false, false, false),
+            &[],
         )
         .expect_err("no confirmed grant → block");
         assert!(
@@ -418,6 +441,7 @@ mod tests {
             "ipk_app",
             Some("rev1"),
             &resolver(false, false, true),
+            &[],
         )
         .expect("a confirmed binding must lift the state to Satisfied → admit");
         assert!(
@@ -444,6 +468,7 @@ mod tests {
             "ipk_app",
             Some("rev1"),
             &resolver(true, false, false),
+            &[],
         )
         .expect("present host env lifts Unknown → Satisfied");
         assert!(
@@ -488,6 +513,7 @@ mod tests {
             "ipk_app",
             Some("rev1"),
             &resolver(true, true, true),
+            &[],
         )
         .expect("unknown port stays a warning, never a block");
         assert!(
@@ -516,6 +542,7 @@ mod tests {
             "ipk_app",
             Some("rev1"),
             &resolver(false, true, false),
+            &[],
             |_claims| anyhow::bail!("simulated write-through failure"),
         );
         assert!(
@@ -547,7 +574,7 @@ mod tests {
         )
         .unwrap();
         // The PRODUCTION decision (DB-backed probe) must now admit.
-        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect("recorded grant lifts the secret → admit");
         assert!(
             warnings
@@ -569,7 +596,7 @@ mod tests {
             )],
         );
         // No grant recorded → production probe returns false → still blocks.
-        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect_err("absent grant must still block");
         assert!(
             err.to_string()
@@ -597,7 +624,7 @@ mod tests {
             "user-data",
         )
         .unwrap();
-        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect("recorded binding lifts the state → admit");
         assert!(
             warnings
@@ -637,7 +664,7 @@ mod tests {
                 r#"{"grant_ref":"sk-raw-token"}"#,
             )],
         );
-        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect_err("a raw-token grant_ref must never satisfy a secret condition");
         assert!(
             err.to_string()
@@ -661,11 +688,195 @@ mod tests {
                 r#"{"binding_ref":"/Users/koh/data"}"#,
             )],
         );
-        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"))
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &[])
             .expect_err("a raw-path binding_ref must never satisfy a state condition");
         assert!(
             err.to_string()
                 .contains(ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED)
         );
+    }
+
+    // ── capsule:// query input overlay → preflight (#508) ────────────────────
+
+    use capsule_core::installed_state::parse_capsule_launch_input;
+
+    fn parse_inputs(url: &str) -> Vec<LaunchConditionInput> {
+        parse_capsule_launch_input(url)
+            .expect("parse query")
+            .conditions
+    }
+
+    #[test]
+    fn capsule_query_secret_grant_input_lifts_when_grant_exists() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"projection":"env","grant_ref":null}"#,
+            )],
+        );
+        db.record_secret_grant_ref(
+            "ipk_app",
+            Some("ato.run/koh0920/hello"),
+            "secret.OPENAI_API_KEY",
+            "openai-default",
+        )
+        .unwrap();
+        let inputs = parse_inputs(
+            "capsule://ato.run/koh0920/hello?secret.OPENAI_API_KEY=grant:openai-default",
+        );
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &inputs)
+            .expect("query selects an existing grant → admit");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !matches!(w, RelaunchAdmissionReason::UserGrantRequired { .. }))
+        );
+    }
+
+    #[test]
+    fn capsule_query_secret_grant_input_blocks_when_grant_absent() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                "{}",
+            )],
+        );
+        // The query selects grant `missing`, but it is not in the registry.
+        let inputs = parse_inputs("capsule://ato.run/x?secret.OPENAI_API_KEY=grant:missing");
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &inputs)
+            .expect_err("an absent grant must still block");
+        assert!(
+            err.to_string()
+                .contains(ATO_ERR_RELAUNCH_CONDITION_UNSATISFIED)
+        );
+    }
+
+    #[test]
+    fn capsule_query_state_binding_input_lifts_when_binding_exists() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::State,
+                "data",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"durability":"persistent"}"#,
+            )],
+        );
+        db.record_state_binding_ref(
+            "ipk_app",
+            Some("ato.run/x"),
+            "state.data",
+            "data",
+            "user-data",
+        )
+        .unwrap();
+        let inputs = parse_inputs("capsule://ato.run/x?state.data=binding:user-data");
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &inputs)
+            .expect("query selects an existing binding → admit");
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !matches!(w, RelaunchAdmissionReason::UserGrantRequired { .. }))
+        );
+    }
+
+    #[test]
+    fn capsule_query_state_binding_input_blocks_when_binding_absent() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::State,
+                "data",
+                LaunchConditionStatus::UserGrantRequired,
+                "{}",
+            )],
+        );
+        let inputs = parse_inputs("capsule://ato.run/x?state.data=binding:missing");
+        assert!(
+            preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &inputs).is_err()
+        );
+    }
+
+    #[test]
+    fn capsule_query_input_does_not_record_grant_or_binding_ref() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OPENAI_API_KEY",
+                LaunchConditionStatus::UserGrantRequired,
+                "{}",
+            )],
+        );
+        let inputs = parse_inputs("capsule://ato.run/x?secret.OPENAI_API_KEY=grant:g1");
+        // Blocks (grant absent) AND the query must not have created a registry row.
+        let _ = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &inputs);
+        assert!(
+            !db.secret_grant_ref_exists("g1").unwrap(),
+            "a query input must never create a grant registry row"
+        );
+    }
+
+    #[test]
+    fn capsule_query_unknown_condition_errors() {
+        let (_d, db) = temp_db();
+        record(
+            &db,
+            &[claim_detail(
+                LaunchConditionKind::Secret,
+                "OTHER",
+                LaunchConditionStatus::UserGrantRequired,
+                "{}",
+            )],
+        );
+        // The query references a secret the app does not declare.
+        let inputs = parse_inputs("capsule://ato.run/x?secret.NOPE=grant:g1");
+        let err = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &inputs)
+            .expect_err("unknown condition must error");
+        assert!(err.to_string().contains("unknown condition"));
+    }
+
+    #[test]
+    fn capsule_query_port_input_is_ignored_by_relaunch_preflight_for_now() {
+        let (_d, db) = temp_db();
+        let endpoint = app_service_endpoint("ipk_app", "main");
+        let mut port = launch_condition_from_port_declaration(
+            "ipk_app",
+            Some("rev1"),
+            &endpoint,
+            "tcp",
+            Some(3000),
+            "manifest.targets.port",
+            Some("remap"),
+            LaunchConditionStatus::Unknown,
+        );
+        port.install_revision_id = Some("rev1".to_string());
+        record(&db, &[port]);
+        // A port query input is ignored (port stays Unknown → warns, not blocks).
+        let inputs = parse_inputs("capsule://ato.run/x?port.main=3001");
+        let warnings = preflight_installed_relaunch_decision(&db, "ipk_app", Some("rev1"), &inputs)
+            .expect("port input is ignored, never blocks");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, RelaunchAdmissionReason::Unknown { .. }))
+        );
+    }
+
+    #[test]
+    fn non_installed_run_with_inputs_still_skips() {
+        let inputs = parse_inputs("capsule://ato.run/x?secret.K=grant:g1");
+        assert!(run_relaunch_preflight(None, &inputs).is_ok());
     }
 }
