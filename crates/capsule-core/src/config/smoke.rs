@@ -24,6 +24,34 @@ const STDERR_CAPTURE_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const PROCESS_TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Build a `Command` for a short-lived package-manager / check invocation.
+///
+/// On Windows, package managers (`npm`, `yarn`, `pnpm`, `bun`) and many CLIs
+/// ship as batch launchers (`*.cmd` / `*.bat`). `CreateProcess` only appends
+/// `.exe`, so `Command::new("npm")` fails with "program not found", and a
+/// `.cmd`/`.bat` cannot be executed directly by `CreateProcess` anyway — it
+/// must be run through `cmd.exe`. We therefore route the invocation through
+/// `cmd /D /C <program>` (callers append the remaining args). `/D` disables any
+/// `\Command Processor\AutoRun` script, which would otherwise pollute output and
+/// leak a non-zero exit code into the lifecycle command.
+///
+/// On Unix the program is spawned directly. Long-running service processes are
+/// deliberately NOT routed through this helper: their executables resolve
+/// natively (e.g. `node.exe`) and wrapping them in `cmd.exe` would complicate
+/// process-group termination.
+fn short_lived_subcommand(program: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/D").arg("/C").arg(program);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmokeOptions {
     pub startup_timeout_ms: u64,
@@ -744,7 +772,7 @@ fn prepare_smoke_working_directory(
     };
     let joined_args = args.join(" ");
 
-    let mut command = Command::new(program);
+    let mut command = short_lived_subcommand(program);
     command.args(&args);
     command.current_dir(&cwd_path);
     command.stdin(Stdio::null());
@@ -842,7 +870,7 @@ fn run_check_commands(
             ));
         }
 
-        let mut cmd = Command::new(&parts[0]);
+        let mut cmd = short_lived_subcommand(&parts[0]);
         cmd.args(parts.iter().skip(1));
         cmd.current_dir(&cwd_path);
         cmd.stdin(Stdio::null());
