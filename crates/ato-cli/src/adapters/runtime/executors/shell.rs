@@ -110,7 +110,9 @@ fn shell_command(command: &str) -> Command {
     #[cfg(windows)]
     {
         let mut cmd = Command::new("cmd");
-        cmd.args(["/C", command]);
+        // `/D` disables AutoRun so a broken/foreign \Command Processor\AutoRun script
+        // cannot pollute output or leak a non-zero exit code into the run command.
+        cmd.args(["/D", "/C", command]);
         cmd
     }
 
