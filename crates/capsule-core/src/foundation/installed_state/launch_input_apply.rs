@@ -11,13 +11,15 @@
 //! raw value or host path is ever stored (the parser already rejected those, and
 //! the merged detail is re-validated for redaction).
 //!
+//! `secret.*=grant:<id>`, `state.*=binding:<id>`, and (since #549) a sensitive
+//! `env.*=grant:<id>` — the grant/binding-bearing `UserGrantRequired` kinds — are
+//! overlaid: each sets the matching claim's `grant_ref` / `binding_ref` so the
+//! resolver can confirm it.
+//!
 //! Out of scope this slice (all ignored here): `port` inputs (the launch-time
 //! `PortClaim` admission, #523, owns the actual port), non-sensitive `env`
-//! literals (runtime env injection is a follow-up), and `env.*=grant:<id>` (the
-//! resolver resolves env by *host presence*, not by grant, and an env condition
-//! is `Unknown`/non-blocking anyway — env-via-grant needs a resolver change).
-//! Only `secret.*` and `state.*` — the blocking `UserGrantRequired` kinds — are
-//! overlaid.
+//! literals (runtime env injection is a follow-up), `env.*=required` (no grant to
+//! overlay), and `env.*=prompt` (interactive env-grant creation is a follow-up).
 
 use serde_json::Value;
 
@@ -42,12 +44,13 @@ fn apply_err(msg: impl Into<String>) -> CapsuleError {
 ///
 /// - `secret.<name>=grant:<id>` → set the matching claim's `grant_ref` to `<id>`
 ///   (status unchanged — the resolver confirms existence).
+/// - `env.<name>=grant:<id>` → set the matching Env claim's `grant_ref` (#549),
+///   same mechanism as secret (status unchanged — the resolver confirms it).
 /// - `state.<key>=binding:<id>` → set the matching claim's `binding_ref`.
-/// - `secret`/`state` input with **no** matching claim → error (the user
-///   referenced a condition this app does not declare).
-/// - `port.*`, all `env.*` (literal *and* grant), `required`, and `use-existing`
-///   are ignored this slice (env-via-grant needs a resolver change; see the
-///   module docs).
+/// - `secret`/`state`/`env`-grant input with **no** matching claim → error (the
+///   user referenced a condition this app does not declare).
+/// - `port.*`, env *literals*, `env.*=required`, `env.*=prompt`, and
+///   `use-existing` are ignored this slice (see the module docs).
 pub fn apply_capsule_launch_inputs_to_claims(
     claims: &[LaunchConditionClaim],
     inputs: &[LaunchConditionInput],
@@ -99,7 +102,18 @@ fn actionable(
         LaunchConditionInputKind::State => {
             Some((LaunchConditionKind::State, "state", "binding_ref"))
         }
-        // Port / Env / others are ignored this slice (see module docs).
+        // #549: a sensitive `env.<name>=grant:<id>` overlays a grant_ref onto the
+        // matching Env claim, so the resolver can satisfy it by grant (mirroring
+        // Secret). Only the *grant* form is actionable: an env literal or
+        // `env.K=required` carries no grant to inject and stays ignored (literal
+        // runtime injection and `env.K=prompt` creation are follow-ups), so this
+        // slice does not start enforcing existence for plain env literals.
+        LaunchConditionInputKind::Env
+            if matches!(input.value, LaunchConditionInputValue::Grant(_)) =>
+        {
+            Some((LaunchConditionKind::Env, "env", "grant_ref"))
+        }
+        // Port / env literal / env required / others are ignored this slice.
         _ => None,
     }
 }
@@ -243,10 +257,14 @@ mod tests {
     }
 
     #[test]
-    fn env_grant_input_is_ignored_this_slice() {
-        // env-via-grant needs a resolver change (env resolves by host presence),
-        // so an env grant input is currently ignored and makes no change.
-        let claims = vec![claim(LaunchConditionKind::Env, "MY_TOKEN", "{}")];
+    fn env_grant_input_sets_grant_ref_without_changing_status() {
+        // #549: a sensitive `env.K=grant:<id>` overlays the grant_ref onto the Env
+        // claim (status unchanged — the resolver confirms grant existence).
+        let claims = vec![claim(
+            LaunchConditionKind::Env,
+            "MY_TOKEN",
+            r#"{"source":"manifest.required_env"}"#,
+        )];
         let out = apply_capsule_launch_inputs_to_claims(
             &claims,
             &[input(
@@ -256,7 +274,63 @@ mod tests {
             )],
         )
         .unwrap();
-        assert_eq!(out, claims);
+        let c = find(&out, "MY_TOKEN");
+        assert!(c.detail_json.contains("\"grant_ref\":\"tok-1\""));
+        assert_eq!(c.status, LaunchConditionStatus::UserGrantRequired);
+    }
+
+    #[test]
+    fn env_grant_input_matches_namespaced_env_ledger_key() {
+        let claims = vec![claim(LaunchConditionKind::Env, "env.MY_TOKEN", "{}")];
+        let out = apply_capsule_launch_inputs_to_claims(
+            &claims,
+            &[input(
+                LaunchConditionInputKind::Env,
+                "MY_TOKEN",
+                LaunchConditionInputValue::Grant("tok-1".to_string()),
+            )],
+        )
+        .unwrap();
+        assert!(
+            find(&out, "env.MY_TOKEN")
+                .detail_json
+                .contains("\"grant_ref\":\"tok-1\"")
+        );
+    }
+
+    #[test]
+    fn env_grant_input_for_unknown_condition_errors() {
+        let claims = vec![claim(LaunchConditionKind::Env, "OTHER", "{}")];
+        let err = apply_capsule_launch_inputs_to_claims(
+            &claims,
+            &[input(
+                LaunchConditionInputKind::Env,
+                "MY_TOKEN",
+                LaunchConditionInputValue::Grant("tok-1".to_string()),
+            )],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown condition 'env.MY_TOKEN'"));
+    }
+
+    #[test]
+    fn env_literal_input_is_still_ignored() {
+        // A non-sensitive env literal carries no grant; it stays ignored (no
+        // overlay, and crucially no unknown-condition enforcement).
+        let claims = vec![claim(LaunchConditionKind::Env, "LOG_LEVEL", "{}")];
+        let out = apply_capsule_launch_inputs_to_claims(
+            &claims,
+            &[input(
+                LaunchConditionInputKind::Env,
+                "NOT_DECLARED",
+                LaunchConditionInputValue::Literal("debug".to_string()),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            out, claims,
+            "env literal makes no change and does not error"
+        );
     }
 
     #[test]
