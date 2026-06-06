@@ -1,0 +1,25 @@
+schema_version = "0.3"
+name = "basic-web"
+version = "0.1.0"
+type = "app"
+default_target = "main"
+
+[metadata]
+display_name = "Basic Web (local fixture)"
+description = "Deterministic no-network local fixture: serves a known HTTP response."
+
+[targets.main]
+runtime = "source"
+driver = "node"
+runtime_version = "22.14.0"
+run = "node server.js"
+port = 18890
+
+[pack]
+include = [
+  "capsule.toml",
+  "package.json",
+  "package-lock.json",
+  "server.js",
+  "README.md",
+]
