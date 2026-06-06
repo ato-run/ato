@@ -671,6 +671,31 @@ mod tests {
     }
 
     #[test]
+    fn raw_sensitive_env_value_rejected() {
+        // #549 invariant: a raw secret-shaped value must never be accepted as an
+        // env literal in a URL — only `grant:<id>` (or `required`) is allowed.
+        // (a) a sensitive *name* rejects any literal, even an innocuous-looking one.
+        assert!(
+            parse_capsule_launch_input(&format!("{BASE}?env.OPENAI_API_KEY=sk-abc123")).is_err()
+        );
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.MY_SECRET=anything")).is_err());
+        // (b) a non-sensitive *name* still rejects a secret-shaped *value*.
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.LOG_LEVEL=sk-abc123")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.LOG_LEVEL=Bearer%20xyz")).is_err());
+        // The error never echoes the raw value back.
+        let err = parse_capsule_launch_input(&format!("{BASE}?env.LOG_LEVEL=sk-abc123"))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("sk-abc123"));
+        // A grant input for the same sensitive name is accepted.
+        let ok = parse(&format!("{BASE}?env.OPENAI_API_KEY=grant:openai-default"));
+        assert_eq!(
+            ok.conditions[0].value,
+            LaunchConditionInputValue::Grant("openai-default".to_string())
+        );
+    }
+
+    #[test]
     fn condition_key_accepts_reserved_keys() {
         for key in [
             "port",
