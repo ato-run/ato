@@ -98,6 +98,22 @@ pub struct SecretGrantRefRecord {
     pub status: String,
 }
 
+/// Metadata row for a recorded state binding **ref** (#508): the existence-only
+/// proof that a logical `binding_id` was bound for a launch condition. Carries no
+/// host path — only logical identity (which install profile and condition the
+/// binding belongs to, its `state_key`, and its status). Read at runtime to
+/// re-confirm the proof (ownership, condition, status) before the local-private
+/// target is read and mounted. Mirrors [`SecretGrantRefRecord`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateBindingRefRecord {
+    pub binding_id: String,
+    pub install_profile_key: String,
+    pub capsule_location: Option<String>,
+    pub condition_key: String,
+    pub state_key: String,
+    pub status: String,
+}
+
 /// Metadata row for a recorded state binding **target** (#508): the
 /// provider-local target a logical `binding_id` resolves to. Unlike the
 /// existence-only `state_binding_refs` proof ledger, this row carries the raw,
@@ -1054,6 +1070,50 @@ impl InstalledStateDb {
             .map_err(|e| CapsuleError::Runtime(e.to_string()))?
             .is_some();
         Ok(exists)
+    }
+
+    /// Read the metadata row for a state binding ref by id, for runtime
+    /// materialization.
+    ///
+    /// Returns `Ok(None)` for an unknown id OR a malformed (path/scheme-like) id —
+    /// conservative, exactly like [`Self::read_secret_grant_ref`]. The row carries
+    /// **no** host path (only logical metadata: which install profile and condition
+    /// the binding belongs to, its `state_key`, and its status), so it is safe to
+    /// surface into the launch path. Callers must re-confirm ownership / condition /
+    /// `status == "bound"` here before reading the local-private target.
+    pub fn read_state_binding_ref(
+        &self,
+        binding_id: &str,
+    ) -> Result<Option<StateBindingRefRecord>> {
+        if validate_locator_id(binding_id, "binding").is_err() {
+            return Ok(None);
+        }
+        let conn = self.connect()?;
+        let row = conn
+            .query_row(
+                "SELECT binding_id, install_profile_key, capsule_location, condition_key,
+                        state_key, status
+                 FROM state_binding_refs WHERE binding_id = ?1",
+                params![binding_id],
+                |row| {
+                    let capsule_location: String = row.get(2)?;
+                    Ok(StateBindingRefRecord {
+                        binding_id: row.get(0)?,
+                        install_profile_key: row.get(1)?,
+                        capsule_location: if capsule_location.is_empty() {
+                            None
+                        } else {
+                            Some(capsule_location)
+                        },
+                        condition_key: row.get(3)?,
+                        state_key: row.get(4)?,
+                        status: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(row)
     }
 
     /// Record (upsert) the local-private **target** a state binding resolves to.
@@ -2095,6 +2155,60 @@ mod tests {
         .unwrap();
         assert!(db.state_binding_ref_exists("user-data").unwrap());
         assert!(!db.state_binding_ref_exists("other").unwrap());
+    }
+
+    #[test]
+    fn read_state_binding_ref_returns_metadata_without_path() {
+        let (_dir, db) = temp_db();
+        db.record_state_binding_ref(
+            "ipk_app",
+            Some("ato.run/koh0920/hello"),
+            "state.data",
+            "data",
+            "user-data",
+        )
+        .unwrap();
+        let rec = db
+            .read_state_binding_ref("user-data")
+            .unwrap()
+            .expect("recorded ref is readable");
+        assert_eq!(rec.binding_id, "user-data");
+        assert_eq!(rec.install_profile_key, "ipk_app");
+        assert_eq!(
+            rec.capsule_location.as_deref(),
+            Some("ato.run/koh0920/hello")
+        );
+        assert_eq!(rec.condition_key, "state.data");
+        assert_eq!(rec.state_key, "data");
+        assert_eq!(rec.status, "bound");
+        // The struct has no target_path field — metadata only (structural guarantee).
+    }
+
+    #[test]
+    fn read_state_binding_ref_unknown_or_invalid_returns_none() {
+        let (_dir, db) = temp_db();
+        assert!(
+            db.read_state_binding_ref("never-recorded")
+                .unwrap()
+                .is_none()
+        );
+        // Malformed ids resolve to None (conservative, like the existence probe).
+        assert!(
+            db.read_state_binding_ref("/Users/x/data")
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.read_state_binding_ref("file:///x").unwrap().is_none());
+        assert!(db.read_state_binding_ref("").unwrap().is_none());
+    }
+
+    #[test]
+    fn read_state_binding_ref_empty_capsule_location_is_none() {
+        let (_dir, db) = temp_db();
+        db.record_state_binding_ref("ipk_app", None, "state.data", "data", "b1")
+            .unwrap();
+        let rec = db.read_state_binding_ref("b1").unwrap().unwrap();
+        assert_eq!(rec.capsule_location, None);
     }
 
     // The registry validates at its own boundary — callers are not trusted. The

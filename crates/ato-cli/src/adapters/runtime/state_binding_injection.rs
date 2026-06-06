@@ -141,19 +141,29 @@ pub(crate) fn plan_state_binding_materialization(
     Ok(StateBindingMaterializationPlan { mounts })
 }
 
-/// Resolve admitted state bindings into concrete runtime mounts by reading the
-/// bound target back from the state-binding-target store, after relaunch preflight
-/// admission and before spawn.
+/// Resolve admitted state bindings into concrete runtime mounts by re-confirming
+/// the binding **proof** and then reading the bound target back, after relaunch
+/// preflight admission and before spawn.
 ///
-/// For each planned binding: read its target row; confirm via the row that the
-/// binding belongs to **this** install profile (never mount another app's
-/// directory); a binding that is admitted but has no recorded target blocks the
-/// launch with a typed, actionable error (binding selection is not target
-/// availability). No raw host path ever enters an error message.
+/// The design splits proof from value: `state_binding_refs` is the proof ledger,
+/// `state_binding_targets` is the local-private value store (mirroring `refs` vs
+/// the SecretStore on the secret side). Mounting on the target row alone would let
+/// a half state — a target written without (or after losing) its proof — still
+/// mount, so the ref proof is re-checked here first, exactly like
+/// `resolve_secret_injection` re-checks `read_secret_grant_ref`.
 ///
-/// Short-circuits with no state-binding input (no ledger read). Reads only the
-/// installed-state ledger and the state-binding-target store — never the
-/// manifest/lockfile.
+/// For each planned binding, in order:
+/// 1. re-confirm the `state_binding_ref` proof: it must exist, belong to **this**
+///    install profile, target the same condition (`state.<key>`) and `state_key`,
+///    and be `bound` — never mount on a missing, foreign, mismatched, or non-bound
+///    proof;
+/// 2. read the bound target; an admitted binding whose concrete target was never
+///    recorded blocks the launch (binding selection is not target availability);
+/// 3. confirm via the target row that it too belongs to this install profile.
+///
+/// No raw host path ever enters an error message. Short-circuits with no
+/// state-binding input (no ledger read). Reads only the installed-state ledger and
+/// the state-binding stores — never the manifest/lockfile.
 pub(crate) fn resolve_state_binding_materialization(
     db: &InstalledStateDb,
     install_profile_key: &str,
@@ -172,6 +182,37 @@ pub(crate) fn resolve_state_binding_materialization(
 
     let mut resolved = Vec::with_capacity(plan.mounts.len());
     for entry in &plan.mounts {
+        // Proof FIRST: re-confirm the `state_binding_ref` before touching the value
+        // store. `refs` is the proof ledger; `targets` is the value store. A target
+        // row without a matching bound ref is a forged/half state and must not mount
+        // (mirrors `resolve_secret_injection`'s `read_secret_grant_ref` re-check).
+        let expected_condition_key = format!("state.{}", entry.state_key);
+        match db.read_state_binding_ref(&entry.binding_id)? {
+            Some(rec)
+                if rec.status == "bound"
+                    && rec.install_profile_key == install_profile_key
+                    && rec.condition_key == expected_condition_key
+                    && rec.state_key == entry.state_key => {}
+            Some(rec) if rec.install_profile_key != install_profile_key => {
+                bail!(
+                    "{code}: state binding for 'state.{key}' belongs to a different installed app; \
+                     refusing to mount",
+                    code = ATO_ERR_LAUNCH_CONDITION_STATE_MOUNT_FAILED,
+                    key = entry.state_key,
+                );
+            }
+            _ => {
+                // No matching bound proof for this binding/condition. Selection is
+                // not proof — block rather than mount on the target row alone.
+                bail!(
+                    "{code}: no bound state binding for 'state.{key}'; relaunch with \
+                     state.{key}=prompt to bind it",
+                    code = ATO_ERR_LAUNCH_CONDITION_STATE_TARGET_MISSING,
+                    key = entry.state_key,
+                );
+            }
+        }
+
         // Read the bound target. An admitted binding whose concrete target was
         // never recorded blocks the launch (selection is not availability).
         let record = db
@@ -380,6 +421,8 @@ mod tests {
             r#"{"durability":"persistent","mount_target":"/app/data"}"#,
         ))
         .unwrap();
+        db.record_state_binding_ref("ipk_app", None, "state.data", "data", "user-data")
+            .unwrap();
         db.record_state_binding_target("user-data", "ipk_app", RAW_PATH)
             .unwrap();
         let resolved = resolve_state_binding_materialization(
@@ -407,7 +450,11 @@ mod tests {
             r#"{"mount_target":"/app/data"}"#,
         ))
         .unwrap();
-        // The binding is admitted (input present) but no target row recorded.
+        // The binding proof exists (ref bound for this app/condition) but the
+        // local-private target row was never recorded — selection is not
+        // availability, so the launch is blocked.
+        db.record_state_binding_ref("ipk_app", None, "state.data", "data", "user-data")
+            .unwrap();
         let err = resolve_state_binding_materialization(
             &db,
             "ipk_app",
@@ -422,6 +469,126 @@ mod tests {
     }
 
     #[test]
+    fn state_binding_materialization_blocks_when_ref_missing_even_if_target_exists() {
+        let (_d, db) = temp_db();
+        db.record_launch_condition_claim(&state_claim(
+            "ipk_app",
+            "rev1",
+            "data",
+            r#"{"mount_target":"/app/data"}"#,
+        ))
+        .unwrap();
+        // A target row exists but NO `state_binding_ref` proof was recorded — the
+        // exact half state the proof re-check guards against. Mounting on the target
+        // alone would forge proof, so the launch must be blocked.
+        db.record_state_binding_target("user-data", "ipk_app", RAW_PATH)
+            .unwrap();
+        let err = resolve_state_binding_materialization(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &[binding_input("data", "user-data")],
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(ATO_ERR_LAUNCH_CONDITION_STATE_TARGET_MISSING),
+            "missing proof must block the launch with a typed error"
+        );
+        // Even though a target row exists, its raw host path must not leak.
+        assert!(!msg.contains(RAW_PATH));
+    }
+
+    #[test]
+    fn state_binding_materialization_requires_ref_and_target() {
+        // Only the full proof+value pair mounts: ref bound for this app/condition
+        // AND the local-private target recorded. Both present → exactly one mount.
+        let (_d, db) = temp_db();
+        db.record_launch_condition_claim(&state_claim(
+            "ipk_app",
+            "rev1",
+            "data",
+            r#"{"durability":"persistent","mount_target":"/app/data"}"#,
+        ))
+        .unwrap();
+        db.record_state_binding_ref("ipk_app", None, "state.data", "data", "user-data")
+            .unwrap();
+        db.record_state_binding_target("user-data", "ipk_app", RAW_PATH)
+            .unwrap();
+        let resolved = resolve_state_binding_materialization(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &[binding_input("data", "user-data")],
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].binding_id, "user-data");
+        assert_eq!(resolved[0].source, PathBuf::from(RAW_PATH));
+    }
+
+    #[test]
+    fn state_binding_materialization_blocks_ref_owned_by_other_app() {
+        let (_d, db) = temp_db();
+        db.record_launch_condition_claim(&state_claim(
+            "ipk_app",
+            "rev1",
+            "data",
+            r#"{"mount_target":"/app/data"}"#,
+        ))
+        .unwrap();
+        // The proof ref is bound under a DIFFERENT install profile. The target row
+        // is owned by this app, but the proof says it is another app's binding —
+        // refuse before even reading the target.
+        db.record_state_binding_ref("ipk_other", None, "state.data", "data", "user-data")
+            .unwrap();
+        db.record_state_binding_target("user-data", "ipk_app", RAW_PATH)
+            .unwrap();
+        let err = resolve_state_binding_materialization(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &[binding_input("data", "user-data")],
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(ATO_ERR_LAUNCH_CONDITION_STATE_MOUNT_FAILED));
+        assert!(!msg.contains(RAW_PATH));
+    }
+
+    #[test]
+    fn state_binding_materialization_blocks_ref_for_different_condition() {
+        let (_d, db) = temp_db();
+        db.record_launch_condition_claim(&state_claim(
+            "ipk_app",
+            "rev1",
+            "data",
+            r#"{"mount_target":"/app/data"}"#,
+        ))
+        .unwrap();
+        // The proof ref exists for THIS app but binds a DIFFERENT condition
+        // (`state.cache`/`cache`), while the input/claim is `state.data`. A proof for
+        // one condition must not satisfy another — block the mount.
+        db.record_state_binding_ref("ipk_app", None, "state.cache", "cache", "user-data")
+            .unwrap();
+        db.record_state_binding_target("user-data", "ipk_app", RAW_PATH)
+            .unwrap();
+        let err = resolve_state_binding_materialization(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &[binding_input("data", "user-data")],
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(ATO_ERR_LAUNCH_CONDITION_STATE_TARGET_MISSING),
+            "a proof for a different condition must not satisfy this binding"
+        );
+        assert!(!msg.contains(RAW_PATH));
+    }
+
+    #[test]
     fn state_binding_materialization_blocks_other_app_binding() {
         let (_d, db) = temp_db();
         db.record_launch_condition_claim(&state_claim(
@@ -431,7 +598,11 @@ mod tests {
             r#"{"mount_target":"/app/data"}"#,
         ))
         .unwrap();
-        // The target row is owned by a DIFFERENT install profile.
+        // The proof ref passes for this app, but the target row is owned by a
+        // DIFFERENT install profile — defence in depth: the target-ownership check
+        // refuses even after the proof check.
+        db.record_state_binding_ref("ipk_app", None, "state.data", "data", "user-data")
+            .unwrap();
         db.record_state_binding_target("user-data", "ipk_other", RAW_PATH)
             .unwrap();
         let err = resolve_state_binding_materialization(
@@ -456,6 +627,8 @@ mod tests {
             r#"{"mount_target":"/app/data"}"#,
         ))
         .unwrap();
+        db.record_state_binding_ref("ipk_app", None, "state.data", "data", "user-data")
+            .unwrap();
         db.record_state_binding_target("user-data", "ipk_other", RAW_PATH)
             .unwrap();
         let err = resolve_state_binding_materialization(
