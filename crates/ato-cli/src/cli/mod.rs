@@ -14,6 +14,7 @@ mod key;
 mod package;
 mod profile;
 mod project;
+mod receipts;
 mod registry;
 mod root;
 pub(crate) mod scoped_id_prompt;
@@ -48,6 +49,8 @@ pub(crate) use package::PackageCommands;
 pub(crate) use profile::ProfileCommands;
 #[allow(unused_imports)]
 pub(crate) use project::{ProjectCommands, ScaffoldCommands};
+#[allow(unused_imports)]
+pub(crate) use receipts::ReceiptsCommands;
 #[allow(unused_imports)]
 pub(crate) use registry::RegistryCommands;
 pub(crate) use root::{Cli, Commands};

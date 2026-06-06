@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use capsule_core::CapsuleError;
 use capsule_core::runtime::oci::{
     BollardOciRuntimeClient, OciContainerInspect, OciContainerRequest, OciLogChunk,
-    OciMountSourceKind, OciNetworkRequest, OciRuntimeClient,
+    OciNetworkRequest, OciRuntimeClient,
 };
 use capsule_core::types::{
     OciImageResolution, OciPlatform, OciProviderKind, OciProviderMode, OciProviderSemantics,
@@ -19,6 +19,10 @@ use capsule_core::podman::ATO_PODMAN_MACHINE_NAME;
 
 use crate::adapters::runtime::podman_machine::{
     PodmanMachine, PodmanMachineStatus, parse_machine_entries, parse_podman_machine_list,
+};
+use crate::application::provider_projection::oci::{
+    OciMountProjection, OciPortProjection, OciProjectionPlan, OciRenderError,
+    render_podman_mount_value, render_podman_port_value,
 };
 
 // In tests use zero timeouts so the poll loop exits immediately without sleeping.
@@ -662,53 +666,30 @@ impl PodmanProbePlatform {
     }
 }
 
-/// Returns the option suffix for a `-v` mount argument.
-///
-/// * no ownership, writable  → `""`
-/// * no ownership, readonly  → `":ro"`
-/// * ownership,    writable  → `":U"` (Podman engine-delegated UID/GID remap, #428)
-///
-/// Caller must ensure `readonly && ownership.is_some()` is rejected before
-/// calling (that is a `ReadOnlyOwnershipConflict` error).
+/// Returns the option suffix for a `-v` mount argument (`""`, `":ro"`, or
+/// `":U"`). Thin adapter over the projection renderer
+/// `provider_projection::oci::podman_mount_opts`; retained for its unit tests.
 fn podman_mount_opts(mount: &capsule_core::runtime::oci::OciMountSpec) -> &'static str {
-    match (mount.readonly, mount.ownership.is_some()) {
-        (true, false) => ":ro",
-        (false, true) => ":U",
-        _ => "",
-    }
+    crate::application::provider_projection::oci::podman_mount_opts(
+        mount.readonly,
+        mount.ownership.is_some(),
+    )
 }
 
-/// Render an [`OciMountSpec`] into the value passed after `-v` to `podman create`.
-///
-/// * [`OciMountSourceKind::BindPath`] → `<host-path>:<target><opts>`, with the
-///   host path canonicalized to resolve symlinks (e.g. `/tmp` → `/private/tmp`).
-/// * [`OciMountSourceKind::EngineVolume`] → `<volume-name>:<target><opts>`. The
-///   source is a named volume, not a filesystem path, so it is **never**
-///   canonicalized; Podman auto-creates it on first use. See #444.
+/// Render an `OciMountSpec` into the value passed after `-v` to `podman create`.
+/// Thin adapter over the projection renderer
+/// `provider_projection::oci::render_podman_mount_value` (#444 bind-path vs
+/// engine-volume logic lives there); retained for its unit tests.
 fn podman_mount_arg(mount: &capsule_core::runtime::oci::OciMountSpec) -> String {
-    let source = match mount.source_kind {
-        OciMountSourceKind::EngineVolume { .. } => mount.source.clone(),
-        OciMountSourceKind::BindPath => std::fs::canonicalize(&mount.source)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| mount.source.clone()),
-    };
-    format!("{}:{}{}", source, mount.target, podman_mount_opts(mount))
+    render_podman_mount_value(&OciMountProjection::from_spec(mount))
 }
 
-/// Render an [`OciPortSpec`] into the argument value passed after `-p` to
-/// `podman create`. Honors `host_ip` so the orchestrator's
-/// `Some("127.0.0.1")` request publishes to loopback rather than the
-/// engine-default bind, matching the prior bollard `HostBinding` behavior.
-///
-/// Podman's `-p` grammar: `[[ip:][hostPort]:]containerPort[/protocol]`.
+/// Render an `OciPortSpec` into the value passed after `-p` to `podman create`.
+/// Thin adapter over the projection renderer
+/// `provider_projection::oci::render_podman_port_value`; retained for its
+/// unit tests.
 fn podman_publish_port_arg(port: &capsule_core::runtime::oci::OciPortSpec) -> String {
-    let suffix = format!("{}/{}", port.container_port, port.protocol);
-    match (port.host_ip.as_deref(), port.host_port) {
-        (Some(ip), Some(hp)) => format!("{ip}:{hp}:{suffix}"),
-        (Some(ip), None) => format!("{ip}::{suffix}"),
-        (None, Some(hp)) => format!("{hp}:{suffix}"),
-        (None, None) => suffix,
-    }
+    render_podman_port_value(&OciPortProjection::from_spec(port))
 }
 
 #[derive(Clone)]
@@ -1349,60 +1330,19 @@ where
         &self,
         request: &OciContainerRequest,
     ) -> Result<String, OciProviderError> {
-        let mut args: Vec<String> = vec!["create".into(), "--name".into(), request.name.clone()];
-        // Pass --platform when creating an emulated (non-native) container.
-        if let Some(platform) = &request.platform {
-            let host = auto_select_platform();
-            if platform.architecture != host.architecture {
-                args.push("--platform".into());
-                args.push(format!("linux/{}", platform.architecture));
-            }
-        }
-        for (k, v) in &request.labels {
-            args.push("--label".into());
-            args.push(format!("{k}={v}"));
-        }
-        for (k, v) in &request.env {
-            args.push("--env".into());
-            args.push(format!("{k}={v}"));
-        }
-        for port in &request.ports {
-            args.push("-p".into());
-            args.push(podman_publish_port_arg(port));
-        }
-        if let Some(wd) = &request.working_dir {
-            args.push("--workdir".into());
-            args.push(wd.clone());
-        }
-        if let Some(user) = &request.user {
-            args.push("--user".into());
-            args.push(user.clone());
-        }
-        for mount in &request.mounts {
-            // readonly + ownership is a contradiction: a read-only mount cannot
-            // be re-owned by the engine (:U requires write access).
-            if mount.readonly && mount.ownership.is_some() {
-                return Err(OciProviderError::ReadOnlyOwnershipConflict {
-                    target: mount.target.clone(),
-                });
-            }
-            args.push("-v".into());
-            args.push(podman_mount_arg(mount));
-        }
-        if let Some(net) = &request.network {
-            args.push("--network".into());
-            args.push(net.clone());
-        }
-        for alias in &request.aliases {
-            args.push("--network-alias".into());
-            args.push(alias.clone());
-        }
-        for host_entry in &request.extra_hosts {
-            args.push("--add-host".into());
-            args.push(host_entry.clone());
-        }
-        args.push(request.image.clone());
-        args.extend(request.cmd.iter().cloned());
+        // Provider projection boundary (#501): the resolved launch conditions
+        // become an `OciProjectionPlan` (the source of truth), and the
+        // `podman create` argv is *derived* from that plan rather than built ad
+        // hoc here. The plan carries no runtime evidence (container id, pid, log
+        // path); those are produced below and are not part of plan identity.
+        let plan = OciProjectionPlan::from_container_request(request);
+        let args = plan
+            .render_podman_create_argv(&auto_select_platform())
+            .map_err(|e| match e {
+                OciRenderError::ReadOnlyOwnershipConflict { target } => {
+                    OciProviderError::ReadOnlyOwnershipConflict { target }
+                }
+            })?;
         let output = self
             .podman_command()
             .args(&args)
@@ -3082,7 +3022,9 @@ impl OciProvider for FakeOciProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::runtime::oci::{OciContainerInspect, OciMountSpec, OciPortSpec};
+    use capsule_core::runtime::oci::{
+        OciContainerInspect, OciMountSourceKind, OciMountSpec, OciPortSpec,
+    };
     use capsule_core::types::{OciProviderKind, OciProviderMode, OciProviderSubstrate};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};

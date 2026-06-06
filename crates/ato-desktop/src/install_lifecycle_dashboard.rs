@@ -21,7 +21,6 @@
 /// from a background task or action handler.
 use std::sync::Mutex;
 
-use crate::proc_util::CommandNoWindowExt;
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
@@ -129,6 +128,36 @@ pub struct InstalledAppSessionSummary {
     pub pid: Option<i32>,
     /// `"running"` when the process is confirmed alive; absent otherwise.
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchableInstalledProfile {
+    pub installed_app_id: String,
+    pub profile_id: String,
+    pub install_profile_key: String,
+    pub install_revision_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstalledProfileLaunchError {
+    NotFound,
+    Degraded { message: String },
+}
+
+impl InstalledProfileLaunchError {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            InstalledProfileLaunchError::NotFound => "installed_profile_not_found",
+            InstalledProfileLaunchError::Degraded { .. } => "installed_profile_degraded",
+        }
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            InstalledProfileLaunchError::NotFound => None,
+            InstalledProfileLaunchError::Degraded { message } => Some(message.as_str()),
+        }
+    }
 }
 
 // ── Dashboard cache (Blocker 1 fix) ─────────────────────────────────────────
@@ -279,24 +308,118 @@ pub fn list_app_revisions(
         .collect()
 }
 
-// ── Launch (called from GPUI background executor — Blocker 2 fix) ───────────
+/// Resolve an install profile key to a launchable installed profile without
+/// launching it. Used by MCP `NavigateToUrl` preflight to distinguish a
+/// not-found key from a degraded (missing-revision) profile before the actual
+/// launch path (`open_installed_app_by_ipk`) runs.
+pub fn inspect_launchable_installed_profile(
+    install_profile_key: &str,
+) -> std::result::Result<LaunchableInstalledProfile, InstalledProfileLaunchError> {
+    let store = open_store().map_err(|err| InstalledProfileLaunchError::Degraded {
+        message: format!("{:#}", err.context("open installed app store")),
+    })?;
+    let apps =
+        store
+            .list_installed_apps()
+            .map_err(|err| InstalledProfileLaunchError::Degraded {
+                message: format!("{:#}", err.context("list installed apps")),
+            })?;
 
-/// Run `ato launch <ipk> -y` synchronously.  Intended to be called from a
-/// GPUI background-executor spawn (not from the render thread or a raw
-/// `std::thread::spawn`).
-pub fn spawn_launch(ato_bin: &std::path::Path, install_profile_key: &str) -> Result<String> {
-    let output = std::process::Command::new(ato_bin)
-        .no_console_window()
-        .arg("launch")
-        .arg(install_profile_key)
-        .arg("-y")
-        .output()
-        .with_context(|| format!("spawn ato launch '{}'", install_profile_key))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("ato launch failed: {stderr}");
+    for app_id in &apps {
+        let profiles =
+            store
+                .list_profiles(app_id)
+                .map_err(|err| InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "{:#}",
+                        err.context(format!("list profiles for {}", app_id.as_str()))
+                    ),
+                })?;
+        for profile_id in &profiles {
+            let candidate_key = install_lifecycle::derive_install_profile_key(app_id, profile_id);
+            if candidate_key.as_str() != install_profile_key {
+                continue;
+            }
+
+            let _record = store.read_app_record(app_id).map_err(|err| {
+                InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "{:#}",
+                        err.context(format!("read app record for {}", app_id.as_str()))
+                    ),
+                }
+            })?;
+            let current_revision = store.current_revision(app_id, profile_id).map_err(|err| {
+                InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "{:#}",
+                        err.context(format!(
+                            "read current revision for {}/{}",
+                            app_id.as_str(),
+                            profile_id.as_str()
+                        ))
+                    ),
+                }
+            })?;
+            let revision_dir = store.revision_dir(&current_revision);
+            if !revision_dir.is_dir() {
+                return Err(InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "current revision {} for {}/{} is missing at {}",
+                        current_revision.as_str(),
+                        app_id.as_str(),
+                        profile_id.as_str(),
+                        revision_dir.display()
+                    ),
+                });
+            }
+            let output_dir = store.revision_output_dir(&current_revision);
+            if !output_dir.is_dir() {
+                return Err(InstalledProfileLaunchError::Degraded {
+                    message: format!(
+                        "current revision {} for {}/{} has no output directory at {}",
+                        current_revision.as_str(),
+                        app_id.as_str(),
+                        profile_id.as_str(),
+                        output_dir.display()
+                    ),
+                });
+            }
+
+            return Ok(LaunchableInstalledProfile {
+                installed_app_id: app_id.as_str().to_owned(),
+                profile_id: profile_id.as_str().to_owned(),
+                install_profile_key: candidate_key.as_str().to_owned(),
+                install_revision_id: current_revision.as_str().to_owned(),
+            });
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+
+    Err(InstalledProfileLaunchError::NotFound)
+}
+
+// ── Launch command contract ─────────────────────────────────────────────────
+
+/// The argv (after the binary) for launching an installed profile.
+///
+/// Installed-app launches go through `ato launch <install_profile_key> -y` — the
+/// install-owned, pre-consented entry point that runs the profile's pinned
+/// current revision — never `ato app session start <handle>` (the run-owned,
+/// consent-gated path). Exposed as a pure function so the command contract is
+/// unit-testable without spawning a process. The actual spawn (with the
+/// Desktop's `ATO_HOME` / runtime opt-out env) lives in
+/// [`crate::orchestrator::spawn_installed_launch`].
+pub fn installed_launch_command_args(install_profile_key: &str) -> Vec<String> {
+    // `--detached-session` (#565): the Desktop needs `ato launch` to start the
+    // installed app as a *detached* session that writes a discoverable
+    // StoredSessionInfo (which `ensure_installed_session` polls for), rather than
+    // the public CLI's foreground/blocking behavior.
+    vec![
+        "launch".to_string(),
+        install_profile_key.to_string(),
+        "-y".to_string(),
+        "--detached-session".to_string(),
+    ]
 }
 
 // ── Session attachment (Blocker 4 fix: only alive sessions) ─────────────────
@@ -675,6 +798,79 @@ mod tests {
 
     #[test]
     #[serial]
+    fn inspect_launchable_installed_profile_returns_identity_for_current_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app_id, profile_id, ipk) = scaffold_one(&dir, 1);
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+
+        let profile = inspect_launchable_installed_profile(ipk.as_str()).unwrap();
+
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+
+        assert_eq!(profile.installed_app_id, app_id.as_str());
+        assert_eq!(profile.profile_id, profile_id.as_str());
+        assert_eq!(profile.install_profile_key, ipk.as_str());
+        assert!(profile.install_revision_id.starts_with("rev_dash_"));
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_launchable_installed_profile_returns_not_found_for_unknown_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 1);
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+
+        let err = inspect_launchable_installed_profile("ipk_does_not_exist").unwrap_err();
+
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+
+        assert_eq!(err, InstalledProfileLaunchError::NotFound);
+        assert_eq!(err.reason(), "installed_profile_not_found");
+    }
+
+    #[test]
+    #[serial]
+    fn inspect_launchable_installed_profile_returns_degraded_when_current_revision_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(&dir);
+        let app_id = InstalledAppId::new("app_degraded_launch");
+        let profile_id = ProfileId::new("default");
+        store
+            .write_app_record(&make_app_record(&app_id, "acme", "broken", "1.0.0"))
+            .unwrap();
+        store
+            .write_profile(&app_id, &make_default_profile(&profile_id))
+            .unwrap();
+        let ipk = install_lifecycle::derive_install_profile_key(&app_id, &profile_id);
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+
+        let err = inspect_launchable_installed_profile(ipk.as_str()).unwrap_err();
+
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+
+        assert_eq!(err.reason(), "installed_profile_degraded");
+        assert!(
+            err.detail()
+                .unwrap_or_default()
+                .contains("current revision"),
+            "expected current revision detail, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn current_revision_none_when_link_missing() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(&dir);
@@ -815,6 +1011,22 @@ mod tests {
         unsafe {
             std::env::remove_var("ATO_HOME");
         }
+    }
+
+    #[test]
+    fn installed_launch_uses_ato_launch_not_session_start() {
+        // Regression: an installed app must relaunch through the install-owned,
+        // pre-consented `ato launch <ipk>`, never `ato app session start` (which
+        // is run-owned and consent-gated). `--detached-session` (#565) selects
+        // the detached variant of `ato launch` that writes a discoverable
+        // session record for the Desktop — it is still `ato launch`, not the
+        // handle-keyed `app session start` path.
+        let args = super::installed_launch_command_args("ipk_abc123");
+        assert_eq!(
+            args,
+            vec!["launch", "ipk_abc123", "-y", "--detached-session"]
+        );
+        assert_ne!(args.first().map(String::as_str), Some("app"));
     }
 
     #[test]

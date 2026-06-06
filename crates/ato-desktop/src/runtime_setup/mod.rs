@@ -14,6 +14,7 @@
 //! command needs is fixed; what differs is which capsule's manifest grants it.
 
 mod install;
+pub(crate) mod launch_intent;
 mod prepare;
 mod status;
 mod types;
@@ -113,6 +114,31 @@ pub fn dispatch(
         }
         RuntimeSetupCommand::OpenRuntimeSetupLogs { request_id } => {
             install::open_runtime_setup_logs(cx, request_id);
+        }
+        RuntimeSetupCommand::PrepareWindowsRuntimeSubstrate {
+            request_id,
+            action,
+            source_surface,
+        } => {
+            prepare::start_windows_substrate(cx, request_id, action, source_surface);
+        }
+        RuntimeSetupCommand::RepairHostRuntime { request_id } => {
+            prepare::start_runtime_repair(cx, request_id);
+        }
+        RuntimeSetupCommand::ResumeRuntimeSetupAfterReboot { request_id } => {
+            status::spawn_runtime_setup_resume(cx, request_id);
+        }
+        RuntimeSetupCommand::CancelPendingLaunch { request_id } => {
+            // Clear the interrupted-launch marker only; Runtime Setup itself is
+            // untouched. Then clear the banner on the active surface(s).
+            launch_intent::clear_pending_launch();
+            launch_intent::push_pending_launch(cx, None);
+            let response = serde_json::json!({
+                "ok": true,
+                "requestId": request_id,
+                "pendingLaunchCancelled": true,
+            });
+            push_runtime_setup(cx, &response.to_string());
         }
     }
     Ok(())

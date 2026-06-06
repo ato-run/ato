@@ -11,9 +11,13 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::installed_state::{InstalledStateDb, os_port_is_free};
 use capsule_core::router::ManifestData;
 use capsule_core::types::ServiceSpec;
 
+use crate::adapters::runtime::port_admission::{
+    self, DEFAULT_PORT_CONFLICT_POLICY, PortAdmissionPlan,
+};
 use crate::application::pipeline::cleanup::{CleanupScope, PipelineAttemptContext};
 use crate::application::services::{
     ServiceGraphPlan, ServicePhaseCoordinator, ServicePhaseRuntime,
@@ -21,10 +25,14 @@ use crate::application::services::{
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 
-use super::launch_context::RuntimeLaunchContext;
+use super::launch_context::{PortPreference, RuntimeLaunchContext};
 
 const READINESS_INTERVAL: Duration = Duration::from_millis(250);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Protocol for web-service port claims. Web services bind TCP listeners; the
+/// claim ledger scopes conflicts per-protocol (#515).
+const PORT_ADMISSION_PROTOCOL: &str = "tcp";
 
 #[derive(Debug, Default, Clone)]
 struct RuntimeBins {
@@ -97,6 +105,100 @@ impl ServiceStartupRuntime {
             .unwrap_or_else(|poison| poison.into_inner());
         std::mem::take(&mut state.running)
     }
+
+    /// Compute the installed-app port admission plan for `service_name` from the
+    /// already-resolved service env (its `PORT`), returning the open DB handle
+    /// alongside the plan so the claim can be recorded after a successful spawn.
+    ///
+    /// `Ok(None)` when admission does not apply: this is not an installed-app
+    /// launch, the service is not `main`, there is no preferred port, or the
+    /// installed-state DB is unavailable (admission is best-effort and never
+    /// blocks a launch on infrastructure failure). A genuine, unresolvable port
+    /// conflict still surfaces as `Err` with the typed `ATO_ERR_PORT_CONFLICT`.
+    fn plan_port_admission(
+        &self,
+        service_name: &str,
+        env: &HashMap<String, String>,
+    ) -> Result<Option<(InstalledStateDb, PortAdmissionPlan)>> {
+        if self.launch_ctx.install_profile_key().is_none() {
+            return Ok(None);
+        }
+        let db = match InstalledStateDb::open_default() {
+            Ok(db) => db,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "installed-state DB unavailable; skipping port admission"
+                );
+                return Ok(None);
+            }
+        };
+        let preferred = resolve_preferred_port(&self.launch_ctx, service_name, env);
+        let plan = plan_service_port_admission(
+            &db,
+            &self.launch_ctx,
+            service_name,
+            preferred,
+            os_port_is_free,
+        )?;
+        Ok(plan.map(|plan| (db, plan)))
+    }
+}
+
+/// Compute a port admission plan for a web service, gated to the `main`
+/// service (the only one whose `PORT` ato injects). Delegates the conflict
+/// decision to [`port_admission::plan_port_admission_with`] with the default
+/// (Remap) policy. The `os_available` probe is injectable for tests.
+fn plan_service_port_admission(
+    db: &InstalledStateDb,
+    launch_ctx: &RuntimeLaunchContext,
+    service_name: &str,
+    preferred: Option<u16>,
+    os_available: impl Fn(u16) -> bool,
+) -> Result<Option<PortAdmissionPlan>> {
+    if service_name != "main" {
+        return Ok(None);
+    }
+    port_admission::plan_port_admission_with(
+        db,
+        launch_ctx.install_profile_key(),
+        service_name,
+        PORT_ADMISSION_PROTOCOL,
+        preferred,
+        DEFAULT_PORT_CONFLICT_POLICY,
+        os_available,
+    )
+}
+
+/// Resolve the preferred port for a service's port admission (#548).
+///
+/// Resolution order, keyed by logical endpoint name:
+/// - `Some(PortPreference::Concrete(n))` → a `capsule://…?port[.<endpoint>]=<n>`
+///   query input requested `n`; it overrides the env-derived `PORT`.
+/// - `Some(PortPreference::Auto)` → a `capsule://…?port[.<endpoint>]=auto` query
+///   input *explicitly* asked for auto-assign. This returns `None` **and
+///   suppresses the env-`PORT` fallback** for that endpoint, so admission has no
+///   concrete preferred port and the runtime uses its OS auto-assign path,
+///   creating no preferred-port claim from the query.
+/// - no entry → no query preference for this endpoint, so fall back to the
+///   env-derived `PORT` (unchanged behavior; `ato run` lands here as a no-op).
+fn resolve_preferred_port(
+    launch_ctx: &RuntimeLaunchContext,
+    service_name: &str,
+    env: &HashMap<String, String>,
+) -> Option<u16> {
+    match launch_ctx.port_preference(service_name) {
+        Some(PortPreference::Concrete(port)) => Some(port),
+        // Explicit auto suppresses the env-PORT fallback for this endpoint.
+        Some(PortPreference::Auto) => None,
+        None => env.get("PORT").and_then(|port| port.parse::<u16>().ok()),
+    }
+}
+
+/// Override the service env's `PORT` with the admission-resolved port. Mirrors
+/// exactly what `start_service` applies before spawning.
+fn apply_port_admission(env: &mut HashMap<String, String>, plan: &PortAdmissionPlan) {
+    env.insert("PORT".to_string(), plan.resolved_port.to_string());
 }
 
 #[async_trait]
@@ -109,7 +211,20 @@ impl ServicePhaseRuntime for ServiceStartupRuntime {
             ))
         })?;
 
-        let env = build_service_env(&self.plan, service_name, spec, &self.launch_ctx)?;
+        let mut env = build_service_env(&self.plan, service_name, spec, &self.launch_ctx)?;
+
+        // Installed-app port admission (#508): for the `main` service of an
+        // installed app, reconcile the resolved `PORT` against the per-install
+        // port-claim ledger before binding. A port held by a *different*
+        // installed endpoint is remapped (default policy) so two installed apps
+        // that both prefer the same port don't collide. The claim is recorded
+        // only after a successful spawn (below) — never here, since the launch
+        // may still fail. `ato run` / non-installed launches are untouched.
+        let port_admission = self.plan_port_admission(service_name, &env)?;
+        if let Some((_, plan)) = &port_admission {
+            apply_port_admission(&mut env, plan);
+        }
+
         let mut cmd = build_service_command(&self.runtime_dir, spec, &self.runtime_bins)?;
         cmd.current_dir(&self.runtime_dir)
             .stdin(Stdio::null())
@@ -135,6 +250,13 @@ impl ServicePhaseRuntime for ServiceStartupRuntime {
                 service_name, spec.entrypoint
             )
         })?;
+
+        // The service spawned successfully; persist the port claim so future
+        // relaunches and other installed apps observe the reservation. Recording
+        // is best-effort and must not fail an already-running service.
+        if let Some((db, plan)) = &port_admission {
+            port_admission::record_port_admission_plan(db, plan);
+        }
 
         let pid = child.id();
         let stdout = child.stdout.take();
@@ -325,7 +447,60 @@ fn build_service_env(
 
     env.extend(launch_ctx.injected_env().clone());
 
+    // SecretStore-backed launch-condition grants (#508). Applied at the service
+    // env-build boundary only and kept off the receipt-observed `merged_env`; last
+    // so a secret wins for its exact env key.
+    for secret in launch_ctx.secret_env() {
+        env.insert(secret.name.clone(), secret.value.expose().to_string());
+    }
+
+    // State-binding materialization (#508). The web-services executor runs the
+    // service as a host process — it has no mount namespace to bind a guest path
+    // into — so a bound state directory is projected as an env var the app reads
+    // to locate its persistent state. Kept off the receipt-observed `merged_env`
+    // (build_service_env is the spawn-env construction point, mirroring secrets
+    // above).
+    apply_state_mounts_to_service_env(&mut env, launch_ctx);
+
     Ok(env)
+}
+
+/// Project state-binding mounts into a host-process service env (#508). The
+/// web-services executor cannot bind-mount, so each bound directory is exposed as
+/// an `ATO_STATE_<KEY>` env var pointing at the host source path. Applied at the
+/// spawn-env construction boundary only — never merged into the receipt-observed
+/// env. Factored out so the projection is unit-testable without a full plan.
+fn apply_state_mounts_to_service_env(
+    env: &mut HashMap<String, String>,
+    launch_ctx: &RuntimeLaunchContext,
+) {
+    for mount in launch_ctx.state_mounts() {
+        env.insert(
+            state_mount_env_name(mount),
+            mount.source.to_string_lossy().to_string(),
+        );
+    }
+}
+
+/// Derive the env var name a host-process service reads to locate a bound state
+/// directory. Uses the state key (non-sensitive) so the name is stable across
+/// relaunches: `data` → `ATO_STATE_DATA`. Non-alphanumeric characters are
+/// normalized to `_`.
+fn state_mount_env_name(
+    mount: &crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount,
+) -> String {
+    let suffix: String = mount
+        .state_key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("ATO_STATE_{suffix}")
 }
 
 fn build_service_command(
@@ -793,13 +968,310 @@ fn service_startup_order(services: &HashMap<String, ServiceSpec>) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        readiness_initial_delay, readiness_interval, readiness_timeout, resolve_probe_port,
-        service_startup_order,
+        PortPreference, RuntimeLaunchContext, apply_port_admission, plan_service_port_admission,
+        readiness_initial_delay, readiness_interval, readiness_timeout, resolve_preferred_port,
+        resolve_probe_port, service_startup_order,
     };
+    use crate::adapters::runtime::port_admission::{logical_endpoint, record_port_admission_plan};
+    use capsule_core::installed_state::{ConflictPolicy, InstalledStateDb, PortClaim};
     use capsule_core::types::ReadinessProbe;
     use capsule_core::types::ServiceSpec;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    fn temp_db() -> (tempfile::TempDir, InstalledStateDb) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = InstalledStateDb::open(dir.path().join("state")).expect("open db");
+        (dir, db)
+    }
+
+    fn installed_ctx(ipk: &str) -> RuntimeLaunchContext {
+        RuntimeLaunchContext::empty().with_install_profile_key(Some(ipk.to_string()))
+    }
+
+    fn other_app_main_claim(ipk: &str, port: u16) -> PortClaim {
+        PortClaim {
+            install_profile_key: ipk.to_string(),
+            logical_endpoint: logical_endpoint(ipk, "main"),
+            preferred_port: port,
+            last_actual_port: Some(port),
+            protocol: super::PORT_ADMISSION_PROTOCOL.to_string(),
+            conflict_policy: ConflictPolicy::Remap,
+        }
+    }
+
+    /// Reproduce exactly what `start_service` does to the env: resolve the
+    /// preferred port (env `PORT`, overridable by a `capsule://` port query input
+    /// on the launch context), resolve the admission plan, apply it, and return
+    /// the resulting `PORT`.
+    fn resolved_port_env(
+        db: &InstalledStateDb,
+        launch_ctx: &RuntimeLaunchContext,
+        service_name: &str,
+        preferred: u16,
+    ) -> String {
+        resolved_port_env_with_os(db, launch_ctx, service_name, preferred, |_| true)
+    }
+
+    fn resolved_port_env_with_os(
+        db: &InstalledStateDb,
+        launch_ctx: &RuntimeLaunchContext,
+        service_name: &str,
+        env_port: u16,
+        os_available: impl Fn(u16) -> bool,
+    ) -> String {
+        let mut env = HashMap::new();
+        env.insert("PORT".to_string(), env_port.to_string());
+        let preferred = resolve_preferred_port(launch_ctx, service_name, &env);
+        let plan =
+            plan_service_port_admission(db, launch_ctx, service_name, preferred, os_available)
+                .expect("admission must not error under Remap");
+        if let Some(plan) = &plan {
+            apply_port_admission(&mut env, plan);
+        }
+        env.get("PORT").cloned().expect("PORT must be present")
+    }
+
+    fn installed_ctx_with_port(ipk: &str, endpoint: &str, port: u16) -> RuntimeLaunchContext {
+        let mut prefs = HashMap::new();
+        prefs.insert(endpoint.to_string(), PortPreference::Concrete(port));
+        installed_ctx(ipk).with_port_preferences(prefs)
+    }
+
+    fn installed_ctx_with_auto(ipk: &str, endpoint: &str) -> RuntimeLaunchContext {
+        let mut prefs = HashMap::new();
+        prefs.insert(endpoint.to_string(), PortPreference::Auto);
+        installed_ctx(ipk).with_port_preferences(prefs)
+    }
+
+    #[test]
+    fn state_binding_mount_reaches_web_service_boundary() {
+        use super::apply_state_mounts_to_service_env;
+        use crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount;
+        use std::path::PathBuf;
+
+        let raw = "/Users/koh/.local/share/app/data";
+        let ctx = RuntimeLaunchContext::empty().with_state_mounts(vec![RuntimeStateBindingMount {
+            state_key: "data".to_string(),
+            binding_id: "user-data".to_string(),
+            source: PathBuf::from(raw),
+            target: "/app/data".to_string(),
+            readonly: false,
+        }]);
+        let mut env = HashMap::new();
+        apply_state_mounts_to_service_env(&mut env, &ctx);
+        // The bound host directory is projected to the service env at the boundary.
+        assert_eq!(env.get("ATO_STATE_DATA").map(String::as_str), Some(raw));
+        // It never reaches the receipt-observed env surfaces.
+        assert!(ctx.merged_env().is_empty());
+        assert!(ctx.injected_mounts().is_empty());
+    }
+
+    #[test]
+    fn installed_conflicting_claim_remaps_port_env() {
+        let (_d, db) = temp_db();
+        // A different installed app already holds 3000.
+        db.record_port_claim(&other_app_main_claim("ipk_other", 3000))
+            .unwrap();
+        let ctx = installed_ctx("ipk_app");
+        let port = resolved_port_env(&db, &ctx, "main", 3000);
+        assert_ne!(port, "3000", "conflicting installed claim must remap PORT");
+        assert!(
+            port.parse::<u16>().unwrap() >= 49152,
+            "remap must land in the ephemeral range"
+        );
+    }
+
+    #[test]
+    fn non_installed_launch_leaves_port_unchanged() {
+        let (_d, db) = temp_db();
+        // Even with a conflicting claim on record, a non-installed launch
+        // (no install_profile_key) must keep its preferred PORT.
+        db.record_port_claim(&other_app_main_claim("ipk_other", 3000))
+            .unwrap();
+        let ctx = RuntimeLaunchContext::empty();
+        let port = resolved_port_env(&db, &ctx, "main", 3000);
+        assert_eq!(port, "3000", "non-installed launch must be untouched");
+    }
+
+    #[test]
+    fn successful_launch_records_last_actual_port() {
+        let (_d, db) = temp_db();
+        let ctx = installed_ctx("ipk_app");
+        let plan = plan_service_port_admission(&db, &ctx, "main", Some(3000), |_| true)
+            .unwrap()
+            .expect("installed main launch must produce a plan");
+        // start_service records only after a successful spawn.
+        record_port_admission_plan(&db, &plan);
+
+        let claims = db.port_claims().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].install_profile_key, "ipk_app");
+        assert_eq!(claims[0].preferred_port, 3000);
+        assert_eq!(claims[0].last_actual_port, Some(3000));
+    }
+
+    #[test]
+    fn same_app_same_endpoint_keeps_preferred_port() {
+        let (_d, db) = temp_db();
+        // The app already holds its own main endpoint at 3000.
+        db.record_port_claim(&other_app_main_claim("ipk_app", 3000))
+            .unwrap();
+        let ctx = installed_ctx("ipk_app");
+        // Relaunching the same app/endpoint sees its own claim as self → keeps 3000.
+        let port = resolved_port_env(&db, &ctx, "main", 3000);
+        assert_eq!(port, "3000", "own endpoint claim must not self-conflict");
+    }
+
+    #[test]
+    fn non_main_service_is_not_admitted() {
+        let (_d, db) = temp_db();
+        db.record_port_claim(&other_app_main_claim("ipk_other", 3000))
+            .unwrap();
+        let ctx = installed_ctx("ipk_app");
+        // Only the `main` service's PORT is ato-injected / admitted.
+        let plan = plan_service_port_admission(&db, &ctx, "worker", Some(3000), |_| true).unwrap();
+        assert!(plan.is_none(), "non-main services skip port admission");
+    }
+
+    #[test]
+    fn port_query_main_sets_preferred_port() {
+        let (_d, db) = temp_db();
+        // No conflict: a `capsule://…?port.main=3001` query input becomes the
+        // preferred port, overriding the env `PORT` (here 8080).
+        let ctx = installed_ctx_with_port("ipk_app", "main", 3001);
+        let port = resolved_port_env(&db, &ctx, "main", 8080);
+        assert_eq!(port, "3001", "port query input must set the preferred port");
+        // And it is the claim's preferred port, not just the resolved one.
+        let plan = plan_service_port_admission(&db, &ctx, "main", Some(3001), |_| true)
+            .unwrap()
+            .expect("installed main launch produces a plan");
+        assert_eq!(plan.claim.preferred_port, 3001);
+    }
+
+    #[test]
+    fn port_query_endpoint_sets_preferred_port() {
+        // The web-service `main` service maps to the `main` logical endpoint, so a
+        // `port.main=...` query keyed by endpoint name resolves for it. An input
+        // keyed for a different endpoint must NOT bleed into `main`.
+        let ctx = installed_ctx_with_port("ipk_app", "main", 4242);
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        assert_eq!(resolve_preferred_port(&ctx, "main", &env), Some(4242));
+
+        let other = installed_ctx_with_port("ipk_app", "admin", 4242);
+        assert_eq!(
+            resolve_preferred_port(&other, "main", &env),
+            Some(8080),
+            "a port input for a different endpoint must not apply to main"
+        );
+    }
+
+    #[test]
+    fn port_query_conflict_remaps() {
+        let (_d, db) = temp_db();
+        // A different installed app already holds the query-requested port; the
+        // existing default Remap policy must remap away from it.
+        db.record_port_claim(&other_app_main_claim("ipk_other", 3001))
+            .unwrap();
+        let ctx = installed_ctx_with_port("ipk_app", "main", 3001);
+        let port = resolved_port_env(&db, &ctx, "main", 8080);
+        assert_ne!(port, "3001", "conflicting installed claim must remap PORT");
+        assert!(
+            port.parse::<u16>().unwrap() >= 49152,
+            "remap must land in the ephemeral range"
+        );
+        // The claim still records 3001 as the preferred (logical endpoint stable).
+        let plan = plan_service_port_admission(&db, &ctx, "main", Some(3001), |p| p != 3001)
+            .unwrap()
+            .expect("plan");
+        assert_eq!(plan.claim.preferred_port, 3001);
+    }
+
+    #[test]
+    fn port_query_auto_suppresses_env_port_preference() {
+        // `port=auto` is an *explicit* auto: it must suppress the env-`PORT`
+        // fallback for that endpoint so admission sees no concrete preferred port,
+        // even when the service env carries a `PORT`. (Option A — the spec.)
+        let ctx = installed_ctx_with_auto("ipk_app", "main");
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        assert_eq!(
+            resolve_preferred_port(&ctx, "main", &env),
+            None,
+            "explicit auto must suppress the env-PORT fallback, not fall back to 8080"
+        );
+    }
+
+    #[test]
+    fn port_query_auto_with_env_port_creates_no_port_claim() {
+        let (_d, db) = temp_db();
+        // End-to-end seam: `port=auto` + a `PORT=8080` service env must NOT create
+        // a concrete preferred-port claim. The suppressed fallback yields a `None`
+        // preferred port, so admission produces no plan (OS auto-assign path).
+        let ctx = installed_ctx_with_auto("ipk_app", "main");
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        let preferred = resolve_preferred_port(&ctx, "main", &env);
+        assert_eq!(preferred, None);
+        let plan = plan_service_port_admission(&db, &ctx, "main", preferred, |_| true).unwrap();
+        assert!(
+            plan.is_none(),
+            "explicit auto must create no concrete port claim even with env PORT set"
+        );
+    }
+
+    #[test]
+    fn port_query_auto_endpoint_suppresses_only_that_endpoint() {
+        // `port.<endpoint>=auto` must suppress the env-`PORT` fallback only for the
+        // named endpoint. A *different* endpoint (with no preference of its own)
+        // keeps the existing env-`PORT` behavior unchanged.
+        let ctx = installed_ctx_with_auto("ipk_app", "admin");
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        // The admin endpoint was marked auto → suppressed.
+        assert_eq!(
+            resolve_preferred_port(&ctx, "admin", &env),
+            None,
+            "auto on `admin` must suppress its env-PORT fallback"
+        );
+        // `main` has no preference at all → unchanged env-PORT fallback.
+        assert_eq!(
+            resolve_preferred_port(&ctx, "main", &env),
+            Some(8080),
+            "an endpoint without an auto entry keeps the env-PORT fallback"
+        );
+    }
+
+    #[test]
+    fn no_port_preference_keeps_env_port_fallback() {
+        let (_d, db) = temp_db();
+        // No port query input at all (e.g. `ato app run` with no `?port=`): the
+        // env-`PORT` fallback is unchanged and a concrete claim is still created.
+        let ctx = installed_ctx("ipk_app");
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        let preferred = resolve_preferred_port(&ctx, "main", &env);
+        assert_eq!(preferred, Some(8080), "no preference → env-PORT fallback");
+        let plan = plan_service_port_admission(&db, &ctx, "main", preferred, |_| true)
+            .unwrap()
+            .expect("installed main launch with env PORT produces a plan");
+        assert_eq!(plan.claim.preferred_port, 8080);
+    }
+
+    #[test]
+    fn port_query_does_not_affect_ato_run() {
+        let (_d, db) = temp_db();
+        // `ato run` carries no install identity and no port preferences. Even if a
+        // conflicting claim exists and the runtime synthesized port preferences
+        // (which it would not for `ato run`), the non-installed launch keeps its
+        // env PORT untouched and creates no plan.
+        db.record_port_claim(&other_app_main_claim("ipk_other", 3001))
+            .unwrap();
+        let ctx = RuntimeLaunchContext::empty();
+        let env = HashMap::from([("PORT".to_string(), "3001".to_string())]);
+        // No install identity → preferred resolves to env PORT but admission is skipped.
+        assert_eq!(resolve_preferred_port(&ctx, "main", &env), Some(3001));
+        let port = resolved_port_env(&db, &ctx, "main", 3001);
+        assert_eq!(port, "3001", "ato run must keep its PORT untouched");
+        let plan = plan_service_port_admission(&db, &ctx, "main", Some(3001), |_| true).unwrap();
+        assert!(plan.is_none(), "non-installed launch produces no plan");
+    }
 
     fn http_probe(port: &str) -> ReadinessProbe {
         ReadinessProbe {

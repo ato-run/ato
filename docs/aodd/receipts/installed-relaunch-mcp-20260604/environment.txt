@@ -1,0 +1,10 @@
+date: 2026-06-04
+branch: test/installed-app-relaunch-mcp-smoke  @ 58c0c8a9
+dev tip merged: #471/#476/#477 (58c0c8a9)
+ATO_HOME: /tmp/ato.28888c41
+HOME: /tmp/ato-home.4a206862
+platform: Darwin 24.6.0 arm64
+binaries:
+  ato-desktop:     crates/ato-desktop/target/debug/ato-desktop
+  ato-desktop-mcp: crates/ato-desktop/target/debug/ato-desktop-mcp
+  ato-cli:         target/debug/ato

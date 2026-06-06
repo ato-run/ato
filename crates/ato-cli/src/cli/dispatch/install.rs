@@ -19,6 +19,7 @@ const CURATED_INSTALL_ALIASES: &[(&str, &str)] = &[
 pub(crate) struct InstallCommandArgs {
     pub(crate) slug: Option<String>,
     pub(crate) from_gh_repo: Option<String>,
+    pub(crate) from_local: Option<PathBuf>,
     pub(crate) registry: Option<String>,
     pub(crate) version: Option<String>,
     pub(crate) default: bool,
@@ -47,6 +48,26 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
             std::io::stderr().is_terminal(),
         );
     let rt = tokio::runtime::Runtime::new()?;
+
+    if let Some(local_dir) = args.from_local.as_deref() {
+        if args.registry.is_some() {
+            anyhow::bail!("--registry cannot be used with --from-local");
+        }
+        if args.version.is_some() {
+            anyhow::bail!("--version cannot be used with --from-local");
+        }
+
+        let result = rt.block_on(install::install_local_directory(
+            local_dir,
+            install::LocalInstallOptions {
+                output_dir: args.output,
+                projection_preference,
+                json_output: args.json,
+            },
+        ))?;
+        render_install_result(&result, args.json, args.no_project)?;
+        return Ok(());
+    }
 
     if let Some(repository) = args.from_gh_repo.as_deref() {
         if args.registry.is_some() {

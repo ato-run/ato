@@ -40,5 +40,6 @@ pub use store::{
     read_session_records, session_record_path, session_root, write_session_record_atomic,
 };
 pub use validate::{
-    RecordValidationOutcome, RecordValidationParams, handle_matches_record, validate_record_only,
+    RecordValidationOutcome, RecordValidationParams, handle_matches_record,
+    validate_record_for_install_profile_key, validate_record_only,
 };

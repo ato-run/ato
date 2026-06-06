@@ -1,0 +1,24 @@
+repo: ato
+branch: verify/480-481-482 (= origin/dev @ 78a5670b, contains #489/#480, #483/#481, #488/#482)
+date: 2026-06-04
+host: macOS (Darwin 24.6.0, arm64)
+toolchain: cargo (stable), uv 0.10.0 (Homebrew), node v22.17.0
+
+ATO_HOME: <repo>/.tmp/ir/h  (installed fixture state; app installed_at 2026-06-04T11:08:56Z)
+desktop binary: <repo>/crates/ato-desktop/target/debug/ato-desktop  (rebuilt 22:22 from origin/dev)
+mcp binary: <repo>/crates/ato-desktop/target/debug/ato-desktop-mcp  (rebuilt 22:22 from origin/dev)
+ato binary: <repo>/target/debug/ato  (ATO_DESKTOP_ATO_BIN)
+
+fixture: crates/ato-cli/tests/fixtures/installed-relaunch-node
+  capsule_handle: ato-run/installed-relaunch-node   version: 0.1.0
+  runtime: web (deterministic static page on 127.0.0.1:18880), no external services / DB / secrets
+
+install identity (captured from ATO_HOME):
+  installed_app_id:     app_824778c6c091d7fd3be1603198b77ba4
+  profile_id:           default
+  install_profile_key:  ipk_82508d85640a941525c49106efdd4071
+  install_revision_id:  rev_fe1fbb91dedb0a2f24e61091e2e2b420
+
+note: `ato install` has no local-path mode; deterministic install is covered hermetically by
+      crates/ato-cli/tests/installed_relaunch_fixture_install.rs (mock Store/GitHub, no network).
+      The ATO_HOME above was populated by that install path in an earlier run on 2026-06-04.

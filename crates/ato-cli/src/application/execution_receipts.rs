@@ -129,7 +129,19 @@ pub(crate) fn read_receipt_document_at(
     execution_id: &str,
 ) -> Result<ExecutionReceiptDocument> {
     let path = receipt_path(root, execution_id)?;
-    let raw = fs::read(&path)
+    read_receipt_document_from_file(&path)
+}
+
+/// Read and schema-discriminate a receipt document from an explicit file path.
+///
+/// Unlike [`read_receipt_document_at`], which resolves the canonical
+/// `~/.ato/executions/<id>/receipt.json` location from an execution id, this
+/// accepts an arbitrary path — used by `ato receipts diff <old> <new>`, which
+/// operates on receipt files the caller names directly. Errors are readable and
+/// non-panicking for the missing-path, invalid-JSON, missing-schema, and
+/// unsupported-version cases.
+pub(crate) fn read_receipt_document_from_file(path: &Path) -> Result<ExecutionReceiptDocument> {
+    let raw = fs::read(path)
         .with_context(|| format!("failed to read execution receipt {}", path.display()))?;
     let value: serde_json::Value = serde_json::from_slice(&raw)
         .with_context(|| format!("failed to parse execution receipt {}", path.display()))?;

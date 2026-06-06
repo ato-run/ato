@@ -1,0 +1,41 @@
+# Baseline (origin/dev = 78a5670b)
+cargo fmt --all -- --check                                  # PASS (no drift)
+cargo check --workspace --all-targets                       # PASS (exit 0)
+cargo check --bin ato-desktop                               # PASS (exit 0)
+cargo check --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp  # PASS (exit 0)
+
+# #480 focused
+cargo test -p ato-cli --lib lifecycle                       # PASS 17
+cargo test -p ato-cli --test installed_relaunch_fixture_install -- --test-threads=1  # PASS 1
+cargo test --bin ato-desktop-mcp host_dispatch_action       # PASS 3
+
+# #481 focused
+cargo test -p ato-cli --lib auto_fix_all                    # PASS 2 (mock uv)
+cargo test -p ato-cli --lib v03_build_provision             # PASS 5 (incl. rejects_requirements_without_uv_lock, uses_requirements_uv_lock_with_pip_sync)
+cargo test -p ato-cli --test fail_closed_runtime_preflight  # PASS 4, IGNORED 2 (documented)
+#   native_python_uv_lock_missing_fail_closed -> ATO_ERR_PROVISIONING_LOCK_INCOMPLETE/E104 + "uv.lock"
+
+# #482 focused
+cargo test --bin ato-desktop navigate_to_url_mcp_preflight  # PASS 1 (not_found structured failure)
+cargo test --bin ato-desktop inspect_launchable_installed_profile  # PASS 3 (identity / not_found / degraded)
+cargo test --bin ato-desktop ato_app_install_profile_key    # PASS 3 (parse / reject)
+
+# Live integrated E2E (rebuilt desktop + mcp, ATO_HOME=<repo>/.tmp/ir/h)
+ato-desktop --skip-onboarding &                             # socket published in ${ATO_HOME}/run/
+# valid reopen:
+host_dispatch_action NavigateToUrl ato://app/ipk_82508d85640a941525c49106efdd4071
+#   -> {"ok":true,"queued_action":"NavigateToUrl"}
+curl -fsS http://127.0.0.1:18880/                           # PASS: "Ato installed relaunch fixture" (served in 1s)
+#   session record runs/run-*/session.json stamped install_profile_key=ipk_8250...
+host_take_screenshot                                        # PASS: no consent/review wizard (screenshots/host-relaunch-no-wizard.png)
+# invalid reopen:
+host_dispatch_action NavigateToUrl ato://app/ipk_does_not_exist
+#   -> {"ok":false,"action":"NavigateToUrl","url":"ato://app/ipk_does_not_exist","reason":"installed_profile_not_found"}
+host_dispatch_action NavigateToUrl ato://app/has/too/many/segments
+#   -> {"ok":false,...,"reason":"invalid_ato_app_url","detail":"ato://app URL must be shaped as ato://app/<install_profile_key>"}
+# desktop log: invalid URLs intercepted by preflight; no guest launch, no consent wizard, no handle fallback.
+
+# Regression
+cargo test -p capsule-core                                  # PASS (all)
+cargo test -p ato-cli --lib                                 # see README (authoritative count)
+cargo test --bin ato-desktop                                # 12 pre-existing env-dependent failures (secret-store identity / local snapshot asserts), unrelated to #480/#481/#482

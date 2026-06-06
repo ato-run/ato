@@ -1,0 +1,6 @@
+[2m2026-06-04T10:01:59.243089Z[0m [32m INFO[0m focus dispatcher routes action [3maction[0m[2m=[0mNavigateToUrl
+[2m2026-06-04T10:01:59.243236Z[0m [32m INFO[0m Focus-mode NavigateToUrl [3murl[0m[2m=[0mato://app/ipk_does_not_exist00000000000000
+[2m2026-06-04T10:01:59.243402Z[0m [33m WARN[0m NavigateToUrl(ato://app): no launchable installed profile — ignored [3merror[0m[2m=[0mno installed app matches 'ato://app/ipk_does_not_exist00000000000000' (not installed, or the install is degraded) [3murl[0m[2m=[0mato://app/ipk_does_not_exist00000000000000
+[2m2026-06-04T10:03:51.668028Z[0m [32m INFO[0m focus dispatcher routes action [3maction[0m[2m=[0mNavigateToUrl
+[2m2026-06-04T10:03:51.668168Z[0m [32m INFO[0m Focus-mode NavigateToUrl [3murl[0m[2m=[0mato://app/ipk_does_not_exist00000000000000
+[2m2026-06-04T10:03:51.668294Z[0m [33m WARN[0m NavigateToUrl(ato://app): no launchable installed profile — ignored [3merror[0m[2m=[0mno installed app matches 'ato://app/ipk_does_not_exist00000000000000' (not installed, or the install is degraded) [3murl[0m[2m=[0mato://app/ipk_does_not_exist00000000000000

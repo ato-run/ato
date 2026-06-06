@@ -1,12 +1,16 @@
 mod dependency_root;
 mod diagnose;
 pub(crate) mod lifecycle_path;
+mod python_lock;
 mod shadow;
 mod types;
 
 pub(crate) use dependency_root::{dependency_root, relative_dependency_root_from_manifest};
 pub(crate) use lifecycle_path::{
     LifecyclePathPlan, LifecyclePhase, build_lifecycle_path_plan, materialize_lifecycle_toolchains,
+};
+pub(crate) use python_lock::{
+    python_requirements_lock_missing, python_requirements_lock_sync_command,
 };
 
 use std::sync::Arc;

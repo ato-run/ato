@@ -140,6 +140,49 @@ pub(crate) enum RuntimeInternalCommands {
         #[arg(long = "emit-json", default_value_t = false)]
         emit_json: bool,
     },
+
+    /// Repair the Ato-managed Podman machine: restart it and re-verify with
+    /// `podman info`. Remediation for the "machine running but unhealthy" state.
+    /// Only ever touches `ato-podman`. (#460)
+    #[command(
+        hide = true,
+        about = "Repair the Ato-managed Podman machine (restart + verify) (plumbing)"
+    )]
+    RepairHostRuntime {
+        /// Emit machine-readable JSON progress lines on stdout.
+        #[arg(long = "emit-json", default_value_t = false)]
+        emit_json: bool,
+    },
+
+    /// Resume Runtime Setup after a reboot: read the resume marker, re-check the
+    /// (read-only) substrate status, and report the next step, clearing the
+    /// marker once the substrate is ready or the marker is stale. (#460)
+    #[command(hide = true, about = "Resume Runtime Setup after a reboot (plumbing)")]
+    ResumeAfterReboot {
+        /// Emit machine-readable JSON on stdout.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Execute a Windows substrate remediation: enable WSL / WSL2, write a
+    /// reboot-resume marker, or repair the Ato Podman machine. The Desktop
+    /// supplies elevation for actions that require admin. (#460)
+    #[command(
+        hide = true,
+        about = "Execute a Windows substrate remediation action (plumbing)"
+    )]
+    PrepareWindowsSubstrate {
+        /// One of: install-wsl | enable-wsl2 | reboot-required |
+        /// open-virtualization-instructions | repair-podman-machine.
+        #[arg(long)]
+        action: String,
+        /// Which surface initiated it (`onboarding` | `settings`).
+        #[arg(long = "source-surface", default_value = "settings")]
+        source_surface: String,
+        /// Emit machine-readable JSON progress lines on stdout.
+        #[arg(long = "emit-json", default_value_t = false)]
+        emit_json: bool,
+    },
 }
 
 #[derive(Subcommand)]
