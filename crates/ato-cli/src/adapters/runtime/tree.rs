@@ -8,8 +8,6 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
-#[cfg(windows)]
-use std::os::windows::fs as windows_fs;
 
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::types::CapsuleManifest;
@@ -317,31 +315,84 @@ fn switch_current_symlink(base_dir: &Path, runtime_dir: &Path) -> Result<()> {
     let current_path = base_dir.join(CURRENT_SYMLINK);
     if let Ok(meta) = fs::symlink_metadata(&current_path)
         && meta.file_type().is_dir()
-        && !meta.file_type().is_symlink()
+        && !current_pointer_is_link(&meta)
     {
+        // Only replace a pointer we own. A real directory (not a symlink/junction)
+        // sitting here is a user file we must not clobber. Note: on Windows a
+        // directory *junction* has the DIRECTORY attribute set yet
+        // `FileType::is_symlink()` is false, so we test the reparse-point attribute
+        // instead — otherwise relaunch would refuse to repoint its own junction.
         bail!(
-            "Refusing to replace runtime current directory that is not a symlink: {}",
+            "Refusing to replace runtime current directory that is not a symlink/junction: {}",
             current_path.display()
         );
     }
 
     let tmp_link = base_dir.join(format!(".{}.tmp-{}", CURRENT_SYMLINK, random_suffix()));
-    if tmp_link.exists() {
-        fs::remove_file(&tmp_link).ok();
-    }
+    remove_pointer_if_present(&tmp_link);
 
     create_directory_symlink(runtime_dir, &tmp_link)?;
+
+    // On Windows `fs::rename` cannot atomically replace an existing directory
+    // reparse point (symlink/junction), so drop the previous pointer first. On
+    // Unix the rename replaces the old symlink atomically, so we leave it.
+    #[cfg(windows)]
+    remove_pointer_if_present(&current_path);
+
     let result = fs::rename(&tmp_link, &current_path).with_context(|| {
         format!(
-            "Failed to atomically switch runtime symlink {} -> {}",
+            "Failed to atomically switch runtime pointer {} -> {}",
             tmp_link.display(),
             current_path.display()
         )
     });
     if result.is_err() {
-        fs::remove_file(&tmp_link).ok();
+        remove_pointer_if_present(&tmp_link);
     }
     result
+}
+
+/// Whether `meta` (from `symlink_metadata`) describes a pointer ato may replace:
+/// a symlink on Unix, or any reparse point (symlink or junction) on Windows.
+fn current_pointer_is_link(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+/// Remove a `current` pointer (symlink or Windows junction) without following it
+/// to its target. Directory reparse points must be removed via `remove_dir`
+/// (which unlinks only the reparse point, leaving the target intact); a file
+/// symlink via `remove_file`. Missing paths are a no-op.
+fn remove_pointer_if_present(path: &Path) {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+        if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            let _ = fs::remove_dir(path);
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if meta.file_type().is_dir() {
+            let _ = fs::remove_dir(path);
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -357,13 +408,42 @@ fn create_directory_symlink(target: &Path, link: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn create_directory_symlink(target: &Path, link: &Path) -> Result<()> {
-    windows_fs::symlink_dir(target, link).with_context(|| {
-        format!(
-            "Failed to create symlink {} -> {}",
+    // Use a directory JUNCTION, not a symlink. `CreateSymbolicLinkW` (what
+    // `std::os::windows::fs::symlink_dir` calls) requires
+    // `SeCreateSymbolicLinkPrivilege` — held only by elevated processes or when
+    // Developer Mode is enabled — and otherwise fails with os error 1314
+    // (ERROR_PRIVILEGE_NOT_HELD). A junction is a privilege-free directory
+    // reparse point and is fully sufficient for ato's `current` pointer (it is
+    // followed transparently and read back via `read_link`). `mklink /J` is a
+    // `cmd.exe` builtin, so it is invoked through `cmd /D /C` (`/D` disables any
+    // host AutoRun script that could otherwise pollute output / leak an exit code).
+    let output = std::process::Command::new("cmd")
+        .arg("/D")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .with_context(|| {
+            format!(
+                "Failed to spawn mklink to create junction {} -> {}",
+                link.display(),
+                target.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "Failed to create junction {} -> {}: {}",
             link.display(),
-            target.display()
-        )
-    })
+            target.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
