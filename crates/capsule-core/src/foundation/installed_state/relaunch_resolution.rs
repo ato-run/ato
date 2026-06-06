@@ -4,9 +4,9 @@
 //! The relaunch preflight (#531) reads the ledger and evaluates admission. This
 //! module sits *between* the two: it takes the recorded conditions and tries to
 //! resolve the ones that depend on local facts — `Unknown` host env, a
-//! `UserGrantRequired` secret with a grant reference, a `UserGrantRequired`
-//! state with a binding reference — into `Satisfied`, **without re-reading the
-//! manifest / lockfile**.
+//! `UserGrantRequired` secret *or sensitive env* (#549) with a grant reference, a
+//! `UserGrantRequired` state with a binding reference — into `Satisfied`,
+//! **without re-reading the manifest / lockfile**.
 //!
 //! ## Discipline
 //!
@@ -172,6 +172,26 @@ pub fn resolve_relaunch_conditions(
                     warnings.push(RelaunchResolutionWarning::EnvStillUnknown {
                         condition_key: claim.condition_key.clone(),
                     });
+                }
+            }
+            // Env-via-grant (#549): a sensitive env condition that demands a user
+            // grant resolves exactly like a secret — confirm a non-null redacted
+            // grant_ref against the grant probe. The env value is never inspected;
+            // the value is injected later on the receipt-excluded secret_env channel.
+            LaunchConditionKind::Env
+                if claim.status == LaunchConditionStatus::UserGrantRequired =>
+            {
+                match detail_string(claim, "grant_ref") {
+                    Some(grant_ref) if (ctx.secret_grant_exists)(&grant_ref) => {
+                        push_update(
+                            &mut updates,
+                            claim,
+                            RelaunchResolutionSource::SecretGrantRef,
+                        );
+                    }
+                    _ => warnings.push(RelaunchResolutionWarning::SecretGrantMissing {
+                        condition_key: claim.condition_key.clone(),
+                    }),
                 }
             }
             // Secret: resolvable only with a non-null redacted grant_ref that the
@@ -382,6 +402,86 @@ mod tests {
         );
         assert_eq!(
             status_of(&res, "OPENAI_API_KEY"),
+            LaunchConditionStatus::UserGrantRequired
+        );
+        assert!(matches!(
+            res.warnings[0],
+            RelaunchResolutionWarning::SecretGrantMissing { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_env_user_grant_required_to_satisfied_when_grant_ref_exists() {
+        // #549: a sensitive env condition resolves by grant_ref, like a secret.
+        let res = resolve_relaunch_conditions(
+            input(vec![claim(
+                LaunchConditionKind::Env,
+                "MY_TOKEN",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"source":"manifest.required_env","grant_ref":"ato-secret://store/my-token"}"#,
+            )]),
+            &ctx(false, true, false),
+        );
+        assert_eq!(
+            status_of(&res, "MY_TOKEN"),
+            LaunchConditionStatus::Satisfied
+        );
+        assert_eq!(
+            res.updates[0].source,
+            RelaunchResolutionSource::SecretGrantRef
+        );
+        // A durable grant resolution must be persistable (not reverted like
+        // transient host-env presence).
+        let persist = res
+            .durable_persist_claims()
+            .expect("env-via-grant resolution is durable");
+        assert_eq!(
+            persist
+                .iter()
+                .find(|c| c.condition_key == "MY_TOKEN")
+                .unwrap()
+                .status,
+            LaunchConditionStatus::Satisfied
+        );
+    }
+
+    #[test]
+    fn resolve_env_user_grant_required_stays_when_grant_missing() {
+        // grant_ref present but the probe says the grant does not exist → blocked.
+        let res = resolve_relaunch_conditions(
+            input(vec![claim(
+                LaunchConditionKind::Env,
+                "MY_TOKEN",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"source":"manifest.required_env","grant_ref":"ato-secret://store/my-token"}"#,
+            )]),
+            &ctx(false, false, false),
+        );
+        assert_eq!(
+            status_of(&res, "MY_TOKEN"),
+            LaunchConditionStatus::UserGrantRequired
+        );
+        assert!(matches!(
+            res.warnings[0],
+            RelaunchResolutionWarning::SecretGrantMissing { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_env_user_grant_required_stays_when_grant_ref_null() {
+        // No grant_ref → nothing to confirm, stays UserGrantRequired even if the
+        // grant probe would say yes. Host-presence does not satisfy a grant-gated env.
+        let res = resolve_relaunch_conditions(
+            input(vec![claim(
+                LaunchConditionKind::Env,
+                "MY_TOKEN",
+                LaunchConditionStatus::UserGrantRequired,
+                r#"{"source":"manifest.required_env","grant_ref":null}"#,
+            )]),
+            &ctx(true, true, false),
+        );
+        assert_eq!(
+            status_of(&res, "MY_TOKEN"),
             LaunchConditionStatus::UserGrantRequired
         );
         assert!(matches!(
