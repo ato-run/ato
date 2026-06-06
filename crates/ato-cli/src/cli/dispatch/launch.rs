@@ -5,7 +5,7 @@
 //! capsule handle, then bridges into the existing run pipeline with profile args applied.
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -23,9 +23,7 @@ use crate::adapters::runtime::launch_condition_prompt::{
 };
 use crate::app_control::session::ScopedInstallLifecycleGuard;
 use crate::cli::commands::run::InstallLifecycleContext;
-use crate::install::support::execute_run_command;
 use crate::reporters;
-use crate::{EnforcementMode, ProviderToolchain, RunAgentMode};
 
 pub(crate) struct LaunchArgs {
     pub(crate) install_profile_key: String,
@@ -37,7 +35,7 @@ pub(crate) struct LaunchArgs {
 
 pub(crate) fn execute_launch_command(
     args: LaunchArgs,
-    reporter: Arc<reporters::CliReporter>,
+    _reporter: Arc<reporters::CliReporter>,
 ) -> Result<()> {
     let instances_root = ato_path_or_workspace_tmp("instances");
     let store =
@@ -129,10 +127,34 @@ pub(crate) fn execute_launch_command(
     // writes the record. Deriving it from a random id here would break the
     // receipt/session/CIK identity contract.
 
-    // Read LaunchProfile to apply args and warn about unsupported fields.
-    let (profile_args, profile_env_refs_warning) =
-        read_profile_launch_config(&store, &app_id, &profile_id);
+    // Read the LaunchProfile. port_policy / concurrency_policy / isolation are
+    // now honoured by the detached session-start machinery this command routes
+    // into (it reserves/remaps the service port and injects it into the
+    // runtime), so they no longer surface a "not yet supported" warning here.
+    // Profile args and env/secret refs are not yet applied on the installed
+    // relaunch path (#565 follow-up) — surface them rather than dropping silently.
+    let (profile_args, _profile_warning) = read_profile_launch_config(&store, &app_id, &profile_id);
+    if !profile_args.is_empty() {
+        tracing::warn!(
+            "ato launch: launch profile args {profile_args:?} are not yet applied on the \
+             installed relaunch path"
+        );
+    }
+    if !capsule_launch_inputs.is_empty() {
+        tracing::warn!(
+            "ato launch: {} launch-condition input(s) resolved but injection on the installed \
+             relaunch path is not yet wired (#565 follow-up)",
+            capsule_launch_inputs.len()
+        );
+    }
+    if args.nacelle.is_some() {
+        tracing::warn!(
+            "ato launch: --nacelle is not applied on the installed relaunch path; ignoring"
+        );
+    }
 
+    // Diagnostic resolution summary on stderr only — stdout is reserved for the
+    // session-start JSON envelope when `--json` is set.
     if args.verbose || args.json {
         let info = serde_json::json!({
             "installed_app_id": app_id.as_str(),
@@ -142,18 +164,7 @@ pub(crate) fn execute_launch_command(
             "capsule_handle": capsule_handle,
             "capsule_launch_inputs": capsule_launch_inputs.len(),
         });
-        if args.json {
-            println!("{}", serde_json::to_string_pretty(&info)?);
-        } else {
-            eprintln!("[ato launch] resolved: {}", serde_json::to_string(&info)?);
-        }
-    }
-
-    if let Some(warn) = profile_env_refs_warning {
-        tracing::warn!("ato launch: {warn}");
-        if args.verbose {
-            eprintln!("ATO-WARN {warn}");
-        }
+        eprintln!("[ato launch] resolved: {}", serde_json::to_string(&info)?);
     }
 
     tracing::debug!(
@@ -164,10 +175,12 @@ pub(crate) fn execute_launch_command(
         capsule_handle,
     );
 
-    // The lifecycle context is set via ScopedInstallLifecycleGuard so it is
-    // always cleared after execute_run_command returns, even on early return or panic.
-    // The session writer derives CapsuleInstanceKey from the pipeline's execution_id
-    // at write time (see apply_install_lifecycle in session.rs).
+    // Stamp the detached session record with the install identity. The guard
+    // sets a thread-local that the session-record writer reads (see
+    // `apply_install_lifecycle` in app_control/session.rs); `start_session`
+    // drives the pipeline on this same thread via `block_on`, so the writer
+    // observes the context and the Desktop can later discover the session by
+    // its install_profile_key. The guard always clears on return (or panic).
     let lifecycle_ctx = InstallLifecycleContext {
         installed_app_id: app_id.as_str().to_string(),
         install_profile_id: profile_id.as_str().to_string(),
@@ -175,62 +188,91 @@ pub(crate) fn execute_launch_command(
         install_revision_id: rev_id.as_str().to_string(),
     };
 
-    // Compute the frozen revision output dir — the run pipeline will bypass the
-    // ~/.ato path guard and run directly from this immutable directory, ensuring
-    // the pinned current_revision is executed even after a rollback.
+    // Resolve the frozen revision: find the pinned `.capsule` and extract its
+    // `capsule.toml`. The run executes directly from this immutable revision
+    // artifact, so the pinned current_revision is honoured even after a
+    // rollback.
     let revision_output_dir = store.revision_output_dir(&rev_id);
+    let pinned_capsule_path =
+        find_capsule_in_revision_output(&revision_output_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "installed revision {} has no .capsule artifact under {} — the install may be \
+                 degraded; reinstall with `ato install`",
+                rev_id.as_str(),
+                revision_output_dir.display()
+            )
+        })?;
+    let pinned_manifest_path = extract_pinned_revision_manifest(&pinned_capsule_path)
+        .with_context(|| {
+            format!(
+                "failed to extract pinned revision capsule {}",
+                pinned_capsule_path.display()
+            )
+        })?;
 
-    // `pinned_revision_output_dir` must be the `.capsule` file, not the output directory.
-    // `normalize_run_target_after_install` only handles the `.capsule` extension check
-    // for a file path; a bare directory falls through to source inference and fails with
-    // ATO_ERR_AMBIGUOUS_ENTRYPOINT because no `capsule.toml` is present at that path.
-    let pinned_capsule_path = find_capsule_in_revision_output(&revision_output_dir)
-        .unwrap_or_else(|| revision_output_dir.clone());
+    let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx);
 
-    // Set the thread-local lifecycle context via a scoped guard so it is
-    // always cleared when this function returns (or panics).
-    let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx.clone());
-
-    execute_run_command(
-        pinned_capsule_path.clone(),
-        /* target */ None,
-        /* args */ profile_args,
-        /* watch */ false,
-        /* background */ false,
-        args.nacelle,
-        /* registry */ None,
-        /* enforcement */ EnforcementMode::Strict,
-        /* sandbox_mode */ false,
-        // Installed capsules are pre-consented artifacts; bypass the sandbox
-        // opt-in / execution-plan consent gate that applies to `ato run`.
-        /* dangerously_skip_permissions */
-        true,
-        /* compatibility_fallback */ None,
-        /* provider_toolchain */ ProviderToolchain::Auto,
-        /* use_existing_toml */ None,
-        /* explicit_commit */ None,
-        /* assume_yes */ args.yes,
-        /* verbose */ args.verbose,
-        /* agent_mode */ RunAgentMode::Auto,
-        /* agent_local_root */ None,
-        /* keep_failed_artifacts */ false,
-        /* auto_fix_mode */ None,
-        /* allow_unverified */ false,
-        /* read */ vec![],
-        /* write */ vec![],
-        /* read_write */ vec![],
-        /* cwd */ None,
-        /* state */ vec![],
-        /* inject */ vec![],
-        /* build_policy */ crate::application::build_materialization::BuildPolicy::IfStale,
-        /* cache_strategy_arg */ crate::cli::shared::CacheStrategyArg::Auto,
-        /* plan_only */ false,
-        /* strict_realization */ false,
-        Some(lifecycle_ctx),
-        /* capsule_launch_inputs */ capsule_launch_inputs,
-        /* pinned_revision_output_dir */ Some(pinned_capsule_path),
-        reporter,
+    // Route through the same detached session-start machinery the normal capsule
+    // path uses (#565). It reserves/remaps the service port, injects it into the
+    // runtime, waits for HTTP readiness, registers the process with the
+    // ProcessManager, and writes a discoverable StoredSessionInfo carrying the
+    // install_profile_key stamped above. On readiness failure it kills the whole
+    // process group, so a timed-out relaunch leaves no orphan holding the port.
+    // Installed capsules are pre-consented artifacts; the session-start pipeline
+    // does not re-show the run consent gate.
+    crate::app_control::start_session(
+        &capsule_handle,
+        /* target_label */ None,
+        /* community_toml_id */ None,
+        /* attach_state */ &[],
+        /* from_materialized_record */ None,
+        /* local_manifest_path */ Some(pinned_manifest_path),
+        /* run_config_hash */ None,
+        args.json,
     )
+}
+
+/// Extract a pinned revision's `.capsule` archive and return the path to its
+/// `capsule.toml`.
+///
+/// `ato launch` runs the frozen revision artifact directly. The session-start
+/// pipeline resolves a local `capsule.toml`, so the immutable `.capsule` is
+/// unpacked next to itself (`<stem>-extracted/`) and the manifest path returned.
+/// Extraction is idempotent: a prior unpack with a `capsule.toml` is reused, so
+/// repeated relaunches of the same revision do not re-extract.
+fn extract_pinned_revision_manifest(pinned_capsule_path: &Path) -> Result<PathBuf> {
+    let stem = pinned_capsule_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "capsule".to_string());
+    let extract_dir = pinned_capsule_path
+        .parent()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "pinned capsule {} has no parent directory",
+                pinned_capsule_path.display()
+            )
+        })?
+        .join(format!("{stem}-extracted"));
+    let manifest_path = extract_dir.join("capsule.toml");
+    if manifest_path.is_file() {
+        return Ok(manifest_path);
+    }
+
+    let bytes = std::fs::read(pinned_capsule_path).with_context(|| {
+        format!(
+            "failed to read pinned capsule {}",
+            pinned_capsule_path.display()
+        )
+    })?;
+    crate::adapters::runtime::tree::extract_capsule_to_runtime_dir(&bytes, &extract_dir)?;
+    if !manifest_path.is_file() {
+        anyhow::bail!(
+            "extracted pinned revision capsule {} is missing capsule.toml",
+            pinned_capsule_path.display()
+        );
+    }
+    Ok(manifest_path)
 }
 
 /// Find the single `.capsule` file inside a revision output directory.
@@ -418,6 +460,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = InstallInstanceStore::new(dir.path()).unwrap();
         (dir, store)
+    }
+
+    /// `extract_pinned_revision_manifest` returns an already-extracted
+    /// `capsule.toml` without re-extracting, so repeated relaunches of the same
+    /// pinned revision are idempotent (#565). The capsule body here is bogus and
+    /// is never read because the extracted dir already exists.
+    #[test]
+    fn extract_pinned_revision_manifest_reuses_existing_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir_all(&output).unwrap();
+        let pinned = output.join("basic-web-0.1.0.capsule");
+        std::fs::write(&pinned, b"not-a-real-capsule").unwrap();
+
+        let extracted = output.join("basic-web-0.1.0-extracted");
+        std::fs::create_dir_all(&extracted).unwrap();
+        let manifest = extracted.join("capsule.toml");
+        std::fs::write(&manifest, "schema_version = \"0.3\"\n").unwrap();
+
+        let resolved =
+            extract_pinned_revision_manifest(&pinned).expect("reuse existing extraction");
+        assert_eq!(resolved, manifest);
     }
 
     fn scaffold_app_with_profile(
