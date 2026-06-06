@@ -19,6 +19,7 @@ mod package;
 mod profile;
 mod project;
 pub(crate) mod publish;
+mod receipts;
 mod reconstruct;
 pub(crate) mod registry;
 mod replay;
@@ -60,6 +61,7 @@ use self::package::execute_package_command;
 use self::profile::execute_profile_command;
 use self::project::{execute_project_command, execute_unproject_command};
 use self::publish::execute_publish_command;
+use self::receipts::execute_receipts_command;
 use self::replay::execute_replay_command;
 use self::scaffold::execute_scaffold_command;
 use self::source::execute_source_command;
@@ -107,6 +109,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             rebuild,
             no_build,
             plan_only,
+            strict_realization,
             oci_compose,
             oci_install_sh,
             read,
@@ -156,6 +159,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             cache_strategy: cache,
             deprecation_warning: None,
             plan_only,
+            strict_realization,
             oci_compose,
             oci_install_sh,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
@@ -423,6 +427,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             execute,
         } => reconstruct::execute_reconstruct_command(id, json || command_json, execute),
 
+        Commands::Receipts { command } => execute_receipts_command(command, json),
+
         Commands::Keygen {
             out,
             force,
@@ -465,6 +471,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Install {
             slug,
             from_gh_repo,
+            from_local,
             registry,
             version,
             default,
@@ -482,6 +489,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         } => install::execute_install_command(install::InstallCommandArgs {
             slug,
             from_gh_repo,
+            from_local,
             registry,
             version,
             default,
@@ -506,6 +514,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             verbose,
             json: command_json,
             nacelle,
+            detached_session,
         } => launch::execute_launch_command(
             launch::LaunchArgs {
                 install_profile_key,
@@ -513,6 +522,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 verbose,
                 json: json || command_json,
                 nacelle,
+                detached_session,
             },
             reporter,
         ),

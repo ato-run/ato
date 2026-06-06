@@ -1125,7 +1125,13 @@ impl WebViewManager {
                     ));
                     continue;
                 }
-                HostDispatchAction { action, .. } => {
+                HostDispatchAction { action, url } => {
+                    if let Some(response) =
+                        crate::app::navigate_to_url_mcp_preflight(action, url.as_deref())
+                    {
+                        req.send(Ok(response));
+                        continue;
+                    }
                     // Push onto the queue; `DesktopShell::render` drains
                     // it on the next paint and invokes the matching
                     // window::open_* helper. This bypasses macOS
@@ -1934,6 +1940,24 @@ impl WebViewManager {
                                     original_secrets: original_secrets.clone(),
                                     community_toml_id: community_toml_id.clone(),
                                 });
+                            }
+                            // #404: the unified modal does not yet render a
+                            // folder picker for state-binding requirements. The
+                            // backend resolve seam
+                            // (`capsule_core::installed_state::resolve_state_binding_from_path`)
+                            // exists; wiring the GPUI picker that calls it is a
+                            // follow-up PR. Log so the requirement is observable.
+                            InteractiveResolutionKind::StateBindingRequired {
+                                state_key,
+                                label,
+                            } => {
+                                info!(
+                                    pane_id,
+                                    handle = %handle,
+                                    %state_key,
+                                    %label,
+                                    "preflight surfaced a state-binding requirement; folder picker is a follow-up"
+                                );
                             }
                         }
                     }

@@ -34,23 +34,61 @@ pub(super) struct RuntimeInstallUiEvent {
 /// keeps the two semantically distinct (managed-toolchain *install* vs.
 /// host-runtime *prepare*) even though both stream progress through the same
 /// `runtimeInstall*` hydrate fields and share the single-job guard.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum RuntimeJobKind {
     Install,
     Prepare,
+    /// Repair the Ato Podman machine (#460 PR2): restart + verify.
+    RepairHostRuntime,
+    /// Run a Windows substrate remediation (#460 PR2): the action token plus the
+    /// initiating surface, forwarded to `prepare-windows-substrate`.
+    PrepareWindowsSubstrate {
+        action: String,
+        source_surface: String,
+    },
 }
 
 impl RuntimeJobKind {
     /// The `ato internal runtime …` argv for this job. Install streams with
-    /// `--json`; prepare uses `--emit-json` (PR #440's flag).
-    fn cli_args<'a>(&self, tools_arg: &'a str) -> [&'a str; 6] {
+    /// `--json`; the host-runtime jobs use `--emit-json` (PR #440's flag).
+    fn cli_args(&self, tools_arg: &str) -> Vec<String> {
+        let s = |v: &str| v.to_string();
         match self {
-            RuntimeJobKind::Install => {
-                ["internal", "runtime", "install", "--tools", tools_arg, "--json"]
-            }
-            RuntimeJobKind::Prepare => {
-                ["internal", "runtime", "prepare", "--tools", tools_arg, "--emit-json"]
-            }
+            RuntimeJobKind::Install => vec![
+                s("internal"),
+                s("runtime"),
+                s("install"),
+                s("--tools"),
+                s(tools_arg),
+                s("--json"),
+            ],
+            RuntimeJobKind::Prepare => vec![
+                s("internal"),
+                s("runtime"),
+                s("prepare"),
+                s("--tools"),
+                s(tools_arg),
+                s("--emit-json"),
+            ],
+            RuntimeJobKind::RepairHostRuntime => vec![
+                s("internal"),
+                s("runtime"),
+                s("repair-host-runtime"),
+                s("--emit-json"),
+            ],
+            RuntimeJobKind::PrepareWindowsSubstrate {
+                action,
+                source_surface,
+            } => vec![
+                s("internal"),
+                s("runtime"),
+                s("prepare-windows-substrate"),
+                s("--action"),
+                action.clone(),
+                s("--source-surface"),
+                source_surface.clone(),
+                s("--emit-json"),
+            ],
         }
     }
 
@@ -59,6 +97,8 @@ impl RuntimeJobKind {
         match self {
             RuntimeJobKind::Install => "runtime install failed",
             RuntimeJobKind::Prepare => "Podman setup failed",
+            RuntimeJobKind::RepairHostRuntime => "Podman machine repair failed",
+            RuntimeJobKind::PrepareWindowsSubstrate { .. } => "Windows substrate setup failed",
         }
     }
 
@@ -67,15 +107,21 @@ impl RuntimeJobKind {
         match self {
             RuntimeJobKind::Install => "failed to start runtime install",
             RuntimeJobKind::Prepare => "failed to start Podman setup",
+            RuntimeJobKind::RepairHostRuntime => "failed to start Podman machine repair",
+            RuntimeJobKind::PrepareWindowsSubstrate { .. } => {
+                "failed to start Windows substrate setup"
+            }
         }
     }
 
     /// Cancellation message (only the foreground install path is cancellable
-    /// today, but prepare shares the same terminal-event plumbing).
+    /// today, but the other jobs share the same terminal-event plumbing).
     fn cancel_message(&self) -> &'static str {
         match self {
             RuntimeJobKind::Install => "runtime install cancelled",
             RuntimeJobKind::Prepare => "Podman setup cancelled",
+            RuntimeJobKind::RepairHostRuntime => "Podman machine repair cancelled",
+            RuntimeJobKind::PrepareWindowsSubstrate { .. } => "Windows substrate setup cancelled",
         }
     }
 }
@@ -144,6 +190,15 @@ pub(super) fn spawn_runtime_job(
             let mut terminal = false;
             while let Ok(event) = rx.try_recv() {
                 terminal |= event.terminal;
+                // #460 PR3b: on a *successful* terminal event, the refreshed
+                // setup status rides along under `runtimeInstallComplete.status`.
+                // If the host runtime is now ready, this is where an interrupted
+                // capsule launch resumes.
+                let resume_status = if event.terminal {
+                    refreshed_status_if_successful(&event.payload)
+                } else {
+                    None
+                };
                 let payload = event.payload.to_string();
                 crate::webview_init_guard::wait_until_idle(&be).await;
                 async_app.update(move |cx| {
@@ -152,6 +207,9 @@ pub(super) fn spawn_runtime_job(
                         cx.global_mut::<ActiveRuntimeInstall>().0 = None;
                     }
                     push_runtime_setup(cx, &payload);
+                    if let Some(status) = resume_status {
+                        super::launch_intent::try_resume_launch_if_ready(cx, &status);
+                    }
                 });
             }
             if terminal {
@@ -337,6 +395,25 @@ pub(crate) fn open_runtime_setup_logs(cx: &mut App, request_id: Option<String>) 
     push_runtime_setup(cx, &response.to_string());
 }
 
+/// Extract the refreshed [`RuntimeSetupStatus`] from a terminal install/prepare
+/// event, but only when the job **succeeded**. Returns `None` on failure /
+/// cancellation or when no status snapshot rode along. Used by the foreground
+/// drain to decide whether to resume an interrupted capsule launch (#460 PR3b).
+fn refreshed_status_if_successful(
+    payload: &Value,
+) -> Option<capsule_core::runtime_setup::RuntimeSetupStatus> {
+    let complete = payload.get("runtimeInstallComplete")?;
+    if !complete
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let status = complete.get("status")?;
+    serde_json::from_value(status.clone()).ok()
+}
+
 fn send_terminal_install_event(
     tx: &std::sync::mpsc::Sender<RuntimeInstallUiEvent>,
     payload: Value,
@@ -380,5 +457,96 @@ mod tests {
     #[test]
     fn parse_installable_tools_rejects_empty() {
         assert!(parse_installable_tools(&[]).is_err());
+    }
+
+    // ── #460 PR2b: substrate job argv (the reboot_required CTA must route to
+    //    prepare-windows-substrate, NOT resume) ────────────────────────────────
+
+    #[test]
+    fn install_and_prepare_cli_args() {
+        assert_eq!(
+            RuntimeJobKind::Install.cli_args("node,uv"),
+            vec![
+                "internal", "runtime", "install", "--tools", "node,uv", "--json"
+            ]
+        );
+        assert_eq!(
+            RuntimeJobKind::Prepare.cli_args("podman"),
+            vec![
+                "internal",
+                "runtime",
+                "prepare",
+                "--tools",
+                "podman",
+                "--emit-json"
+            ]
+        );
+    }
+
+    #[test]
+    fn repair_cli_args() {
+        assert_eq!(
+            RuntimeJobKind::RepairHostRuntime.cli_args(""),
+            vec!["internal", "runtime", "repair-host-runtime", "--emit-json"]
+        );
+    }
+
+    // ── #460 PR3b: only a successful terminal event yields a resume status ──────
+
+    #[test]
+    fn refreshed_status_requires_success_and_a_status_snapshot() {
+        // Success + status snapshot → parsed status.
+        let ok = serde_json::json!({
+            "runtimeInstallComplete": {
+                "success": true,
+                "status": { "tools": [], "windows_substrate": null },
+            },
+        });
+        assert!(refreshed_status_if_successful(&ok).is_some());
+
+        // Failure → no resume status even if a snapshot is present.
+        let failed = serde_json::json!({
+            "runtimeInstallComplete": {
+                "success": false,
+                "status": { "tools": [], "windows_substrate": null },
+            },
+        });
+        assert!(refreshed_status_if_successful(&failed).is_none());
+
+        // Success but no snapshot (e.g. cancelled path) → none.
+        let no_status = serde_json::json!({
+            "runtimeInstallComplete": { "success": true, "status": null },
+        });
+        assert!(refreshed_status_if_successful(&no_status).is_none());
+
+        // Not a terminal completion payload at all → none.
+        let progress = serde_json::json!({ "runtimeInstallProgress": { "phase": "installing" } });
+        assert!(refreshed_status_if_successful(&progress).is_none());
+    }
+
+    #[test]
+    fn reboot_required_routes_through_prepare_windows_substrate() {
+        // Regression guard (#467 review): the reboot_required action persists the
+        // resume marker via prepare-windows-substrate; it must NOT be the
+        // read-only resume-after-reboot command.
+        let args = RuntimeJobKind::PrepareWindowsSubstrate {
+            action: "reboot_required".to_string(),
+            source_surface: "onboarding".to_string(),
+        }
+        .cli_args("");
+        assert_eq!(
+            args,
+            vec![
+                "internal",
+                "runtime",
+                "prepare-windows-substrate",
+                "--action",
+                "reboot_required",
+                "--source-surface",
+                "onboarding",
+                "--emit-json",
+            ]
+        );
+        assert!(!args.iter().any(|a| a == "resume-after-reboot"));
     }
 }

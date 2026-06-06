@@ -29,6 +29,10 @@ pub(crate) fn spawn_runtime_setup_status(cx: &mut gpui::App, request_id: Option<
         crate::webview_init_guard::wait_until_idle(&be).await;
         async_app.update(move |cx| {
             push_runtime_setup(cx, &payload.to_string());
+            // #460 PR3b: keep the pending-launch banner in sync whenever a
+            // surface (re)loads its status — reflects any recorded launch intent.
+            let pending = super::launch_intent::peek_pending_launch();
+            super::launch_intent::push_pending_launch(cx, pending.as_ref());
         });
     })
     .detach();
@@ -45,6 +49,86 @@ fn runtime_setup_status_response(request_id: Option<String>) -> Value {
             "ok": false,
             "requestId": request_id,
             "error": { "message": format!("{err:#}") },
+        }),
+    }
+}
+
+/// Spawn the read-only resume-after-reboot probe off the UI thread and hydrate
+/// the active surface with the result. Mirrors [`spawn_runtime_setup_status`]
+/// but runs `ato internal runtime resume-after-reboot --json`, whose payload
+/// already carries the refreshed `runtimeSetupStatus` and the `resumeOutcome`.
+/// Read-only — never mutates host state. See #460 PR2.
+pub(crate) fn spawn_runtime_setup_resume(cx: &mut gpui::App, request_id: Option<String>) {
+    let async_app = cx.to_async();
+    let fe = cx.foreground_executor().clone();
+    let be = cx.background_executor().clone();
+    let be_for_work = be.clone();
+    fe.spawn(async move {
+        let payload = be_for_work
+            .spawn(async move { runtime_setup_resume_response(request_id) })
+            .await;
+        crate::webview_init_guard::wait_until_idle(&be).await;
+        async_app.update(move |cx| {
+            push_runtime_setup(cx, &payload.to_string());
+            // #460 PR3b: reboot→launch continuity. The CLI's read-only resume
+            // payload carries `launchContinuation`; the Desktop consumes its own
+            // marker and re-gates on host readiness before resuming the launch.
+            if let Some(inner) = payload.get("runtimeSetupResume") {
+                super::launch_intent::apply_reboot_resume_launch(cx, inner);
+            }
+        });
+    })
+    .detach();
+}
+
+fn runtime_setup_resume_response(request_id: Option<String>) -> Value {
+    let ato = match crate::orchestrator::resolve_ato_binary() {
+        Ok(ato) => ato,
+        Err(err) => {
+            return serde_json::json!({
+                "ok": false,
+                "requestId": request_id,
+                "error": { "message": format!("failed to resolve ato helper: {err:#}") },
+            });
+        }
+    };
+    let output = Command::new(&ato)
+        .no_console_window()
+        .args(["internal", "runtime", "resume-after-reboot", "--json"])
+        .stdin(Stdio::null())
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            // The command already prints a JSON object with `resumeOutcome` and
+            // `runtimeSetupStatus`; forward it under a `runtimeSetupResume` field
+            // plus the request id so the surface can correlate it.
+            let parsed: Value =
+                serde_json::from_slice(&out.stdout).unwrap_or_else(|_| serde_json::json!({}));
+            serde_json::json!({
+                "ok": true,
+                "requestId": request_id,
+                "runtimeSetupResume": parsed,
+            })
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let message = if helper_lacks_runtime_subcommand(&stderr) {
+                HELPER_TOO_OLD_MESSAGE.to_string()
+            } else if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                "resume-after-reboot failed".to_string()
+            };
+            serde_json::json!({
+                "ok": false,
+                "requestId": request_id,
+                "error": { "message": message },
+            })
+        }
+        Err(err) => serde_json::json!({
+            "ok": false,
+            "requestId": request_id,
+            "error": { "message": format!("failed to run resume-after-reboot: {err}") },
         }),
     }
 }

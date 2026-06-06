@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gpui::{AnyWindowHandle, App};
 use serde::{Deserialize, Serialize};
 
@@ -156,14 +156,32 @@ fn featured_sample_alias_to_github(value: &str) -> Option<&'static str> {
 // ─── StartPageHistoryStore ───────────────────────────────────────────────────
 
 /// A single entry in the start-page recent-capsules history.
+///
+/// `install_profile_key` / `app_url` carry the **install-owned identity** of an
+/// entry that came from an installed app. When present, the entry can be
+/// relaunched through its stable profile key (`ato launch <ipk>`) and the
+/// Desktop opens its stable [`app_url`](capsule_core::foundation::install_lifecycle::derive_app_url)
+/// instead of treating the `handle` as a fresh `ato run` target. Both are
+/// `Option` and serde-defaulted so history files written before this field
+/// existed (handle-only entries) continue to load unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StartHistoryEntry {
-    /// Capsule handle string (e.g. `github.com/owner/repo`).
+    /// Capsule handle string (e.g. `github.com/owner/repo`). Always present;
+    /// used for display and as the legacy relaunch key when no install
+    /// identity is known.
     pub handle: String,
     /// Human-readable label shown in the recent row.
     pub label: String,
     /// Unix timestamp (seconds) of the most recent open.
     pub last_opened_at: u64,
+    /// Stable install profile key (`ipk_<32hex>`) when this entry is an
+    /// installed app. `None` for legacy / non-installed entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_profile_key: Option<String>,
+    /// Stable app URL (`ato://app/<ipk>`) derived from `install_profile_key`.
+    /// Revision/port-independent open identity. `None` for legacy entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_url: Option<String>,
 }
 
 /// Persistent store for the start-page recent-capsule list.
@@ -206,7 +224,40 @@ impl StartPageHistoryStore {
     /// Upsert an entry by `handle`. If the handle already exists,
     /// its `last_opened_at` and `label` are updated. Entries are sorted
     /// descending by `last_opened_at` and capped at `MAX_HISTORY`.
+    ///
+    /// This is the legacy / non-installed path: it does not touch the
+    /// install-owned identity fields. An existing entry's
+    /// `install_profile_key` / `app_url` are preserved (so a legacy
+    /// re-open never *downgrades* an installed entry).
     pub fn record_open(&mut self, handle: &str, label: &str) {
+        self.upsert(handle, label, None, None);
+    }
+
+    /// Upsert an installed-app entry, stamping its stable install identity.
+    /// Use this when the open resolved to an `install_profile_key` so future
+    /// relaunches go through the installed-app launch path.
+    pub fn record_open_installed(
+        &mut self,
+        handle: &str,
+        label: &str,
+        install_profile_key: &str,
+        app_url: &str,
+    ) {
+        self.upsert(
+            handle,
+            label,
+            Some(install_profile_key.to_string()),
+            Some(app_url.to_string()),
+        );
+    }
+
+    fn upsert(
+        &mut self,
+        handle: &str,
+        label: &str,
+        install_profile_key: Option<String>,
+        app_url: Option<String>,
+    ) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -214,11 +265,19 @@ impl StartPageHistoryStore {
         if let Some(existing) = self.entries.iter_mut().find(|e| e.handle == handle) {
             existing.label = label.to_string();
             existing.last_opened_at = now;
+            // Only upgrade install identity; never clear an existing one with a
+            // legacy (None) re-open.
+            if install_profile_key.is_some() {
+                existing.install_profile_key = install_profile_key;
+                existing.app_url = app_url;
+            }
         } else {
             self.entries.push(StartHistoryEntry {
                 handle: handle.to_string(),
                 label: label.to_string(),
                 last_opened_at: now,
+                install_profile_key,
+                app_url,
             });
         }
         self.entries
@@ -715,16 +774,23 @@ pub fn dispatch(
     Ok(())
 }
 
-/// Try to open an already-running capsule session directly (no consent modal).
-/// If no live session exists, fall back to the consent window.
+/// Shared entry point for `OpenCapsule` (Recent Capsules click) and
+/// `OpenQuery::CapsuleHandle` (URL bar handle re-entry).
 ///
-/// This is the shared entry point for `OpenCapsule` (Recent Capsules click)
-/// and `OpenQuery::CapsuleHandle` (URL bar handle re-entry) so both surfaces
-/// behave consistently: if the capsule is already running, the window reopens
-/// instantly; if it needs to be launched, the consent flow appears as normal.
+/// Routing follows an explicit [`DesktopLaunchIntent`](crate::launch_intent::DesktopLaunchIntent)
+/// boundary rather than always falling through to the consent wizard:
+///
+/// 1. **Live session** → reuse it instantly (no launch, no review).
+/// 2. **Installed profile** (known via Start history or recovered from the
+///    install store) → launch through the install-owned, pre-consented
+///    `ato launch <install_profile_key>` path with **no consent wizard** — this
+///    is the fix for installed apps re-showing review on every relaunch.
+/// 3. **Otherwise** (not installed / ambiguous) → the existing consent flow.
 fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
+    use crate::launch_intent::DesktopLaunchIntent;
     use crate::state::session::SessionRegistry;
 
+    // 1. Live session → focus/reuse (unchanged behavior).
     match crate::orchestrator::try_reuse_live_session_for_click(handle) {
         Ok(Some(session)) => {
             // Recover stored non-secret configs from the existing session so
@@ -746,23 +812,219 @@ fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
             ) {
                 tracing::error!(error = %err, handle, "ato_start: open_capsule ready-window failed");
             }
+            return;
         }
-        Ok(None) => {
-            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
-            {
-                tracing::error!(error = %err, handle, "ato_start: open_capsule consent fallback failed");
-            }
-        }
+        Ok(None) => {}
         Err(err) => {
             tracing::debug!(
                 error = %err,
                 handle,
-                "ato_start: session fast-path failed; falling back to consent"
+                "ato_start: session fast-path failed; resolving launch intent"
             );
+        }
+    }
+
+    // 2. Not running → resolve how to open it.
+    match resolve_open_intent(handle) {
+        DesktopLaunchIntent::LaunchInstalledProfile {
+            install_profile_key,
+            app_url,
+            ..
+        } => {
+            // Persist the durable install identity up-front. A later legacy
+            // `record_open` (from start_boot_launch's history write) preserves
+            // it, so the entry never downgrades to handle-only.
+            record_installed_history(&route, &install_profile_key, &app_url);
+            tracing::info!(
+                handle,
+                %install_profile_key,
+                %app_url,
+                "ato_start: opening installed app via launch intent (no consent wizard)"
+            );
+            match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
+                Ok(boot_handle) => {
+                    crate::window::launch_window::start_installed_launch(
+                        cx,
+                        route,
+                        install_profile_key,
+                        boot_handle,
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        handle,
+                        "ato_start: open_boot_window for installed launch failed; \
+                         falling back to consent flow"
+                    );
+                    if let Err(err) =
+                        crate::window::launch_window::open_consent_window_for_route(cx, route)
+                    {
+                        tracing::error!(error = %err, handle, "ato_start: consent fallback failed");
+                    }
+                }
+            }
+        }
+        // InstallThenLaunch / LegacyTryOpen (and the unreachable FocusSession,
+        // already handled above): first-run / non-installed opens still go
+        // through the existing consent flow.
+        _ => {
             if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, handle, "ato_start: open_capsule consent fallback failed");
             }
+        }
+    }
+}
+
+/// Open an installed app by its durable `install_profile_key` — the identity
+/// behind an `ato://app/<ipk>` URL (#261). This is the deep-link / automation
+/// entry point that mirrors what a Start-window tile click does, but keyed by
+/// the unambiguous install identity rather than a capsule handle, so it never
+/// mis-resolves a handle shared by two installs.
+///
+/// Flow (same boundaries as [`open_capsule_from_start`], minus the consent
+/// wizard — an installed profile is pre-consented):
+/// 1. reverse-resolve the ipk to a launchable target (canonical handle + url);
+/// 2. live session for that ipk → reuse instantly (no relaunch);
+/// 3. otherwise record the durable identity, open the boot window, and run the
+///    install-owned `ato launch <ipk>` path via `start_installed_launch`.
+///
+/// Returns `Err` only when the ipk does not resolve to a launchable installed
+/// profile (unknown / degraded) or the store is unreadable — the caller surfaces
+/// that rather than silently degrading to a handle launch + consent wizard.
+pub(crate) fn open_installed_app_by_ipk(cx: &mut App, app_url_or_ipk: &str) -> Result<()> {
+    use crate::state::session::SessionRegistry;
+
+    // Accepts either an `ato://app/<ipk>` URL or a bare `ipk_…` — the resolver
+    // strips the prefix when present.
+    let target = crate::launch_intent::installed_target_for_app_url(app_url_or_ipk)
+        .context("resolve install_profile_key against install store")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no installed app matches '{app_url_or_ipk}' \
+                 (not installed, or the install is degraded)"
+            )
+        })?;
+
+    let label = target
+        .handle
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&target.handle)
+        .to_string();
+    let route = GuestRoute::CapsuleHandle {
+        handle: target.handle.clone(),
+        label,
+        community_toml_id: None,
+    };
+
+    // 1. Live session keyed by ipk → reuse instantly (no relaunch, no boot
+    //    window). Matches by install_profile_key, so a session whose handle has
+    //    drifted from the record is still found.
+    match crate::orchestrator::try_reuse_live_session_for_install_profile_key(
+        &target.install_profile_key,
+    ) {
+        Ok(Some(session)) => {
+            let launch_configs = cx
+                .global::<SessionRegistry>()
+                .get_session(&session.session_id)
+                .map(|s| s.launch_context.launch_configs.clone())
+                .unwrap_or_default();
+            crate::window::orchestrator::open_ready_capsule_window(
+                cx,
+                route,
+                session,
+                launch_configs,
+            )
+            .context("open ready window for reused installed session")?;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                install_profile_key = %target.install_profile_key,
+                "ato_start: ipk session fast-path failed; starting installed launch"
+            );
+        }
+    }
+
+    // 2. Not running → record durable identity, open boot window, launch.
+    record_installed_history(&route, &target.install_profile_key, &target.app_url);
+    tracing::info!(
+        handle = %target.handle,
+        install_profile_key = %target.install_profile_key,
+        app_url = %target.app_url,
+        "ato_start: opening installed app by ipk (no consent wizard)"
+    );
+    let boot_handle = crate::window::launch_window::open_boot_window(cx, Some(&route))
+        .context("open boot window for installed launch")?;
+    crate::window::launch_window::start_installed_launch(
+        cx,
+        route,
+        target.install_profile_key,
+        boot_handle,
+    );
+    Ok(())
+}
+
+/// Resolve the launch intent for a not-running handle by consulting Start
+/// history (for a previously-stamped install identity) and the install store
+/// (to recover identity for legacy handle-only history entries). The live
+/// session case is handled by the caller, so `live_session_id` is `None` here.
+fn resolve_open_intent(handle: &str) -> crate::launch_intent::DesktopLaunchIntent {
+    use crate::launch_intent::{
+        InstalledMatch, IntentInputs, installed_match_for_handle, resolve_launch_intent,
+    };
+
+    let history_install = StartPageHistoryStore::load()
+        .entries
+        .into_iter()
+        .find(|e| e.handle == handle)
+        .and_then(|e| match (e.install_profile_key, e.app_url) {
+            (Some(ipk), Some(url)) => Some((ipk, url)),
+            _ => None,
+        });
+
+    let installed_match = match open_install_store() {
+        Ok(store) => installed_match_for_handle(&store, handle).unwrap_or(InstalledMatch::None),
+        Err(err) => {
+            tracing::debug!(error = %err, handle, "ato_start: install store unavailable for intent resolution");
+            InstalledMatch::None
+        }
+    };
+
+    resolve_launch_intent(IntentInputs {
+        handle: handle.to_string(),
+        live_session_id: None,
+        history_install,
+        installed_match,
+    })
+}
+
+fn open_install_store()
+-> anyhow::Result<capsule_core::foundation::install_lifecycle::InstallInstanceStore> {
+    let root = capsule_core::common::paths::ato_path_or_workspace_tmp("instances");
+    capsule_core::foundation::install_lifecycle::InstallInstanceStore::new(&root)
+}
+
+/// Persist an installed-app open with its stable install identity. Mirrors
+/// `launch_window::record_start_history` but stamps `install_profile_key` /
+/// `app_url` so future relaunches resolve straight to the installed-profile
+/// launch path.
+fn record_installed_history(route: &GuestRoute, install_profile_key: &str, app_url: &str) {
+    let item = match route {
+        GuestRoute::CapsuleHandle { handle, label, .. }
+        | GuestRoute::CapsuleUrl { handle, label, .. } => Some((handle.as_str(), label.as_str())),
+        _ => None,
+    };
+    if let Some((handle, label)) = item {
+        let mut store = StartPageHistoryStore::load();
+        store.record_open_installed(handle, label, install_profile_key, app_url);
+        if let Err(err) = store.save() {
+            tracing::warn!(error = %err, "ato_start: failed to save installed start history");
         }
     }
 }
@@ -1039,5 +1301,69 @@ mod tests {
         store.record_open("github.com/first/one", "First again");
         // After re-recording first/one, it should be at index 0
         assert_eq!(store.entries[0].handle, "github.com/first/one");
+    }
+
+    #[test]
+    fn old_history_json_without_install_fields_loads() {
+        // History files written before the install-identity fields existed
+        // must still deserialize, with the new fields defaulting to None.
+        let json = r#"{
+            "entries": [
+                { "handle": "github.com/owner/repo", "label": "Repo", "last_opened_at": 1700000000 }
+            ]
+        }"#;
+        let store: StartPageHistoryStore =
+            serde_json::from_str(json).expect("legacy history must deserialize");
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(store.entries[0].handle, "github.com/owner/repo");
+        assert!(store.entries[0].install_profile_key.is_none());
+        assert!(store.entries[0].app_url.is_none());
+    }
+
+    #[test]
+    fn record_open_installed_stamps_identity() {
+        let mut store = StartPageHistoryStore::default();
+        store.record_open_installed("acme/hello", "Hello", "ipk_abc", "ato://app/ipk_abc");
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(
+            store.entries[0].install_profile_key.as_deref(),
+            Some("ipk_abc")
+        );
+        assert_eq!(
+            store.entries[0].app_url.as_deref(),
+            Some("ato://app/ipk_abc")
+        );
+    }
+
+    #[test]
+    fn legacy_record_open_does_not_clear_install_identity() {
+        // A plain re-open of an already-installed entry must not downgrade it
+        // back to a handle-only (legacy) entry.
+        let mut store = StartPageHistoryStore::default();
+        store.record_open_installed("acme/hello", "Hello", "ipk_abc", "ato://app/ipk_abc");
+        store.record_open("acme/hello", "Hello reopened");
+        assert_eq!(
+            store.entries[0].install_profile_key.as_deref(),
+            Some("ipk_abc"),
+            "legacy record_open must preserve existing install identity"
+        );
+        assert_eq!(store.entries[0].label, "Hello reopened");
+    }
+
+    #[test]
+    fn install_fields_round_trip_through_serde() {
+        let mut store = StartPageHistoryStore::default();
+        store.record_open_installed("acme/hello", "Hello", "ipk_abc", "ato://app/ipk_abc");
+        store.record_open("github.com/legacy/one", "Legacy");
+        let json = serde_json::to_string(&store).unwrap();
+        let back: StartPageHistoryStore = serde_json::from_str(&json).unwrap();
+        let installed = back
+            .entries
+            .iter()
+            .find(|e| e.handle == "acme/hello")
+            .unwrap();
+        assert_eq!(installed.install_profile_key.as_deref(), Some("ipk_abc"));
+        // The legacy entry must serialize without the optional fields (skip_serializing_if).
+        assert!(!json.contains("\"install_profile_key\":null"));
     }
 }

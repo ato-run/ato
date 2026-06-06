@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -2611,7 +2612,9 @@ pub(crate) fn execute_run_command(
     build_policy: crate::application::build_materialization::BuildPolicy,
     cache_strategy_arg: crate::cli::shared::CacheStrategyArg,
     plan_only: bool,
+    strict_realization: bool,
     install_lifecycle_context: Option<crate::cli::commands::run::InstallLifecycleContext>,
+    capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
     pinned_revision_output_dir: Option<std::path::PathBuf>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
@@ -2657,14 +2660,16 @@ pub(crate) fn execute_run_command(
         reporter,
         preview_mode: false,
         plan_only,
+        strict_realization,
         install_lifecycle_context,
+        capsule_launch_inputs,
         pinned_revision_output_dir,
     }))
 }
 
 fn apply_github_auto_fix_to_draft(
     draft: &mut install::GitHubInstallDraftResponse,
-    _checkout_dir: &Path,
+    checkout_dir: &Path,
     auto_fix_mode: Option<GitHubAutoFixMode>,
     force_port_reassignment: bool,
     json: bool,
@@ -2680,11 +2685,18 @@ fn apply_github_auto_fix_to_draft(
         return Ok(());
     };
 
-    let fixed = if force_port_reassignment {
+    let mut fixed = if force_port_reassignment {
         super::github_inference::reassign_github_install_preview_toml_port(preview_toml)?
     } else {
         super::github_inference::auto_fix_github_install_preview_toml(preview_toml)?
     };
+    let mut python_lockfiles_repaired = false;
+    if matches!(auto_fix_mode, Some(GitHubAutoFixMode::All)) {
+        let repaired =
+            auto_fix_github_python_lockfiles_for_preview_toml(&fixed, checkout_dir, json)?;
+        python_lockfiles_repaired = repaired.repaired;
+        fixed = repaired.preview_toml;
+    }
 
     if fixed.trim() != preview_toml.trim() {
         if !json {
@@ -2695,9 +2707,268 @@ fn apply_github_auto_fix_to_draft(
             }
         }
         draft.preview_toml = Some(fixed);
+    } else if python_lockfiles_repaired && !json {
+        eprintln!("ℹ️  Generated Python uv.lock in the GitHub checkout before build/install.");
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct GitHubPythonLockAutoFixResult {
+    pub(super) preview_toml: String,
+    pub(super) repaired: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitHubPythonLockRepairKind {
+    Pyproject,
+    Requirements,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct GitHubPythonLockRepairTarget {
+    label: String,
+    working_dir: PathBuf,
+    kind: GitHubPythonLockRepairKind,
+}
+
+pub(super) fn auto_fix_github_python_lockfiles_for_preview_toml(
+    preview_toml: &str,
+    checkout_dir: &Path,
+    json: bool,
+) -> Result<GitHubPythonLockAutoFixResult> {
+    let targets = github_python_lock_repair_targets(preview_toml, checkout_dir)?;
+    if targets.is_empty() {
+        return Ok(GitHubPythonLockAutoFixResult {
+            preview_toml: preview_toml.to_string(),
+            repaired: false,
+        });
+    }
+
+    let mut repaired = false;
+    for target in targets {
+        run_github_python_lock_repair(&target, json)?;
+        repaired = true;
+    }
+
+    let normalized =
+        super::github_inference::normalize_github_install_preview_toml(checkout_dir, preview_toml)?;
+    Ok(GitHubPythonLockAutoFixResult {
+        preview_toml: normalized,
+        repaired,
+    })
+}
+
+pub(super) fn github_python_lock_repair_targets(
+    preview_toml: &str,
+    checkout_dir: &Path,
+) -> Result<Vec<GitHubPythonLockRepairTarget>> {
+    let Ok(parsed) = toml::from_str::<toml::Value>(preview_toml) else {
+        return Ok(Vec::new());
+    };
+    let Some(root_table) = parsed.as_table() else {
+        return Ok(Vec::new());
+    };
+
+    let mut targets = Vec::new();
+    if let Some(named_targets) = root_table.get("targets").and_then(toml::Value::as_table) {
+        for (label, value) in named_targets {
+            let Some(target_table) = value.as_table() else {
+                continue;
+            };
+            if !github_preview_target_is_python(target_table) {
+                continue;
+            }
+            let working_dir = target_table
+                .get("working_dir")
+                .and_then(toml::Value::as_str)
+                .or_else(|| root_table.get("working_dir").and_then(toml::Value::as_str));
+            if let Some(target) =
+                github_python_lock_repair_target(label, working_dir, checkout_dir)?
+            {
+                targets.push(target);
+            }
+        }
+        return Ok(targets);
+    }
+
+    if github_preview_target_is_python(root_table)
+        && let Some(target) = github_python_lock_repair_target(
+            root_table
+                .get("default_target")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("app"),
+            root_table.get("working_dir").and_then(toml::Value::as_str),
+            checkout_dir,
+        )?
+    {
+        targets.push(target);
+    }
+
+    Ok(targets)
+}
+
+fn github_preview_target_is_python(table: &toml::value::Table) -> bool {
+    let driver = table
+        .get("driver")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    if matches!(driver.as_deref(), Some("python")) {
+        return true;
+    }
+
+    table
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .map(|runtime| runtime == "source/python" || runtime == "web/python")
+        .unwrap_or(false)
+}
+
+fn github_python_lock_repair_target(
+    label: &str,
+    working_dir: Option<&str>,
+    checkout_dir: &Path,
+) -> Result<Option<GitHubPythonLockRepairTarget>> {
+    let working_dir = resolve_github_auto_fix_working_dir(checkout_dir, working_dir)?;
+    let uv_lock = working_dir.join("uv.lock");
+    if uv_lock.exists() {
+        return Ok(None);
+    }
+
+    let pyproject = working_dir.join("pyproject.toml");
+    if pyproject.exists() {
+        return Ok(Some(GitHubPythonLockRepairTarget {
+            label: label.to_string(),
+            working_dir,
+            kind: GitHubPythonLockRepairKind::Pyproject,
+        }));
+    }
+
+    let requirements = working_dir.join("requirements.txt");
+    if requirements.exists() {
+        return Ok(Some(GitHubPythonLockRepairTarget {
+            label: label.to_string(),
+            working_dir,
+            kind: GitHubPythonLockRepairKind::Requirements,
+        }));
+    }
+
+    Ok(None)
+}
+
+pub(super) fn resolve_github_auto_fix_working_dir(
+    checkout_dir: &Path,
+    working_dir: Option<&str>,
+) -> Result<PathBuf> {
+    let canonical_checkout = checkout_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize GitHub checkout {}",
+            checkout_dir.display()
+        )
+    })?;
+    let Some(raw) = working_dir.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(canonical_checkout);
+    };
+    let relative = Path::new(raw);
+    if relative.is_absolute() {
+        return Err(github_python_lock_auto_fix_error(format!(
+            "GitHub auto-fix refuses absolute working_dir '{}'",
+            raw
+        ))
+        .into());
+    }
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(github_python_lock_auto_fix_error(format!(
+            "GitHub auto-fix refuses working_dir '{}' because it contains '..'",
+            raw
+        ))
+        .into());
+    }
+
+    let candidate = checkout_dir.join(relative);
+    let canonical_candidate = candidate.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize GitHub auto-fix working_dir {}",
+            candidate.display()
+        )
+    })?;
+    if !canonical_candidate.starts_with(&canonical_checkout) {
+        return Err(github_python_lock_auto_fix_error(format!(
+            "GitHub auto-fix refuses working_dir '{}' because it resolves outside checkout {}",
+            raw,
+            canonical_checkout.display()
+        ))
+        .into());
+    }
+    Ok(canonical_candidate)
+}
+
+fn github_python_lock_auto_fix_error(message: String) -> AtoExecutionError {
+    crate::adapters::runtime::provisioning::python_requirements_lock_missing(message)
+}
+
+fn run_github_python_lock_repair(target: &GitHubPythonLockRepairTarget, json: bool) -> Result<()> {
+    let (args, description) = match target.kind {
+        GitHubPythonLockRepairKind::Pyproject => (vec!["lock"], "uv lock"),
+        GitHubPythonLockRepairKind::Requirements => {
+            // Existing Ato source/python packaging keys on the filename `uv.lock`.
+            // For requirements-only projects this file is intentionally a
+            // pip-compile requirements lock, not uv's project-mode TOML lockfile.
+            (
+                vec!["pip", "compile", "requirements.txt", "-o", "uv.lock"],
+                "uv pip compile requirements.txt -o uv.lock",
+            )
+        }
+    };
+
+    if !json {
+        eprintln!(
+            "ℹ️  Generating Python lockfile for target '{}' with `{}`...",
+            target.label, description
+        );
+    }
+
+    let output = Command::new("uv")
+        .args(&args)
+        .current_dir(&target.working_dir)
+        .output()
+        .map_err(|error| {
+            github_python_lock_auto_fix_error(format!(
+                "failed to run `{}` in {}: {}",
+                description,
+                target.working_dir.display(),
+                error
+            ))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(github_python_lock_auto_fix_error(format!(
+        "failed to generate uv.lock for GitHub target '{}' in {} with `{}` (status {}): {}",
+        target.label,
+        target.working_dir.display(),
+        description,
+        output.status,
+        if stderr.is_empty() {
+            "<no stderr>"
+        } else {
+            stderr.as_str()
+        }
+    ))
+    .into())
 }
 
 fn should_retry_github_auto_fix_port(

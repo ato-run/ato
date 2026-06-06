@@ -104,8 +104,23 @@ pub struct ToolTargets {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolArtifact {
     pub url: String,
+    /// SHA-256 of the downloaded archive/distribution bytes at `url`.
+    ///
+    /// This is the **archive/download** hash, not the hash of the resolved
+    /// executable inside the archive. `None` when the archive hash is unknown
+    /// at lock-generation time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// SHA-256 of the resolved executable/tool-entry file after extraction.
+    ///
+    /// Distinct from [`Self::sha256`]: that is the archive hash, this is the
+    /// resolved tool binary hash. Optional and currently a schema slot — lock
+    /// generation does not extract archives, so it is only populated when a
+    /// future materialization/writeback path supplies a known resolved hash.
+    /// Never carries the archive hash, and is omitted (not an empty string)
+    /// when unknown. See #469.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }

@@ -515,6 +515,12 @@ fn default_readiness_interval_seconds() -> u32 {
 #[serde(rename_all = "kebab-case")]
 pub enum HostCapabilityName {
     /// Open a file or project in the host user's editor (VSCode, Cursor, etc.).
+    ///
+    /// Schema/protocol shape only: the manifest and bridge types exist for
+    /// forward compatibility, but no host implements a production execution
+    /// path or consent UI for it yet. Until that lands, this capability is
+    /// rejected by [`CapsuleManifest::validate`] so it cannot be declared as a
+    /// silently-inert grant. See #468.
     OpenEditor,
     /// Open a file using the host OS default application.
     OpenFile,
@@ -529,6 +535,21 @@ impl HostCapabilityName {
             Self::OpenEditor => "open-editor",
             Self::OpenFile => "open-file",
             Self::RevealWorkspace => "reveal-workspace",
+        }
+    }
+
+    /// Whether this Ato build implements a production host execution path
+    /// (and the consent UI) for the capability.
+    ///
+    /// `open-editor` is schema-only — the manifest/protocol types exist but no
+    /// host actually launches an editor and there is no consent integration, so
+    /// it returns `false` and manifest validation rejects it rather than
+    /// granting an inert capability. See #468. Remove this gate once the host
+    /// execution path and consent UI exist.
+    pub fn is_host_supported(&self) -> bool {
+        match self {
+            Self::OpenEditor => false,
+            Self::OpenFile | Self::RevealWorkspace => true,
         }
     }
 }
@@ -2026,6 +2047,12 @@ impl CapsuleManifest {
     ///
     /// The returned set is what the host MUST grant at session creation time
     /// (after user consent) for the capsule to operate correctly.
+    ///
+    /// This is a pure protocol-shape mapping and does not itself gate on host
+    /// support: capabilities with no production execution path (currently
+    /// `open-editor`, see [`HostCapabilityName::is_host_supported`] and #468)
+    /// are rejected earlier by [`CapsuleManifest::validate`], so in production a
+    /// manifest carrying such a capability never reaches this point.
     pub fn host_capability_grants(&self) -> Vec<crate::foundation::types::bridge::CapabilityGrant> {
         self.host_capabilities
             .iter()
@@ -2131,7 +2158,15 @@ run = "node index.js"
     }
 
     #[test]
-    fn host_capability_grants_conversion() {
+    fn host_capability_grants_is_pure_protocol_shape_mapping() {
+        // `host_capability_grants()` is a pure type-level mapping and does NOT
+        // gate on host support — it still maps `open-editor` to its grant so the
+        // protocol shape is preserved for future compatibility. This does NOT
+        // imply production support: a manifest declaring `open-editor` is
+        // rejected by `validate()` (see `open_editor_is_rejected_*` below and
+        // #468) before grants are ever computed in production. We call the
+        // mapping directly here, bypassing validation, only to assert the
+        // protocol shape is retained.
         let toml = r#"
 schema_version = "0.3"
 name = "editor-capsule"
@@ -2153,6 +2188,109 @@ run = "node index.js"
             grants[0],
             crate::foundation::types::bridge::CapabilityGrant::OpenEditor
         ));
+        // The same manifest must NOT pass validation, even though the protocol
+        // mapping above succeeds.
+        assert!(
+            manifest.validate().is_err(),
+            "open-editor must be rejected by validation despite the protocol mapping"
+        );
+    }
+
+    #[test]
+    fn open_editor_is_rejected_as_unsupported_host_capability() {
+        let toml = r#"
+schema_version = "0.3"
+name = "editor-capsule"
+type = "app"
+default_target = "app"
+
+[[host_capabilities]]
+name = "open-editor"
+reason = "Open generated files."
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let manifest = CapsuleManifest::from_toml(toml).unwrap();
+        let errors = manifest
+            .validate()
+            .expect_err("open-editor must fail validation as unsupported");
+        assert!(
+            errors
+                .iter()
+                .any(|err| matches!(err, ValidationError::UnsupportedHostCapability { .. })),
+            "expected an UnsupportedHostCapability error, got: {errors:?}"
+        );
+        let details = errors
+            .iter()
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            details.contains("open-editor"),
+            "error must name the capability, got: {details}"
+        );
+        assert!(
+            details.contains("https://github.com/ato-run/ato/issues/468"),
+            "error must be actionable, got: {details}"
+        );
+    }
+
+    #[test]
+    fn open_editor_is_rejected_by_load_manifest() {
+        let toml = r#"
+schema_version = "0.3"
+name = "editor-capsule"
+type = "app"
+default_target = "app"
+
+[[host_capabilities]]
+name = "open-editor"
+reason = "Open generated files."
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capsule.toml");
+        std::fs::write(&path, toml).expect("write manifest");
+
+        let err = crate::contract::manifest::load_manifest(&path)
+            .expect_err("load_manifest must reject unsupported open-editor capability");
+        assert!(
+            err.to_string().contains("open-editor"),
+            "error must name the capability, got: {err}"
+        );
+    }
+
+    #[test]
+    fn supported_host_capabilities_still_validate() {
+        let toml = r#"
+schema_version = "0.3"
+name = "supported-capsule"
+type = "app"
+default_target = "app"
+
+[[host_capabilities]]
+name = "open-file"
+reason = "Open a generated file with the default application."
+
+[[host_capabilities]]
+name = "reveal-workspace"
+reason = "Show the output directory in the file manager."
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let manifest = CapsuleManifest::from_toml(toml).unwrap();
+        assert!(
+            manifest.validate().is_ok(),
+            "open-file and reveal-workspace must remain supported: {:?}",
+            manifest.validate().err()
+        );
     }
 
     #[test]

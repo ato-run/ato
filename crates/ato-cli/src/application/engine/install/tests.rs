@@ -20,6 +20,43 @@ use axum::{Json, Router};
 use ed25519_dalek::{Signer as _, SigningKey};
 use tokio::sync::Mutex;
 
+#[cfg(unix)]
+fn install_fake_uv(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("fake uv bin dir");
+    let uv = bin_dir.join("uv");
+    let log = temp.path().join("uv.log");
+    std::fs::write(
+        &uv,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$ATO_FAKE_UV_LOG"
+case "$*" in
+  "pip compile requirements.txt -o uv.lock")
+    printf '# fake pip-compile lock\n' > uv.lock
+    exit 0
+    ;;
+  "lock")
+    printf 'version = 1\n' > uv.lock
+    exit 0
+    ;;
+  *)
+    echo "unexpected uv args: $*" >&2
+    exit 9
+    ;;
+esac
+"#,
+    )
+    .expect("fake uv script");
+    let mut perms = std::fs::metadata(&uv)
+        .expect("fake uv metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&uv, perms).expect("fake uv permissions");
+    (bin_dir, log)
+}
+
 const TEST_SCOPED_ID: &str = "koh0920/sample";
 const TEST_VERSION: &str = "1.0.0";
 const TEST_LEASE_ID: &str = "lease-test-1";
@@ -469,6 +506,185 @@ port = 3000
 
     assert!((18000..=18999).contains(&port));
     assert_ne!(port, 3000);
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_all_generates_requirements_python_lock_and_includes_it() {
+    let _guard = test_env_lock().lock().expect("env lock");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    std::fs::write(checkout.join("requirements.txt"), "requests==2.32.0\n").expect("requirements");
+    std::fs::write(checkout.join("app.py"), "print('ok')\n").expect("app");
+    let (bin_dir, log) = install_fake_uv(&tmp);
+    let prior_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{prior_path}", bin_dir.display());
+    let _path_guard = EnvVarGuard::set("PATH", Some(&path));
+    let _log_guard = EnvVarGuard::set("ATO_FAKE_UV_LOG", Some(log.to_str().expect("log path")));
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "python app.py"
+
+[pack]
+include = ["app.py", "requirements.txt"]
+"#;
+
+    let result =
+        support::auto_fix_github_python_lockfiles_for_preview_toml(manifest, &checkout, true)
+            .expect("auto-fix python lock");
+
+    assert!(result.repaired);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("uv.lock")).expect("uv.lock"),
+        "# fake pip-compile lock\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("uv log"),
+        "pip compile requirements.txt -o uv.lock\n"
+    );
+    let parsed = result
+        .preview_toml
+        .parse::<toml::Value>()
+        .expect("parse normalized toml");
+    let include = parsed
+        .get("pack")
+        .and_then(|pack| pack.get("include"))
+        .and_then(toml::Value::as_array)
+        .expect("pack.include");
+    assert!(
+        include
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .any(|value| value == "uv.lock"),
+        "normalized preview should include generated uv.lock: {}",
+        result.preview_toml
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_all_prefers_pyproject_lock_over_requirements_compile() {
+    let _guard = test_env_lock().lock().expect("env lock");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    std::fs::write(
+        checkout.join("pyproject.toml"),
+        "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("pyproject");
+    std::fs::write(checkout.join("requirements.txt"), "requests==2.32.0\n").expect("requirements");
+    let (bin_dir, log) = install_fake_uv(&tmp);
+    let prior_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{prior_path}", bin_dir.display());
+    let _path_guard = EnvVarGuard::set("PATH", Some(&path));
+    let _log_guard = EnvVarGuard::set("ATO_FAKE_UV_LOG", Some(log.to_str().expect("log path")));
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "python app.py"
+
+[pack]
+include = ["pyproject.toml", "requirements.txt"]
+"#;
+
+    let result =
+        support::auto_fix_github_python_lockfiles_for_preview_toml(manifest, &checkout, true)
+            .expect("auto-fix python lock");
+
+    assert!(result.repaired);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("uv.lock")).expect("uv.lock"),
+        "version = 1\n"
+    );
+    assert_eq!(std::fs::read_to_string(&log).expect("uv log"), "lock\n");
+}
+
+#[test]
+fn auto_fix_rejects_absolute_python_working_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    let manifest = format!(
+        r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+working_dir = "{}"
+run = "python app.py"
+"#,
+        checkout.display()
+    );
+
+    let err = support::github_python_lock_repair_targets(&manifest, &checkout)
+        .expect_err("absolute working_dir should fail");
+
+    assert!(err.to_string().contains("absolute working_dir"));
+}
+
+#[test]
+fn auto_fix_rejects_parent_python_working_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+working_dir = "../outside"
+run = "python app.py"
+"#;
+
+    let err = support::github_python_lock_repair_targets(manifest, &checkout)
+        .expect_err("parent working_dir should fail");
+
+    assert!(err.to_string().contains("contains '..'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_fix_rejects_symlink_escape_python_working_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let checkout = tmp.path().join("checkout");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    std::fs::create_dir_all(&outside).expect("outside");
+    std::os::unix::fs::symlink(&outside, checkout.join("linked")).expect("symlink");
+    let manifest = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+working_dir = "linked"
+run = "python app.py"
+"#;
+
+    let err = support::github_python_lock_repair_targets(manifest, &checkout)
+        .expect_err("symlink escape should fail");
+
+    assert!(err.to_string().contains("outside checkout"));
 }
 
 #[test]
@@ -3231,5 +3447,566 @@ fn install_profile_key_is_stable_across_reinstalls() {
     assert_ne!(
         info_v1.install_revision_id, info_v2.install_revision_id,
         "each distinct content_hash must produce a different install_revision_id"
+    );
+}
+
+// ── Storage admission integration (#508) ────────────────────────────────────
+
+const ADMISSION_MANIFEST_NO_DISK: &str = r#"
+schema_version = "0.3"
+name = "no-disk-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+
+fn admission_manifest_with_disk(disk: &str) -> String {
+    format!(
+        r#"
+schema_version = "0.3"
+name = "needs-disk-app"
+type = "app"
+default_target = "app"
+[requirements]
+disk = "{disk}"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#
+    )
+}
+
+fn admission_db() -> (tempfile::TempDir, InstalledStateDb) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = InstalledStateDb::open(dir.path().join("state")).expect("open installed-state db");
+    (dir, db)
+}
+
+#[test]
+fn storage_admission_skips_when_no_disk_requirement() {
+    let (dir, db) = admission_db();
+    let outcome =
+        enforce_storage_admission(&db, Some(ADMISSION_MANIFEST_NO_DISK), dir.path()).unwrap();
+    assert!(matches!(outcome, StorageAdmissionOutcome::Skipped));
+}
+
+#[test]
+fn storage_admission_admits_when_space_available_and_returns_required() {
+    let (dir, db) = admission_db();
+    let manifest = admission_manifest_with_disk("1MB");
+    let outcome = enforce_storage_admission(&db, Some(&manifest), dir.path()).unwrap();
+    match outcome {
+        StorageAdmissionOutcome::Admitted { required_bytes } => {
+            assert!(
+                required_bytes > 0,
+                "declared 1MB must yield a positive estimate"
+            );
+        }
+        other => panic!("expected Admitted, got {other:?}"),
+    }
+}
+
+#[test]
+fn install_launch_ledger_records_storage_condition_in_db_sot() {
+    // The install-side projection writes the storage requirement into the
+    // launch-condition ledger (the SOT), keyed by app + revision (#508). This
+    // exercises the install-side `install_launch_conditions` builder + the
+    // strict `record_installed_launch_ledger` write without constructing a full
+    // InstallResult.
+    use capsule_core::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
+    let (_dir, db) = admission_db();
+    let claims = install_launch_conditions("ipk_app", "rev1", Some(21_474_836_480), None);
+    db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
+        .expect("ledger write must succeed");
+
+    let loaded = db.list_launch_condition_claims("ipk_app").unwrap();
+    // Baseline marker + storage condition.
+    let storage = loaded
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::Storage)
+        .expect("storage condition present");
+    assert_eq!(storage.install_revision_id.as_deref(), Some("rev1"));
+    assert!(storage.detail_json.contains("21474836480"));
+    assert!(
+        loaded
+            .iter()
+            .any(|c| c.condition_key == LEDGER_EXTRACTION_STATUS_KEY),
+        "the baseline extraction-status marker is always recorded"
+    );
+}
+
+#[test]
+fn install_launch_ledger_records_baseline_even_without_disk_requirement() {
+    // An installed app with no declared disk requirement (storage admission
+    // skipped) still gets a ledger: only the baseline marker, never empty (#508).
+    use capsule_core::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
+    let (_dir, db) = admission_db();
+    let claims = install_launch_conditions("ipk_app", "rev1", None, None);
+    assert_eq!(
+        claims.len(),
+        1,
+        "no disk requirement and no manifest → only the baseline marker"
+    );
+    assert_eq!(claims[0].kind, LaunchConditionKind::Policy);
+    assert_eq!(claims[0].condition_key, LEDGER_EXTRACTION_STATUS_KEY);
+
+    db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
+        .expect("ledger write must succeed");
+    let loaded = db.list_launch_condition_claims("ipk_app").unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(
+        !loaded.is_empty(),
+        "an installed revision must never have an empty ledger"
+    );
+    assert!(loaded[0].detail_json.contains("\"complete\":false"));
+}
+
+/// Parse a manifest TOML fixture into a `CapsuleManifest` for extractor tests.
+fn manifest_fixture(toml: &str) -> CapsuleManifest {
+    CapsuleManifest::from_toml(toml).expect("fixture manifest must parse")
+}
+
+fn extraction_status_detail(
+    claims: &[capsule_core::installed_state::LaunchConditionClaim],
+) -> serde_json::Value {
+    use capsule_core::installed_state::LEDGER_EXTRACTION_STATUS_KEY;
+    let marker = claims
+        .iter()
+        .find(|c| c.condition_key == LEDGER_EXTRACTION_STATUS_KEY)
+        .expect("baseline marker present");
+    serde_json::from_str(&marker.detail_json).expect("marker detail is JSON")
+}
+
+#[test]
+fn install_launch_conditions_records_env_condition_when_manifest_declares_env_projection() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "env-app"
+type = "app"
+default_target = "app"
+required_env = ["DATABASE_URL"]
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[targets.app.env]
+LOG_LEVEL = "info"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let env: Vec<_> = claims
+        .iter()
+        .filter(|c| c.kind == LaunchConditionKind::Env)
+        .collect();
+    // Declared env (LOG_LEVEL) → Satisfied; host-required (DATABASE_URL) → Unknown.
+    let declared = env
+        .iter()
+        .find(|c| c.condition_key == "LOG_LEVEL")
+        .expect("declared env extracted");
+    assert_eq!(declared.status, LaunchConditionStatus::Satisfied);
+    let required = env
+        .iter()
+        .find(|c| c.condition_key == "DATABASE_URL")
+        .expect("required env extracted");
+    assert_eq!(required.status, LaunchConditionStatus::Unknown);
+    // No raw value ("info") is ever stored.
+    assert!(claims.iter().all(|c| !c.detail_json.contains("info")));
+}
+
+#[test]
+fn install_launch_conditions_records_secret_condition_when_manifest_declares_secret_requirement() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "secret-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[dependencies.db]
+capsule = "capsule://ato/postgres@16"
+contract = "service@1"
+[dependencies.db.credentials]
+password = "{{env.PG_PASSWORD}}"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let secret = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::Secret)
+        .expect("secret condition extracted");
+    assert_eq!(secret.condition_key, "db.password");
+    assert_eq!(secret.status, LaunchConditionStatus::UserGrantRequired);
+    assert!(secret.detail_json.contains("\"grant_ref\":null"));
+    // The templated credential value is never stored.
+    assert!(
+        claims
+            .iter()
+            .all(|c| !c.detail_json.contains("PG_PASSWORD"))
+    );
+}
+
+#[test]
+fn install_launch_conditions_records_state_condition_when_manifest_declares_state_binding() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "state-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "user data"
+attach = "explicit"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let state = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::State)
+        .expect("state condition extracted");
+    assert_eq!(state.condition_key, "data");
+    assert_eq!(state.status, LaunchConditionStatus::UserGrantRequired);
+    assert!(state.detail_json.contains("\"durability\":\"persistent\""));
+    // No service binding declared → no guest mount target recorded.
+    assert!(!state.detail_json.contains("mount_target"));
+}
+
+#[test]
+fn install_launch_conditions_records_state_mount_target_from_service_binding() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    // When the manifest declares `services.main.state_bindings`, the guest mount
+    // target is recorded in the state claim detail so runtime materialization
+    // (#508) can place the bound directory without re-reading the manifest. The
+    // recorded value is the guest path — never a host path.
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "state-app"
+version = "0.1.0"
+type = "app"
+default_target = "container"
+runtime = "oci"
+run = "ghcr.io/example/hello:latest"
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "user data"
+attach = "explicit"
+
+[services.main]
+target = "container"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let state = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::State)
+        .expect("state condition extracted");
+    assert_eq!(state.condition_key, "data");
+    assert_eq!(state.status, LaunchConditionStatus::UserGrantRequired);
+    assert!(
+        state
+            .detail_json
+            .contains("\"mount_target\":\"/var/lib/app\""),
+        "guest mount target must be recorded: {}",
+        state.detail_json
+    );
+}
+
+#[test]
+fn extraction_status_removes_env_secret_state_only_when_extractors_run() {
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "full-app"
+type = "app"
+default_target = "app"
+required_env = ["DATABASE_URL"]
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "user data"
+"#,
+    );
+    let detail = extraction_status_detail(&install_launch_conditions(
+        "ipk_app",
+        "rev1",
+        None,
+        Some(&manifest),
+    ));
+    let extracted: Vec<&str> = detail["extracted_kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for kind in ["storage", "port", "env", "secret", "state"] {
+        assert!(extracted.contains(&kind), "{kind} should be extracted");
+    }
+    let missing: Vec<&str> = detail["missing_extractors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for kind in ["port", "env", "secret", "state"] {
+        assert!(!missing.contains(&kind), "{kind} must not be missing");
+    }
+    // Not-yet-wired kinds remain missing this slice.
+    assert!(missing.contains(&"runtime"));
+}
+
+#[test]
+fn no_supported_schema_keeps_kind_in_missing_extractors() {
+    // No manifest available → no kind beyond storage was examined; env/secret/
+    // state stay in missing_extractors (never claimed as extracted).
+    let detail =
+        extraction_status_detail(&install_launch_conditions("ipk_app", "rev1", None, None));
+    let extracted: Vec<&str> = detail["extracted_kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(extracted, vec!["storage"]);
+    let missing: Vec<&str> = detail["missing_extractors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for kind in ["port", "env", "secret", "state"] {
+        assert!(missing.contains(&kind), "{kind} must remain missing");
+    }
+}
+
+#[test]
+fn install_launch_conditions_records_port_condition_when_target_declares_port() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionSource};
+    // `[execution]` is rejected in schema 0.3, so the listening port is declared
+    // on the target; the extractor resolves it like `execution_port()`.
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "port-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+port = 3000
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let port = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::Port)
+        .expect("port condition extracted");
+    assert_eq!(port.condition_key, "ato://app/ipk_app/main.tcp");
+    assert_eq!(port.status, LaunchConditionStatus::Unknown);
+    assert_eq!(port.source, LaunchConditionSource::Manifest);
+    assert!(port.detail_json.contains("\"preferred_port\":3000"));
+    assert!(port.detail_json.contains("\"protocol\":\"tcp\""));
+    assert!(port.detail_json.contains("\"conflict_policy\":\"remap\""));
+}
+
+#[test]
+fn install_launch_conditions_records_service_port_condition_when_service_declares_expose() {
+    use capsule_core::installed_state::LaunchConditionKind;
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "svc-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+[services.worker]
+entrypoint = "node worker.js"
+expose = ["http"]
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let worker = claims
+        .iter()
+        .find(|c| {
+            c.kind == LaunchConditionKind::Port && c.condition_key == "ato://app/ipk_app/worker.tcp"
+        })
+        .expect("service port condition extracted");
+    // A service exposure has no concrete port at install time.
+    assert!(!worker.detail_json.contains("preferred_port"));
+    assert_eq!(worker.status, LaunchConditionStatus::Unknown);
+}
+
+#[test]
+fn install_launch_conditions_marks_port_extracted_even_when_manifest_has_no_port() {
+    use capsule_core::installed_state::LaunchConditionKind;
+    // No port declared anywhere, but the manifest *was* examined → Port is
+    // extracted (zero port conditions), not left in missing_extractors.
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "no-port-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    assert!(
+        !claims.iter().any(|c| c.kind == LaunchConditionKind::Port),
+        "no port declaration → no port condition"
+    );
+    let detail = extraction_status_detail(&claims);
+    let extracted: Vec<&str> = detail["extracted_kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        extracted.contains(&"port"),
+        "port extractor ran → extracted"
+    );
+    let missing: Vec<&str> = detail["missing_extractors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(!missing.contains(&"port"));
+}
+
+#[test]
+fn no_manifest_keeps_port_in_missing_extractors() {
+    let detail =
+        extraction_status_detail(&install_launch_conditions("ipk_app", "rev1", None, None));
+    let missing: Vec<&str> = detail["missing_extractors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        missing.contains(&"port"),
+        "no manifest → port stays missing"
+    );
+}
+
+#[test]
+fn port_extraction_does_not_write_port_claims() {
+    // Recording the ledger must not touch the launch-time port_claims projection.
+    let (_dir, db) = admission_db();
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "port-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+port = 3000
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
+        .expect("ledger write must succeed");
+    assert!(
+        db.port_claims().unwrap().is_empty(),
+        "install-time port declarations must not reserve / write port_claims"
+    );
+}
+
+#[test]
+fn port_condition_uses_same_logical_endpoint_as_launch_port_admission() {
+    use capsule_core::installed_state::LaunchConditionKind;
+    // The install-time declaration and #523's launch-time admission must address
+    // the same logical endpoint, so they converge on one ledger condition_key.
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "port-app"
+type = "app"
+default_target = "app"
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+port = 3000
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let port = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::Port)
+        .expect("port condition");
+    let launch_endpoint =
+        crate::adapters::runtime::port_admission::logical_endpoint("ipk_app", "main");
+    assert!(
+        port.detail_json
+            .contains(&format!("\"logical_endpoint\":\"{launch_endpoint}\"")),
+        "install endpoint must match launch-time admission endpoint {launch_endpoint}: {}",
+        port.detail_json
+    );
+    assert_eq!(port.condition_key, format!("{launch_endpoint}.tcp"));
+}
+
+#[test]
+fn storage_admission_rejects_when_existing_claims_exhaust_the_volume() {
+    let (dir, db) = admission_db();
+    // Reserve more than the free space (wide margin so the result is stable),
+    // so even a modest declared requirement no longer fits.
+    let free = capsule_core::installed_state::available_space_for_target(dir.path()).unwrap();
+    db.record_storage_claim(&StorageClaim {
+        install_profile_key: "hog".to_string(),
+        reserved_bytes: free.saturating_add(100 * 1024 * 1024 * 1024),
+    })
+    .unwrap();
+
+    let manifest = admission_manifest_with_disk("1GB");
+    let err = enforce_storage_admission(&db, Some(&manifest), dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains(crate::utils::error::ATO_ERR_INSUFFICIENT_STORAGE),
+        "error must carry the typed code: {msg}"
+    );
+    // The message surfaces required / reserved / shortfall context.
+    assert!(
+        msg.contains("required") && msg.contains("reserved") && msg.contains("short by"),
+        "error must explain why: {msg}"
+    );
+}
+
+#[test]
+fn storage_admission_errors_on_invalid_disk_requirement() {
+    let (dir, db) = admission_db();
+    // A malformed disk requirement must fail up front, not be treated as
+    // "no requirement" and silently skipped.
+    let manifest = admission_manifest_with_disk("not-a-size");
+    let result = enforce_storage_admission(&db, Some(&manifest), dir.path());
+    assert!(
+        result.is_err(),
+        "malformed requirements.disk must error, not skip: {result:?}"
     );
 }
