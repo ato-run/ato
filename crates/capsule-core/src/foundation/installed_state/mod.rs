@@ -39,6 +39,7 @@ mod launch_prompt_plan;
 mod port;
 mod relaunch_admission;
 mod relaunch_resolution;
+mod state_binding_resolve;
 
 pub use admission::{
     StorageAdmission, available_space, available_space_for_target, evaluate_storage_admission,
@@ -71,4 +72,8 @@ pub use relaunch_admission::{
 pub use relaunch_resolution::{
     LaunchConditionUpdate, RelaunchResolution, RelaunchResolutionContext, RelaunchResolutionInput,
     RelaunchResolutionSource, RelaunchResolutionWarning, resolve_relaunch_conditions,
+};
+pub use state_binding_resolve::{
+    ResolvedStateBinding, resolve_state_binding_from_path,
+    resolve_state_binding_from_path_with_location,
 };
