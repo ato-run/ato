@@ -445,6 +445,7 @@ pub fn start_session(
     community_toml_id: Option<&str>,
     attach_state: &[String],
     from_materialized_record: Option<&str>,
+    local_manifest_path: Option<std::path::PathBuf>,
     run_config_hash: Option<&str>,
     json: bool,
 ) -> Result<()> {
@@ -516,7 +517,28 @@ pub fn start_session(
         }
     }
 
-    let mut runner = if let Some(cid) = community_toml_id {
+    let mut runner = if let Some(manifest_path) = local_manifest_path {
+        // Installed-app relaunch (`ato launch <ipk>`): the caller already
+        // extracted the pinned-revision `capsule.toml`. Resolve the plan
+        // directly from it (no network) so the frozen revision runs even after
+        // a rollback, and reuse the detached session-start machinery (port
+        // reservation, ready probe, ProcessManager registration, stamped
+        // session record) so the Desktop can discover the session by its
+        // install_profile_key (#565).
+        if community_toml_id.is_some() || from_materialized_record.is_some() {
+            anyhow::bail!(
+                "internal: installed-app relaunch cannot combine a pinned manifest with --community-toml-id / --from-materialized-record"
+            );
+        }
+        super::session_runner::SessionStartPhaseRunner::from_toml_path(
+            handle,
+            manifest_path,
+            target_label,
+            attach_state.to_vec(),
+            run_config_hash.map(str::to_string),
+            json,
+        )
+    } else if let Some(cid) = community_toml_id {
         if from_materialized_record.is_some() {
             anyhow::bail!("--community-toml-id cannot be used with --from-materialized-record");
         }

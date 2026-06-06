@@ -33,6 +33,7 @@ pub(super) fn execute_app_command(command: crate::AppCommands, json_mode: bool) 
                 community_toml_id.as_deref(),
                 &attach_state,
                 from_materialized_record.as_deref(),
+                /* local_manifest_path */ None,
                 run_config_hash.as_deref(),
                 json_mode || json,
             ),

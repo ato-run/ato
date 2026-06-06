@@ -410,10 +410,15 @@ pub fn inspect_launchable_installed_profile(
 /// Desktop's `ATO_HOME` / runtime opt-out env) lives in
 /// [`crate::orchestrator::spawn_installed_launch`].
 pub fn installed_launch_command_args(install_profile_key: &str) -> Vec<String> {
+    // `--detached-session` (#565): the Desktop needs `ato launch` to start the
+    // installed app as a *detached* session that writes a discoverable
+    // StoredSessionInfo (which `ensure_installed_session` polls for), rather than
+    // the public CLI's foreground/blocking behavior.
     vec![
         "launch".to_string(),
         install_profile_key.to_string(),
         "-y".to_string(),
+        "--detached-session".to_string(),
     ]
 }
 
@@ -1011,10 +1016,16 @@ mod tests {
     #[test]
     fn installed_launch_uses_ato_launch_not_session_start() {
         // Regression: an installed app must relaunch through the install-owned,
-        // pre-consented `ato launch <ipk> -y`, never `ato app session start`
-        // (which is run-owned and consent-gated).
+        // pre-consented `ato launch <ipk>`, never `ato app session start` (which
+        // is run-owned and consent-gated). `--detached-session` (#565) selects
+        // the detached variant of `ato launch` that writes a discoverable
+        // session record for the Desktop — it is still `ato launch`, not the
+        // handle-keyed `app session start` path.
         let args = super::installed_launch_command_args("ipk_abc123");
-        assert_eq!(args, vec!["launch", "ipk_abc123", "-y"]);
+        assert_eq!(
+            args,
+            vec!["launch", "ipk_abc123", "-y", "--detached-session"]
+        );
         assert_ne!(args.first().map(String::as_str), Some("app"));
     }
 
