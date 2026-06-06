@@ -1,0 +1,20 @@
+{
+  "capsule_id": "github:ato-run/installed-relaunch-node",
+  "scoped_id": "ato-run/installed-relaunch-node",
+  "publisher": "ato-run",
+  "slug": "installed-relaunch-node",
+  "version": "0.1.0",
+  "content_hash": "blake3:29d05ebe86592dd0cb46cccbb7e55fec3a29fbc8e89089a7d176c0e8354a8e3c",
+  "install_lifecycle": {
+    "installed_app_id": "app_824778c6c091d7fd3be1603198b77ba4",
+    "profile_id": "default",
+    "install_profile_key": "ipk_82508d85640a941525c49106efdd4071",
+    "install_revision_id": "rev_fe1fbb91dedb0a2f24e61091e2e2b420",
+    "current_revision_path": "<ATO_HOME>/instances/revisions/rev_fe1fbb91dedb0a2f24e61091e2e2b420"
+  },
+  "mock_requests": [
+    "/v1/github/repos/ato-run/installed-relaunch-node/install-draft",
+    "/repos/ato-run/installed-relaunch-node/tarball/1111111111111111111111111111111111111111"
+  ]
+}
+

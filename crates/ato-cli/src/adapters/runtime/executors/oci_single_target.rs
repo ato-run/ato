@@ -9,6 +9,7 @@
 //! The legacy Bollard/Docker-compatible execution path is in `oci.rs`.
 //! New code must NOT route through that path.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -31,14 +32,88 @@ use crate::reporters::CliReporter;
 const OCI_STOP_TIMEOUT_SECS: i64 = 10;
 
 /// Execute a single OCI target through the official `PodmanProvider` path.
+///
+/// `strict_realization` is the opt-in `--strict-realization` profile (#500/#501):
+/// when set, Gate 5 blocks the launch before any pull/create if a required policy
+/// facet cannot be enforced.
 pub(crate) async fn execute_single_target(
     plan: &ManifestData,
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
+    strict_realization: bool,
 ) -> Result<i32> {
     let selector = DefaultOciProviderSelector;
     let provider = selector.select_provider();
-    execute_with_provider(plan, reporter, launch_ctx, &provider).await
+    execute_with_provider(plan, reporter, launch_ctx, &provider, strict_realization).await
+}
+
+/// Assemble the env map handed to `create_container`, in precedence order: the
+/// OCI target's manifest env (`base`), then the launch context's injected env,
+/// then the container proxy override, then SecretStore-backed launch-condition
+/// grants (#508) last so a secret wins for its exact key.
+///
+/// Secret values reach **only** this map (the in-memory `OciContainerRequest.env`).
+/// They are taken from `launch_ctx.secret_env()` — a channel deliberately excluded
+/// from `merged_env`/`merged_env_with_origins`/`env_permission_keys` — so the
+/// prelaunch receipt, session record, and logs never observe a raw value.
+fn build_oci_container_env(
+    base: HashMap<String, String>,
+    launch_ctx: &RuntimeLaunchContext,
+) -> HashMap<String, String> {
+    let mut env = base;
+    env.extend(launch_ctx.merged_env());
+    // Override proxy env for containers: 127.0.0.1 is unreachable from inside a
+    // container; use host.containers.internal instead.
+    if let Some(port) = launch_ctx.egress_proxy_port() {
+        let container_proxy = crate::common::proxy::proxy_env_for_oci_container(port, &[]);
+        for (k, v) in crate::common::proxy::proxy_env_to_pairs(&container_proxy) {
+            env.insert(k, v);
+        }
+    }
+    // SecretStore-backed launch-condition grants (#508). Applied at the OCI
+    // container-creation boundary only; the value reaches only this map. Last so a
+    // secret wins for its exact env key.
+    for secret in launch_ctx.secret_env() {
+        env.insert(secret.name.clone(), secret.value.expose().to_string());
+    }
+    env
+}
+
+/// Build the OCI container mounts from both the injected-mount channel and the
+/// receipt-excluded state-binding channel (#508).
+///
+/// State-binding mounts carry the bound host directory and must reach the
+/// container at the create boundary, but they live on `launch_ctx.state_mounts()`
+/// — NOT `injected_mounts()`, which the receipt's filesystem observer
+/// (`observe_filesystem_v2`) hashes by source path. Routing them through
+/// `injected_mounts` would leak the raw host path into the receipt's filesystem
+/// identity; they are merged into the live request only here, never observed.
+fn build_oci_mounts(
+    launch_ctx: &RuntimeLaunchContext,
+) -> Vec<capsule_core::runtime::oci::OciMountSpec> {
+    launch_ctx
+        .injected_mounts()
+        .iter()
+        .map(|m| capsule_core::runtime::oci::OciMountSpec {
+            source: m.source.to_string_lossy().to_string(),
+            target: m.target.clone(),
+            readonly: m.readonly,
+            ownership: None,
+            source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
+        })
+        .chain(
+            launch_ctx
+                .state_mounts()
+                .iter()
+                .map(|m| capsule_core::runtime::oci::OciMountSpec {
+                    source: m.source.to_string_lossy().to_string(),
+                    target: m.target.clone(),
+                    readonly: m.readonly,
+                    ownership: None,
+                    source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
+                }),
+        )
+        .collect()
 }
 
 /// Core execution logic, accepting any `OciProvider` implementation.
@@ -48,9 +123,17 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     provider: &P,
+    strict_realization: bool,
 ) -> Result<i32> {
     // ── Gate 1: OCI policy envelope from the lock-compiled execution plan ────
-    let oci_envelope = resolve_oci_envelope(plan)?;
+    // Compile the full plan once; it is reused for the launch receipt so the
+    // receipt records exactly the plan the gates evaluated.
+    let execution_plan = compile_oci_execution_plan(plan)?;
+    let oci_envelope = execution_plan
+        .oci
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("{}", OciProviderError::OciPolicyEnvelopeMissing))
+        .context("OCI execution plan missing policy envelope; ensure target has runtime=\"oci\"")?;
 
     // ── Gate 2: resolved image digest required ───────────────────────────────
     let resolved_image = oci_envelope
@@ -96,17 +179,11 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
 
     let pull_ref = build_digest_pull_ref(resolved_image);
 
-    // Env: merge OCI target env with launch context env.
-    let mut env = plan.targets_oci_env();
-    env.extend(launch_ctx.merged_env());
-    // Override proxy env for containers: 127.0.0.1 is unreachable from inside a
-    // container; use host.containers.internal instead.
-    if let Some(port) = launch_ctx.egress_proxy_port() {
-        let container_proxy = crate::common::proxy::proxy_env_for_oci_container(port, &[]);
-        for (k, v) in crate::common::proxy::proxy_env_to_pairs(&container_proxy) {
-            env.insert(k, v);
-        }
-    }
+    // Env: OCI target manifest env overlaid with launch-context injected env, the
+    // container proxy override, and SecretStore-backed grants (#508). Secret values
+    // reach only this `OciContainerRequest.env`, never the receipt/session/logs —
+    // see `build_oci_container_env`.
+    let env = build_oci_container_env(plan.targets_oci_env(), launch_ctx);
 
     // Cmd: prefer targets_oci_cmd, fall back to entrypoint/run command.
     let mut cmd = plan.targets_oci_cmd();
@@ -131,17 +208,42 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
         })
         .unwrap_or_default();
 
-    let mounts: Vec<capsule_core::runtime::oci::OciMountSpec> = launch_ctx
-        .injected_mounts()
-        .iter()
-        .map(|m| capsule_core::runtime::oci::OciMountSpec {
-            source: m.source.to_string_lossy().to_string(),
-            target: m.target.clone(),
-            readonly: m.readonly,
-            ownership: None,
-            source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
-        })
-        .collect();
+    let mounts = build_oci_mounts(launch_ctx);
+
+    // Assemble the launch request up front so the strict realization gate can
+    // inspect the full projection BEFORE any image pull or container creation.
+    let container_request = OciContainerRequest {
+        name: container_name.clone(),
+        image: pull_ref,
+        cmd,
+        env,
+        working_dir: plan.targets_oci_working_dir(),
+        labels,
+        mounts,
+        ports,
+        network: None,
+        aliases: Vec::new(),
+        platform: None,
+        extra_hosts: if launch_ctx.egress_proxy_port().is_some() {
+            vec![crate::common::proxy::OCI_HOST_GATEWAY_ENTRY.to_string()]
+        } else {
+            vec![]
+        },
+        user: plan.targets_oci_user(),
+    };
+
+    // ── Gate 5: strict realization profile (#500/#501) ───────────────────────
+    // Opt-in `--strict-realization`. Blocks before any pull/create when a
+    // required policy facet cannot be enforced by PodmanProvider, the image is
+    // unpinned, or a host-bound mount fallback is required. Normal mode is a
+    // no-op here. This is distinct from Gate 4 (`OciPolicyMode::Strict`).
+    enforce_strict_oci_launch(&oci_envelope, &container_request, strict_realization)?;
+
+    // Persist a durable prelaunch receipt with the OCI provider evidence (#501),
+    // BEFORE any pull/create, so the resolved launch envelope is recorded
+    // independent of the live container. Best-effort: a receipt issue must never
+    // regress an OCI launch.
+    persist_oci_launch_receipt(plan, &execution_plan, launch_ctx, None, &reporter).await;
 
     reporter
         .notify(format!(
@@ -156,25 +258,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
         .context("failed to pull OCI image")?;
 
     let container_id = provider
-        .create_container(&OciContainerRequest {
-            name: container_name.clone(),
-            image: pull_ref,
-            cmd,
-            env,
-            working_dir: plan.targets_oci_working_dir(),
-            labels,
-            mounts,
-            ports,
-            network: None,
-            aliases: Vec::new(),
-            platform: None,
-            extra_hosts: if launch_ctx.egress_proxy_port().is_some() {
-                vec![crate::common::proxy::OCI_HOST_GATEWAY_ENTRY.to_string()]
-            } else {
-                vec![]
-            },
-            user: plan.targets_oci_user(),
-        })
+        .create_container(&container_request)
         .await
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))
         .context("failed to create OCI container")?;
@@ -247,8 +331,13 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     Ok(exit_code as i32)
 }
 
-/// Compile the `OciPolicyEnvelope` from the lock-derived execution plan.
-fn resolve_oci_envelope(plan: &ManifestData) -> Result<OciPolicyEnvelope> {
+/// Compile the full lock-derived `ExecutionPlan` for the selected OCI target.
+///
+/// Shared by the policy-envelope gate and the launch-receipt builder so both read
+/// the same compiled plan (the receipt records exactly what the gate evaluated).
+pub(crate) fn compile_oci_execution_plan(
+    plan: &ManifestData,
+) -> Result<capsule_core::execution_plan::model::ExecutionPlan> {
     use capsule_core::contract::lock_runtime;
     use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
 
@@ -256,18 +345,13 @@ fn resolve_oci_envelope(plan: &ManifestData) -> Result<OciPolicyEnvelope> {
         lock_runtime::resolve_lock_runtime_model(&plan.lock, Some(plan.selected_target_label()))
             .context("failed to resolve lock runtime model for OCI target")?;
 
-    let execution_plan = derive::compile_execution_plan_from_lock(
+    derive::compile_execution_plan_from_lock(
         &plan.lock,
         &resolved,
         &Default::default(),
         &PlatformSnapshot::current(),
     )
-    .context("failed to compile OCI execution plan from lock")?;
-
-    execution_plan
-        .oci
-        .ok_or_else(|| anyhow::anyhow!("{}", OciProviderError::OciPolicyEnvelopeMissing))
-        .context("OCI execution plan missing policy envelope; ensure target has runtime=\"oci\"")
+    .context("failed to compile OCI execution plan from lock")
 }
 
 /// Check that the policy mode can be honoured by the PodmanProvider.
@@ -300,6 +384,86 @@ fn enforce_policy_gate(envelope: &OciPolicyEnvelope) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// Gate 5 (#500/#501): apply the opt-in strict realization profile to an OCI
+/// launch *before* any pull/create.
+///
+/// Routes the resolved policy envelope + projection plan through the strict
+/// realization gate: in strict mode it blocks (typed
+/// `ATO_ERR_STRICT_REALIZATION_BLOCKED`) when a required policy facet cannot be
+/// enforced by PodmanProvider, the image is unpinned, or a host-bound mount
+/// fallback is required. In normal mode it is a no-op, so existing OCI launches
+/// are never newly blocked. The typed error is surfaced through anyhow and stays
+/// downcastable for structured output.
+fn enforce_strict_oci_launch(
+    envelope: &OciPolicyEnvelope,
+    request: &OciContainerRequest,
+    strict_realization: bool,
+) -> Result<()> {
+    use crate::application::provider_projection::oci::OciProjectionPlan;
+    use crate::application::provider_projection::strict_oci::{
+        OciProviderEnforcement, OciStrictFacts, enforce_strict_oci,
+    };
+    use capsule_core::realization::LaunchProfile;
+
+    let profile = if strict_realization {
+        LaunchProfile::Strict
+    } else {
+        LaunchProfile::Normal
+    };
+    let projection = OciProjectionPlan::from_container_request(request);
+    let facts = OciStrictFacts::from_launch(envelope, &projection);
+    let enforcement = OciProviderEnforcement::podman(facts.network_policy_required);
+    // The graph-derived resolved execution id is not threaded into the OCI launch
+    // path yet (a remaining #501 slice), so pass `None` rather than substituting
+    // the provider projection fingerprint — which is not an execution identity.
+    enforce_strict_oci(&facts, &enforcement, profile, None).map_err(anyhow::Error::new)
+}
+
+/// Persist a durable launch receipt carrying OCI provider evidence (#501).
+///
+/// Shared by the single-target and multi-service OCI paths. Builds the v2 receipt
+/// (which already includes `provider_projections`) via the shared receipt builder
+/// and writes it to the executions store, emitting the stable `RECEIPT: <path>`
+/// line on success (parity with the source-native launch path).
+///
+/// **Best-effort:** on any build/write failure it warns and returns — a receipt
+/// issue must never regress an OCI launch. `provider_projections_override` lets the
+/// multi-service path supply one evidence record per service; `None` keeps the
+/// builder's single declared projection (single-target).
+pub(crate) async fn persist_oci_launch_receipt(
+    plan: &ManifestData,
+    execution_plan: &capsule_core::execution_plan::model::ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    provider_projections_override: Option<
+        Vec<capsule_core::execution_identity::OciProviderReceiptEvidence>,
+    >,
+    reporter: &Arc<CliReporter>,
+) {
+    let result = crate::application::execution_receipt_builder::build_oci_launch_receipt(
+        plan,
+        execution_plan,
+        launch_ctx,
+        provider_projections_override,
+    )
+    .and_then(|document| {
+        crate::application::execution_receipts::write_receipt_document_atomic(&document)
+    });
+    match result {
+        Ok(path) => {
+            let _ = reporter
+                .notify(format!("RECEIPT: {}", path.display()))
+                .await;
+        }
+        Err(err) => {
+            let _ = reporter
+                .notify(format!(
+                    "⚠  failed to persist OCI launch receipt (continuing): {err}"
+                ))
+                .await;
+        }
+    }
 }
 
 fn print_log_chunk(service_name: &str, chunk: &OciLogChunk) -> std::io::Result<()> {
@@ -385,6 +549,126 @@ mod tests {
             egress_allow: egress,
             policy_mode,
         }
+    }
+
+    // ── Secret env injection (#508) ───────────────────────────────────────────
+    // OCI secret grants must reach the container env but never the receipt /
+    // session / logs. These exercise `build_oci_container_env`, the single seam
+    // where the env handed to `create_container` is assembled.
+    use crate::adapters::runtime::secret_injection::{RuntimeSecretEnv, SecretValue};
+
+    fn secret(name: &str, value: &str) -> RuntimeSecretEnv {
+        RuntimeSecretEnv {
+            name: name.to_string(),
+            value: SecretValue::new(value.to_string()),
+        }
+    }
+
+    #[test]
+    fn oci_secret_env_reaches_container_env() {
+        let ctx = RuntimeLaunchContext::default()
+            .with_secret_env(vec![secret("OPENAI_API_KEY", "sk-live-secret")]);
+        let env = build_oci_container_env(HashMap::new(), &ctx);
+        assert_eq!(
+            env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-live-secret"),
+            "secret grant must reach the container env"
+        );
+    }
+
+    #[test]
+    fn oci_secret_env_wins_over_base_env_key() {
+        let mut base = HashMap::new();
+        base.insert("OPENAI_API_KEY".to_string(), "placeholder".to_string());
+        let ctx = RuntimeLaunchContext::default()
+            .with_secret_env(vec![secret("OPENAI_API_KEY", "sk-live-secret")]);
+        let env = build_oci_container_env(base, &ctx);
+        assert_eq!(
+            env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-live-secret"),
+            "a secret is applied last so it wins for its exact key"
+        );
+    }
+
+    #[test]
+    fn oci_secret_env_not_in_receipt_or_session_env() {
+        let ctx = RuntimeLaunchContext::default()
+            .with_secret_env(vec![secret("OPENAI_API_KEY", "sk-live-secret")]);
+        // Receipt/session observe `merged_env*`, which must exclude `secret_env`.
+        assert!(
+            !ctx.merged_env().contains_key("OPENAI_API_KEY"),
+            "secret_env must not appear in merged_env (receipt-observed)"
+        );
+        assert!(
+            !ctx.merged_env_with_origins().contains_key("OPENAI_API_KEY"),
+            "secret_env must not appear in merged_env_with_origins (receipt-observed)"
+        );
+    }
+
+    #[test]
+    fn oci_secret_env_not_in_generated_log_output() {
+        // The launch context is what may be Debug-logged; the raw secret value must
+        // not appear in its Debug rendering (RuntimeSecretEnv redacts the value).
+        let ctx = RuntimeLaunchContext::default()
+            .with_secret_env(vec![secret("OPENAI_API_KEY", "sk-live-secret")]);
+        let rendered = format!("{ctx:?}");
+        assert!(
+            !rendered.contains("sk-live-secret"),
+            "raw secret value must not appear in launch-context Debug output"
+        );
+    }
+
+    #[test]
+    fn oci_secret_env_debug_redacted() {
+        let entry = secret("OPENAI_API_KEY", "sk-live-secret");
+        let rendered = format!("{entry:?}");
+        assert!(!rendered.contains("sk-live-secret"), "value must be redacted");
+        assert!(
+            rendered.contains("OPENAI_API_KEY"),
+            "the env name is not sensitive and may appear"
+        );
+    }
+
+    // ── State-binding mounts (#508) ───────────────────────────────────────────
+    // The bound host directory must reach the container mounts but never the
+    // receipt's filesystem identity (which hashes injected_mounts() sources).
+    use crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount;
+
+    #[test]
+    fn state_binding_mount_reaches_oci_container_mounts() {
+        let raw = "/Users/koh/.local/share/app/data";
+        let ctx =
+            RuntimeLaunchContext::default().with_state_mounts(vec![RuntimeStateBindingMount {
+                state_key: "data".to_string(),
+                binding_id: "user-data".to_string(),
+                source: std::path::PathBuf::from(raw),
+                target: "/app/data".to_string(),
+                readonly: false,
+            }]);
+        let mounts = build_oci_mounts(&ctx);
+        let state_mount = mounts
+            .iter()
+            .find(|m| m.target == "/app/data")
+            .expect("state mount must reach the OCI container mounts");
+        assert_eq!(state_mount.source, raw);
+        assert!(!state_mount.readonly);
+        // It never appears on the receipt-observed mount channel.
+        assert!(
+            ctx.injected_mounts().is_empty(),
+            "state mount must not be in injected_mounts (receipt-observed)"
+        );
+    }
+
+    #[test]
+    fn oci_secret_injection_does_not_affect_non_installed_run() {
+        // Transient `ato run` carries no secret_env; the env map must be untouched
+        // by the secret loop (only the base env, no secret keys added).
+        let mut base = HashMap::new();
+        base.insert("FOO".to_string(), "bar".to_string());
+        let ctx = RuntimeLaunchContext::default();
+        assert!(ctx.secret_env().is_empty());
+        let env = build_oci_container_env(base.clone(), &ctx);
+        assert_eq!(env, base, "no secret_env means env is unchanged by injection");
     }
 
     // ── Policy gate tests ─────────────────────────────────────────────────────

@@ -45,6 +45,7 @@
 - [Association Spec](draft/ASSOCIATION_SPEC.md)
 - [ATO Home Layout](draft/ATO_HOME_LAYOUT.md)
 - [Build Materialization](draft/BUILD_MATERIALIZATION.md)
+- [Capsule Core Model](draft/CAPSULE_CORE_MODEL.md)
 - [Capsule Foundation Resource State Memo](draft/CAPSULE_FOUNDATION_RESOURCE_STATE_MEMO.md)
 - [Capsule URL Spec](draft/CAPSULE_URL_SPEC.md)
 - [Cross Platform Distribution Spec](draft/CROSS_PLATFORM_DISTRIBUTION_SPEC.md)

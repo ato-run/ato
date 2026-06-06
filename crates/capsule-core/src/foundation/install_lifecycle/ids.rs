@@ -132,6 +132,27 @@ pub fn derive_install_profile_key(app: &InstalledAppId, profile: &ProfileId) -> 
     InstallProfileKey::new(format!("ipk_{}", hex_prefix(&input, 32)))
 }
 
+/// Derive the stable, user-facing **app URL** for an installed profile.
+///
+/// Shape: `ato://app/<install_profile_key>`.
+///
+/// This is the durable open-identity an Ato install assigns to a profile: it is
+/// what Desktop windows, the Start page, Dashboard entries, and OS shortcuts
+/// should target. Unlike a runtime session's `local_url` (an ephemeral loopback
+/// port behind the router) or a `.capsule` / revision-output path, this URL is
+/// independent of which revision is current and which port a given session
+/// happens to bind — it depends *only* on the `install_profile_key`. A rollback,
+/// update, or relaunch therefore never changes it.
+///
+/// The router/proxy that resolves `ato://app/<ipk>` to the current revision's
+/// running session is a separate concern (not all callers can navigate this
+/// scheme yet); until that binding exists, callers may open the session
+/// `local_url` as a temporary adapter while still persisting this URL as the
+/// stable identity.
+pub fn derive_app_url(profile_key: &InstallProfileKey) -> String {
+    format!("ato://app/{}", profile_key.as_str())
+}
+
 /// Derive a path-safe [`InstalledAppId`] from an arbitrary scoped capsule id (e.g. `publisher/slug`).
 ///
 /// The raw scoped id may contain `/` which would be interpreted as a path separator
@@ -311,6 +332,44 @@ mod tests {
         let key1 = derive_install_profile_key(&app, &profile);
         let key2 = derive_install_profile_key(&app, &profile);
         assert_eq!(key1, key2, "profile key must not change between calls");
+    }
+
+    // ── app_url stable identity ────────────────────────────────────────────
+
+    #[test]
+    fn app_url_derives_from_profile_key_only() {
+        let app = InstalledAppId::new("app_abc123");
+        let profile = ProfileId::new("default");
+        let key = derive_install_profile_key(&app, &profile);
+
+        let url = derive_app_url(&key);
+        assert_eq!(url, format!("ato://app/{}", key.as_str()));
+        assert!(
+            url.starts_with("ato://app/ipk_"),
+            "app url must be ato://app/<ipk>, got: {url}"
+        );
+    }
+
+    #[test]
+    fn app_url_is_revision_and_port_independent() {
+        let app = InstalledAppId::new("app_xyz");
+        let profile = ProfileId::new("default");
+        let key = derive_install_profile_key(&app, &profile);
+
+        // The same profile key always yields the same app URL — it cannot
+        // encode a revision id, an execution id, or a runtime port.
+        let url1 = derive_app_url(&key);
+        let url2 = derive_app_url(&derive_install_profile_key(&app, &profile));
+        assert_eq!(url1, url2);
+        assert!(!url1.contains("rev_"), "app url must not embed a revision");
+        assert!(
+            !url1.contains("exec_"),
+            "app url must not embed an execution"
+        );
+        assert!(
+            !url1.contains("127.0.0.1") && !url1.contains("localhost"),
+            "app url must not embed a runtime loopback port: {url1}"
+        );
     }
 
     // ── capsule_instance_key requires all 3 components ─────────────────────

@@ -104,6 +104,14 @@ pub(crate) struct PreparedRunContext {
     pub(crate) validation_mode: capsule_core::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
+    /// Install profile key for an installed-app launch (`ato launch`), `None`
+    /// for ephemeral `ato run`. Captured from the trusted install-lifecycle
+    /// identity on the synchronous run thread and threaded explicitly into
+    /// [`resolve_launch_context`] so the launch path never reads the
+    /// thread-local install context across an async executor boundary (#508).
+    ///
+    /// [`resolve_launch_context`]: crate::adapters::runtime::executors::target_runner::resolve_launch_context
+    pub(crate) install_profile_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +173,9 @@ impl PreparedRunContext {
                 .is_some_and(|decision| decision.plan.manifest.get("engine").is_some()),
             compatibility_legacy_lock: authoritative_input
                 .and_then(|input| input.compatibility_legacy_lock.clone()),
+            // Stamped explicitly by the caller from the request's trusted
+            // install-lifecycle identity (see the run pipeline below).
+            install_profile_key: None,
         })
     }
 
@@ -184,6 +195,7 @@ impl PreparedRunContext {
             validation_mode,
             engine_override_declared,
             compatibility_legacy_lock: self.compatibility_legacy_lock.clone(),
+            install_profile_key: self.install_profile_key.clone(),
         }
     }
 }
@@ -235,10 +247,25 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) cache_strategy: CacheStrategy,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
+    /// #500 — opt-in strict fail-closed realization profile. When `true`, the
+    /// execute phase consults the strict realization gate before any process or
+    /// container is created and blocks the launch with a typed error if a
+    /// required input cannot be verified. `false` (default) keeps the
+    /// conservative, non-breaking behavior.
+    pub(crate) strict_realization: bool,
     /// Revision-pinned output directory set by `ato launch`. When `Some`,
     /// `run_install_phase` bypasses `resolve_run_target_or_install` and uses
     /// this frozen revision output dir directly as the run target.
     pub(crate) pinned_revision_output_dir: Option<std::path::PathBuf>,
+    /// Trusted install-lifecycle identity set by `ato launch`. Threaded into the
+    /// dependency materialization request so the session record is stamped with
+    /// installed app / profile / revision identity via explicit data flow.
+    pub(crate) install_lifecycle_context:
+        Option<crate::cli::commands::run::InstallLifecycleContext>,
+    /// Launch-condition inputs from a `capsule://…?<query>` launch URL, overlaid
+    /// onto the in-memory installed-state claims before the relaunch preflight
+    /// resolves them (inputs, not proof). Empty for `ato run` / `ato launch <ipk>`.
+    pub(crate) capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
 }
 
 impl ConsumerRunRequest {
@@ -1596,6 +1623,10 @@ fn dependency_request_for_run(
         platform: PlatformTriple::current(),
         cache_strategy: request.cache_strategy,
         attestation_strategy: AttestationStrategy::None,
+        // Trusted, request-scoped install-lifecycle identity (set only by
+        // `ato launch`). Threaded as typed data so the materialized session
+        // record is stamped without any reliance on process env / globals.
+        install_lifecycle_context: request.install_lifecycle_context.clone(),
     })
 }
 
@@ -1628,6 +1659,43 @@ fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMod
     } else {
         capsule_core::types::ValidationMode::Strict
     }
+}
+
+/// Collect per-endpoint preferred-port requests from `capsule://` port query
+/// inputs (#548). Keyed by logical endpoint name (`main` for the bare `port`):
+///
+/// - a value parsing as `u16` → [`PortPreference::Concrete`] (the requested
+///   preferred port).
+/// - the literal `"auto"` → [`PortPreference::Auto`], an *explicit* "no concrete
+///   preferred port" that suppresses the env-`PORT` fallback for that endpoint at
+///   admission time (so `port=auto` with `PORT` in the service env creates no
+///   concrete claim — it lands on the runtime's OS auto-assign path).
+///
+/// Other `Literal` values (non-numeric, out-of-range) are dropped: parsing
+/// already rejects them, so they should never reach here.
+fn collect_port_preferences(
+    inputs: &[capsule_core::installed_state::LaunchConditionInput],
+) -> HashMap<String, crate::executors::launch_context::PortPreference> {
+    use crate::executors::launch_context::PortPreference;
+    use capsule_core::installed_state::{LaunchConditionInputKind, LaunchConditionInputValue};
+    let mut prefs = HashMap::new();
+    for input in inputs {
+        if input.kind != LaunchConditionInputKind::Port {
+            continue;
+        }
+        let LaunchConditionInputValue::Literal(value) = &input.value else {
+            continue;
+        };
+        let preference = if value == "auto" {
+            PortPreference::Auto
+        } else if let Ok(port) = value.parse::<u16>() {
+            PortPreference::Concrete(port)
+        } else {
+            continue;
+        };
+        prefs.insert(input.key.clone(), preference);
+    }
+    prefs
 }
 
 pub(crate) async fn run_prepare_phase<P>(
@@ -1681,6 +1749,34 @@ where
         &workspace_root,
         validation_mode,
         effective_target_label,
+    )?;
+    // Source of truth for installed-app launch identity: the explicit
+    // install-lifecycle context `ato launch` passes through the request — not
+    // the thread-local. Threaded onto the prepared context so the (async)
+    // launch-context resolution stamps it without crossing a thread-local
+    // boundary (#508).
+    prepared.install_profile_key = request
+        .install_lifecycle_context
+        .as_ref()
+        .map(|ctx| ctx.install_profile_key.clone());
+    // Installed-app relaunch preflight (#508): read the Installed-State DB ledger
+    // (the SOT) and block before launch if a required condition is unsatisfied.
+    // Gated on the install identity, so `ato run` / non-installed launches are
+    // untouched. Runs here in the prepare phase, before any executor.
+    //
+    // `capsule://…?<query>` launch URLs (`ato launch capsule://…`) supply
+    // launch-condition inputs (which grant/binding to try); they are overlaid
+    // onto the in-memory claims before resolution. They are inputs, not proof —
+    // the resolver still checks the DB registry before admission. Empty for
+    // `ato run` and `ato launch <ipk>`.
+    crate::adapters::runtime::relaunch_preflight::run_relaunch_preflight(
+        request.install_lifecycle_context.as_ref().map(|ctx| {
+            (
+                ctx.install_profile_key.as_str(),
+                ctx.install_revision_id.as_str(),
+            )
+        }),
+        &request.capsule_launch_inputs,
     )?;
     let state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
@@ -1878,6 +1974,82 @@ where
     .with_workspace_root(prepared.workspace_root.clone())
     .with_injected_env(injected_data.env)
     .with_injected_mounts(injected_data.mounts);
+
+    // #508/#549: resolve SecretStore-backed launch-condition grants into a
+    // dedicated, receipt-excluded secret env channel — after relaunch preflight
+    // admission and before spawn. Gated on an installed identity plus at least one
+    // `secret.*=grant:<id>` OR sensitive `env.*=grant:<id>` input, so `ato run` and
+    // `ato launch <ipk>` open no DB. A grant that exists but has no stored value
+    // blocks the launch (typed).
+    if let Some(lifecycle) = request.install_lifecycle_context.as_ref() {
+        let has_secret_grant = request.capsule_launch_inputs.iter().any(|input| {
+            matches!(
+                input.kind,
+                capsule_core::installed_state::LaunchConditionInputKind::Secret
+                    | capsule_core::installed_state::LaunchConditionInputKind::Env
+            ) && matches!(
+                input.value,
+                capsule_core::installed_state::LaunchConditionInputValue::Grant(_)
+            )
+        });
+        if has_secret_grant {
+            let db = capsule_core::installed_state::InstalledStateDb::open_default()
+                .context("open installed-state DB for secret injection")?;
+            let secret_env = crate::adapters::runtime::secret_injection::resolve_secret_injection(
+                &db,
+                &lifecycle.install_profile_key,
+                Some(&lifecycle.install_revision_id),
+                &request.capsule_launch_inputs,
+                &crate::adapters::runtime::secret_injection::SecretStoreValueStore,
+            )?;
+            launch_ctx = launch_ctx.with_secret_env(secret_env);
+        }
+    }
+
+    // #508: materialize SecretStore-analog state bindings into a dedicated,
+    // receipt-excluded mount channel — after relaunch preflight admission and
+    // before spawn. Gated on an installed identity plus at least one
+    // `state.*=binding:<id>` input, so `ato run` and `ato launch <ipk>` open no DB.
+    // A binding that is admitted but whose target was never recorded blocks the
+    // launch (typed). The bound host path reaches the runtime on `state_mounts`,
+    // never `injected_mounts` (which the receipt observes), so it never enters the
+    // execution receipt / session record / logs.
+    if let Some(lifecycle) = request.install_lifecycle_context.as_ref() {
+        let has_state_binding = request.capsule_launch_inputs.iter().any(|input| {
+            input.kind == capsule_core::installed_state::LaunchConditionInputKind::State
+                && matches!(
+                    input.value,
+                    capsule_core::installed_state::LaunchConditionInputValue::Binding(_)
+                )
+        });
+        if has_state_binding {
+            let db = capsule_core::installed_state::InstalledStateDb::open_default()
+                .context("open installed-state DB for state binding materialization")?;
+            let state_mounts =
+                crate::adapters::runtime::state_binding_injection::resolve_state_binding_materialization(
+                    &db,
+                    &lifecycle.install_profile_key,
+                    Some(&lifecycle.install_revision_id),
+                    &request.capsule_launch_inputs,
+                )?;
+            launch_ctx = launch_ctx.with_state_mounts(state_mounts);
+        }
+    }
+
+    // #548: carry `capsule://…?port[.<endpoint>]=<n>` query inputs as per-endpoint
+    // preferred ports so the web-service port admission picks them before
+    // consulting the claim ledger. Gated on an installed identity, so `ato run`
+    // (no install lifecycle) is untouched. `port=auto` (the literal `"auto"`) is
+    // carried as `PortPreference::Auto` — an *explicit* "no concrete preferred
+    // port" that suppresses the env-`PORT` fallback for that endpoint at
+    // admission time, so it never becomes a concrete claim and the runtime uses
+    // its OS auto-assign path.
+    if request.install_lifecycle_context.is_some() {
+        let port_preferences = collect_port_preferences(&request.capsule_launch_inputs);
+        if !port_preferences.is_empty() {
+            launch_ctx = launch_ctx.with_port_preferences(port_preferences);
+        }
+    }
     if let Some(external_capsules) = external_capsules.as_ref() {
         for (dependency, env) in external_capsules.caller_envs() {
             launch_ctx = launch_ctx.with_injected_env_with_origin(
@@ -3029,6 +3201,7 @@ where
                 &decision.plan,
                 request.reporter.clone(),
                 &launch_ctx,
+                request.strict_realization,
             )
             .await?;
             if exit != 0 {
@@ -3094,6 +3267,7 @@ where
             &decision.plan,
             request.reporter.clone(),
             &launch_ctx,
+            request.strict_realization,
         )
         .await?;
         if exit != 0 {
@@ -3241,6 +3415,31 @@ where
         .reporter
         .notify(format!("RECEIPT: {}", execution_receipt_path.display()))
         .await?;
+
+    // #500 — strict fail-closed realization gate. Opt-in via
+    // `--strict-realization`. This runs at the prelaunch boundary: the resolved
+    // launch graph is built and the prelaunch receipt is persisted, but no guest
+    // process, runtime process, or container has been created yet. In the
+    // default profile this is a no-op; in strict mode it blocks the launch with
+    // a typed `AtoExecutionError` (recoverable downstream via downcast) when a
+    // required input cannot be verified. The host/provider realization-evidence
+    // producer is #501, so until it lands strict mode is conservatively
+    // fail-closed — see `application::strict_realization`.
+    if request.strict_realization {
+        // Fail-closed: strict mode must refuse to launch anything it cannot even
+        // inspect. A missing resolved launch graph is a block, not a skip.
+        let Some(launch_graph) = receipt_output.launch_graph.as_ref() else {
+            return Err(
+                crate::application::strict_realization::missing_launch_graph_error().into(),
+            );
+        };
+        let env = crate::application::strict_realization::launch_environment();
+        crate::application::strict_realization::enforce_strict_realization(
+            launch_graph,
+            &env,
+            crate::application::strict_realization::launch_profile(true),
+        )?;
+    }
 
     let run_command_uses_specialized_executor = decision
         .plan
@@ -4319,10 +4518,11 @@ mod tests {
     use super::{
         ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
         ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
-        PreparedRunContext, RunPipelineState, ServiceRequiredAsset, normalize_existing_path,
-        normalize_write_path, parent_package_id, parse_external_service_contracts,
-        parse_reuse_if_present_service_preflights, reconcile_compat_manifest_targets,
-        resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
+        PreparedRunContext, RunPipelineState, ServiceRequiredAsset, collect_port_preferences,
+        normalize_existing_path, normalize_write_path, parent_package_id,
+        parse_external_service_contracts, parse_reuse_if_present_service_preflights,
+        reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
+        validate_sandbox_grants_best_effort,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -4336,6 +4536,59 @@ mod tests {
 
     fn empty_host_env() -> crate::application::dependency_credentials::MapHostEnv {
         crate::application::dependency_credentials::MapHostEnv::new(&[])
+    }
+
+    #[test]
+    fn collect_port_preferences_records_concrete_ports_and_explicit_auto() {
+        use crate::executors::launch_context::PortPreference;
+        use capsule_core::installed_state::{
+            LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+        };
+        let port = |key: &str, value: &str| LaunchConditionInput {
+            kind: LaunchConditionInputKind::Port,
+            key: key.to_string(),
+            value: LaunchConditionInputValue::Literal(value.to_string()),
+        };
+        let inputs = vec![
+            port("main", "3001"),
+            port("admin", "auto"),
+            port("api", "8080"),
+            // Non-port inputs are ignored.
+            LaunchConditionInput {
+                kind: LaunchConditionInputKind::Secret,
+                key: "OPENAI_API_KEY".to_string(),
+                value: LaunchConditionInputValue::Grant("g1".to_string()),
+            },
+        ];
+        let prefs = collect_port_preferences(&inputs);
+        assert_eq!(prefs.get("main"), Some(&PortPreference::Concrete(3001)));
+        assert_eq!(prefs.get("api"), Some(&PortPreference::Concrete(8080)));
+        assert_eq!(
+            prefs.get("admin"),
+            Some(&PortPreference::Auto),
+            "port=auto is recorded as explicit Auto (suppresses env-PORT fallback)"
+        );
+        assert_eq!(prefs.len(), 3);
+    }
+
+    #[test]
+    fn collect_port_preferences_drops_unparseable_literal() {
+        use capsule_core::installed_state::{
+            LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+        };
+        // Parsing already rejects non-numeric / out-of-range port literals, but the
+        // collector defensively drops anything that is neither `auto` nor a u16.
+        let inputs = vec![LaunchConditionInput {
+            kind: LaunchConditionInputKind::Port,
+            key: "main".to_string(),
+            value: LaunchConditionInputValue::Literal("not-a-port".to_string()),
+        }];
+        assert!(collect_port_preferences(&inputs).is_empty());
+    }
+
+    #[test]
+    fn collect_port_preferences_empty_for_no_port_inputs() {
+        assert!(collect_port_preferences(&[]).is_empty());
     }
 
     fn workspace_tempdir(name: &str) -> tempfile::TempDir {
@@ -4549,6 +4802,7 @@ run = "/usr/bin/true"
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: Some("ipk_authority".to_string()),
         };
 
         let rerouted = prepared.with_bridge_manifest(
@@ -4570,6 +4824,12 @@ run = "/usr/bin/true"
             capsule_core::types::ValidationMode::Preview
         );
         assert!(rerouted.engine_override_declared);
+        // Install identity must survive the reroute so the rerouted launch
+        // context resolution still stamps it (#508).
+        assert_eq!(
+            rerouted.install_profile_key.as_deref(),
+            Some("ipk_authority")
+        );
     }
 
     #[test]
@@ -4883,7 +5143,10 @@ url = "http://127.0.0.1:8787/health"
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(false)),
             preview_mode: false,
+            strict_realization: false,
             pinned_revision_output_dir: None,
+            install_lifecycle_context: None,
+            capsule_launch_inputs: Vec::new(),
         }
     }
 

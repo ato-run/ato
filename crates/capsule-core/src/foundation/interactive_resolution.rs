@@ -72,6 +72,22 @@ pub enum InteractiveResolutionKind {
         provisioning_policy_hash: String,
         summary: String,
     },
+    /// An installed app declares a `[state.<key>]` requirement with
+    /// `attach = "explicit"` (#404) that has no host-directory binding yet, so
+    /// the user must choose a local folder before launch. Carries the logical
+    /// `state_key` and a user-facing `label` only — **never** a host path. The
+    /// Desktop's requirement-aggregation modal surfaces this as a "choose
+    /// folder" prompt; the chosen path is resolved through
+    /// `capsule_core::installed_state::resolve_state_binding_from_path`, which
+    /// keeps the raw path local-private.
+    StateBindingRequired {
+        /// The logical state key (e.g. `data`). Re-submitted as
+        /// `state.<state_key>=binding:<id>` after the user picks a folder.
+        state_key: String,
+        /// A user-facing description of what the folder is for (e.g. the
+        /// state requirement's `purpose`). Not a path.
+        label: String,
+    },
 }
 
 /// Pre-rendered presentation text shared across surfaces (CLI human
@@ -298,5 +314,35 @@ mod tests {
         assert!(json.contains(r#""target":"main""#), "{json}");
         // hint is None → must be skipped, not serialized as null.
         assert!(!json.contains(r#""hint":"#), "{json}");
+    }
+
+    /// #404: the StateBindingRequired kind serializes with the snake_case
+    /// discriminator and carries the logical `state_key` + a user-facing
+    /// `label`, never a host path. Locks the wire shape the desktop's
+    /// requirement-aggregation modal will route on.
+    #[test]
+    fn state_binding_required_serializes_with_snake_case_discriminator() {
+        let envelope = InteractiveResolutionEnvelope {
+            kind: InteractiveResolutionKind::StateBindingRequired {
+                state_key: "data".to_string(),
+                label: "user documents".to_string(),
+            },
+            display: ResolutionDisplay {
+                message: "Choose a local folder for 'user documents'.".to_string(),
+                hint: None,
+            },
+        };
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        assert!(
+            json.contains(r#""type":"state_binding_required""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""state_key":"data""#), "{json}");
+        assert!(json.contains(r#""label":"user documents""#), "{json}");
+
+        let round_tripped: InteractiveResolutionEnvelope =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round_tripped, envelope);
     }
 }

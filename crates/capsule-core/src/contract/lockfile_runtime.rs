@@ -790,6 +790,9 @@ pub(super) fn resolve_pnpm_tool_targets(platforms: &[RuntimePlatform]) -> ToolTa
                         PNPM_VERSION
                     ),
                     sha256: None,
+                    // Resolved binary hash is not available at lock generation
+                    // time (no extraction). See #469.
+                    binary_sha256: None,
                     version: Some(PNPM_VERSION.to_string()),
                 },
             )
@@ -821,6 +824,10 @@ pub(super) async fn resolve_uv_tool_targets(
                 ToolArtifact {
                     url,
                     sha256: Some(sha256),
+                    // Archive hash above is the published `.sha256` sidecar; the
+                    // resolved binary hash requires extraction and is not
+                    // available here. See #469.
+                    binary_sha256: None,
                     version: Some(UV_VERSION.to_string()),
                 },
             ))
@@ -858,6 +865,9 @@ pub(super) fn resolve_yarn_tool_targets(platforms: &[RuntimePlatform]) -> ToolTa
                         YARN_CLASSIC_VERSION
                     ),
                     sha256: None,
+                    // Resolved binary hash is not available at lock generation
+                    // time (no extraction). See #469.
+                    binary_sha256: None,
                     version: Some(YARN_CLASSIC_VERSION.to_string()),
                 },
             )
@@ -880,6 +890,9 @@ pub(super) fn resolve_bun_tool_targets(platforms: &[RuntimePlatform]) -> ToolTar
                         BUN_VERSION, bun_triple
                     ),
                     sha256: None,
+                    // Resolved binary hash is not available at lock generation
+                    // time (no extraction). See #469.
+                    binary_sha256: None,
                     version: Some(BUN_VERSION.to_string()),
                 },
             ))

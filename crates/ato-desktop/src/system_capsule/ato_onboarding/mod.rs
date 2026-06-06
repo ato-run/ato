@@ -23,6 +23,11 @@ pub enum OnboardingCommand {
         version: u16,
         #[serde(default)]
         skipped: bool,
+        /// #460 PR3: when set, resume straight into this capsule launch after
+        /// onboarding closes (the "Continue to sample app" path), instead of the
+        /// configured startup surface. A `capsule://…` handle / URL.
+        #[serde(default)]
+        launch_handle: Option<String>,
     },
 }
 
@@ -45,7 +50,11 @@ pub fn dispatch(
     command: OnboardingCommand,
 ) -> Result<(), BrokerError> {
     match command {
-        OnboardingCommand::Complete { version, skipped } => {
+        OnboardingCommand::Complete {
+            version,
+            skipped,
+            launch_handle,
+        } => {
             // Tear down any in-flight runtime install before leaving the flow.
             crate::runtime_setup::cancel_active_install(cx);
             let mut config = load_config();
@@ -57,8 +66,25 @@ pub fn dispatch(
 
             let _ = host.update(cx, |_, window, _| window.remove_window());
 
-            crate::window::open_configured_startup_surface(cx, startup_surface)
-                .map_err(|err| BrokerError::Internal(err.to_string()))?;
+            // #460 PR3 (Case A): if onboarding finished with a "Continue to
+            // sample app" intent, resume straight into that capsule launch via
+            // the existing consent/launch path — no shell, no manual return.
+            // Otherwise land on the configured startup surface.
+            match launch_handle.filter(|h| !h.trim().is_empty()) {
+                Some(handle) => {
+                    let route = crate::state::GuestRoute::CapsuleHandle {
+                        handle: handle.clone(),
+                        label: handle.clone(),
+                        community_toml_id: None,
+                    };
+                    crate::window::launch_window::open_consent_window_for_route(cx, route)
+                        .map_err(|err| BrokerError::Internal(err.to_string()))?;
+                }
+                None => {
+                    crate::window::open_configured_startup_surface(cx, startup_surface)
+                        .map_err(|err| BrokerError::Internal(err.to_string()))?;
+                }
+            }
         }
     }
 
@@ -98,7 +124,35 @@ mod tests {
         let cmd = OnboardingCommand::Complete {
             version: ONBOARDING_VERSION,
             skipped: false,
+            launch_handle: None,
         };
         assert_eq!(cmd.required_capability(), Capability::OnboardingComplete);
+    }
+
+    #[test]
+    fn complete_without_launch_handle_defaults_to_none() {
+        // Existing clients that omit `launch_handle` must still deserialize.
+        let cmd: OnboardingCommand =
+            serde_json::from_str(r#"{"kind":"complete","version":1,"skipped":false}"#).unwrap();
+        match cmd {
+            OnboardingCommand::Complete { launch_handle, .. } => assert_eq!(launch_handle, None),
+        }
+    }
+
+    #[test]
+    fn complete_carries_launch_handle() {
+        // #460 PR3: "Continue to sample app" sends a capsule handle.
+        let cmd: OnboardingCommand = serde_json::from_str(
+            r#"{"kind":"complete","version":1,"launch_handle":"capsule://github.com/sosedoff/pgweb"}"#,
+        )
+        .unwrap();
+        match cmd {
+            OnboardingCommand::Complete { launch_handle, .. } => {
+                assert_eq!(
+                    launch_handle.as_deref(),
+                    Some("capsule://github.com/sosedoff/pgweb")
+                );
+            }
+        }
     }
 }

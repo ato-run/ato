@@ -174,6 +174,12 @@ pub static UV: RuntimeToolSpec = RuntimeToolSpec {
     },
 };
 
+// Deno is intentionally not a `RuntimeToolSpec` tool. It is a primary runtime,
+// modeled in `RuntimeSection` (`runtimes.deno` in the lockfile) and handled by
+// the Deno runtime path (`resolve_deno_runtime`, `generate_deno_lock`). This
+// registry is only for auxiliary package/runtime tools — uv, pnpm, yarn, bun.
+// Deno's absence here is not a bug and does not mean Deno is unsupported.
+// See docs/dev-notes/runtime-vs-runtime-tools.md and #470.
 const REGISTRY: &[&RuntimeToolSpec] = &[&PNPM, &YARN, &BUN, &UV];
 
 pub fn registry() -> &'static [&'static RuntimeToolSpec] {
@@ -196,9 +202,19 @@ pub struct ToolHandle {
     /// Directory to prepend to PATH so the tool name resolves to the shim.
     pub bin_dir: PathBuf,
     pub version: String,
-    /// SHA-256 of the downloaded archive. Empty when the host tool was used
-    /// directly. Suitable for recording into
-    /// `capsule.lock.json::tools.<name>.binary_sha256`.
+    /// SHA-256 of the downloaded archive/distribution bytes.
+    ///
+    /// Empty when the host tool was used directly (no managed provisioning) or
+    /// when served from cache (the archive bytes are not retained). Maps to
+    /// `capsule.lock.json::tools.<name>.targets.<triple>.sha256`.
+    pub archive_sha256: String,
+    /// SHA-256 of the resolved executable/tool-entry file after extraction.
+    ///
+    /// This is the **resolved binary** hash, distinct from
+    /// [`Self::archive_sha256`]. Empty when the host tool was used directly.
+    /// Maps to `capsule.lock.json::tools.<name>.targets.<triple>.binary_sha256`.
+    /// Historically this field carried the archive hash; that was the bug fixed
+    /// in #469.
     pub binary_sha256: String,
 }
 
@@ -273,6 +289,9 @@ pub async fn ensure_runtime_tool(
         return Ok(ToolHandle {
             bin_dir: dir.to_path_buf(),
             version: String::new(),
+            // Host PATH tool: Ato did not provision it, so neither hash is
+            // known. Left empty so callers serialize neither into the lockfile.
+            archive_sha256: String::new(),
             binary_sha256: String::new(),
         });
     }
@@ -300,11 +319,15 @@ pub async fn ensure_runtime_tool(
 
     if shim_path.exists() {
         match validate_tool_cache(spec, &shim_path, &extracted_dir, &sha_path) {
-            Ok(sha) => {
+            Ok(binary_sha256) => {
                 return Ok(ToolHandle {
                     bin_dir: shim_dir,
                     version,
-                    binary_sha256: sha,
+                    // Cache hit: the archive bytes are not retained, so the
+                    // archive hash is unknown here. `validate_tool_cache`
+                    // recomputes the resolved binary hash from the target file.
+                    archive_sha256: String::new(),
+                    binary_sha256,
                 });
             }
             Err(err) => {
@@ -614,9 +637,14 @@ fn install_runtime_tool_archive(
 
     write_shim(spec, deps, &target_path, &shim_path)?;
 
-    fs::write(&sha_path, &archive_sha256).map_err(|e| {
+    // Hash of the resolved executable, not the archive. The cache-side
+    // `binary.sha256` file stores this resolved hash so its name matches its
+    // contents (older builds wrote the archive hash here — the #469 bug).
+    let binary_sha256 = sha256_file(&target_path)?;
+
+    fs::write(&sha_path, &binary_sha256).map_err(|e| {
         CapsuleError::Pack(format!(
-            "Failed to write archive hash {}: {}",
+            "Failed to write binary hash {}: {}",
             sha_path.display(),
             e
         ))
@@ -625,17 +653,37 @@ fn install_runtime_tool_archive(
     Ok(ToolHandle {
         bin_dir: shim_dir,
         version: version.to_string(),
-        binary_sha256: archive_sha256,
+        archive_sha256,
+        binary_sha256,
     })
 }
 
+/// SHA-256 of a file's bytes, hex-encoded. Used for the resolved tool-entry
+/// hash (#469).
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to read {} for hashing: {}",
+            path.display(),
+            e
+        ))
+    })?;
+    Ok(hex::encode(Sha256::digest(&bytes)))
+}
+
 /// Validates all cache integrity conditions for a managed runtime tool.
-/// Returns the validated sha256 string on success.
+/// Returns the **resolved binary** SHA-256 on success.
 ///
 /// Checks:
 /// 1. shim file is present and executable (Unix)
 /// 2. extracted target is present and executable for NativeBinary (via resolve_tool_target)
 /// 3. binary.sha256 is present, non-empty, and a valid 64-char hex string
+///
+/// The cache-side `binary.sha256` file is still required as an integrity marker
+/// of a completed install, but its *value* is no longer trusted as the binary
+/// identity: older caches stored the archive hash there under the same name, so
+/// the resolved binary hash is recomputed from the actual target file and that
+/// value is returned. See #469.
 fn validate_tool_cache(
     spec: &RuntimeToolSpec,
     shim_path: &Path,
@@ -643,8 +691,9 @@ fn validate_tool_cache(
     sha_path: &Path,
 ) -> Result<String> {
     validate_cached_shim(spec, shim_path)?;
-    resolve_tool_target(spec, extracted_dir)?;
-    validate_cached_sha(sha_path)
+    let target_path = resolve_tool_target(spec, extracted_dir)?;
+    validate_cached_sha(sha_path)?;
+    sha256_file(&target_path)
 }
 
 fn validate_cached_shim(spec: &RuntimeToolSpec, shim_path: &Path) -> Result<()> {
@@ -1270,6 +1319,25 @@ mod tests {
     }
 
     #[test]
+    fn deno_is_runtime_modeled_not_runtime_tool_spec() {
+        // Deno is a primary runtime (modeled in RuntimeSection / `runtimes.deno`),
+        // not a RuntimeToolSpec tool. Its absence from REGISTRY is intentional and
+        // must not be read as "Deno unsupported". See #470 and
+        // docs/dev-notes/runtime-vs-runtime-tools.md.
+        assert!(
+            lookup("deno").is_none(),
+            "deno must not be a RuntimeToolSpec tool — it is runtime-modeled"
+        );
+        // The auxiliary runtime tools remain registry-modeled.
+        assert!(lookup("uv").is_some());
+        assert!(lookup("pnpm").is_some());
+        assert!(lookup("yarn").is_some());
+        assert!(lookup("bun").is_some());
+        // The registry is exactly these four tools.
+        assert_eq!(registry().len(), 4);
+    }
+
+    #[test]
     fn tool_registry_builds_expected_urls_and_archive_names() {
         let cases = [
             (
@@ -1685,6 +1753,59 @@ mod tests {
         assert!(
             handle2.bin_dir.join(shim_name).is_file(),
             "shim must be restored after reinstall"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn managed_install_records_resolved_binary_hash_not_archive_hash() {
+        // #469 guard: ToolHandle.binary_sha256 must be the resolved tool-entry
+        // file hash, and archive_sha256 the archive bytes hash — never conflated.
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let version = unique_version("uv-hash");
+        let archive = build_uv_archive();
+        let handle = install_runtime_tool_archive(&UV, &version, &ToolDeps::default(), &archive)
+            .expect("install uv");
+
+        // archive_sha256 == hash of the downloaded archive bytes.
+        let expected_archive = hex::encode(Sha256::digest(&archive));
+        assert_eq!(
+            handle.archive_sha256, expected_archive,
+            "archive_sha256 must be the archive bytes hash"
+        );
+
+        // binary_sha256 == hash of the resolved tool-entry file, not the archive.
+        let target = ato_home
+            .path()
+            .join("toolchains/tools/uv")
+            .join(&version)
+            .join("extracted")
+            .join(resolved_layout_path(&UV).unwrap());
+        let expected_binary = hex::encode(Sha256::digest(fs::read(&target).expect("read target")));
+        assert_eq!(
+            handle.binary_sha256, expected_binary,
+            "binary_sha256 must be the resolved target file hash"
+        );
+
+        // The #469 bug was these two being the same value.
+        assert_ne!(
+            handle.archive_sha256, handle.binary_sha256,
+            "archive and resolved-binary hashes must not be conflated"
+        );
+
+        // The cache-side `binary.sha256` file stores the resolved binary hash.
+        let sha_path = ato_home
+            .path()
+            .join("toolchains/tools/uv")
+            .join(&version)
+            .join("binary.sha256");
+        let cached = fs::read_to_string(&sha_path).expect("read cache sha");
+        assert_eq!(
+            cached.trim(),
+            handle.binary_sha256,
+            "cache file must store the resolved binary hash, not the archive hash"
         );
     }
 

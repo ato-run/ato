@@ -116,6 +116,8 @@ pub(crate) enum PrepareError {
     MachineInitFailed(String),
     /// `podman machine start ato-podman` failed.
     MachineStartFailed(String),
+    /// `podman machine stop ato-podman` failed (repair flow, #460).
+    MachineStopFailed(String),
     /// `podman info` verification failed after preparation.
     VerifyFailed(String),
     /// Podman preparation is not supported on this platform.
@@ -140,6 +142,12 @@ impl std::fmt::Display for PrepareError {
                 write!(
                     f,
                     "failed to start podman machine '{ATO_PODMAN_MACHINE_NAME}': {m}"
+                )
+            }
+            Self::MachineStopFailed(m) => {
+                write!(
+                    f,
+                    "failed to stop podman machine '{ATO_PODMAN_MACHINE_NAME}': {m}"
                 )
             }
             Self::VerifyFailed(m) => write!(f, "podman readiness check failed: {m}"),
@@ -543,6 +551,74 @@ fn verify<E: PrepareEnv, R: PrepareReporter>(
     Ok(())
 }
 
+/// Public entry for `ato internal runtime repair-host-runtime [--emit-json]`
+/// (#460 PR2). Restart-and-verify the Ato-managed Podman machine — the
+/// remediation for the "machine running but `podman info` fails" health-error
+/// state. Only the `ato-podman` machine is ever touched.
+pub(crate) fn repair_host_runtime(json: bool) -> Result<()> {
+    let env = SystemPrepareEnv;
+    let reporter = StreamReporter {
+        tool: ToolKind::Podman,
+        json,
+    };
+    emit_progress(ToolKind::Podman, InstallPhase::Queued, "Queued", json);
+    match repair_ato_machine(&env, &reporter) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            emit_progress(
+                ToolKind::Podman,
+                InstallPhase::Failed,
+                err.to_string(),
+                json,
+            );
+            Err(anyhow!("podman machine repair failed: {err}"))
+        }
+    }
+}
+
+/// Restart and re-verify the Ato-managed Podman machine (#460).
+///
+/// Repairs the health-error state (machine running but `podman info` fails) with
+/// the least-destructive action: `machine stop ato-podman` → `machine start
+/// ato-podman` → `info --connection ato-podman`. **Only `ato-podman` is
+/// touched** — a user's own machine and the global default connection are never
+/// stopped or reconfigured. Recreating the machine (destructive) is intentionally
+/// out of scope here and is a separate, confirmation-gated follow-up.
+fn repair_ato_machine<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+) -> Result<(), PrepareError> {
+    if matches!(env.platform(), PreparePlatform::Linux) {
+        // Native Linux Podman has no machine; "repair" is just re-verify.
+        return verify(env, reporter, None);
+    }
+
+    reporter.phase(
+        InstallPhase::StartingMachine,
+        &format!("Restarting Podman machine '{ATO_PODMAN_MACHINE_NAME}'…"),
+    );
+    let stop = env
+        .run_podman(&["machine", "stop", ATO_PODMAN_MACHINE_NAME])
+        .map_err(|err| PrepareError::MachineStopFailed(err.to_string()))?;
+    // A machine that is already stopped is fine to "stop" — only surface a hard
+    // failure that is not the already-stopped case.
+    if !stop.success() && !machine_already_stopped(&stop.message()) {
+        return Err(PrepareError::MachineStopFailed(stop.message()));
+    }
+
+    start_ato_machine(env, reporter)?;
+    verify(env, reporter, Some(ATO_PODMAN_MACHINE_NAME))?;
+    reporter.phase(InstallPhase::Ready, "Podman machine repaired");
+    Ok(())
+}
+
+/// Whether a `machine stop` error message indicates the machine was already
+/// stopped (a benign no-op for the repair flow).
+fn machine_already_stopped(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("already stopped") || lower.contains("not running")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,5 +1020,87 @@ mod tests {
     #[test]
     fn prepare_tools_rejects_empty() {
         assert!(prepare_tools(vec![], true).is_err());
+    }
+
+    // ── #460 PR2: repair flow ─────────────────────────────────────────────────
+
+    #[test]
+    fn repair_restarts_ato_machine_in_order() {
+        let env = FakeEnv::new(PreparePlatform::Windows)
+            .with_podman("machine stop ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        repair_ato_machine(&env, &reporter).expect("repairs");
+        assert_eq!(
+            env.calls(),
+            vec![
+                "podman machine stop ato-podman",
+                "podman machine start ato-podman",
+                "podman --connection ato-podman info --format json",
+            ]
+        );
+    }
+
+    #[test]
+    fn repair_only_touches_ato_machine() {
+        let env = FakeEnv::new(PreparePlatform::Windows)
+            .with_podman("machine stop ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        repair_ato_machine(&env, &reporter).expect("repairs");
+        // Every machine command names ato-podman; no user/default machine touched.
+        for call in env.calls() {
+            if call.contains("machine stop") || call.contains("machine start") {
+                assert!(
+                    call.ends_with("ato-podman"),
+                    "repair must only mutate ato-podman, got: {call}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repair_tolerates_already_stopped_machine() {
+        let mut env = FakeEnv::new(PreparePlatform::Windows)
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
+        // `machine stop` reports already-stopped (non-zero) → treated as benign.
+        env.podman.insert(
+            "machine stop ato-podman".to_string(),
+            CmdOutput {
+                status: 125,
+                stdout: String::new(),
+                stderr: "Error: machine ato-podman is already stopped".to_string(),
+            },
+        );
+        let reporter = RecordingReporter::default();
+        repair_ato_machine(&env, &reporter).expect("repairs despite already-stopped");
+        assert!(
+            env.calls()
+                .contains(&"podman machine start ato-podman".to_string())
+        );
+    }
+
+    #[test]
+    fn repair_fails_when_verify_fails() {
+        let env = FakeEnv::new(PreparePlatform::Windows)
+            .with_podman("machine stop ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 1, "");
+        let reporter = RecordingReporter::default();
+        let err = repair_ato_machine(&env, &reporter).expect_err("verify fails");
+        assert!(matches!(err, PrepareError::VerifyFailed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn repair_on_linux_only_verifies() {
+        let env = FakeEnv::new(PreparePlatform::Linux).with_podman("info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        repair_ato_machine(&env, &reporter).expect("verifies");
+        let calls = env.calls();
+        assert!(!calls.iter().any(|c| c.contains("machine")), "{calls:?}");
+        assert_eq!(calls, vec!["podman info --format json"]);
     }
 }

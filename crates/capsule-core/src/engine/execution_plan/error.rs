@@ -25,6 +25,10 @@ pub enum AtoErrorCode {
     AtoErrLockfileTampered,
     AtoErrInstallConsentRequired,
     AtoErrPermissionGatesRequired,
+    /// #500 — the strict fail-closed realization gate refused a launch before
+    /// execution because a required launch input could not be verified. Opt-in
+    /// (`--strict-realization`); normal launches never produce this code.
+    AtoErrStrictRealizationBlocked,
     AtoErrInternal,
 }
 
@@ -52,6 +56,7 @@ impl AtoErrorCode {
             Self::AtoErrLockfileTampered => "ATO_ERR_LOCKFILE_TAMPERED",
             Self::AtoErrInstallConsentRequired => "ATO_ERR_INSTALL_CONSENT_REQUIRED",
             Self::AtoErrPermissionGatesRequired => "ATO_ERR_PERMISSION_GATES_REQUIRED",
+            Self::AtoErrStrictRealizationBlocked => "ATO_ERR_STRICT_REALIZATION_BLOCKED",
             Self::AtoErrInternal => "ATO_ERR_INTERNAL",
         }
     }
@@ -77,6 +82,7 @@ impl AtoErrorCode {
             Self::AtoErrLockfileTampered => "lockfile_tampered",
             Self::AtoErrInstallConsentRequired => "install_consent_required",
             Self::AtoErrPermissionGatesRequired => "permission_gates_required",
+            Self::AtoErrStrictRealizationBlocked => "strict_realization_blocked",
             Self::AtoErrInternal => "internal_error",
         }
     }
@@ -101,6 +107,7 @@ impl AtoErrorCode {
             | Self::AtoErrPolicyViolation
             | Self::AtoErrSecurityPolicyViolation
             | Self::AtoErrExecutionContractInvalid
+            | Self::AtoErrStrictRealizationBlocked
             | Self::AtoErrRuntimeNotResolved => "execution",
             Self::AtoErrInternal => "internal",
         }
@@ -294,6 +301,32 @@ impl AtoExecutionError {
     pub fn with_manifest_suggestion(mut self, suggestion: ManifestSuggestion) -> Self {
         self.manifest_suggestion = Some(suggestion);
         self
+    }
+
+    /// Attach a typed, structured `details` payload. Callers are responsible for
+    /// ensuring the value is receipt-safe (redacted) before attaching it.
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
+    /// #500 — the strict fail-closed realization gate refused a launch before
+    /// execution. `details` must already be the redacted strict-gate payload
+    /// (node id/kind, reason code, hash summaries, explanation) — never a raw
+    /// path, env value, secret, or provider command.
+    pub fn strict_realization_blocked(message: impl Into<String>, details: Value) -> Self {
+        Self::new(
+            AtoErrorCode::AtoErrStrictRealizationBlocked,
+            message,
+            Some("realization"),
+            None,
+            Some(
+                "Strict mode requires every launch input to be verifiable. Resolve the reported \
+                 realization gaps, or rerun without --strict-realization to launch in the default \
+                 (conservative) profile.",
+            ),
+        )
+        .with_details(details)
     }
 
     pub fn policy_violation(message: impl Into<String>) -> Self {

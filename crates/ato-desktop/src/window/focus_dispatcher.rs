@@ -331,6 +331,12 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                         };
                     }
                     AutomationCommand::HostDispatchAction { action, url } => {
+                        if let Some(response) =
+                            crate::app::navigate_to_url_mcp_preflight(&action, url.as_deref())
+                        {
+                            req.send(Ok(response));
+                            continue;
+                        }
                         let action_name = action.clone();
                         let action_url = url.clone();
                         let dispatch_result: Result<(), String> = async_app_for_loop
@@ -598,6 +604,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                     OnboardingCommand::Complete {
                                                         version: ONBOARDING_VERSION,
                                                         skipped,
+                                                        launch_handle: None,
                                                     },
                                                 )
                                                 .map_err(|err| err.to_string())
