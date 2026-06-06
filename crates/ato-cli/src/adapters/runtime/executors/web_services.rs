@@ -429,7 +429,53 @@ fn build_service_env(
         env.insert(secret.name.clone(), secret.value.expose().to_string());
     }
 
+    // State-binding materialization (#508). The web-services executor runs the
+    // service as a host process — it has no mount namespace to bind a guest path
+    // into — so a bound state directory is projected as an env var the app reads
+    // to locate its persistent state. Kept off the receipt-observed `merged_env`
+    // (build_service_env is the spawn-env construction point, mirroring secrets
+    // above).
+    apply_state_mounts_to_service_env(&mut env, launch_ctx);
+
     Ok(env)
+}
+
+/// Project state-binding mounts into a host-process service env (#508). The
+/// web-services executor cannot bind-mount, so each bound directory is exposed as
+/// an `ATO_STATE_<KEY>` env var pointing at the host source path. Applied at the
+/// spawn-env construction boundary only — never merged into the receipt-observed
+/// env. Factored out so the projection is unit-testable without a full plan.
+fn apply_state_mounts_to_service_env(
+    env: &mut HashMap<String, String>,
+    launch_ctx: &RuntimeLaunchContext,
+) {
+    for mount in launch_ctx.state_mounts() {
+        env.insert(
+            state_mount_env_name(mount),
+            mount.source.to_string_lossy().to_string(),
+        );
+    }
+}
+
+/// Derive the env var name a host-process service reads to locate a bound state
+/// directory. Uses the state key (non-sensitive) so the name is stable across
+/// relaunches: `data` → `ATO_STATE_DATA`. Non-alphanumeric characters are
+/// normalized to `_`.
+fn state_mount_env_name(
+    mount: &crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount,
+) -> String {
+    let suffix: String = mount
+        .state_key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("ATO_STATE_{suffix}")
 }
 
 fn build_service_command(
@@ -946,6 +992,29 @@ mod tests {
             apply_port_admission(&mut env, plan);
         }
         env.get("PORT").cloned().expect("PORT must be present")
+    }
+
+    #[test]
+    fn state_binding_mount_reaches_web_service_boundary() {
+        use super::apply_state_mounts_to_service_env;
+        use crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount;
+        use std::path::PathBuf;
+
+        let raw = "/Users/koh/.local/share/app/data";
+        let ctx = RuntimeLaunchContext::empty().with_state_mounts(vec![RuntimeStateBindingMount {
+            state_key: "data".to_string(),
+            binding_id: "user-data".to_string(),
+            source: PathBuf::from(raw),
+            target: "/app/data".to_string(),
+            readonly: false,
+        }]);
+        let mut env = HashMap::new();
+        apply_state_mounts_to_service_env(&mut env, &ctx);
+        // The bound host directory is projected to the service env at the boundary.
+        assert_eq!(env.get("ATO_STATE_DATA").map(String::as_str), Some(raw));
+        // It never reaches the receipt-observed env surfaces.
+        assert!(ctx.merged_env().is_empty());
+        assert!(ctx.injected_mounts().is_empty());
     }
 
     #[test]
