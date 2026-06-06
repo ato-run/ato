@@ -133,7 +133,7 @@ impl ServiceStartupRuntime {
                 return Ok(None);
             }
         };
-        let preferred = env.get("PORT").and_then(|port| port.parse::<u16>().ok());
+        let preferred = resolve_preferred_port(&self.launch_ctx, service_name, env);
         let plan = plan_service_port_admission(
             &db,
             &self.launch_ctx,
@@ -168,6 +168,25 @@ fn plan_service_port_admission(
         DEFAULT_PORT_CONFLICT_POLICY,
         os_available,
     )
+}
+
+/// Resolve the preferred port for a service's port admission (#548).
+///
+/// A `capsule://…?port[.<endpoint>]=<n>` query input (carried on the launch
+/// context, keyed by logical endpoint name) overrides the deterministic default
+/// preferred port derived from the service env's `PORT`. `port=auto` carries no
+/// concrete port (it left no preference on the context), so it falls back to the
+/// env-derived `PORT` — i.e. the runtime's default / auto-assign, never a
+/// preferred-port claim. `ato run` carries no preferences, so this is a no-op
+/// there.
+fn resolve_preferred_port(
+    launch_ctx: &RuntimeLaunchContext,
+    service_name: &str,
+    env: &HashMap<String, String>,
+) -> Option<u16> {
+    launch_ctx
+        .preferred_port(service_name)
+        .or_else(|| env.get("PORT").and_then(|port| port.parse::<u16>().ok()))
 }
 
 /// Override the service env's `PORT` with the admission-resolved port. Mirrors
@@ -898,8 +917,8 @@ fn service_startup_order(services: &HashMap<String, ServiceSpec>) -> Result<Vec<
 mod tests {
     use super::{
         RuntimeLaunchContext, apply_port_admission, plan_service_port_admission,
-        readiness_initial_delay, readiness_interval, readiness_timeout, resolve_probe_port,
-        service_startup_order,
+        readiness_initial_delay, readiness_interval, readiness_timeout, resolve_preferred_port,
+        resolve_probe_port, service_startup_order,
     };
     use crate::adapters::runtime::port_admission::{logical_endpoint, record_port_admission_plan};
     use capsule_core::installed_state::{ConflictPolicy, InstalledStateDb, PortClaim};
@@ -930,22 +949,41 @@ mod tests {
     }
 
     /// Reproduce exactly what `start_service` does to the env: resolve the
-    /// admission plan, apply it, and return the resulting `PORT`.
+    /// preferred port (env `PORT`, overridable by a `capsule://` port query input
+    /// on the launch context), resolve the admission plan, apply it, and return
+    /// the resulting `PORT`.
     fn resolved_port_env(
         db: &InstalledStateDb,
         launch_ctx: &RuntimeLaunchContext,
         service_name: &str,
         preferred: u16,
     ) -> String {
+        resolved_port_env_with_os(db, launch_ctx, service_name, preferred, |_| true)
+    }
+
+    fn resolved_port_env_with_os(
+        db: &InstalledStateDb,
+        launch_ctx: &RuntimeLaunchContext,
+        service_name: &str,
+        env_port: u16,
+        os_available: impl Fn(u16) -> bool,
+    ) -> String {
         let mut env = HashMap::new();
-        env.insert("PORT".to_string(), preferred.to_string());
+        env.insert("PORT".to_string(), env_port.to_string());
+        let preferred = resolve_preferred_port(launch_ctx, service_name, &env);
         let plan =
-            plan_service_port_admission(db, launch_ctx, service_name, Some(preferred), |_| true)
+            plan_service_port_admission(db, launch_ctx, service_name, preferred, os_available)
                 .expect("admission must not error under Remap");
         if let Some(plan) = &plan {
             apply_port_admission(&mut env, plan);
         }
         env.get("PORT").cloned().expect("PORT must be present")
+    }
+
+    fn installed_ctx_with_port(ipk: &str, endpoint: &str, port: u16) -> RuntimeLaunchContext {
+        let mut prefs = HashMap::new();
+        prefs.insert(endpoint.to_string(), port);
+        installed_ctx(ipk).with_port_preferences(prefs)
     }
 
     #[test]
@@ -1013,6 +1051,104 @@ mod tests {
         // Only the `main` service's PORT is ato-injected / admitted.
         let plan = plan_service_port_admission(&db, &ctx, "worker", Some(3000), |_| true).unwrap();
         assert!(plan.is_none(), "non-main services skip port admission");
+    }
+
+    #[test]
+    fn port_query_main_sets_preferred_port() {
+        let (_d, db) = temp_db();
+        // No conflict: a `capsule://…?port.main=3001` query input becomes the
+        // preferred port, overriding the env `PORT` (here 8080).
+        let ctx = installed_ctx_with_port("ipk_app", "main", 3001);
+        let port = resolved_port_env(&db, &ctx, "main", 8080);
+        assert_eq!(port, "3001", "port query input must set the preferred port");
+        // And it is the claim's preferred port, not just the resolved one.
+        let plan = plan_service_port_admission(&db, &ctx, "main", Some(3001), |_| true)
+            .unwrap()
+            .expect("installed main launch produces a plan");
+        assert_eq!(plan.claim.preferred_port, 3001);
+    }
+
+    #[test]
+    fn port_query_endpoint_sets_preferred_port() {
+        let (_d, db) = temp_db();
+        // The web-service `main` service maps to the `main` logical endpoint, so a
+        // `port.main=...` query keyed by endpoint name resolves for it. An input
+        // keyed for a different endpoint must NOT bleed into `main`.
+        let ctx = installed_ctx_with_port("ipk_app", "main", 4242);
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        assert_eq!(resolve_preferred_port(&ctx, "main", &env), Some(4242));
+
+        let other = installed_ctx_with_port("ipk_app", "admin", 4242);
+        assert_eq!(
+            resolve_preferred_port(&other, "main", &env),
+            Some(8080),
+            "a port input for a different endpoint must not apply to main"
+        );
+    }
+
+    #[test]
+    fn port_query_conflict_remaps() {
+        let (_d, db) = temp_db();
+        // A different installed app already holds the query-requested port; the
+        // existing default Remap policy must remap away from it.
+        db.record_port_claim(&other_app_main_claim("ipk_other", 3001))
+            .unwrap();
+        let ctx = installed_ctx_with_port("ipk_app", "main", 3001);
+        let port = resolved_port_env(&db, &ctx, "main", 8080);
+        assert_ne!(port, "3001", "conflicting installed claim must remap PORT");
+        assert!(
+            port.parse::<u16>().unwrap() >= 49152,
+            "remap must land in the ephemeral range"
+        );
+        // The claim still records 3001 as the preferred (logical endpoint stable).
+        let plan = plan_service_port_admission(&db, &ctx, "main", Some(3001), |p| p != 3001)
+            .unwrap()
+            .expect("plan");
+        assert_eq!(plan.claim.preferred_port, 3001);
+    }
+
+    #[test]
+    fn port_query_auto_does_not_create_concrete_claim() {
+        let (_d, db) = temp_db();
+        // `port=auto` carries no concrete port, so it leaves no preference on the
+        // context: the preferred port falls back to the env-derived `PORT`, and no
+        // 3001 claim is created. (run.rs's collect_port_preferences skips `auto`,
+        // so the context simply has no entry — modeled here by an installed_ctx
+        // with no port preference.)
+        let ctx = installed_ctx("ipk_app");
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        assert_eq!(
+            resolve_preferred_port(&ctx, "main", &env),
+            Some(8080),
+            "auto leaves no preference; falls back to env PORT"
+        );
+        // With no env PORT either, there is no concrete preferred port → no claim.
+        let empty_env = HashMap::new();
+        assert_eq!(resolve_preferred_port(&ctx, "main", &empty_env), None);
+        let plan = plan_service_port_admission(&db, &ctx, "main", None, |_| true).unwrap();
+        assert!(
+            plan.is_none(),
+            "no concrete preferred port → no port claim (auto-assign)"
+        );
+    }
+
+    #[test]
+    fn port_query_does_not_affect_ato_run() {
+        let (_d, db) = temp_db();
+        // `ato run` carries no install identity and no port preferences. Even if a
+        // conflicting claim exists and the runtime synthesized port preferences
+        // (which it would not for `ato run`), the non-installed launch keeps its
+        // env PORT untouched and creates no plan.
+        db.record_port_claim(&other_app_main_claim("ipk_other", 3001))
+            .unwrap();
+        let ctx = RuntimeLaunchContext::empty();
+        let env = HashMap::from([("PORT".to_string(), "3001".to_string())]);
+        // No install identity → preferred resolves to env PORT but admission is skipped.
+        assert_eq!(resolve_preferred_port(&ctx, "main", &env), Some(3001));
+        let port = resolved_port_env(&db, &ctx, "main", 3001);
+        assert_eq!(port, "3001", "ato run must keep its PORT untouched");
+        let plan = plan_service_port_admission(&db, &ctx, "main", Some(3001), |_| true).unwrap();
+        assert!(plan.is_none(), "non-installed launch produces no plan");
     }
 
     fn http_probe(port: &str) -> ReadinessProbe {
