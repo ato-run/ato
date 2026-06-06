@@ -2,7 +2,7 @@ use super::*;
 
 use crate::adapters::runtime::provisioning::{
     LifecyclePathPlan, LifecyclePhase, build_lifecycle_path_plan, dependency_root,
-    materialize_lifecycle_toolchains,
+    materialize_lifecycle_toolchains, python_requirements_lock_sync_command,
 };
 use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
@@ -676,13 +676,34 @@ fn provision_command_from_python_importer(
     execution_working_directory: &Path,
     runtime_version: Option<&str>,
 ) -> Result<Option<String>> {
-    let python_pin = runtime_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!(" --python {value}"))
-        .unwrap_or_default();
+    let uv_lock = execution_working_directory.join("uv.lock");
+    let pyproject = execution_working_directory.join("pyproject.toml");
+    if pyproject.exists() {
+        return if uv_lock.exists() {
+            Ok(Some("uv sync --frozen".to_string()))
+        } else {
+            Err(AtoExecutionError::lock_incomplete(
+                "source/python target has pyproject.toml but is missing uv.lock for fail-closed provisioning",
+                Some("uv.lock"),
+            )
+            .into())
+        };
+    }
 
     if let Some(requirements_path) = resolve_python_requirements_path(execution_working_directory) {
+        // Prefer a committed pip-compile lock when one is present (e.g. a
+        // GitHub install repaired via `--auto-fix:all`). Local developer runs
+        // of a requirements-only project that has no lockfile yet must keep
+        // working, so fall back to the historical `uv pip install` path rather
+        // than failing closed — tightening that is out of scope here.
+        if uv_lock.exists() {
+            return Ok(Some(python_requirements_lock_sync_command(runtime_version)));
+        }
+        let python_pin = runtime_version
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" --python {value}"))
+            .unwrap_or_default();
         let requirements_arg = requirements_path
             .strip_prefix(execution_working_directory)
             .unwrap_or(requirements_path.as_path())
@@ -759,7 +780,9 @@ fn run_lifecycle_shell_command(
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", command]);
+        // `/D` disables AutoRun so a broken/foreign \Command Processor\AutoRun script
+        // cannot pollute output or leak a non-zero exit code into the lifecycle command.
+        cmd.args(["/D", "/C", command]);
         cmd
     };
 
@@ -875,6 +898,10 @@ fn preflight_python_uv_lock_for_source_driver(
     // accident.
     let dep_root = dependency_root(plan);
 
+    // A requirements-only project is provisionable on the local run path even
+    // without a lockfile (`provision_command_from_python_importer` falls back to
+    // `uv pip install`). The GitHub install/build path enforces fail-closed
+    // lockfiles separately; do not tighten the local `ato run .` gate here.
     if resolve_python_requirements_path(&dep_root).is_some() {
         return Ok(());
     }
@@ -1402,6 +1429,7 @@ mod tests {
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: None,
         }
     }
 
@@ -1602,6 +1630,9 @@ run_command = "serve.py"
 
     #[test]
     fn provision_command_omits_python_pin_when_runtime_version_unset() {
+        // Local `ato run .` of a requirements-only project with no lockfile must
+        // keep provisioning via the `uv pip install` fallback. Fail-closed
+        // lockfile enforcement lives on the GitHub install/build path, not here.
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
             .expect("write requirements");
@@ -1634,6 +1665,7 @@ run_command = "main.py"
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
             .expect("write requirements");
+        fs::write(dir.path().join("uv.lock"), "# pip-compile lock\n").expect("write lock");
         let plan = build_plan(
             dir.path(),
             r#"
@@ -1657,7 +1689,39 @@ run_command = "main.py"
             command.starts_with("uv venv --python 3.11.10 --seed --clear &&"),
             "command={command}"
         );
-        assert!(command.contains("'setuptools<72'"), "command={command}");
+        assert!(command.contains("uv pip sync uv.lock"), "command={command}");
+    }
+
+    #[test]
+    fn provision_command_prefers_pyproject_uv_lock_over_requirements_lock() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write pyproject");
+        fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+        fs::write(dir.path().join("uv.lock"), "version = 1\n").expect("write lock");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+run_command = "main.py"
+"#,
+        );
+
+        let command = plan_v03_provision_command(&plan)
+            .expect("provision command")
+            .expect("python project lock should provision");
+
+        assert_eq!(command, "uv sync --frozen");
     }
 
     #[test]

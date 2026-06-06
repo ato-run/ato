@@ -55,7 +55,7 @@ impl ExecutionGraphNode {
         }
     }
 
-    pub(super) fn identifier(&self) -> &str {
+    pub fn identifier(&self) -> &str {
         match self {
             Self::Source { identifier }
             | Self::Runtime { identifier }
@@ -72,6 +72,32 @@ impl ExecutionGraphNode {
             | Self::Process { identifier }
             | Self::RuntimeInstance { identifier }
             | Self::BridgeCapability { identifier } => identifier,
+        }
+    }
+
+    /// Stable, serialization-friendly label for the node kind.
+    ///
+    /// Unlike [`Self::kind_discriminant`] (an internal ordering aid whose
+    /// numeric values may shift), this label is part of the receipt contract:
+    /// it is what a [`super::super::execution_identity::NodeReceipt`] records as
+    /// its `kind`. Keep the strings stable.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Source { .. } => "source",
+            Self::Runtime { .. } => "runtime",
+            Self::DependencyOutput { .. } => "dependency-output",
+            Self::ToolCapsule { .. } => "tool-capsule",
+            Self::Service { .. } => "service",
+            Self::Provider { .. } => "provider",
+            Self::Bridge { .. } => "bridge",
+            Self::Env { .. } => "env",
+            Self::Filesystem { .. } => "filesystem",
+            Self::Network { .. } => "network",
+            Self::State { .. } => "state",
+            Self::Entrypoint { .. } => "entrypoint",
+            Self::Process { .. } => "process",
+            Self::RuntimeInstance { .. } => "runtime-instance",
+            Self::BridgeCapability { .. } => "bridge-capability",
         }
     }
 }
@@ -104,6 +130,24 @@ impl ExecutionGraphEdgeKind {
             Self::Injects => 7,
             Self::StartsBefore => 8,
             Self::Observes => 9,
+        }
+    }
+
+    /// Stable, serialization-friendly label for the edge kind. Part of the
+    /// receipt contract (an [`super::super::execution_identity::EdgeReceipt`]
+    /// records this as its `kind`); keep the strings stable.
+    pub fn kind_label(self) -> &'static str {
+        match self {
+            Self::DependsOn => "depends-on",
+            Self::MaterializesTo => "materializes-to",
+            Self::Provides => "provides",
+            Self::Requires => "requires",
+            Self::ConnectsTo => "connects-to",
+            Self::Grants => "grants",
+            Self::Mounts => "mounts",
+            Self::Injects => "injects",
+            Self::StartsBefore => "starts-before",
+            Self::Observes => "observes",
         }
     }
 }

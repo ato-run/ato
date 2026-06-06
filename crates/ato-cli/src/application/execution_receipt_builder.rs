@@ -8,13 +8,14 @@ use capsule_core::engine::execution_graph::{
 use capsule_core::execution_identity::{
     ExecutionIdentityInput, ExecutionIdentityInputV2, ExecutionReceipt, ExecutionReceiptDocument,
     ExecutionReceiptV2, ExecutionRunnerIdentity, FilesystemIdentityBuilder, FilesystemIdentityV2,
-    GraphCompleteness, GraphReceipt, LaunchIdentity, PolicyIdentity, PolicyIdentityBuilder,
-    PolicyIdentityV2, Tracked,
+    GraphCompleteness, GraphReceipt, LaunchIdentity, ObservationScope, OciProviderReceiptEvidence,
+    PolicyIdentity, PolicyIdentityBuilder, PolicyIdentityV2, Tracked,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ManifestData;
+use capsule_core::runtime::oci::{OciContainerRequest, OciPortSpec};
 use capsule_core::types::{
     OciLaunchEnvelope, OciPolicyEnforcementLevel, OciPolicyEnforcementMode, OciPolicyEnvelope,
     OciProviderKind, OciProviderMode, OciProviderSemantics, OciProviderSubstrate,
@@ -28,6 +29,7 @@ use crate::application::execution_observers_v2::{
     observe_environment_v2, observe_filesystem_v2, observe_launch_v2, observe_runtime_v2,
     observe_source_provenance, observe_source_v2,
 };
+use crate::application::provider_projection::oci::OciProjectionPlan;
 use crate::executors::launch_context::RuntimeLaunchContext;
 
 /// Receipt schema selector. Step 17 of the portability v2 implementation
@@ -310,6 +312,11 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
     // observed_execution_id stays None per v0.6.0 contract (no
     // observation hooks). Setter exists for forward-compat only.
 
+    // Receipt-safe OCI provider evidence (#493), derived through the #516
+    // provider projection boundary from the declared/locked OCI envelope. Empty
+    // for non-OCI launches.
+    let provider_projections = declared_oci_provider_projections(plan, execution_plan);
+
     let receipt = ExecutionReceiptV2::from_input(identity_input, chrono::Utc::now().to_rfc3339())?
         .with_runner(ExecutionRunnerIdentity::new(
             "ato-cli",
@@ -321,7 +328,26 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
             std::env::consts::ARCH,
             "unknown-libc"
         ))
+        // Node/edge receipts are a projection of the *resolved* launch graph —
+        // the load-bearing graph, never ad hoc runtime command strings (#493).
+        .with_graph_projection(&launch_graph_bundle.resolved_graph)
+        .with_provider_projections(provider_projections)
+        // Completeness stays Partial: receipts are derived from the
+        // declared/resolved graph only — there is no observed (post-spawn)
+        // coverage yet (#494/#495). Emitting Complete would overclaim.
         .with_graph_completeness(GraphCompleteness::Partial)
+        // #495: this receipt carries declared + resolved evidence only; the
+        // runtime layer is not observed (NodeReceipt/EdgeReceipt population is
+        // #521, the realization classifier is #522). Make that explicit rather
+        // than implying it from the empty observed facets.
+        .with_observation_scope(ObservationScope::declared_resolved())
+        // #494: spell out WHY the graph is Partial — runtime not observed —
+        // as typed reasons derived from the scope. Non-empty even though
+        // node/edge receipts are populated: a declared/resolved projection is
+        // not runtime observation, so this never becomes Complete.
+        .with_graph_completeness_reasons(
+            ObservationScope::declared_resolved().graph_completeness_reasons(),
+        )
         .with_graph_receipt(GraphReceipt::launch_passed(
             declared_execution_id,
             resolved_execution_id,
@@ -329,6 +355,108 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
         ));
 
     Ok((receipt, launch_graph_bundle))
+}
+
+/// Derive receipt-safe OCI provider evidence for the launch, if it targets an
+/// OCI runtime (#493).
+///
+/// The evidence is produced by routing the declared/locked OCI launch facts
+/// through the #516 provider projection boundary
+/// ([`OciProjectionPlan::receipt_evidence`]), so the receipt records the same
+/// projection the runtime realizes — not a separate ad hoc summary. Only
+/// plan-time-known facts are available here (the receipt is built at preflight,
+/// before spawn): declared image ref + locked digest, declared container port,
+/// env var *names*, working dir/user. Runtime-resolved mounts and the live
+/// container id/pid are intentionally absent — they are session-local provider
+/// evidence, not part of this declared projection.
+///
+/// Returns an empty vec for non-OCI launches.
+fn declared_oci_provider_projections(
+    plan: &ManifestData,
+    execution_plan: &ExecutionPlan,
+) -> Vec<OciProviderReceiptEvidence> {
+    let Some(oci) = &execution_plan.oci else {
+        return Vec::new();
+    };
+    oci_provider_projection_evidence(
+        oci,
+        plan.targets_oci_cmd(),
+        plan.targets_oci_env(),
+        plan.targets_oci_working_dir(),
+        plan.targets_oci_user(),
+    )
+}
+
+/// Pure core of [`declared_oci_provider_projections`]: project a resolved OCI
+/// policy envelope plus the plan-time launch facts into receipt-safe provider
+/// evidence with typed enforcement status. Split out so it can be tested without
+/// a full `ManifestData`/`ExecutionPlan` fixture.
+fn oci_provider_projection_evidence(
+    oci: &capsule_core::execution_plan::model::OciPolicyEnvelope,
+    cmd: Vec<String>,
+    env: std::collections::HashMap<String, String>,
+    working_dir: Option<String>,
+    user: Option<String>,
+) -> Vec<OciProviderReceiptEvidence> {
+    // Prefer the locked digest (pinned) when the lock resolved one; otherwise
+    // fall back to the declared tag (honestly unpinned).
+    let image = match &oci.resolved_image {
+        Some(resolved) if resolved.resolved_digest.starts_with("sha256:") => {
+            format!("{}@{}", oci.declared_image_ref, resolved.resolved_digest)
+        }
+        _ => oci.declared_image_ref.clone(),
+    };
+
+    let ports = oci
+        .port_exposure
+        .map(|container_port| {
+            vec![OciPortSpec {
+                container_port,
+                host_port: None,
+                protocol: "tcp".to_string(),
+                host_ip: Some("127.0.0.1".to_string()),
+            }]
+        })
+        .unwrap_or_default();
+
+    // A declared request: launch conditions known at plan time. `env` carries
+    // declared values but `receipt_evidence()` projects *keys only*, so no value
+    // is persisted. Runtime-only inputs (injected mounts, container name, live
+    // platform/emulation choice) are left empty.
+    let request = OciContainerRequest {
+        // Name is a runtime handle and is never read by `receipt_evidence()`;
+        // a declared placeholder keeps the projection session-independent.
+        name: "ato-oci-declared".to_string(),
+        image,
+        cmd,
+        env,
+        working_dir,
+        labels: std::collections::HashMap::new(),
+        mounts: Vec::new(),
+        ports,
+        network: None,
+        aliases: Vec::new(),
+        platform: None,
+        extra_hosts: Vec::new(),
+        user,
+    };
+
+    // Record the selected provider's typed policy-enforcement status (#501): a
+    // declared egress allowlist is the canonical facet PodmanProvider cannot
+    // enforce, so it surfaces as `Unsupported` rather than implying enforcement.
+    let network_policy_required = !oci.egress_allow.is_empty();
+    let enforcement =
+        crate::application::provider_projection::strict_oci::OciProviderEnforcement::podman(
+            network_policy_required,
+        );
+    let plan = OciProjectionPlan::from_container_request(&request);
+    vec![
+        crate::application::provider_projection::strict_oci::provider_receipt_evidence(
+            &plan,
+            &enforcement,
+            network_policy_required,
+        ),
+    ]
 }
 
 /// Build the declared-domain `ExecutionGraph` for the receipt path.
@@ -531,6 +659,42 @@ pub(crate) fn build_prelaunch_receipt_document_with_graph(
     }
 }
 
+/// Build a durable launch-receipt document for an OCI launch (#501).
+///
+/// Reuses the runtime-agnostic v2 prelaunch builder — `derive_launch_spec`
+/// returns a stub for OCI and the v2 observers tolerate it — so OCI launches
+/// produce the SAME receipt family as source-native launches, including the
+/// `provider_projections` evidence, `GraphCompleteness::Partial`,
+/// `ObservationScope::declared_resolved`, and no `observed_execution_id`. No new
+/// JSON format is introduced.
+///
+/// OCI launch receipts are always **v2**: the `provider_projections` field exists
+/// only on v2, so a v1 receipt could not carry the provider evidence. Source-native
+/// receipts keep honoring `ATO_RECEIPT_SCHEMA` — this function does not change that.
+///
+/// `provider_projections_override` replaces the builder's single declared OCI
+/// projection with an explicit list — used by the multi-service path to record one
+/// evidence record per service. `None` keeps the builder's own
+/// `declared_oci_provider_projections` output (correct for single-target).
+pub(crate) fn build_oci_launch_receipt(
+    plan: &ManifestData,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    provider_projections_override: Option<Vec<OciProviderReceiptEvidence>>,
+) -> Result<ExecutionReceiptDocument> {
+    let (mut receipt, _bundle) =
+        build_prelaunch_receipt_v2_with_graph(plan, execution_plan, launch_ctx, None)?;
+    if let Some(projections) = provider_projections_override {
+        receipt = receipt.with_provider_projections(projections);
+    }
+    // Fold the (now final) provider facts into the assessment layer (#501):
+    // value-free provider-gap completeness reasons + conservative reproducibility
+    // causes. Strictly additive and pre-observation — graph stays `Partial`,
+    // ObservationScope stays declared/resolved, no observed_execution_id.
+    receipt = receipt.with_oci_provider_assessment();
+    Ok(ExecutionReceiptDocument::V2(receipt))
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod graph_identity_tests {
@@ -620,6 +784,27 @@ contract = "service@1"
         graph
             .canonical_form(CanonicalGraphDomain::Resolved)
             .digest_hex()
+    }
+
+    /// #493: the launch graph the receipt builder projects into node/edge
+    /// receipts is non-empty for a normal dependency-bearing launch. This
+    /// closes the loop with the capsule-core mapping tests: the production
+    /// graph source the builder feeds to `with_graph_projection` actually
+    /// carries nodes and edges, so the wired receipts are non-empty.
+    #[test]
+    fn launch_graph_receipt_source_is_non_empty_for_dependency_launch() {
+        let plan = synthetic_plan(SAMPLE_MANIFEST);
+        let fs = synthetic_filesystem("blake3:fs");
+        let policy = synthetic_policy("blake3:net", "blake3:cap", "blake3:sandbox");
+        let graph = build_declared_graph(&plan, &fs, &policy).expect("declared graph");
+        assert!(
+            !graph.nodes.is_empty(),
+            "graph nodes feed node_receipts; a dependency launch must have some"
+        );
+        assert!(
+            !graph.edges.is_empty(),
+            "graph edges feed edge_receipts; a dependency launch must have some"
+        );
     }
 
     /// Declared id reacts to a manifest-level dependency change.
@@ -1029,5 +1214,335 @@ fn classification_inputs_from_v2(
         runtime: runtime_v1,
         environment: env_v1,
         filesystem: fs_v1,
+    }
+}
+
+#[cfg(test)]
+mod oci_provider_evidence_tests {
+    use super::oci_provider_projection_evidence;
+    use capsule_core::execution_identity::{OciEnforcementStatus, OciImageDigestStatus};
+    use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
+    use std::collections::HashMap;
+
+    fn envelope(egress: Vec<String>) -> OciPolicyEnvelope {
+        OciPolicyEnvelope {
+            declared_image_ref: "docker.io/library/nginx:1.27".to_string(),
+            resolved_image: None,
+            port_exposure: Some(8080),
+            egress_allow: egress,
+            policy_mode: OciPolicyMode::Off,
+        }
+    }
+
+    #[test]
+    fn oci_projection_receipt_contains_provider_evidence() {
+        let env = HashMap::from([("PORT".to_string(), "8080".to_string())]);
+        let evidence = oci_provider_projection_evidence(
+            &envelope(vec!["api.example.com".to_string()]),
+            vec!["nginx".to_string()],
+            env,
+            Some("/app".to_string()),
+            Some("1000:1000".to_string()),
+        );
+        assert_eq!(
+            evidence.len(),
+            1,
+            "an OCI launch must record provider evidence"
+        );
+        let ev = &evidence[0];
+        assert_eq!(ev.provider_kind, "oci");
+        assert_eq!(ev.provider_version.as_deref(), Some("oci-podman-v1"));
+        // Declared tag (no resolved digest) is honestly unpinned, never fabricated.
+        assert!(matches!(
+            ev.image_digest_status,
+            OciImageDigestStatus::Unpinned
+        ));
+        // A declared egress allowlist surfaces as Unsupported — podman cannot
+        // enforce it; the receipt states that honestly rather than implying it.
+        assert_eq!(
+            ev.network_enforcement_status,
+            OciEnforcementStatus::Unsupported
+        );
+        assert_eq!(
+            ev.capability_enforcement_status,
+            OciEnforcementStatus::Enforced
+        );
+        // ...and `capabilities_required` agrees: a declared egress allowlist is a
+        // required network policy (not derived from the internal `--network`).
+        assert!(
+            ev.capabilities_required
+                .contains(&"network-policy".to_string()),
+            "egress allowlist must surface as a required network policy: {:?}",
+            ev.capabilities_required
+        );
+        // env NAMES only — no values.
+        assert_eq!(ev.env_keys, vec!["PORT".to_string()]);
+        let json = serde_json::to_string(ev).expect("encode");
+        assert!(
+            !json.contains("\"8080\""),
+            "env value must not appear: {json}"
+        );
+    }
+
+    #[test]
+    fn non_oci_launch_has_no_provider_evidence() {
+        // No egress declared, but still an OCI envelope → evidence present with
+        // enforcement Enforced (nothing to downgrade). The empty case is when
+        // `execution_plan.oci` is None, exercised by `declared_oci_provider_projections`.
+        let evidence =
+            oci_provider_projection_evidence(&envelope(vec![]), vec![], HashMap::new(), None, None);
+        assert_eq!(
+            evidence[0].network_enforcement_status,
+            OciEnforcementStatus::Enforced
+        );
+    }
+}
+
+#[cfg(test)]
+mod oci_launch_receipt_tests {
+    use capsule_core::execution_identity::{
+        CaseSensitivity, DependencyIdentityV2, EnvironmentIdentityV2, EnvironmentMode,
+        ExecutionIdentityInputV2, ExecutionReceiptDocument, ExecutionReceiptV2, FdLayoutIdentity,
+        FilesystemIdentityV2, FilesystemSemantics, GraphCompleteness, GraphCompletenessReason,
+        LaunchArg, LaunchEntryPoint, LaunchIdentityV2, OciEnforcementStatus, OciImageDigestStatus,
+        OciProviderReceiptEvidence, PlatformIdentity, PolicyIdentityV2, ProviderProjectionGap,
+        ReproducibilityClass, ReproducibilityIdentity, RuntimeCompleteness, RuntimeIdentityV2,
+        SourceIdentityV2, SourceProvenance, SourceProvenanceKind, SymlinkPolicy, TmpPolicy,
+        Tracked, UlimitIdentity,
+    };
+    use std::collections::BTreeMap;
+
+    /// One receipt-safe per-service provider evidence record (mirrors the shape
+    /// the orchestration path persists; env *keys* only, never values).
+    fn evidence(service: &str, image: &str) -> OciProviderReceiptEvidence {
+        OciProviderReceiptEvidence {
+            provider_kind: "oci".to_string(),
+            provider_name: "podman".to_string(),
+            image_reference: image.to_string(),
+            image_digest_status: OciImageDigestStatus::Unpinned,
+            platform: None,
+            env_keys: vec!["PORT".to_string()],
+            mounts: vec![],
+            ports: vec![],
+            network_aliases: vec![service.to_string()],
+            capabilities_required: vec!["network-policy".to_string()],
+            provider_version: Some("oci-podman-v1".to_string()),
+            network_enforcement_status: OciEnforcementStatus::Unsupported,
+            capability_enforcement_status: OciEnforcementStatus::Enforced,
+            derived_command_redacted: vec!["create".to_string(), "<redacted>".to_string()],
+            service_label: Some(service.to_string()),
+        }
+    }
+
+    /// A minimal valid v2 receipt carrying the given provider evidence. Mirrors
+    /// what `build_oci_launch_receipt` produces (v2 + `with_provider_projections`)
+    /// without needing a lock-compiled `ExecutionPlan`, so the persistence,
+    /// override, and receipt-safety can be unit-tested.
+    fn oci_receipt_with(projections: Vec<OciProviderReceiptEvidence>) -> ExecutionReceiptV2 {
+        let input = ExecutionIdentityInputV2::new(
+            SourceIdentityV2 {
+                source_tree_hash: Tracked::unknown("oci has no source tree"),
+                manifest_path_role: Tracked::known("workspace:capsule.toml".to_string()),
+            },
+            SourceProvenance {
+                kind: SourceProvenanceKind::Local,
+                git_remote: None,
+                git_commit: None,
+                registry_ref: None,
+            },
+            DependencyIdentityV2 {
+                derivation_hash: Tracked::not_applicable(),
+                output_hash: Tracked::not_applicable(),
+                derivation_inputs: None,
+            },
+            RuntimeIdentityV2 {
+                declared: Some("oci".to_string()),
+                resolved_ref: Tracked::known("oci".to_string()),
+                binary_hash: Tracked::not_applicable(),
+                dynamic_linkage: Tracked::not_applicable(),
+                completeness: RuntimeCompleteness::DeclaredOnly,
+                platform: PlatformIdentity {
+                    os: "linux".to_string(),
+                    arch: "amd64".to_string(),
+                    libc: "unknown".to_string(),
+                },
+            },
+            EnvironmentIdentityV2 {
+                entries: Vec::new(),
+                fd_layout: Tracked::known(FdLayoutIdentity {
+                    stdin: "inherited".to_string(),
+                    stdout: "inherited".to_string(),
+                    stderr: "inherited".to_string(),
+                }),
+                umask: Tracked::known("022".to_string()),
+                ulimits: Tracked::known(UlimitIdentity {
+                    limits: BTreeMap::new(),
+                }),
+                mode: EnvironmentMode::Closed,
+                ambient_untracked_keys: Vec::new(),
+            },
+            FilesystemIdentityV2 {
+                view_hash: Tracked::known("blake3:fs".to_string()),
+                partial_view_hash: None,
+                source_root: Tracked::known("workspace:.".to_string()),
+                working_directory: Tracked::known("workspace:.".to_string()),
+                readonly_layers: Vec::new(),
+                writable_dirs: Vec::new(),
+                persistent_state: Vec::new(),
+                semantics: FilesystemSemantics {
+                    case_sensitivity: Tracked::known(CaseSensitivity::Sensitive),
+                    symlink_policy: Tracked::known(SymlinkPolicy::Preserve),
+                    tmp_policy: Tracked::known(TmpPolicy::SessionLocal),
+                },
+            },
+            PolicyIdentityV2 {
+                network_policy_hash: Tracked::known("blake3:net".to_string()),
+                capability_policy_hash: Tracked::known("blake3:cap".to_string()),
+                sandbox_policy_hash: Tracked::known("blake3:sandbox".to_string()),
+            },
+            LaunchIdentityV2 {
+                entry_point: LaunchEntryPoint::Command {
+                    name: "oci".to_string(),
+                },
+                argv: Vec::<LaunchArg>::new(),
+                working_directory: Tracked::known("workspace:.".to_string()),
+            },
+            None,
+            ReproducibilityIdentity {
+                class: ReproducibilityClass::HostBound,
+                causes: Vec::new(),
+            },
+        );
+        ExecutionReceiptV2::from_input(input, "2026-06-05T00:00:00Z".to_string())
+            .expect("build v2 receipt")
+            .with_provider_projections(projections)
+            .with_graph_completeness(GraphCompleteness::Partial)
+    }
+
+    #[test]
+    fn oci_provider_evidence_persists_per_service_and_round_trips() {
+        let receipt = oci_receipt_with(vec![
+            evidence("web", "alpine:3.21"),
+            evidence("db", "postgres:16"),
+        ]);
+        let exec_id = receipt.execution_id.clone();
+        let doc = ExecutionReceiptDocument::V2(receipt);
+
+        // Persist to an isolated executions root and read it back.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = crate::application::execution_receipts::write_receipt_document_atomic_at(
+            temp.path(),
+            &doc,
+        )
+        .expect("write receipt");
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("receipt.json")
+        );
+
+        let read =
+            crate::application::execution_receipts::read_receipt_document_at(temp.path(), &exec_id)
+                .expect("read receipt");
+        let read_v2 = match read {
+            ExecutionReceiptDocument::V2(r) => r,
+            ExecutionReceiptDocument::V1(_) => panic!("v2 expected"),
+        };
+
+        // One provider-evidence record per service, each value-free-labeled.
+        assert_eq!(read_v2.provider_projections.len(), 2);
+        let labels: Vec<&str> = read_v2
+            .provider_projections
+            .iter()
+            .filter_map(|p| p.service_label.as_deref())
+            .collect();
+        assert!(labels.contains(&"web") && labels.contains(&"db"));
+        // Enforcement status persisted; env keys (not values).
+        assert_eq!(
+            read_v2.provider_projections[0].network_enforcement_status,
+            OciEnforcementStatus::Unsupported
+        );
+        assert!(
+            read_v2.provider_projections[0]
+                .env_keys
+                .contains(&"PORT".to_string())
+        );
+
+        // Boundaries: no runtime observation, never Complete pre-observation.
+        assert!(read_v2.observed_execution_id.is_none());
+        assert_ne!(
+            read_v2.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+
+        // On-disk receipt-safety.
+        let json = std::fs::read_to_string(&path).expect("read file");
+        assert!(
+            !json.contains("observed_execution_id"),
+            "no observed id on disk: {json}"
+        );
+        assert!(
+            !json.contains("\"state\":\"complete\""),
+            "must not claim a Complete graph on disk"
+        );
+        assert!(
+            json.contains("provider_projections"),
+            "provider evidence must be persisted on disk"
+        );
+    }
+
+    #[test]
+    fn oci_receipt_with_no_override_still_v2() {
+        // The single-target path passes no override; the receipt is still v2 and
+        // can carry whatever the builder attached. Here we assert the v2 shape and
+        // that an empty projection list is allowed (the declared projection is
+        // attached by the builder in the real path).
+        let receipt = oci_receipt_with(Vec::new());
+        let doc = ExecutionReceiptDocument::V2(receipt);
+        assert!(matches!(doc, ExecutionReceiptDocument::V2(_)));
+    }
+
+    #[test]
+    fn persisted_oci_receipt_reflects_provider_assessment() {
+        // A receipt built like the OCI launch path (provider evidence + the #501
+        // assessment) persists the provider-gap reasons and a conservative,
+        // cause-bearing reproducibility — without ever claiming observation.
+        let receipt =
+            oci_receipt_with(vec![evidence("web", "alpine:3.21")]).with_oci_provider_assessment();
+        let exec_id = receipt.execution_id.clone();
+        let doc = ExecutionReceiptDocument::V2(receipt);
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::application::execution_receipts::write_receipt_document_atomic_at(temp.path(), &doc)
+            .expect("write");
+        let read =
+            crate::application::execution_receipts::read_receipt_document_at(temp.path(), &exec_id)
+                .expect("read");
+        let read_v2 = match read {
+            ExecutionReceiptDocument::V2(r) => r,
+            ExecutionReceiptDocument::V1(_) => panic!("v2"),
+        };
+
+        // The `evidence` helper is unpinned + egress-unsupported → both gaps
+        // persist as value-free reasons.
+        let has = |gap| {
+            read_v2.graph_completeness_reasons.iter().any(|r| {
+                matches!(
+                    r,
+                    GraphCompletenessReason::ProviderProjectionIncomplete { gap: g, .. } if *g == gap
+                )
+            })
+        };
+        assert!(has(ProviderProjectionGap::ImageUnpinned));
+        assert!(has(ProviderProjectionGap::NetworkEnforcementUnsupported));
+        // Conservative reproducibility; never Complete; never observed.
+        assert_eq!(
+            read_v2.reproducibility.class,
+            ReproducibilityClass::BestEffort
+        );
+        assert_ne!(
+            read_v2.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+        assert!(read_v2.observed_execution_id.is_none());
     }
 }

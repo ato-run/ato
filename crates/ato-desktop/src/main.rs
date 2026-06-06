@@ -14,6 +14,7 @@ mod egress_proxy;
 mod github_manifest_draft;
 mod install_lifecycle_dashboard;
 mod ipc;
+mod launch_intent;
 mod localization;
 mod logging;
 mod netd;

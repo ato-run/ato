@@ -136,6 +136,85 @@ pub struct NavigateToUrl {
     pub url: String,
 }
 
+/// Parse an `ato://app/<install_profile_key>` URL into its install profile key.
+///
+/// Returns `None` for URLs that are not `ato://app` (so callers fall through to
+/// other routing). Returns `Some(Err(_))` for malformed `ato://app` URLs so the
+/// MCP surface can report a structured `invalid_ato_app_url` failure instead of
+/// silently ignoring a typo'd deep link.
+pub(crate) fn ato_app_install_profile_key(raw: &str) -> Option<Result<String, String>> {
+    let trimmed = raw.trim();
+    let parsed = match url::Url::parse(trimmed) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return trimmed
+                .starts_with("ato://app")
+                .then(|| Err(format!("invalid ato://app URL: {err}")));
+        }
+    };
+    if parsed.scheme() != "ato" || parsed.host_str() != Some("app") {
+        return None;
+    }
+
+    let segments: Vec<_> = parsed
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+        .unwrap_or_default();
+    if segments.len() != 1 {
+        return Some(Err(
+            "ato://app URL must be shaped as ato://app/<install_profile_key>".to_string(),
+        ));
+    }
+
+    Some(Ok(segments[0].to_string()))
+}
+
+/// MCP preflight for `host_dispatch_action`. When an automation client dispatches
+/// `NavigateToUrl` with an `ato://app/<ipk>` URL that is malformed, unknown, or
+/// points to a degraded installed profile, return a structured
+/// `{ok:false, action, url, reason, detail?}` response so the call fails visibly
+/// instead of queueing an action that would silently do nothing. Returns `None`
+/// for every other action/URL, in which case the dispatcher queues as normal.
+pub(crate) fn navigate_to_url_mcp_preflight(
+    action: &str,
+    url: Option<&str>,
+) -> Option<serde_json::Value> {
+    if action != "NavigateToUrl" {
+        return None;
+    }
+    let raw = url?;
+    let install_profile_key = match ato_app_install_profile_key(raw)? {
+        Ok(key) => key,
+        Err(message) => {
+            return Some(serde_json::json!({
+                "ok": false,
+                "action": action,
+                "url": raw,
+                "reason": "invalid_ato_app_url",
+                "detail": message,
+            }));
+        }
+    };
+
+    match crate::install_lifecycle_dashboard::inspect_launchable_installed_profile(
+        &install_profile_key,
+    ) {
+        Ok(_) => None,
+        Err(err) => {
+            let mut response = serde_json::json!({
+                "ok": false,
+                "action": action,
+                "url": raw,
+                "reason": err.reason(),
+            });
+            if let Some(detail) = err.detail() {
+                response["detail"] = serde_json::Value::String(detail.to_string());
+            }
+            Some(response)
+        }
+    }
+}
+
 /// Returns true if `input` looks like a GitHub repository URL (with or
 /// without scheme/host prefix). Used by the control bar to route GitHub
 /// repo inputs to the GitHub Import review surface instead of the
@@ -984,6 +1063,29 @@ pub fn run(skip_onboarding: bool) {
                     return;
                 }
 
+            // ato://app/<ipk> — the durable open identity of an installed app
+            // (#261). Route it straight to the install-owned, pre-consented
+            // launch path keyed by install_profile_key so deep links and the
+            // MCP `browser_navigate` / `NavigateToUrl` surface can reopen an
+            // installed app without re-showing the first-run consent wizard.
+            if raw.starts_with("ato://app/") {
+                match crate::system_capsule::ato_start::open_installed_app_by_ipk(cx, raw) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        // Unknown / degraded ipk or unreadable store. Fail
+                        // visibly rather than silently degrading to a handle
+                        // launch + consent wizard, which would lose the pinned
+                        // revision and install identity.
+                        tracing::warn!(
+                            error = %err,
+                            url = %raw,
+                            "NavigateToUrl(ato://app): no launchable installed profile — ignored"
+                        );
+                    }
+                }
+                return;
+            }
+
             if let Some(rest) = raw.strip_prefix("capsule://") {
                 // Extract optional ?ctoml=<id> query parameter.
                 let (rest_path, community_toml_id) = if let Some(q_pos) = rest.find('?') {
@@ -1023,18 +1125,14 @@ pub fn run(skip_onboarding: bool) {
                             label,
                             community_toml_id,
                         };
-                        if let Err(err) =
-                            crate::window::launch_window::open_consent_window_for_route_with_client(
-                                cx,
-                                route,
-                                crate::state::session::SessionClientKind::OsBrowser,
-                            )
-                        {
-                            tracing::error!(
-                                error = %err,
-                                "NavigateToUrl(capsule, os-browser) open_consent_window_for_route failed"
-                            );
-                        }
+                        // #460 PR3b: route through Runtime Setup first if the host
+                        // OCI runtime is not ready, then resume this launch.
+                        crate::runtime_setup::launch_intent::open_capsule_launch_gated(
+                            cx,
+                            route,
+                            crate::state::session::SessionClientKind::OsBrowser,
+                            "launch_flow",
+                        );
                     }
                     crate::config::CapsuleOpenMode::Webviewer => {
                         tracing::warn!(
@@ -1046,16 +1144,12 @@ pub fn run(skip_onboarding: bool) {
                             label,
                             community_toml_id,
                         };
-                        if let Err(err) =
-                            crate::window::launch_window::open_consent_window_for_route(
-                                cx, route,
-                            )
-                        {
-                            tracing::error!(
-                                error = %err,
-                                "NavigateToUrl(capsule) open_consent_window_for_route failed"
-                            );
-                        }
+                        crate::runtime_setup::launch_intent::open_capsule_launch_gated(
+                            cx,
+                            route,
+                            crate::state::session::SessionClientKind::AtoWindow,
+                            "launch_flow",
+                        );
                     }
                     crate::config::CapsuleOpenMode::Window => {
                         let route = crate::state::GuestRoute::CapsuleHandle {
@@ -1066,16 +1160,15 @@ pub fn run(skip_onboarding: bool) {
                         // Gate every capsule launch on a pre-flight consent
                         // wizard. On Approve the broker spawns the real
                         // AppWindow + boot wizard; on Cancel nothing happens.
-                        if let Err(err) =
-                            crate::window::launch_window::open_consent_window_for_route(
-                                cx, route,
-                            )
-                        {
-                            tracing::error!(
-                                error = %err,
-                                "NavigateToUrl(capsule) open_consent_window_for_route failed"
-                            );
-                        }
+                        // #460 PR3b: if the host OCI runtime is not ready, this
+                        // first detours through Runtime Setup and resumes the
+                        // launch once it is ready instead of stranding the user.
+                        crate::runtime_setup::launch_intent::open_capsule_launch_gated(
+                            cx,
+                            route,
+                            crate::state::session::SessionClientKind::AtoWindow,
+                            "launch_flow",
+                        );
                     }
                 }
                 return;
@@ -1615,12 +1708,63 @@ fn resolve_assets_dir() -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_assets_dir;
+    use super::{ato_app_install_profile_key, navigate_to_url_mcp_preflight, resolve_assets_dir};
+    use serial_test::serial;
 
     #[test]
     fn resolve_assets_dir_finds_workspace_assets() {
         let path = resolve_assets_dir().expect("workspace assets should resolve");
         assert!(path.ends_with("assets"));
         assert!(path.is_dir());
+    }
+
+    #[test]
+    fn ato_app_install_profile_key_extracts_single_key() {
+        let key = ato_app_install_profile_key("ato://app/ipk_abc123?utm=ignored")
+            .expect("ato app URL should be recognized")
+            .expect("key should parse");
+
+        assert_eq!(key, "ipk_abc123");
+    }
+
+    #[test]
+    fn ato_app_install_profile_key_ignores_other_urls() {
+        assert!(ato_app_install_profile_key("capsule://github.com/ato-run/demo").is_none());
+        assert!(ato_app_install_profile_key("https://ato.run/").is_none());
+    }
+
+    #[test]
+    fn ato_app_install_profile_key_rejects_missing_or_nested_key() {
+        let missing = ato_app_install_profile_key("ato://app/")
+            .expect("ato app URL should be recognized")
+            .unwrap_err();
+        let nested = ato_app_install_profile_key("ato://app/ipk_a/extra")
+            .expect("ato app URL should be recognized")
+            .unwrap_err();
+
+        assert!(missing.contains("ato://app/<install_profile_key>"));
+        assert!(nested.contains("ato://app/<install_profile_key>"));
+    }
+
+    #[test]
+    #[serial]
+    fn navigate_to_url_mcp_preflight_returns_structured_failure_for_unknown_ato_app() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+
+        let response =
+            navigate_to_url_mcp_preflight("NavigateToUrl", Some("ato://app/ipk_does_not_exist"))
+                .expect("ato app URL should produce a preflight response");
+
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["action"], "NavigateToUrl");
+        assert_eq!(response["url"], "ato://app/ipk_does_not_exist");
+        assert_eq!(response["reason"], "installed_profile_not_found");
     }
 }
