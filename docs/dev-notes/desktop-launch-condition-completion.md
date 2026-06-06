@@ -1,15 +1,17 @@
-# Desktop launch-condition completion — device-local boundary
+# Desktop launch-condition core — device-local backend completion audit
 
-_Status as of 2026-06-06. Scope: complete the **device-local** Desktop install
-experience for Capsule launch conditions. Cross-device (#509), cloud secret
-store, GC (#550), and strict repair (#551) are out of scope._
+_Status as of 2026-06-06. Scope: the **device-local backend/core** for Capsule
+launch conditions. The Desktop **GUI experience is NOT yet complete** — the
+GPUI/rfd folder-picker that consumes the #560 backend seam is a required
+follow-up (see Deferred). Cross-device (#509), cloud secret store, GC (#550), and
+strict repair (#551) are out of scope._
 
 Core principle throughout: **prompt is not proof** — a ref/claim is written only
 after the real value/target exists; raw secret values and raw host paths never
 enter the ledger, receipts, logs, or errors; relaunch resolution never rereads
 the manifest/lockfile.
 
-## Target experience (now met for the device-local boundary)
+## Target experience (device-local backend/core: met — GUI picker still required)
 
 ```
 User opens / relaunches an installed Capsule
@@ -19,6 +21,12 @@ User opens / relaunches an installed Capsule
   -> Ato records proof only after real local values/targets exist
   -> relaunches without rereading scattered lockfiles/manifests
 ```
+
+The **CLI** path achieves this today. On **Desktop**, the backend seam (#560)
+surfaces an unresolved `state.*` (`state_binding_required`) and the
+`resolve_state_binding_from_path` core API satisfies it — but the **GUI
+folder-picker that drives it is a required follow-up**; until it ships, the
+Desktop GUI experience is not yet end-to-end complete.
 
 ## Status by condition kind
 
@@ -106,8 +114,23 @@ the library layer the PRs target (preflight probes, secret/env injection, state
 materialization + resolve), but a true installed-relaunch e2e of the new
 conditions needs the fixture in **#561**. No fake pass was recorded.
 
+## Review status (not yet merged)
+The four code PRs received REQUEST CHANGES — proof-boundary tightenings, all
+addressed:
+- #559: re-confirm the `state_binding_ref` proof (existence + install-profile +
+  `condition_key`/`state_key`/status) **before** reading the target.
+- #556: `port=auto` truly suppresses the env-`PORT` fallback (no concrete claim).
+- #558: require the grant's `condition_key` to match `secret.K`/`env.K` (not just
+  status + owner).
+- #560: reject a `condition_key`/`state_key` mismatch in `resolve_state_binding_from_path`.
+
+The integration + smoke results above predate these fixes and must be
+re-confirmed before merge. Merge order once green: #559 → #556 → #558 → #560 →
+this audit.
+
 ## Provenance
 Batch coordinated 2026-06-06. PRs #556 (port), #558 (env-grant, +#557 follow-up),
 #559 (state materialization), #560 (Desktop seam), plus this audit. Built in
-manual worktrees off `origin/dev` (the batch isolated-worktree mechanism is
-unreliable in this environment). No `Co-Authored-By` trailers per repo policy.
+manual worktrees off `origin/dev` (the batch `isolation:"worktree"` mechanism is
+unreliable in this environment; non-isolated `bypassPermissions` background
+agents on pre-made worktrees work). No `Co-Authored-By` trailers per repo policy.
