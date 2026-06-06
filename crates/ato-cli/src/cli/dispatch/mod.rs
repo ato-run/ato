@@ -514,6 +514,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             verbose,
             json: command_json,
             nacelle,
+            detached_session,
         } => launch::execute_launch_command(
             launch::LaunchArgs {
                 install_profile_key,
@@ -521,6 +522,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 verbose,
                 json: json || command_json,
                 nacelle,
+                detached_session,
             },
             reporter,
         ),
