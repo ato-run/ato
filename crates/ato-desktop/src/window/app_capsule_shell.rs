@@ -1144,16 +1144,23 @@ pub(crate) fn describe_launch_error(err: &LaunchError) -> String {
             requirements,
             ..
         } => {
+            use capsule_core::interactive_resolution::InteractiveResolutionKind;
             let consent_count = requirements
+                .iter()
+                .filter(|e| matches!(e.kind, InteractiveResolutionKind::ConsentRequired { .. }))
+                .count();
+            // #404: state-binding requirements are neither consents nor secrets;
+            // count them separately so the secret count stays accurate.
+            let state_binding_count = requirements
                 .iter()
                 .filter(|e| {
                     matches!(
                         e.kind,
-                        capsule_core::interactive_resolution::InteractiveResolutionKind::ConsentRequired { .. }
+                        InteractiveResolutionKind::StateBindingRequired { .. }
                     )
                 })
                 .count();
-            let secret_count = requirements.len() - consent_count;
+            let secret_count = requirements.len() - consent_count - state_binding_count;
             let mut parts = Vec::new();
             if consent_count > 0 {
                 parts.push(format!(
@@ -1164,6 +1171,9 @@ pub(crate) fn describe_launch_error(err: &LaunchError) -> String {
                 parts.push(format!(
                     "{secret_count} required secret(s) — run: ato app config set {handle}"
                 ));
+            }
+            if state_binding_count > 0 {
+                parts.push(format!("{state_binding_count} state folder(s) to choose"));
             }
             format!("Launch prerequisites not met:\n{}", parts.join("\n"))
         }

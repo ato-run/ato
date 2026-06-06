@@ -12,9 +12,12 @@
 //! Query keys are launch-condition keys *directly* — there is no
 //! `condition.* / placement.* / runtime.*` namespace and no `c/p/r` sugar.
 //! Placement and runtime are Ato-runtime decisions, not capsule-protocol query
-//! inputs. `.` is the only key separator (`::` is rejected). `auto` and `prompt`
-//! are **not** accepted as explicit values — when an input is omitted, the
-//! runtime performs automatic resolution / prompting per capsule.toml.
+//! inputs. `.` is the only key separator (`::` is rejected). `prompt` is
+//! accepted only for `secret.* / state.*` (interactive create/select); when an
+//! input is omitted, the runtime performs automatic resolution / prompting per
+//! capsule.toml. `auto` is accepted only for `port.*` (an explicit "no concrete
+//! preferred port — let the runtime assign one"); it is rejected everywhere
+//! else, since omitting an input already means automatic resolution.
 //!
 //! Reserved condition keys: `port`, `port.<endpoint>`, `env.<name>`,
 //! `secret.<name>`, `state.<key>`, `network.<key>`, `hardware.<key>`,
@@ -145,7 +148,10 @@ fn parse_condition_input(key: &str, value: &str) -> Result<LaunchConditionInput>
              query keys are condition keys directly (port/env/secret/state)"
         )));
     }
-    if value == "auto" {
+    // `auto` requests an explicit "no concrete preferred — runtime assigns" —
+    // valid only for `port.*` (handled by the port arm). Reject it everywhere
+    // else, where omitting the input already means automatic resolution.
+    if value == "auto" && namespace != "port" {
         return Err(parse_err(format!(
             "'auto' is not allowed as an explicit query value for '{key}'; \
              omit the input to let the runtime resolve automatically"
@@ -164,11 +170,18 @@ fn parse_condition_input(key: &str, value: &str) -> Result<LaunchConditionInput>
     match namespace {
         "port" => {
             let endpoint = if rest.is_empty() { "main" } else { rest };
-            let port = parse_port_value(value)?;
+            // `auto` carries no concrete port: it means "let the runtime assign".
+            // Represented as the literal `"auto"` so the launch-time admission
+            // creates NO preferred-port claim (falls back to default/auto-assign).
+            let value = if value == "auto" {
+                "auto".to_string()
+            } else {
+                parse_port_value(value)?.to_string()
+            };
             Ok(LaunchConditionInput {
                 kind: LaunchConditionInputKind::Port,
                 key: endpoint.to_string(),
-                value: LaunchConditionInputValue::Literal(port.to_string()),
+                value: LaunchConditionInputValue::Literal(value),
             })
         }
         "env" => {
@@ -509,8 +522,35 @@ mod tests {
     }
 
     #[test]
-    fn capsule_launch_input_rejects_auto_value() {
-        assert!(parse_capsule_launch_input(&format!("{BASE}?port=auto")).is_err());
+    fn capsule_launch_input_accepts_port_auto_as_literal() {
+        // `port=auto` is an explicit "no concrete preferred port"; it parses to a
+        // `Literal("auto")` so launch-time admission creates no preferred claim.
+        let input = parse(&format!("{BASE}?port=auto"));
+        let c = &input.conditions[0];
+        assert_eq!(c.kind, LaunchConditionInputKind::Port);
+        assert_eq!(c.key, "main");
+        assert_eq!(
+            c.value,
+            LaunchConditionInputValue::Literal("auto".to_string())
+        );
+    }
+
+    #[test]
+    fn capsule_launch_input_accepts_endpoint_port_auto_as_literal() {
+        let input = parse(&format!("{BASE}?port.admin=auto"));
+        let c = &input.conditions[0];
+        assert_eq!(c.kind, LaunchConditionInputKind::Port);
+        assert_eq!(c.key, "admin");
+        assert_eq!(
+            c.value,
+            LaunchConditionInputValue::Literal("auto".to_string())
+        );
+    }
+
+    #[test]
+    fn capsule_launch_input_rejects_auto_for_env() {
+        // `auto` is accepted only for `port.*`; everywhere else it stays rejected.
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.LOG_LEVEL=auto")).is_err());
     }
 
     #[test]
@@ -611,12 +651,47 @@ mod tests {
     }
 
     #[test]
+    fn port_query_invalid_port_rejected() {
+        // Out-of-range / non-numeric / negative port literals are rejected; only
+        // `auto` and a valid 1..=65535 integer are accepted.
+        assert!(parse_capsule_launch_input(&format!("{BASE}?port=99999")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?port=abc")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?port=-1")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?port.main=70000")).is_err());
+    }
+
+    #[test]
     fn sensitive_env_requires_grant_not_literal() {
         assert!(parse_capsule_launch_input(&format!("{BASE}?env.MY_TOKEN=abc")).is_err());
         let ok = parse(&format!("{BASE}?env.MY_TOKEN=grant:tok-1"));
         assert_eq!(
             ok.conditions[0].value,
             LaunchConditionInputValue::Grant("tok-1".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_sensitive_env_value_rejected() {
+        // #549 invariant: a raw secret-shaped value must never be accepted as an
+        // env literal in a URL — only `grant:<id>` (or `required`) is allowed.
+        // (a) a sensitive *name* rejects any literal, even an innocuous-looking one.
+        assert!(
+            parse_capsule_launch_input(&format!("{BASE}?env.OPENAI_API_KEY=sk-abc123")).is_err()
+        );
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.MY_SECRET=anything")).is_err());
+        // (b) a non-sensitive *name* still rejects a secret-shaped *value*.
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.LOG_LEVEL=sk-abc123")).is_err());
+        assert!(parse_capsule_launch_input(&format!("{BASE}?env.LOG_LEVEL=Bearer%20xyz")).is_err());
+        // The error never echoes the raw value back.
+        let err = parse_capsule_launch_input(&format!("{BASE}?env.LOG_LEVEL=sk-abc123"))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("sk-abc123"));
+        // A grant input for the same sensitive name is accepted.
+        let ok = parse(&format!("{BASE}?env.OPENAI_API_KEY=grant:openai-default"));
+        assert_eq!(
+            ok.conditions[0].value,
+            LaunchConditionInputValue::Grant("openai-default".to_string())
         );
     }
 
