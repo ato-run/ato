@@ -508,13 +508,22 @@ pub fn launch_condition_from_secret_requirement(
 /// Project a state requirement / binding into a launch condition. `state_key` is
 /// the logical state name (the `condition_key`). The detail carries only logical
 /// metadata — an optional `binding_ref` (a logical state locator such as
-/// `ato-state://…`, never a raw host path) and an optional `durability`.
+/// `ato-state://…`, never a raw host path), an optional `durability`, and an
+/// optional `mount_target`.
+///
+/// `mount_target` is the **guest** mount path the state directory is exposed at
+/// inside the launched process/container (e.g. `/app/data`), taken from the
+/// manifest's `services.main.state_bindings[].target` at install time. It is a
+/// guest-side, non-sensitive path — never the raw host `target_path` — and exists
+/// so the runtime materialization step (#508) can place the bound directory at the
+/// correct guest target without re-reading the manifest/lockfile at relaunch.
 pub fn launch_condition_from_state_binding(
     install_profile_key: &str,
     install_revision_id: Option<&str>,
     state_key: &str,
     binding_ref: Option<&str>,
     durability: Option<&str>,
+    mount_target: Option<&str>,
     status: LaunchConditionStatus,
 ) -> LaunchConditionClaim {
     let mut detail = serde_json::Map::new();
@@ -528,6 +537,12 @@ pub fn launch_condition_from_state_binding(
         detail.insert(
             "durability".to_string(),
             Value::String(durability.to_string()),
+        );
+    }
+    if let Some(mount_target) = mount_target {
+        detail.insert(
+            "mount_target".to_string(),
+            Value::String(mount_target.to_string()),
         );
     }
     LaunchConditionClaim {
@@ -917,6 +932,7 @@ mod tests {
             "data",
             Some("ato-state://app/data"),
             Some("persistent"),
+            Some("/app/data"),
             LaunchConditionStatus::Satisfied,
         );
         assert_eq!(c.kind, LaunchConditionKind::State);
@@ -926,6 +942,8 @@ mod tests {
                 .contains("\"binding_ref\":\"ato-state://app/data\"")
         );
         assert!(c.detail_json.contains("\"durability\":\"persistent\""));
+        // The guest mount target is recorded (not the host path).
+        assert!(c.detail_json.contains("\"mount_target\":\"/app/data\""));
         // Never a raw host path.
         assert!(!c.detail_json.contains("/Users/"));
         assert!(!c.detail_json.contains("/home/"));
