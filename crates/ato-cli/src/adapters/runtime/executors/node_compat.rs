@@ -434,6 +434,35 @@ fn maybe_build_direct_node_command(
     Ok(None)
 }
 
+/// Mirror each `host:<declared>` entry in `allow_hosts` onto `<resolved>` so a
+/// remapped session port (chosen by `start_runtime_session` when the declared
+/// port is occupied) is permitted by the deno sandbox alongside the originally
+/// declared port. Returns `allow_hosts` unchanged when there is no remap
+/// (`resolved == declared`) or when either port is absent. (#565)
+fn allow_net_hosts_for_resolved_port(
+    allow_hosts: &[String],
+    declared: Option<u16>,
+    resolved: Option<u16>,
+) -> Vec<String> {
+    let mut out = allow_hosts.to_vec();
+    let (Some(declared), Some(resolved)) = (declared, resolved) else {
+        return out;
+    };
+    if resolved == declared {
+        return out;
+    }
+    let declared_suffix = format!(":{declared}");
+    for entry in allow_hosts {
+        if let Some(host) = entry.strip_suffix(&declared_suffix) {
+            let rebased = format!("{host}:{resolved}");
+            if !out.contains(&rebased) {
+                out.push(rebased);
+            }
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_runtime_command(
     deno_bin: &Path,
@@ -479,11 +508,18 @@ fn build_runtime_command(
         cmd.arg("--allow-env");
         cmd.arg("--allow-sys");
 
-        if !execution_plan.runtime.policy.network.allow_hosts.is_empty() {
-            cmd.arg(format!(
-                "--allow-net={}",
-                execution_plan.runtime.policy.network.allow_hosts.join(",")
-            ));
+        // When start_runtime_session remaps an occupied declared port, the
+        // server binds the resolved port (injected via $PORT below). Mirror each
+        // `host:<declared>` allow-net entry onto the resolved port so the deno
+        // sandbox permits the listen instead of denying it and crashing the
+        // server before readiness (#565). No-op when not remapped.
+        let allow_net = allow_net_hosts_for_resolved_port(
+            &execution_plan.runtime.policy.network.allow_hosts,
+            plan.execution_port(),
+            runtime_overrides::override_port(plan.execution_port()),
+        );
+        if !allow_net.is_empty() {
+            cmd.arg(format!("--allow-net={}", allow_net.join(",")));
         }
 
         let mut allow_read = execution_plan.runtime.policy.filesystem.read_only.clone();
@@ -528,10 +564,21 @@ fn build_runtime_command(
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
     }
-    if execution_plan.target.runtime == ExecutionRuntime::Web {
+    // Inject the resolved web port. `Web` runtimes always do; `Source` runtimes
+    // (e.g. a Node HTTP server reading `process.env.PORT`) do too whenever a port
+    // was declared or a session override is active, so a remapped session port
+    // actually reaches the server instead of it binding its hardcoded default and
+    // colliding on the occupied declared port (#565). Apps without a port resolve
+    // `override_port` to `None` and are unaffected.
+    if matches!(
+        execution_plan.target.runtime,
+        ExecutionRuntime::Web | ExecutionRuntime::Source
+    ) {
         if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
             cmd.env("PORT", port.to_string());
         }
+    }
+    if execution_plan.target.runtime == ExecutionRuntime::Web {
         if !dangerously_skip_permissions {
             cmd.arg("--allow-env");
             cmd.arg("--allow-sys");
@@ -1040,8 +1087,9 @@ fn verify_execution_plan_hashes(execution_plan: &ExecutionPlan) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_provider_backed_node_workspace, map_deno_permission_error, map_node_compat_error,
-        prepend_managed_node_to_path, provider_resolution_metadata_path,
+        allow_net_hosts_for_resolved_port, is_provider_backed_node_workspace,
+        map_deno_permission_error, map_node_compat_error, prepend_managed_node_to_path,
+        provider_resolution_metadata_path,
     };
 
     use capsule_core::launch_spec::{LaunchSpecSource, derive_launch_spec};
@@ -1072,6 +1120,64 @@ type = "app"
             HashMap::new(),
         )
         .expect("execution descriptor")
+    }
+
+    // #565: when start_runtime_session remaps an occupied declared port, the
+    // deno `--allow-net` allowlist must also permit the resolved port on every
+    // host that the declared port was permitted on, or the sandbox denies the
+    // server's listen and it crashes before readiness.
+    #[test]
+    fn allow_net_mirrors_declared_port_onto_resolved_on_remap() {
+        let declared = vec![
+            "0.0.0.0:18890".to_string(),
+            "127.0.0.1:18890".to_string(),
+            "localhost:18890".to_string(),
+        ];
+        let out = allow_net_hosts_for_resolved_port(&declared, Some(18890), Some(14126));
+        // Declared entries are preserved...
+        for entry in &declared {
+            assert!(
+                out.contains(entry),
+                "declared {entry} must be kept: {out:?}"
+            );
+        }
+        // ...and each is mirrored onto the resolved port.
+        for host in ["0.0.0.0", "127.0.0.1", "localhost"] {
+            assert!(
+                out.contains(&format!("{host}:14126")),
+                "resolved {host}:14126 must be permitted: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_net_unchanged_when_port_not_remapped() {
+        let declared = vec!["127.0.0.1:18890".to_string()];
+        // resolved == declared: no extra entries.
+        assert_eq!(
+            allow_net_hosts_for_resolved_port(&declared, Some(18890), Some(18890)),
+            declared
+        );
+        // missing override: unchanged.
+        assert_eq!(
+            allow_net_hosts_for_resolved_port(&declared, Some(18890), None),
+            declared
+        );
+    }
+
+    #[test]
+    fn allow_net_only_mirrors_entries_matching_declared_port() {
+        // An egress host on a different port must not be rebased.
+        let declared = vec![
+            "127.0.0.1:18890".to_string(),
+            "api.example.com:443".to_string(),
+        ];
+        let out = allow_net_hosts_for_resolved_port(&declared, Some(18890), Some(14126));
+        assert!(out.contains(&"127.0.0.1:14126".to_string()), "{out:?}");
+        assert!(
+            !out.iter().any(|h| h == "api.example.com:14126"),
+            "unrelated egress host must not be rebased: {out:?}"
+        );
     }
 
     #[test]
