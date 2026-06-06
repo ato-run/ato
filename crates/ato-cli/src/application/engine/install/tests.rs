@@ -3678,6 +3678,54 @@ attach = "explicit"
     assert_eq!(state.condition_key, "data");
     assert_eq!(state.status, LaunchConditionStatus::UserGrantRequired);
     assert!(state.detail_json.contains("\"durability\":\"persistent\""));
+    // No service binding declared → no guest mount target recorded.
+    assert!(!state.detail_json.contains("mount_target"));
+}
+
+#[test]
+fn install_launch_conditions_records_state_mount_target_from_service_binding() {
+    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    // When the manifest declares `services.main.state_bindings`, the guest mount
+    // target is recorded in the state claim detail so runtime materialization
+    // (#508) can place the bound directory without re-reading the manifest. The
+    // recorded value is the guest path — never a host path.
+    let manifest = manifest_fixture(
+        r#"
+schema_version = "0.3"
+name = "state-app"
+version = "0.1.0"
+type = "app"
+default_target = "container"
+runtime = "oci"
+run = "ghcr.io/example/hello:latest"
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "user data"
+attach = "explicit"
+
+[services.main]
+target = "container"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app"
+"#,
+    );
+    let claims = install_launch_conditions("ipk_app", "rev1", None, Some(&manifest));
+    let state = claims
+        .iter()
+        .find(|c| c.kind == LaunchConditionKind::State)
+        .expect("state condition extracted");
+    assert_eq!(state.condition_key, "data");
+    assert_eq!(state.status, LaunchConditionStatus::UserGrantRequired);
+    assert!(
+        state
+            .detail_json
+            .contains("\"mount_target\":\"/var/lib/app\""),
+        "guest mount target must be recorded: {}",
+        state.detail_json
+    );
 }
 
 #[test]
