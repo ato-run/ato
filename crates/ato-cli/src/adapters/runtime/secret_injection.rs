@@ -174,10 +174,12 @@ pub(crate) fn plan_secret_injection(
 /// reading the secure store, after relaunch preflight admission and before spawn.
 ///
 /// For each planned secret grant: confirm via the registry that the grant belongs
-/// to this install profile and is `granted` (never inject another app's grant),
-/// then read its value. A grant that exists but has no stored value blocks the
-/// launch with a typed error (grant selection is not value availability). No value
-/// ever enters an error message.
+/// to this install profile, is `granted`, AND was minted for THIS exact condition
+/// (`secret.K` / `env.K`) — never inject another app's grant, and never let a grant
+/// issued for one condition (a different name, or the other namespace) satisfy a
+/// different one. Then read its value. A grant that exists but has no stored value
+/// blocks the launch with a typed error (grant selection is not value availability).
+/// No value ever enters an error message.
 ///
 /// Short-circuits with no secret-grant input (no ledger read). Reads only the
 /// installed-state ledger and the secure store — never the manifest/lockfile.
@@ -200,26 +202,54 @@ pub(crate) fn resolve_secret_injection(
 
     let mut resolved = Vec::with_capacity(plan.env.len());
     for entry in &plan.env {
-        // Ownership + status: the grant must belong to THIS install profile and be
-        // granted. Defence-in-depth — never inject a grant from another app.
+        // The grant's recorded `condition_key` (`secret.K` for a Secret input,
+        // `env.K` for a sensitive Env input — that namespaced form is what
+        // `record_secret_grant_ref` validates and stores). A grant is the proof for
+        // THIS condition only, so a grant minted for a different env/secret name —
+        // or for the *other* namespace at the same name — must not satisfy it.
+        let expected_condition_key = format!("{}.{}", entry.namespace, entry.name);
+        // Ownership + status + condition: the grant must belong to THIS install
+        // profile, be granted, AND match this exact condition. Defence-in-depth —
+        // never inject a grant from another app, or a grant for another condition.
         match db.read_secret_grant_ref(&entry.grant_id)? {
             Some(rec)
-                if rec.status == "granted" && rec.install_profile_key == install_profile_key => {}
+                if rec.status == "granted"
+                    && rec.install_profile_key == install_profile_key
+                    && grant_matches_condition(
+                        &rec.condition_key,
+                        &expected_condition_key,
+                        &entry.name,
+                    ) => {}
             Some(rec) if rec.install_profile_key != install_profile_key => {
                 bail!(
-                    "{code}: secret grant for '{ns}.{name}' belongs to a different installed \
+                    "{code}: secret grant for '{expected}' belongs to a different installed \
                      app; refusing to inject",
                     code = ATO_ERR_LAUNCH_CONDITION_SECRET_INJECTION_FAILED,
-                    ns = entry.namespace,
-                    name = entry.name,
+                    expected = expected_condition_key,
+                );
+            }
+            Some(rec)
+                if rec.status == "granted"
+                    && !grant_matches_condition(
+                        &rec.condition_key,
+                        &expected_condition_key,
+                        &entry.name,
+                    ) =>
+            {
+                // A grant exists and is owned by this app, but was minted for a
+                // different launch condition. The grant is not proof for THIS one.
+                bail!(
+                    "{code}: the grant for '{expected}' was issued for a different launch \
+                     condition; create the grant for '{expected}', then relaunch",
+                    code = ATO_ERR_LAUNCH_CONDITION_SECRET_INJECTION_FAILED,
+                    expected = expected_condition_key,
                 );
             }
             _ => {
                 bail!(
-                    "{code}: no granted secret for '{ns}.{name}'; create the grant, then relaunch",
+                    "{code}: no granted secret for '{expected}'; create the grant, then relaunch",
                     code = ATO_ERR_LAUNCH_CONDITION_SECRET_VALUE_MISSING,
-                    ns = entry.namespace,
-                    name = entry.name,
+                    expected = expected_condition_key,
                 );
             }
         }
@@ -228,11 +258,10 @@ pub(crate) fn resolve_secret_injection(
             .get_secret(install_profile_key, &entry.name)?
             .ok_or_else(|| {
                 inject_err(format!(
-                    "{code}: a grant exists for '{ns}.{name}' but no value is stored; recreate the \
+                    "{code}: a grant exists for '{expected}' but no value is stored; recreate the \
                      grant to set it",
                     code = ATO_ERR_LAUNCH_CONDITION_SECRET_VALUE_MISSING,
-                    ns = entry.namespace,
-                    name = entry.name,
+                    expected = expected_condition_key,
                 ))
             })?;
         resolved.push(RuntimeSecretEnv {
@@ -255,6 +284,24 @@ fn is_secret_grant_input(input: &LaunchConditionInput) -> bool {
 /// Match a ledger claim key against `<namespace>.<input_key>` (bare or namespaced).
 fn matches_key(claim_key: &str, namespace: &str, input_key: &str) -> bool {
     claim_key == input_key || claim_key == format!("{namespace}.{input_key}")
+}
+
+/// Does a recorded grant's `condition_key` satisfy the condition we're injecting?
+///
+/// The grant is the proof for THIS condition only. The canonical recorded form is
+/// the namespaced `secret.K` / `env.K` (that is what `record_secret_grant_ref`
+/// validates and stores), so the namespaced match is the one that matters: it
+/// rejects a grant minted for a different name OR for the other namespace at the
+/// same name (`env.MY_TOKEN` must not satisfy `secret.MY_TOKEN`, and vice versa).
+/// A bare `K` is accepted for backward compatibility with any pre-namespaced row,
+/// but only against the same name — a bare key is namespace-agnostic, so it is the
+/// one form that cannot distinguish secret-vs-env; we lean on the namespaced form.
+fn grant_matches_condition(
+    recorded_condition_key: &str,
+    expected_condition_key: &str,
+    name: &str,
+) -> bool {
+    recorded_condition_key == expected_condition_key || recorded_condition_key == name
 }
 
 #[cfg(test)]
@@ -634,6 +681,115 @@ mod tests {
         .unwrap_err();
         let rendered = format!("{err:#}");
         assert!(rendered.contains(ATO_ERR_LAUNCH_CONDITION_SECRET_INJECTION_FAILED));
+        assert!(!rendered.contains(SECRET));
+    }
+
+    // ── cross-condition grant rejection ───────────────────────────────────────
+    // A grant is the proof for ONE launch condition. An owned, `granted` grant whose
+    // recorded `condition_key` is for a different name — or for the other namespace
+    // at the same name — must NOT satisfy the condition being injected.
+
+    #[test]
+    fn secret_grant_for_different_secret_condition_blocks() {
+        let (_d, db) = temp_db();
+        // The launch input/claim is for OPENAI_API_KEY, but the grant was minted for
+        // a DIFFERENT secret condition (secret.OTHER).
+        db.record_launch_condition_claim(&secret_claim("ipk_app", "rev1", "OPENAI_API_KEY"))
+            .unwrap();
+        db.record_secret_grant_ref("ipk_app", None, "secret.OTHER", "g1")
+            .unwrap();
+        let err = resolve_secret_injection(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &[grant_input("OPENAI_API_KEY", "g1")],
+            &FakeValueStore {
+                value: Some(SECRET.to_string()),
+            },
+        )
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains(ATO_ERR_LAUNCH_CONDITION_SECRET_INJECTION_FAILED));
+        assert!(rendered.contains("secret.OPENAI_API_KEY"));
+        // The error names the condition we tried to satisfy, never the foreign one
+        // and never the value.
+        assert!(!rendered.contains("secret.OTHER"));
+        assert!(!rendered.contains(SECRET));
+    }
+
+    #[test]
+    fn env_grant_for_different_env_condition_blocks() {
+        let (_d, db) = temp_db();
+        // The launch input/claim is for MY_TOKEN, but the grant was minted for a
+        // DIFFERENT env condition (env.OTHER).
+        db.record_launch_condition_claim(&env_claim("ipk_app", "rev1", "MY_TOKEN"))
+            .unwrap();
+        db.record_secret_grant_ref("ipk_app", None, "env.OTHER", "g1")
+            .unwrap();
+        let err = resolve_secret_injection(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &[env_grant_input("MY_TOKEN", "g1")],
+            &FakeValueStore {
+                value: Some(SECRET.to_string()),
+            },
+        )
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains(ATO_ERR_LAUNCH_CONDITION_SECRET_INJECTION_FAILED));
+        assert!(rendered.contains("env.MY_TOKEN"));
+        assert!(!rendered.contains("env.OTHER"));
+        assert!(!rendered.contains(SECRET));
+    }
+
+    #[test]
+    fn env_grant_does_not_accept_secret_condition_ref() {
+        let (_d, db) = temp_db();
+        // The env claim is for MY_TOKEN; the grant carries a same-named SECRET
+        // condition (secret.MY_TOKEN). A secret grant is not proof for an env one.
+        db.record_launch_condition_claim(&env_claim("ipk_app", "rev1", "MY_TOKEN"))
+            .unwrap();
+        db.record_secret_grant_ref("ipk_app", None, "secret.MY_TOKEN", "g1")
+            .unwrap();
+        let err = resolve_secret_injection(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &[env_grant_input("MY_TOKEN", "g1")],
+            &FakeValueStore {
+                value: Some(SECRET.to_string()),
+            },
+        )
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains(ATO_ERR_LAUNCH_CONDITION_SECRET_INJECTION_FAILED));
+        assert!(rendered.contains("env.MY_TOKEN"));
+        assert!(!rendered.contains(SECRET));
+    }
+
+    #[test]
+    fn secret_grant_does_not_accept_env_condition_ref() {
+        let (_d, db) = temp_db();
+        // The secret claim is for MY_TOKEN; the grant carries a same-named ENV
+        // condition (env.MY_TOKEN). An env grant is not proof for a secret one.
+        db.record_launch_condition_claim(&secret_claim("ipk_app", "rev1", "MY_TOKEN"))
+            .unwrap();
+        db.record_secret_grant_ref("ipk_app", None, "env.MY_TOKEN", "g1")
+            .unwrap();
+        let err = resolve_secret_injection(
+            &db,
+            "ipk_app",
+            Some("rev1"),
+            &[grant_input("MY_TOKEN", "g1")],
+            &FakeValueStore {
+                value: Some(SECRET.to_string()),
+            },
+        )
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains(ATO_ERR_LAUNCH_CONDITION_SECRET_INJECTION_FAILED));
+        assert!(rendered.contains("secret.MY_TOKEN"));
         assert!(!rendered.contains(SECRET));
     }
 }
