@@ -241,13 +241,16 @@ pub const SECRET_DETAIL_ALLOWED_KEYS: &[&str] = &[
 
 /// The only `detail_json` keys permitted for a [`LaunchConditionKind::Env`]
 /// condition — projection metadata pointing at where the value comes from,
-/// never the value itself.
+/// never the value itself. `grant_ref` is a redacted secret-grant reference for a
+/// sensitive `env.*=grant:<id>` condition (#549), exactly like the Secret kind —
+/// it is a logical id, never the value.
 pub const ENV_DETAIL_ALLOWED_KEYS: &[&str] = &[
     "source",
     "projection",
     "ref",
     "logical_endpoint",
     "condition_ref",
+    "grant_ref",
 ];
 
 /// Validate that `detail_json` is a redacted JSON object suitable for storage.
