@@ -23,7 +23,9 @@ use crate::adapters::runtime::launch_condition_prompt::{
 };
 use crate::app_control::session::ScopedInstallLifecycleGuard;
 use crate::cli::commands::run::InstallLifecycleContext;
+use crate::install::support::execute_run_command;
 use crate::reporters;
+use crate::{EnforcementMode, ProviderToolchain, RunAgentMode};
 
 pub(crate) struct LaunchArgs {
     pub(crate) install_profile_key: String,
@@ -31,11 +33,15 @@ pub(crate) struct LaunchArgs {
     pub(crate) verbose: bool,
     pub(crate) json: bool,
     pub(crate) nacelle: Option<PathBuf>,
+    /// Internal (ato-desktop only): start the installed app as a *detached*
+    /// session that writes a discoverable `StoredSessionInfo`, instead of the
+    /// default foreground run. Off for the public `ato launch` CLI. See #565.
+    pub(crate) detached_session: bool,
 }
 
 pub(crate) fn execute_launch_command(
     args: LaunchArgs,
-    _reporter: Arc<reporters::CliReporter>,
+    reporter: Arc<reporters::CliReporter>,
 ) -> Result<()> {
     let instances_root = ato_path_or_workspace_tmp("instances");
     let store =
@@ -127,34 +133,10 @@ pub(crate) fn execute_launch_command(
     // writes the record. Deriving it from a random id here would break the
     // receipt/session/CIK identity contract.
 
-    // Read the LaunchProfile. port_policy / concurrency_policy / isolation are
-    // now honoured by the detached session-start machinery this command routes
-    // into (it reserves/remaps the service port and injects it into the
-    // runtime), so they no longer surface a "not yet supported" warning here.
-    // Profile args and env/secret refs are not yet applied on the installed
-    // relaunch path (#565 follow-up) — surface them rather than dropping silently.
-    let (profile_args, _profile_warning) = read_profile_launch_config(&store, &app_id, &profile_id);
-    if !profile_args.is_empty() {
-        tracing::warn!(
-            "ato launch: launch profile args {profile_args:?} are not yet applied on the \
-             installed relaunch path"
-        );
-    }
-    if !capsule_launch_inputs.is_empty() {
-        tracing::warn!(
-            "ato launch: {} launch-condition input(s) resolved but injection on the installed \
-             relaunch path is not yet wired (#565 follow-up)",
-            capsule_launch_inputs.len()
-        );
-    }
-    if args.nacelle.is_some() {
-        tracing::warn!(
-            "ato launch: --nacelle is not applied on the installed relaunch path; ignoring"
-        );
-    }
+    // Read the LaunchProfile to apply args and warn about unsupported fields.
+    let (profile_args, profile_env_refs_warning) =
+        read_profile_launch_config(&store, &app_id, &profile_id);
 
-    // Diagnostic resolution summary on stderr only — stdout is reserved for the
-    // session-start JSON envelope when `--json` is set.
     if args.verbose || args.json {
         let info = serde_json::json!({
             "installed_app_id": app_id.as_str(),
@@ -163,24 +145,39 @@ pub(crate) fn execute_launch_command(
             "install_revision_id": rev_id.as_str(),
             "capsule_handle": capsule_handle,
             "capsule_launch_inputs": capsule_launch_inputs.len(),
+            "detached_session": args.detached_session,
         });
-        eprintln!("[ato launch] resolved: {}", serde_json::to_string(&info)?);
+        // The public `ato launch --json` contract prints the resolution summary
+        // to stdout. The detached desktop path reserves stdout for the
+        // session-start JSON envelope, so it logs to stderr instead.
+        if args.json && !args.detached_session {
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        } else {
+            eprintln!("[ato launch] resolved: {}", serde_json::to_string(&info)?);
+        }
+    }
+
+    if let Some(warn) = profile_env_refs_warning {
+        tracing::warn!("ato launch: {warn}");
+        if args.verbose {
+            eprintln!("ATO-WARN {warn}");
+        }
     }
 
     tracing::debug!(
-        "launch: app={} profile={} rev={} handle={}",
+        "launch: app={} profile={} rev={} handle={} detached={}",
         app_id.as_str(),
         profile_id.as_str(),
         rev_id.as_str(),
         capsule_handle,
+        args.detached_session,
     );
 
-    // Stamp the detached session record with the install identity. The guard
-    // sets a thread-local that the session-record writer reads (see
-    // `apply_install_lifecycle` in app_control/session.rs); `start_session`
-    // drives the pipeline on this same thread via `block_on`, so the writer
-    // observes the context and the Desktop can later discover the session by
-    // its install_profile_key. The guard always clears on return (or panic).
+    // The lifecycle context is set via ScopedInstallLifecycleGuard so the
+    // resulting session record (foreground or detached) is stamped with the
+    // install identity, and the guard always clears on return (or panic). The
+    // session writer derives CapsuleInstanceKey from the pipeline's execution_id
+    // at write time (see apply_install_lifecycle in session.rs).
     let lifecycle_ctx = InstallLifecycleContext {
         installed_app_id: app_id.as_str().to_string(),
         install_profile_id: profile_id.as_str().to_string(),
@@ -188,13 +185,128 @@ pub(crate) fn execute_launch_command(
         install_revision_id: rev_id.as_str().to_string(),
     };
 
+    let revision_output_dir = store.revision_output_dir(&rev_id);
+
+    // ato-desktop's installed-relaunch path (#565): start a *detached* session
+    // that writes a discoverable record. The default public CLI path below keeps
+    // its foreground behavior.
+    if args.detached_session {
+        return relaunch_installed_detached(
+            &capsule_handle,
+            &revision_output_dir,
+            &rev_id,
+            profile_args,
+            capsule_launch_inputs,
+            args.nacelle.as_deref(),
+            lifecycle_ctx,
+            args.json,
+        );
+    }
+
+    // Default `ato launch <ipk>`: run the pinned revision foreground.
+    //
+    // `pinned_revision_output_dir` must be the `.capsule` file, not the output
+    // directory. `normalize_run_target_after_install` only handles the `.capsule`
+    // extension check for a file path; a bare directory falls through to source
+    // inference and fails with ATO_ERR_AMBIGUOUS_ENTRYPOINT because no
+    // `capsule.toml` is present at that path.
+    let pinned_capsule_path = find_capsule_in_revision_output(&revision_output_dir)
+        .unwrap_or_else(|| revision_output_dir.clone());
+
+    let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx.clone());
+
+    execute_run_command(
+        pinned_capsule_path.clone(),
+        /* target */ None,
+        /* args */ profile_args,
+        /* watch */ false,
+        /* background */ false,
+        args.nacelle,
+        /* registry */ None,
+        /* enforcement */ EnforcementMode::Strict,
+        /* sandbox_mode */ false,
+        // Installed capsules are pre-consented artifacts; bypass the sandbox
+        // opt-in / execution-plan consent gate that applies to `ato run`.
+        /* dangerously_skip_permissions */
+        true,
+        /* compatibility_fallback */ None,
+        /* provider_toolchain */ ProviderToolchain::Auto,
+        /* use_existing_toml */ None,
+        /* explicit_commit */ None,
+        /* assume_yes */ args.yes,
+        /* verbose */ args.verbose,
+        /* agent_mode */ RunAgentMode::Auto,
+        /* agent_local_root */ None,
+        /* keep_failed_artifacts */ false,
+        /* auto_fix_mode */ None,
+        /* allow_unverified */ false,
+        /* read */ vec![],
+        /* write */ vec![],
+        /* read_write */ vec![],
+        /* cwd */ None,
+        /* state */ vec![],
+        /* inject */ vec![],
+        /* build_policy */ crate::application::build_materialization::BuildPolicy::IfStale,
+        /* cache_strategy_arg */ crate::cli::shared::CacheStrategyArg::Auto,
+        /* plan_only */ false,
+        /* strict_realization */ false,
+        Some(lifecycle_ctx),
+        /* capsule_launch_inputs */ capsule_launch_inputs,
+        /* pinned_revision_output_dir */ Some(pinned_capsule_path),
+        reporter,
+    )
+}
+
+/// ato-desktop installed-relaunch path (#565): start the pinned revision as a
+/// *detached* session that writes a discoverable `StoredSessionInfo` (stamped
+/// with the install_profile_key via the active lifecycle guard) which the
+/// Desktop discovers by polling `try_reuse_live_session_for_install_profile_key`.
+///
+/// Intentionally separate from the default foreground `ato launch`: the public
+/// CLI keeps its blocking behavior and full profile-args / launch-input / nacelle
+/// handling, while the Desktop needs a discoverable, healthcheck-able,
+/// ProcessManager-registered session it can attach a WebView to and stop later.
+/// Reuses the same session-start machinery the normal capsule path uses (port
+/// reserve/remap, ready probe, kill-process-group on readiness failure → no
+/// orphan).
+///
+/// Not yet wired on this detached path (logged, never silently dropped): launch
+/// profile `args`, `capsule://…?secret/state/env` inputs, and `--nacelle`. The
+/// foreground path applies all of those; the Desktop relaunch currently targets
+/// condition-less installed apps.
+#[allow(clippy::too_many_arguments)]
+fn relaunch_installed_detached(
+    capsule_handle: &str,
+    revision_output_dir: &Path,
+    rev_id: &InstallRevisionId,
+    profile_args: Vec<String>,
+    capsule_launch_inputs: Vec<LaunchConditionInput>,
+    nacelle: Option<&Path>,
+    lifecycle_ctx: InstallLifecycleContext,
+    json: bool,
+) -> Result<()> {
+    if !profile_args.is_empty() {
+        tracing::warn!(
+            "ato launch (detached): launch profile args {profile_args:?} are not yet applied on \
+             the installed relaunch path"
+        );
+    }
+    if !capsule_launch_inputs.is_empty() {
+        tracing::warn!(
+            "ato launch (detached): {} launch-condition input(s) resolved but injection on the \
+             installed relaunch path is not yet wired",
+            capsule_launch_inputs.len()
+        );
+    }
+    if nacelle.is_some() {
+        tracing::warn!("ato launch (detached): --nacelle is not applied; ignoring");
+    }
+
     // Resolve the frozen revision: find the pinned `.capsule` and extract its
     // `capsule.toml`. The run executes directly from this immutable revision
-    // artifact, so the pinned current_revision is honoured even after a
-    // rollback.
-    let revision_output_dir = store.revision_output_dir(&rev_id);
+    // artifact, so the pinned current_revision is honoured even after a rollback.
     let pinned_capsule_path =
-        find_capsule_in_revision_output(&revision_output_dir).ok_or_else(|| {
+        find_capsule_in_revision_output(revision_output_dir).ok_or_else(|| {
             anyhow::anyhow!(
                 "installed revision {} has no .capsule artifact under {} — the install may be \
                  degraded; reinstall with `ato install`",
@@ -212,23 +324,21 @@ pub(crate) fn execute_launch_command(
 
     let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx);
 
-    // Route through the same detached session-start machinery the normal capsule
-    // path uses (#565). It reserves/remaps the service port, injects it into the
-    // runtime, waits for HTTP readiness, registers the process with the
-    // ProcessManager, and writes a discoverable StoredSessionInfo carrying the
-    // install_profile_key stamped above. On readiness failure it kills the whole
-    // process group, so a timed-out relaunch leaves no orphan holding the port.
-    // Installed capsules are pre-consented artifacts; the session-start pipeline
-    // does not re-show the run consent gate.
+    // Reuse the detached session-start machinery: reserve/remap the service port,
+    // inject it, wait for HTTP readiness, register with the ProcessManager, and
+    // write a discoverable StoredSessionInfo stamped with the install_profile_key.
+    // On readiness failure it kills the whole process group, so a timed-out
+    // relaunch leaves no orphan. Installed capsules are pre-consented; the
+    // session-start pipeline does not re-show the run consent gate.
     crate::app_control::start_session(
-        &capsule_handle,
+        capsule_handle,
         /* target_label */ None,
         /* community_toml_id */ None,
         /* attach_state */ &[],
         /* from_materialized_record */ None,
         /* local_manifest_path */ Some(pinned_manifest_path),
         /* run_config_hash */ None,
-        args.json,
+        json,
     )
 }
 
