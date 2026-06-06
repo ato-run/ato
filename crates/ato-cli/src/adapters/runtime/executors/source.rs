@@ -941,6 +941,15 @@ impl NacelleExecAdapter {
                         "target": mount.target,
                         "readonly": mount.readonly,
                     }))
+                    // State-binding mounts (#508) reach the runtime here at the
+                    // spawn boundary only — they live on a receipt-excluded
+                    // channel, so they are NOT in injected_mounts() above (which
+                    // the receipt's filesystem observer hashes).
+                    .chain(launch_ctx.state_mounts().iter().map(|mount| json!({
+                        "source": mount.source.display().to_string(),
+                        "target": mount.target,
+                        "readonly": mount.readonly,
+                    })))
                     .collect::<Vec<_>>(),
                 "ipc_env": ipc_env,
                 "ipc_socket_paths": ipc_socket_paths,
@@ -2404,6 +2413,57 @@ mod tests {
         assert!(payload_env.iter().any(|pair| {
             pair[0].as_str() == Some("UV_PYTHON") && pair[1].as_str() == Some("3.11.10")
         }));
+    }
+
+    #[test]
+    fn state_binding_mount_reaches_source_spawn_boundary() {
+        // #508: a state-binding mount (receipt-excluded channel) must reach the
+        // nacelle source payload's `mounts` array at the spawn boundary, with the
+        // bound host source and the guest mount target.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let dir = tempdir().unwrap();
+        let state_dir = dir.path().join("bound-state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(dir.path().join("main.py"), "print('ok')\n").unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
+
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            runtime_version = "3.11.10"
+            entrypoint = "main.py"
+            "#,
+            "dev",
+        );
+        let launch_ctx = RuntimeLaunchContext::empty()
+            .with_effective_cwd(dir.path().join("caller"))
+            .with_state_mounts(vec![
+                crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount {
+                    state_key: "data".to_string(),
+                    binding_id: "user-data".to_string(),
+                    source: state_dir.clone(),
+                    target: "/app/data".to_string(),
+                    readonly: false,
+                },
+            ]);
+
+        let adapter =
+            NacelleExecAdapter::for_plan(&plan, ExecuteMode::Foreground, &launch_ctx).unwrap();
+        let mounts = adapter.payload["mounts"].as_array().expect("mounts array");
+        let state_mount = mounts
+            .iter()
+            .find(|m| m["target"].as_str() == Some("/app/data"))
+            .expect("state mount must reach the source payload boundary");
+        assert_eq!(
+            state_mount["source"].as_str(),
+            Some(state_dir.to_string_lossy().as_ref())
+        );
+        assert_eq!(state_mount["readonly"].as_bool(), Some(false));
     }
 
     #[test]

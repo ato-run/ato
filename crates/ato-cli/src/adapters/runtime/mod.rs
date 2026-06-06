@@ -14,4 +14,5 @@ pub(crate) mod provider_workspace;
 pub(crate) mod provisioning;
 pub(crate) mod relaunch_preflight;
 pub(crate) mod secret_injection;
+pub(crate) mod state_binding_injection;
 pub(crate) mod tree;
