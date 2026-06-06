@@ -47,6 +47,7 @@ use crate::runtime::tree as runtime_tree;
 
 mod github_archive;
 mod github_inference;
+mod local_source;
 mod manifest_delta;
 mod manifest_integrity;
 mod persistence;
@@ -55,6 +56,7 @@ pub(crate) mod support;
 
 use github_archive::*;
 use github_inference::*;
+pub use local_source::{LocalInstallOptions, install_local_directory};
 use manifest_delta::*;
 use manifest_integrity::*;
 use persistence::*;
@@ -331,19 +333,23 @@ pub struct InstallExecutionOptions {
 enum InstallSource {
     Registry(String),
     Local(String),
+    /// A hermetic local-directory install (`--from-local`). Carries a stable,
+    /// non-host-leaking cache label (`local-fixture:<publisher>/<slug>`) so no
+    /// remote chunk-sync is attempted and no absolute host path enters caches.
+    LocalFixture(String),
 }
 
 impl InstallSource {
     fn registry_url(&self) -> Option<&str> {
         match self {
             Self::Registry(url) => Some(url),
-            Self::Local(_) => None,
+            Self::Local(_) | Self::LocalFixture(_) => None,
         }
     }
 
     fn cache_label(&self) -> &str {
         match self {
-            Self::Registry(url) | Self::Local(url) => url,
+            Self::Registry(url) | Self::Local(url) | Self::LocalFixture(url) => url,
         }
     }
 }

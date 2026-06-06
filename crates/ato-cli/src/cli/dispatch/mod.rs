@@ -471,6 +471,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Install {
             slug,
             from_gh_repo,
+            from_local,
             registry,
             version,
             default,
@@ -488,6 +489,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         } => install::execute_install_command(install::InstallCommandArgs {
             slug,
             from_gh_repo,
+            from_local,
             registry,
             version,
             default,

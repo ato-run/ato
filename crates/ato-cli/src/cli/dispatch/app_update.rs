@@ -52,6 +52,7 @@ pub(crate) fn execute_app_update_command(args: AppUpdateArgs) -> Result<()> {
     execute_install_command(InstallCommandArgs {
         slug: Some(capsule_handle),
         from_gh_repo: None,
+        from_local: None,
         registry: None,
         version: None,
         default: false,
