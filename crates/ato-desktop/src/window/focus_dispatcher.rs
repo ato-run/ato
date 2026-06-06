@@ -27,7 +27,9 @@ use crate::system_capsule::ato_onboarding::{ONBOARDING_VERSION, OnboardingComman
 use crate::webview::{DOCK_AUTOMATION_PANE_ID, dispatch_automation_command};
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::dock::DockEntitySlot;
-use crate::window::focus_guest_panes::{FocusGuestPaneRegistry, is_focus_guest_pane_id};
+use crate::window::focus_guest_panes::{
+    FocusGuestPaneEntry, FocusGuestPaneRegistry, is_focus_guest_pane_id,
+};
 
 /// Start the Focus-mode automation dispatcher. Spawns the socket
 /// listener (`AutomationHost::start`) plus a foreground polling task
@@ -759,6 +761,54 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                         // content window closes — that call is idempotent.
                         let stop_result: Result<serde_json::Value, String> =
                             async_app_for_loop.update(|cx| {
+                                // #568: installed app-capsule windows are tracked
+                                // in the FocusGuestPaneRegistry (the route-agnostic
+                                // source of truth that backs browser_tabs). When
+                                // the frontmost content window is such a pane,
+                                // resolve the stop through it: read the *live*
+                                // session id from the shell and close the right
+                                // window. The OpenContentWindows-only lookup below
+                                // returned had_active_session:false for these
+                                // windows because the cached capsule context can
+                                // lack a session id (e.g. while the page is still
+                                // settling), and it does not cover every installed
+                                // route variant.
+                                if let Some(front) = cx
+                                    .global::<OpenContentWindows>()
+                                    .mru_order()
+                                    .into_iter()
+                                    .next()
+                                {
+                                    let window_id = front.handle.window_id().as_u64();
+                                    if let Some(pane_id) = cx
+                                        .global::<FocusGuestPaneRegistry>()
+                                        .pane_id_for_window(window_id)
+                                        && let Some(entry) = cx
+                                            .global::<FocusGuestPaneRegistry>()
+                                            .get(pane_id)
+                                            .cloned()
+                                    {
+                                        let session_id = guest_pane_session_id(cx, &entry);
+                                        let stopped = match &session_id {
+                                            Some(sid) => matches!(
+                                                crate::orchestrator::stop_guest_session(sid),
+                                                Ok(true)
+                                            ),
+                                            None => false,
+                                        };
+                                        // Close the window regardless of stop
+                                        // outcome so the Focus View can be reused.
+                                        let _ = close_content_window(cx, window_id);
+                                        return Ok(serde_json::json!({
+                                            "ok": true,
+                                            "stopped": stopped,
+                                            "had_active_session": session_id.is_some(),
+                                            "session_id": session_id,
+                                            "handle": entry.handle,
+                                        }));
+                                    }
+                                }
+
                                 let active = cx
                                     .global::<OpenContentWindows>()
                                     .mru_order()
@@ -962,6 +1012,46 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                             Err(msg) => req.send(Err(msg)),
                         };
                     }
+                    AutomationCommand::ClosePane { pane_id } => {
+                        // Close an installed app-capsule window/pane (#568).
+                        // Previously fell through to the catch-all below and
+                        // returned "Discriminant(18) is not supported in Focus
+                        // mode", so MCP `browser_close_tab` could not close a
+                        // guest capsule window. Resolve the pane via the
+                        // FocusGuestPaneRegistry (route-agnostic source of truth
+                        // for live guest panes) and close its GPUI window.
+                        let pane_id = *pane_id;
+                        let result: Result<serde_json::Value, String> =
+                            async_app_for_loop.update(|cx| {
+                                let Some(entry) = resolve_guest_pane(cx, pane_id) else {
+                                    return Err(if pane_id == 0 {
+                                        "no WebView pane to close".to_string()
+                                    } else {
+                                        format!("unknown pane {pane_id} (no such guest capsule)")
+                                    });
+                                };
+                                // Read the live session id for a truthful
+                                // response, then close the window. on_window_closed
+                                // applies windowCloseBehavior: it detaches the
+                                // client and stops the session only when policy =
+                                // stop-session (keep-session-running leaves the
+                                // session discoverable for relaunch).
+                                let session_id = guest_pane_session_id(cx, &entry);
+                                let closed = close_content_window(cx, entry.window_id);
+                                Ok(serde_json::json!({
+                                    "ok": true,
+                                    "closed": closed,
+                                    "pane_id": entry.pane_id,
+                                    "window_id": entry.window_id,
+                                    "handle": entry.handle,
+                                    "session_id": session_id,
+                                }))
+                            });
+                        match result {
+                            Ok(json) => req.send(Ok(json)),
+                            Err(msg) => req.send(Err(msg)),
+                        };
+                    }
                     other => {
                         // Non-dock browser_* and other commands with no
                         // consumer in Focus mode. Returning an explicit
@@ -1065,6 +1155,49 @@ fn frontmost_guest_pane_id(cx: &App) -> Option<usize> {
         })
 }
 
+/// Resolve the guest capsule pane targeted by a close/stop request (#568).
+/// `pane_id == 0` selects the frontmost live guest pane; an explicit Focus
+/// guest pane id selects that pane. Returns `None` for the dock id, an unknown
+/// id, or when no guest pane is open.
+fn resolve_guest_pane(cx: &App, pane_id: usize) -> Option<FocusGuestPaneEntry> {
+    let target = if pane_id == 0 {
+        frontmost_guest_pane_id(cx)?
+    } else if is_focus_guest_pane_id(pane_id) {
+        pane_id
+    } else {
+        return None;
+    };
+    cx.global::<FocusGuestPaneRegistry>().get(target).cloned()
+}
+
+/// Live session id of a guest pane, read from its shell (`None` while the
+/// capsule is still booting). Preferred over the cached
+/// `OpenContentWindows` capsule context, which can lag the shell state.
+fn guest_pane_session_id(cx: &App, entry: &FocusGuestPaneEntry) -> Option<String> {
+    entry
+        .shell
+        .upgrade()
+        .and_then(|shell| shell.read(cx).current_session_id())
+}
+
+/// Remove the GPUI content window for `window_id`. Returns true if a window
+/// handle was found and removal was dispatched. Closing the window runs
+/// `app::on_window_closed`, which detaches the session client and (when
+/// `windowCloseBehavior = stop-session`) stops the underlying session.
+fn close_content_window(cx: &mut App, window_id: u64) -> bool {
+    let handle = cx
+        .global::<OpenContentWindows>()
+        .get(window_id)
+        .map(|e| e.handle);
+    match handle {
+        Some(handle) => {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            true
+        }
+        None => false,
+    }
+}
+
 /// Short, user-facing title derived from a capsule handle string. Fallback
 /// used when `OpenContentWindows` has no entry for the pane's window.
 fn short_handle_title(handle: &str) -> String {
@@ -1143,6 +1276,9 @@ mod tests {
         assert!(!is_browser_pane_command(&FocusPane { pane_id: 1 }));
         assert!(!is_browser_pane_command(&ListSessions));
         assert!(!is_browser_pane_command(&StopActiveSession));
+        // ClosePane is handled by the app-level match arm (#568), not the
+        // guest-pane browser dispatch.
+        assert!(!is_browser_pane_command(&ClosePane { pane_id: 1 }));
         assert!(!is_browser_pane_command(&HostDispatchAction {
             action: "X".into(),
             url: None
