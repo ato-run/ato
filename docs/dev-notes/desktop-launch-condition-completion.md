@@ -124,9 +124,16 @@ addressed:
   status + owner).
 - #560: reject a `condition_key`/`state_key` mismatch in `resolve_state_binding_from_path`.
 
-The integration + smoke results above predate these fixes and must be
-re-confirmed before merge. Merge order once green: #559 → #556 → #558 → #560 →
-this audit.
+**Re-confirmed post-fix (PASS).** The four fixed branches were re-merged in order
+(#559 → #556 → #558 → #560) onto `dev`: additive conflicts only (`launch_context.rs`
+`state_mounts` + the `PortPreference` carrier; `run.rs` the two sequential
+pre-spawn gates), resolved by union; `cargo build -p ato-cli` and
+`cargo check --workspace --all-targets` clean; focused suites **560 passed / 0
+failed** (secret_injection 23, state_binding 29, port 220, preflight 78, relaunch
+27, capsule-core installed_state 183). No regressions; the new proof-boundary
+checks hold under integration. Live CLI smoke remains blocked by #561.
+
+Merge order: #559 → #556 → #558 → #560 → this audit.
 
 ## Provenance
 Batch coordinated 2026-06-06. PRs #556 (port), #558 (env-grant, +#557 follow-up),
