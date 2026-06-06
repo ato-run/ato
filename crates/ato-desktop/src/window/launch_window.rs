@@ -625,7 +625,7 @@ fn build_consent_preview(
             let requirements = data
                 .requirements
                 .into_iter()
-                .map(|env| match env.kind {
+                .filter_map(|env| match env.kind {
                     InteractiveResolutionKind::SecretsRequired { target, schema } => {
                         let fields = schema
                             .into_iter()
@@ -654,12 +654,12 @@ fn build_consent_preview(
                                 }
                             })
                             .collect();
-                        ConsentRequirementItem::Secret {
+                        Some(ConsentRequirementItem::Secret {
                             target,
                             display_message: env.display.message,
                             display_hint: env.display.hint,
                             fields,
-                        }
+                        })
                     }
                     InteractiveResolutionKind::ConsentRequired {
                         scoped_id,
@@ -668,14 +668,18 @@ fn build_consent_preview(
                         policy_segment_hash,
                         provisioning_policy_hash,
                         summary,
-                    } => ConsentRequirementItem::Consent {
+                    } => Some(ConsentRequirementItem::Consent {
                         scoped_id,
                         version,
                         target_label,
                         policy_segment_hash,
                         provisioning_policy_hash,
                         summary,
-                    },
+                    }),
+                    // #404: the wizard does not yet render a folder picker for
+                    // state-binding requirements. Drop it from this preview;
+                    // wiring the picker into the wizard is a follow-up PR.
+                    InteractiveResolutionKind::StateBindingRequired { .. } => None,
                 })
                 .collect();
 
@@ -1298,6 +1302,265 @@ pub fn start_boot_launch(
             }
         })
         .detach();
+}
+
+/// Launch an installed app **without** the first-run consent wizard.
+///
+/// Installed apps are pre-consented (see `ato launch` / `dangerously_skip_permissions`),
+/// so relaunching one must never re-show review — the historical bug this fixes.
+/// The flow:
+///   1. ensures a backing session by running `ato launch <ipk> -y` (pinned
+///      current revision, install-lifecycle stamped, pre-consented) through the
+///      Desktop's own `ATO_HOME` / runtime-env plumbing, off the UI thread, and
+///      waits until that session's record is visible;
+///   2. opens the app window directly from that session record.
+///
+/// **Fail-closed:** if `ato launch` exits early, errors, or no session appears
+/// before the deadline, this surfaces a boot failure. It never falls back to a
+/// handle-based `ato app session start`, which would lose the pinned revision
+/// and install-lifecycle identity (and could re-enter consent).
+///
+/// The durable open identity is the install profile's `app_url`
+/// (`ato://app/<ipk>`), persisted to Start history by the caller. Until a router
+/// binds that URL to the running session, the window is opened from the
+/// session's ephemeral `local_url` as a documented temporary adapter.
+pub fn start_installed_launch(
+    cx: &mut App,
+    route: GuestRoute,
+    install_profile_key: String,
+    boot_handle: AnyWindowHandle,
+) {
+    let boot_shell_weak = cx
+        .try_global::<PendingBootShell>()
+        .and_then(|g| g.0.clone());
+    let Some(launch_input) = launch_input_for_route(&route) else {
+        show_boot_failure(
+            cx,
+            &boot_shell_weak,
+            "This route cannot be launched as an installed app.",
+        );
+        return;
+    };
+    let handle = launch_input.source_handle().to_string();
+
+    // Abort support: closing the boot window flips the flag so we stop waiting
+    // and tear down the launch instead of opening a window.
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    cx.set_global(PendingBootShell(None));
+    cx.set_global(BootWindowSlot {
+        boot_window: Some(boot_handle),
+        abort_flag: Some(Arc::clone(&abort_flag)),
+    });
+    if let Some(shell) = boot_shell_weak.as_ref().and_then(|weak| weak.upgrade()) {
+        shell.update(cx, |shell, _cx| {
+            shell.push_detail("Launching installed app");
+            shell.push_detail("Starting current revision (pre-consented)");
+        });
+    }
+
+    let async_app = cx.to_async();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+    async_app
+        .foreground_executor()
+        .spawn(async move {
+            let ensure_handle = handle.clone();
+            let ensure_ipk = install_profile_key.clone();
+            let abort_bg = Arc::clone(&abort_flag);
+            // Spawn `ato launch` and wait for its session record off the UI thread.
+            let result = be
+                .spawn(
+                    async move { ensure_installed_session(&ensure_ipk, &ensure_handle, &abort_bg) },
+                )
+                .await;
+            let aborted = abort_flag.load(Ordering::Acquire);
+            let shell_for_result = boot_shell_weak.clone();
+            let route_for_open = route.clone();
+            aa.update(move |cx: &mut App| {
+                if aborted {
+                    if let Ok(session) = &result {
+                        stop_session_async(session.session_id.clone());
+                    }
+                    close_boot_window_handle(cx, boot_handle, None);
+                    return;
+                }
+                match result {
+                    Ok(session) => {
+                        let session_id = session.session_id.clone();
+                        match crate::window::orchestrator::open_ready_capsule_window(
+                            cx,
+                            route_for_open,
+                            session,
+                            Vec::new(),
+                        ) {
+                            Ok(app_handle) => {
+                                let app_window_id = app_handle.window_id().as_u64();
+                                let _ =
+                                    app_handle.update(cx, |_, window, _| window.activate_window());
+                                close_boot_window_handle(cx, boot_handle, Some(app_window_id));
+                                tracing::info!(
+                                    %session_id,
+                                    app_window_id,
+                                    "installed launch: app window opened (no consent wizard)"
+                                );
+                            }
+                            Err(err) => {
+                                stop_session_async(session_id);
+                                show_boot_failure(
+                                    cx,
+                                    &shell_for_result,
+                                    &format!("App window creation failed: {err}"),
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        // Fail closed — never fall back to handle-based session
+                        // start for an installed app.
+                        show_boot_failure(
+                            cx,
+                            &shell_for_result,
+                            &format!("Couldn't launch installed app: {err:#}"),
+                        );
+                    }
+                }
+            });
+        })
+        .detach();
+}
+
+/// Log a diagnostic when a reused installed session's handle differs from the
+/// Start-entry handle. The `install_profile_key` is the canonical identity
+/// (#261), so a handle drift is expected and harmless — surface it rather than
+/// failing the launch.
+fn log_installed_handle_mismatch(
+    session: &crate::orchestrator::CapsuleLaunchSession,
+    start_handle: &str,
+    install_profile_key: &str,
+) {
+    if session.handle != start_handle && session.normalized_handle != start_handle {
+        tracing::info!(
+            start_handle = %start_handle,
+            session_handle = %session.handle,
+            install_profile_key,
+            "installed launch session handle differed from Start entry handle; using install_profile_key identity"
+        );
+    }
+}
+
+/// Ensure a backing session exists for an installed app, keyed by
+/// `install_profile_key` — the durable installed identity (#261), not the
+/// capsule handle. `handle` is the Start-entry handle, retained only to log a
+/// diagnostic when it differs from the session's handle.
+///
+/// If a compatible live session already exists it is reused immediately, with
+/// **no** new `ato launch` child spawned — this matters when an app is already
+/// running but the Start-entry handle has drifted from the session's handle.
+/// Otherwise it spawns `ato launch <ipk> -y` (which blocks for the session's
+/// lifetime) and polls until the matching session record appears.
+///
+/// Returns the session on success. Returns `Err` if `ato launch` exits before a
+/// session appears, if the wait times out, or if the launch is aborted — the
+/// caller treats every `Err` as a fail-closed boot failure rather than falling
+/// back to a handle launch. On any non-success path the (possibly still
+/// running) launch process is killed so it does not leak.
+fn ensure_installed_session(
+    install_profile_key: &str,
+    handle: &str,
+    abort: &AtomicBool,
+) -> Result<crate::orchestrator::CapsuleLaunchSession> {
+    // 1. Reuse an already-live installed session before spawning anything. This
+    //    avoids a redundant `ato launch` child when the app is already running
+    //    (e.g. live session + drifted Start-entry handle). A read error here is
+    //    non-fatal: fall through and let the spawn path establish the session.
+    match crate::orchestrator::try_reuse_live_session_for_install_profile_key(install_profile_key) {
+        Ok(Some(session)) => {
+            log_installed_handle_mismatch(&session, handle, install_profile_key);
+            return Ok(session);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::debug!(error = %err, install_profile_key, "installed launch: pre-spawn session lookup errored; spawning ato launch")
+        }
+    }
+
+    // 2. No live session — spawn `ato launch`. Uses the Desktop helper plumbing
+    //    (ATO_HOME + runtime opt-out env), so the launch targets the same
+    //    store/runtime the Desktop is using.
+    let mut launched = crate::orchestrator::spawn_installed_launch(install_profile_key)
+        .map_err(|e| anyhow::anyhow!("start `ato launch` for installed app: {e:#}"))?;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let outcome = loop {
+        if abort.load(Ordering::Acquire) {
+            break Err(anyhow::anyhow!("launch aborted"));
+        }
+        // #261: discover the backing session by its install_profile_key, not by
+        // capsule handle. The handle is display/legacy metadata only — matching
+        // on it could miss the session `ato launch <ipk>` just created if its
+        // canonical handle differs from the Start entry handle.
+        match crate::orchestrator::try_reuse_live_session_for_install_profile_key(
+            install_profile_key,
+        ) {
+            // Success: the detached session that `ato launch` wrote serves the
+            // app. The launch process itself may have already exited (it now
+            // detaches once the session record is on disk, #565).
+            Ok(Some(session)) => {
+                log_installed_handle_mismatch(&session, handle, install_profile_key);
+                return Ok(session);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::debug!(error = %err, install_profile_key, "installed launch: session poll error")
+            }
+        }
+        match launched.child.try_wait() {
+            Ok(Some(status)) => {
+                // `ato launch` now starts the installed app as a *detached*
+                // session and exits 0 once the session record is written (#565),
+                // so a clean exit is the normal success handoff rather than an
+                // early failure. The record is already on disk; re-poll briefly
+                // before concluding failure, covering the instant between the
+                // child exiting and the record's healthcheck settling. A
+                // non-zero exit is a real failure — surface it immediately.
+                if status.success() {
+                    let grace = std::time::Instant::now() + Duration::from_secs(5);
+                    while std::time::Instant::now() < grace && !abort.load(Ordering::Acquire) {
+                        if let Ok(Some(session)) =
+                            crate::orchestrator::try_reuse_live_session_for_install_profile_key(
+                                install_profile_key,
+                            )
+                        {
+                            log_installed_handle_mismatch(&session, handle, install_profile_key);
+                            return Ok(session);
+                        }
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
+                }
+                let tail = crate::orchestrator::read_installed_launch_log_tail(&launched.log_path);
+                let detail = if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{tail}")
+                };
+                break Err(anyhow::anyhow!(
+                    "`ato launch` exited ({status}) without establishing a discoverable session.{detail}"
+                ));
+            }
+            Ok(None) => {}
+            Err(err) => break Err(anyhow::anyhow!("failed to poll `ato launch`: {err}")),
+        }
+        if std::time::Instant::now() >= deadline {
+            break Err(anyhow::anyhow!(
+                "timed out waiting for the installed app session to start"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    // Failure/abort: don't leave a stuck launch process behind.
+    let _ = launched.child.kill();
+    outcome
 }
 
 fn launch_input_for_route(route: &GuestRoute) -> Option<DesktopLaunchInput> {

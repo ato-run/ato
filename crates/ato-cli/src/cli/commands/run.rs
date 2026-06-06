@@ -71,7 +71,7 @@ type RunPipelineState = run_phase::RunPipelineState;
 /// Note: `capsule_instance_key` is NOT stored here. The session writer derives
 /// it from `(install_profile_key + install_revision_id + session execution_id)`
 /// at record-write time so the CIK reflects the real receipt execution identity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstallLifecycleContext {
     pub installed_app_id: String,
     pub install_profile_id: String,
@@ -114,8 +114,15 @@ pub struct RunArgs {
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
     pub plan_only: bool,
-    #[allow(dead_code)]
+    /// #500 — opt-in strict fail-closed realization profile.
+    pub strict_realization: bool,
     pub install_lifecycle_context: Option<InstallLifecycleContext>,
+    /// Launch-condition inputs parsed from a `capsule://…?<query>` launch URL
+    /// (`ato launch capsule://…`). Overlaid onto the in-memory installed-state
+    /// claims before the relaunch preflight resolves them — these are *inputs*
+    /// (which grant/binding to try), never proof; the resolver still checks the
+    /// DB registry before admission. Empty for `ato run` and `ato launch <ipk>`.
+    pub capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
     pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
 
@@ -526,7 +533,10 @@ fn build_consumer_run_request(
         cache_strategy: args.cache_strategy,
         reporter: args.reporter.clone(),
         preview_mode: args.preview_mode,
+        strict_realization: args.strict_realization,
         pinned_revision_output_dir: args.pinned_revision_output_dir.clone(),
+        install_lifecycle_context: args.install_lifecycle_context.clone(),
+        capsule_launch_inputs: args.capsule_launch_inputs.clone(),
     }
 }
 
@@ -1979,6 +1989,7 @@ run = "node server.js""#,
             validation_mode: capsule_core::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
+            install_profile_key: None,
         };
         for preview_mode in [false, true] {
             let launch_ctx = RuntimeLaunchContext::empty()
@@ -2077,7 +2088,9 @@ run = "node server.js""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            strict_realization: false,
             install_lifecycle_context: None,
+            capsule_launch_inputs: vec![],
             pinned_revision_output_dir: None,
         };
 
@@ -2185,7 +2198,9 @@ run = "main.py""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            strict_realization: false,
             install_lifecycle_context: None,
+            capsule_launch_inputs: vec![],
             pinned_revision_output_dir: None,
         };
 
@@ -2290,7 +2305,9 @@ run = "main.py""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            strict_realization: false,
             install_lifecycle_context: None,
+            capsule_launch_inputs: vec![],
             pinned_revision_output_dir: None,
         };
 
@@ -2383,7 +2400,9 @@ run = "node index.js"
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: true,
+            strict_realization: false,
             install_lifecycle_context: None,
+            capsule_launch_inputs: vec![],
             pinned_revision_output_dir: None,
         };
 

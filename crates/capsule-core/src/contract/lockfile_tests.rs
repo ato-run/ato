@@ -506,6 +506,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
         ToolArtifact {
             url: "https://example.com/uv.tar.gz".to_string(),
             sha256: Some("deadbeef".to_string()),
+            binary_sha256: None,
             version: Some("0.4.19".to_string()),
         },
     )]);
@@ -585,6 +586,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 ToolArtifact {
                     url: format!("https://example.com/{}/uv.tar.gz", platform.target_triple),
                     sha256: Some("deadbeef".to_string()),
+                    binary_sha256: None,
                     version: Some("0.4.19".to_string()),
                 },
             )
@@ -683,6 +685,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 ToolArtifact {
                     url: format!("https://example.com/{}/uv.tar.gz", platform.target_triple),
                     sha256: Some("deadbeef".to_string()),
+                    binary_sha256: None,
                     version: Some("0.4.19".to_string()),
                 },
             )
@@ -787,6 +790,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
                 ToolArtifact {
                     url: uv_artifact_url(platform.target_triple).unwrap(),
                     sha256: Some("deadbeef".to_string()),
+                    binary_sha256: None,
                     version: Some(UV_VERSION.to_string()),
                 },
             )
@@ -1581,4 +1585,162 @@ fn lockfile_accepts_legacy_lockfile_without_tool_capsules() {
     }"#;
     let parsed: CapsuleLock = serde_json::from_str(legacy).expect("parse legacy lockfile");
     assert!(parsed.tool_capsules.is_empty());
+}
+
+// ── ToolArtifact.binary_sha256 (#469) ────────────────────────────────────────
+
+#[test]
+fn tool_artifact_parses_legacy_without_binary_sha256() {
+    // Lockfile JSON written before the binary_sha256 field existed must still
+    // deserialize, with binary_sha256 defaulting to None.
+    let legacy = r#"{
+        "url": "https://example.com/uv.tar.gz",
+        "sha256": "deadbeef",
+        "version": "0.4.19"
+    }"#;
+    let parsed: ToolArtifact = serde_json::from_str(legacy).expect("parse legacy ToolArtifact");
+    assert_eq!(parsed.sha256.as_deref(), Some("deadbeef"));
+    assert_eq!(parsed.binary_sha256, None);
+}
+
+#[test]
+fn tool_artifact_omits_binary_sha256_when_none() {
+    // None must be omitted entirely, never serialized as an empty string.
+    let artifact = ToolArtifact {
+        url: "https://example.com/uv.tar.gz".to_string(),
+        sha256: Some("archivehash".to_string()),
+        binary_sha256: None,
+        version: Some("0.4.19".to_string()),
+    };
+    let json = serde_json::to_string(&artifact).expect("serialize");
+    assert!(
+        !json.contains("binary_sha256"),
+        "binary_sha256 must be omitted when None, got: {json}"
+    );
+}
+
+#[test]
+fn tool_artifact_serializes_and_roundtrips_binary_sha256() {
+    // archive hash and resolved binary hash are distinct, independent fields.
+    let artifact = ToolArtifact {
+        url: "https://example.com/uv.tar.gz".to_string(),
+        sha256: Some("archivehash".to_string()),
+        binary_sha256: Some("resolvedbinaryhash".to_string()),
+        version: Some("0.4.19".to_string()),
+    };
+    let json = serde_json::to_string(&artifact).expect("serialize");
+    assert!(json.contains("binary_sha256"), "got: {json}");
+
+    let parsed: ToolArtifact = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.sha256.as_deref(), Some("archivehash"));
+    assert_eq!(parsed.binary_sha256.as_deref(), Some("resolvedbinaryhash"));
+    assert_eq!(parsed.version.as_deref(), Some("0.4.19"));
+    // The two hashes must not be conflated.
+    assert_ne!(parsed.sha256, parsed.binary_sha256);
+}
+
+#[test]
+fn tool_artifact_roundtrips_through_full_lockfile() {
+    let lockfile = CapsuleLock {
+        version: "1".to_string(),
+        meta: LockMeta {
+            created_at: "2026-03-08T00:00:00Z".to_string(),
+            manifest_hash: "blake3:deadbeef".to_string(),
+        },
+        allowlist: None,
+        capsule_dependencies: Vec::new(),
+        injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
+        tools: Some(ToolSection {
+            uv: Some(ToolTargets {
+                targets: HashMap::from([(
+                    "aarch64-apple-darwin".to_string(),
+                    ToolArtifact {
+                        url: "https://example.com/uv.tar.gz".to_string(),
+                        sha256: Some("archivehash".to_string()),
+                        binary_sha256: Some("resolvedbinaryhash".to_string()),
+                        version: Some("0.4.19".to_string()),
+                    },
+                )]),
+            }),
+            pnpm: None,
+            yarn: None,
+            bun: None,
+        }),
+        runtimes: None,
+        targets: HashMap::new(),
+    };
+
+    let json = serde_json::to_string(&lockfile).expect("serialize lockfile");
+    let parsed: CapsuleLock = serde_json::from_str(&json).expect("deserialize lockfile");
+    let artifact = parsed
+        .tools
+        .and_then(|tools| tools.uv)
+        .and_then(|uv| uv.targets.get("aarch64-apple-darwin").cloned())
+        .expect("uv artifact present");
+    assert_eq!(artifact.sha256.as_deref(), Some("archivehash"));
+    assert_eq!(
+        artifact.binary_sha256.as_deref(),
+        Some("resolvedbinaryhash")
+    );
+}
+
+// ── Deno is runtime-modeled, not a tool (#470) ───────────────────────────────
+
+#[test]
+fn deno_serializes_under_runtimes_not_tools() {
+    // Deno is a primary runtime: it belongs under `runtimes.deno`, never
+    // `tools.deno`. `ToolSection` has no `deno` field at all. See #470 and
+    // docs/dev-notes/runtime-vs-runtime-tools.md.
+    let lockfile = CapsuleLock {
+        version: "1".to_string(),
+        meta: LockMeta {
+            created_at: "2026-03-08T00:00:00Z".to_string(),
+            manifest_hash: "blake3:deadbeef".to_string(),
+        },
+        allowlist: None,
+        capsule_dependencies: Vec::new(),
+        injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
+        tools: None,
+        runtimes: Some(RuntimeSection {
+            python: None,
+            deno: Some(RuntimeEntry {
+                provider: "official".to_string(),
+                version: "1.46.3".to_string(),
+                targets: HashMap::from([(
+                    "aarch64-apple-darwin".to_string(),
+                    RuntimeArtifact {
+                        url: "https://example.com/deno.zip".to_string(),
+                        sha256: "deadbeef".to_string(),
+                    },
+                )]),
+            }),
+            node: None,
+            java: None,
+            dotnet: None,
+        }),
+        targets: HashMap::new(),
+    };
+
+    let value: serde_json::Value =
+        serde_json::to_value(&lockfile).expect("serialize lockfile to value");
+
+    // Deno appears under `runtimes`, not `tools`.
+    assert!(
+        value.get("runtimes").and_then(|r| r.get("deno")).is_some(),
+        "deno must serialize under runtimes.deno"
+    );
+    assert!(
+        value.get("tools").is_none(),
+        "no tools section expected for a deno-only lockfile"
+    );
+
+    // Round-trips back under runtimes.deno.
+    let parsed: CapsuleLock =
+        serde_json::from_value(value).expect("deserialize lockfile from value");
+    assert!(
+        parsed.runtimes.and_then(|r| r.deno).is_some(),
+        "deno must round-trip under runtimes.deno"
+    );
 }

@@ -114,6 +114,7 @@ pub(super) fn execute_replay_command(
         cache_strategy: CacheStrategyArg::Auto,
         deprecation_warning: None,
         plan_only: false,
+        strict_realization: false,
         oci_compose: false,
         oci_install_sh: false,
         reporter: Arc::new(reporters::CliReporter::new_run(json)),

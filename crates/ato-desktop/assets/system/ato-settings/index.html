@@ -582,6 +582,13 @@
           </div>
           <div id="runtime-status-msg" class="state-msg">Checking runtime tools…</div>
           <div id="runtime-tools-list"></div>
+          <!-- #460 PR3b: pending interrupted-launch banner. Shown when the user
+               started a capsule launch before the host runtime was ready; the
+               Desktop resumes it automatically once setup completes. -->
+          <div id="pending-launch-banner" class="row" style="display:none; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; padding:8px 10px; border:1px solid var(--accent, #8B5CF6); border-radius:8px;">
+            <span id="pending-launch-msg" style="font-size:12px;"></span>
+            <button class="btn" id="pending-launch-cancel-btn" style="font-size:12px; padding:2px 10px;">Cancel</button>
+          </div>
         </div>
 
         <!-- Host runtimes -->
@@ -600,6 +607,18 @@
           <div id="podman-rt-detail" style="font-size:11px; color:var(--soft); margin:2px 0 0 0;"></div>
           <div class="form-row" style="justify-content:flex-end;">
             <button class="btn" id="podman-disable-btn">Disable Podman</button>
+          </div>
+
+          <!-- #460 PR2: Windows substrate (WSL / virtualization / reboot / machine health) -->
+          <div id="substrate-section" class="row" style="display:none; flex-direction:column; align-items:stretch; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid var(--border, #2a2a2a);">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+              <span id="substrate-status" class="diag-value"><span class="diag-dot gray"></span>—</span>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <button class="btn" id="substrate-resume-btn" style="display:none;">Already restarted? Continue</button>
+                <button class="btn btn-primary" id="substrate-action-btn" style="display:none;"></button>
+              </div>
+            </div>
+            <div id="substrate-detail" style="font-size:11px; color:var(--soft); margin:0;"></div>
           </div>
         </div>
 
@@ -967,6 +986,19 @@ window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
   if (payload && payload.runtimeInstallComplete) { onRuntimeInstallComplete(payload.runtimeInstallComplete); runtimeTouched = true; }
   if (payload && payload.runtimeInstallCancelled !== undefined) { setRuntimeInstalling(false); runtimeTouched = true; }
   if (payload && payload.runtimeSetupLogsOpened) { runtimeTouched = true; }
+  // #460 PR2: resume-after-reboot carries a refreshed status snapshot.
+  if (payload && payload.runtimeSetupResume) {
+    const resumed = payload.runtimeSetupResume.runtimeSetupStatus;
+    if (resumed) renderRuntimeStatus(resumed);
+    runtimeTouched = true;
+  }
+  // #460 PR3b: pending interrupted-launch banner (explicit null clears it).
+  if (payload && 'pendingLaunch' in payload) { renderPendingLaunch(payload.pendingLaunch); runtimeTouched = true; }
+  if (payload && payload.pendingLaunchCancelled) { renderPendingLaunch(null); runtimeTouched = true; }
+  if (payload && payload.launchResumeFailed) {
+    showRuntimeError((payload.error && payload.error.message) || 'Could not resume the pending launch.');
+    runtimeTouched = true;
+  }
 
   if (payload && !payload.ok && payload.error) {
     const msg = payload.error.message || String(payload.error);
@@ -1251,6 +1283,80 @@ function renderRuntimeStatus(status) {
   }
   // Drive the actionable Host-runtimes Podman row from the same status.
   renderPodmanRow((status.tools || []).find(t => t.kind === 'podman'));
+  // #460 PR2: Windows substrate (WSL / virtualization / reboot / machine health).
+  renderWindowsSubstrate(status.windows_substrate, (status.tools || []).find(t => t.kind === 'podman'));
+}
+
+// #460 PR3b: show/hide the pending interrupted-launch banner. `pending` is the
+// `{ label, launchInput, kind }` object, or null/undefined to clear it.
+function renderPendingLaunch(pending) {
+  const banner = document.getElementById('pending-launch-banner');
+  const msg = document.getElementById('pending-launch-msg');
+  if (!banner || !msg) return;
+  if (!pending) { banner.style.display = 'none'; msg.textContent = ''; return; }
+  const label = pending.label || pending.launchInput || 'your app';
+  msg.textContent = 'After setup, Ato will continue opening ' + label + '.';
+  banner.style.display = 'flex';
+}
+
+// #460 PR2: render the Windows substrate state + Desktop-driven CTA. The button
+// dispatches the new IPC commands; no PowerShell/WSL shell is ever shown.
+let _lastSubstrateAction = null;
+function renderWindowsSubstrate(substrate, podmanTool) {
+  const section = document.getElementById('substrate-section');
+  if (!section) return;
+  // Only meaningful on Windows, where setup-status carries windows_substrate.
+  if (!substrate) { section.style.display = 'none'; return; }
+  section.style.display = 'flex';
+
+  const statusEl = document.getElementById('substrate-status');
+  const detailEl = document.getElementById('substrate-detail');
+  const btn = document.getElementById('substrate-action-btn');
+  const action = substrate.action || { kind: 'none' };
+  const healthError = !!podmanTool && podmanTool.action === 'repair_host_runtime';
+  const ready = substrate.wsl === 'ready' && !healthError;
+
+  if (statusEl) {
+    const dot = ready ? 'green' : 'yellow';
+    const label = ready ? 'WSL2 ready'
+      : substrate.wsl === 'missing' ? 'WSL not installed'
+      : substrate.wsl === 'wsl2_unavailable' ? 'WSL2 unavailable'
+      : substrate.wsl === 'reboot_required' ? 'Restart required'
+      : healthError ? 'Podman machine needs repair'
+      : 'Windows substrate';
+    statusEl.innerHTML = '<span class="diag-dot ' + dot + '"></span>' + label;
+  }
+  // For a Podman machine health error the substrate message ("WSL2 is
+  // available") is misleading — describe the machine fault instead.
+  if (detailEl) {
+    detailEl.textContent = healthError
+      ? ((podmanTool && podmanTool.message) || 'The Ato Podman machine is running but not responding.')
+      : ready ? (substrate.message || 'WSL2 is available.')
+      : (action.description || substrate.message || '');
+  }
+
+  // Decide the primary CTA. `reboot_required` persists the resume marker via
+  // prepare-windows-substrate (NOT resume, which is read-only); the separate
+  // resume button below is the explicit post-restart continuation.
+  let label = null, command = null;
+  if (action.kind === 'reboot_required') {
+    label = 'Save and restart';
+    command = { kind: 'prepare_windows_runtime_substrate', action: 'reboot_required', source_surface: 'settings' };
+  } else if (healthError || action.kind === 'repair_podman_machine') {
+    label = 'Repair Ato Podman machine'; command = { kind: 'repair_host_runtime' };
+  } else if (!ready && action.kind && action.kind !== 'none' && action.can_run_from_desktop) {
+    label = action.label || 'Fix';
+    command = { kind: 'prepare_windows_runtime_substrate', action: action.kind, source_surface: 'settings' };
+  }
+  _lastSubstrateAction = command;
+  if (btn) {
+    if (command) { btn.style.display = ''; btn.textContent = label; }
+    else { btn.style.display = 'none'; }
+  }
+  // The explicit "Already restarted? Continue" (read-only resume) shows only for
+  // the reboot-required state.
+  const resumeBtn = document.getElementById('substrate-resume-btn');
+  if (resumeBtn) resumeBtn.style.display = action.kind === 'reboot_required' ? '' : 'none';
 }
 
 // ── Host runtimes: Podman prepare row ───────────────────────────────────────
@@ -1412,6 +1518,32 @@ document.getElementById('runtime-install-btn').addEventListener('click', () => {
 
 document.getElementById('runtime-logs-btn').addEventListener('click', () => {
   BRIDGE({ kind: 'open_runtime_setup_logs', request_id: nextReqId() });
+});
+
+// #460 PR3b: dismiss a pending interrupted-launch. Clears the launch-intent
+// marker only — Runtime Setup keeps running.
+document.getElementById('pending-launch-cancel-btn').addEventListener('click', () => {
+  renderPendingLaunch(null);
+  BRIDGE({ kind: 'cancel_pending_launch', request_id: nextReqId() });
+});
+
+// #460 PR2: Windows substrate remediation CTA (enable WSL / repair machine /
+// continue-after-restart). Mutating actions reuse the runtime-install busy state;
+// resume is read-only.
+document.getElementById('substrate-action-btn').addEventListener('click', () => {
+  const cmd = _lastSubstrateAction;
+  if (!cmd) return;
+  // Every primary substrate CTA mutates host state (prepare/repair) → reuse the
+  // runtime-install busy state.
+  if (_runtimeInstalling) return;
+  setRuntimeInstalling(true, 'prepare');
+  BRIDGE(Object.assign({ request_id: nextReqId() }, cmd));
+});
+
+// Explicit post-restart continuation: read-only resume (does not write a marker
+// or mutate host state), so it does not enter the install busy state.
+document.getElementById('substrate-resume-btn').addEventListener('click', () => {
+  BRIDGE({ kind: 'resume_runtime_setup_after_reboot', request_id: nextReqId() });
 });
 
 // Explicit Podman preparation / enablement (the only path that may set

@@ -12,6 +12,7 @@ use super::key::KeyCommands;
 use super::package::PackageCommands;
 use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
+use super::receipts::ReceiptsCommands;
 use super::registry::RegistryCommands;
 use super::shared::{
     CacheStrategyArg, CompatibilityFallbackBackend, EnforcementMode, GitMode, ProviderToolchain,
@@ -217,6 +218,13 @@ pub(crate) enum Commands {
         #[arg(long = "plan-only", default_value_t = false)]
         plan_only: bool,
 
+        /// Fail-closed realization profile (#500): block the launch before
+        /// execution if any required launch input cannot be verified, instead
+        /// of launching with a conservative warning. Opt-in; the default
+        /// profile is unchanged.
+        #[arg(long = "strict-realization", default_value_t = false)]
+        strict_realization: bool,
+
         /// Import from docker-compose.yml and run as an Ato OCI service graph
         /// through PodmanProvider (experimental, requires Podman)
         #[arg(long = "oci-compose", default_value_t = false, hide = true)]
@@ -381,7 +389,7 @@ pub(crate) enum Commands {
     #[command(hide = true, about = "Register a durable local app from the store")]
     Install {
         /// Capsule scoped ID (publisher/slug)
-        #[arg(required_unless_present = "from_gh_repo")]
+        #[arg(required_unless_present_any = ["from_gh_repo", "from_local"])]
         slug: Option<String>,
 
         /// Build and install directly from a public GitHub repository
@@ -391,6 +399,16 @@ pub(crate) enum Commands {
             conflicts_with = "slug"
         )]
         from_gh_repo: Option<String>,
+
+        /// Build and install directly from a local capsule directory (hermetic;
+        /// no network/registry/GitHub). Expects `<DIR>/capsule.toml`. Intended
+        /// for deterministic Desktop/AODD relaunch smoke tests.
+        #[arg(
+            long = "from-local",
+            value_name = "DIR",
+            conflicts_with_all = ["slug", "from_gh_repo"]
+        )]
+        from_local: Option<PathBuf>,
 
         /// Registry URL (default: api.ato.run)
         #[arg(long)]
@@ -466,10 +484,12 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
-        about = "Launch an installed app by its stable install profile key"
+        about = "Launch an installed app by its install profile key or capsule:// URL"
     )]
     Launch {
-        /// Install profile key (`ipk_<32hex>`) from `ato install` output
+        /// Install profile key (`ipk_<32hex>`) from `ato install`, or a
+        /// `capsule://<location>?<query>` URL to relaunch an installed app with
+        /// launch-condition query inputs.
         install_profile_key: String,
 
         /// Skip interactive prompts and assume yes
@@ -487,6 +507,12 @@ pub(crate) enum Commands {
         /// Override the nacelle runtime binary path
         #[arg(long, hide = true)]
         nacelle: Option<PathBuf>,
+
+        /// Internal (ato-desktop): start the installed app as a detached session
+        /// that writes a discoverable session record, instead of running
+        /// foreground. Not for interactive use. See #565.
+        #[arg(long = "detached-session", hide = true, default_value_t = false)]
+        detached_session: bool,
     },
 
     #[command(about = "List install revisions for an installed app profile")]
@@ -709,6 +735,12 @@ pub(crate) enum Commands {
         /// command will return a `not-implemented` error when this flag is passed.
         #[arg(long, hide = true)]
         execute: bool,
+    },
+
+    #[command(about = "Inspect and compare stored execution receipts")]
+    Receipts {
+        #[command(subcommand)]
+        command: ReceiptsCommands,
     },
 
     #[command(hide = true, about = "Search the store for packages")]

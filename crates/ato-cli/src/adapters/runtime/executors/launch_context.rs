@@ -5,6 +5,8 @@ use std::process::Command;
 use anyhow::Result;
 use capsule_core::execution_identity::EnvOrigin;
 
+use crate::adapters::runtime::secret_injection::RuntimeSecretEnv;
+use crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount;
 use crate::ipc::inject::IpcContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +14,23 @@ pub struct InjectedMount {
     pub source: PathBuf,
     pub target: String,
     pub readonly: bool,
+}
+
+/// Per-endpoint preferred-port request carried from a `capsule://` port query
+/// input (#548).
+///
+/// - `Concrete(n)` — `port[.<endpoint>]=<n>`: this exact port is the preferred
+///   port for the endpoint; admission records a claim with it.
+/// - `Auto` — `port[.<endpoint>]=auto`: an *explicit* request for no concrete
+///   preferred port. This is distinct from "no entry": it actively **suppresses
+///   the env `PORT` fallback** for that endpoint so the runtime uses its OS
+///   auto-assign path and creates no concrete preferred-port claim from the
+///   query. Concrete query ports still win; an endpoint with no entry at all
+///   keeps the existing env-`PORT` behavior unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortPreference {
+    Concrete(u16),
+    Auto,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +71,59 @@ pub struct RuntimeLaunchContext {
     /// `http://host.containers.internal:<port>` (the loopback `127.0.0.1` used
     /// by source-native env injection cannot be reached from inside containers).
     egress_proxy_port: Option<u16>,
+    /// Install profile key when this launch is an installed-app launch
+    /// (`ato app run`/desktop relaunch), `None` for ephemeral `ato run`.
+    ///
+    /// Threaded explicitly (rather than read from the thread-local install
+    /// lifecycle context) because the launch path crosses async executor
+    /// boundaries where the thread-local does not reliably propagate. Used by
+    /// `web_services` to scope per-install port admission claims so two
+    /// installed apps that both prefer the same port get deterministically
+    /// remapped instead of colliding.
+    install_profile_key: Option<String>,
+    /// SecretStore-backed launch-condition grants resolved for this installed
+    /// relaunch (#508), injected into the spawned process env.
+    ///
+    /// Deliberately a **separate** channel from `injected_env`: secret values must
+    /// reach the process but must NOT be observed by the execution receipt /
+    /// session record, which read `merged_env*`. This field is therefore excluded
+    /// from `merged_env`, `merged_env_with_origins`, and `env_permission_keys`, and
+    /// is applied only at the final spawn-env construction points
+    /// (`apply_allowlisted_env`, the nacelle payload, and the web-service env map).
+    /// `RuntimeLaunchContext` does not derive `Serialize`, and `RuntimeSecretEnv`'s
+    /// `Debug` redacts the value, so values never reach logs or serialized state.
+    secret_env: Vec<RuntimeSecretEnv>,
+    /// State-binding mounts resolved for this installed relaunch (#508): an
+    /// admitted `state.K=binding:<id>` whose bound host directory must reach the
+    /// launched process/container at its guest mount target.
+    ///
+    /// Deliberately a **separate** channel from `injected_mounts`: the bound host
+    /// path must reach the runtime but must NOT be observed by the execution
+    /// receipt / session record. `observe_filesystem_v2` computes a
+    /// `canonical_mount_identity` over every `injected_mounts()` *source* path, so
+    /// routing a state target through `injected_mounts` would leak the raw host
+    /// path into the receipt's filesystem identity. This field is excluded from
+    /// `injected_mounts()`, `merged_env*`, and `env_permission_keys`, and is
+    /// applied only at the final spawn / container-creation points (source JSON
+    /// `mounts`, OCI `OciMountSpec`, web-service mount projection).
+    /// `RuntimeLaunchContext` does not derive `Serialize`, and
+    /// `RuntimeStateBindingMount`'s `Debug` redacts the source path, so the path
+    /// never reaches logs or serialized state.
+    state_mounts: Vec<RuntimeStateBindingMount>,
+    /// Preferred-port request per logical endpoint from a `capsule://` port query
+    /// input (`port=<n>` / `port.<endpoint>=<n>` / `port[.<endpoint>]=auto`),
+    /// keyed by endpoint name (`main` for the bare `port`). Used by the web-service
+    /// port admission to pick the preferred port for that endpoint before
+    /// consulting the claim ledger (#548).
+    ///
+    /// - `Concrete(n)` → that port is preferred.
+    /// - `Auto` → an *explicit* "no concrete preferred port" that suppresses the
+    ///   env-`PORT` fallback for that endpoint (OS auto-assign, no concrete claim).
+    /// - no entry → unchanged behavior: env-`PORT` fallback applies.
+    ///
+    /// Empty for `ato run` (no install lifecycle), so transient launches are
+    /// untouched.
+    port_preferences: HashMap<String, PortPreference>,
 }
 
 impl RuntimeLaunchContext {
@@ -72,6 +144,10 @@ impl RuntimeLaunchContext {
                 workspace_root: None,
                 dep_endpoints: Vec::new(),
                 egress_proxy_port: None,
+                install_profile_key: None,
+                secret_env: Vec::new(),
+                state_mounts: Vec::new(),
+                port_preferences: HashMap::new(),
             }
         } else {
             Self::empty()
@@ -171,6 +247,61 @@ impl RuntimeLaunchContext {
         self.egress_proxy_port
     }
 
+    /// Mark this launch as an installed-app launch identified by
+    /// `install_profile_key`. `None` keeps it ephemeral (`ato run`).
+    pub fn with_install_profile_key(mut self, key: Option<String>) -> Self {
+        self.install_profile_key = key;
+        self
+    }
+
+    pub fn install_profile_key(&self) -> Option<&str> {
+        self.install_profile_key.as_deref()
+    }
+
+    /// Attach SecretStore-backed launch-condition grants resolved for this
+    /// installed relaunch (#508). These are injected into the spawned process env
+    /// but excluded from receipt/session env observation — see [`Self::secret_env`].
+    pub fn with_secret_env(mut self, secret_env: Vec<RuntimeSecretEnv>) -> Self {
+        self.secret_env = secret_env;
+        self
+    }
+
+    pub fn secret_env(&self) -> &[RuntimeSecretEnv] {
+        &self.secret_env
+    }
+
+    /// Attach state-binding mounts resolved for this installed relaunch (#508).
+    /// These reach the spawned process/container at their guest mount target but
+    /// are excluded from receipt/session mount observation — see
+    /// [`Self::state_mounts`].
+    pub fn with_state_mounts(mut self, state_mounts: Vec<RuntimeStateBindingMount>) -> Self {
+        self.state_mounts = state_mounts;
+        self
+    }
+
+    pub fn state_mounts(&self) -> &[RuntimeStateBindingMount] {
+        &self.state_mounts
+    }
+
+    /// Attach per-endpoint preferred-port requests from `capsule://` port query
+    /// inputs (#548). Keyed by logical endpoint name (`main` for bare `port`).
+    /// `port[.<endpoint>]=auto` is carried as [`PortPreference::Auto`] so it can
+    /// explicitly suppress the env-`PORT` fallback for that endpoint. Empty for
+    /// `ato run`, leaving transient launches untouched.
+    pub fn with_port_preferences(mut self, prefs: HashMap<String, PortPreference>) -> Self {
+        self.port_preferences = prefs;
+        self
+    }
+
+    /// The preferred-port request a `capsule://` port query made for `endpoint`,
+    /// if any. `None` when no port input named this endpoint (so the env-`PORT`
+    /// fallback applies); `Some(PortPreference::Auto)` when the query explicitly
+    /// asked for auto (suppressing that fallback); `Some(PortPreference::Concrete)`
+    /// for a concrete requested port.
+    pub fn port_preference(&self, endpoint: &str) -> Option<PortPreference> {
+        self.port_preferences.get(endpoint).copied()
+    }
+
     pub fn ipc(&self) -> Option<&IpcContext> {
         self.ipc.as_ref()
     }
@@ -244,6 +375,12 @@ impl RuntimeLaunchContext {
             cmd.env(key, value);
         }
 
+        // Secret grants last so they win for their exact env key. Applied here at
+        // the spawn boundary only; never merged into the receipt-observed env.
+        for secret in &self.secret_env {
+            cmd.env(&secret.name, secret.value.expose());
+        }
+
         Ok(())
     }
 }
@@ -301,6 +438,102 @@ mod tests {
 
         assert_eq!(value, "127.0.0.1");
         assert_eq!(ctx.env_permission_keys(), vec!["ATO_SERVICE_DB_HOST"]);
+    }
+
+    #[test]
+    fn secret_env_reaches_command_but_is_excluded_from_receipt_env() {
+        use crate::adapters::runtime::secret_injection::{RuntimeSecretEnv, SecretValue};
+        let ctx = RuntimeLaunchContext::empty().with_secret_env(vec![RuntimeSecretEnv {
+            name: "OPENAI_API_KEY".to_string(),
+            value: SecretValue::new("sk-secret-value".to_string()),
+        }]);
+
+        // Excluded from every env surface the receipt / session observer reads.
+        assert!(
+            ctx.merged_env().is_empty(),
+            "secret must not be in merged_env"
+        );
+        assert!(
+            ctx.merged_env_with_origins().is_empty(),
+            "secret must not be in the receipt-observed env"
+        );
+        assert!(ctx.env_permission_keys().is_empty());
+        assert!(ctx.injected_env().is_empty());
+
+        // But applied to the spawned command at the boundary.
+        let mut cmd = std::process::Command::new("echo");
+        ctx.apply_allowlisted_env(&mut cmd).unwrap();
+        let value = cmd.get_envs().find_map(|(k, v)| {
+            if k == "OPENAI_API_KEY" {
+                v.map(|v| v.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(value.as_deref(), Some("sk-secret-value"));
+    }
+
+    #[test]
+    fn secret_env_value_is_redacted_in_context_debug() {
+        use crate::adapters::runtime::secret_injection::{RuntimeSecretEnv, SecretValue};
+        let ctx = RuntimeLaunchContext::empty().with_secret_env(vec![RuntimeSecretEnv {
+            name: "OPENAI_API_KEY".to_string(),
+            value: SecretValue::new("sk-secret-xyz".to_string()),
+        }]);
+        let rendered = format!("{ctx:?}");
+        assert!(
+            !rendered.contains("sk-secret-xyz"),
+            "debug leaked the value"
+        );
+        assert!(
+            rendered.contains("OPENAI_API_KEY"),
+            "name should be visible"
+        );
+    }
+
+    #[test]
+    fn state_mounts_are_excluded_from_injected_mounts_and_receipt_env() {
+        use crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount;
+        let ctx = RuntimeLaunchContext::empty().with_state_mounts(vec![RuntimeStateBindingMount {
+            state_key: "data".to_string(),
+            binding_id: "user-data".to_string(),
+            source: PathBuf::from("/Users/koh/.local/share/app/data"),
+            target: "/app/data".to_string(),
+            readonly: false,
+        }]);
+
+        // The state mount must NOT appear on the receipt-observed mount channel
+        // (observe_filesystem_v2 reads injected_mounts() and hashes the source).
+        assert!(
+            ctx.injected_mounts().is_empty(),
+            "state mount must not be in injected_mounts (receipt-observed)"
+        );
+        // Nor on any env surface.
+        assert!(ctx.merged_env().is_empty());
+        assert!(ctx.merged_env_with_origins().is_empty());
+        assert!(ctx.env_permission_keys().is_empty());
+        // But it is reachable on its own channel for the spawn boundary.
+        assert_eq!(ctx.state_mounts().len(), 1);
+        assert_eq!(ctx.state_mounts()[0].target, "/app/data");
+    }
+
+    #[test]
+    fn state_mount_source_is_redacted_in_context_debug() {
+        use crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount;
+        let raw = "/Users/koh/.local/share/app/secret-data";
+        let ctx = RuntimeLaunchContext::empty().with_state_mounts(vec![RuntimeStateBindingMount {
+            state_key: "data".to_string(),
+            binding_id: "user-data".to_string(),
+            source: PathBuf::from(raw),
+            target: "/app/data".to_string(),
+            readonly: false,
+        }]);
+        let rendered = format!("{ctx:?}");
+        assert!(!rendered.contains(raw), "debug leaked the host path");
+        assert!(
+            rendered.contains("/app/data"),
+            "guest target should be visible"
+        );
     }
 
     #[test]

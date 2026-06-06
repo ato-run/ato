@@ -67,6 +67,40 @@ pub enum RuntimeSetupCommand {
         #[serde(default)]
         request_id: Option<String>,
     },
+    /// Execute a Windows substrate remediation the Desktop offered (#460 PR2):
+    /// enable WSL / WSL2, write a reboot-resume marker, or open virtualization
+    /// guidance. Host-state-mutating, so gated by
+    /// [`Capability::RuntimeSetupPrepare`]; streams progress like prepare.
+    PrepareWindowsRuntimeSubstrate {
+        #[serde(default)]
+        request_id: Option<String>,
+        /// One of the `WindowsSubstrateActionKind` tokens, e.g. `install_wsl`,
+        /// `enable_wsl2`, `reboot_required`, `open_virtualization_instructions`.
+        action: String,
+        /// Which surface initiated it (`onboarding` | `settings`).
+        #[serde(default)]
+        source_surface: Option<String>,
+    },
+    /// Repair the Ato-managed Podman machine (restart + verify). Host-mutating,
+    /// gated by [`Capability::RuntimeSetupPrepare`]. (#460 PR2)
+    RepairHostRuntime {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
+    /// Resume Runtime Setup after a reboot: re-check the substrate and report the
+    /// next step. Read-only, gated by [`Capability::RuntimeSetupRead`]. (#460 PR2)
+    ResumeRuntimeSetupAfterReboot {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
+    /// Cancel a pending interrupted-launch (#460 PR3b): clears the launch-intent
+    /// marker so Runtime Setup will no longer resume into it. Does not cancel
+    /// Runtime Setup itself. Clears a local advisory marker only, so it is gated
+    /// by [`Capability::RuntimeSetupRead`].
+    CancelPendingLaunch {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
 }
 
 impl RuntimeSetupCommand {
@@ -81,6 +115,17 @@ impl RuntimeSetupCommand {
             RuntimeSetupCommand::PrepareRuntimeTools { .. } => Capability::RuntimeSetupPrepare,
             RuntimeSetupCommand::CancelRuntimeInstall { .. } => Capability::RuntimeSetupInstall,
             RuntimeSetupCommand::OpenRuntimeSetupLogs { .. } => Capability::RuntimeSetupOpenLogs,
+            // Substrate remediation + repair mutate host state → same gate as prepare.
+            RuntimeSetupCommand::PrepareWindowsRuntimeSubstrate { .. } => {
+                Capability::RuntimeSetupPrepare
+            }
+            RuntimeSetupCommand::RepairHostRuntime { .. } => Capability::RuntimeSetupPrepare,
+            // Resume only re-reads status → read capability.
+            RuntimeSetupCommand::ResumeRuntimeSetupAfterReboot { .. } => {
+                Capability::RuntimeSetupRead
+            }
+            // Cancelling a pending launch only clears a local advisory marker.
+            RuntimeSetupCommand::CancelPendingLaunch { .. } => Capability::RuntimeSetupRead,
         }
     }
 
@@ -96,6 +141,10 @@ impl RuntimeSetupCommand {
                 | "prepare_runtime_tools"
                 | "cancel_runtime_install"
                 | "open_runtime_setup_logs"
+                | "prepare_windows_runtime_substrate"
+                | "repair_host_runtime"
+                | "resume_runtime_setup_after_reboot"
+                | "cancel_pending_launch"
         )
     }
 }
@@ -112,8 +161,7 @@ pub(crate) fn helper_lacks_runtime_subcommand(stderr: &str) -> bool {
 
 /// User-facing message shown when the resolved helper is too old to run
 /// Runtime Setup.
-pub(crate) const HELPER_TOO_OLD_MESSAGE: &str =
-    "The bundled Ato helper is too old to run Runtime Setup (missing the \
+pub(crate) const HELPER_TOO_OLD_MESSAGE: &str = "The bundled Ato helper is too old to run Runtime Setup (missing the \
      `internal runtime` command). Reinstall or update Ato so the helper \
      matches this version.";
 
@@ -138,6 +186,74 @@ mod tests {
     }
 
     #[test]
+    fn substrate_kinds_are_recognised() {
+        for kind in [
+            "prepare_windows_runtime_substrate",
+            "repair_host_runtime",
+            "resume_runtime_setup_after_reboot",
+            "cancel_pending_launch",
+        ] {
+            assert!(RuntimeSetupCommand::is_runtime_setup_kind(kind));
+        }
+    }
+
+    #[test]
+    fn cancel_pending_launch_deserializes_and_is_read_gated() {
+        let cmd: RuntimeSetupCommand =
+            serde_json::from_str(r#"{"kind":"cancel_pending_launch"}"#).unwrap();
+        match &cmd {
+            RuntimeSetupCommand::CancelPendingLaunch { request_id } => {
+                assert_eq!(request_id.as_deref(), None)
+            }
+            other => panic!("expected CancelPendingLaunch, got {other:?}"),
+        }
+        // Clearing a local advisory marker is read-gated (available on both
+        // onboarding and settings surfaces).
+        assert_eq!(cmd.required_capability(), Capability::RuntimeSetupRead);
+    }
+
+    #[test]
+    fn substrate_commands_use_expected_capabilities() {
+        let prepare = RuntimeSetupCommand::PrepareWindowsRuntimeSubstrate {
+            request_id: None,
+            action: "install_wsl".into(),
+            source_surface: Some("onboarding".into()),
+        };
+        let repair = RuntimeSetupCommand::RepairHostRuntime { request_id: None };
+        let resume = RuntimeSetupCommand::ResumeRuntimeSetupAfterReboot { request_id: None };
+        // Host-mutating substrate actions are gated like prepare.
+        assert_eq!(
+            prepare.required_capability(),
+            Capability::RuntimeSetupPrepare
+        );
+        assert_eq!(
+            repair.required_capability(),
+            Capability::RuntimeSetupPrepare
+        );
+        // Resume only re-reads status.
+        assert_eq!(resume.required_capability(), Capability::RuntimeSetupRead);
+    }
+
+    #[test]
+    fn prepare_windows_substrate_deserializes() {
+        let cmd: RuntimeSetupCommand = serde_json::from_str(
+            r#"{"kind":"prepare_windows_runtime_substrate","action":"enable_wsl2","source_surface":"settings"}"#,
+        )
+        .unwrap();
+        match cmd {
+            RuntimeSetupCommand::PrepareWindowsRuntimeSubstrate {
+                action,
+                source_surface,
+                ..
+            } => {
+                assert_eq!(action, "enable_wsl2");
+                assert_eq!(source_surface.as_deref(), Some("settings"));
+            }
+            other => panic!("expected PrepareWindowsRuntimeSubstrate, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn install_and_logs_use_distinct_capabilities() {
         let install = RuntimeSetupCommand::InstallRuntimeTools {
             request_id: None,
@@ -149,10 +265,16 @@ mod tests {
         };
         let logs = RuntimeSetupCommand::OpenRuntimeSetupLogs { request_id: None };
         let status = RuntimeSetupCommand::RuntimeSetupStatus { request_id: None };
-        assert_eq!(install.required_capability(), Capability::RuntimeSetupInstall);
+        assert_eq!(
+            install.required_capability(),
+            Capability::RuntimeSetupInstall
+        );
         // Prepare (host-runtime mutation) is gated distinctly from install
         // (managed-toolchain provisioning).
-        assert_eq!(prepare.required_capability(), Capability::RuntimeSetupPrepare);
+        assert_eq!(
+            prepare.required_capability(),
+            Capability::RuntimeSetupPrepare
+        );
         assert_eq!(logs.required_capability(), Capability::RuntimeSetupOpenLogs);
         assert_eq!(status.required_capability(), Capability::RuntimeSetupRead);
     }

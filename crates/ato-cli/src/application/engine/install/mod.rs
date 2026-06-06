@@ -26,10 +26,17 @@ use capsule_core::foundation::install_lifecycle::{
     path_safe_app_id,
 };
 
+use capsule_core::installed_state::{
+    InstalledStateDb, LaunchConditionClaim, LaunchConditionKind, LaunchConditionStatus,
+    StorageAdmission, StorageClaim, app_service_endpoint, launch_condition_extraction_status,
+    launch_condition_from_env_projection, launch_condition_from_port_declaration,
+    launch_condition_from_secret_requirement, launch_condition_from_state_binding,
+    launch_condition_from_storage_claim,
+};
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::resource::cas::LocalCasIndex;
-use capsule_core::types::CapsuleManifest;
 use capsule_core::types::identity::public_key_to_did;
+use capsule_core::types::{CapsuleManifest, StateAttach, StateDurability};
 
 use crate::artifact_hash::{
     compute_blake3_label as compute_blake3, compute_sha256_hex as compute_sha256, equals_hash,
@@ -40,6 +47,7 @@ use crate::runtime::tree as runtime_tree;
 
 mod github_archive;
 mod github_inference;
+mod local_source;
 mod manifest_delta;
 mod manifest_integrity;
 mod persistence;
@@ -48,6 +56,7 @@ pub(crate) mod support;
 
 use github_archive::*;
 use github_inference::*;
+pub use local_source::{LocalInstallOptions, install_local_directory};
 use manifest_delta::*;
 use manifest_integrity::*;
 use persistence::*;
@@ -324,19 +333,23 @@ pub struct InstallExecutionOptions {
 enum InstallSource {
     Registry(String),
     Local(String),
+    /// A hermetic local-directory install (`--from-local`). Carries a stable,
+    /// non-host-leaking cache label (`local-fixture:<publisher>/<slug>`) so no
+    /// remote chunk-sync is attempted and no absolute host path enters caches.
+    LocalFixture(String),
 }
 
 impl InstallSource {
     fn registry_url(&self) -> Option<&str> {
         match self {
             Self::Registry(url) => Some(url),
-            Self::Local(_) => None,
+            Self::Local(_) | Self::LocalFixture(_) => None,
         }
     }
 
     fn cache_label(&self) -> &str {
         match self {
-            Self::Registry(url) | Self::Local(url) => url,
+            Self::Registry(url) | Self::Local(url) | Self::LocalFixture(url) => url,
         }
     }
 }
@@ -1176,6 +1189,17 @@ pub async fn install_app(
     )?;
     let target_version = target_version_owned.as_str();
     ensure_release_exists(&capsule.releases, target_version)?;
+
+    // Storage admission (#508): decide before downloading whether the declared
+    // disk requirement fits on the install volume after existing installed
+    // claims, so we fail up front instead of mid-download.
+    let storage_db = InstalledStateDb::open_default()?;
+    let storage_admission = enforce_storage_admission(
+        &storage_db,
+        capsule.manifest_toml.as_deref(),
+        &install_volume_probe(output_dir.as_deref()),
+    )?;
+
     let (bytes, normalized_file_name) = match install_manifest_delta_path(
         &client,
         &registry,
@@ -1212,7 +1236,7 @@ pub async fn install_app(
         }
     };
 
-    complete_install_from_bytes(
+    let result = complete_install_from_bytes(
         capsule.id,
         scoped_ref,
         capsule.slug,
@@ -1230,7 +1254,33 @@ pub async fn install_app(
         },
         InstallSource::Registry(registry),
     )
-    .await
+    .await?;
+
+    // Record the storage reservation for the installed capsule so subsequent
+    // installs account for it during admission (#508).
+    let required_bytes = match storage_admission {
+        StorageAdmissionOutcome::Admitted { required_bytes } => {
+            record_install_storage_claim(&storage_db, &result, required_bytes);
+            Some(required_bytes)
+        }
+        StorageAdmissionOutcome::Skipped => None,
+    };
+
+    // Update the installed-app launch condition ledger (the SOT, #508). Always
+    // written on a successful install — even when there is no disk requirement —
+    // so an empty ledger is never read as "no launch conditions": a baseline
+    // extraction-status marker records that extraction is still incomplete.
+    // Strict: unlike the best-effort storage-claim projection above, a failure
+    // here means the SOT could not be recorded, so it fails the install rather
+    // than silently leaving the ledger stale.
+    record_install_launch_ledger(
+        &storage_db,
+        &result,
+        required_bytes,
+        capsule.manifest_toml.as_deref(),
+    )?;
+
+    Ok(result)
 }
 
 pub(crate) async fn fetch_capsule_detail_record(
@@ -2231,6 +2281,468 @@ pub async fn suggest_scoped_capsules(
     suggestions.sort_by_key(|s: &_| std::cmp::Reverse(s.downloads));
     suggestions.truncate(3);
     Ok(suggestions)
+}
+
+// ── Storage admission (#508) ────────────────────────────────────────────────
+
+/// Outcome of the pre-download storage admission step.
+#[derive(Debug)]
+pub(crate) enum StorageAdmissionOutcome {
+    /// Admitted; carries the estimated required bytes so a storage claim can be
+    /// recorded after the install completes.
+    Admitted { required_bytes: u64 },
+    /// No declared disk requirement, so storage could not be estimated; the
+    /// check is skipped rather than blocking the install. A future slice can use
+    /// measured artifact sizes instead of the declared requirement.
+    Skipped,
+}
+
+/// Declared disk requirement (bytes) from a resolved manifest.
+///
+/// `Ok(None)` only when there is no manifest or no declared `requirements.disk`.
+/// A malformed manifest or a malformed disk value (e.g. `disk = "nonsense"`) is
+/// an **error**, not a silent skip — it must stop the install up front rather
+/// than weaken admission to "no requirement".
+fn declared_disk_requirement_bytes(manifest_toml: Option<&str>) -> Result<Option<u64>> {
+    let Some(toml) = manifest_toml else {
+        return Ok(None);
+    };
+    let manifest = CapsuleManifest::from_toml(toml)?;
+    Ok(manifest.requirements.disk_bytes()?)
+}
+
+/// Volume to probe for an install: the configured store root, or the default
+/// `~/.ato/store`. The leaf install dir does not exist yet, so admission probes
+/// the nearest existing ancestor of this path.
+fn install_volume_probe(output_dir: Option<&Path>) -> PathBuf {
+    output_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(capsule_core::common::paths::ato_store_dir)
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const GIB: f64 = (1u64 << 30) as f64;
+    const MIB: f64 = (1u64 << 20) as f64;
+    let f = n as f64;
+    if f >= GIB {
+        format!("{:.1} GiB", f / GIB)
+    } else if f >= MIB {
+        format!("{:.1} MiB", f / MIB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Pre-download storage admission (#508): reject before downloading if the
+/// declared disk requirement does not fit on the install volume after existing
+/// installed claims. Returns the estimated required bytes on admit so the caller
+/// can record a claim after a successful install.
+pub(crate) fn enforce_storage_admission(
+    db: &InstalledStateDb,
+    manifest_toml: Option<&str>,
+    install_volume: &Path,
+) -> Result<StorageAdmissionOutcome> {
+    let Some(required_bytes) = declared_disk_requirement_bytes(manifest_toml)? else {
+        debug!("storage admission skipped: no declared disk requirement");
+        return Ok(StorageAdmissionOutcome::Skipped);
+    };
+    match db.check_storage_admission(required_bytes, install_volume)? {
+        StorageAdmission::Admitted { .. } => {
+            Ok(StorageAdmissionOutcome::Admitted { required_bytes })
+        }
+        StorageAdmission::Rejected {
+            required_bytes,
+            available_bytes,
+            reserved_bytes,
+            free_after_claims,
+            shortfall_bytes,
+        } => bail!(
+            "{code}: not enough storage to install. required {req}, free after reservations {free} \
+             on {path} (volume free {avail}, {reserved} reserved by installed apps), short by {short}",
+            code = crate::utils::error::ATO_ERR_INSUFFICIENT_STORAGE,
+            req = fmt_bytes(required_bytes),
+            free = fmt_bytes(free_after_claims),
+            path = install_volume.display(),
+            avail = fmt_bytes(available_bytes),
+            reserved = fmt_bytes(reserved_bytes),
+            short = fmt_bytes(shortfall_bytes),
+        ),
+    }
+}
+
+/// Record a storage reservation for a freshly-installed capsule. Best-effort: a
+/// recording failure must not fail an already-completed install.
+fn record_install_storage_claim(
+    db: &InstalledStateDb,
+    result: &InstallResult,
+    required_bytes: u64,
+) {
+    let Some(lifecycle) = result.install_lifecycle.as_ref() else {
+        return;
+    };
+    if let Err(err) = db.record_storage_claim(&StorageClaim {
+        install_profile_key: lifecycle.install_profile_key.as_str().to_string(),
+        reserved_bytes: required_bytes,
+    }) {
+        tracing::warn!(error = %err, "failed to record installed-capsule storage claim");
+    }
+}
+
+/// Update the installed-app **launch condition ledger** — the device/provider-
+/// local source of truth for relaunch conditions (#508).
+///
+/// Strict by design: a failure propagates and fails the install, because a
+/// silently-stale SOT would let later relaunch/admission make decisions from an
+/// incomplete condition set. (Runtime observation updates such as a port's
+/// `last_actual_port` remain best-effort elsewhere — only the condition ledger
+/// is strict.)
+///
+/// Always writes a baseline marker (plus the storage requirement when declared),
+/// so a successful install never leaves an empty ledger that could be misread as
+/// "no launch conditions". When the manifest is available, env / secret / state
+/// conditions are extracted from it too (#508). The remaining kinds (port /
+/// runtime / provider_capability / network / hardware / policy) are a follow-up;
+/// the baseline marker lists them as not-yet-extracted.
+fn record_install_launch_ledger(
+    db: &InstalledStateDb,
+    result: &InstallResult,
+    required_bytes: Option<u64>,
+    manifest_toml: Option<&str>,
+) -> Result<()> {
+    let Some(lifecycle) = result.install_lifecycle.as_ref() else {
+        // Lifecycle registration is best-effort upstream; without an install
+        // identity there is no per-app key to anchor a ledger entry, so there is
+        // nothing to record (and nothing is silently lost — the identity itself
+        // was not established).
+        return Ok(());
+    };
+    let install_profile_key = lifecycle.install_profile_key.as_str();
+    let install_revision_id = lifecycle.install_revision_id.as_str();
+    // Parse the manifest for env/secret/state extraction. It was already
+    // validated upstream (storage admission parsed it); if it somehow fails to
+    // parse here, degrade to baseline + storage (env/secret/state stay marked
+    // missing) rather than failing an otherwise-successful install — the DB
+    // write itself remains strict.
+    let manifest = manifest_toml.and_then(|toml| CapsuleManifest::from_toml(toml).ok());
+    let claims = install_launch_conditions(
+        install_profile_key,
+        install_revision_id,
+        required_bytes,
+        manifest.as_ref(),
+    );
+    db.record_installed_launch_ledger(
+        install_profile_key,
+        Some(install_revision_id),
+        None,
+        &claims,
+    )
+    .map_err(anyhow::Error::from)
+}
+
+/// Build the launch condition set known at install time for an installed app
+/// revision. Pure (no I/O) so the install-side projection is testable without
+/// constructing a full `InstallResult`.
+///
+/// Always includes the ledger **baseline marker** (so the revision's ledger is
+/// never empty) plus the storage requirement when declared. When `manifest` is
+/// `Some`, the env / secret / state schemas are fully examined and their
+/// conditions extracted — and only then are those kinds added to the baseline's
+/// `extracted_kinds`. When `manifest` is `None` (unparseable) those kinds stay in
+/// `missing_extractors`, so the marker never claims a kind was examined when it
+/// wasn't.
+fn install_launch_conditions(
+    install_profile_key: &str,
+    install_revision_id: &str,
+    required_bytes: Option<u64>,
+    manifest: Option<&CapsuleManifest>,
+) -> Vec<LaunchConditionClaim> {
+    let mut extracted_kinds = vec![LaunchConditionKind::Storage];
+    let mut claims = Vec::new();
+    if let Some(required_bytes) = required_bytes {
+        claims.push(launch_condition_from_storage_claim(
+            install_profile_key,
+            Some(install_revision_id),
+            required_bytes,
+        ));
+    }
+    if let Some(manifest) = manifest {
+        claims.extend(extract_port_conditions(
+            manifest,
+            install_profile_key,
+            install_revision_id,
+        ));
+        extracted_kinds.push(LaunchConditionKind::Port);
+        claims.extend(extract_env_conditions(
+            manifest,
+            install_profile_key,
+            install_revision_id,
+        ));
+        extracted_kinds.push(LaunchConditionKind::Env);
+        claims.extend(extract_secret_conditions(
+            manifest,
+            install_profile_key,
+            install_revision_id,
+        ));
+        extracted_kinds.push(LaunchConditionKind::Secret);
+        claims.extend(extract_state_conditions(
+            manifest,
+            install_profile_key,
+            install_revision_id,
+        ));
+        extracted_kinds.push(LaunchConditionKind::State);
+    }
+    // Baseline marker first, built once extracted_kinds is final.
+    let mut all = vec![launch_condition_extraction_status(
+        install_profile_key,
+        Some(install_revision_id),
+        &extracted_kinds,
+    )];
+    all.extend(claims);
+    all
+}
+
+/// Extract install-time **Port** launch conditions from the manifest.
+///
+/// Records port *declarations* — "this app requires this logical endpoint /
+/// preferred port" — **not** reservations. Status is `Unknown`: OS availability
+/// and the final (possibly remapped) port are only known at launch, where #523's
+/// port admission records the resolved `PortClaim`. This function never writes
+/// `port_claims` and never probes the OS.
+///
+/// Two sources are read:
+/// - the canonical main-service port (resolved like `execution_port()`:
+///   per-default-target port → global targets port → legacy `execution.port`),
+///   keyed to the `main` endpoint;
+/// - each `[services.<name>]` that exposes ports, keyed to its own endpoint
+///   (the concrete port is allocated at runtime, so it is absent here).
+///
+/// Logical endpoints use [`app_service_endpoint`] so an install-time declaration
+/// and a launch-time claim share the same `condition_key`.
+fn extract_port_conditions(
+    manifest: &CapsuleManifest,
+    install_profile_key: &str,
+    install_revision_id: &str,
+) -> Vec<LaunchConditionClaim> {
+    const PROTOCOL: &str = "tcp";
+    const CONFLICT_POLICY: &str = "remap";
+
+    // endpoint -> (preferred_port, source). The concrete main port is inserted
+    // first, so a same-named service's exposure can't downgrade it to portless.
+    let mut ports: std::collections::BTreeMap<String, (Option<u16>, &'static str)> =
+        std::collections::BTreeMap::new();
+
+    let (main_port, main_source) = resolve_main_port(manifest);
+    if let Some(port) = main_port {
+        ports.insert(
+            app_service_endpoint(install_profile_key, "main"),
+            (Some(port), main_source),
+        );
+    }
+    if let Some(services) = &manifest.services {
+        for (name, service) in services {
+            let exposes = service.expose.as_ref().is_some_and(|e| !e.is_empty());
+            if exposes {
+                ports
+                    .entry(app_service_endpoint(install_profile_key, name))
+                    .or_insert((None, "manifest.services.expose"));
+            }
+        }
+    }
+
+    ports
+        .into_iter()
+        .map(|(endpoint, (preferred, source))| {
+            launch_condition_from_port_declaration(
+                install_profile_key,
+                Some(install_revision_id),
+                &endpoint,
+                PROTOCOL,
+                preferred,
+                source,
+                Some(CONFLICT_POLICY),
+                LaunchConditionStatus::Unknown,
+            )
+        })
+        .collect()
+}
+
+/// Resolve the app's canonical main listening port from the manifest, mirroring
+/// `ManifestData::execution_port` (per-default-target port → global targets port
+/// → legacy `execution.port`). Returns the port and a provenance string.
+fn resolve_main_port(manifest: &CapsuleManifest) -> (Option<u16>, &'static str) {
+    if let Some(targets) = &manifest.targets {
+        if let Some(port) = targets
+            .named
+            .get(&manifest.default_target)
+            .and_then(|target| target.port)
+        {
+            return (Some(port), "manifest.targets.named.port");
+        }
+        if let Some(port) = targets.port {
+            return (Some(port), "manifest.targets.port");
+        }
+    }
+    if let Some(port) = manifest.execution.port {
+        return (Some(port), "manifest.execution.port");
+    }
+    (None, "")
+}
+
+/// Extract **Env** launch conditions from the manifest. Records env-var *names*
+/// only — never values. Env declared with a value in the manifest
+/// (`[execution].env`, per-target `env`, `[services.*].env`) is `Satisfied`; env
+/// required from the host (`required_env`, per-target `required_env`,
+/// `[isolation].allow_env`) is `Unknown`, since its presence can't be confirmed
+/// at install. One condition per unique name; declared takes precedence over
+/// host-required.
+fn extract_env_conditions(
+    manifest: &CapsuleManifest,
+    install_profile_key: &str,
+    install_revision_id: &str,
+) -> Vec<LaunchConditionClaim> {
+    // name -> (source, status). Declared (Satisfied) env is collected before
+    // host-required (Unknown), so `or_insert` makes declared win a name clash.
+    use LaunchConditionStatus::{Satisfied, Unknown};
+    let mut envs: std::collections::BTreeMap<String, (&'static str, LaunchConditionStatus)> =
+        std::collections::BTreeMap::new();
+
+    // Declared with a value in the manifest → Satisfied (value never stored).
+    for name in manifest.execution.env.keys() {
+        envs.entry(name.clone())
+            .or_insert(("manifest.execution", Satisfied));
+    }
+    if let Some(targets) = &manifest.targets {
+        for name in targets.env.keys() {
+            envs.entry(name.clone())
+                .or_insert(("manifest.targets", Satisfied));
+        }
+        for target in targets.named.values() {
+            for name in target.env.keys() {
+                envs.entry(name.clone())
+                    .or_insert(("manifest.targets.named", Satisfied));
+            }
+            for name in &target.required_env {
+                envs.entry(name.clone())
+                    .or_insert(("manifest.targets.named.required_env", Unknown));
+            }
+        }
+    }
+    if let Some(services) = &manifest.services {
+        for service in services.values() {
+            for name in service.env.iter().flat_map(|env| env.keys()) {
+                envs.entry(name.clone())
+                    .or_insert(("manifest.services", Satisfied));
+            }
+        }
+    }
+    // Required from the host → Unknown (presence unconfirmed at install).
+    for name in &manifest.required_env {
+        envs.entry(name.clone())
+            .or_insert(("manifest.required_env", Unknown));
+    }
+    if let Some(isolation) = &manifest.isolation {
+        for name in &isolation.allow_env {
+            envs.entry(name.clone())
+                .or_insert(("manifest.isolation.allow_env", Unknown));
+        }
+    }
+
+    envs.into_iter()
+        .map(|(name, (source, status))| {
+            launch_condition_from_env_projection(
+                install_profile_key,
+                Some(install_revision_id),
+                &name,
+                source,
+                None,
+                status,
+            )
+        })
+        .collect()
+}
+
+/// Extract **Secret** launch conditions from the manifest's dependency
+/// credential declarations (`[dependencies.<alias>].credentials`). Records the
+/// credential *name* only (keyed `<alias>.<credential>`) as a redacted reference
+/// — the templated value is never read. Status is `UserGrantRequired` (no grant
+/// is confirmed at install time).
+fn extract_secret_conditions(
+    manifest: &CapsuleManifest,
+    install_profile_key: &str,
+    install_revision_id: &str,
+) -> Vec<LaunchConditionClaim> {
+    let mut claims = Vec::new();
+    for (alias, dependency) in &manifest.dependencies {
+        for credential_name in dependency.credentials.keys() {
+            let condition_key = format!("{alias}.{credential_name}");
+            claims.push(launch_condition_from_secret_requirement(
+                install_profile_key,
+                Some(install_revision_id),
+                &condition_key,
+                "dependency_credential",
+                None,
+                Some("capsule_instance"),
+            ));
+        }
+    }
+    claims
+}
+
+/// Extract **State** launch conditions from the manifest's `[state.*]`
+/// requirements. Records the logical state key + durability + attach status —
+/// never a raw host path. Auto-attached state is `Satisfied` (Ato provisions it);
+/// explicit-attach state is `UserGrantRequired` (the user must bind it).
+fn extract_state_conditions(
+    manifest: &CapsuleManifest,
+    install_profile_key: &str,
+    install_revision_id: &str,
+) -> Vec<LaunchConditionClaim> {
+    manifest
+        .state
+        .iter()
+        .map(|(state_key, requirement)| {
+            let durability = match requirement.durability {
+                StateDurability::Ephemeral => "ephemeral",
+                StateDurability::Persistent => "persistent",
+            };
+            let status = match requirement.attach {
+                StateAttach::Auto => LaunchConditionStatus::Satisfied,
+                StateAttach::Explicit => LaunchConditionStatus::UserGrantRequired,
+            };
+            // Record the **guest** mount target (e.g. `/app/data`) from the
+            // manifest's `services.main.state_bindings[].target` so the runtime
+            // materialization step (#508) can place the bound directory at the
+            // right guest path without re-reading the manifest at relaunch. This
+            // is a guest-side, non-sensitive path — never the raw host path, which
+            // is intentionally not stored here.
+            let mount_target = manifest_state_mount_target(manifest, state_key);
+            // No resolved binding ref at install; logical metadata only — the
+            // service binding's host mount path is intentionally not stored.
+            launch_condition_from_state_binding(
+                install_profile_key,
+                Some(install_revision_id),
+                state_key,
+                None,
+                Some(durability),
+                mount_target.as_deref(),
+                status,
+            )
+        })
+        .collect()
+}
+
+/// Resolve the guest mount target for a logical `state_key` from the manifest's
+/// `services.main.state_bindings`. Returns `None` when the manifest declares no
+/// service binding for the state (e.g. a state with no mount), so the runtime
+/// materialization step can fall back gracefully. The returned path is the
+/// guest-side mount target (e.g. `/app/data`) — never a raw host path.
+fn manifest_state_mount_target(manifest: &CapsuleManifest, state_key: &str) -> Option<String> {
+    let main = manifest.services.as_ref()?.get("main")?;
+    main.state_bindings
+        .iter()
+        .find(|binding| binding.state.trim() == state_key)
+        .map(|binding| binding.target.trim().to_string())
+        .filter(|target| !target.is_empty())
 }
 
 #[cfg(test)]
