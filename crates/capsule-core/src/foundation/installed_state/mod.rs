@@ -43,7 +43,10 @@ mod relaunch_resolution;
 pub use admission::{
     StorageAdmission, available_space, available_space_for_target, evaluate_storage_admission,
 };
-pub use db::{InstalledStateDb, MaterializedObject, SecretGrantRefRecord, StorageClaim};
+pub use db::{
+    InstalledStateDb, MaterializedObject, SecretGrantRefRecord, StateBindingRefRecord,
+    StateBindingTargetRecord, StorageClaim,
+};
 pub use launch_condition::{
     ALL_LAUNCH_CONDITION_KINDS, ENV_DETAIL_ALLOWED_KEYS, LEDGER_EXTRACTION_STATUS_KEY,
     LOCAL_PROVIDER_ID, LaunchConditionClaim, LaunchConditionKind, LaunchConditionSource,

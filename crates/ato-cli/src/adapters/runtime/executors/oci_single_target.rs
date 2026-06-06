@@ -79,6 +79,43 @@ fn build_oci_container_env(
     env
 }
 
+/// Build the OCI container mounts from both the injected-mount channel and the
+/// receipt-excluded state-binding channel (#508).
+///
+/// State-binding mounts carry the bound host directory and must reach the
+/// container at the create boundary, but they live on `launch_ctx.state_mounts()`
+/// — NOT `injected_mounts()`, which the receipt's filesystem observer
+/// (`observe_filesystem_v2`) hashes by source path. Routing them through
+/// `injected_mounts` would leak the raw host path into the receipt's filesystem
+/// identity; they are merged into the live request only here, never observed.
+fn build_oci_mounts(
+    launch_ctx: &RuntimeLaunchContext,
+) -> Vec<capsule_core::runtime::oci::OciMountSpec> {
+    launch_ctx
+        .injected_mounts()
+        .iter()
+        .map(|m| capsule_core::runtime::oci::OciMountSpec {
+            source: m.source.to_string_lossy().to_string(),
+            target: m.target.clone(),
+            readonly: m.readonly,
+            ownership: None,
+            source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
+        })
+        .chain(
+            launch_ctx
+                .state_mounts()
+                .iter()
+                .map(|m| capsule_core::runtime::oci::OciMountSpec {
+                    source: m.source.to_string_lossy().to_string(),
+                    target: m.target.clone(),
+                    readonly: m.readonly,
+                    ownership: None,
+                    source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
+                }),
+        )
+        .collect()
+}
+
 /// Core execution logic, accepting any `OciProvider` implementation.
 /// Separated for testability — tests inject `FakeOciProvider`.
 pub(crate) async fn execute_with_provider<P: OciProvider>(
@@ -171,17 +208,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
         })
         .unwrap_or_default();
 
-    let mounts: Vec<capsule_core::runtime::oci::OciMountSpec> = launch_ctx
-        .injected_mounts()
-        .iter()
-        .map(|m| capsule_core::runtime::oci::OciMountSpec {
-            source: m.source.to_string_lossy().to_string(),
-            target: m.target.clone(),
-            readonly: m.readonly,
-            ownership: None,
-            source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
-        })
-        .collect();
+    let mounts = build_oci_mounts(launch_ctx);
 
     // Assemble the launch request up front so the strict realization gate can
     // inspect the full projection BEFORE any image pull or container creation.
@@ -599,6 +626,36 @@ mod tests {
         assert!(
             rendered.contains("OPENAI_API_KEY"),
             "the env name is not sensitive and may appear"
+        );
+    }
+
+    // ── State-binding mounts (#508) ───────────────────────────────────────────
+    // The bound host directory must reach the container mounts but never the
+    // receipt's filesystem identity (which hashes injected_mounts() sources).
+    use crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount;
+
+    #[test]
+    fn state_binding_mount_reaches_oci_container_mounts() {
+        let raw = "/Users/koh/.local/share/app/data";
+        let ctx =
+            RuntimeLaunchContext::default().with_state_mounts(vec![RuntimeStateBindingMount {
+                state_key: "data".to_string(),
+                binding_id: "user-data".to_string(),
+                source: std::path::PathBuf::from(raw),
+                target: "/app/data".to_string(),
+                readonly: false,
+            }]);
+        let mounts = build_oci_mounts(&ctx);
+        let state_mount = mounts
+            .iter()
+            .find(|m| m.target == "/app/data")
+            .expect("state mount must reach the OCI container mounts");
+        assert_eq!(state_mount.source, raw);
+        assert!(!state_mount.readonly);
+        // It never appears on the receipt-observed mount channel.
+        assert!(
+            ctx.injected_mounts().is_empty(),
+            "state mount must not be in injected_mounts (receipt-observed)"
         );
     }
 
