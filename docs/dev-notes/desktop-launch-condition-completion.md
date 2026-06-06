@@ -114,7 +114,12 @@ the library layer the PRs target (preflight probes, secret/env injection, state
 materialization + resolve), but a true installed-relaunch e2e of the new
 conditions needs the fixture in **#561**. No fake pass was recorded.
 
-## Review status (not yet merged)
+## Review status (all review-approved; combined into one PR)
+#559 (state runtime materialization) is **already merged into `dev`**. The
+remaining four review-approved PRs — #556 (port), #558 (env-grant), #560
+(Desktop seam), and #562 (this audit) — were **combined into this single PR**
+against `dev` in the reviewed order, so the per-PR merge order below is now moot.
+
 The four code PRs received REQUEST CHANGES — proof-boundary tightenings, all
 addressed:
 - #559: re-confirm the `state_binding_ref` proof (existence + install-profile +
@@ -133,7 +138,8 @@ failed** (secret_injection 23, state_binding 29, port 220, preflight 78, relaunc
 27, capsule-core installed_state 183). No regressions; the new proof-boundary
 checks hold under integration. Live CLI smoke remains blocked by #561.
 
-Merge order: #559 → #556 → #558 → #560 → this audit.
+#559 landed on `dev` first; #556/#558/#560 and this audit were then combined into
+this PR (atop the already-merged #559) in the reviewed order.
 
 ## Provenance
 Batch coordinated 2026-06-06. PRs #556 (port), #558 (env-grant, +#557 follow-up),
