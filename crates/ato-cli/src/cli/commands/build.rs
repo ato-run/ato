@@ -1330,24 +1330,45 @@ fn run_build_lifecycle_shell_command(
     command: &str,
     phase: &str,
 ) -> Result<()> {
-    // Prepend ato-managed Node bin dir to PATH inside the command string (#294).
-    // `sh -l` sources profile scripts that reset PATH, so we inject after the reset.
-    // Use `ensure_node_binary_with_authority(plan, None)` so provider-backed targets
-    // (npm:pkg) that store runtime_version in capsule.toml are handled correctly.
-    let managed_node_path_prefix: String =
+    // Prepend the ato-managed Node bin dir to PATH so the lifecycle command finds
+    // the pinned node/npm (#294). Use `ensure_node_binary_with_authority(plan, None)`
+    // so provider-backed targets (npm:pkg) that store runtime_version in capsule.toml
+    // are handled correctly.
+    let managed_node_dir: Option<PathBuf> =
         match runtime_manager::ensure_node_binary_with_authority(plan, None) {
-            Ok(node_bin) => node_bin
-                .parent()
-                .map(|dir| format!("export PATH={}:$PATH; ", dir.display()))
-                .unwrap_or_default(),
-            Err(_) => String::new(),
+            Ok(node_bin) => node_bin.parent().map(|dir| dir.to_path_buf()),
+            Err(_) => None,
         };
-    let effective_command = format!("{}{}", managed_node_path_prefix, command);
+
+    // The mechanism for injecting that dir is shell-specific:
+    //   * `sh -lc` sources login-profile scripts that *reset* PATH, so on Unix we
+    //     must inject `export PATH=…:$PATH;` *inside* the command string (after the
+    //     reset) for it to survive.
+    //   * `cmd /C` does not source any profile and never resets PATH, so on Windows
+    //     we set PATH directly on the child env. Injecting `export PATH=…:$PATH;`
+    //     into a `cmd /C` string is invalid syntax — cmd reports
+    //     "'export' is not recognized" and the command fails (Windows install bug).
+    #[cfg(windows)]
+    let effective_command = command.to_string();
+
+    #[cfg(not(windows))]
+    let effective_command = match &managed_node_dir {
+        Some(dir) => format!("export PATH={}:$PATH; {}", dir.display(), command),
+        None => command.to_string(),
+    };
 
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", &effective_command]);
+        // `/D` disables AutoRun (HKLM/HKCU \Command Processor\AutoRun). A broken or
+        // foreign-user AutoRun script otherwise runs on every `cmd /C`, prints its
+        // error, and leaks a non-zero exit code into the lifecycle command — failing
+        // the build/provision even when the actual command succeeded.
+        cmd.args(["/D", "/C", &effective_command]);
+        if let Some(dir) = &managed_node_dir {
+            let existing = std::env::var("PATH").unwrap_or_default();
+            cmd.env("PATH", format!("{};{}", dir.display(), existing));
+        }
         cmd
     };
 
