@@ -1,14 +1,19 @@
 #[path = "env_origin.rs"]
 mod env_origin;
 
+mod drift;
 mod filesystem_builder;
 mod policy_builder;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::engine::execution_graph::ExecutionGraph;
 use crate::error::{CapsuleError, Result};
 use crate::types::{OciLaunchEnvelope, StateSharing};
+pub use drift::{
+    DriftClass, DriftError, ReceiptDriftChange, ReceiptDriftReport, diff_receipt_documents,
+};
 pub use env_origin::{EnvOrigin, default_env_origin};
 pub use filesystem_builder::FilesystemIdentityBuilder;
 pub use policy_builder::PolicyIdentityBuilder;
@@ -362,15 +367,40 @@ pub struct ExecutionReceiptV2 {
     /// readiness gate). See [`GraphReceipt`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_receipt: Option<GraphReceipt>,
-    /// Per-node observations for the launch graph. Reserved — emitted
-    /// as `[]` today so future waves can populate it without a schema
-    /// bump.
+    /// Per-node projection of the launch graph (#493): one entry per graph
+    /// node, populated by [`Self::with_graph_projection`] from the
+    /// declared/resolved graph. Empty only for legacy/no-graph launches. See
+    /// [`NodeReceipt`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub node_receipts: Vec<NodeReceipt>,
-    /// Per-edge observations for the launch graph. Reserved — see
-    /// `node_receipts`.
+    /// Per-edge projection of the launch graph (#493); see `node_receipts`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_receipts: Vec<EdgeReceipt>,
+    /// Receipt-safe provider projection evidence for OCI launches (#493,
+    /// derived from the #516 provider projection boundary). One entry per
+    /// realized service/target. Diagnostic only: like `runner` and
+    /// `node_receipts`, this is attached after `from_input` and is **not** part
+    /// of the JCS projection, so it never feeds `execution_id`. Carries only
+    /// receipt-safe fields (env var *names*, image ref/digest status, mount
+    /// targets, ports, network aliases, capability flags) — never resolved env
+    /// values, argv, container id, pid, or log path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_projections: Vec<OciProviderReceiptEvidence>,
+    /// Which execution-identity evidence layers this receipt observed
+    /// (refs #495). Distinguishes a declared/resolved-evidence receipt from a
+    /// runtime-observed one. `None` for receipts written before the field
+    /// existed (back-compat); populated as
+    /// [`ObservationScope::declared_resolved`] for graph-backed receipts. See
+    /// [`ObservationScope`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_scope: Option<ObservationScope>,
+    /// Typed reasons the launch graph is [`GraphCompleteness::Partial`] rather
+    /// than `Complete` (refs #494). A `Partial` graph-backed receipt always
+    /// carries at least one reason — chiefly that the runtime layer was not
+    /// observed. Empty (and omitted) for legacy / non-graph receipts written
+    /// before the field existed. See [`GraphCompletenessReason`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graph_completeness_reasons: Vec<GraphCompletenessReason>,
 }
 
 impl ExecutionReceiptV2 {
@@ -407,6 +437,13 @@ impl ExecutionReceiptV2 {
             graph_receipt: None,
             node_receipts: Vec::new(),
             edge_receipts: Vec::new(),
+            provider_projections: Vec::new(),
+            // Set by the graph-backed builder via `with_observation_scope`;
+            // `None` keeps non-graph / legacy paths back-compatible.
+            observation_scope: None,
+            // Populated by the graph-backed builder once the scope is known;
+            // empty keeps legacy receipts back-compatible.
+            graph_completeness_reasons: Vec::new(),
         })
     }
 
@@ -450,6 +487,99 @@ impl ExecutionReceiptV2 {
     /// Attach a [`GraphReceipt`] lifecycle-pass record.
     pub fn with_graph_receipt(mut self, receipt: GraphReceipt) -> Self {
         self.graph_receipt = Some(receipt);
+        self
+    }
+
+    /// Populate `node_receipts` and `edge_receipts` from a launch
+    /// [`ExecutionGraph`] (#493).
+    ///
+    /// The receipts are a faithful projection of the declared/resolved launch
+    /// graph: one [`NodeReceipt`] per graph node (its identifier + kind) and one
+    /// [`EdgeReceipt`] per graph edge (source + target + kind). `status` is left
+    /// `None` — this PR derives receipts from the *declared/resolved* graph only;
+    /// it does **not** observe runtime lifecycle pass/fail, so claiming a status
+    /// would be fabricated evidence. Observed status is future work (#495).
+    ///
+    /// Node identity comes from the graph (manifest/lock/policy-derived), never
+    /// from runtime command strings, container ids, or session-local data — so
+    /// re-running the same launch in a new session yields identical receipts.
+    pub fn with_graph_projection(mut self, graph: &ExecutionGraph) -> Self {
+        self.node_receipts = graph
+            .nodes
+            .iter()
+            .map(|node| NodeReceipt {
+                node_identifier: node.identifier().to_string(),
+                kind: node.kind_label().to_string(),
+                status: None,
+            })
+            .collect();
+        self.edge_receipts = graph
+            .edges
+            .iter()
+            .map(|edge| EdgeReceipt {
+                source: edge.source.clone(),
+                target: edge.target.clone(),
+                kind: edge.kind.kind_label().to_string(),
+                status: None,
+            })
+            .collect();
+        self
+    }
+
+    /// Attach receipt-safe OCI provider projection evidence (#493, #516).
+    pub fn with_provider_projections(
+        mut self,
+        projections: Vec<OciProviderReceiptEvidence>,
+    ) -> Self {
+        self.provider_projections = projections;
+        self
+    }
+
+    /// Fold OCI provider-evidence facts into this receipt's assessment layer
+    /// (#501): append the value-free provider-gap completeness reasons and merge
+    /// the implied reproducibility causes, then recompute the class conservatively.
+    ///
+    /// Strictly additive and pre-observation: it never changes
+    /// `graph_completeness` (stays `Partial`), `observation_scope`, or
+    /// `observed_execution_id`, and merging causes can only *lower*
+    /// reproducibility, never raise it. A no-op when there is no provider
+    /// evidence (so source-native receipts are unaffected). Call this *after*
+    /// `provider_projections` are final.
+    pub fn with_oci_provider_assessment(mut self) -> Self {
+        if self.provider_projections.is_empty() {
+            return self;
+        }
+        let assessment = assess_oci_provider_projection_facts(&self.provider_projections);
+        self.graph_completeness_reasons
+            .extend(assessment.completeness_reasons);
+        if !assessment.reproducibility_causes.is_empty() {
+            self.reproducibility
+                .causes
+                .extend(assessment.reproducibility_causes);
+            self.reproducibility.causes.sort();
+            self.reproducibility.causes.dedup();
+            self.reproducibility.class =
+                ReproducibilityClass::from_causes(&self.reproducibility.causes);
+        }
+        self
+    }
+
+    /// Attach an [`ObservationScope`] describing which evidence layers this
+    /// receipt observed (refs #495).
+    pub fn with_observation_scope(mut self, scope: ObservationScope) -> Self {
+        self.observation_scope = Some(scope);
+        self
+    }
+
+    /// Attach typed [`GraphCompletenessReason`]s explaining why the launch
+    /// graph is `Partial` (refs #494). Typically derived from the receipt's
+    /// [`ObservationScope`] via
+    /// [`ObservationScope::graph_completeness_reasons`].
+    pub fn with_graph_completeness_reasons(
+        mut self,
+        reasons: Vec<GraphCompletenessReason>,
+    ) -> Self {
+        self.graph_completeness_reasons = reasons;
         self
     }
 
@@ -500,6 +630,26 @@ impl ExecutionReceiptV2 {
 
         let untracked_string =
             || Tracked::untracked("partial receipt: launch envelope not resolved");
+
+        // Annotate evidence from whichever graph ids the boundary already
+        // had. Computed before the move into the struct fields below.
+        let observation_scope = ObservationScope {
+            declared: if declared_execution_id.is_some() {
+                LayerEvidence::Present
+            } else {
+                LayerEvidence::Absent
+            },
+            resolved: if resolved_execution_id.is_some() {
+                LayerEvidence::Present
+            } else {
+                LayerEvidence::Absent
+            },
+            // Runtime is never observed on a failed launch.
+            observed: RuntimeObservation::NotObserved,
+        };
+        // Diagnostic reasons the (incomplete) graph evidence is not Complete,
+        // derived from the scope before it is moved into the struct below.
+        let graph_completeness_reasons = observation_scope.graph_completeness_reasons();
 
         Self {
             schema_version: EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
@@ -588,6 +738,9 @@ impl ExecutionReceiptV2 {
             graph_receipt: None,
             node_receipts: Vec::new(),
             edge_receipts: Vec::new(),
+            provider_projections: Vec::new(),
+            observation_scope: Some(observation_scope),
+            graph_completeness_reasons,
         }
     }
 }
@@ -633,6 +786,229 @@ impl GraphCompleteness {
         match self {
             GraphCompleteness::Partial => "partial",
             GraphCompleteness::Complete => "complete",
+        }
+    }
+}
+
+/// Evidence state of a declared- or resolved-domain layer in a receipt
+/// (refs #495).
+///
+/// `Present` means the receipt carries that layer's identity evidence (the
+/// declared / resolved execution-id facets and the corresponding graph
+/// projection). `Absent` means it was not derived for this receipt (e.g. a
+/// preflight receipt that never reached host resolution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayerEvidence {
+    Present,
+    Absent,
+}
+
+impl LayerEvidence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LayerEvidence::Present => "present",
+            LayerEvidence::Absent => "absent",
+        }
+    }
+}
+
+/// Observation state of the runtime (`Observed`-domain) layer (refs #495).
+///
+/// There is **deliberately no `Observed` variant** in this slice: runtime
+/// observation — per-node / per-edge lifecycle observations (#521) and the
+/// realization classifier (#522) — is not captured yet. Encoding the absence
+/// as a typed reason (rather than implying it by an empty `observed_*` field)
+/// lets a receipt reader tell "we have declared/resolved evidence but did not
+/// observe the runtime" from "we observed the runtime". Because the variant
+/// space cannot say `Observed`, this type also makes it impossible for this
+/// slice to silently claim runtime evidence it does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeObservation {
+    /// Runtime was not observed for this receipt.
+    NotObserved,
+    /// Runtime observation is intentionally outside this receipt's scope.
+    OutOfScope,
+    /// Runtime observation is deferred to a later stage/wave (#521/#522).
+    Deferred,
+}
+
+impl RuntimeObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeObservation::NotObserved => "not-observed",
+            RuntimeObservation::OutOfScope => "out-of-scope",
+            RuntimeObservation::Deferred => "deferred",
+        }
+    }
+}
+
+/// What evidence a receipt actually observed, per execution-identity layer
+/// (refs #495).
+///
+/// A v2 receipt mixes facets derived at different stages: `declared`
+/// (manifest / lock / policy), `resolved` (after host resolution), and
+/// `observed` (runtime observation of the spawned workload). Before #521/#522
+/// land NodeReceipt/EdgeReceipt population and the realization classifier, a
+/// graph-backed receipt carries declared + resolved evidence only — it has not
+/// observed the runtime. `ObservationScope` records that explicitly so a
+/// reader never has to infer "runtime not observed" from an absent field.
+///
+/// This type does **not** synthesize `observed_execution_id` and does **not**
+/// upgrade [`GraphCompleteness`] to `Complete`; it only annotates what the
+/// receipt does and does not contain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationScope {
+    pub declared: LayerEvidence,
+    pub resolved: LayerEvidence,
+    pub observed: RuntimeObservation,
+}
+
+impl ObservationScope {
+    /// Scope for a graph-backed receipt that carries declared + resolved
+    /// evidence but did not observe the runtime. The runtime layer is
+    /// [`RuntimeObservation::NotObserved`]: there is no observation hook in
+    /// v0.6.0, so this is a statement of fact, not a promise.
+    pub fn declared_resolved() -> Self {
+        Self {
+            declared: LayerEvidence::Present,
+            resolved: LayerEvidence::Present,
+            observed: RuntimeObservation::NotObserved,
+        }
+    }
+
+    /// Scope for a receipt that only carries declared-domain evidence (e.g.
+    /// host resolution never ran). Runtime layer is `NotObserved`.
+    pub fn declared_only() -> Self {
+        Self {
+            declared: LayerEvidence::Present,
+            resolved: LayerEvidence::Absent,
+            observed: RuntimeObservation::NotObserved,
+        }
+    }
+
+    /// Whether this scope claims any runtime observation. Always `false` in
+    /// this slice — the type cannot represent runtime observation — but
+    /// exposed so call sites and tests can assert the invariant directly.
+    pub fn has_runtime_observation(&self) -> bool {
+        // `RuntimeObservation` has no `Observed` variant; runtime evidence is
+        // never claimed here. Kept as an explicit method so the contract is
+        // checkable rather than implied.
+        false
+    }
+
+    /// Conservative reasons the graph attached to a receipt is
+    /// [`GraphCompleteness::Partial`] rather than `Complete` (refs #494),
+    /// derived purely from which evidence layers this scope carries.
+    ///
+    /// The runtime layer always contributes a reason — `RuntimeObservation`
+    /// cannot say `Observed` — so the result is **never empty** while the
+    /// runtime is unobserved. That is the structural reason a graph-backed
+    /// receipt with this scope can never be `Complete`, *even when its
+    /// `node_receipts` / `edge_receipts` are non-empty*: a populated
+    /// declared/resolved projection is not runtime observation.
+    pub fn graph_completeness_reasons(&self) -> Vec<GraphCompletenessReason> {
+        let mut reasons = Vec::new();
+        match self.observed {
+            RuntimeObservation::NotObserved => {
+                reasons.push(GraphCompletenessReason::RuntimeNotObserved)
+            }
+            RuntimeObservation::Deferred => {
+                reasons.push(GraphCompletenessReason::RuntimeObservationDeferred)
+            }
+            RuntimeObservation::OutOfScope => {
+                reasons.push(GraphCompletenessReason::RuntimeObservationOutOfScope)
+            }
+        }
+        if self.resolved == LayerEvidence::Absent {
+            reasons.push(GraphCompletenessReason::ResolvedLayerAbsent);
+        }
+        if self.declared == LayerEvidence::Absent {
+            reasons.push(GraphCompletenessReason::DeclaredLayerAbsent);
+        }
+        reasons
+    }
+}
+
+/// Why a receipt's launch graph is [`GraphCompleteness::Partial`] (refs #494).
+///
+/// Typed — never a free-form string — so receipt readers can branch on the
+/// reason. A `Partial` receipt always carries at least one of these. The
+/// runtime-observation reasons mirror [`RuntimeObservation`]; the
+/// layer-absent reasons mirror an `Absent` [`LayerEvidence`].
+///
+/// There is deliberately no "complete" reason: this slice never emits
+/// [`GraphCompleteness::Complete`]. Runtime observation (#521 lifecycle
+/// observations, #522 realization classifier) is what would let a future
+/// wave clear these reasons.
+// `Copy` is intentionally dropped: the additive `ProviderProjectionIncomplete`
+// variant carries owned `String`s (a value-free provider kind + service label).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphCompletenessReason {
+    /// The runtime was not observed (`ObservationScope.observed ==
+    /// NotObserved`): the graph is a declared/resolved projection only.
+    RuntimeNotObserved,
+    /// Runtime observation is deferred to a later wave (#521/#522).
+    RuntimeObservationDeferred,
+    /// Runtime observation is intentionally outside this receipt's scope.
+    RuntimeObservationOutOfScope,
+    /// The resolved-domain layer was not derived for this receipt.
+    ResolvedLayerAbsent,
+    /// The declared-domain layer was not derived for this receipt.
+    DeclaredLayerAbsent,
+    /// A provider projection facet is incomplete before runtime observation
+    /// (#501): an unpinned image, an unenforceable declared policy, or a
+    /// host-bound mount. This is a declared/resolved-domain provider fact — it
+    /// does NOT imply the workload was observed running. All fields are
+    /// value-free (a coarse provider kind, an optional service label, and a typed
+    /// gap) — never a host path, env value, secret, or command.
+    ProviderProjectionIncomplete {
+        provider_kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_label: Option<String>,
+        gap: ProviderProjectionGap,
+    },
+}
+
+/// A specific way a provider projection is incomplete pre-observation (#501).
+/// Typed and value-free, suitable for a [`GraphCompletenessReason`] in a receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderProjectionGap {
+    /// The launch image is tag-only / unpinned: its immutable materialized
+    /// identity is not known at projection time.
+    ImageUnpinned,
+    /// A declared network policy is enforced only best-effort by the provider.
+    NetworkEnforcementDowngraded,
+    /// A declared network policy cannot be enforced by the provider at all
+    /// (e.g. podman + an egress allowlist).
+    NetworkEnforcementUnsupported,
+    /// Whether the provider can enforce the declared network policy is unknown.
+    NetworkEnforcementUnknown,
+    /// A declared capability/sandbox policy is not fully enforced by the provider.
+    CapabilityEnforcementIncomplete,
+    /// The projection depends on a host-path bind mount (a host-bound fallback),
+    /// rather than engine-managed state.
+    HostBoundMount,
+}
+
+impl GraphCompletenessReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GraphCompletenessReason::RuntimeNotObserved => "runtime-not-observed",
+            GraphCompletenessReason::RuntimeObservationDeferred => "runtime-observation-deferred",
+            GraphCompletenessReason::RuntimeObservationOutOfScope => {
+                "runtime-observation-out-of-scope"
+            }
+            GraphCompletenessReason::ResolvedLayerAbsent => "resolved-layer-absent",
+            GraphCompletenessReason::DeclaredLayerAbsent => "declared-layer-absent",
+            // Coarse label; the specific provider/service/gap live in the typed
+            // fields (and the serde representation).
+            GraphCompletenessReason::ProviderProjectionIncomplete { .. } => {
+                "provider-projection-incomplete"
+            }
         }
     }
 }
@@ -687,10 +1063,15 @@ impl GraphReceipt {
     }
 }
 
-/// Per-node receipt entry. Reserved for future waves that attach
-/// per-node lifecycle pass/fail observations. Today emitted as an empty
-/// list so the schema is forward-compatible: downstream consumers can
-/// already iterate `node_receipts` without a schema bump.
+/// Per-node receipt entry: one node of the launch graph projected into the
+/// receipt (#493).
+///
+/// Populated by [`ExecutionReceiptV2::with_graph_projection`] from the
+/// declared/resolved launch graph — `node_identifier` and `kind` come from the
+/// graph node, never from runtime command strings or session-local data.
+/// `status` stays `None`: this is a declared/resolved-graph projection, not a
+/// runtime observation; per-node lifecycle pass/fail status remains future work
+/// (#495). Legacy paths with no graph available emit an empty list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeReceipt {
     pub node_identifier: String,
@@ -699,7 +1080,9 @@ pub struct NodeReceipt {
     pub status: Option<String>,
 }
 
-/// Per-edge receipt entry. Reserved for future waves; see `NodeReceipt`.
+/// Per-edge receipt entry: one edge of the launch graph projected into the
+/// receipt (#493). See [`NodeReceipt`] for the declared/resolved-vs-observed
+/// distinction — `status` is likewise `None` until observation lands (#495).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeReceipt {
     pub source: String,
@@ -707,6 +1090,241 @@ pub struct EdgeReceipt {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+}
+
+/// Receipt-safe provider projection evidence for one OCI service/target (#493).
+///
+/// This is the receipt-facing summary of the #516 provider projection boundary:
+/// it records *what the provider was asked to realize* for a Capsule, without
+/// claiming runtime observation and without leaking secrets. Producers
+/// (`ato-cli`'s `OciProjectionPlan::receipt_evidence`) MUST keep this
+/// receipt-safe:
+///
+/// * env vars appear as **names only** ([`Self::env_keys`]) — never values;
+/// * the image is recorded as a reference + a pinned/unpinned digest *status*;
+/// * mounts record their *target* and flags, never source host paths;
+/// * **excluded entirely**: resolved env values, argv/command strings, the
+///   requested container name, container id, provider pid, and log paths.
+///   Those are session-local provider evidence, not Capsule identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciProviderReceiptEvidence {
+    /// Provider class, e.g. `"oci"`.
+    pub provider_kind: String,
+    /// Concrete realizer name, e.g. `"podman"`.
+    pub provider_name: String,
+    /// The image reference as launched (`repo:tag` or `repo@sha256:…`).
+    pub image_reference: String,
+    /// How well the image is pinned. A digest is image evidence, not identity.
+    pub image_digest_status: OciImageDigestStatus,
+    /// Target platform, e.g. `"linux/amd64"`, when an override is declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Environment variable **names** projected into the container, sorted.
+    /// Values are never recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_keys: Vec<String>,
+    /// Mount projections — target + flags only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<OciMountReceiptEvidence>,
+    /// Published container ports (declared container port + protocol).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<OciPortReceiptEvidence>,
+    /// Service network aliases this container answers to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_aliases: Vec<String>,
+    /// Names of the provider capabilities these launch conditions require,
+    /// sorted (e.g. `"persistent-state"`, `"network-policy"`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities_required: Vec<String>,
+    /// Provider version/family when known (e.g. `"oci-podman-v1"`). Coarse and
+    /// value-free; never a host path or machine handle. Additive (#501).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_version: Option<String>,
+    /// Whether the selected provider can enforce the *declared* network policy
+    /// (e.g. an egress allowlist). `Unknown` by default for back-compat (#501).
+    #[serde(default, skip_serializing_if = "OciEnforcementStatus::is_unknown")]
+    pub network_enforcement_status: OciEnforcementStatus,
+    /// Whether the selected provider can enforce the declared capability/sandbox
+    /// policy. `Unknown` by default for back-compat (#501).
+    #[serde(default, skip_serializing_if = "OciEnforcementStatus::is_unknown")]
+    pub capability_enforcement_status: OciEnforcementStatus,
+    /// The derived provider invocation (e.g. `podman create` argv) reduced to a
+    /// **redacted** shape: flags survive, every value becomes `<redacted>`. This
+    /// is derived projection evidence, never identity and never a raw command
+    /// (#501). Optional/additive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived_command_redacted: Vec<String>,
+    /// Value-free service/target label identifying which orchestrated service
+    /// this evidence record describes. `None` for a single-target launch; set per
+    /// service for a multi-service launch so one receipt can carry one evidence
+    /// record per service. Never a host path or secret (#501). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_label: Option<String>,
+}
+
+/// Whether a provider can enforce a declared policy facet for a projection.
+///
+/// Recorded as typed provider evidence (#501) so a receipt states honestly
+/// whether a required policy is actually enforced, downgraded to best-effort, or
+/// unsupported by the selected provider — rather than implying enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OciEnforcementStatus {
+    /// The provider fully enforces the declared policy facet.
+    Enforced,
+    /// The provider enforces it only partially / best-effort.
+    Downgraded,
+    /// The provider fundamentally cannot enforce it (e.g. podman + egress
+    /// allowlist).
+    Unsupported,
+    /// Enforcement capability is not determined. The conservative default: an
+    /// `Unknown` facet is treated as *not* enforced by strict mode.
+    #[default]
+    Unknown,
+}
+
+impl OciEnforcementStatus {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    /// Whether the declared policy facet is actually enforced. Only
+    /// [`Self::Enforced`] counts — `Downgraded`/`Unsupported`/`Unknown` are all
+    /// "not enforced" for a fail-closed decision (#500/#501).
+    pub fn is_enforced(&self) -> bool {
+        matches!(self, Self::Enforced)
+    }
+}
+
+/// The receipt-assessment delta derived from OCI provider evidence (#501): the
+/// declared/resolved provider facts that keep a receipt's graph honestly
+/// `Partial` and its reproducibility conservative *before any runtime
+/// observation*. Pure data — carries no execution identity and never implies an
+/// observed run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OciProviderProjectionAssessment {
+    /// Additional, value-free reasons the graph is `Partial` (one per provider
+    /// gap). Appended to the receipt's existing reasons (e.g. `RuntimeNotObserved`).
+    pub completeness_reasons: Vec<GraphCompletenessReason>,
+    /// Reproducibility causes implied by the provider gaps. Merged into the
+    /// receipt's causes; the class is then recomputed conservatively.
+    pub reproducibility_causes: Vec<ReproducibilityCause>,
+}
+
+/// Assess OCI provider evidence into receipt-assessment facts (#501).
+///
+/// Pure and conservative: it classifies *declared/resolved* provider facts
+/// only — an unpinned image, an unenforceable/downgraded/unknown declared
+/// network or capability policy, and host-path bind mounts. It NEVER asserts
+/// runtime observation, never clears `Partial`, and never derives an execution
+/// identity. Each completeness reason is value-free and carries the service
+/// label so a multi-service receipt attributes the gap without a host path.
+pub fn assess_oci_provider_projection_facts(
+    projections: &[OciProviderReceiptEvidence],
+) -> OciProviderProjectionAssessment {
+    let mut completeness_reasons = Vec::new();
+    let mut reproducibility_causes = Vec::new();
+
+    for evidence in projections {
+        let reason =
+            |gap: ProviderProjectionGap| GraphCompletenessReason::ProviderProjectionIncomplete {
+                provider_kind: evidence.provider_kind.clone(),
+                service_label: evidence.service_label.clone(),
+                gap,
+            };
+
+        // An unpinned (tag-only) image has no known immutable materialized
+        // identity → the dependency output is unknown.
+        if matches!(evidence.image_digest_status, OciImageDigestStatus::Unpinned) {
+            completeness_reasons.push(reason(ProviderProjectionGap::ImageUnpinned));
+            reproducibility_causes.push(ReproducibilityCause::UnknownDependencyOutput);
+        }
+
+        // A declared network policy (e.g. an egress allowlist surfaced as the
+        // `network-policy` required capability) that the provider does not fully
+        // enforce. Any non-`Enforced` status leaves the launch network-bound.
+        let network_required = evidence
+            .capabilities_required
+            .iter()
+            .any(|cap| cap == "network-policy");
+        if network_required {
+            let gap = match evidence.network_enforcement_status {
+                OciEnforcementStatus::Enforced => None,
+                OciEnforcementStatus::Downgraded => {
+                    Some(ProviderProjectionGap::NetworkEnforcementDowngraded)
+                }
+                OciEnforcementStatus::Unsupported => {
+                    Some(ProviderProjectionGap::NetworkEnforcementUnsupported)
+                }
+                OciEnforcementStatus::Unknown => {
+                    Some(ProviderProjectionGap::NetworkEnforcementUnknown)
+                }
+            };
+            if let Some(gap) = gap {
+                completeness_reasons.push(reason(gap));
+                reproducibility_causes.push(ReproducibilityCause::NetworkBound);
+            }
+        }
+
+        // A declared capability/sandbox policy the provider only partially
+        // enforces or cannot enforce. (Unknown stays silent: it is the default
+        // when no capability policy is modeled.)
+        if matches!(
+            evidence.capability_enforcement_status,
+            OciEnforcementStatus::Downgraded | OciEnforcementStatus::Unsupported
+        ) {
+            completeness_reasons.push(reason(
+                ProviderProjectionGap::CapabilityEnforcementIncomplete,
+            ));
+        }
+
+        // A host-path bind mount (not an engine-managed volume) is a host-bound
+        // fallback → not host-portable.
+        if evidence.mounts.iter().any(|mount| !mount.engine_volume) {
+            completeness_reasons.push(reason(ProviderProjectionGap::HostBoundMount));
+            reproducibility_causes.push(ReproducibilityCause::HostBound);
+        }
+    }
+
+    reproducibility_causes.sort();
+    reproducibility_causes.dedup();
+    OciProviderProjectionAssessment {
+        completeness_reasons,
+        reproducibility_causes,
+    }
+}
+
+/// Pinned/unpinned status of an OCI image in a receipt. The digest is recorded
+/// as image evidence; an unpinned (tag-only) reference is represented honestly
+/// rather than fabricated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "state")]
+pub enum OciImageDigestStatus {
+    /// Fully pinned: `repo@sha256:<64 hex>`.
+    Pinned { digest: String },
+    /// Tag-only / unresolved at projection time.
+    Unpinned,
+}
+
+/// Receipt-safe mount projection: target path and flags only (no source host
+/// path, which could leak user filesystem layout).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciMountReceiptEvidence {
+    pub target: String,
+    pub readonly: bool,
+    /// `true` when backed by an engine-managed volume rather than a host bind.
+    pub engine_volume: bool,
+    /// `true` when this is durable engine-managed state (survives restarts).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub persistent_state: bool,
+}
+
+/// Receipt-safe port projection: declared container port + protocol. The
+/// host-side port is runtime-allocated and is not recorded as identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OciPortReceiptEvidence {
+    pub container_port: u16,
+    pub protocol: String,
 }
 
 /// Outcome class for an execution receipt (refs #74, #99).
@@ -1258,6 +1876,18 @@ pub struct ReproducibilityIdentity {
     pub causes: Vec<ReproducibilityCause>,
 }
 
+/// Conservative, **pre-observation** reproducibility classification of an
+/// execution (refs #494).
+///
+/// The class is derived from declared/resolved identity facets (manifest,
+/// lock, policy, host resolution) — never from runtime observation, which this
+/// slice does not perform. It is conservative: any uncertainty downgrades to
+/// [`ReproducibilityClass::BestEffort`] rather than overclaiming. The
+/// accompanying [`ReproducibilityCause`] list is the typed "why".
+///
+/// In particular, [`ReproducibilityClass::NetworkBound`] means the policy
+/// **permits egress** (see [`ReproducibilityCause::NetworkBound`]); it does
+/// **not** assert that the workload actually performed any network access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReproducibilityClass {
@@ -1265,16 +1895,57 @@ pub enum ReproducibilityClass {
     HostBound,
     StateBound,
     TimeBound,
+    /// Reproducibility may depend on network egress that policy permits. A
+    /// *capability* statement (egress allowed), not an observation of traffic.
     NetworkBound,
     BestEffort,
 }
 
+impl ReproducibilityClass {
+    /// Derive the conservative reproducibility class from a set of typed causes.
+    ///
+    /// The canonical precedence used across the codebase: no causes ⇒ `Pure`;
+    /// any "unknown/untracked" cause ⇒ `BestEffort`; otherwise the most
+    /// constraining bound (`StateBound` → `TimeBound` → `NetworkBound` →
+    /// `HostBound`), falling back to `BestEffort`. Adding causes can only keep or
+    /// *lower* reproducibility — it never upgrades a class.
+    pub fn from_causes(causes: &[ReproducibilityCause]) -> Self {
+        if causes.is_empty() {
+            return Self::Pure;
+        }
+        if causes.iter().any(ReproducibilityCause::is_best_effort) {
+            return Self::BestEffort;
+        }
+        if causes.contains(&ReproducibilityCause::StateBound) {
+            return Self::StateBound;
+        }
+        if causes.contains(&ReproducibilityCause::TimeBound) {
+            return Self::TimeBound;
+        }
+        if causes.contains(&ReproducibilityCause::NetworkBound) {
+            return Self::NetworkBound;
+        }
+        if causes.contains(&ReproducibilityCause::HostBound) {
+            return Self::HostBound;
+        }
+        Self::BestEffort
+    }
+}
+
+/// Typed reason contributing to a [`ReproducibilityClass`] (refs #494).
+///
+/// Each cause is derived pre-observation from declared/resolved facets. They
+/// are diagnostic and never imply runtime observation occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReproducibilityCause {
     HostBound,
     StateBound,
     TimeBound,
+    /// Policy permits network egress (e.g. a non-empty allow-hosts list), so
+    /// the result may depend on external services. This is an **egress-allowed
+    /// capability** statement derived from policy — it does NOT mean the
+    /// workload was observed making any network request.
     NetworkBound,
     UnknownDependencyOutput,
     UnknownRuntimeIdentity,
@@ -1282,6 +1953,23 @@ pub enum ReproducibilityCause {
     UntrackedFilesystemView,
     UntrackedDynamicDependency,
     LifecycleUnknown,
+}
+
+impl ReproducibilityCause {
+    /// Whether this cause reflects *unknown/untracked* evidence (as opposed to a
+    /// known-but-impure binding). Any such cause forces
+    /// [`ReproducibilityClass::BestEffort`].
+    pub fn is_best_effort(&self) -> bool {
+        matches!(
+            self,
+            Self::UnknownDependencyOutput
+                | Self::UnknownRuntimeIdentity
+                | Self::UntrackedEnvironment
+                | Self::UntrackedFilesystemView
+                | Self::UntrackedDynamicDependency
+                | Self::LifecycleUnknown
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -2345,6 +3033,519 @@ pub(in crate::engine::execution_identity) mod tests {
         assert!(decoded.failure_envelope.is_none());
     }
 
+    // ── #493: non-empty NodeReceipt / EdgeReceipt from the launch graph ──────
+
+    fn base_receipt() -> ExecutionReceiptV2 {
+        ExecutionReceiptV2::from_input(sample_input_v2(), "2026-05-03T00:00:00Z".to_string())
+            .expect("receipt")
+    }
+
+    // ── #501: OCI provider facts → receipt assessment ──
+
+    #[allow(clippy::too_many_arguments)]
+    fn oci_evidence(
+        service: Option<&str>,
+        image_digest_status: OciImageDigestStatus,
+        network: OciEnforcementStatus,
+        capability: OciEnforcementStatus,
+        capabilities_required: &[&str],
+        host_bind_mount: bool,
+    ) -> OciProviderReceiptEvidence {
+        OciProviderReceiptEvidence {
+            provider_kind: "oci".to_string(),
+            provider_name: "podman".to_string(),
+            image_reference: "repo/app".to_string(),
+            image_digest_status,
+            platform: None,
+            env_keys: Vec::new(),
+            mounts: if host_bind_mount {
+                vec![OciMountReceiptEvidence {
+                    target: "/data".to_string(),
+                    readonly: false,
+                    engine_volume: false,
+                    persistent_state: false,
+                }]
+            } else {
+                Vec::new()
+            },
+            ports: Vec::new(),
+            network_aliases: Vec::new(),
+            capabilities_required: capabilities_required
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
+            provider_version: Some("oci-podman-v1".to_string()),
+            network_enforcement_status: network,
+            capability_enforcement_status: capability,
+            derived_command_redacted: Vec::new(),
+            service_label: service.map(|s| s.to_string()),
+        }
+    }
+
+    fn has_gap(reasons: &[GraphCompletenessReason], wanted: ProviderProjectionGap) -> bool {
+        reasons.iter().any(|r| {
+            matches!(
+                r,
+                GraphCompletenessReason::ProviderProjectionIncomplete { gap, .. } if *gap == wanted
+            )
+        })
+    }
+
+    #[test]
+    fn assess_unpinned_image_adds_materialization_reason() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Unpinned,
+            OciEnforcementStatus::Enforced,
+            OciEnforcementStatus::Enforced,
+            &[],
+            false,
+        )]);
+        assert!(has_gap(
+            &a.completeness_reasons,
+            ProviderProjectionGap::ImageUnpinned
+        ));
+        assert!(
+            a.reproducibility_causes
+                .contains(&ReproducibilityCause::UnknownDependencyOutput)
+        );
+    }
+
+    #[test]
+    fn assess_unsupported_network_enforcement_adds_policy_reason() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Pinned {
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            OciEnforcementStatus::Unsupported,
+            OciEnforcementStatus::Enforced,
+            &["network-policy"],
+            false,
+        )]);
+        assert!(has_gap(
+            &a.completeness_reasons,
+            ProviderProjectionGap::NetworkEnforcementUnsupported
+        ));
+        assert!(
+            a.reproducibility_causes
+                .contains(&ReproducibilityCause::NetworkBound)
+        );
+    }
+
+    #[test]
+    fn assess_unknown_network_enforcement_stays_conservative() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Pinned {
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            OciEnforcementStatus::Unknown,
+            OciEnforcementStatus::Enforced,
+            &["network-policy"],
+            false,
+        )]);
+        assert!(has_gap(
+            &a.completeness_reasons,
+            ProviderProjectionGap::NetworkEnforcementUnknown
+        ));
+        assert!(
+            a.reproducibility_causes
+                .contains(&ReproducibilityCause::NetworkBound)
+        );
+    }
+
+    #[test]
+    fn assess_pinned_enforced_no_mounts_is_clean() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Pinned {
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            OciEnforcementStatus::Enforced,
+            OciEnforcementStatus::Enforced,
+            &["network-policy"],
+            false,
+        )]);
+        assert!(a.completeness_reasons.is_empty());
+        assert!(a.reproducibility_causes.is_empty());
+    }
+
+    #[test]
+    fn assess_host_bound_mount_adds_host_bound() {
+        let a = assess_oci_provider_projection_facts(&[oci_evidence(
+            None,
+            OciImageDigestStatus::Pinned {
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            OciEnforcementStatus::Enforced,
+            OciEnforcementStatus::Enforced,
+            &[],
+            true,
+        )]);
+        assert!(has_gap(
+            &a.completeness_reasons,
+            ProviderProjectionGap::HostBoundMount
+        ));
+        assert!(
+            a.reproducibility_causes
+                .contains(&ReproducibilityCause::HostBound)
+        );
+    }
+
+    #[test]
+    fn assess_multi_service_reasons_carry_value_free_service_label() {
+        let a = assess_oci_provider_projection_facts(&[
+            oci_evidence(
+                Some("web"),
+                OciImageDigestStatus::Unpinned,
+                OciEnforcementStatus::Enforced,
+                OciEnforcementStatus::Enforced,
+                &[],
+                false,
+            ),
+            oci_evidence(
+                Some("db"),
+                OciImageDigestStatus::Unpinned,
+                OciEnforcementStatus::Enforced,
+                OciEnforcementStatus::Enforced,
+                &[],
+                true,
+            ),
+        ]);
+        let labels: Vec<&str> = a
+            .completeness_reasons
+            .iter()
+            .filter_map(|r| match r {
+                GraphCompletenessReason::ProviderProjectionIncomplete { service_label, .. } => {
+                    service_label.as_deref()
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&"web") && labels.contains(&"db"));
+        // The reasons are value-free: no host path (e.g. the mount target) leaks.
+        let json = serde_json::to_string(&a.completeness_reasons).expect("serialize");
+        assert!(!json.contains("/data"), "no host path in reasons: {json}");
+    }
+
+    #[test]
+    fn with_oci_provider_assessment_keeps_partial_and_conservative() {
+        let receipt = base_receipt()
+            .with_graph_completeness(GraphCompleteness::Partial)
+            .with_graph_completeness_reasons(vec![GraphCompletenessReason::RuntimeNotObserved])
+            .with_observation_scope(ObservationScope::declared_resolved())
+            .with_provider_projections(vec![oci_evidence(
+                Some("web"),
+                OciImageDigestStatus::Unpinned,
+                OciEnforcementStatus::Unsupported,
+                OciEnforcementStatus::Enforced,
+                &["network-policy"],
+                true,
+            )])
+            .with_oci_provider_assessment();
+
+        // Graph stays Partial; the runtime-not-observed reason is preserved and
+        // the provider gaps are appended.
+        assert_eq!(receipt.graph_completeness, Some(GraphCompleteness::Partial));
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+        assert!(
+            receipt
+                .graph_completeness_reasons
+                .iter()
+                .any(|r| matches!(r, GraphCompletenessReason::RuntimeNotObserved))
+        );
+        assert!(has_gap(
+            &receipt.graph_completeness_reasons,
+            ProviderProjectionGap::ImageUnpinned
+        ));
+        assert!(has_gap(
+            &receipt.graph_completeness_reasons,
+            ProviderProjectionGap::NetworkEnforcementUnsupported
+        ));
+        assert!(has_gap(
+            &receipt.graph_completeness_reasons,
+            ProviderProjectionGap::HostBoundMount
+        ));
+
+        // Reproducibility is cause-bearing and conservative (unpinned image ⇒
+        // an unknown dependency output ⇒ BestEffort).
+        for cause in [
+            ReproducibilityCause::UnknownDependencyOutput,
+            ReproducibilityCause::NetworkBound,
+            ReproducibilityCause::HostBound,
+        ] {
+            assert!(receipt.reproducibility.causes.contains(&cause));
+        }
+        assert_eq!(
+            receipt.reproducibility.class,
+            ReproducibilityClass::BestEffort
+        );
+
+        // Pre-observation invariants: no observed id; scope stays declared/resolved.
+        assert!(receipt.observed_execution_id.is_none());
+        assert_eq!(
+            receipt.observation_scope,
+            Some(ObservationScope::declared_resolved())
+        );
+    }
+
+    #[test]
+    fn with_oci_provider_assessment_is_noop_without_provider_evidence() {
+        // Source-native receipts (no provider_projections) are unaffected.
+        let before = base_receipt()
+            .with_graph_completeness_reasons(vec![GraphCompletenessReason::RuntimeNotObserved]);
+        let reasons_before = before.graph_completeness_reasons.clone();
+        let class_before = before.reproducibility.class;
+        let causes_before = before.reproducibility.causes.clone();
+
+        let after = before.with_oci_provider_assessment();
+        assert_eq!(after.graph_completeness_reasons, reasons_before);
+        assert_eq!(after.reproducibility.class, class_before);
+        assert_eq!(after.reproducibility.causes, causes_before);
+    }
+
+    #[test]
+    fn provider_projections_are_never_used_as_resolved_execution_id() {
+        let pinned_digest = format!("sha256:{}", "d".repeat(64));
+        let input = sample_input_v2()
+            .with_resolved_execution_id(Some("graph:resolved-exec-id".to_string()));
+        let receipt = ExecutionReceiptV2::from_input(input, "2026-05-03T00:00:00Z".to_string())
+            .expect("receipt")
+            .with_provider_projections(vec![oci_evidence(
+                Some("web"),
+                OciImageDigestStatus::Pinned {
+                    digest: pinned_digest.clone(),
+                },
+                OciEnforcementStatus::Enforced,
+                OciEnforcementStatus::Enforced,
+                &[],
+                false,
+            )])
+            .with_oci_provider_assessment();
+
+        // The resolved execution id is the graph-derived id, never the image
+        // digest or any provider projection fact.
+        assert_eq!(
+            receipt.resolved_execution_id.as_deref(),
+            Some("graph:resolved-exec-id")
+        );
+        assert_ne!(
+            receipt.resolved_execution_id.as_deref(),
+            Some(pinned_digest.as_str())
+        );
+        assert!(receipt.observed_execution_id.is_none());
+    }
+
+    #[test]
+    fn graph_backed_receipt_has_non_empty_node_and_edge_receipts() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+                ExecutionGraphNode::Provider {
+                    identifier: "provider:podman".to_string(),
+                },
+            ],
+            edges: vec![ExecutionGraphEdge {
+                source: "src:app".to_string(),
+                target: "dep:db".to_string(),
+                kind: ExecutionGraphEdgeKind::DependsOn,
+            }],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+
+        let receipt = base_receipt().with_graph_projection(&graph);
+        assert!(
+            !receipt.node_receipts.is_empty(),
+            "graph-backed launch must emit node receipts"
+        );
+        assert!(
+            !receipt.edge_receipts.is_empty(),
+            "graph-backed launch must emit edge receipts"
+        );
+        assert_eq!(receipt.node_receipts.len(), 3);
+        assert_eq!(receipt.edge_receipts.len(), 1);
+        // Completeness must NOT be auto-promoted to Complete by projection.
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+    }
+
+    #[test]
+    fn graph_backed_receipt_json_has_non_empty_node_and_edge_receipts() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        // A representative launch graph projected into a receipt the same way
+        // the production builder does (`with_graph_projection`).
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+            ],
+            edges: vec![ExecutionGraphEdge {
+                source: "src:app".to_string(),
+                target: "dep:db".to_string(),
+                kind: ExecutionGraphEdgeKind::DependsOn,
+            }],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+        let receipt = base_receipt().with_graph_projection(&graph);
+
+        // #493 acceptance: the *serialized* receipt JSON carries non-empty
+        // node_receipts / edge_receipts arrays — not just the in-memory struct.
+        let json = serde_json::to_value(&receipt).expect("receipt json");
+        assert!(
+            json["node_receipts"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "serialized receipt must carry a non-empty node_receipts array; got: {json}"
+        );
+        assert!(
+            json["edge_receipts"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "serialized receipt must carry a non-empty edge_receipts array; got: {json}"
+        );
+        // The graph-derived identity + kind contract is visible in the JSON.
+        assert_eq!(json["node_receipts"][0]["node_identifier"], "src:app");
+        assert_eq!(json["edge_receipts"][0]["kind"], "depends-on");
+        // No observed status is fabricated in the wire bytes.
+        assert!(json["node_receipts"][0].get("status").is_none());
+    }
+
+    #[test]
+    fn node_receipts_are_derived_from_launch_graph_not_runtime_command() {
+        use crate::engine::execution_graph::{ExecutionGraph, ExecutionGraphNode};
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Service {
+                    identifier: "service:web".to_string(),
+                },
+                ExecutionGraphNode::State {
+                    identifier: "state:pgdata".to_string(),
+                },
+            ],
+            edges: Vec::new(),
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+
+        let receipt = base_receipt().with_graph_projection(&graph);
+        // Node identity == graph node identifier + kind — never a runtime
+        // command, container id, or session-local string.
+        let ids: Vec<&str> = receipt
+            .node_receipts
+            .iter()
+            .map(|n| n.node_identifier.as_str())
+            .collect();
+        assert_eq!(ids, vec!["service:web", "state:pgdata"]);
+        let kinds: Vec<&str> = receipt
+            .node_receipts
+            .iter()
+            .map(|n| n.kind.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["service", "state"]);
+        // No observed status is claimed — receipts derive from declared/resolved
+        // graph only.
+        assert!(receipt.node_receipts.iter().all(|n| n.status.is_none()));
+
+        // The projection is a pure function of the graph: identical graph ⇒
+        // identical receipts, independent of any other (runtime) receipt state.
+        let again = base_receipt().with_graph_projection(&graph);
+        assert_eq!(receipt.node_receipts, again.node_receipts);
+    }
+
+    #[test]
+    fn edge_receipts_include_declared_dependency_edges() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+                ExecutionGraphNode::State {
+                    identifier: "state:pgdata".to_string(),
+                },
+            ],
+            edges: vec![
+                ExecutionGraphEdge {
+                    source: "src:app".to_string(),
+                    target: "dep:db".to_string(),
+                    kind: ExecutionGraphEdgeKind::DependsOn,
+                },
+                ExecutionGraphEdge {
+                    source: "dep:db".to_string(),
+                    target: "state:pgdata".to_string(),
+                    kind: ExecutionGraphEdgeKind::Mounts,
+                },
+            ],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+
+        let receipt = base_receipt().with_graph_projection(&graph);
+        assert!(
+            receipt
+                .edge_receipts
+                .iter()
+                .any(|e| e.kind == "depends-on" && e.source == "src:app" && e.target == "dep:db"),
+            "declared dependency edge must produce a matching EdgeReceipt"
+        );
+        assert!(receipt.edge_receipts.iter().any(|e| e.kind == "mounts"));
+        assert!(receipt.edge_receipts.iter().all(|e| e.status.is_none()));
+    }
+
+    #[test]
+    fn legacy_or_incomplete_graph_receipt_stays_partial_without_panic() {
+        use crate::engine::execution_graph::ExecutionGraph;
+        // A receipt built without a graph projection (legacy path / graph
+        // genuinely unavailable) keeps empty node/edge receipts and never panics.
+        let base = base_receipt();
+        assert!(base.node_receipts.is_empty());
+        assert!(base.edge_receipts.is_empty());
+        assert!(base.provider_projections.is_empty());
+
+        // Projecting an empty graph is a no-op, not a panic.
+        let projected = base.with_graph_projection(&ExecutionGraph::default());
+        assert!(projected.node_receipts.is_empty());
+        assert!(projected.edge_receipts.is_empty());
+
+        // A pre-#493 receipt JSON (no node/edge/provider keys) round-trips with
+        // serde defaults, and completeness is never silently Complete.
+        let json = serde_json::to_string(&projected).expect("encode");
+        let decoded: ExecutionReceiptV2 = serde_json::from_str(&json).expect("decode");
+        assert!(decoded.node_receipts.is_empty());
+        assert!(decoded.provider_projections.is_empty());
+        assert_ne!(
+            decoded.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+    }
+
     #[test]
     fn partial_failure_receipt_carries_envelope_and_synthetic_id() {
         let envelope = ReceiptFailureEnvelope {
@@ -2574,6 +3775,319 @@ pub(in crate::engine::execution_identity) mod tests {
             graph_receipt.resolved_execution_id.as_deref(),
             Some("blake3:resolved")
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #495 ObservationScope
+    // -----------------------------------------------------------------
+
+    /// A graph-backed receipt fixture: declared + resolved evidence, no
+    /// runtime observation. Mirrors what the ato-cli graph-backed builder
+    /// attaches (`with_observation_scope(ObservationScope::declared_resolved)`).
+    fn observation_scope_fixture_receipt() -> ExecutionReceiptV2 {
+        ExecutionReceiptV2::partial_failure(
+            "2026-05-03T00:00:00Z".to_string(),
+            ReceiptResultClass::RecoverableFailure,
+            ReceiptFailureEnvelope {
+                kind: ReceiptFailureKind::Recoverable,
+                code: "E001".to_string(),
+                name: "fixture".to_string(),
+                phase: "manifest".to_string(),
+                message: "fixture".to_string(),
+                hint: None,
+                resource: None,
+                target: None,
+                retryable: false,
+                interactive_resolution_required: None,
+                classification: None,
+                cleanup_status: None,
+                cleanup_actions: Vec::new(),
+                manifest_suggestion: None,
+                details: None,
+            },
+            Some("blake3:declared".to_string()),
+            Some("blake3:resolved".to_string()),
+            None,
+        )
+        .with_graph_completeness(GraphCompleteness::Partial)
+        .with_observation_scope(ObservationScope::declared_resolved())
+    }
+
+    #[test]
+    fn observation_scope_declared_resolved_marks_declared_resolved_evidence_only() {
+        let scope = ObservationScope::declared_resolved();
+        assert_eq!(scope.declared, LayerEvidence::Present);
+        assert_eq!(scope.resolved, LayerEvidence::Present);
+        // The runtime layer is explicitly not observed — not implied by an
+        // absent field.
+        assert_eq!(scope.observed, RuntimeObservation::NotObserved);
+        assert!(!scope.has_runtime_observation());
+    }
+
+    #[test]
+    fn observation_scope_never_claims_runtime_observation() {
+        // Whatever reason the observed layer carries, it never asserts that
+        // the runtime was observed. The `RuntimeObservation` enum has no
+        // `Observed` variant, so this holds by construction for every value.
+        for observed in [
+            RuntimeObservation::NotObserved,
+            RuntimeObservation::OutOfScope,
+            RuntimeObservation::Deferred,
+        ] {
+            let scope = ObservationScope {
+                declared: LayerEvidence::Present,
+                resolved: LayerEvidence::Present,
+                observed,
+            };
+            assert!(!scope.has_runtime_observation());
+        }
+    }
+
+    #[test]
+    fn receipt_with_observation_scope_synthesizes_no_observed_id_and_no_complete() {
+        let receipt = observation_scope_fixture_receipt();
+
+        // The receipt carries the declared/resolved-only scope.
+        assert_eq!(
+            receipt.observation_scope,
+            Some(ObservationScope::declared_resolved())
+        );
+
+        // #495 invariants: no observed_execution_id is synthesized, and
+        // completeness is never upgraded to Complete.
+        assert!(
+            receipt.observed_execution_id.is_none(),
+            "observed_execution_id must not be synthesized in this slice"
+        );
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete),
+            "Complete must never be emitted in this slice"
+        );
+        assert_eq!(receipt.graph_completeness, Some(GraphCompleteness::Partial));
+    }
+
+    #[test]
+    fn observation_scope_serde_roundtrip_uses_kebab_strings() {
+        let scope = ObservationScope::declared_resolved();
+        let json = serde_json::to_string(&scope).expect("serialize scope");
+        // Layer/runtime states serialize as kebab-case strings.
+        assert!(json.contains("\"present\""));
+        assert!(json.contains("\"not-observed\""));
+        let parsed: ObservationScope = serde_json::from_str(&json).expect("deserialize scope");
+        assert_eq!(parsed, scope);
+
+        // declared_only differs only in the resolved layer.
+        let declared_only = ObservationScope::declared_only();
+        assert_eq!(declared_only.resolved, LayerEvidence::Absent);
+        assert_ne!(declared_only, scope);
+    }
+
+    #[test]
+    fn legacy_receipt_without_observation_scope_roundtrips_to_none() {
+        // Serialize a receipt, then strip `observation_scope` to model a
+        // receipt written before the field existed. It must still parse, with
+        // `observation_scope == None`, and the rest of the receipt intact.
+        let receipt = observation_scope_fixture_receipt();
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        let obj = value.as_object_mut().expect("receipt is a JSON object");
+        assert!(
+            obj.remove("observation_scope").is_some(),
+            "fixture receipt must serialize observation_scope so the strip is meaningful"
+        );
+
+        let legacy: ExecutionReceiptV2 = serde_json::from_value(value).expect("legacy parse");
+        assert!(
+            legacy.observation_scope.is_none(),
+            "missing observation_scope must deserialize to None (back-compat)"
+        );
+        // Other fields survive the roundtrip.
+        assert_eq!(legacy.execution_id, receipt.execution_id);
+        assert_eq!(legacy.graph_completeness, receipt.graph_completeness);
+        assert!(legacy.observed_execution_id.is_none());
+    }
+
+    #[test]
+    fn happy_path_receipt_defaults_observation_scope_to_none() {
+        // `from_input` (the non-graph / legacy construction path) leaves the
+        // scope unset; the graph-backed builder is what attaches it.
+        let receipt =
+            ExecutionReceiptV2::from_input(sample_input_v2(), "2026-05-03T00:00:00Z".to_string())
+                .unwrap();
+        assert!(receipt.observation_scope.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // #494 GraphCompleteness reasons
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn declared_resolved_scope_reasons_are_runtime_not_observed_only() {
+        let reasons = ObservationScope::declared_resolved().graph_completeness_reasons();
+        // declared + resolved present ⇒ the only reason is the unobserved
+        // runtime layer. Never empty (so the receipt can never be Complete).
+        assert_eq!(reasons, vec![GraphCompletenessReason::RuntimeNotObserved]);
+    }
+
+    #[test]
+    fn declared_only_scope_reasons_include_resolved_absent() {
+        let reasons = ObservationScope::declared_only().graph_completeness_reasons();
+        assert!(reasons.contains(&GraphCompletenessReason::RuntimeNotObserved));
+        assert!(reasons.contains(&GraphCompletenessReason::ResolvedLayerAbsent));
+    }
+
+    #[test]
+    fn every_observation_scope_yields_at_least_one_reason() {
+        // Exhaustive over the runtime-observation variants and both
+        // resolved-layer states: a scope is never "Complete" (empty reasons)
+        // while runtime is unobserved.
+        for observed in [
+            RuntimeObservation::NotObserved,
+            RuntimeObservation::OutOfScope,
+            RuntimeObservation::Deferred,
+        ] {
+            for resolved in [LayerEvidence::Present, LayerEvidence::Absent] {
+                let scope = ObservationScope {
+                    declared: LayerEvidence::Present,
+                    resolved,
+                    observed,
+                };
+                assert!(
+                    !scope.graph_completeness_reasons().is_empty(),
+                    "scope {scope:?} must yield >= 1 partial reason"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn graph_backed_receipt_is_partial_because_runtime_not_observed() {
+        use crate::engine::execution_graph::{
+            ExecutionGraph, ExecutionGraphEdge, ExecutionGraphEdgeKind, ExecutionGraphNode,
+        };
+        // Mirror the ato-cli builder: Partial + scope + reasons derived from
+        // the scope, with populated node/edge receipts.
+        let graph = ExecutionGraph {
+            nodes: vec![
+                ExecutionGraphNode::Source {
+                    identifier: "src:app".to_string(),
+                },
+                ExecutionGraphNode::DependencyOutput {
+                    identifier: "dep:db".to_string(),
+                },
+            ],
+            edges: vec![ExecutionGraphEdge {
+                source: "src:app".to_string(),
+                target: "dep:db".to_string(),
+                kind: ExecutionGraphEdgeKind::DependsOn,
+            }],
+            labels: Default::default(),
+            constraints: Vec::new(),
+        };
+        let receipt = observation_scope_fixture_receipt()
+            .with_graph_projection(&graph)
+            .with_graph_completeness_reasons(
+                ObservationScope::declared_resolved().graph_completeness_reasons(),
+            );
+
+        // Acceptance: Partial always carries >= 1 reason, and the reason is
+        // the unobserved runtime.
+        assert_eq!(receipt.graph_completeness, Some(GraphCompleteness::Partial));
+        assert!(!receipt.graph_completeness_reasons.is_empty());
+        assert!(
+            receipt
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::RuntimeNotObserved)
+        );
+
+        // Acceptance: non-empty node/edge receipts must NOT promote to Complete.
+        assert!(
+            !receipt.node_receipts.is_empty() || !receipt.edge_receipts.is_empty(),
+            "fixture graph should populate node/edge receipts"
+        );
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete),
+            "Complete must never be emitted in this slice"
+        );
+        // And no observed id is synthesized.
+        assert!(receipt.observed_execution_id.is_none());
+    }
+
+    #[test]
+    fn partial_failure_receipt_carries_graph_completeness_reasons() {
+        // No graph ids ⇒ declared/resolved absent ⇒ reasons include the
+        // absent layers plus the unobserved runtime.
+        let receipt = ExecutionReceiptV2::partial_failure(
+            "2026-05-03T00:00:00Z".to_string(),
+            ReceiptResultClass::RecoverableFailure,
+            ReceiptFailureEnvelope {
+                kind: ReceiptFailureKind::Recoverable,
+                code: "E001".to_string(),
+                name: "fixture".to_string(),
+                phase: "manifest".to_string(),
+                message: "fixture".to_string(),
+                hint: None,
+                resource: None,
+                target: None,
+                retryable: false,
+                interactive_resolution_required: None,
+                classification: None,
+                cleanup_status: None,
+                cleanup_actions: Vec::new(),
+                manifest_suggestion: None,
+                details: None,
+            },
+            None,
+            None,
+            None,
+        );
+        assert!(
+            receipt
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::RuntimeNotObserved)
+        );
+        assert!(
+            receipt
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::ResolvedLayerAbsent)
+        );
+        assert_ne!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+        assert!(receipt.observed_execution_id.is_none());
+    }
+
+    #[test]
+    fn graph_completeness_reasons_serde_uses_kebab_and_roundtrips() {
+        let receipt = observation_scope_fixture_receipt().with_graph_completeness_reasons(vec![
+            GraphCompletenessReason::RuntimeNotObserved,
+            GraphCompletenessReason::ResolvedLayerAbsent,
+        ]);
+        let json = serde_json::to_string(&receipt).expect("serialize");
+        assert!(json.contains("\"runtime-not-observed\""));
+        assert!(json.contains("\"resolved-layer-absent\""));
+        let parsed: ExecutionReceiptV2 = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            parsed.graph_completeness_reasons,
+            receipt.graph_completeness_reasons
+        );
+    }
+
+    #[test]
+    fn legacy_receipt_without_graph_completeness_reasons_roundtrips_to_empty() {
+        // A receipt written before #494 has no `graph_completeness_reasons`
+        // key; it must still parse, with the field defaulting to empty.
+        let receipt = observation_scope_fixture_receipt()
+            .with_graph_completeness_reasons(vec![GraphCompletenessReason::RuntimeNotObserved]);
+        let mut value = serde_json::to_value(&receipt).expect("to_value");
+        let obj = value.as_object_mut().expect("object");
+        assert!(obj.remove("graph_completeness_reasons").is_some());
+
+        let legacy: ExecutionReceiptV2 = serde_json::from_value(value).expect("legacy parse");
+        assert!(legacy.graph_completeness_reasons.is_empty());
+        assert_eq!(legacy.graph_completeness, receipt.graph_completeness);
     }
 
     #[test]

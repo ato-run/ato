@@ -1,0 +1,12 @@
+repo: ato
+branch: test/installable-installed-app-relaunch-fixture
+date: 2026-06-04
+
+fixture: crates/ato-cli/tests/fixtures/installed-relaunch-node
+mock_store_api: local 127.0.0.1 test server
+mock_github_api: local 127.0.0.1 test server
+external_network: not used for fixture install path
+ato_home: <repo>/.tmp/ir/h
+home: <repo>/.tmp/ir/u
+desktop_helper: <repo>/target/debug/ato
+

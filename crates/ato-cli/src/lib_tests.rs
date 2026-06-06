@@ -257,6 +257,51 @@ fn run_command_parses_agent_mode() {
     }
 }
 
+/// Parse argv and return the `Launch` command's `detached_session` flag.
+///
+/// `Cli::try_parse_from` recurses deeply enough to overflow the default ~2 MiB
+/// test-thread stack for this crate's large command enum — a pre-existing
+/// clap-derive limitation (the same overflow hits the existing `run_command_*`
+/// parse tests on a single-test run). Run the parse on a roomier stack so this
+/// regression guard does not abort the suite.
+fn launch_detached_flag(argv: &'static [&'static str]) -> bool {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(
+            move || match Cli::try_parse_from(argv).expect("parse").command {
+                Commands::Launch {
+                    detached_session, ..
+                } => detached_session,
+                other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+            },
+        )
+        .expect("spawn parse thread")
+        .join()
+        .expect("join parse thread")
+}
+
+#[test]
+fn launch_ipk_defaults_to_foreground_not_detached() {
+    // #565 regression guard: the public `ato launch <ipk>` must NOT detach by
+    // default — that would change its blocking behavior and bypass the
+    // profile-args / launch-condition-input handling the foreground path applies.
+    // Detached session-start is an internal ato-desktop opt-in only.
+    assert!(
+        !launch_detached_flag(&["ato", "launch", "ipk_abc123", "-y"]),
+        "public `ato launch` must default to foreground"
+    );
+}
+
+#[test]
+fn launch_detached_session_is_explicit_internal_opt_in() {
+    assert!(launch_detached_flag(&[
+        "ato",
+        "launch",
+        "ipk_abc123",
+        "--detached-session"
+    ]));
+}
+
 #[test]
 fn run_command_parses_entry_and_env_flags() {
     let cli = Cli::try_parse_from([

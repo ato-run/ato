@@ -76,43 +76,11 @@ fn classify_observations(
     causes.sort();
     causes.dedup();
 
-    let class = classify_causes(&causes);
+    // The class-from-causes precedence lives in capsule-core so the OCI provider
+    // assessment (#501) recomputes the class identically when it merges its causes.
+    let class = ReproducibilityClass::from_causes(&causes);
 
     ReproducibilityIdentity { class, causes }
-}
-
-fn classify_causes(causes: &[ReproducibilityCause]) -> ReproducibilityClass {
-    if causes.is_empty() {
-        return ReproducibilityClass::Pure;
-    }
-    if causes.iter().any(is_best_effort_cause) {
-        return ReproducibilityClass::BestEffort;
-    }
-    if causes.contains(&ReproducibilityCause::StateBound) {
-        return ReproducibilityClass::StateBound;
-    }
-    if causes.contains(&ReproducibilityCause::TimeBound) {
-        return ReproducibilityClass::TimeBound;
-    }
-    if causes.contains(&ReproducibilityCause::NetworkBound) {
-        return ReproducibilityClass::NetworkBound;
-    }
-    if causes.contains(&ReproducibilityCause::HostBound) {
-        return ReproducibilityClass::HostBound;
-    }
-    ReproducibilityClass::BestEffort
-}
-
-fn is_best_effort_cause(cause: &ReproducibilityCause) -> bool {
-    matches!(
-        cause,
-        ReproducibilityCause::UnknownDependencyOutput
-            | ReproducibilityCause::UnknownRuntimeIdentity
-            | ReproducibilityCause::UntrackedEnvironment
-            | ReproducibilityCause::UntrackedFilesystemView
-            | ReproducibilityCause::UntrackedDynamicDependency
-            | ReproducibilityCause::LifecycleUnknown
-    )
 }
 
 #[cfg(test)]
@@ -176,6 +144,45 @@ mod tests {
                 ReproducibilityCause::StateBound,
                 ReproducibilityCause::NetworkBound
             ]
+        );
+    }
+
+    /// #494: `NetworkBound` is an *egress-allowed capability* verdict, not an
+    /// observation of traffic. The classifier's network input is a single
+    /// boolean derived from policy (`!allow_hosts.is_empty()` in
+    /// `classify_execution`); there is no observed-traffic input. Flipping the
+    /// capability bool — with every other facet held known — is the sole
+    /// difference between `Pure` and `NetworkBound`.
+    #[test]
+    fn network_bound_means_egress_allowed_not_observed_traffic() {
+        let egress_allowed = classify_observations(
+            true,
+            &known_dependencies(),
+            &known_runtime(Tracked::known("glibc:stable".to_string())),
+            &known_environment(),
+            &known_filesystem(Vec::new()),
+        );
+        assert_eq!(egress_allowed.class, ReproducibilityClass::NetworkBound);
+        assert_eq!(
+            egress_allowed.causes,
+            vec![ReproducibilityCause::NetworkBound]
+        );
+
+        // Same execution, egress NOT permitted by policy ⇒ the cause is gone
+        // and the class is Pure. The verdict tracks the policy capability, not
+        // any observed network activity (of which the classifier sees none).
+        let egress_denied = classify_observations(
+            false,
+            &known_dependencies(),
+            &known_runtime(Tracked::known("glibc:stable".to_string())),
+            &known_environment(),
+            &known_filesystem(Vec::new()),
+        );
+        assert_eq!(egress_denied.class, ReproducibilityClass::Pure);
+        assert!(
+            !egress_denied
+                .causes
+                .contains(&ReproducibilityCause::NetworkBound)
         );
     }
 
