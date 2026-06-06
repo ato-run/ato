@@ -54,7 +54,7 @@ use capsule_core::interactive_resolution::{
 };
 use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ExecutionProfile;
-use capsule_core::types::{ConfigField, ConfigKind, OciProviderKind, OciProviderMode};
+use capsule_core::types::{ConfigField, ConfigKind, OciProviderKind, OciProviderMode, StateAttach};
 
 use crate::app_control::sample_recipes::{
     resolve_sample_recipe_for_github, resolve_sample_recipe_for_input,
@@ -407,6 +407,48 @@ pub fn collect_aggregate_requirements(
                 ),
                 hint: Some(
                     "Set these via the launching app's secret form or the shell environment."
+                        .to_string(),
+                ),
+            },
+        });
+    }
+
+    // 2b. State-binding requirements (#404). Each `[state.<key>]` with
+    //     `attach = "explicit"` needs a user-chosen host directory before
+    //     launch — the same conditions the install ledger records as
+    //     `UserGrantRequired` (see `extract_state_conditions`). Auto-attach
+    //     states are provisioned by Ato (ledger `Satisfied`) and are omitted.
+    //     We emit a typed `StateBindingRequired { state_key, label }` so the
+    //     desktop's requirement-aggregation modal can surface a "choose folder"
+    //     prompt; the chosen path is resolved through the non-interactive
+    //     `resolve_state_binding_from_path` seam, which keeps the raw path
+    //     local-private. The label is the requirement's `purpose` (a
+    //     user-facing string, never a path); no raw path is emitted here.
+    //
+    //     Emitted in sorted state-key order for a stable modal layout.
+    let mut state_keys: Vec<&String> = manifest
+        .state
+        .iter()
+        .filter(|(_, requirement)| requirement.attach == StateAttach::Explicit)
+        .map(|(key, _)| key)
+        .collect();
+    state_keys.sort();
+    for state_key in state_keys {
+        let requirement = &manifest.state[state_key];
+        let label = if requirement.purpose.trim().is_empty() {
+            state_key.clone()
+        } else {
+            requirement.purpose.clone()
+        };
+        requirements.push(InteractiveResolutionEnvelope {
+            kind: InteractiveResolutionKind::StateBindingRequired {
+                state_key: state_key.clone(),
+                label: label.clone(),
+            },
+            display: ResolutionDisplay {
+                message: format!("Choose a local folder for '{label}'."),
+                hint: Some(
+                    "This app stores persistent data here. Pick a directory on this device."
                         .to_string(),
                 ),
             },
@@ -1318,6 +1360,9 @@ egress_allow = ["smtp.gmail.com"]
                 InteractiveResolutionKind::ConsentRequired { target_label, .. } => {
                     target_label.as_str()
                 }
+                InteractiveResolutionKind::StateBindingRequired { state_key, .. } => {
+                    state_key.as_str()
+                }
             })
             .collect();
         // Expected: global PG_PASSWORD + target=app SECRET_KEY +
@@ -1419,6 +1464,150 @@ run = "python -m app"
 
         assert_eq!(result.visited_targets.len(), 1);
         assert_eq!(result.visited_targets[0], "cli");
+    }
+
+    /// #404: an `attach = "explicit"` `[state.<key>]` requirement is unresolved
+    /// at preflight (the same conditions the install ledger marks
+    /// `UserGrantRequired`), so the collector must emit a typed
+    /// `StateBindingRequired { state_key, label }`. The label is the
+    /// requirement's `purpose` (a user-facing string), and NO raw host path is
+    /// emitted anywhere in the result.
+    #[test]
+    #[serial_test::serial]
+    fn preflight_emits_state_binding_required_for_unresolved_state() {
+        let home = TempDir::new().expect("home");
+        let ato_home = TempDir::new().expect("ato_home");
+        let _home_guard = scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
+        let _ato_home_guard =
+            scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let manifest_dir = TempDir::new().expect("manifest_dir");
+        let manifest_path = manifest_dir.path().join("capsule.toml");
+        let manifest = r#"
+schema_version = "0.3"
+name           = "state-binding-app"
+version        = "0.1.0"
+type           = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/state-binding-app:latest"
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "user documents"
+attach = "explicit"
+schema_id = "state-binding-app/data/v1"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app/data"
+"#;
+        fs::write(&manifest_path, manifest).expect("write");
+
+        let result =
+            collect_aggregate_requirements(&manifest_path.to_string_lossy(), ExecutionProfile::Dev)
+                .expect("collect");
+
+        let state_reqs: Vec<(&str, &str)> = result
+            .requirements
+            .iter()
+            .filter_map(|env| match &env.kind {
+                InteractiveResolutionKind::StateBindingRequired { state_key, label } => {
+                    Some((state_key.as_str(), label.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            state_reqs,
+            vec![("data", "user documents")],
+            "explicit-attach state must surface a StateBindingRequired with the purpose as label"
+        );
+
+        // No raw host path (the manifest's `state_bindings.target =
+        // /var/lib/app/data`) may appear in the emitted state-binding
+        // requirement — it carries only the logical state key + label.
+        let state_envelopes: Vec<&InteractiveResolutionEnvelope> = result
+            .requirements
+            .iter()
+            .filter(|env| {
+                matches!(
+                    env.kind,
+                    InteractiveResolutionKind::StateBindingRequired { .. }
+                )
+            })
+            .collect();
+        let json = serde_json::to_string(&state_envelopes).expect("serialize");
+        assert!(
+            !json.contains("/var/lib/app/data"),
+            "no host path may be emitted: {json}"
+        );
+        assert!(
+            !json.contains('/'),
+            "no path separator may be emitted: {json}"
+        );
+    }
+
+    /// #404: an `attach = "auto"` state is provisioned by Ato (ledger
+    /// `Satisfied`), so the collector must NOT emit a StateBindingRequired for
+    /// it — only explicit-attach states need a user-chosen folder.
+    #[test]
+    #[serial_test::serial]
+    fn preflight_omits_requirement_when_bound() {
+        let home = TempDir::new().expect("home");
+        let ato_home = TempDir::new().expect("ato_home");
+        let _home_guard = scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
+        let _ato_home_guard =
+            scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let manifest_dir = TempDir::new().expect("manifest_dir");
+        let manifest_path = manifest_dir.path().join("capsule.toml");
+        let manifest = r#"
+schema_version = "0.3"
+name           = "auto-state-app"
+version        = "0.1.0"
+type           = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/auto-state-app:latest"
+
+[state.cache]
+kind = "filesystem"
+durability = "ephemeral"
+purpose = "scratch cache"
+attach = "auto"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "cache"
+target = "/var/lib/app/cache"
+"#;
+        fs::write(&manifest_path, manifest).expect("write");
+
+        let result =
+            collect_aggregate_requirements(&manifest_path.to_string_lossy(), ExecutionProfile::Dev)
+                .expect("collect");
+
+        let has_state_req = result.requirements.iter().any(|env| {
+            matches!(
+                env.kind,
+                InteractiveResolutionKind::StateBindingRequired { .. }
+            )
+        });
+        assert!(
+            !has_state_req,
+            "auto-attach (Satisfied) state must not surface a StateBindingRequired"
+        );
     }
 
     /// PR #180 review fix: a capsule manifest carrying

@@ -604,6 +604,16 @@ fn filter_already_provided_secrets(
                     display: env.display,
                 })
             }
+            // #404: a state-binding requirement is not satisfied by the
+            // secret/config input map, so it always passes through. The folder
+            // picker that resolves it is a follow-up; today it surfaces as an
+            // unmet requirement.
+            kind @ InteractiveResolutionKind::StateBindingRequired { .. } => {
+                Some(InteractiveResolutionEnvelope {
+                    kind,
+                    display: env.display,
+                })
+            }
         })
         .collect()
 }
