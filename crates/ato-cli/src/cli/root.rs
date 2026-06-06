@@ -389,7 +389,7 @@ pub(crate) enum Commands {
     #[command(hide = true, about = "Register a durable local app from the store")]
     Install {
         /// Capsule scoped ID (publisher/slug)
-        #[arg(required_unless_present = "from_gh_repo")]
+        #[arg(required_unless_present_any = ["from_gh_repo", "from_local"])]
         slug: Option<String>,
 
         /// Build and install directly from a public GitHub repository
@@ -399,6 +399,16 @@ pub(crate) enum Commands {
             conflicts_with = "slug"
         )]
         from_gh_repo: Option<String>,
+
+        /// Build and install directly from a local capsule directory (hermetic;
+        /// no network/registry/GitHub). Expects `<DIR>/capsule.toml`. Intended
+        /// for deterministic Desktop/AODD relaunch smoke tests.
+        #[arg(
+            long = "from-local",
+            value_name = "DIR",
+            conflicts_with_all = ["slug", "from_gh_repo"]
+        )]
+        from_local: Option<PathBuf>,
 
         /// Registry URL (default: api.ato.run)
         #[arg(long)]

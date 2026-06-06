@@ -1,0 +1,40 @@
+schema_version = "0.3"
+name = "launch-conditions"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[metadata]
+display_name = "Launch Conditions (local fixture)"
+description = "Declares an explicit-attach state binding + a fixed port to seed the installed-state ledger for relaunch-condition smoke."
+
+# OCI target: the manifest schema only allows state_bindings on OCI targets, so a
+# launch-condition-declaring fixture must be OCI. `busybox` is a tiny, widely
+# cached image. Packing/launching this fixture needs the image present locally
+# (no network pull is performed); seed it once with `ato` OCI prep or
+# `docker pull busybox:latest` before exercising the launch path. The install
+# ledger is recorded from the manifest at install time and does NOT require the
+# image, so `ato install --from-local` records the state/port claims regardless.
+[targets.app]
+runtime = "oci"
+image = "docker.io/library/busybox:latest"
+port = 18891
+
+# Explicit-attach state requirement: at install this becomes a `state` launch
+# condition with status `UserGrantRequired` in the installed-state ledger, so a
+# future relaunch can be driven with `?state.data=prompt|grant:<id>`.
+[state.data]
+kind = "filesystem"
+durability = "ephemeral"
+purpose = "primary-data"
+attach = "explicit"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app/data"
+
+[pack]
+include = ["capsule.toml", "README.md"]
