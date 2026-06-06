@@ -5,7 +5,7 @@
 //! capsule handle, then bridges into the existing run pipeline with profile args applied.
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -33,6 +33,10 @@ pub(crate) struct LaunchArgs {
     pub(crate) verbose: bool,
     pub(crate) json: bool,
     pub(crate) nacelle: Option<PathBuf>,
+    /// Internal (ato-desktop only): start the installed app as a *detached*
+    /// session that writes a discoverable `StoredSessionInfo`, instead of the
+    /// default foreground run. Off for the public `ato launch` CLI. See #565.
+    pub(crate) detached_session: bool,
 }
 
 pub(crate) fn execute_launch_command(
@@ -129,7 +133,7 @@ pub(crate) fn execute_launch_command(
     // writes the record. Deriving it from a random id here would break the
     // receipt/session/CIK identity contract.
 
-    // Read LaunchProfile to apply args and warn about unsupported fields.
+    // Read the LaunchProfile to apply args and warn about unsupported fields.
     let (profile_args, profile_env_refs_warning) =
         read_profile_launch_config(&store, &app_id, &profile_id);
 
@@ -141,8 +145,12 @@ pub(crate) fn execute_launch_command(
             "install_revision_id": rev_id.as_str(),
             "capsule_handle": capsule_handle,
             "capsule_launch_inputs": capsule_launch_inputs.len(),
+            "detached_session": args.detached_session,
         });
-        if args.json {
+        // The public `ato launch --json` contract prints the resolution summary
+        // to stdout. The detached desktop path reserves stdout for the
+        // session-start JSON envelope, so it logs to stderr instead.
+        if args.json && !args.detached_session {
             println!("{}", serde_json::to_string_pretty(&info)?);
         } else {
             eprintln!("[ato launch] resolved: {}", serde_json::to_string(&info)?);
@@ -157,16 +165,18 @@ pub(crate) fn execute_launch_command(
     }
 
     tracing::debug!(
-        "launch: app={} profile={} rev={} handle={}",
+        "launch: app={} profile={} rev={} handle={} detached={}",
         app_id.as_str(),
         profile_id.as_str(),
         rev_id.as_str(),
         capsule_handle,
+        args.detached_session,
     );
 
-    // The lifecycle context is set via ScopedInstallLifecycleGuard so it is
-    // always cleared after execute_run_command returns, even on early return or panic.
-    // The session writer derives CapsuleInstanceKey from the pipeline's execution_id
+    // The lifecycle context is set via ScopedInstallLifecycleGuard so the
+    // resulting session record (foreground or detached) is stamped with the
+    // install identity, and the guard always clears on return (or panic). The
+    // session writer derives CapsuleInstanceKey from the pipeline's execution_id
     // at write time (see apply_install_lifecycle in session.rs).
     let lifecycle_ctx = InstallLifecycleContext {
         installed_app_id: app_id.as_str().to_string(),
@@ -175,20 +185,34 @@ pub(crate) fn execute_launch_command(
         install_revision_id: rev_id.as_str().to_string(),
     };
 
-    // Compute the frozen revision output dir — the run pipeline will bypass the
-    // ~/.ato path guard and run directly from this immutable directory, ensuring
-    // the pinned current_revision is executed even after a rollback.
     let revision_output_dir = store.revision_output_dir(&rev_id);
 
-    // `pinned_revision_output_dir` must be the `.capsule` file, not the output directory.
-    // `normalize_run_target_after_install` only handles the `.capsule` extension check
-    // for a file path; a bare directory falls through to source inference and fails with
-    // ATO_ERR_AMBIGUOUS_ENTRYPOINT because no `capsule.toml` is present at that path.
+    // ato-desktop's installed-relaunch path (#565): start a *detached* session
+    // that writes a discoverable record. The default public CLI path below keeps
+    // its foreground behavior.
+    if args.detached_session {
+        return relaunch_installed_detached(
+            &capsule_handle,
+            &revision_output_dir,
+            &rev_id,
+            profile_args,
+            capsule_launch_inputs,
+            args.nacelle.as_deref(),
+            lifecycle_ctx,
+            args.json,
+        );
+    }
+
+    // Default `ato launch <ipk>`: run the pinned revision foreground.
+    //
+    // `pinned_revision_output_dir` must be the `.capsule` file, not the output
+    // directory. `normalize_run_target_after_install` only handles the `.capsule`
+    // extension check for a file path; a bare directory falls through to source
+    // inference and fails with ATO_ERR_AMBIGUOUS_ENTRYPOINT because no
+    // `capsule.toml` is present at that path.
     let pinned_capsule_path = find_capsule_in_revision_output(&revision_output_dir)
         .unwrap_or_else(|| revision_output_dir.clone());
 
-    // Set the thread-local lifecycle context via a scoped guard so it is
-    // always cleared when this function returns (or panics).
     let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx.clone());
 
     execute_run_command(
@@ -231,6 +255,134 @@ pub(crate) fn execute_launch_command(
         /* pinned_revision_output_dir */ Some(pinned_capsule_path),
         reporter,
     )
+}
+
+/// ato-desktop installed-relaunch path (#565): start the pinned revision as a
+/// *detached* session that writes a discoverable `StoredSessionInfo` (stamped
+/// with the install_profile_key via the active lifecycle guard) which the
+/// Desktop discovers by polling `try_reuse_live_session_for_install_profile_key`.
+///
+/// Intentionally separate from the default foreground `ato launch`: the public
+/// CLI keeps its blocking behavior and full profile-args / launch-input / nacelle
+/// handling, while the Desktop needs a discoverable, healthcheck-able,
+/// ProcessManager-registered session it can attach a WebView to and stop later.
+/// Reuses the same session-start machinery the normal capsule path uses (port
+/// reserve/remap, ready probe, kill-process-group on readiness failure → no
+/// orphan).
+///
+/// Not yet wired on this detached path (logged, never silently dropped): launch
+/// profile `args`, `capsule://…?secret/state/env` inputs, and `--nacelle`. The
+/// foreground path applies all of those; the Desktop relaunch currently targets
+/// condition-less installed apps.
+#[allow(clippy::too_many_arguments)]
+fn relaunch_installed_detached(
+    capsule_handle: &str,
+    revision_output_dir: &Path,
+    rev_id: &InstallRevisionId,
+    profile_args: Vec<String>,
+    capsule_launch_inputs: Vec<LaunchConditionInput>,
+    nacelle: Option<&Path>,
+    lifecycle_ctx: InstallLifecycleContext,
+    json: bool,
+) -> Result<()> {
+    if !profile_args.is_empty() {
+        tracing::warn!(
+            "ato launch (detached): launch profile args {profile_args:?} are not yet applied on \
+             the installed relaunch path"
+        );
+    }
+    if !capsule_launch_inputs.is_empty() {
+        tracing::warn!(
+            "ato launch (detached): {} launch-condition input(s) resolved but injection on the \
+             installed relaunch path is not yet wired",
+            capsule_launch_inputs.len()
+        );
+    }
+    if nacelle.is_some() {
+        tracing::warn!("ato launch (detached): --nacelle is not applied; ignoring");
+    }
+
+    // Resolve the frozen revision: find the pinned `.capsule` and extract its
+    // `capsule.toml`. The run executes directly from this immutable revision
+    // artifact, so the pinned current_revision is honoured even after a rollback.
+    let pinned_capsule_path =
+        find_capsule_in_revision_output(revision_output_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "installed revision {} has no .capsule artifact under {} — the install may be \
+                 degraded; reinstall with `ato install`",
+                rev_id.as_str(),
+                revision_output_dir.display()
+            )
+        })?;
+    let pinned_manifest_path = extract_pinned_revision_manifest(&pinned_capsule_path)
+        .with_context(|| {
+            format!(
+                "failed to extract pinned revision capsule {}",
+                pinned_capsule_path.display()
+            )
+        })?;
+
+    let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx);
+
+    // Reuse the detached session-start machinery: reserve/remap the service port,
+    // inject it, wait for HTTP readiness, register with the ProcessManager, and
+    // write a discoverable StoredSessionInfo stamped with the install_profile_key.
+    // On readiness failure it kills the whole process group, so a timed-out
+    // relaunch leaves no orphan. Installed capsules are pre-consented; the
+    // session-start pipeline does not re-show the run consent gate.
+    crate::app_control::start_session(
+        capsule_handle,
+        /* target_label */ None,
+        /* community_toml_id */ None,
+        /* attach_state */ &[],
+        /* from_materialized_record */ None,
+        /* local_manifest_path */ Some(pinned_manifest_path),
+        /* run_config_hash */ None,
+        json,
+    )
+}
+
+/// Extract a pinned revision's `.capsule` archive and return the path to its
+/// `capsule.toml`.
+///
+/// `ato launch` runs the frozen revision artifact directly. The session-start
+/// pipeline resolves a local `capsule.toml`, so the immutable `.capsule` is
+/// unpacked next to itself (`<stem>-extracted/`) and the manifest path returned.
+/// Extraction is idempotent: a prior unpack with a `capsule.toml` is reused, so
+/// repeated relaunches of the same revision do not re-extract.
+fn extract_pinned_revision_manifest(pinned_capsule_path: &Path) -> Result<PathBuf> {
+    let stem = pinned_capsule_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "capsule".to_string());
+    let extract_dir = pinned_capsule_path
+        .parent()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "pinned capsule {} has no parent directory",
+                pinned_capsule_path.display()
+            )
+        })?
+        .join(format!("{stem}-extracted"));
+    let manifest_path = extract_dir.join("capsule.toml");
+    if manifest_path.is_file() {
+        return Ok(manifest_path);
+    }
+
+    let bytes = std::fs::read(pinned_capsule_path).with_context(|| {
+        format!(
+            "failed to read pinned capsule {}",
+            pinned_capsule_path.display()
+        )
+    })?;
+    crate::adapters::runtime::tree::extract_capsule_to_runtime_dir(&bytes, &extract_dir)?;
+    if !manifest_path.is_file() {
+        anyhow::bail!(
+            "extracted pinned revision capsule {} is missing capsule.toml",
+            pinned_capsule_path.display()
+        );
+    }
+    Ok(manifest_path)
 }
 
 /// Find the single `.capsule` file inside a revision output directory.
@@ -418,6 +570,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = InstallInstanceStore::new(dir.path()).unwrap();
         (dir, store)
+    }
+
+    /// `extract_pinned_revision_manifest` returns an already-extracted
+    /// `capsule.toml` without re-extracting, so repeated relaunches of the same
+    /// pinned revision are idempotent (#565). The capsule body here is bogus and
+    /// is never read because the extracted dir already exists.
+    #[test]
+    fn extract_pinned_revision_manifest_reuses_existing_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir_all(&output).unwrap();
+        let pinned = output.join("basic-web-0.1.0.capsule");
+        std::fs::write(&pinned, b"not-a-real-capsule").unwrap();
+
+        let extracted = output.join("basic-web-0.1.0-extracted");
+        std::fs::create_dir_all(&extracted).unwrap();
+        let manifest = extracted.join("capsule.toml");
+        std::fs::write(&manifest, "schema_version = \"0.3\"\n").unwrap();
+
+        let resolved =
+            extract_pinned_revision_manifest(&pinned).expect("reuse existing extraction");
+        assert_eq!(resolved, manifest);
     }
 
     fn scaffold_app_with_profile(

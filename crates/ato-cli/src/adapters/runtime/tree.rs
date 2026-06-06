@@ -241,7 +241,10 @@ fn validate_promotion_metadata(
     Ok(())
 }
 
-fn extract_capsule_to_runtime_dir(capsule_bytes: &[u8], runtime_dir: &Path) -> Result<()> {
+pub(crate) fn extract_capsule_to_runtime_dir(
+    capsule_bytes: &[u8],
+    runtime_dir: &Path,
+) -> Result<()> {
     let parent = runtime_dir
         .parent()
         .context("Runtime directory must have a parent")?;
