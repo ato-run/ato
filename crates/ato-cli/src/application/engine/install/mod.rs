@@ -2703,6 +2703,13 @@ fn extract_state_conditions(
                 StateAttach::Auto => LaunchConditionStatus::Satisfied,
                 StateAttach::Explicit => LaunchConditionStatus::UserGrantRequired,
             };
+            // Record the **guest** mount target (e.g. `/app/data`) from the
+            // manifest's `services.main.state_bindings[].target` so the runtime
+            // materialization step (#508) can place the bound directory at the
+            // right guest path without re-reading the manifest at relaunch. This
+            // is a guest-side, non-sensitive path — never the raw host path, which
+            // is intentionally not stored here.
+            let mount_target = manifest_state_mount_target(manifest, state_key);
             // No resolved binding ref at install; logical metadata only — the
             // service binding's host mount path is intentionally not stored.
             launch_condition_from_state_binding(
@@ -2711,10 +2718,25 @@ fn extract_state_conditions(
                 state_key,
                 None,
                 Some(durability),
+                mount_target.as_deref(),
                 status,
             )
         })
         .collect()
+}
+
+/// Resolve the guest mount target for a logical `state_key` from the manifest's
+/// `services.main.state_bindings`. Returns `None` when the manifest declares no
+/// service binding for the state (e.g. a state with no mount), so the runtime
+/// materialization step can fall back gracefully. The returned path is the
+/// guest-side mount target (e.g. `/app/data`) — never a raw host path.
+fn manifest_state_mount_target(manifest: &CapsuleManifest, state_key: &str) -> Option<String> {
+    let main = manifest.services.as_ref()?.get("main")?;
+    main.state_bindings
+        .iter()
+        .find(|binding| binding.state.trim() == state_key)
+        .map(|binding| binding.target.trim().to_string())
+        .filter(|target| !target.is_empty())
 }
 
 #[cfg(test)]

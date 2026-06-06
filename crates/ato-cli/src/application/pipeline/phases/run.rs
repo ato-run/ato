@@ -1964,6 +1964,36 @@ where
             launch_ctx = launch_ctx.with_secret_env(secret_env);
         }
     }
+
+    // #508: materialize SecretStore-analog state bindings into a dedicated,
+    // receipt-excluded mount channel — after relaunch preflight admission and
+    // before spawn. Gated on an installed identity plus at least one
+    // `state.*=binding:<id>` input, so `ato run` and `ato launch <ipk>` open no DB.
+    // A binding that is admitted but whose target was never recorded blocks the
+    // launch (typed). The bound host path reaches the runtime on `state_mounts`,
+    // never `injected_mounts` (which the receipt observes), so it never enters the
+    // execution receipt / session record / logs.
+    if let Some(lifecycle) = request.install_lifecycle_context.as_ref() {
+        let has_state_binding = request.capsule_launch_inputs.iter().any(|input| {
+            input.kind == capsule_core::installed_state::LaunchConditionInputKind::State
+                && matches!(
+                    input.value,
+                    capsule_core::installed_state::LaunchConditionInputValue::Binding(_)
+                )
+        });
+        if has_state_binding {
+            let db = capsule_core::installed_state::InstalledStateDb::open_default()
+                .context("open installed-state DB for state binding materialization")?;
+            let state_mounts =
+                crate::adapters::runtime::state_binding_injection::resolve_state_binding_materialization(
+                    &db,
+                    &lifecycle.install_profile_key,
+                    Some(&lifecycle.install_revision_id),
+                    &request.capsule_launch_inputs,
+                )?;
+            launch_ctx = launch_ctx.with_state_mounts(state_mounts);
+        }
+    }
     if let Some(external_capsules) = external_capsules.as_ref() {
         for (dependency, env) in external_capsules.caller_envs() {
             launch_ctx = launch_ctx.with_injected_env_with_origin(
