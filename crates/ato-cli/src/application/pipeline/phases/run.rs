@@ -1661,6 +1661,30 @@ fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMod
     }
 }
 
+/// Collect concrete per-endpoint preferred ports from `capsule://` port query
+/// inputs (#548). Only `Port` inputs whose value parses as a `u16` contribute;
+/// `port=auto` (the literal `"auto"`) carries no concrete port and is skipped,
+/// so it never becomes a preferred-port claim. Keyed by logical endpoint name
+/// (`main` for the bare `port`).
+fn collect_port_preferences(
+    inputs: &[capsule_core::installed_state::LaunchConditionInput],
+) -> HashMap<String, u16> {
+    use capsule_core::installed_state::{LaunchConditionInputKind, LaunchConditionInputValue};
+    let mut prefs = HashMap::new();
+    for input in inputs {
+        if input.kind != LaunchConditionInputKind::Port {
+            continue;
+        }
+        let LaunchConditionInputValue::Literal(value) = &input.value else {
+            continue;
+        };
+        if let Ok(port) = value.parse::<u16>() {
+            prefs.insert(input.key.clone(), port);
+        }
+    }
+    prefs
+}
+
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -1962,6 +1986,19 @@ where
                 &crate::adapters::runtime::secret_injection::SecretStoreValueStore,
             )?;
             launch_ctx = launch_ctx.with_secret_env(secret_env);
+        }
+    }
+
+    // #548: carry `capsule://…?port[.<endpoint>]=<n>` query inputs as per-endpoint
+    // preferred ports so the web-service port admission picks them before
+    // consulting the claim ledger. Gated on an installed identity, so `ato run`
+    // (no install lifecycle) is untouched. `port=auto` carries no concrete port
+    // (parsed as the literal `"auto"`) and is skipped here, leaving the runtime's
+    // default / auto-assign in place — it never becomes a preferred claim.
+    if request.install_lifecycle_context.is_some() {
+        let port_preferences = collect_port_preferences(&request.capsule_launch_inputs);
+        if !port_preferences.is_empty() {
+            launch_ctx = launch_ctx.with_port_preferences(port_preferences);
         }
     }
     if let Some(external_capsules) = external_capsules.as_ref() {
@@ -4432,10 +4469,11 @@ mod tests {
     use super::{
         ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
         ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
-        PreparedRunContext, RunPipelineState, ServiceRequiredAsset, normalize_existing_path,
-        normalize_write_path, parent_package_id, parse_external_service_contracts,
-        parse_reuse_if_present_service_preflights, reconcile_compat_manifest_targets,
-        resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
+        PreparedRunContext, RunPipelineState, ServiceRequiredAsset, collect_port_preferences,
+        normalize_existing_path, normalize_write_path, parent_package_id,
+        parse_external_service_contracts, parse_reuse_if_present_service_preflights,
+        reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
+        validate_sandbox_grants_best_effort,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -4449,6 +4487,42 @@ mod tests {
 
     fn empty_host_env() -> crate::application::dependency_credentials::MapHostEnv {
         crate::application::dependency_credentials::MapHostEnv::new(&[])
+    }
+
+    #[test]
+    fn collect_port_preferences_keeps_concrete_ports_and_skips_auto() {
+        use capsule_core::installed_state::{
+            LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+        };
+        let port = |key: &str, value: &str| LaunchConditionInput {
+            kind: LaunchConditionInputKind::Port,
+            key: key.to_string(),
+            value: LaunchConditionInputValue::Literal(value.to_string()),
+        };
+        let inputs = vec![
+            port("main", "3001"),
+            port("admin", "auto"),
+            port("api", "8080"),
+            // Non-port inputs are ignored.
+            LaunchConditionInput {
+                kind: LaunchConditionInputKind::Secret,
+                key: "OPENAI_API_KEY".to_string(),
+                value: LaunchConditionInputValue::Grant("g1".to_string()),
+            },
+        ];
+        let prefs = collect_port_preferences(&inputs);
+        assert_eq!(prefs.get("main"), Some(&3001));
+        assert_eq!(prefs.get("api"), Some(&8080));
+        assert!(
+            !prefs.contains_key("admin"),
+            "port=auto carries no concrete port → no preference"
+        );
+        assert_eq!(prefs.len(), 2);
+    }
+
+    #[test]
+    fn collect_port_preferences_empty_for_no_port_inputs() {
+        assert!(collect_port_preferences(&[]).is_empty());
     }
 
     fn workspace_tempdir(name: &str) -> tempfile::TempDir {

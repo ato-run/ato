@@ -75,6 +75,14 @@ pub struct RuntimeLaunchContext {
     /// `RuntimeLaunchContext` does not derive `Serialize`, and `RuntimeSecretEnv`'s
     /// `Debug` redacts the value, so values never reach logs or serialized state.
     secret_env: Vec<RuntimeSecretEnv>,
+    /// Preferred port per logical endpoint requested via a `capsule://` port
+    /// query input (`port=<n>` / `port.<endpoint>=<n>`), keyed by endpoint name
+    /// (`main` for the bare `port`). Used by the web-service port admission to
+    /// pick the preferred port for that endpoint before consulting the claim
+    /// ledger (#548). `port=auto` carries no concrete preference and so produces
+    /// no entry here — the runtime falls back to its default / auto-assign. Empty
+    /// for `ato run` (no install lifecycle), so transient launches are untouched.
+    port_preferences: HashMap<String, u16>,
 }
 
 impl RuntimeLaunchContext {
@@ -97,6 +105,7 @@ impl RuntimeLaunchContext {
                 egress_proxy_port: None,
                 install_profile_key: None,
                 secret_env: Vec::new(),
+                port_preferences: HashMap::new(),
             }
         } else {
             Self::empty()
@@ -217,6 +226,22 @@ impl RuntimeLaunchContext {
 
     pub fn secret_env(&self) -> &[RuntimeSecretEnv] {
         &self.secret_env
+    }
+
+    /// Attach per-endpoint preferred ports requested via `capsule://` port query
+    /// inputs (#548). Keyed by logical endpoint name (`main` for bare `port`).
+    /// `port=auto` carries no concrete port and is excluded by the caller, so it
+    /// never appears here. Empty for `ato run`, leaving transient launches
+    /// untouched.
+    pub fn with_port_preferences(mut self, prefs: HashMap<String, u16>) -> Self {
+        self.port_preferences = prefs;
+        self
+    }
+
+    /// The preferred port a `capsule://` port query requested for `endpoint`, if
+    /// any. `None` when no port input named this endpoint or it was `port=auto`.
+    pub fn preferred_port(&self, endpoint: &str) -> Option<u16> {
+        self.port_preferences.get(endpoint).copied()
     }
 
     pub fn ipc(&self) -> Option<&IpcContext> {
