@@ -1975,18 +1975,22 @@ where
     .with_injected_env(injected_data.env)
     .with_injected_mounts(injected_data.mounts);
 
-    // #508: resolve SecretStore-backed launch-condition grants into a dedicated,
-    // receipt-excluded secret env channel — after relaunch preflight admission and
-    // before spawn. Gated on an installed identity plus at least one
-    // `secret.*=grant:<id>` input, so `ato run` and `ato launch <ipk>` open no DB.
-    // A grant that exists but has no stored value blocks the launch (typed).
+    // #508/#549: resolve SecretStore-backed launch-condition grants into a
+    // dedicated, receipt-excluded secret env channel — after relaunch preflight
+    // admission and before spawn. Gated on an installed identity plus at least one
+    // `secret.*=grant:<id>` OR sensitive `env.*=grant:<id>` input, so `ato run` and
+    // `ato launch <ipk>` open no DB. A grant that exists but has no stored value
+    // blocks the launch (typed).
     if let Some(lifecycle) = request.install_lifecycle_context.as_ref() {
         let has_secret_grant = request.capsule_launch_inputs.iter().any(|input| {
-            input.kind == capsule_core::installed_state::LaunchConditionInputKind::Secret
-                && matches!(
-                    input.value,
-                    capsule_core::installed_state::LaunchConditionInputValue::Grant(_)
-                )
+            matches!(
+                input.kind,
+                capsule_core::installed_state::LaunchConditionInputKind::Secret
+                    | capsule_core::installed_state::LaunchConditionInputKind::Env
+            ) && matches!(
+                input.value,
+                capsule_core::installed_state::LaunchConditionInputValue::Grant(_)
+            )
         });
         if has_secret_grant {
             let db = capsule_core::installed_state::InstalledStateDb::open_default()
