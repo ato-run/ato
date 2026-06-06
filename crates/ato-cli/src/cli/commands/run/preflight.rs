@@ -780,7 +780,9 @@ fn run_lifecycle_shell_command(
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", command]);
+        // `/D` disables AutoRun so a broken/foreign \Command Processor\AutoRun script
+        // cannot pollute output or leak a non-zero exit code into the lifecycle command.
+        cmd.args(["/D", "/C", command]);
         cmd
     };
 
