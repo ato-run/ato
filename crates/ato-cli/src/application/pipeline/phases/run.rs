@@ -1661,6 +1661,43 @@ fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMod
     }
 }
 
+/// Collect per-endpoint preferred-port requests from `capsule://` port query
+/// inputs (#548). Keyed by logical endpoint name (`main` for the bare `port`):
+///
+/// - a value parsing as `u16` → [`PortPreference::Concrete`] (the requested
+///   preferred port).
+/// - the literal `"auto"` → [`PortPreference::Auto`], an *explicit* "no concrete
+///   preferred port" that suppresses the env-`PORT` fallback for that endpoint at
+///   admission time (so `port=auto` with `PORT` in the service env creates no
+///   concrete claim — it lands on the runtime's OS auto-assign path).
+///
+/// Other `Literal` values (non-numeric, out-of-range) are dropped: parsing
+/// already rejects them, so they should never reach here.
+fn collect_port_preferences(
+    inputs: &[capsule_core::installed_state::LaunchConditionInput],
+) -> HashMap<String, crate::executors::launch_context::PortPreference> {
+    use crate::executors::launch_context::PortPreference;
+    use capsule_core::installed_state::{LaunchConditionInputKind, LaunchConditionInputValue};
+    let mut prefs = HashMap::new();
+    for input in inputs {
+        if input.kind != LaunchConditionInputKind::Port {
+            continue;
+        }
+        let LaunchConditionInputValue::Literal(value) = &input.value else {
+            continue;
+        };
+        let preference = if value == "auto" {
+            PortPreference::Auto
+        } else if let Ok(port) = value.parse::<u16>() {
+            PortPreference::Concrete(port)
+        } else {
+            continue;
+        };
+        prefs.insert(input.key.clone(), preference);
+    }
+    prefs
+}
+
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -1992,6 +2029,21 @@ where
                     &request.capsule_launch_inputs,
                 )?;
             launch_ctx = launch_ctx.with_state_mounts(state_mounts);
+        }
+    }
+
+    // #548: carry `capsule://…?port[.<endpoint>]=<n>` query inputs as per-endpoint
+    // preferred ports so the web-service port admission picks them before
+    // consulting the claim ledger. Gated on an installed identity, so `ato run`
+    // (no install lifecycle) is untouched. `port=auto` (the literal `"auto"`) is
+    // carried as `PortPreference::Auto` — an *explicit* "no concrete preferred
+    // port" that suppresses the env-`PORT` fallback for that endpoint at
+    // admission time, so it never becomes a concrete claim and the runtime uses
+    // its OS auto-assign path.
+    if request.install_lifecycle_context.is_some() {
+        let port_preferences = collect_port_preferences(&request.capsule_launch_inputs);
+        if !port_preferences.is_empty() {
+            launch_ctx = launch_ctx.with_port_preferences(port_preferences);
         }
     }
     if let Some(external_capsules) = external_capsules.as_ref() {
@@ -4462,10 +4514,11 @@ mod tests {
     use super::{
         ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
         ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
-        PreparedRunContext, RunPipelineState, ServiceRequiredAsset, normalize_existing_path,
-        normalize_write_path, parent_package_id, parse_external_service_contracts,
-        parse_reuse_if_present_service_preflights, reconcile_compat_manifest_targets,
-        resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
+        PreparedRunContext, RunPipelineState, ServiceRequiredAsset, collect_port_preferences,
+        normalize_existing_path, normalize_write_path, parent_package_id,
+        parse_external_service_contracts, parse_reuse_if_present_service_preflights,
+        reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
+        validate_sandbox_grants_best_effort,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -4479,6 +4532,59 @@ mod tests {
 
     fn empty_host_env() -> crate::application::dependency_credentials::MapHostEnv {
         crate::application::dependency_credentials::MapHostEnv::new(&[])
+    }
+
+    #[test]
+    fn collect_port_preferences_records_concrete_ports_and_explicit_auto() {
+        use crate::executors::launch_context::PortPreference;
+        use capsule_core::installed_state::{
+            LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+        };
+        let port = |key: &str, value: &str| LaunchConditionInput {
+            kind: LaunchConditionInputKind::Port,
+            key: key.to_string(),
+            value: LaunchConditionInputValue::Literal(value.to_string()),
+        };
+        let inputs = vec![
+            port("main", "3001"),
+            port("admin", "auto"),
+            port("api", "8080"),
+            // Non-port inputs are ignored.
+            LaunchConditionInput {
+                kind: LaunchConditionInputKind::Secret,
+                key: "OPENAI_API_KEY".to_string(),
+                value: LaunchConditionInputValue::Grant("g1".to_string()),
+            },
+        ];
+        let prefs = collect_port_preferences(&inputs);
+        assert_eq!(prefs.get("main"), Some(&PortPreference::Concrete(3001)));
+        assert_eq!(prefs.get("api"), Some(&PortPreference::Concrete(8080)));
+        assert_eq!(
+            prefs.get("admin"),
+            Some(&PortPreference::Auto),
+            "port=auto is recorded as explicit Auto (suppresses env-PORT fallback)"
+        );
+        assert_eq!(prefs.len(), 3);
+    }
+
+    #[test]
+    fn collect_port_preferences_drops_unparseable_literal() {
+        use capsule_core::installed_state::{
+            LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+        };
+        // Parsing already rejects non-numeric / out-of-range port literals, but the
+        // collector defensively drops anything that is neither `auto` nor a u16.
+        let inputs = vec![LaunchConditionInput {
+            kind: LaunchConditionInputKind::Port,
+            key: "main".to_string(),
+            value: LaunchConditionInputValue::Literal("not-a-port".to_string()),
+        }];
+        assert!(collect_port_preferences(&inputs).is_empty());
+    }
+
+    #[test]
+    fn collect_port_preferences_empty_for_no_port_inputs() {
+        assert!(collect_port_preferences(&[]).is_empty());
     }
 
     fn workspace_tempdir(name: &str) -> tempfile::TempDir {
