@@ -15,6 +15,23 @@ pub struct InjectedMount {
     pub readonly: bool,
 }
 
+/// Per-endpoint preferred-port request carried from a `capsule://` port query
+/// input (#548).
+///
+/// - `Concrete(n)` — `port[.<endpoint>]=<n>`: this exact port is the preferred
+///   port for the endpoint; admission records a claim with it.
+/// - `Auto` — `port[.<endpoint>]=auto`: an *explicit* request for no concrete
+///   preferred port. This is distinct from "no entry": it actively **suppresses
+///   the env `PORT` fallback** for that endpoint so the runtime uses its OS
+///   auto-assign path and creates no concrete preferred-port claim from the
+///   query. Concrete query ports still win; an endpoint with no entry at all
+///   keeps the existing env-`PORT` behavior unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortPreference {
+    Concrete(u16),
+    Auto,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeLaunchContext {
     ipc: Option<IpcContext>,
@@ -75,14 +92,20 @@ pub struct RuntimeLaunchContext {
     /// `RuntimeLaunchContext` does not derive `Serialize`, and `RuntimeSecretEnv`'s
     /// `Debug` redacts the value, so values never reach logs or serialized state.
     secret_env: Vec<RuntimeSecretEnv>,
-    /// Preferred port per logical endpoint requested via a `capsule://` port
-    /// query input (`port=<n>` / `port.<endpoint>=<n>`), keyed by endpoint name
-    /// (`main` for the bare `port`). Used by the web-service port admission to
-    /// pick the preferred port for that endpoint before consulting the claim
-    /// ledger (#548). `port=auto` carries no concrete preference and so produces
-    /// no entry here — the runtime falls back to its default / auto-assign. Empty
-    /// for `ato run` (no install lifecycle), so transient launches are untouched.
-    port_preferences: HashMap<String, u16>,
+    /// Preferred-port request per logical endpoint from a `capsule://` port query
+    /// input (`port=<n>` / `port.<endpoint>=<n>` / `port[.<endpoint>]=auto`),
+    /// keyed by endpoint name (`main` for the bare `port`). Used by the web-service
+    /// port admission to pick the preferred port for that endpoint before
+    /// consulting the claim ledger (#548).
+    ///
+    /// - `Concrete(n)` → that port is preferred.
+    /// - `Auto` → an *explicit* "no concrete preferred port" that suppresses the
+    ///   env-`PORT` fallback for that endpoint (OS auto-assign, no concrete claim).
+    /// - no entry → unchanged behavior: env-`PORT` fallback applies.
+    ///
+    /// Empty for `ato run` (no install lifecycle), so transient launches are
+    /// untouched.
+    port_preferences: HashMap<String, PortPreference>,
 }
 
 impl RuntimeLaunchContext {
@@ -228,19 +251,22 @@ impl RuntimeLaunchContext {
         &self.secret_env
     }
 
-    /// Attach per-endpoint preferred ports requested via `capsule://` port query
+    /// Attach per-endpoint preferred-port requests from `capsule://` port query
     /// inputs (#548). Keyed by logical endpoint name (`main` for bare `port`).
-    /// `port=auto` carries no concrete port and is excluded by the caller, so it
-    /// never appears here. Empty for `ato run`, leaving transient launches
-    /// untouched.
-    pub fn with_port_preferences(mut self, prefs: HashMap<String, u16>) -> Self {
+    /// `port[.<endpoint>]=auto` is carried as [`PortPreference::Auto`] so it can
+    /// explicitly suppress the env-`PORT` fallback for that endpoint. Empty for
+    /// `ato run`, leaving transient launches untouched.
+    pub fn with_port_preferences(mut self, prefs: HashMap<String, PortPreference>) -> Self {
         self.port_preferences = prefs;
         self
     }
 
-    /// The preferred port a `capsule://` port query requested for `endpoint`, if
-    /// any. `None` when no port input named this endpoint or it was `port=auto`.
-    pub fn preferred_port(&self, endpoint: &str) -> Option<u16> {
+    /// The preferred-port request a `capsule://` port query made for `endpoint`,
+    /// if any. `None` when no port input named this endpoint (so the env-`PORT`
+    /// fallback applies); `Some(PortPreference::Auto)` when the query explicitly
+    /// asked for auto (suppressing that fallback); `Some(PortPreference::Concrete)`
+    /// for a concrete requested port.
+    pub fn port_preference(&self, endpoint: &str) -> Option<PortPreference> {
         self.port_preferences.get(endpoint).copied()
     }
 
