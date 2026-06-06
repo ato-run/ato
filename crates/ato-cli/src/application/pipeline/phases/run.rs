@@ -1661,14 +1661,22 @@ fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMod
     }
 }
 
-/// Collect concrete per-endpoint preferred ports from `capsule://` port query
-/// inputs (#548). Only `Port` inputs whose value parses as a `u16` contribute;
-/// `port=auto` (the literal `"auto"`) carries no concrete port and is skipped,
-/// so it never becomes a preferred-port claim. Keyed by logical endpoint name
-/// (`main` for the bare `port`).
+/// Collect per-endpoint preferred-port requests from `capsule://` port query
+/// inputs (#548). Keyed by logical endpoint name (`main` for the bare `port`):
+///
+/// - a value parsing as `u16` → [`PortPreference::Concrete`] (the requested
+///   preferred port).
+/// - the literal `"auto"` → [`PortPreference::Auto`], an *explicit* "no concrete
+///   preferred port" that suppresses the env-`PORT` fallback for that endpoint at
+///   admission time (so `port=auto` with `PORT` in the service env creates no
+///   concrete claim — it lands on the runtime's OS auto-assign path).
+///
+/// Other `Literal` values (non-numeric, out-of-range) are dropped: parsing
+/// already rejects them, so they should never reach here.
 fn collect_port_preferences(
     inputs: &[capsule_core::installed_state::LaunchConditionInput],
-) -> HashMap<String, u16> {
+) -> HashMap<String, crate::executors::launch_context::PortPreference> {
+    use crate::executors::launch_context::PortPreference;
     use capsule_core::installed_state::{LaunchConditionInputKind, LaunchConditionInputValue};
     let mut prefs = HashMap::new();
     for input in inputs {
@@ -1678,9 +1686,14 @@ fn collect_port_preferences(
         let LaunchConditionInputValue::Literal(value) = &input.value else {
             continue;
         };
-        if let Ok(port) = value.parse::<u16>() {
-            prefs.insert(input.key.clone(), port);
-        }
+        let preference = if value == "auto" {
+            PortPreference::Auto
+        } else if let Ok(port) = value.parse::<u16>() {
+            PortPreference::Concrete(port)
+        } else {
+            continue;
+        };
+        prefs.insert(input.key.clone(), preference);
     }
     prefs
 }
@@ -1992,9 +2005,11 @@ where
     // #548: carry `capsule://…?port[.<endpoint>]=<n>` query inputs as per-endpoint
     // preferred ports so the web-service port admission picks them before
     // consulting the claim ledger. Gated on an installed identity, so `ato run`
-    // (no install lifecycle) is untouched. `port=auto` carries no concrete port
-    // (parsed as the literal `"auto"`) and is skipped here, leaving the runtime's
-    // default / auto-assign in place — it never becomes a preferred claim.
+    // (no install lifecycle) is untouched. `port=auto` (the literal `"auto"`) is
+    // carried as `PortPreference::Auto` — an *explicit* "no concrete preferred
+    // port" that suppresses the env-`PORT` fallback for that endpoint at
+    // admission time, so it never becomes a concrete claim and the runtime uses
+    // its OS auto-assign path.
     if request.install_lifecycle_context.is_some() {
         let port_preferences = collect_port_preferences(&request.capsule_launch_inputs);
         if !port_preferences.is_empty() {
@@ -4490,7 +4505,8 @@ mod tests {
     }
 
     #[test]
-    fn collect_port_preferences_keeps_concrete_ports_and_skips_auto() {
+    fn collect_port_preferences_records_concrete_ports_and_explicit_auto() {
+        use crate::executors::launch_context::PortPreference;
         use capsule_core::installed_state::{
             LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
         };
@@ -4511,13 +4527,29 @@ mod tests {
             },
         ];
         let prefs = collect_port_preferences(&inputs);
-        assert_eq!(prefs.get("main"), Some(&3001));
-        assert_eq!(prefs.get("api"), Some(&8080));
-        assert!(
-            !prefs.contains_key("admin"),
-            "port=auto carries no concrete port → no preference"
+        assert_eq!(prefs.get("main"), Some(&PortPreference::Concrete(3001)));
+        assert_eq!(prefs.get("api"), Some(&PortPreference::Concrete(8080)));
+        assert_eq!(
+            prefs.get("admin"),
+            Some(&PortPreference::Auto),
+            "port=auto is recorded as explicit Auto (suppresses env-PORT fallback)"
         );
-        assert_eq!(prefs.len(), 2);
+        assert_eq!(prefs.len(), 3);
+    }
+
+    #[test]
+    fn collect_port_preferences_drops_unparseable_literal() {
+        use capsule_core::installed_state::{
+            LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+        };
+        // Parsing already rejects non-numeric / out-of-range port literals, but the
+        // collector defensively drops anything that is neither `auto` nor a u16.
+        let inputs = vec![LaunchConditionInput {
+            kind: LaunchConditionInputKind::Port,
+            key: "main".to_string(),
+            value: LaunchConditionInputValue::Literal("not-a-port".to_string()),
+        }];
+        assert!(collect_port_preferences(&inputs).is_empty());
     }
 
     #[test]
