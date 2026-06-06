@@ -507,6 +507,12 @@ pub(crate) enum Commands {
         /// Override the nacelle runtime binary path
         #[arg(long, hide = true)]
         nacelle: Option<PathBuf>,
+
+        /// Internal (ato-desktop): start the installed app as a detached session
+        /// that writes a discoverable session record, instead of running
+        /// foreground. Not for interactive use. See #565.
+        #[arg(long = "detached-session", hide = true, default_value_t = false)]
+        detached_session: bool,
     },
 
     #[command(about = "List install revisions for an installed app profile")]
