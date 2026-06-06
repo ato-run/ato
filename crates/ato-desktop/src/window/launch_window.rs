@@ -1502,7 +1502,9 @@ fn ensure_installed_session(
         match crate::orchestrator::try_reuse_live_session_for_install_profile_key(
             install_profile_key,
         ) {
-            // Success: leave the launch process running — it serves the app.
+            // Success: the detached session that `ato launch` wrote serves the
+            // app. The launch process itself may have already exited (it now
+            // detaches once the session record is on disk, #565).
             Ok(Some(session)) => {
                 log_installed_handle_mismatch(&session, handle, install_profile_key);
                 return Ok(session);
@@ -1514,6 +1516,27 @@ fn ensure_installed_session(
         }
         match launched.child.try_wait() {
             Ok(Some(status)) => {
+                // `ato launch` now starts the installed app as a *detached*
+                // session and exits 0 once the session record is written (#565),
+                // so a clean exit is the normal success handoff rather than an
+                // early failure. The record is already on disk; re-poll briefly
+                // before concluding failure, covering the instant between the
+                // child exiting and the record's healthcheck settling. A
+                // non-zero exit is a real failure — surface it immediately.
+                if status.success() {
+                    let grace = std::time::Instant::now() + Duration::from_secs(5);
+                    while std::time::Instant::now() < grace && !abort.load(Ordering::Acquire) {
+                        if let Ok(Some(session)) =
+                            crate::orchestrator::try_reuse_live_session_for_install_profile_key(
+                                install_profile_key,
+                            )
+                        {
+                            log_installed_handle_mismatch(&session, handle, install_profile_key);
+                            return Ok(session);
+                        }
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
+                }
                 let tail = crate::orchestrator::read_installed_launch_log_tail(&launched.log_path);
                 let detail = if tail.is_empty() {
                     String::new()
@@ -1521,7 +1544,7 @@ fn ensure_installed_session(
                     format!("\n{tail}")
                 };
                 break Err(anyhow::anyhow!(
-                    "`ato launch` exited early ({status}) before the app was ready.{detail}"
+                    "`ato launch` exited ({status}) without establishing a discoverable session.{detail}"
                 ));
             }
             Ok(None) => {}
