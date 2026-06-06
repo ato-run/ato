@@ -145,10 +145,11 @@ pub fn resolve_state_binding_from_path_with_location(
         )));
     }
 
-    // The registry validates the condition key as a reserved `state.*` key. Be
-    // permissive about the caller passing either the bare key (`data`) or the
-    // namespaced key (`state.data`): normalize to the namespaced reserved form
-    // the registry and the resolver agree on.
+    // Accept the bare key (`data`) or the namespaced key (`state.data`), but
+    // ONLY when it names exactly this `state_key`; a mismatched pair (e.g.
+    // `condition_key = "state.other"`, `state_key = "data"`) is rejected so we
+    // never silently bind a different state than the caller intends. The result
+    // is the canonical `state.<state_key>` form the registry and resolver agree on.
     let registry_condition_key = normalize_state_condition_key(condition_key, state_key)?;
 
     let binding_id = derive_state_binding_id(install_profile_key, &registry_condition_key);
@@ -186,24 +187,67 @@ pub fn resolve_state_binding_from_path_with_location(
     })
 }
 
-/// Normalize a caller-supplied condition key to the reserved `state.<key>` form.
+/// Normalize a caller-supplied condition key to the canonical `state.<state_key>`
+/// form, enforcing that the key refers to *exactly* the given `state_key`.
 ///
-/// Accepts the bare key (`data`) or the already-namespaced key (`state.data`).
-/// Rejects a key that names a *different* state, a non-`state.*` namespace, or a
-/// path/URI-shaped key (via `condition_key_kind`'s validation), so a malformed
-/// key can never reach the registry.
+/// The caller passes the install identity, the ledger claim's `condition_key`,
+/// and the bare `state_key` independently; nothing upstream guarantees they
+/// agree. If we trusted `condition_key` blindly, a mismatched pair (e.g.
+/// `condition_key = "state.other"`, `state_key = "data"`) would bind
+/// `state.other` while the caller believes it resolved `data` — a silent
+/// wrong-binding correctness bug for the Desktop picker. So we require:
+///
+/// - **bare key** (`data`): must equal `state_key`; canonicalized to
+///   `state.<state_key>`;
+/// - **namespaced key** (`state.data`): must equal `state.<state_key>` exactly;
+/// - anything else (a different state, a non-`state.*` namespace, a path/URI-
+///   shaped key) is rejected via `condition_key_kind`'s validation plus the
+///   exact-match check, so a malformed or mismatched key can never reach the
+///   registry.
+///
+/// The returned value is always the canonical `state.<state_key>` — the single
+/// form the registry, the binding-id derivation, and the relaunch resolver agree
+/// on. Errors name only the logical condition/state keys, never the host path.
 fn normalize_state_condition_key(condition_key: &str, state_key: &str) -> Result<String> {
-    let normalized = if condition_key.contains('.') {
-        condition_key.to_string()
+    let canonical = format!("state.{state_key}");
+
+    if condition_key.contains('.') {
+        // A namespaced key must be a valid reserved `state.*` key (rejects
+        // non-`state.*` namespaces, path/URI-shaped keys, forbidden namespaces)
+        // AND name exactly this state: `state.<state_key>`.
+        match condition_key_kind(condition_key)? {
+            LaunchConditionInputKind::State => {}
+            other => {
+                return Err(CapsuleError::Runtime(format!(
+                    "condition key must be a state.* key (got {other:?} kind '{condition_key}')"
+                )));
+            }
+        }
+        if condition_key != canonical {
+            return Err(CapsuleError::Runtime(format!(
+                "condition key '{condition_key}' does not match state key '{state_key}'; \
+                 expected '{canonical}'"
+            )));
+        }
     } else {
-        // A bare key: namespace it as `state.<key>`. We use the explicit
-        // state_key to avoid trusting an ambiguous bare condition_key.
-        format!("state.{state_key}")
-    };
-    match condition_key_kind(&normalized)? {
-        LaunchConditionInputKind::State => Ok(normalized),
+        // A bare key must be exactly the state key it claims to resolve. We do
+        // not silently accept e.g. `other` for `state.data`.
+        if condition_key != state_key {
+            return Err(CapsuleError::Runtime(format!(
+                "bare condition key '{condition_key}' does not match state key '{state_key}'; \
+                 expected '{state_key}' or '{canonical}'"
+            )));
+        }
+    }
+
+    // Validate the canonical form is itself a well-formed `state.*` key (this
+    // also rejects an empty state_key reaching here), then return it — the
+    // single form everything downstream agrees on.
+    match condition_key_kind(&canonical)? {
+        LaunchConditionInputKind::State => Ok(canonical),
         other => Err(CapsuleError::Runtime(format!(
-            "condition key must be a state.* key (got {other:?} kind '{normalized}')"
+            "state key '{state_key}' is not a valid state.* condition key \
+             (got {other:?} kind '{canonical}')"
         ))),
     }
 }
@@ -322,6 +366,73 @@ mod tests {
         assert!(format!("{err}").to_lowercase().contains("state"));
         let binding_id = derive_state_binding_id("ipk_app", "secret.TOKEN");
         assert!(!db.state_binding_target_exists(&binding_id).unwrap());
+    }
+
+    #[test]
+    fn resolve_state_binding_rejects_condition_key_for_different_state() {
+        let (_d, db) = temp_db();
+        // A well-formed `state.*` condition key that names a DIFFERENT state than
+        // the bare `state_key` the caller is resolving must be rejected — never
+        // silently bind `state.other` while the caller believes it bound `data`.
+        let err =
+            resolve_state_binding_from_path(&db, "ipk_app", "state.other", "data", STATE_PATH)
+                .unwrap_err();
+        let rendered = format!("{err}");
+        // The error names the logical keys, never the host path.
+        assert!(rendered.contains("state.other"));
+        assert!(rendered.contains("data"));
+        assert!(!rendered.contains(STATE_PATH));
+        // Nothing was recorded for EITHER state — fail-closed before any write.
+        let mismatched_id = derive_state_binding_id("ipk_app", "state.other");
+        let claimed_id = derive_state_binding_id("ipk_app", "state.data");
+        assert!(!db.state_binding_target_exists(&mismatched_id).unwrap());
+        assert!(!db.state_binding_ref_exists(&mismatched_id).unwrap());
+        assert!(!db.state_binding_target_exists(&claimed_id).unwrap());
+        assert!(!db.state_binding_ref_exists(&claimed_id).unwrap());
+    }
+
+    #[test]
+    fn resolve_state_binding_accepts_bare_matching_state_key() {
+        let (_d, db) = temp_db();
+        // A bare condition key that equals the state key resolves, canonicalizing
+        // to `state.<state_key>` (same id/input as the namespaced form).
+        let resolved =
+            resolve_state_binding_from_path(&db, "ipk_app", "data", "data", STATE_PATH).unwrap();
+        let canonical_id = derive_state_binding_id("ipk_app", "state.data");
+        assert_eq!(resolved.binding_id, canonical_id);
+        assert_eq!(
+            resolved.launch_input,
+            format!("state.data=binding:{canonical_id}")
+        );
+        assert!(db.state_binding_ref_exists(&resolved.binding_id).unwrap());
+        // A bare key that does NOT equal the state key is rejected before any write.
+        let err = resolve_state_binding_from_path(&db, "ipk_app", "other", "data", STATE_PATH)
+            .unwrap_err();
+        let rendered = format!("{err}");
+        assert!(rendered.contains("other"));
+        assert!(rendered.contains("data"));
+        assert!(!rendered.contains(STATE_PATH));
+        assert!(
+            !db.state_binding_target_exists(&derive_state_binding_id("ipk_app", "state.other"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_state_binding_accepts_namespaced_matching_state_key() {
+        let (_d, db) = temp_db();
+        // A namespaced condition key that equals `state.<state_key>` resolves and
+        // records the canonical binding.
+        let resolved =
+            resolve_state_binding_from_path(&db, "ipk_app", "state.data", "data", STATE_PATH)
+                .unwrap();
+        let canonical_id = derive_state_binding_id("ipk_app", "state.data");
+        assert_eq!(resolved.binding_id, canonical_id);
+        assert_eq!(
+            resolved.launch_input,
+            format!("state.data=binding:{canonical_id}")
+        );
+        assert!(db.state_binding_ref_exists(&resolved.binding_id).unwrap());
     }
 
     #[test]
