@@ -24,6 +24,10 @@ use capsule_core::podman::{self, ATO_PODMAN_MACHINE_NAME, PodmanResolveError, Re
 use capsule_core::runtime_setup::{InstallPhase, InstallStrategy, ToolKind};
 
 use crate::adapters::runtime::podman_machine::{PodmanMachine, parse_machine_entries};
+use crate::application::podman_install::{
+    PodmanInstallStrategy, ReqwestArtifactFetcher, install_ato_managed_podman, install_strategies,
+    pinned_artifact,
+};
 use crate::application::runtime_setup::{emit_progress, install_tools};
 
 /// Public entry for `ato internal runtime prepare --tools … [--emit-json]`.
@@ -102,11 +106,9 @@ fn classify_prepare_tools(
 pub(crate) enum PrepareError {
     /// `ATO_PODMAN_BIN` was set but unusable — fail hard, never substitute.
     InvalidOverride(String),
-    /// Podman is missing and Ato cannot install it here (no brew, or an
-    /// unsupported platform); carries instructions.
+    /// Podman is missing and Ato could not install it here (no strategy
+    /// succeeded); carries Homebrew-free, actionable instructions.
     InstallUnavailable(String),
-    /// The install command ran but failed.
-    InstallFailed(String),
     /// After installing, Podman still could not be resolved (likely a PATH
     /// refresh / restart is required).
     StillMissingAfterInstall(String),
@@ -129,7 +131,6 @@ impl std::fmt::Display for PrepareError {
         match self {
             Self::InvalidOverride(m) => write!(f, "{m}"),
             Self::InstallUnavailable(m) => write!(f, "{m}"),
-            Self::InstallFailed(m) => write!(f, "podman install failed: {m}"),
             Self::StillMissingAfterInstall(m) => write!(f, "{m}"),
             Self::MachineQueryFailed(m) => write!(f, "could not read podman machines: {m}"),
             Self::MachineInitFailed(m) => {
@@ -232,6 +233,20 @@ trait PrepareEnv {
     fn brew_bin(&self) -> Option<PathBuf>;
     /// Run `brew install podman`.
     fn run_brew_install_podman(&self, brew: &Path) -> std::io::Result<CmdOutput>;
+    /// Host OS, in `std::env::consts::OS` spelling.
+    fn host_os(&self) -> &str;
+    /// Host arch, in `std::env::consts::ARCH` spelling.
+    fn host_arch(&self) -> &str;
+    /// Whether Ato has a pinned managed Podman build for this host. Demotes
+    /// Homebrew to optional: a brew-less host with a managed build still
+    /// installs.
+    fn managed_podman_available(&self) -> bool {
+        pinned_artifact(self.host_os(), self.host_arch()).is_some()
+    }
+    /// Download, digest-verify, and extract an Ato-managed Podman into the tools
+    /// cache. Returns the install error string on failure (already actionable
+    /// and never a "install Homebrew" instruction).
+    fn install_ato_managed_podman(&self) -> Result<(), String>;
 }
 
 /// Real host environment: spawns processes, resolving podman through PR #436's
@@ -272,6 +287,24 @@ impl PrepareEnv for SystemPrepareEnv {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
+    }
+
+    fn host_os(&self) -> &str {
+        std::env::consts::OS
+    }
+
+    fn host_arch(&self) -> &str {
+        std::env::consts::ARCH
+    }
+
+    fn install_ato_managed_podman(&self) -> Result<(), String> {
+        let tools_dir =
+            capsule_core::common::paths::ato_tools_dir().map_err(|err| err.to_string())?;
+        std::fs::create_dir_all(&tools_dir).map_err(|err| err.to_string())?;
+        let fetcher = ReqwestArtifactFetcher;
+        install_ato_managed_podman(&fetcher, self.host_os(), self.host_arch(), &tools_dir)
+            .map(|_| ())
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -414,31 +447,23 @@ fn invalid_override(path: &Path) -> PrepareError {
     ))
 }
 
-/// Install Podman after explicit opt-in. macOS uses Homebrew; other platforms
-/// return actionable instructions rather than running an installer here.
+/// Install Podman after explicit opt-in.
+///
+/// macOS iterates the ordered strategies from [`install_strategies`]: an
+/// already-present Homebrew first, then the **Ato-managed installer**
+/// (download + digest-verify + extract into `~/.ato/tools`), then actionable
+/// manual instructions. A missing Homebrew is **not** an error — it simply
+/// falls through to the Ato-managed path so a clean VM with no brew still gets
+/// Podman. The manual instructions never tell the user to install Homebrew.
+///
+/// Windows/Linux keep their package-manager instructions (they never required
+/// Homebrew); an Ato-managed path for those targets is a documented follow-up.
 fn install_podman<E: PrepareEnv, R: PrepareReporter>(
     env: &E,
     reporter: &R,
 ) -> Result<(), PrepareError> {
     match env.platform() {
-        PreparePlatform::Macos => {
-            let Some(brew) = env.brew_bin() else {
-                return Err(PrepareError::InstallUnavailable(
-                    "Podman is not installed and Homebrew was not found. Install Homebrew \
-                     (https://brew.sh) and re-run, or install Podman manually from \
-                     https://podman.io/docs/installation."
-                        .to_string(),
-                ));
-            };
-            reporter.phase(InstallPhase::Installing, "Installing Podman via Homebrew…");
-            let out = env
-                .run_brew_install_podman(&brew)
-                .map_err(|err| PrepareError::InstallFailed(err.to_string()))?;
-            if !out.success() {
-                return Err(PrepareError::InstallFailed(out.message()));
-            }
-            Ok(())
-        }
+        PreparePlatform::Macos => install_podman_macos(env, reporter),
         PreparePlatform::Windows => Err(PrepareError::InstallUnavailable(
             "Podman is not installed. Install it (e.g. `winget install RedHat.Podman`) and \
              re-run; a sign-out/restart may be required before the CLI is visible."
@@ -453,6 +478,71 @@ fn install_podman<E: PrepareEnv, R: PrepareReporter>(
             "Podman preparation is not supported on this platform".to_string(),
         )),
     }
+}
+
+/// macOS strategy loop. Tries each strategy in order; a strategy that is merely
+/// *unavailable* (e.g. brew absent) is skipped, while a strategy that *runs and
+/// fails* records its error. Only when every strategy is exhausted is the
+/// accumulated, brew-free actionable message returned.
+fn install_podman_macos<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+) -> Result<(), PrepareError> {
+    let brew_present = env.brew_bin().is_some();
+    let managed_available = env.managed_podman_available();
+    let mut attempt_errors: Vec<String> = Vec::new();
+
+    for strategy in install_strategies(brew_present, managed_available) {
+        match strategy {
+            PodmanInstallStrategy::Homebrew => {
+                // Only reached when brew is present.
+                let Some(brew) = env.brew_bin() else { continue };
+                reporter.phase(InstallPhase::Installing, "Installing Podman via Homebrew…");
+                match env.run_brew_install_podman(&brew) {
+                    Ok(out) if out.success() => return Ok(()),
+                    Ok(out) => attempt_errors.push(format!("Homebrew: {}", out.message())),
+                    Err(err) => attempt_errors.push(format!("Homebrew: {err}")),
+                }
+            }
+            PodmanInstallStrategy::AtoManaged => {
+                reporter.phase(
+                    InstallPhase::Downloading,
+                    "Downloading a verified Podman build (no Homebrew required)…",
+                );
+                match env.install_ato_managed_podman() {
+                    Ok(()) => return Ok(()),
+                    Err(err) => attempt_errors.push(format!("Ato-managed install: {err}")),
+                }
+            }
+            PodmanInstallStrategy::ManualInstructions => {
+                return Err(PrepareError::InstallUnavailable(manual_install_message(
+                    &attempt_errors,
+                )));
+            }
+        }
+    }
+
+    // `install_strategies` always ends with ManualInstructions, so the loop
+    // returns above; this is defensive.
+    Err(PrepareError::InstallUnavailable(manual_install_message(
+        &attempt_errors,
+    )))
+}
+
+/// The last-resort, **Homebrew-free** instruction. Surfaces any earlier
+/// strategy failures so the user can see *why* auto-install did not work, then
+/// points at the official installer — never at `brew.sh`.
+fn manual_install_message(attempt_errors: &[String]) -> String {
+    let mut msg = String::from(
+        "Ato could not automatically install a local container runtime. Install Podman \
+         manually from https://podman.io/docs/installation and re-run.",
+    );
+    if !attempt_errors.is_empty() {
+        msg.push_str(" (attempts: ");
+        msg.push_str(&attempt_errors.join("; "));
+        msg.push(')');
+    }
+    msg
 }
 
 fn still_missing_message(platform: PreparePlatform) -> String {
@@ -643,6 +733,11 @@ mod tests {
         podman: HashMap<String, CmdOutput>,
         brew: Option<PathBuf>,
         brew_install: Option<CmdOutput>,
+        /// Whether a pinned Ato-managed Podman build exists for this fake host.
+        managed_available: bool,
+        /// Result of the Ato-managed install (`Ok` = success). `None` means the
+        /// strategy is never expected to run in this test.
+        managed_install: Option<Result<(), String>>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -654,8 +749,18 @@ mod tests {
                 podman: HashMap::new(),
                 brew: None,
                 brew_install: None,
+                managed_available: false,
+                managed_install: None,
                 calls: RefCell::new(Vec::new()),
             }
+        }
+
+        /// Configure the Ato-managed installer: whether a build is pinned for
+        /// the host and, when run, whether it succeeds.
+        fn with_managed(mut self, available: bool, result: Option<Result<(), String>>) -> Self {
+            self.managed_available = available;
+            self.managed_install = result;
+            self
         }
 
         fn with_resolves(
@@ -729,6 +834,34 @@ mod tests {
             self.brew_install.clone().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "brew install not configured")
             })
+        }
+
+        fn host_os(&self) -> &str {
+            // Map the fake platform to a `std::env::consts::OS` spelling so the
+            // managed-availability default would behave; overridden directly.
+            match self.platform {
+                PreparePlatform::Macos => "macos",
+                PreparePlatform::Windows => "windows",
+                PreparePlatform::Linux => "linux",
+                PreparePlatform::Other => "other",
+            }
+        }
+
+        fn host_arch(&self) -> &str {
+            "aarch64"
+        }
+
+        fn managed_podman_available(&self) -> bool {
+            self.managed_available
+        }
+
+        fn install_ato_managed_podman(&self) -> Result<(), String> {
+            self.calls
+                .borrow_mut()
+                .push("ato-managed install podman".to_string());
+            self.managed_install
+                .clone()
+                .unwrap_or_else(|| Err("ato-managed install not configured".to_string()))
         }
     }
 
@@ -835,17 +968,145 @@ mod tests {
     }
 
     #[test]
-    fn missing_podman_without_brew_is_install_unavailable() {
+    fn missing_podman_without_brew_or_managed_is_actionable_not_brew() {
+        // No brew AND no managed build for this host: the only path left is the
+        // manual instruction. It must be actionable and must NOT tell the user
+        // to install Homebrew.
         let env = FakeEnv::new(PreparePlatform::Macos)
             .with_resolves(vec![Err(PodmanResolveError::NotFound {
                 searched: Vec::new(),
             })])
-            .with_brew(None, None);
+            .with_brew(None, None)
+            .with_managed(false, None);
         let reporter = RecordingReporter::default();
-        let err = prepare_podman(&env, &reporter).expect_err("no brew => unavailable");
+        let err = prepare_podman(&env, &reporter).expect_err("nothing available => unavailable");
+        let PrepareError::InstallUnavailable(msg) = &err else {
+            panic!("expected InstallUnavailable, got {err:?}");
+        };
         assert!(
-            matches!(err, PrepareError::InstallUnavailable(_)),
-            "{err:?}"
+            !msg.to_lowercase().contains("homebrew") && !msg.contains("brew.sh"),
+            "must not instruct installing Homebrew: {msg}"
+        );
+        assert!(
+            msg.contains("podman.io"),
+            "should point at the official installer: {msg}"
+        );
+    }
+
+    #[test]
+    fn install_podman_falls_through_to_ato_managed_when_brew_missing() {
+        // The headline clean-VM case: no Homebrew, but a pinned managed build
+        // exists. Ato must install it itself rather than erroring on brew.
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_resolves(vec![
+                Err(PodmanResolveError::NotFound {
+                    searched: Vec::new(),
+                }),
+                Ok(resolved()),
+            ])
+            .with_brew(None, None)
+            .with_managed(true, Some(Ok(())))
+            .with_podman("machine list --format json", 0, "[]")
+            .with_podman("machine init ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("prepares via Ato-managed install");
+        let calls = env.calls();
+        assert!(
+            calls.contains(&"ato-managed install podman".to_string()),
+            "must use the Ato-managed installer: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("brew install")),
+            "must not attempt brew when absent: {calls:?}"
+        );
+        assert!(
+            reporter.phases().contains(&InstallPhase::Downloading),
+            "managed install should emit a Downloading phase: {:?}",
+            reporter.phases()
+        );
+    }
+
+    #[test]
+    fn install_podman_prefers_brew_when_present() {
+        // When brew IS present, it is tried first and the managed installer is
+        // never invoked.
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_resolves(vec![
+                Err(PodmanResolveError::NotFound {
+                    searched: Vec::new(),
+                }),
+                Ok(resolved()),
+            ])
+            .with_brew(Some("/opt/homebrew/bin/brew"), Some(0))
+            .with_managed(true, Some(Ok(())))
+            .with_podman("machine list --format json", 0, "[]")
+            .with_podman("machine init ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("prepares via brew");
+        let calls = env.calls();
+        assert!(calls.iter().any(|c| c.starts_with("brew install podman")));
+        assert!(
+            !calls.contains(&"ato-managed install podman".to_string()),
+            "managed installer must not run when brew succeeds: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn install_podman_falls_through_to_managed_when_brew_install_fails() {
+        // brew present but `brew install` fails => fall through to the managed
+        // installer rather than surfacing a brew error.
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_resolves(vec![
+                Err(PodmanResolveError::NotFound {
+                    searched: Vec::new(),
+                }),
+                Ok(resolved()),
+            ])
+            .with_brew(Some("/opt/homebrew/bin/brew"), Some(1))
+            .with_managed(true, Some(Ok(())))
+            .with_podman("machine list --format json", 0, "[]")
+            .with_podman("machine init ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("falls through to managed");
+        let calls = env.calls();
+        assert!(calls.iter().any(|c| c.starts_with("brew install podman")));
+        assert!(calls.contains(&"ato-managed install podman".to_string()));
+    }
+
+    #[test]
+    fn missing_provider_surfaces_actionable_error_not_brew_instruction() {
+        // End-to-end: a clean host where the managed install itself fails (e.g.
+        // offline) must still surface an actionable, Homebrew-free error — the
+        // Runtime Setup card / CLI renders this, never "install Homebrew".
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_resolves(vec![Err(PodmanResolveError::NotFound {
+                searched: Vec::new(),
+            })])
+            .with_brew(None, None)
+            .with_managed(true, Some(Err("network unreachable".to_string())));
+        let reporter = RecordingReporter::default();
+        let err = prepare_podman(&env, &reporter).expect_err("managed install failed");
+        let PrepareError::InstallUnavailable(msg) = &err else {
+            panic!("expected InstallUnavailable, got {err:?}");
+        };
+        assert!(
+            !msg.to_lowercase().contains("homebrew") && !msg.contains("brew.sh"),
+            "missing provider must never instruct installing Homebrew: {msg}"
+        );
+        // The attempted strategy's failure is surfaced so the user can act.
+        assert!(
+            msg.contains("network unreachable"),
+            "should surface the attempt: {msg}"
+        );
+        assert!(
+            msg.contains("podman.io"),
+            "should point at official installer: {msg}"
         );
     }
 
