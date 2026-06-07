@@ -103,6 +103,36 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
             causes,
         );
     }
+    // The app's own dependency build needs the `git` CLI to fetch a git-URL
+    // dependency (e.g. `pkg @ git+https://…` in requirements.txt/uv.lock, or a
+    // `git+https://…` entry in package.json), but `git` is not installed on the
+    // host. Ato's GitHub *source fetch* is gitless (tarball API), so this is the
+    // app build toolchain — not Ato — requiring git. Surface a typed, actionable
+    // E203 (dependency_install_failed) instead of letting the opaque uv/npm
+    // "git not found" error fall through to the generic E999. See the gitless
+    // GitHub source install hotfix.
+    if is_build_toolchain_git_missing(err) {
+        return CliDiagnostic::new(
+            CliDiagnosticCode::E203,
+            "This app's dependency build needs the `git` CLI to fetch a git-URL \
+             dependency (e.g. `git+https://…`), but `git` is not installed. Ato's \
+             GitHub source fetch itself does not need git; this requirement comes \
+             from the app's own dependencies. Install git and retry."
+                .to_string(),
+            Some(
+                "このアプリの依存解決が git-URL 依存 (例: `git+https://…`) を取得するために \
+                 `git` CLI を必要としていますが、git が見つかりません。Ato の GitHub ソース取得 \
+                 自体は git 不要ですが、アプリ側の依存が git を要求しています。git を \
+                 インストールしてから再実行してください。",
+            ),
+            None,
+            None,
+            None,
+            true,
+            false,
+            causes,
+        );
+    }
     // A container started but exited before passing its readiness probe. Both
     // the multi-service executor and the orchestration session path preserve a
     // typed `OciExitedBeforeReadyError` in the chain; classify it as the typed
@@ -388,6 +418,28 @@ fn distributable_artifact_missing_message(err: &AnyhowError) -> Option<String> {
         .find(|message| is_distributable_artifact_missing(message))
 }
 
+/// True when the error chain shows the app's dependency build failed because the
+/// host has no `git` CLI to fetch a git-URL dependency.
+///
+/// Matches the package-manager signatures observed when `git` is absent from
+/// PATH during dependency resolution:
+/// - uv:  "Git executable not found. Ensure that Git is installed and available."
+/// - pip: "Cannot find command 'git'"
+/// - npm: spawning `git` fails with ENOENT ("spawn git" + "enoent")
+///
+/// Ato's own GitHub source fetch is tarball-based (gitless), so a git requirement
+/// here always originates from the app's declared dependencies, not from Ato.
+pub(super) fn is_build_toolchain_git_missing(err: &AnyhowError) -> bool {
+    err.chain().any(|cause| {
+        // Lowercase once so casing variants of the package-manager signatures
+        // (e.g. real npm emits uppercase `spawn git ENOENT`) still match.
+        let lower = cause.to_string().to_lowercase();
+        lower.contains("git executable not found")
+            || lower.contains("cannot find command 'git'")
+            || (lower.contains("spawn git") && lower.contains("enoent"))
+    })
+}
+
 /// Map an exited-before-ready failure (a container that started but died before
 /// passing its readiness probe) to the typed `oci_container_exited_before_ready`
 /// diagnostic (E306), preserving the service name, exit code, and log tail.
@@ -396,7 +448,7 @@ fn distributable_artifact_missing_message(err: &AnyhowError) -> Option<String> {
 /// textual marker so any path that emits it still avoids the E999 fallback.
 fn exited_before_ready_diagnostic(err: &AnyhowError, causes: &[String]) -> Option<CliDiagnostic> {
     use crate::adapters::runtime::executors::oci_multi_service::{
-        OCI_EXITED_BEFORE_READY_CODE, OciExitedBeforeReadyError,
+        OciExitedBeforeReadyError, OCI_EXITED_BEFORE_READY_CODE,
     };
 
     const HINT: &str = "コンテナは起動しましたが readiness 前に終了しました。上のログを確認してください。\
@@ -639,7 +691,7 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
 mod podman_disabled_tests {
     use anyhow::Context as _;
 
-    use super::{CliDiagnosticCode, CommandContext, from_anyhow};
+    use super::{from_anyhow, CliDiagnosticCode, CommandContext};
 
     #[test]
     fn smoke_shell_failure_maps_to_e213() {
@@ -709,6 +761,84 @@ mod podman_disabled_tests {
     }
 
     #[test]
+    fn uv_git_missing_during_build_maps_to_e203_not_internal() {
+        // Real uv signature when a `git+https://…` dependency is resolved on a
+        // host without the git CLI. Ato's source fetch is gitless, so this is the
+        // app's build toolchain requiring git: surface a typed, actionable E203
+        // instead of the opaque E999 fallback a clean-VM user currently hits.
+        let err = anyhow::anyhow!(
+            "Git operation failed: Git executable not found. Ensure that Git is installed and available."
+        )
+        .context("failed to materialize dependencies for source-python run");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E203,
+            "uv git-missing build failure must map to dependency_install_failed (E203), not E999"
+        );
+        assert_eq!(diagnostic.name, "dependency_install_failed");
+        assert!(
+            diagnostic.message.contains("does not need git"),
+            "diagnostic must clarify Ato's fetch is gitless, got: {}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic.hint.is_some(),
+            "diagnostic must carry an actionable hint"
+        );
+    }
+
+    #[test]
+    fn npm_git_spawn_enoent_during_build_maps_to_e203() {
+        // Real npm signature when a `git+https://…` dependency is installed
+        // without the git CLI: spawning `git` fails with ENOENT.
+        let err = anyhow::anyhow!(
+            "npm error syscall spawn git\nnpm error enoent An unknown git error occurred"
+        )
+        .context("failed to materialize provider-backed npm package");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E203,
+            "npm git-spawn-ENOENT build failure must map to E203, not E999"
+        );
+    }
+
+    #[test]
+    fn npm_git_spawn_enoent_uppercase_during_build_maps_to_e203() {
+        // npm emits the syscall error with uppercase ENOENT in practice; the
+        // matcher must be case-insensitive so this still maps to E203, not E999.
+        let err = anyhow::anyhow!("npm error syscall spawn git ENOENT")
+            .context("failed to materialize provider-backed npm package");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E203,
+            "uppercase `spawn git ENOENT` build failure must map to E203, not E999"
+        );
+    }
+
+    #[test]
+    fn generic_dependency_failure_without_git_signature_does_not_map_to_e203() {
+        // A dependency build failure unrelated to git must NOT be reclassified as
+        // the git-missing diagnostic.
+        let err = anyhow::anyhow!(
+            "failed to install seed packages into virtual environment: No solution found"
+        )
+        .context("failed to materialize dependencies");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_ne!(
+            diagnostic.code,
+            CliDiagnosticCode::E203,
+            "non-git dependency failures must not be reclassified as git-missing"
+        );
+    }
+
+    #[test]
     fn podman_disabled_maps_to_engine_missing_not_internal() {
         // Mirrors the real wrapping: the session-start path adds the
         // "OCI provider not ready before session start" context on top of the
@@ -737,7 +867,7 @@ mod podman_disabled_tests {
 
 #[cfg(test)]
 mod exited_before_ready_tests {
-    use super::{CliDiagnosticCode, CommandContext, from_anyhow};
+    use super::{from_anyhow, CliDiagnosticCode, CommandContext};
     use crate::adapters::runtime::executors::oci_multi_service::OciExitedBeforeReadyError;
 
     fn db_exited_error() -> OciExitedBeforeReadyError {
