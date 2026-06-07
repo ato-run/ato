@@ -67,9 +67,11 @@ impl ResolvedPodman {
     /// exact same binary instead of re-resolving.
     pub fn invocation(&self) -> PodmanInvocation {
         let path_env = self.bin_dir().and_then(prepend_path_env);
+        let containers_conf = ato_managed_containers_conf(&self.bin).map(PathBuf::into_os_string);
         PodmanInvocation {
             program: self.bin.clone().into_os_string(),
             path_env,
+            containers_conf,
             found: true,
         }
     }
@@ -125,6 +127,12 @@ pub struct PodmanInvocation {
     pub program: OsString,
     /// `PATH` value to set on the child, when a directory could be resolved.
     pub path_env: Option<OsString>,
+    /// `CONTAINERS_CONF` value to set on the child, when the resolved binary is
+    /// an Ato-managed install carrying its own `containers.conf` (which points
+    /// `podman machine` at the bundled gvproxy/vfkit helpers). `None` for a
+    /// Homebrew/system Podman — that brings its own helpers and config, and Ato
+    /// must not override it.
+    pub containers_conf: Option<OsString>,
     /// Whether a real binary was resolved (vs. a fallback program).
     pub found: bool,
 }
@@ -162,12 +170,14 @@ fn invocation_from(resolved: Result<ResolvedPodman, PodmanResolveError>) -> Podm
         Err(PodmanResolveError::InvalidEnvOverride { path }) => PodmanInvocation {
             program: path.into_os_string(),
             path_env: None,
+            containers_conf: None,
             found: false,
         },
         // Genuinely missing: fall back to the bare name.
         Err(PodmanResolveError::NotFound { .. }) => PodmanInvocation {
             program: OsString::from("podman"),
             path_env: None,
+            containers_conf: None,
             found: false,
         },
     }
@@ -231,6 +241,42 @@ fn ato_managed_podman_locations() -> Vec<PathBuf> {
         out.push(dir.join(bin));
     }
     out
+}
+
+/// Name of the Ato-generated Podman config written next to a managed install.
+/// Mirrors the constant the installer (`ato-cli`) writes; kept here so the
+/// resolver can point a spawned podman at it via `CONTAINERS_CONF`.
+const ATO_CONTAINERS_CONF_FILE: &str = "containers.conf";
+
+/// Locate the Ato-managed `containers.conf` for a resolved podman `bin`, if one
+/// exists.
+///
+/// Returns the config path only when `bin` lives under an Ato-managed install
+/// (`~/.ato/tools/podman-<ver>/…`) **and** that install dir contains a
+/// `containers.conf`. A Homebrew/system Podman never matches, so Ato never
+/// overrides a user's own Podman configuration — it only directs the Podman it
+/// installed itself at the helper bundle it placed alongside it.
+fn ato_managed_containers_conf(bin: &Path) -> Option<PathBuf> {
+    let tools_dir = crate::common::paths::ato_tools_dir().ok()?;
+    if !bin.starts_with(&tools_dir) {
+        return None;
+    }
+    // Walk up to the `<tools>/podman-<ver>` install dir (its parent is tools_dir)
+    // and look for the generated config there.
+    let mut dir = bin.parent();
+    while let Some(current) = dir {
+        if current.parent() == Some(tools_dir.as_path())
+            && current
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("podman-"))
+        {
+            let conf = current.join(ATO_CONTAINERS_CONF_FILE);
+            return conf.is_file().then_some(conf);
+        }
+        dir = current.parent();
+    }
+    None
 }
 
 // ── Internal, testable helpers ───────────────────────────────────────────────
@@ -563,6 +609,55 @@ mod tests {
         assert!(
             first.to_string_lossy().contains("podman-5.2.3"),
             "newest version should be probed first: {first:?}"
+        );
+    }
+
+    #[test]
+    fn ato_managed_containers_conf_found_for_managed_install() {
+        // A managed install carrying a containers.conf → the resolver locates it
+        // so a spawned podman gets CONTAINERS_CONF pointing at the helper bundle.
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", temp.path());
+        let install = temp.path().join("tools").join("podman-5.2.3");
+        let bin = install.join("usr").join("bin").join("podman");
+        std::fs::create_dir_all(bin.parent().unwrap()).expect("mkdir");
+        std::fs::write(&bin, b"#!/bin/sh\n").expect("write podman");
+        let conf = install.join("containers.conf");
+        std::fs::write(&conf, b"[engine]\n").expect("write conf");
+
+        assert_eq!(super::ato_managed_containers_conf(&bin), Some(conf));
+    }
+
+    #[test]
+    fn ato_managed_containers_conf_absent_without_conf_file() {
+        // A managed install without a containers.conf yields None (no env set).
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", temp.path());
+        let bin = temp
+            .path()
+            .join("tools")
+            .join("podman-5.2.3")
+            .join("usr")
+            .join("bin")
+            .join("podman");
+        std::fs::create_dir_all(bin.parent().unwrap()).expect("mkdir");
+        std::fs::write(&bin, b"#!/bin/sh\n").expect("write podman");
+
+        assert_eq!(super::ato_managed_containers_conf(&bin), None);
+    }
+
+    #[test]
+    fn ato_managed_containers_conf_none_for_homebrew_podman() {
+        // A Homebrew/system podman is never matched — Ato must not override a
+        // user's own podman config.
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", temp.path());
+        assert_eq!(
+            super::ato_managed_containers_conf(Path::new("/opt/homebrew/bin/podman")),
+            None
         );
     }
 }
