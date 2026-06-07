@@ -1203,6 +1203,7 @@ pub(super) fn start_runtime_session(
             plan,
             launch,
             &prepared.launch_ctx,
+            runtime_process.execution_cwd.as_deref(),
             session_web_port.as_ref().map(|web_port| web_port.port),
         ),
     );
@@ -2375,6 +2376,7 @@ fn spawn_runtime_process(
                 event_rx: None,
                 workload_pid: None,
                 log_path: None,
+                execution_cwd: None,
             }),
             "deno" => Ok(CapsuleProcess {
                 child: crate::executors::deno::spawn(
@@ -2388,6 +2390,7 @@ fn spawn_runtime_process(
                 event_rx: None,
                 workload_pid: None,
                 log_path: None,
+                execution_cwd: None,
             }),
             "node" => Ok(CapsuleProcess {
                 child: crate::executors::node_compat::spawn_with_selected_port(
@@ -2402,6 +2405,7 @@ fn spawn_runtime_process(
                 event_rx: None,
                 workload_pid: None,
                 log_path: None,
+                execution_cwd: None,
             }),
             "python" => crate::executors::source::execute_host(
                 plan,
@@ -2434,6 +2438,7 @@ fn spawn_runtime_process(
             event_rx: None,
             workload_pid: None,
             log_path: None,
+            execution_cwd: None,
         }),
         capsule_core::execution_plan::guard::ExecutorKind::NodeCompat => Ok(CapsuleProcess {
             child: crate::executors::node_compat::spawn(
@@ -2447,6 +2452,7 @@ fn spawn_runtime_process(
             event_rx: None,
             workload_pid: None,
             log_path: None,
+            execution_cwd: None,
         }),
         capsule_core::execution_plan::guard::ExecutorKind::WebStatic => Ok(CapsuleProcess {
             child: crate::executors::open_web::spawn_background(plan)?,
@@ -2454,6 +2460,7 @@ fn spawn_runtime_process(
             event_rx: None,
             workload_pid: None,
             log_path: None,
+            execution_cwd: None,
         }),
         // Native covers source/python and source/native. Always go
         // through `source::execute_host`, which routes through nacelle
