@@ -9,12 +9,17 @@
 pub mod finalizer;
 pub mod hashing;
 pub mod ids;
+pub mod launch_reuse;
 pub mod launch_template;
 pub mod records;
 pub mod store;
 
 pub use finalizer::{FinalizerInput, FinalizerOutput, InstallRevisionFinalizer};
 pub use hashing::canonical_hash;
+pub use launch_reuse::{
+    LaunchReuseDecision, LaunchReuseInputs, RevalidationFailure, RevalidationFailureKind,
+    RevalidationOutcome, VolatileRevalidation, evaluate_launch_reuse,
+};
 pub use launch_template::{
     BindingAssignmentSet, BindingAssignmentSource, CompatibilityIndex, LaunchTemplate,
     LaunchTemplateKey, RequirementBinding, RequirementBindingKind, RunnerClass,
