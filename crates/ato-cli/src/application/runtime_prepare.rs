@@ -115,10 +115,11 @@ pub(crate) enum PrepareError {
     /// `podman machine list` failed or was unparseable.
     MachineQueryFailed(String),
     /// The Ato-managed Podman is missing a required `podman machine` helper
-    /// binary (e.g. `gvproxy`, `vfkit`). Caught by preflight *before* `machine
-    /// init`, or mapped from a `could not find "gvproxy"` machine error, so the
-    /// user gets a typed, actionable diagnostic instead of an opaque failure.
-    /// This is an Ato packaging/runtime issue, not a user Homebrew/git issue.
+    /// binary (e.g. `gvproxy`, `vfkit`) and a self-repair reinstall did not (or
+    /// could not) complete it, or it was mapped from a `could not find "gvproxy"`
+    /// machine error. Surfaces a typed, actionable diagnostic instead of an
+    /// opaque failure. This is an Ato packaging/runtime issue, not a user
+    /// Homebrew/git issue.
     RuntimeProviderIncomplete { helper: String },
     /// `podman machine init ato-podman` failed.
     MachineInitFailed(String),
@@ -141,9 +142,9 @@ impl std::fmt::Display for PrepareError {
             Self::MachineQueryFailed(m) => write!(f, "could not read podman machines: {m}"),
             Self::RuntimeProviderIncomplete { helper } => write!(
                 f,
-                "Ato-managed Podman is incomplete: required helper binary `{helper}` was not \
-                 found. This is an Ato packaging/runtime setup issue, not a user Homebrew/git \
-                 issue. Re-run runtime setup to reinstall the full Podman machine runtime."
+                "Ato-managed Podman is incomplete: required helper binary `{helper}` could not \
+                 be installed, so the Podman machine runtime is not usable. This is an Ato \
+                 packaging/runtime setup issue, not a user Homebrew/git issue."
             ),
             Self::MachineInitFailed(m) => {
                 write!(
@@ -613,14 +614,14 @@ fn prepare_machine<E: PrepareEnv, R: PrepareReporter>(
     match plan {
         MachinePlan::UseAto | MachinePlan::UseDefault => {}
         MachinePlan::StartAto => {
-            preflight_machine_helpers(env)?;
+            ensure_machine_helpers(env, reporter)?;
             start_ato_machine(env, reporter)?;
         }
         MachinePlan::InitAndStartAto => {
-            // Catch an incomplete Ato-managed runtime BEFORE `machine init` so
-            // the user gets a typed "missing gvproxy" diagnostic, not an opaque
-            // mid-init failure.
-            preflight_machine_helpers(env)?;
+            // Make the runtime complete BEFORE `machine init` so a fresh VM (or a
+            // partial #577-era install) reaches a working machine, not an opaque
+            // mid-init `could not find "gvproxy"`.
+            ensure_machine_helpers(env, reporter)?;
             init_ato_machine(env, reporter)?;
             start_ato_machine(env, reporter)?;
         }
@@ -628,11 +629,50 @@ fn prepare_machine<E: PrepareEnv, R: PrepareReporter>(
     Ok(plan.verify_connection())
 }
 
-/// Fail with a typed [`PrepareError::RuntimeProviderIncomplete`] if the resolved
-/// (Ato-managed) Podman is missing a required machine helper. A non-managed
-/// Podman reports no missing helpers, so this is a no-op for Homebrew/system
-/// installs.
-fn preflight_machine_helpers<E: PrepareEnv>(env: &E) -> Result<(), PrepareError> {
+/// Ensure the resolved Podman has the `podman machine` helpers it needs,
+/// **self-repairing** an incomplete Ato-managed install rather than dead-ending
+/// the user.
+///
+/// A non-Ato-managed Podman never reports missing helpers (it is trusted to
+/// bring its own), so this is a no-op there. For an Ato-managed install that is
+/// missing helpers — exactly the #577 clean-VM state where only
+/// `~/.ato/tools/podman-<ver>/usr/bin/podman` exists — re-running runtime setup
+/// resolves the *same* incomplete binary and would otherwise loop on the same
+/// error. So we reinstall the full bundle (download + digest-verify
+/// podman + gvproxy + vfkit, atomically promoted), then re-check. Only if the
+/// reinstall fails to produce a complete runtime do we surface a typed error.
+fn ensure_machine_helpers<E: PrepareEnv, R: PrepareReporter>(
+    env: &E,
+    reporter: &R,
+) -> Result<(), PrepareError> {
+    if env.missing_machine_helpers().is_empty() {
+        return Ok(());
+    }
+
+    // `missing_machine_helpers` only reports for an Ato-managed install, and any
+    // host with such an install has a pinned managed artifact — so a reinstall
+    // is available. (The guard keeps us honest if that ever stops holding.)
+    if !env.managed_podman_available() {
+        let helper = env
+            .missing_machine_helpers()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "gvproxy".to_string());
+        return Err(PrepareError::RuntimeProviderIncomplete { helper });
+    }
+
+    reporter.phase(
+        InstallPhase::Downloading,
+        "Completing the Podman machine runtime (downloading verified helpers)…",
+    );
+    // Reinstall the full bundle in place. A failure here means we genuinely could
+    // not complete the runtime — report it as such, not as "re-run setup".
+    env.install_ato_managed_podman()
+        .map_err(PrepareError::InstallUnavailable)?;
+
+    // Re-resolve + re-check (each env call resolves fresh) — the freshly written
+    // containers.conf is now in place too, so subsequent podman invocations pick
+    // up the helper dir.
     if let Some(helper) = env.missing_machine_helpers().into_iter().next() {
         return Err(PrepareError::RuntimeProviderIncomplete { helper });
     }
@@ -818,8 +858,9 @@ mod tests {
         /// strategy is never expected to run in this test.
         managed_install: Option<Result<(), String>>,
         /// Helper binaries the resolved Podman is missing (drives the machine
-        /// preflight). Empty = complete runtime.
-        missing_helpers: Vec<String>,
+        /// preflight/repair). Empty = complete runtime. A successful Ato-managed
+        /// (re)install clears it, simulating the bundle's helpers being placed.
+        missing_helpers: RefCell<Vec<String>>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -833,15 +874,17 @@ mod tests {
                 brew_install: None,
                 managed_available: false,
                 managed_install: None,
-                missing_helpers: Vec::new(),
+                missing_helpers: RefCell::new(Vec::new()),
                 calls: RefCell::new(Vec::new()),
             }
         }
 
-        /// Configure the machine-helper preflight: which required helpers the
-        /// resolved Podman is missing (empty = complete).
-        fn with_missing_helpers(mut self, helpers: &[&str]) -> Self {
-            self.missing_helpers = helpers.iter().map(|h| h.to_string()).collect();
+        /// Configure the machine-helper preflight/repair: which required helpers
+        /// the resolved Podman is missing (empty = complete). A successful
+        /// managed (re)install clears this, modelling the bundle's helpers being
+        /// installed.
+        fn with_missing_helpers(self, helpers: &[&str]) -> Self {
+            *self.missing_helpers.borrow_mut() = helpers.iter().map(|h| h.to_string()).collect();
             self
         }
 
@@ -949,13 +992,20 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push("ato-managed install podman".to_string());
-            self.managed_install
+            let result = self
+                .managed_install
                 .clone()
-                .unwrap_or_else(|| Err("ato-managed install not configured".to_string()))
+                .unwrap_or_else(|| Err("ato-managed install not configured".to_string()));
+            // A successful (re)install places the bundled helpers — model that by
+            // clearing the missing set so the post-repair re-check passes.
+            if result.is_ok() {
+                self.missing_helpers.borrow_mut().clear();
+            }
+            result
         }
 
         fn missing_machine_helpers(&self) -> Vec<String> {
-            self.missing_helpers.clone()
+            self.missing_helpers.borrow().clone()
         }
     }
 
@@ -1265,20 +1315,88 @@ mod tests {
     }
 
     #[test]
-    fn preflight_missing_helper_fails_typed_before_machine_init() {
-        // An Ato-managed Podman missing gvproxy must fail with the typed
-        // runtime-incomplete error BEFORE `machine init` is ever attempted.
+    fn incomplete_managed_install_self_repairs_then_inits() {
+        // The #577 clean-VM state: an Ato-managed Podman is resolvable but its
+        // machine helpers are missing. Runtime prepare must REINSTALL the full
+        // bundle (not just error out), then proceed to machine init — no
+        // "re-run setup" dead-end.
         let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_managed(true, Some(Ok(())))
+            .with_missing_helpers(&["gvproxy", "vfkit"])
             .with_podman("machine list --format json", 0, "[]")
-            .with_missing_helpers(&["gvproxy"]);
+            .with_podman("machine init ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("self-repairs then prepares");
+        let calls = env.calls();
+        assert!(
+            calls.contains(&"ato-managed install podman".to_string()),
+            "must reinstall the bundle to repair: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"podman machine init ato-podman".to_string()),
+            "must init the machine after repair: {calls:?}"
+        );
+        // Repaired exactly once — no loop.
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.contains("install podman"))
+                .count(),
+            1,
+            "reinstall must run exactly once: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn incomplete_managed_install_failed_repair_is_typed_and_does_not_loop() {
+        // If the repair reinstall itself fails, surface a typed error and never
+        // attempt machine init — and never loop on reinstall.
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_managed(true, Some(Err("download failed".to_string())))
+            .with_missing_helpers(&["gvproxy"])
+            .with_podman("machine list --format json", 0, "[]");
+        let reporter = RecordingReporter::default();
+        let err = prepare_podman(&env, &reporter).expect_err("failed repair must error");
+        // A reinstall failure is reported as an install problem, not "re-run".
+        assert!(
+            matches!(err, PrepareError::InstallUnavailable(_)),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            !msg.to_lowercase().contains("re-run runtime setup"),
+            "must not give a misleading retry hint: {msg}"
+        );
+        let calls = env.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.contains("install podman"))
+                .count(),
+            1,
+            "reinstall attempted once, no loop: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("machine init")),
+            "init must not run when repair failed: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn incomplete_runtime_without_managed_artifact_is_typed_no_init() {
+        // Defensive branch: a missing-helper report with no pinned managed
+        // artifact (cannot repair) → typed error, no init, never "re-run setup".
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_missing_helpers(&["gvproxy"]) // managed_available defaults false
+            .with_podman("machine list --format json", 0, "[]");
         let reporter = RecordingReporter::default();
         let err = prepare_podman(&env, &reporter).expect_err("incomplete runtime must fail");
         assert!(
             matches!(err, PrepareError::RuntimeProviderIncomplete { ref helper } if helper == "gvproxy"),
             "{err:?}"
         );
-        // The diagnostic is actionable and explicitly attributes the fault to
-        // Ato packaging, not the user's environment.
         let msg = err.to_string();
         assert!(msg.contains("gvproxy"), "{msg}");
         assert!(
@@ -1289,8 +1407,11 @@ mod tests {
             !msg.to_lowercase().contains("install homebrew"),
             "must never tell the user to install Homebrew: {msg}"
         );
-        // `machine init` was NOT attempted — the failure is a preflight.
         let calls = env.calls();
+        assert!(
+            !calls.iter().any(|c| c.contains("install podman")),
+            "no managed artifact → no reinstall attempt: {calls:?}"
+        );
         assert!(
             !calls.iter().any(|c| c.contains("machine init")),
             "init must not run when helpers are missing: {calls:?}"
