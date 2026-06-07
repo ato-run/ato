@@ -410,7 +410,7 @@ enum SessionStatus {
     Stopped,
     Failed,
     Expired,
-    Reconciled,
+    Finalized,
 }
 
 struct PortBinding {
@@ -1741,14 +1741,14 @@ Web Console は control surface であり、runner ではない。ただし Web 
 `SessionLifecycle` は runner-local process state ではなく、control plane が観測する session node の lifecycle である。v0 の基本遷移は次の通り。
 
 ```text
-Planned -> Starting -> Running -> Stopping -> Stopped -> Reconciled
+Planned -> Starting -> Running -> Stopping -> Stopped -> Finalized
 Planned -> Expired
 Starting -> Failed
 Running -> Failed
 Stopping -> Failed
 ```
 
-`Stopped` は runner が stop を受理し、receipt/log collection が可能な状態を表す。`Reconciled` は route cleanup、port release、terminal receipt/log link の記録が完了した状態を表す。terminal state に入った session は再利用しない。同じ launch profile を再実行する場合は新しい `session_id` を発行する。
+`Stopped` は runner が stop を受理し、receipt/log collection が可能な状態を表す。`Finalized` は reconciler による route cleanup、port release、terminal receipt/log link の記録が完了した UI/API-facing terminal state を表す。terminal state に入った session は再利用しない。同じ launch profile を再実行する場合は新しい `session_id` を発行する。
 
 ## Relationship to Store / Install Profiles
 
