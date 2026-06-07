@@ -12,17 +12,43 @@ and come back."_
 | Desktop/CLI run with **Homebrew not installed** | ✅ | Running Ato never needed brew; provider *install* no longer hard-requires it (#574). |
 | **git not installed** → public GitHub source **fetch + manifest inference** works | ✅ | Already tarball-based (`download_github_repository_at_ref`, `ATO_GITHUB_API_BASE_URL`); `source_tree_hash` excludes `.git`. Verified empirically with `git` scrubbed from PATH (#575 `gitless_github_source_install_e2e`) and locked by the extended `consumer_paths_do_not_spawn_git_commands` guard. |
 | OCI target with **no provider** → routed to Runtime Setup, **not** "install Homebrew" | ✅ | `install_podman` now yields a typed actionable error presenting the Ato-managed installer, never a brew instruction (#574). |
-| When Podman is needed, **Ato presents a verified installer strategy** | ✅ | Ordered strategies (Homebrew-if-present → Ato-managed verified download → manual) + digest-fail-closed installer (#574). The macOS arm64/x86_64 digests are the **real Podman v5.2.3 shasums** — the arm64 archive and its `podman-5.2.3/usr/bin/podman` layout were downloaded and verified locally. A manual clean-VM smoke of the full auto-install (below) remains the last confirmation. |
+| When Podman is needed, **Ato presents a verified installer strategy** | ✅ (download→run); ⏳ (machine) | Ordered strategies (Homebrew-if-present → Ato-managed verified download → manual) + digest-fail-closed, **atomic** installer with timeouts (#574). The real production fetcher was run on macOS arm64: download → digest match → extract → `podman --version` = `podman version 5.2.3` (throwaway tools dir). The no-brew **machine** path (`machine init/start/info` + OCI Ready) is **NOT yet validated** — see "Required before merge". |
 | Failures are **typed actionable errors**, not `CommandNotFound(git/brew)` | ✅ | git-toolchain-missing → E203 with a "fetch is gitless; this is your app's dependency" message (#575); provider-missing → actionable Runtime-Setup error (#574). |
+
+## Required before merge
+
+A real clean-VM macOS smoke (no brew/git/ATO_HOME/podman) verifying
+download → sha → resolve-from-`~/.ato/tools` → `podman machine init ato-podman` →
+`machine start` → `podman --connection ato-podman info --format json` →
+an OCI sample reaches Ready.
+
+**Status: NOT yet validated end-to-end.** The no-brew Podman **machine** path
+(`machine init`/`start`/`info` + an OCI sample reaching Ready) is a required
+pre-merge manual clean-VM smoke and has NOT been run. Running
+`podman machine init/start` mutates the real host, so it is deliberately left to
+the clean-VM gate and was NOT executed on the development machine.
+
+What **is** now verified (real, on macOS arm64, against a throwaway tools dir —
+not the user's `~/.ato`): the production fetcher downloads the pinned Podman
+v5.2.3 darwin/arm64 archive (~25 MB), its SHA256 matches the pinned digest
+(`1449ceb220907ca94407ca3a2a7d5d7909602657d3f5ea9cab26e4dd7c366b69`), it
+extracts, and the extracted `podman --version` reports `podman version 5.2.3`.
+The install is now **atomic** (extract into a temp sibling dir, validate the
+binary runs, then `rename` into place; remove the temp dir on any failure) and
+the fetcher has connect/total HTTP timeouts (15s/300s). This is the
+`real_ato_managed_install_downloads_verifies_and_runs` smoke (ignored by
+default; needs network + macOS arm64).
 
 ## Known residual blockers (finishable; need clean-VM confirmation)
 
-1. **Clean-VM end-to-end auto-install smoke.** The pinned macOS Podman v5.2.3
-   digests are now real (arm64 archive + layout verified locally), so the
-   Ato-managed installer downloads → digest-verifies → extracts Podman with no
-   Homebrew. The last confirmation is a manual smoke on a fresh VM (no brew):
-   trigger the OCI provider setup and confirm the installed Podman reaches a
-   working machine.
+1. **Clean-VM end-to-end auto-install smoke (machine path).** The download half is
+   now proven for real on macOS arm64 (download → digest-verify → extract →
+   `podman --version`), and the installer is atomic with HTTP timeouts. The
+   remaining unconfirmed half is the **machine** path on a fresh VM (no brew):
+   `podman machine init ato-podman` → `machine start` →
+   `podman --connection ato-podman info --format json` → an OCI sample reaches
+   Ready. This was deliberately NOT run on the dev machine (it mutates the real
+   host) and is the required pre-merge gate. See "Required before merge".
 2. **App dependencies that use `git+https://…`.** These genuinely need `git` (or a
    future gitless dependency resolver). Ato's *own* fetch is gitless; #575 makes
    this a clear typed error (E203) instead of an opaque E999, but auto-resolving
