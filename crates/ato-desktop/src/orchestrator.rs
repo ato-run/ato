@@ -1963,6 +1963,20 @@ pub(crate) fn spawn_installed_launch(install_profile_key: &str) -> Result<Instal
         .context("clone installed launch log handle")?;
     cmd.stdout(Stdio::from(stdout));
     cmd.stderr(Stdio::from(stderr));
+    // Make the wrapper its own process-group leader (pgid == its pid). The
+    // detached runtime it starts (`--detached-session` → node/deno executor,
+    // which does not call setsid/setpgid) inherits this group, so the Desktop
+    // can reap the *whole* launch — wrapper + runtime — with a single
+    // group-directed signal on abort / readiness-timeout / stop, even after the
+    // wrapper has exited (the group persists while the runtime is in it). Without
+    // this, killing only the wrapper PID orphans the runtime on its resolved
+    // port (the AddrInUse-on-retry / leftover-listener failure mode). See
+    // `crate::window::launch_window::kill_installed_launch_process_group`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let child = cmd
         .spawn()
         .with_context(|| format!("spawn `ato launch {install_profile_key} -y`"))?;
