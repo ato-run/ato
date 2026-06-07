@@ -22,6 +22,8 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -122,6 +124,69 @@ def discover_socket(ato_home):
     return data.get("socket"), json.dumps(data)
 
 
+def find_session_records_for_ipk(ato_home, ipk):
+    """All session records stamped with `install_profile_key == ipk`.
+
+    `ato launch --detached-session` writes a StoredSessionInfo stamped with the
+    install_profile_key once the runtime is HTTP-ready and registered. Multiple
+    records may exist transiently (a stopped-but-not-yet-reaped first launch plus
+    a fresh relaunch), so callers probe each for a live upstream rather than
+    trusting the first."""
+    sessions = Path(ato_home) / "apps" / "ato-desktop" / "sessions"
+    out = []
+    try:
+        files = sorted(sessions.glob("*.json"))
+    except Exception:
+        return out
+    for f in files:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("install_profile_key") == ipk:
+            out.append(d)
+    return out
+
+
+def http_get(url, timeout=5):
+    """Return (status_code_or_None, body_or_error_string)."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+    except Exception as e:  # connection refused / timeout / DNS
+        return None, str(e)
+
+
+def verify_ready_via_record(ato_home, ipk, marker, attempts=40, delay=1.0):
+    """Authoritative readiness check, independent of WebView introspection.
+
+    Polls for the ipk's detached session record, then HTTP GETs its resolved
+    upstream (`web.local_url`, the dynamically-resolved port) and confirms the
+    marker is actually served. This is the honest "reached Ready" signal: the
+    runtime bound its port, became HTTP-ready, and serves the expected content.
+    Returns (ok, detail, record)."""
+    last = "no session record for ipk yet"
+    for _ in range(attempts):
+        recs = find_session_records_for_ipk(ato_home, ipk)
+        for rec in recs:
+            web = rec.get("web") or {}
+            url = web.get("local_url") or web.get("healthcheck_url")
+            if not url:
+                continue
+            status, body = http_get(url)
+            if status == 200 and marker in body:
+                return (
+                    True,
+                    f"served marker at {url} (session {rec.get('session_id')})",
+                    rec,
+                )
+            last = f"record {rec.get('session_id')} url={url} status={status}"
+        time.sleep(delay)
+    return False, last, None
+
+
 def verify_marker(mcp, marker, attempts=20, delay=1.5):
     """Poll for WebView readiness + marker text. Returns (ok, detail)."""
     last = None
@@ -215,9 +280,27 @@ def main():
             _dump(out_path, recorder, summary)
             return
 
-        ok, detail = verify_marker(mcp, args.marker)
-        summary["first_launch"]["marker_visible"] = ok
-        summary["first_launch"]["marker_detail"] = detail
+        # Authoritative readiness: the detached session record + a live HTTP
+        # response carrying the marker on the dynamically-resolved port. The
+        # WebView introspection below (browser_verify_text_visible) is an
+        # unreliable secondary signal headless (it needs the guest pane's
+        # is_page_loaded callback, which does not fire in this context even
+        # though the WebView renders — see webview_screenshot), so it is
+        # best-effort and never gates the verdict.
+        ok, detail, rec = verify_ready_via_record(ato_home, args.ipk, args.marker)
+        summary["first_launch"]["ready"] = ok
+        summary["first_launch"]["ready_detail"] = detail
+        if rec:
+            summary["first_launch"]["session_id"] = rec.get("session_id")
+            summary["first_launch"]["resolved_url"] = (rec.get("web") or {}).get(
+                "local_url"
+            )
+        # Single best-effort probe: readiness is already established above via the
+        # session record + HTTP, and this introspection path times out headless,
+        # so do not spend 3× the dispatcher timeout on a non-gating signal.
+        wv_ok, wv_detail = verify_marker(mcp, args.marker, attempts=1)
+        summary["first_launch"]["webview_marker_visible"] = wv_ok
+        summary["first_launch"]["webview_marker_detail"] = wv_detail
 
         # snapshot + screenshots regardless
         snap = mcp.call("browser_snapshot")
@@ -240,18 +323,37 @@ def main():
         nav2 = mcp.tool_text(resp2)
         summary["relaunch"]["nav_response"] = nav2
         summary["relaunch"]["nav_isError"] = mcp.tool_is_error(resp2)
-        ok2, detail2 = verify_marker(mcp, args.marker)
-        summary["relaunch"]["marker_visible"] = ok2
-        summary["relaunch"]["marker_detail"] = detail2
+        ok2, detail2, rec2 = verify_ready_via_record(ato_home, args.ipk, args.marker)
+        summary["relaunch"]["ready"] = ok2
+        summary["relaunch"]["ready_detail"] = detail2
+        if rec2:
+            summary["relaunch"]["session_id"] = rec2.get("session_id")
+            summary["relaunch"]["resolved_url"] = (rec2.get("web") or {}).get(
+                "local_url"
+            )
+        wv_ok2, wv_detail2 = verify_marker(mcp, args.marker, attempts=3)
+        summary["relaunch"]["webview_marker_visible"] = wv_ok2
+        summary["relaunch"]["webview_marker_detail"] = wv_detail2
         hs2 = mcp.call("host_take_screenshot")
         summary["relaunch"]["host_screenshot"] = mcp.tool_text(hs2)
+
+        # Relaunch must serve a *different* session than the first launch — proof
+        # the stop tore the first runtime down and a fresh one was spawned (not a
+        # stale reuse). Same resolved port across both is fine (and expected once
+        # the first runtime is gone): it proves no orphan held the port.
+        relaunched_fresh = bool(
+            rec2
+            and summary["first_launch"].get("session_id")
+            and rec2.get("session_id") != summary["first_launch"]["session_id"]
+        )
+        summary["relaunch"]["fresh_session"] = relaunched_fresh
 
         if summary["initialize"] and ok and ok2:
             summary["verdict"] = "PASS"
         elif ok and not ok2:
-            summary["verdict"] = "FAILED: relaunch did not reach marker"
+            summary["verdict"] = "FAILED: relaunch did not reach Ready"
         elif not ok:
-            summary["verdict"] = "FAILED: first launch did not reach marker"
+            summary["verdict"] = "FAILED: first launch did not reach Ready"
     finally:
         mcp.close()
 
