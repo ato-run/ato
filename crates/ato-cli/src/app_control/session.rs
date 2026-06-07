@@ -299,6 +299,13 @@ pub struct SessionInfo {
     graph_completeness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reproducibility_class: Option<String>,
+    /// Runtime observation v1 (#490) carrier: the observed launch envelope +
+    /// diagnostic facts, captured by `start_runtime_session` after the workload
+    /// reached readiness. Internal only — `#[serde(skip)]` keeps it out of the
+    /// desktop session envelope (the receipt is the source of truth). The
+    /// session runner consumes it to stamp the execution receipt.
+    #[serde(skip)]
+    observed_runtime: Option<capsule_core::execution_identity::ObservedRuntimeEvidence>,
 }
 
 impl SessionInfo {
@@ -319,6 +326,28 @@ impl SessionInfo {
         self.observed_execution_id = metadata.observed_execution_id.clone();
         self.graph_completeness = metadata.graph_completeness.clone();
         self.reproducibility_class = metadata.reproducibility_class.clone();
+    }
+
+    /// Attach runtime observation v1 evidence (#490) captured post-spawn.
+    pub(crate) fn set_observed_runtime(
+        &mut self,
+        evidence: capsule_core::execution_identity::ObservedRuntimeEvidence,
+    ) {
+        self.observed_runtime = Some(evidence);
+    }
+
+    /// Take the observed evidence carrier (consumed by the session runner to
+    /// stamp the execution receipt).
+    pub(crate) fn take_observed_runtime(
+        &mut self,
+    ) -> Option<capsule_core::execution_identity::ObservedRuntimeEvidence> {
+        self.observed_runtime.take()
+    }
+
+    /// Surface the observed execution id onto the session after the receipt has
+    /// been stamped, so the desktop envelope matches the receipt.
+    pub(crate) fn set_observed_execution_id(&mut self, id: Option<String>) {
+        self.observed_execution_id = id;
     }
 
     pub(crate) fn to_materialized_launch_record(
@@ -1163,7 +1192,21 @@ pub(super) fn start_runtime_session(
         guard.detach();
     }
 
-    Ok(session_info_from_stored(session))
+    // Runtime observation v1 (#490): this point is reached only after the
+    // workload spawned and passed its readiness gate (spawn/readiness failures
+    // bail earlier), so capture the observed launch envelope from the realized
+    // launch context. The session runner stamps it onto the execution receipt
+    // (it holds the receipt's execution_id).
+    let mut info = session_info_from_stored(session);
+    info.set_observed_runtime(
+        crate::application::runtime_observation::build_observed_runtime_evidence(
+            plan,
+            launch,
+            &prepared.launch_ctx,
+            session_web_port.as_ref().map(|web_port| web_port.port),
+        ),
+    );
+    Ok(info)
 }
 
 /// In-process orchestration session start (#73 PR-C).
@@ -1986,6 +2029,9 @@ pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInf
         observed_execution_id: session.observed_execution_id,
         graph_completeness: session.graph_completeness,
         reproducibility_class: session.reproducibility_class,
+        // Observation evidence is attached post-spawn by start_runtime_session,
+        // not derived from the stored record.
+        observed_runtime: None,
     }
 }
 
@@ -3752,6 +3798,7 @@ mod tests {
                 observed_execution_id: None,
                 graph_completeness: None,
                 reproducibility_class: None,
+                observed_runtime: None,
             },
         };
 
