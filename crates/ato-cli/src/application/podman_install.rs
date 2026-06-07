@@ -40,6 +40,7 @@
 //! security anchor — never leave it blank or guess it.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -238,6 +239,12 @@ impl PodmanArtifactFetcher for ReqwestArtifactFetcher {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
         let client = reqwest::blocking::Client::builder()
             .user_agent(concat!("ato-cli/", env!("CARGO_PKG_VERSION")))
+            // Bound the network so a dead/slow connection surfaces a typed
+            // Fetch error instead of hanging Runtime Setup indefinitely. The
+            // archive is ~25MB; 300s total leaves headroom on slow links while
+            // a 15s connect timeout fails fast when there is no route.
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(300))
             .build()
             .map_err(|e| e.to_string())?;
         let resp = client.get(url).send().map_err(|e| e.to_string())?;
@@ -303,39 +310,127 @@ pub(crate) fn install_ato_managed_podman<F: PodmanArtifactFetcher>(
     }
 
     let install_dir = tools_dir.join(format!("podman-{}", artifact.version));
-    // Clean any prior partial install so extraction is deterministic.
-    if install_dir.exists() {
-        std::fs::remove_dir_all(&install_dir).map_err(|e| PodmanInstallError::Extract {
-            message: format!("could not clear existing install dir: {e}"),
-        })?;
-    }
-    std::fs::create_dir_all(&install_dir).map_err(|e| PodmanInstallError::Extract {
+
+    // Extract into a temp sibling dir, validate (binary present + runnable),
+    // write provenance, then atomically rename into place. Any failure removes
+    // the temp dir so a partial install is never left behind. The atomic rename
+    // means observers only ever see a fully-validated install dir.
+    install_into_temp_then_promote(&bytes, &artifact, tools_dir, &install_dir)
+}
+
+/// Perform the disk-mutating half of an Ato-managed install atomically.
+///
+/// Extracts into `tools_dir/podman-<version>.tmp-<pid>`, validates the binary is
+/// present and runnable (`<binary> --version` exits 0), writes provenance into
+/// the temp dir, then renames the temp dir over `final_dir`. On any failure the
+/// temp dir is removed, leaving no partial install.
+fn install_into_temp_then_promote(
+    bytes: &[u8],
+    artifact: &PinnedArtifact,
+    tools_dir: &Path,
+    final_dir: &Path,
+) -> Result<InstalledPodman, PodmanInstallError> {
+    std::fs::create_dir_all(tools_dir).map_err(|e| PodmanInstallError::Extract {
         message: e.to_string(),
     })?;
 
-    extract_archive(&bytes, artifact.format, artifact.strip_prefix, &install_dir)
-        .map_err(|message| PodmanInstallError::Extract { message })?;
+    let tmp_dir = tools_dir.join(format!(
+        "podman-{}.tmp-{}",
+        artifact.version,
+        std::process::id()
+    ));
+    // Clear a stale temp dir from a prior crashed run before reusing the name.
+    if tmp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| PodmanInstallError::Extract {
+        message: e.to_string(),
+    })?;
 
-    let binary_path = install_dir.join(artifact.binary_rel_path);
-    if !binary_path.is_file() {
-        return Err(PodmanInstallError::BinaryMissing {
-            expected: binary_path,
+    // From here on, every early return must clean up the temp dir.
+    let result = (|| {
+        extract_archive(bytes, artifact.format, artifact.strip_prefix, &tmp_dir)
+            .map_err(|message| PodmanInstallError::Extract { message })?;
+
+        let tmp_binary = tmp_dir.join(artifact.binary_rel_path);
+        if !tmp_binary.is_file() {
+            return Err(PodmanInstallError::BinaryMissing {
+                expected: tmp_binary,
+            });
+        }
+        ensure_executable(&tmp_binary)
+            .map_err(|message| PodmanInstallError::Extract { message })?;
+        // Prove the extracted binary actually runs on this host before we
+        // promote it. A non-zero exit (or spawn failure) fails the install.
+        verify_binary_runs(&tmp_binary)?;
+
+        let final_binary = final_dir.join(artifact.binary_rel_path);
+        let provenance = PodmanProvenance {
+            version: artifact.version.to_string(),
+            sha256: artifact.sha256.to_string(),
+            source_url: artifact.url.to_string(),
+            binary_path: final_binary.to_string_lossy().to_string(),
+        };
+        write_provenance(&tmp_dir, &provenance)?;
+        Ok((final_binary, provenance))
+    })();
+
+    let (final_binary, provenance) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            // No partial install left behind.
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(e);
+        }
+    };
+
+    // Promote atomically: drop a stale final dir immediately before the rename
+    // so the window where neither dir is in place is as small as possible.
+    if final_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(final_dir) {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(PodmanInstallError::Extract {
+                message: format!("could not clear existing install dir: {e}"),
+            });
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp_dir, final_dir) {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(PodmanInstallError::Extract {
+            message: format!("could not promote install dir: {e}"),
         });
     }
-    ensure_executable(&binary_path).map_err(|message| PodmanInstallError::Extract { message })?;
-
-    let provenance = PodmanProvenance {
-        version: artifact.version.to_string(),
-        sha256: artifact.sha256.to_string(),
-        source_url: artifact.url.to_string(),
-        binary_path: binary_path.to_string_lossy().to_string(),
-    };
-    write_provenance(&install_dir, &provenance)?;
 
     Ok(InstalledPodman {
-        binary_path,
+        binary_path: final_binary,
         provenance,
     })
+}
+
+/// Run `<binary> --version` and require a clean (exit 0) run. Proves the
+/// extracted binary is actually executable on this host before promotion.
+fn verify_binary_runs(binary: &Path) -> Result<(), PodmanInstallError> {
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .map_err(|e| PodmanInstallError::Extract {
+            message: format!(
+                "extracted binary at '{}' could not be executed: {e}",
+                binary.display()
+            ),
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PodmanInstallError::Extract {
+            message: format!(
+                "extracted binary at '{}' exited with {} on `--version`: {}",
+                binary.display(),
+                output.status,
+                stderr.trim()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Read the provenance manifest for an Ato-managed install dir, if present.
@@ -551,29 +646,17 @@ mod tests {
                 actual,
             });
         }
-        let install_dir = tools_dir.join(format!("podman-{}", artifact.version));
-        std::fs::create_dir_all(&install_dir).unwrap();
-        extract_archive(&bytes, artifact.format, artifact.strip_prefix, &install_dir)
-            .map_err(|message| PodmanInstallError::Extract { message })?;
-        let binary_path = install_dir.join(artifact.binary_rel_path);
-        if !binary_path.is_file() {
-            return Err(PodmanInstallError::BinaryMissing {
-                expected: binary_path,
-            });
-        }
-        ensure_executable(&binary_path)
-            .map_err(|message| PodmanInstallError::Extract { message })?;
-        let provenance = PodmanProvenance {
-            version: artifact.version.to_string(),
-            sha256: artifact.sha256.to_string(),
-            source_url: artifact.url.to_string(),
-            binary_path: binary_path.to_string_lossy().to_string(),
-        };
-        write_provenance(&install_dir, &provenance)?;
-        Ok(InstalledPodman {
-            binary_path,
-            provenance,
-        })
+        let final_dir = tools_dir.join(format!("podman-{}", artifact.version));
+        // Exercise the real atomic temp-then-promote path (with exec validation)
+        // so tests cover what production runs.
+        install_into_temp_then_promote(&bytes, artifact, tools_dir, &final_dir)
+    }
+
+    /// Bytes of a tiny `podman` stub that exits 0 on `--version`, so the new
+    /// exec-validation passes hermetically. On unix this is a `#!/bin/sh`
+    /// script; the extractor marks it executable from the tar mode (0o755).
+    fn podman_stub_script() -> &'static [u8] {
+        b"#!/bin/sh\necho \"podman version 5.2.3\"\n"
     }
 
     #[test]
@@ -603,7 +686,7 @@ mod tests {
 
     #[test]
     fn ato_managed_installer_extracts_verified_binary() {
-        let bytes = tar_gz_with("usr/bin/podman", b"#!/bin/sh\necho podman\n");
+        let bytes = tar_gz_with("usr/bin/podman", podman_stub_script());
         let artifact = test_artifact_for(&bytes);
         let fetcher = FakeFetcher {
             url: artifact.url.to_string(),
@@ -614,6 +697,60 @@ mod tests {
             .expect("install succeeds with matching digest");
         assert!(installed.binary_path.is_file());
         assert!(installed.binary_path.ends_with("usr/bin/podman"));
+    }
+
+    #[test]
+    fn ato_managed_installer_promotes_atomically_and_leaves_no_temp_dir() {
+        let bytes = tar_gz_with("usr/bin/podman", podman_stub_script());
+        let artifact = test_artifact_for(&bytes);
+        let fetcher = FakeFetcher {
+            url: artifact.url.to_string(),
+            bytes: bytes.clone(),
+        };
+        let tools = tempfile::tempdir().unwrap();
+        install_with_artifact(&fetcher, &artifact, tools.path()).expect("install");
+
+        // Final dir exists; no `.tmp-*` sibling is left behind.
+        let final_dir = tools.path().join("podman-9.9.9-test");
+        assert!(final_dir.is_dir(), "final install dir must exist");
+        let leftover_tmp: Vec<_> = std::fs::read_dir(tools.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("podman-9.9.9-test.tmp-")
+            })
+            .collect();
+        assert!(
+            leftover_tmp.is_empty(),
+            "no temp install dir may survive a successful install: {leftover_tmp:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ato_managed_installer_rejects_non_runnable_binary() {
+        // A binary that exits non-zero on `--version` must fail the install and
+        // leave nothing behind (no final dir, no temp dir).
+        let bytes = tar_gz_with("usr/bin/podman", b"#!/bin/sh\nexit 7\n");
+        let artifact = test_artifact_for(&bytes);
+        let fetcher = FakeFetcher {
+            url: artifact.url.to_string(),
+            bytes: bytes.clone(),
+        };
+        let tools = tempfile::tempdir().unwrap();
+        let err = install_with_artifact(&fetcher, &artifact, tools.path())
+            .expect_err("non-runnable binary must fail the install");
+        assert!(matches!(err, PodmanInstallError::Extract { .. }), "{err:?}");
+
+        let final_dir = tools.path().join("podman-9.9.9-test");
+        assert!(!final_dir.exists(), "no partial install dir may remain");
+        let any_tmp = std::fs::read_dir(tools.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp-"));
+        assert!(!any_tmp, "no temp install dir may remain after failure");
     }
 
     #[test]
@@ -643,7 +780,7 @@ mod tests {
 
     #[test]
     fn ato_managed_installer_records_version_digest_source() {
-        let bytes = tar_gz_with("usr/bin/podman", b"podman-binary");
+        let bytes = tar_gz_with("usr/bin/podman", podman_stub_script());
         let artifact = test_artifact_for(&bytes);
         let fetcher = FakeFetcher {
             url: artifact.url.to_string(),
@@ -698,6 +835,32 @@ mod tests {
         assert_eq!(
             sanitize_entry(Path::new("podman-5.2.3/usr/bin/podman"), "podman-5.2.3"),
             Some(PathBuf::from("usr/bin/podman"))
+        );
+    }
+
+    /// Real network smoke: download the pinned darwin/arm64 artifact with the
+    /// PRODUCTION fetcher, digest-verify, extract, and run the extracted
+    /// `podman --version`. Ignored by default (needs network + macOS arm64); run
+    /// with `cargo test -p ato-cli --lib -- --ignored real_ato_managed_install`.
+    /// Uses a throwaway tools dir, never the user's real `~/.ato`.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[ignore = "real network download; run manually"]
+    #[test]
+    fn real_ato_managed_install_downloads_verifies_and_runs() {
+        let tools = tempfile::tempdir().unwrap();
+        let installed =
+            install_ato_managed_podman(&ReqwestArtifactFetcher, "macos", "aarch64", tools.path())
+                .expect("real install (download + digest verify + extract + run) succeeds");
+        assert!(installed.binary_path.is_file());
+        let out = std::process::Command::new(&installed.binary_path)
+            .arg("--version")
+            .output()
+            .expect("run extracted podman --version");
+        assert!(out.status.success(), "podman --version must exit 0");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(PINNED_PODMAN_VERSION),
+            "podman --version output should mention {PINNED_PODMAN_VERSION}: {stdout}"
         );
     }
 
