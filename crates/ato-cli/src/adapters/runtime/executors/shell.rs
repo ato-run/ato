@@ -26,7 +26,7 @@ pub fn execute(
     let working_dir = launch_spec.working_dir;
     let run_command = normalize_local_shell_command(&run_command, &working_dir);
     let mut cmd = shell_command(&run_command);
-    cmd.current_dir(working_dir);
+    cmd.current_dir(&working_dir);
 
     if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
         proxy::apply_proxy_env(&mut cmd, &proxy_env);
@@ -80,7 +80,9 @@ pub fn execute(
         event_rx: None,
         workload_pid: None,
         log_path: None,
-        execution_cwd: None,
+        // #490: report the realized cwd (the same `working_dir` passed to
+        // `cmd.current_dir` above) so observation records the actual cwd.
+        execution_cwd: Some(working_dir),
     })
 }
 
