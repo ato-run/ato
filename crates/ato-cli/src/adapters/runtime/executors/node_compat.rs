@@ -356,6 +356,7 @@ pub fn spawn_background(
         event_rx: Some(event_rx),
         workload_pid: None,
         log_path: None,
+        execution_cwd: None,
     })
 }
 

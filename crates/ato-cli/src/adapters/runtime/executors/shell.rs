@@ -80,6 +80,7 @@ pub fn execute(
         event_rx: None,
         workload_pid: None,
         log_path: None,
+        execution_cwd: None,
     })
 }
 
