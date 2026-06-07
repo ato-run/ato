@@ -89,25 +89,24 @@ pub(crate) enum ArtifactFormat {
 /// `os` / `arch` use Rust's `std::env::consts` spelling (`"macos"`,
 /// `"aarch64"`, `"x86_64"`, `"windows"`).
 ///
-/// NOTE: the macOS digests below are placeholders pending clean-VM
-/// verification of the exact pinned archive — see the PR. The framework
-/// (download → digest-verify → extract → provenance) is complete and fully
-/// covered by the fake-fetcher tests; only the real per-arch `sha256` constants
-/// need to be filled in from Podman's official release `shasums` before the
-/// real download path is trusted on a clean machine. Until then a mismatch
-/// fails closed (never runs an unverified binary).
+/// The macOS digests below are the real SHA256s from Podman's official v5.2.3
+/// `shasums`; the arm64 archive was downloaded and its digest + internal layout
+/// (`podman-5.2.3/usr/bin/podman`) verified locally. A mismatch still fails
+/// closed (never runs an unverified binary). A manual clean-VM smoke of the full
+/// auto-install is still worthwhile, but the framework + verified digests are in
+/// place.
 pub(crate) fn pinned_artifact(os: &str, arch: &str) -> Option<PinnedArtifact> {
     match (os, arch) {
         // The darwin release zips wrap everything in a top-level
-        // `podman-<version>/` directory (e.g. `podman-5.2.3/usr/bin/podman`),
-        // so `strip_prefix` drops that wrapper and `binary_rel_path` is the
-        // path beneath it. Both must be re-confirmed against the real archive
-        // during clean-VM verification together with the digest.
+        // `podman-<version>/` directory (`podman-5.2.3/usr/bin/podman`, confirmed
+        // against the real archive), so `strip_prefix` drops that wrapper and
+        // `binary_rel_path` is the path beneath it.
         ("macos", "aarch64") => Some(PinnedArtifact {
             version: PINNED_PODMAN_VERSION,
             url: "https://github.com/containers/podman/releases/download/v5.2.3/podman-remote-release-darwin_arm64.zip",
-            // PLACEHOLDER — fill from official shasums before trusting real download.
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            // From the official Podman v5.2.3 `shasums`; the downloaded archive's
+            // SHA256 + internal layout were verified to match this value locally (arm64).
+            sha256: "1449ceb220907ca94407ca3a2a7d5d7909602657d3f5ea9cab26e4dd7c366b69",
             format: ArtifactFormat::Zip,
             binary_rel_path: "usr/bin/podman",
             strip_prefix: "podman-5.2.3",
@@ -115,8 +114,8 @@ pub(crate) fn pinned_artifact(os: &str, arch: &str) -> Option<PinnedArtifact> {
         ("macos", "x86_64") => Some(PinnedArtifact {
             version: PINNED_PODMAN_VERSION,
             url: "https://github.com/containers/podman/releases/download/v5.2.3/podman-remote-release-darwin_amd64.zip",
-            // PLACEHOLDER — fill from official shasums before trusting real download.
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            // From the official Podman v5.2.3 `shasums` (amd64).
+            sha256: "6a7ef2eb934e7b5f002bcc662314fd43013f9452edb2be0889d23da8e201f514",
             format: ArtifactFormat::Zip,
             binary_rel_path: "usr/bin/podman",
             strip_prefix: "podman-5.2.3",

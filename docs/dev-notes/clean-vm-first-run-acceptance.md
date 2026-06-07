@@ -12,15 +12,17 @@ and come back."_
 | Desktop/CLI run with **Homebrew not installed** | ✅ | Running Ato never needed brew; provider *install* no longer hard-requires it (#574). |
 | **git not installed** → public GitHub source **fetch + manifest inference** works | ✅ | Already tarball-based (`download_github_repository_at_ref`, `ATO_GITHUB_API_BASE_URL`); `source_tree_hash` excludes `.git`. Verified empirically with `git` scrubbed from PATH (#575 `gitless_github_source_install_e2e`) and locked by the extended `consumer_paths_do_not_spawn_git_commands` guard. |
 | OCI target with **no provider** → routed to Runtime Setup, **not** "install Homebrew" | ✅ | `install_podman` now yields a typed actionable error presenting the Ato-managed installer, never a brew instruction (#574). |
-| When Podman is needed, **Ato presents a verified installer strategy** | ⚠️ framework | Ordered strategies (Homebrew-if-present → Ato-managed verified download → manual) + digest-fail-closed installer landed (#574). **Remaining:** the pinned macOS Podman SHA256 digests are placeholders, so the real auto-install fails closed → manual instructions until the digests are filled from Podman's official `shasums` and the archive layout is confirmed on a real VM. |
+| When Podman is needed, **Ato presents a verified installer strategy** | ✅ | Ordered strategies (Homebrew-if-present → Ato-managed verified download → manual) + digest-fail-closed installer (#574). The macOS arm64/x86_64 digests are the **real Podman v5.2.3 shasums** — the arm64 archive and its `podman-5.2.3/usr/bin/podman` layout were downloaded and verified locally. A manual clean-VM smoke of the full auto-install (below) remains the last confirmation. |
 | Failures are **typed actionable errors**, not `CommandNotFound(git/brew)` | ✅ | git-toolchain-missing → E203 with a "fetch is gitless; this is your app's dependency" message (#575); provider-missing → actionable Runtime-Setup error (#574). |
 
 ## Known residual blockers (finishable; need clean-VM confirmation)
 
-1. **Podman real digests (#574 remaining step).** Fill the pinned macOS (arm64/x86_64)
-   Podman release SHA256 digests from the official `shasums`, confirm the archive's
-   internal `binary_rel_path` / `strip_prefix` on a fresh VM, then the Ato-managed
-   installer actually installs Podman with no Homebrew.
+1. **Clean-VM end-to-end auto-install smoke.** The pinned macOS Podman v5.2.3
+   digests are now real (arm64 archive + layout verified locally), so the
+   Ato-managed installer downloads → digest-verifies → extracts Podman with no
+   Homebrew. The last confirmation is a manual smoke on a fresh VM (no brew):
+   trigger the OCI provider setup and confirm the installed Podman reaches a
+   working machine.
 2. **App dependencies that use `git+https://…`.** These genuinely need `git` (or a
    future gitless dependency resolver). Ato's *own* fetch is gitless; #575 makes
    this a clear typed error (E203) instead of an opaque E999, but auto-resolving
