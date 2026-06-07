@@ -431,10 +431,12 @@ fn distributable_artifact_missing_message(err: &AnyhowError) -> Option<String> {
 /// here always originates from the app's declared dependencies, not from Ato.
 pub(super) fn is_build_toolchain_git_missing(err: &AnyhowError) -> bool {
     err.chain().any(|cause| {
-        let message = cause.to_string();
-        message.contains("Git executable not found")
-            || message.contains("Cannot find command 'git'")
-            || (message.contains("spawn git") && message.contains("enoent"))
+        // Lowercase once so casing variants of the package-manager signatures
+        // (e.g. real npm emits uppercase `spawn git ENOENT`) still match.
+        let lower = cause.to_string().to_lowercase();
+        lower.contains("git executable not found")
+            || lower.contains("cannot find command 'git'")
+            || (lower.contains("spawn git") && lower.contains("enoent"))
     })
 }
 
@@ -446,7 +448,7 @@ pub(super) fn is_build_toolchain_git_missing(err: &AnyhowError) -> bool {
 /// textual marker so any path that emits it still avoids the E999 fallback.
 fn exited_before_ready_diagnostic(err: &AnyhowError, causes: &[String]) -> Option<CliDiagnostic> {
     use crate::adapters::runtime::executors::oci_multi_service::{
-        OCI_EXITED_BEFORE_READY_CODE, OciExitedBeforeReadyError,
+        OciExitedBeforeReadyError, OCI_EXITED_BEFORE_READY_CODE,
     };
 
     const HINT: &str = "コンテナは起動しましたが readiness 前に終了しました。上のログを確認してください。\
@@ -689,7 +691,7 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
 mod podman_disabled_tests {
     use anyhow::Context as _;
 
-    use super::{CliDiagnosticCode, CommandContext, from_anyhow};
+    use super::{from_anyhow, CliDiagnosticCode, CommandContext};
 
     #[test]
     fn smoke_shell_failure_maps_to_e213() {
@@ -805,6 +807,21 @@ mod podman_disabled_tests {
     }
 
     #[test]
+    fn npm_git_spawn_enoent_uppercase_during_build_maps_to_e203() {
+        // npm emits the syscall error with uppercase ENOENT in practice; the
+        // matcher must be case-insensitive so this still maps to E203, not E999.
+        let err = anyhow::anyhow!("npm error syscall spawn git ENOENT")
+            .context("failed to materialize provider-backed npm package");
+
+        let diagnostic = from_anyhow(&err, CommandContext::Run);
+        assert_eq!(
+            diagnostic.code,
+            CliDiagnosticCode::E203,
+            "uppercase `spawn git ENOENT` build failure must map to E203, not E999"
+        );
+    }
+
+    #[test]
     fn generic_dependency_failure_without_git_signature_does_not_map_to_e203() {
         // A dependency build failure unrelated to git must NOT be reclassified as
         // the git-missing diagnostic.
@@ -850,7 +867,7 @@ mod podman_disabled_tests {
 
 #[cfg(test)]
 mod exited_before_ready_tests {
-    use super::{CliDiagnosticCode, CommandContext, from_anyhow};
+    use super::{from_anyhow, CliDiagnosticCode, CommandContext};
     use crate::adapters::runtime::executors::oci_multi_service::OciExitedBeforeReadyError;
 
     fn db_exited_error() -> OciExitedBeforeReadyError {
