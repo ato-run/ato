@@ -84,6 +84,10 @@ pub(crate) async fn execute_multi_service(
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     strict_realization: bool,
+    // #501: boundary receipt sink. A strict-gate failure receipt persisted here
+    // suppresses the boundary's duplicate partial (one launch → one receipt).
+    // `None` outside the boundary-wrapped pipeline.
+    receipt_sink: Option<&crate::application::receipt_boundary::ReceiptGraphIdSink>,
 ) -> Result<i32> {
     // Validate all services are OCI before proceeding.
     if !plan.all_services_are_oci() {
@@ -245,6 +249,7 @@ pub(crate) async fn execute_multi_service(
                 launch_ctx,
                 Some(provider_evidence),
                 strict_gate.as_ref().err(),
+                receipt_sink,
                 &reporter,
             )
             .await;
