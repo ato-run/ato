@@ -308,7 +308,9 @@ mod tests {
             network_policy_hash: "blake3:net".into(),
             capability_policy_hash: "blake3:cap".into(),
             state_contract_hash: "blake3:state".into(),
-            runner_compatibility_class: RunnerCompatibilityClass::new("managed_runner/linux-x86_64"),
+            runner_compatibility_class: RunnerCompatibilityClass::new(
+                "managed_runner/linux-x86_64",
+            ),
         }
     }
 
@@ -337,27 +339,51 @@ mod tests {
 
         let mut k = sample_key();
         k.binding_set_hash = "blake3:bind2".into();
-        assert_ne!(base, k.key_hash().unwrap(), "binding_set_hash must affect key");
+        assert_ne!(
+            base,
+            k.key_hash().unwrap(),
+            "binding_set_hash must affect key"
+        );
 
         let mut k = sample_key();
         k.network_policy_hash = "blake3:net2".into();
-        assert_ne!(base, k.key_hash().unwrap(), "network_policy_hash must affect key");
+        assert_ne!(
+            base,
+            k.key_hash().unwrap(),
+            "network_policy_hash must affect key"
+        );
 
         let mut k = sample_key();
         k.requirement_graph_hash = "blake3:graph2".into();
-        assert_ne!(base, k.key_hash().unwrap(), "requirement_graph_hash must affect key");
+        assert_ne!(
+            base,
+            k.key_hash().unwrap(),
+            "requirement_graph_hash must affect key"
+        );
 
         let mut k = sample_key();
         k.state_contract_hash = "blake3:state2".into();
-        assert_ne!(base, k.key_hash().unwrap(), "state_contract_hash must affect key");
+        assert_ne!(
+            base,
+            k.key_hash().unwrap(),
+            "state_contract_hash must affect key"
+        );
 
         let mut k = sample_key();
         k.runner_compatibility_class = RunnerCompatibilityClass::new("browser_runner/wasm");
-        assert_ne!(base, k.key_hash().unwrap(), "runner_compatibility_class must affect key");
+        assert_ne!(
+            base,
+            k.key_hash().unwrap(),
+            "runner_compatibility_class must affect key"
+        );
 
         let mut k = sample_key();
         k.install_revision_id = InstallRevisionId::new("rev_bbbb");
-        assert_ne!(base, k.key_hash().unwrap(), "install_revision_id must affect key");
+        assert_ne!(
+            base,
+            k.key_hash().unwrap(),
+            "install_revision_id must affect key"
+        );
     }
 
     // ── Acceptance: observed/session facts do NOT change the key ──────────────

@@ -102,11 +102,8 @@ impl LaunchMaterializationRecord {
         execution_id: ExecutionId,
         materialized_at: impl Into<String>,
     ) -> Self {
-        let capsule_instance_key = derive_capsule_instance_key(
-            &install_profile_key,
-            &install_revision_id,
-            &execution_id,
-        );
+        let capsule_instance_key =
+            derive_capsule_instance_key(&install_profile_key, &install_revision_id, &execution_id);
         Self {
             session_ref: session_ref.into(),
             install_profile_key,
@@ -128,10 +125,15 @@ impl LaunchMaterializationRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::foundation::install_lifecycle::ids::{InstalledAppId, ProfileId, derive_install_profile_key};
+    use crate::foundation::install_lifecycle::ids::{
+        InstalledAppId, ProfileId, derive_install_profile_key,
+    };
 
     fn ipk() -> InstallProfileKey {
-        derive_install_profile_key(&InstalledAppId::new("app_pgweb"), &ProfileId::new("default"))
+        derive_install_profile_key(
+            &InstalledAppId::new("app_pgweb"),
+            &ProfileId::new("default"),
+        )
     }
 
     fn record_for_session(session: &str, exec: ExecutionId) -> LaunchMaterializationRecord {
