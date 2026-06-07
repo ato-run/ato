@@ -353,7 +353,10 @@ mod tests {
             id_before_any_session, id_after_session,
             "artifact_build_id must depend only on build inputs, never on runtime/session/observed facts"
         );
-        assert!(id_after_session.is_valid(), "must be a well-formed build_<64hex>");
+        assert!(
+            id_after_session.is_valid(),
+            "must be a well-formed build_<64hex>"
+        );
         assert!(
             !crate::foundation::install_lifecycle::ids::ExecutionId::looks_like(
                 id_after_session.as_str()
@@ -472,7 +475,10 @@ mod tests {
         let b = StateContractSnapshot::new("cache", "blake3:bbbb").unwrap();
         let h1 = combined_state_contract_hash(&[a.clone(), b.clone()]).unwrap();
         let h2 = combined_state_contract_hash(&[b, a]).unwrap();
-        assert_eq!(h1, h2, "combined state contract hash must be order-independent");
+        assert_eq!(
+            h1, h2,
+            "combined state contract hash must be order-independent"
+        );
     }
 
     #[test]
