@@ -16,10 +16,17 @@
 //! * [`DriftClass::ResolvedDrift`] — Ato *resolved* a different concrete object:
 //!   a runtime / tool hash, dependency output, materialized source/artifact, or
 //!   service-graph projection. These are host-resolution outputs.
-//! * [`DriftClass::ObservedDrift`] — reserved. Runtime-observation drift (#495 /
-//!   #521 / #522) is **not** populated in v1: this differ compares
-//!   declared/resolved evidence only and never emits `ObservedDrift`, never
-//!   reads `observed_execution_id`, and never relies on per-node/edge `status`.
+//! * [`DriftClass::ObservedDrift`] — the *observed launch envelope* changed
+//!   (#496): two runtime-observed receipts (#490) bound a different
+//!   `observed_execution_id` or differ in an envelope fact (runtime
+//!   kind/identity, entrypoint, working directory, env **keys**, mount
+//!   **targets**, provider-projection digest). This is **envelope-level only**:
+//!   the differ still does NOT compare per-node/edge lifecycle `status`
+//!   (#495/#521/#522), and never compares diagnostic/ephemeral facts (PID,
+//!   container id, bound port, local URL, log path, session id, timestamps), so
+//!   it never claims runtime *behaviour* equivalence — only whether the observed
+//!   launch envelope changed. Receipts with no observed layer emit no
+//!   `ObservedDrift`.
 //!
 //! When classification is ambiguous the differ is conservative: a field is only
 //! [`DriftClass::ResolvedDrift`] when it is clearly a resolved / provider-derived
@@ -32,8 +39,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2, LaunchArg, Tracked,
-    TrackingStatus,
+    ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2, LaunchArg,
+    ObservedLaunchEnvelope, Tracked, TrackingStatus,
 };
 
 const COMPONENT_NODE: &str = "node";
@@ -44,7 +51,8 @@ const COMPONENT_PROVIDER_PROJECTION: &str = "provider_projection";
 /// Domain a [`ReceiptDriftChange`] belongs to.
 ///
 /// See the module docs for the declared/resolved/observed distinction.
-/// `ObservedDrift` is reserved and never emitted by the v1 differ.
+/// `ObservedDrift` covers the runtime-observed launch envelope (#490/#496); it
+/// never reflects diagnostic facts or per-node lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DriftClass {
@@ -162,8 +170,12 @@ struct DriftSubject {
     execution_id: Option<String>,
     declared_execution_id: Option<String>,
     resolved_execution_id: Option<String>,
+    observed_execution_id: Option<String>,
     declared_fields: Vec<FacetField>,
     resolved_fields: Vec<FacetField>,
+    /// Observed launch-envelope facts (#490/#496). Empty for receipts with no
+    /// runtime observation. Never carries diagnostic facts (bound port, etc.).
+    observed_fields: Vec<FacetField>,
     nodes: Vec<NodeEntry>,
     edges: Vec<EdgeEntry>,
     provider_projections: Vec<ProjectionEntry>,
@@ -214,8 +226,10 @@ impl DriftSubject {
         self.execution_id.is_some()
             || self.declared_execution_id.is_some()
             || self.resolved_execution_id.is_some()
+            || self.observed_execution_id.is_some()
             || !self.declared_fields.is_empty()
             || !self.resolved_fields.is_empty()
+            || !self.observed_fields.is_empty()
             || !self.nodes.is_empty()
             || !self.edges.is_empty()
             || !self.provider_projections.is_empty()
@@ -367,12 +381,23 @@ impl DriftSubject {
             })
             .collect();
 
+        // --- Observed-domain launch envelope (#490/#496) ---
+        // Only present once the workload was runtime-observed; envelope facts
+        // only (no diagnostic bound port / local URL, no resolved-id anchor).
+        let observed_fields = receipt
+            .observed_runtime
+            .as_ref()
+            .map(|evidence| observed_envelope_fields(&evidence.envelope))
+            .unwrap_or_default();
+
         Self {
             execution_id: Some(receipt.execution_id.clone()),
             declared_execution_id: receipt.declared_execution_id.clone(),
             resolved_execution_id: receipt.resolved_execution_id.clone(),
+            observed_execution_id: receipt.observed_execution_id.clone(),
             declared_fields: declared,
             resolved_fields: resolved,
+            observed_fields,
             nodes,
             edges,
             provider_projections,
@@ -482,13 +507,58 @@ impl DriftSubject {
             execution_id: Some(receipt.execution_id.clone()),
             declared_execution_id: None,
             resolved_execution_id: None,
+            // v1 receipts predate the runtime-observation layer.
+            observed_execution_id: None,
             declared_fields: declared,
             resolved_fields: resolved,
+            observed_fields: Vec::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
             provider_projections: Vec::new(),
         }
     }
+}
+
+/// Project the observed launch envelope (#490/#496) into comparable facet
+/// fields. Only the canonical envelope facts are compared; the diagnostic facts
+/// on [`super::ObservedRuntimeEvidence`] (bound port, local URL) and the derived
+/// `resolved_execution_id` anchor are intentionally excluded, so observed drift
+/// reflects what the workload actually bound — never a runtime-assigned port or
+/// a value already covered by `resolved_execution_id`.
+fn observed_envelope_fields(envelope: &ObservedLaunchEnvelope) -> Vec<FacetField> {
+    vec![
+        FacetField::new(
+            "observed.runtime_kind",
+            "runtime",
+            to_value(&envelope.runtime_kind),
+        ),
+        FacetField::new(
+            "observed.runtime_identity",
+            "runtime",
+            to_value(&envelope.runtime_identity),
+        ),
+        FacetField::new(
+            "observed.entrypoint",
+            "entrypoint",
+            to_value(&envelope.entrypoint),
+        ),
+        FacetField::new(
+            "observed.working_directory",
+            "entrypoint",
+            to_value(&envelope.working_directory),
+        ),
+        FacetField::new("observed.env_keys", "env", to_value(&envelope.env_keys)),
+        FacetField::new(
+            "observed.mount_targets",
+            "filesystem",
+            to_value(&envelope.mount_targets),
+        ),
+        FacetField::new(
+            "observed.provider_projection_digest",
+            "provider",
+            to_value(&envelope.provider_projection_digest),
+        ),
+    ]
 }
 
 fn diff_subjects(old: &DriftSubject, new: &DriftSubject) -> ReceiptDriftReport {
@@ -508,6 +578,13 @@ fn diff_subjects(old: &DriftSubject, new: &DriftSubject) -> ReceiptDriftReport {
         &old.resolved_execution_id,
         &new.resolved_execution_id,
     );
+    diff_execution_id(
+        &mut changes,
+        "observed_execution_id",
+        DriftClass::ObservedDrift,
+        &old.observed_execution_id,
+        &new.observed_execution_id,
+    );
 
     diff_facet_fields(
         &mut changes,
@@ -520,6 +597,12 @@ fn diff_subjects(old: &DriftSubject, new: &DriftSubject) -> ReceiptDriftReport {
         DriftClass::ResolvedDrift,
         &old.resolved_fields,
         &new.resolved_fields,
+    );
+    diff_facet_fields(
+        &mut changes,
+        DriftClass::ObservedDrift,
+        &old.observed_fields,
+        &new.observed_fields,
     );
 
     diff_nodes(&mut changes, &old.nodes, &new.nodes);
@@ -837,10 +920,11 @@ fn node_kind_class(kind: &str) -> DriftClass {
 
 /// Map a graph edge kind label to its drift domain, or `None` to skip it.
 ///
-/// `observes` edges are the runtime-observation seam (#495) and are skipped: v1
-/// never emits `ObservedDrift`. Materialization / provider / service-graph edges
-/// are [`DriftClass::ResolvedDrift`]; declared structural edges (and unknown
-/// kinds, conservatively) are [`DriftClass::DeclaredDrift`].
+/// `observes` edges are the per-edge runtime-observation seam (#495) and are
+/// skipped here — envelope-level observed drift (#496) is handled separately via
+/// the observed facet fields, not per-edge lifecycle. Materialization / provider
+/// / service-graph edges are [`DriftClass::ResolvedDrift`]; declared structural
+/// edges (and unknown kinds, conservatively) are [`DriftClass::DeclaredDrift`].
 fn edge_kind_class(kind: &str) -> Option<DriftClass> {
     match kind {
         "observes" => None,
@@ -1312,32 +1396,39 @@ mod tests {
         assert_eq!(resolved.class, DriftClass::ResolvedDrift);
     }
 
+    /// #496: a changed `observed_execution_id` between two runtime-observed
+    /// receipts is classified as `ObservedDrift`.
     #[test]
-    fn observed_fields_are_ignored_and_observed_drift_is_never_emitted() {
+    fn observed_execution_id_change_is_observed_drift() {
         let old = base_v2();
         let mut new = base_v2();
-        // Observed-domain evidence the v1 differ must never classify.
-        new.observed_execution_id = Some("blake3:observed".to_string());
+        new.observed_execution_id = Some("sha256:observed-2".to_string());
+        let report = diff_receipt_documents(&doc(old), &doc(new)).expect("report");
+        let change = report
+            .changes
+            .iter()
+            .find(|c| c.field == "observed_execution_id")
+            .expect("observed id change");
+        assert_eq!(change.class, DriftClass::ObservedDrift);
+    }
+
+    /// #496 still does NOT compare per-node/edge lifecycle `status` (#495/#521/
+    /// #522) — only the envelope. A status-only change yields no drift.
+    #[test]
+    fn per_node_lifecycle_status_is_not_drift() {
+        let old = base_v2();
+        let mut new = base_v2();
         new.node_receipts[0].status = Some("running".to_string());
         new.edge_receipts[0].status = Some("active".to_string());
-        // A real declared change so the report is non-empty.
+        // A real declared change so the report is non-empty (proves `status`
+        // alone is not what produced it).
         new.launch.entry_point = LaunchEntryPoint::Command {
             name: "uvicorn".to_string(),
         };
         let report = diff_receipt_documents(&doc(old), &doc(new)).expect("report");
         assert!(
-            report
-                .changes
-                .iter()
-                .all(|c| c.class != DriftClass::ObservedDrift),
-            "v1 differ must never emit ObservedDrift"
-        );
-        assert!(
-            report
-                .changes
-                .iter()
-                .all(|c| c.field != "observed_execution_id" && c.field != "status"),
-            "observed-domain fields must be ignored"
+            report.changes.iter().all(|c| c.field != "status"),
+            "per-node/edge lifecycle status must not be compared yet"
         );
         assert!(
             report
@@ -1346,6 +1437,82 @@ mod tests {
                 .any(|c| c.field == "launch.entry_point"),
             "the declared change must still be reported"
         );
+    }
+
+    /// #496: an observed *envelope* fact change is `ObservedDrift`, but a change
+    /// to diagnostic-only facts (bound port / local URL) is NOT drift.
+    #[test]
+    fn observed_envelope_drifts_but_diagnostic_facts_do_not() {
+        use super::super::{ObservedLaunchEnvelope, ObservedRuntimeEvidence};
+        let evidence = |kind: &str, port: u16| ObservedRuntimeEvidence {
+            envelope: ObservedLaunchEnvelope {
+                runtime_kind: kind.to_string(),
+                entrypoint: vec!["node".to_string(), "server.js".to_string()],
+                env_keys: vec!["PORT".to_string()],
+                ..Default::default()
+            },
+            bound_port: Some(port),
+            local_url: Some(format!("http://127.0.0.1:{port}/")),
+        };
+        let mut old = base_v2();
+        old.observed_runtime = Some(evidence("source/node", 18890));
+
+        // (a) Same envelope, different bound port / local URL → no observed drift.
+        let mut same = base_v2();
+        same.observed_runtime = Some(evidence("source/node", 40000));
+        let report = diff_receipt_documents(&doc(old.clone()), &doc(same)).expect("report");
+        assert!(
+            report
+                .changes
+                .iter()
+                .all(|c| c.class != DriftClass::ObservedDrift),
+            "diagnostic bound port / local URL must not produce observed drift"
+        );
+
+        // (b) A real envelope fact change (runtime_kind) → ObservedDrift.
+        let mut changed = base_v2();
+        changed.observed_runtime = Some(evidence("source/python", 18890));
+        let report = diff_receipt_documents(&doc(old), &doc(changed)).expect("report");
+        let drift = report
+            .changes
+            .iter()
+            .find(|c| c.field == "observed.runtime_kind")
+            .expect("runtime_kind drift");
+        assert_eq!(drift.class, DriftClass::ObservedDrift);
+    }
+
+    /// Diagnostic / non-identity receipt fields (timestamp, host fingerprint,
+    /// runner) are not compared, so changing them produces no drift.
+    #[test]
+    fn diagnostic_and_timestamp_fields_do_not_drift() {
+        let old = base_v2();
+        let mut new = base_v2();
+        new.computed_at = "2099-12-31T23:59:59Z".to_string();
+        new.host_fingerprint = Some("linux:arm64:musl".to_string());
+        new.runner = None;
+        let report = diff_receipt_documents(&doc(old), &doc(new)).expect("report");
+        assert!(
+            !report.has_drift,
+            "diagnostic/timestamp fields must not drift: {:?}",
+            report.changes
+        );
+    }
+
+    /// An older / sparser receipt that lacks graph + observed fields must not
+    /// panic — it compares on whatever evidence aligns.
+    #[test]
+    fn missing_graph_and_observed_fields_do_not_panic() {
+        let mut old = base_v2();
+        old.node_receipts.clear();
+        old.edge_receipts.clear();
+        old.observed_runtime = None;
+        old.observed_execution_id = None;
+        old.declared_execution_id = None;
+        old.resolved_execution_id = None;
+        let new = base_v2();
+        // Must not panic; a valid report is produced from the aligned facets.
+        let report = diff_receipt_documents(&doc(old), &doc(new)).expect("report");
+        let _ = report.has_drift;
     }
 
     #[test]
