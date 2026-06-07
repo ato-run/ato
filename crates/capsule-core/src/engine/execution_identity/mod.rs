@@ -3,6 +3,7 @@ mod env_origin;
 
 mod drift;
 mod filesystem_builder;
+mod observed;
 mod policy_builder;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ pub use drift::{
 };
 pub use env_origin::{EnvOrigin, default_env_origin};
 pub use filesystem_builder::FilesystemIdentityBuilder;
+pub use observed::{ObservedLaunchEnvelope, ObservedRuntimeEvidence};
 pub use policy_builder::PolicyIdentityBuilder;
 
 pub const EXECUTION_IDENTITY_SCHEMA_VERSION: u32 = 1;
@@ -401,6 +403,14 @@ pub struct ExecutionReceiptV2 {
     /// before the field existed. See [`GraphCompletenessReason`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graph_completeness_reasons: Vec<GraphCompletenessReason>,
+    /// Runtime observation v1 evidence (#490): the observed launch envelope plus
+    /// diagnostic facts, captured post-spawn once the workload reached
+    /// readiness. `None` for pre-observation receipts (the default) and for
+    /// failed/partial observations. Only [`ObservedRuntimeEvidence::envelope`]
+    /// feeds `observed_execution_id`; the diagnostic fields never do. Additive
+    /// (serde default) so older receipts round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_runtime: Option<ObservedRuntimeEvidence>,
 }
 
 impl ExecutionReceiptV2 {
@@ -444,6 +454,9 @@ impl ExecutionReceiptV2 {
             // Populated by the graph-backed builder once the scope is known;
             // empty keeps legacy receipts back-compatible.
             graph_completeness_reasons: Vec::new(),
+            // Populated post-spawn by `with_observation` (#490); `None` keeps
+            // pre-observation receipts back-compatible.
+            observed_runtime: None,
         })
     }
 
@@ -580,6 +593,39 @@ impl ExecutionReceiptV2 {
         reasons: Vec<GraphCompletenessReason>,
     ) -> Self {
         self.graph_completeness_reasons = reasons;
+        self
+    }
+
+    /// Stamp runtime observation v1 (#490) onto an already-built receipt.
+    ///
+    /// Derives `observed_execution_id` from the evidence's canonical envelope
+    /// (never copied from `resolved_execution_id`), flips the observation
+    /// scope's runtime layer to [`RuntimeObservation::Observed`] (preserving the
+    /// declared/resolved layers), recomputes the completeness reasons, and
+    /// refreshes any [`GraphReceipt`]'s observed id. **Keeps
+    /// [`GraphCompleteness`] untouched** — observation v1 never emits
+    /// `Complete`.
+    ///
+    /// Call ONLY after a real post-spawn observation that carries minimal
+    /// evidence ([`ObservedLaunchEnvelope::has_minimal_evidence`]); a
+    /// failed/partial/aborted observation must leave the pre-observation receipt
+    /// unchanged (`observed_execution_id` stays `None`).
+    pub fn with_observation(mut self, evidence: ObservedRuntimeEvidence) -> Self {
+        let observed_id = evidence.envelope.compute_observed_execution_id();
+        let scope = match self.observation_scope {
+            Some(existing) => ObservationScope {
+                observed: RuntimeObservation::Observed,
+                ..existing
+            },
+            None => ObservationScope::declared_resolved_observed(),
+        };
+        self.graph_completeness_reasons = scope.graph_completeness_reasons();
+        self.observation_scope = Some(scope);
+        self.observed_execution_id = Some(observed_id.clone());
+        if let Some(graph_receipt) = self.graph_receipt.as_mut() {
+            graph_receipt.observed_execution_id = Some(observed_id);
+        }
+        self.observed_runtime = Some(evidence);
         self
     }
 
@@ -741,6 +787,8 @@ impl ExecutionReceiptV2 {
             provider_projections: Vec::new(),
             observation_scope: Some(observation_scope),
             graph_completeness_reasons,
+            // A partial/failure receipt never carries runtime observation.
+            observed_runtime: None,
         }
     }
 }
@@ -813,16 +861,19 @@ impl LayerEvidence {
     }
 }
 
-/// Observation state of the runtime (`Observed`-domain) layer (refs #495).
+/// Observation state of the runtime (`Observed`-domain) layer (refs #495, #490).
 ///
-/// There is **deliberately no `Observed` variant** in this slice: runtime
-/// observation — per-node / per-edge lifecycle observations (#521) and the
-/// realization classifier (#522) — is not captured yet. Encoding the absence
-/// as a typed reason (rather than implying it by an empty `observed_*` field)
-/// lets a receipt reader tell "we have declared/resolved evidence but did not
-/// observe the runtime" from "we observed the runtime". Because the variant
-/// space cannot say `Observed`, this type also makes it impossible for this
-/// slice to silently claim runtime evidence it does not have.
+/// Runtime observation v1 (#490) adds the [`RuntimeObservation::Observed`]
+/// variant: a receipt whose workload spawned, reached readiness, and had its
+/// *observed launch envelope* captured ([`ObservedLaunchEnvelope`]). The
+/// non-observed variants remain so a reader can still tell "we have
+/// declared/resolved evidence but did not observe the runtime" from "we
+/// observed the runtime". `Observed` is emitted **only** from a real post-spawn
+/// observation; it is never synthesized just because a process started, and a
+/// failed/partial observation stays `Deferred` with `observed_execution_id =
+/// None`. Observation v1 is envelope-level only — it does **not** upgrade
+/// [`GraphCompleteness`] to `Complete` (per-node/edge lifecycle and drift
+/// reconciliation remain #521/#522).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RuntimeObservation {
@@ -832,6 +883,11 @@ pub enum RuntimeObservation {
     OutOfScope,
     /// Runtime observation is deferred to a later stage/wave (#521/#522).
     Deferred,
+    /// The runtime was observed post-spawn at the envelope level (#490): the
+    /// receipt carries [`ObservedRuntimeEvidence`] and a real
+    /// `observed_execution_id`. Still envelope-level only, so the graph stays
+    /// [`GraphCompleteness::Partial`].
+    Observed,
 }
 
 impl RuntimeObservation {
@@ -840,6 +896,7 @@ impl RuntimeObservation {
             RuntimeObservation::NotObserved => "not-observed",
             RuntimeObservation::OutOfScope => "out-of-scope",
             RuntimeObservation::Deferred => "deferred",
+            RuntimeObservation::Observed => "observed",
         }
     }
 }
@@ -878,6 +935,20 @@ impl ObservationScope {
         }
     }
 
+    /// Scope for a runtime-observed receipt (#490): declared + resolved
+    /// evidence plus a real post-spawn observed launch envelope. The graph is
+    /// still [`GraphCompleteness::Partial`] — observation v1 is envelope-level
+    /// only — so `graph_completeness_reasons` reports
+    /// [`GraphCompletenessReason::RuntimeObservationMinimal`] rather than
+    /// claiming completeness.
+    pub fn declared_resolved_observed() -> Self {
+        Self {
+            declared: LayerEvidence::Present,
+            resolved: LayerEvidence::Present,
+            observed: RuntimeObservation::Observed,
+        }
+    }
+
     /// Scope for a receipt that only carries declared-domain evidence (e.g.
     /// host resolution never ran). Runtime layer is `NotObserved`.
     pub fn declared_only() -> Self {
@@ -888,14 +959,13 @@ impl ObservationScope {
         }
     }
 
-    /// Whether this scope claims any runtime observation. Always `false` in
-    /// this slice — the type cannot represent runtime observation — but
-    /// exposed so call sites and tests can assert the invariant directly.
+    /// Whether this scope claims runtime observation (#490). `true` only when
+    /// `observed == RuntimeObservation::Observed` — i.e. a real post-spawn
+    /// envelope was captured. The non-observed states (`NotObserved`,
+    /// `Deferred`, `OutOfScope`) all return `false`, so a reader can never
+    /// mistake a deferred/failed observation for a real one.
     pub fn has_runtime_observation(&self) -> bool {
-        // `RuntimeObservation` has no `Observed` variant; runtime evidence is
-        // never claimed here. Kept as an explicit method so the contract is
-        // checkable rather than implied.
-        false
+        matches!(self.observed, RuntimeObservation::Observed)
     }
 
     /// Conservative reasons the graph attached to a receipt is
@@ -919,6 +989,14 @@ impl ObservationScope {
             }
             RuntimeObservation::OutOfScope => {
                 reasons.push(GraphCompletenessReason::RuntimeObservationOutOfScope)
+            }
+            // Observed at the envelope level (#490): the runtime *was* observed,
+            // so this is not `RuntimeNotObserved` — but the graph is still
+            // `Partial` because per-node/edge lifecycle observation and drift
+            // reconciliation (#521/#522) have not run. That keeps the
+            // "a Partial receipt always carries a reason" invariant true.
+            RuntimeObservation::Observed => {
+                reasons.push(GraphCompletenessReason::RuntimeObservationMinimal)
             }
         }
         if self.resolved == LayerEvidence::Absent {
@@ -954,6 +1032,10 @@ pub enum GraphCompletenessReason {
     RuntimeObservationDeferred,
     /// Runtime observation is intentionally outside this receipt's scope.
     RuntimeObservationOutOfScope,
+    /// The runtime was observed at the envelope level (#490), but the graph is
+    /// still `Partial`: per-node/edge lifecycle observation and drift
+    /// reconciliation (#521/#522) have not run, so it is not yet `Complete`.
+    RuntimeObservationMinimal,
     /// The resolved-domain layer was not derived for this receipt.
     ResolvedLayerAbsent,
     /// The declared-domain layer was not derived for this receipt.
@@ -1002,6 +1084,7 @@ impl GraphCompletenessReason {
             GraphCompletenessReason::RuntimeObservationOutOfScope => {
                 "runtime-observation-out-of-scope"
             }
+            GraphCompletenessReason::RuntimeObservationMinimal => "runtime-observation-minimal",
             GraphCompletenessReason::ResolvedLayerAbsent => "resolved-layer-absent",
             GraphCompletenessReason::DeclaredLayerAbsent => "declared-layer-absent",
             // Coarse label; the specific provider/service/gap live in the typed
@@ -3865,6 +3948,96 @@ pub(in crate::engine::execution_identity) mod tests {
             "Complete must never be emitted in this slice"
         );
         assert_eq!(receipt.graph_completeness, Some(GraphCompleteness::Partial));
+    }
+
+    /// #490: applying a real observation stamps `observed_execution_id`, flips
+    /// the scope's runtime layer to `Observed`, swaps the completeness reason
+    /// from `RuntimeNotObserved` to `RuntimeObservationMinimal`, and — crucially
+    /// — does NOT upgrade `GraphCompleteness` to `Complete`.
+    #[test]
+    fn with_observation_sets_observed_id_keeps_partial_no_complete() {
+        let receipt = observation_scope_fixture_receipt();
+        assert!(receipt.observed_execution_id.is_none());
+        assert!(receipt.observed_runtime.is_none());
+        let before_completeness = receipt.graph_completeness;
+
+        let envelope = ObservedLaunchEnvelope {
+            resolved_execution_id: receipt.resolved_execution_id.clone(),
+            runtime_kind: "source/node".to_string(),
+            runtime_identity: Some("deno 2.6.8".to_string()),
+            entrypoint: vec!["node".to_string(), "server.js".to_string()],
+            working_directory: Some(".".to_string()),
+            env_keys: vec!["PORT".to_string()],
+            mount_targets: vec![],
+            provider_projection_digest: None,
+        };
+        let expected_id = envelope.compute_observed_execution_id();
+        let observed = receipt
+            .clone()
+            .with_observation(ObservedRuntimeEvidence::new(envelope).with_bound_port(Some(40000)));
+
+        assert_eq!(
+            observed.observed_execution_id.as_deref(),
+            Some(expected_id.as_str())
+        );
+        assert_ne!(
+            observed.observed_execution_id, observed.resolved_execution_id,
+            "observed id must not be a copy of resolved id"
+        );
+        let scope = observed.observation_scope.expect("scope");
+        assert_eq!(scope.observed, RuntimeObservation::Observed);
+        assert!(scope.has_runtime_observation());
+        assert!(observed.observed_runtime.is_some());
+        // Completeness label is untouched; never Complete.
+        assert_eq!(observed.graph_completeness, before_completeness);
+        assert_ne!(
+            observed.graph_completeness,
+            Some(GraphCompleteness::Complete)
+        );
+        assert!(
+            observed
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::RuntimeObservationMinimal),
+            "observed receipt must carry the minimal-observation reason"
+        );
+        assert!(
+            !observed
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::RuntimeNotObserved),
+            "RuntimeNotObserved must be cleared once observed"
+        );
+    }
+
+    /// #490 identity rule: diagnostic/ephemeral runtime facts (bound port, local
+    /// URL — runtime-assigned, like a PID or container id) must NOT change
+    /// `observed_execution_id`. Only the canonical envelope does.
+    #[test]
+    fn observed_id_ignores_diagnostic_runtime_facts() {
+        let receipt = observation_scope_fixture_receipt();
+        let envelope = ObservedLaunchEnvelope {
+            resolved_execution_id: receipt.resolved_execution_id.clone(),
+            runtime_kind: "source/node".to_string(),
+            runtime_identity: Some("deno 2.6.8".to_string()),
+            entrypoint: vec!["node".to_string(), "server.js".to_string()],
+            working_directory: Some(".".to_string()),
+            env_keys: vec!["PORT".to_string()],
+            mount_targets: vec![],
+            provider_projection_digest: None,
+        };
+        let a = receipt.clone().with_observation(
+            ObservedRuntimeEvidence::new(envelope.clone())
+                .with_bound_port(Some(18890))
+                .with_local_url(Some("http://127.0.0.1:18890/".to_string())),
+        );
+        let b = receipt.with_observation(
+            ObservedRuntimeEvidence::new(envelope)
+                .with_bound_port(Some(40000))
+                .with_local_url(Some("http://127.0.0.1:40000/".to_string())),
+        );
+        assert_eq!(
+            a.observed_execution_id, b.observed_execution_id,
+            "bound port / local url are diagnostic and must not affect identity"
+        );
     }
 
     #[test]
