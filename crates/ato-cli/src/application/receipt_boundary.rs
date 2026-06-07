@@ -35,6 +35,7 @@
 //! diagnostic surface.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -76,9 +77,17 @@ pub(crate) struct GraphIds {
 ///
 /// Empty cell -> no bundle was built before the failure -> partial
 /// receipt's declared/resolved ids remain `None` (the pre-PR-3b shape).
+///
+/// The sink also carries a `receipt_emitted` flag (#501): the inner launch
+/// path sets it when it has ALREADY durably persisted a failure receipt for
+/// the failing launch (e.g. the OCI strict-realization gate writes a rich
+/// failure receipt with provider evidence, then propagates the gate error).
+/// The boundary wrapper reads it and skips its own generic partial-receipt
+/// emission, so one launch never yields two receipts for one failure.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ReceiptGraphIdSink {
     inner: Arc<Mutex<Option<GraphIds>>>,
+    receipt_emitted: Arc<AtomicBool>,
 }
 
 impl ReceiptGraphIdSink {
@@ -107,6 +116,25 @@ impl ReceiptGraphIdSink {
             .ok()
             .and_then(|guard| guard.clone())
             .unwrap_or_default()
+    }
+
+    /// Record that the inner launch path has ALREADY durably persisted an
+    /// execution receipt for the failing launch (#501) — e.g. the OCI
+    /// strict-realization gate wrote a rich failure receipt carrying provider
+    /// evidence. The boundary wrapper reads this via
+    /// [`receipt_already_emitted`](Self::receipt_already_emitted) and skips its
+    /// own generic partial-receipt emission, so a single launch never yields
+    /// two receipts for one failure. Idempotent; only set after a *successful*
+    /// write so a best-effort write failure still falls back to the boundary's
+    /// partial.
+    pub(crate) fn mark_receipt_emitted(&self) {
+        self.receipt_emitted.store(true, Ordering::SeqCst);
+    }
+
+    /// True if the inner launch path already persisted a receipt for this
+    /// launch (see [`mark_receipt_emitted`](Self::mark_receipt_emitted)).
+    pub(crate) fn receipt_already_emitted(&self) -> bool {
+        self.receipt_emitted.load(Ordering::SeqCst)
     }
 }
 
@@ -206,7 +234,11 @@ where
 {
     let sink_for_future = ctx.graph_id_sink.clone();
     let outcome = inner(sink_for_future).await;
+    // Skip the generic partial when the inner launch path already persisted a
+    // rich failure receipt for this error (#501 OCI strict-gate path) — a single
+    // launch must never produce two receipts for one failure.
     if let Err(error) = outcome.as_ref()
+        && !ctx.graph_id_sink.receipt_already_emitted()
         && let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx)
     {
         match write_receipt_document_atomic(&ExecutionReceiptDocument::V2(receipt.clone())) {
@@ -254,7 +286,11 @@ where
 {
     let sink_for_future = ctx.graph_id_sink.clone();
     let outcome = inner(sink_for_future).await;
-    if let Err(error) = outcome.as_ref() {
+    // Mirrors `emit_receipt_on_result`: skip the generic partial when the inner
+    // launch path already persisted a rich failure receipt for this error (#501).
+    if let Err(error) = outcome.as_ref()
+        && !ctx.graph_id_sink.receipt_already_emitted()
+    {
         if let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx) {
             if let Err(write_err) =
                 write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V2(receipt))
@@ -647,6 +683,67 @@ mod tests {
         assert!(
             entries.is_empty(),
             "wrapper must not write a receipt for untyped errors"
+        );
+    }
+
+    /// #501: when the inner launch path has ALREADY persisted a rich failure
+    /// receipt (it calls `sink.mark_receipt_emitted()` — as the OCI strict-gate
+    /// path does after writing a provider-evidence receipt) the boundary wrapper
+    /// must NOT write a second, generic partial receipt for the same error. A
+    /// single launch yields exactly one receipt. The original error still
+    /// propagates.
+    #[tokio::test]
+    async fn wrapper_skips_partial_when_receipt_already_emitted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = ReceiptEmissionContext::for_boundary("test boundary");
+
+        let outcome: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), |sink| async move {
+            // The inner launch path persisted its own rich receipt, then signals
+            // the boundary to stand down before propagating the typed gate error.
+            sink.mark_receipt_emitted();
+            Err::<(), _>(anyhow::Error::new(execution_error(
+                AtoErrorCode::AtoErrProvisioningLockIncomplete,
+            )))
+        })
+        .await;
+        assert!(
+            outcome.is_err(),
+            "wrapper must still propagate the original gate error"
+        );
+
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "boundary must not double-emit a partial when the launch path already \
+             persisted a receipt, found {entries:?}"
+        );
+    }
+
+    /// Inverse guard: a typed failure with the flag UNSET still produces exactly
+    /// one boundary partial. Pins that the skip is gated on the flag, not blanket.
+    #[tokio::test]
+    async fn wrapper_emits_partial_when_receipt_not_marked_emitted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = ReceiptEmissionContext::for_boundary("test boundary");
+
+        let _: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), |_sink| async {
+            Err::<(), _>(anyhow::Error::new(execution_error(
+                AtoErrorCode::AtoErrProvisioningLockIncomplete,
+            )))
+        })
+        .await;
+
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "an unmarked typed failure must still get exactly one boundary partial"
         );
     }
 
