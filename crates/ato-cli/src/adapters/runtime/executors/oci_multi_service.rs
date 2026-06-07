@@ -216,19 +216,22 @@ pub(crate) async fn execute_multi_service(
     // policy, an unpinned image, or a host-bound mount fallback. Normal mode is a
     // no-op. Distinct from the always-on `enforce_multi_service_policy_gate`.
     let is_podman = provider.semantics().kind == OciProviderKind::Podman;
-    enforce_strict_oci_orchestration(
+    let strict_gate = enforce_strict_oci_orchestration(
         &orch_plan,
         &images,
         &egress_allow,
         is_podman,
         strict_realization,
-    )?;
+    );
 
     // Persist a durable launch receipt with one receipt-safe provider-evidence
     // record per service (#501), BEFORE `execute_service_graph_with_provider`
-    // runs any side effect. The receipt's identity/graph come from the selected
-    // target's compiled plan; its `provider_projections` carry every service.
-    // Best-effort: a receipt issue never regresses the launch.
+    // runs any side effect — INCLUDING when the strict gate blocks the launch, in
+    // which case the receipt is marked as a typed failure (keeping its real
+    // declared/resolved ids + per-service provider evidence). The receipt's
+    // identity/graph come from the selected target's compiled plan; its
+    // `provider_projections` carry every service. Best-effort: a receipt issue
+    // never regresses the launch.
     let provider_evidence: Vec<_> =
         oci_orchestration_provider_evidence(&orch_plan, &images, &egress_allow, is_podman)
             .into_iter()
@@ -241,6 +244,7 @@ pub(crate) async fn execute_multi_service(
                 &execution_plan,
                 launch_ctx,
                 Some(provider_evidence),
+                strict_gate.as_ref().err(),
                 &reporter,
             )
             .await;
@@ -253,6 +257,9 @@ pub(crate) async fn execute_multi_service(
                 .await;
         }
     }
+    // Propagate the strict-gate block (if any) only after the failure receipt is
+    // on disk.
+    strict_gate?;
 
     execute_service_graph_with_provider(
         &orch_plan,
