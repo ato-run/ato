@@ -619,7 +619,14 @@ impl ExecutionReceiptV2 {
             },
             None => ObservationScope::declared_resolved_observed(),
         };
-        self.graph_completeness_reasons = scope.graph_completeness_reasons();
+        // Replace ONLY the runtime-observation reason (NotObserved → Minimal).
+        // Provider-projection gaps (#501) and layer-absent reasons are appended
+        // outside the scope and must survive observation, so they are preserved
+        // rather than overwritten by a full `scope.graph_completeness_reasons()`.
+        self.graph_completeness_reasons
+            .retain(|reason| !reason.is_runtime_observation());
+        self.graph_completeness_reasons
+            .push(GraphCompletenessReason::RuntimeObservationMinimal);
         self.observation_scope = Some(scope);
         self.observed_execution_id = Some(observed_id.clone());
         if let Some(graph_receipt) = self.graph_receipt.as_mut() {
@@ -1093,6 +1100,20 @@ impl GraphCompletenessReason {
                 "provider-projection-incomplete"
             }
         }
+    }
+
+    /// Whether this reason describes the runtime-observation layer (as opposed
+    /// to a layer-absent or provider-projection reason). Used when stamping
+    /// runtime observation (#490) to swap only the runtime reason while
+    /// preserving provider-projection (#501) and layer-absent reasons.
+    pub fn is_runtime_observation(&self) -> bool {
+        matches!(
+            self,
+            GraphCompletenessReason::RuntimeNotObserved
+                | GraphCompletenessReason::RuntimeObservationDeferred
+                | GraphCompletenessReason::RuntimeObservationOutOfScope
+                | GraphCompletenessReason::RuntimeObservationMinimal
+        )
     }
 }
 
@@ -4005,6 +4026,48 @@ pub(in crate::engine::execution_identity) mod tests {
                 .graph_completeness_reasons
                 .contains(&GraphCompletenessReason::RuntimeNotObserved),
             "RuntimeNotObserved must be cleared once observed"
+        );
+    }
+
+    /// #490 + #501: observation must preserve non-runtime completeness reasons
+    /// (provider-projection gaps, layer-absent) and swap only the runtime reason
+    /// from `RuntimeNotObserved` to `RuntimeObservationMinimal`.
+    #[test]
+    fn with_observation_preserves_provider_projection_reasons() {
+        let mut receipt = observation_scope_fixture_receipt();
+        receipt.graph_completeness_reasons = vec![
+            GraphCompletenessReason::RuntimeNotObserved,
+            GraphCompletenessReason::ProviderProjectionIncomplete {
+                provider_kind: "oci".to_string(),
+                service_label: Some("web".to_string()),
+                gap: ProviderProjectionGap::ImageUnpinned,
+            },
+        ];
+        let envelope = ObservedLaunchEnvelope {
+            runtime_kind: "oci/podman".to_string(),
+            entrypoint: vec!["app".to_string()],
+            ..Default::default()
+        };
+        let observed = receipt.with_observation(ObservedRuntimeEvidence::new(envelope));
+        assert!(
+            observed.graph_completeness_reasons.iter().any(|r| matches!(
+                r,
+                GraphCompletenessReason::ProviderProjectionIncomplete {
+                    gap: ProviderProjectionGap::ImageUnpinned,
+                    ..
+                }
+            )),
+            "provider-projection reason must survive observation stamping"
+        );
+        assert!(
+            observed
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::RuntimeObservationMinimal)
+        );
+        assert!(
+            !observed
+                .graph_completeness_reasons
+                .contains(&GraphCompletenessReason::RuntimeNotObserved)
         );
     }
 

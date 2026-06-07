@@ -54,8 +54,10 @@ pub struct ObservedLaunchEnvelope {
     /// Actual runtime kind/provider used, logical form (e.g. `"source/node"`,
     /// `"oci/podman"`). Never a host path.
     pub runtime_kind: String,
-    /// Resolved runtime identity in logical form (e.g. `"deno 2.6.8"`, an image
-    /// digest). Never the host filesystem path of the runtime binary.
+    /// Declared/version-based logical runtime identity (e.g. `"node 22.14.0"`, an
+    /// image digest). Never the host filesystem path of the runtime binary. v1
+    /// does not content-address the runtime binary, so this is a logical
+    /// identity rather than a resolved runtime fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_identity: Option<String>,
     /// Entrypoint after launch-profile application, as the *logical*

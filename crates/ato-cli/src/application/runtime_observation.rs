@@ -31,8 +31,16 @@ pub(crate) fn build_observed_runtime_evidence(
     plan: &ManifestData,
     launch: &LaunchSpec,
     launch_ctx: &RuntimeLaunchContext,
+    execution_cwd: Option<&Path>,
     bound_port: Option<u16>,
 ) -> ObservedRuntimeEvidence {
+    // The executor's realized cwd is authoritative — the host source executor
+    // reports `resolve_host_execution_cwd(...)` via `CapsuleProcess.execution_cwd`,
+    // which can differ from the caller's ambient cwd. Fall back to the launch
+    // context's effective cwd only when the executor did not report one (e.g.
+    // node/deno, whose cwd is `effective_cwd().unwrap_or(runtime_dir)`); never an
+    // ambient estimate beyond that.
+    let actual_cwd = execution_cwd.or_else(|| launch_ctx.effective_cwd().map(|p| p.as_path()));
     let envelope = ObservedLaunchEnvelope {
         // Anchored by mark_v2_receipt_observed from the receipt itself.
         resolved_execution_id: None,
@@ -40,7 +48,7 @@ pub(crate) fn build_observed_runtime_evidence(
         runtime_identity: observed_runtime_identity(plan),
         entrypoint: observed_entrypoint(launch),
         working_directory: observed_working_directory(
-            launch_ctx.effective_cwd().map(|p| p.as_path()),
+            actual_cwd,
             launch_ctx.workspace_root().map(|p| p.as_path()),
         ),
         env_keys: launch_ctx.env_permission_keys(),
@@ -65,7 +73,10 @@ fn observed_runtime_kind(plan: &ManifestData) -> String {
     }
 }
 
-/// Logical resolved runtime identity, e.g. `"node 22.14.0"` — never a host path.
+/// Declared/version-based logical runtime identity, e.g. `"node 22.14.0"` —
+/// derived from the plan's driver + resolved runtime version, never a host path.
+/// (v1 does not hash the runtime binary; this is a logical identity, not a
+/// content-addressed runtime fingerprint.)
 fn observed_runtime_identity(plan: &ManifestData) -> Option<String> {
     let version = plan.execution_runtime_version()?;
     let name = plan
