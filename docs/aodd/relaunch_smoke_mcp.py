@@ -187,6 +187,30 @@ def verify_ready_via_record(ato_home, ipk, marker, attempts=40, delay=1.0):
     return False, last, None
 
 
+def wait_for_session_stopped(ato_home, session_id, url, marker, attempts=30, delay=0.5):
+    """After stop_active_session, poll until the prior runtime is actually down —
+    its session record removed, or its upstream no longer serving the marker.
+
+    stop_active_session / stop_guest_session are non-blocking (they signal the
+    stop and return), so without this poll the relaunch could race a still-
+    settling runtime and the fresh-session assertion would be flaky. Returns True
+    once the prior runtime is gone, False on timeout."""
+    if not session_id:
+        return True
+    rec_path = (
+        Path(ato_home) / "apps" / "ato-desktop" / "sessions" / f"{session_id}.json"
+    )
+    for _ in range(attempts):
+        if not rec_path.exists():
+            return True
+        if url:
+            status, body = http_get(url)
+            if status != 200 or marker not in body:
+                return True
+        time.sleep(delay)
+    return False
+
+
 def verify_marker(mcp, marker, attempts=20, delay=1.5):
     """Poll for WebView readiness + marker text. Returns (ok, detail)."""
     last = None
@@ -315,7 +339,17 @@ def main():
         st = mcp.call("stop_active_session")
         summary["close"]["response"] = mcp.tool_text(st)
         summary["close"]["isError"] = mcp.tool_is_error(st)
-        time.sleep(3)
+        # stop is non-blocking: poll for the prior runtime to actually go down
+        # before relaunching (instead of a fixed sleep), so the relaunch and the
+        # fresh-session assertion are deterministic and we confirm the stop freed
+        # the resolved port.
+        stop_completed = wait_for_session_stopped(
+            ato_home,
+            summary["first_launch"].get("session_id"),
+            summary["first_launch"].get("resolved_url"),
+            args.marker,
+        )
+        summary["close"]["stop_completed"] = stop_completed
 
         # ---- Relaunch ----
         log("\n[relaunch] NavigateToUrl " + url)
@@ -331,7 +365,7 @@ def main():
             summary["relaunch"]["resolved_url"] = (rec2.get("web") or {}).get(
                 "local_url"
             )
-        wv_ok2, wv_detail2 = verify_marker(mcp, args.marker, attempts=3)
+        wv_ok2, wv_detail2 = verify_marker(mcp, args.marker, attempts=1)
         summary["relaunch"]["webview_marker_visible"] = wv_ok2
         summary["relaunch"]["webview_marker_detail"] = wv_detail2
         hs2 = mcp.call("host_take_screenshot")
@@ -348,12 +382,22 @@ def main():
         )
         summary["relaunch"]["fresh_session"] = relaunched_fresh
 
-        if summary["initialize"] and ok and ok2:
-            summary["verdict"] = "PASS"
-        elif ok and not ok2:
-            summary["verdict"] = "FAILED: relaunch did not reach Ready"
+        # Verdict gates, strict→lenient. A relaunch that merely reuses the still-
+        # live first session (e.g. stop did not actually tear it down) returns the
+        # marker too, so reaching Ready is necessary but NOT sufficient — PASS also
+        # requires the stop to have completed and the relaunch to be a fresh session.
+        if not summary["initialize"]:
+            summary["verdict"] = "FAILED: MCP initialize failed"
         elif not ok:
             summary["verdict"] = "FAILED: first launch did not reach Ready"
+        elif not summary["close"].get("stop_completed", True):
+            summary["verdict"] = "FAILED: stop did not tear down the first runtime"
+        elif not ok2:
+            summary["verdict"] = "FAILED: relaunch did not reach Ready"
+        elif not relaunched_fresh:
+            summary["verdict"] = "FAILED: relaunch reused stale session"
+        else:
+            summary["verdict"] = "PASS"
     finally:
         mcp.close()
 
