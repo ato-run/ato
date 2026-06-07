@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { ShieldCheck, Box, Hexagon, FileCode, Container, Wrench, ShipWheel } from 'lucide-react'
+import { ShieldCheck, Box, Hexagon, FileCode, Container, Wrench, ShipWheel, Cloud, Clock } from 'lucide-react'
 import { BRIDGE } from '../bridge'
 
 const pillTones = {
@@ -38,6 +38,51 @@ const podmanPhaseLabels = {
   verifying: 'Verifying Podman',
   ready: 'Podman is ready',
   failed: 'Podman setup failed',
+}
+
+// Rough download footprint per tool, in MB. These are order-of-magnitude
+// figures (Podman includes a VM machine image; the language runtimes are
+// compressed toolchain archives), not exact artifact sizes — the estimate UI
+// always frames the result as approximate. Used only to size the time hint.
+const APPROX_DOWNLOAD_MB = { podman: 280, node: 35, uv: 18, python: 32 }
+// Fixed post-download work (extract / verify / machine-init) added per tool,
+// in minutes, so the estimate doesn't read as instant on a fast link.
+const FIXED_OVERHEAD_MIN = { podman: 1.5, node: 0.3, uv: 0.2, python: 0.4 }
+// Assumed throughput band (Mbps) used when the WebView can't report a real
+// downlink — WKWebView on macOS exposes no `navigator.connection`. slow→fast.
+const ASSUMED_MBPS = { slow: 12, fast: 80 }
+
+function minutesForMb(mb, mbps) {
+  // MB → megabits (×8) ÷ Mbps → seconds; ÷60 → minutes.
+  return (mb * 8) / mbps / 60
+}
+
+function formatMinutes(min) {
+  if (min < 1) return '<1 min'
+  return `${Math.round(min)} min`
+}
+
+// Build a download-size + time estimate for the tools that will actually be
+// fetched. Returns null when nothing downloads. Prefers a real
+// `navigator.connection.downlink` (single estimate); otherwise reports an
+// assumed slow→fast band. Always advisory — never presented as exact.
+function estimateSetup(kinds) {
+  const downloadMb = kinds.reduce((sum, k) => sum + (APPROX_DOWNLOAD_MB[k] || 0), 0)
+  if (downloadMb <= 0) return null
+  const overheadMin = kinds.reduce((sum, k) => sum + (FIXED_OVERHEAD_MIN[k] || 0), 0)
+  const downlink =
+    typeof navigator !== 'undefined' && navigator.connection && navigator.connection.downlink
+  if (downlink && downlink > 0) {
+    const min = minutesForMb(downloadMb, downlink) + overheadMin
+    return { downloadMb, label: `about ${formatMinutes(min)}`, measured: true }
+  }
+  const fast = minutesForMb(downloadMb, ASSUMED_MBPS.fast) + overheadMin
+  const slow = minutesForMb(downloadMb, ASSUMED_MBPS.slow) + overheadMin
+  const label =
+    Math.round(fast) === Math.round(slow)
+      ? `about ${formatMinutes(slow)}`
+      : `about ${formatMinutes(fast)}–${formatMinutes(slow)}`
+  return { downloadMb, label, measured: false }
 }
 
 let requestCounter = 0
@@ -312,6 +357,11 @@ export default function Step5({
   pythonInstallEnabled,
   setPythonInstallEnabled,
 }) {
+  // "I'll use ato on cloud": opt out of installing any runtime on this device.
+  // When on, Podman + every Ato-managed language runtime is treated as off
+  // (and persisted false), so Continue finishes without downloading anything.
+  // Kept local to Step5 — App's `finish` merges whatever overrides we pass.
+  const [cloudMode, setCloudMode] = useState(false)
   const [checking, setChecking] = useState(true)
   const [runtimeStatus, setRuntimeStatus] = useState(null)
   const [runtimeError, setRuntimeError] = useState(null)
@@ -429,10 +479,13 @@ export default function Step5({
   }, [])
 
   const tools = useMemo(() => statusByKind(runtimeStatus), [runtimeStatus])
+  // Cloud mode forces every local-runtime toggle off without discarding the
+  // user's underlying choices — un-checking "use cloud" restores them.
+  const podmanActive = podmanEnabled && !cloudMode
   const languageCards = [
     {
       kind: 'node',
-      checked: nodeInstallEnabled,
+      checked: nodeInstallEnabled && !cloudMode,
       setChecked: setNodeInstallEnabled,
       icon: Hexagon,
       title: 'Install Ato-managed Node.js when needed',
@@ -440,7 +493,7 @@ export default function Step5({
     },
     {
       kind: 'uv',
-      checked: uvInstallEnabled,
+      checked: uvInstallEnabled && !cloudMode,
       setChecked: setUvInstallEnabled,
       icon: Box,
       title: 'Install Ato-managed uv when needed',
@@ -448,7 +501,7 @@ export default function Step5({
     },
     {
       kind: 'python',
-      checked: pythonInstallEnabled,
+      checked: pythonInstallEnabled && !cloudMode,
       setChecked: setPythonInstallEnabled,
       icon: FileCode,
       title: 'Install Ato-managed Python when needed',
@@ -465,29 +518,52 @@ export default function Step5({
   // single source of truth for "the primary action must prepare, not finish".
   const podmanTool = tools.podman
   const podmanShouldPrepare =
-    podmanEnabled &&
+    podmanActive &&
     !!podmanTool &&
     !podmanTool.ready &&
     podmanPrepareActions.has(podmanTool.action)
   // Opted-in but not preparable (e.g. unsupported host / no package manager):
   // show guidance, never trap — Continue still finishes, skip still offered.
   const podmanNeedsInstructions =
-    podmanEnabled && !!podmanTool && !podmanTool.ready && podmanTool.action === 'open_instructions'
+    podmanActive && !!podmanTool && !podmanTool.ready && podmanTool.action === 'open_instructions'
 
   const hasPendingWork = managedPending || podmanShouldPrepare
   const failedProgress = Object.values(progressByTool).some((progress) => progress.phase === 'failed')
 
+  // Size + time hint for the work the primary button will actually run. Podman
+  // only downloads when an explicit prepare is pending; managed tools only when
+  // selected and not already present. Cloud mode downloads nothing → null.
+  const pendingDownloadKinds = [
+    ...selectedInstallTools,
+    ...(podmanShouldPrepare ? ['podman'] : []),
+  ]
+  const setupEstimate = useMemo(
+    () => estimateSetup(pendingDownloadKinds),
+    [pendingDownloadKinds.join(',')],
+  )
+
+  // Persisted/forwarded settings. In cloud mode every local runtime is off.
+  const effectiveSettings = {
+    podman_enabled: cloudMode ? false : podmanEnabled,
+    node_install_enabled: cloudMode ? false : nodeInstallEnabled,
+    uv_install_enabled: cloudMode ? false : uvInstallEnabled,
+    python_install_enabled: cloudMode ? false : pythonInstallEnabled,
+  }
+  // Always carry the effective settings into finish so cloud-mode opt-out is
+  // persisted deterministically regardless of the underlying toggle state.
+  const finishOnboarding = (overrides = {}, launchHandle = null) =>
+    onFinish({ ...effectiveSettings, ...overrides }, launchHandle)
+
+  // The primary action installs every pending prerequisite in one go (managed
+  // language runtimes first, then Podman prepare is chained on completion), so
+  // it reads as a single "Install prerequisites" step rather than per-tool.
   let primaryLabel
   if (installing) {
-    primaryLabel = activeJob === 'prepare' ? 'Preparing Podman...' : 'Installing selected tools...'
+    primaryLabel = activeJob === 'prepare' ? 'Preparing Podman...' : 'Installing prerequisites...'
   } else if (checking) {
     primaryLabel = 'Checking tools...'
-  } else if (managedPending && podmanShouldPrepare) {
-    primaryLabel = failedProgress ? 'Retry setup' : 'Install and prepare selected tools'
-  } else if (managedPending) {
-    primaryLabel = failedProgress ? 'Retry selected tools' : 'Install selected tools'
-  } else if (podmanShouldPrepare) {
-    primaryLabel = failedProgress ? 'Retry Podman setup' : 'Prepare Podman'
+  } else if (hasPendingWork) {
+    primaryLabel = failedProgress ? 'Retry setup' : 'Install prerequisites'
   } else {
     primaryLabel = 'Continue'
   }
@@ -496,10 +572,7 @@ export default function Step5({
   const saveSettings = () => {
     BRIDGE({
       kind: 'save_runtime_setup_settings',
-      podman_enabled: podmanEnabled,
-      node_install_enabled: nodeInstallEnabled,
-      uv_install_enabled: uvInstallEnabled,
-      python_install_enabled: pythonInstallEnabled,
+      ...effectiveSettings,
     })
   }
 
@@ -587,13 +660,13 @@ export default function Step5({
     // (via the finish override) so a failed/unavailable prepare never traps the
     // user on the final step.
     setPodmanEnabled(false)
-    onFinish({ podman_enabled: false })
+    finishOnboarding({ podman_enabled: false })
   }
 
   const handlePrimary = () => {
     if (installing || checking) return
     if (!hasPendingWork) {
-      onFinish()
+      finishOnboarding()
       return
     }
     // 1) persist settings  2) managed install (if selected)  3) Podman prepare.
@@ -627,7 +700,7 @@ export default function Step5({
   }, [])
 
   const podmanPill = podmanStatusPill({
-    checked: podmanEnabled,
+    checked: podmanActive,
     tool: tools.podman,
     progress: progressByTool.podman,
   })
@@ -679,12 +752,30 @@ export default function Step5({
 
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3">
         <p className="text-[12px] font-bold tracking-widest text-slate-400 uppercase">
+          Where apps run
+        </p>
+        <ToggleCard
+          checked={cloudMode}
+          onToggle={() => setCloudMode((v) => !v)}
+          disabled={installing}
+          icon={Cloud}
+          title="I'll use ato on cloud"
+          status={cloudMode ? 'Cloud' : 'This device'}
+          statusTone={cloudMode ? 'violet' : 'slate'}
+          control="switch"
+        >
+          Run apps on ato.run instead of this device. Ato won't install Podman
+          or any language runtime locally — you can turn this off any time in
+          Settings.
+        </ToggleCard>
+
+        <p className="mt-2 text-[12px] font-bold tracking-widest text-slate-400 uppercase">
           Container apps
         </p>
         <ToggleCard
-          checked={podmanEnabled}
+          checked={podmanActive}
           onToggle={() => setPodmanEnabled((v) => !v)}
-          disabled={installing}
+          disabled={installing || cloudMode}
           icon={Container}
           title="Use Podman for container apps"
           status={podmanPill.label}
@@ -715,7 +806,7 @@ export default function Step5({
           ato-podman after you confirm. This may download packages or a VM image.
         </ToggleCard>
 
-        {podmanEnabled && runtimeStatus?.windows_substrate ? (
+        {podmanActive && runtimeStatus?.windows_substrate ? (
           <WindowsSubstrateCard
             substrate={runtimeStatus.windows_substrate}
             podmanTool={tools.podman}
@@ -740,7 +831,7 @@ export default function Step5({
               key={card.kind}
               checked={card.checked}
               onToggle={() => card.setChecked((v) => !v)}
-              disabled={installing}
+              disabled={installing || cloudMode}
               icon={card.icon}
               title={card.title}
               status={pill.label}
@@ -800,20 +891,35 @@ export default function Step5({
       {/* #460 PR3 (Case A): once setup is ready with nothing pending, offer to
           resume straight into a lightweight sample app instead of just finishing.
           pgweb is single-service, secret-free, and a good Podman smoke. */}
-      {!installing && !checking && !hasPendingWork && podmanEnabled && !!tools.podman?.ready && (
+      {!installing && !checking && !hasPendingWork && podmanActive && !!tools.podman?.ready && (
         <button
           type="button"
-          onClick={() => onFinish({}, 'capsule://github.com/sosedoff/pgweb')}
+          onClick={() => finishOnboarding({}, 'capsule://github.com/sosedoff/pgweb')}
           className="shrink-0 mt-6 w-full py-3 bg-white border border-violet-200 text-[#8B5CF6] rounded-2xl font-bold text-[15px] hover:bg-violet-50 transition-colors flex justify-center items-center gap-2"
         >
           Continue to a sample app <span className="text-lg">→</span>
         </button>
       )}
 
+      {/* Size + time hint for the pending downloads. Advisory only: it shows an
+          assumed slow→fast band unless the WebView reports a real downlink. */}
+      {!installing && !checking && setupEstimate && (
+        <div className="shrink-0 mt-4 flex items-start gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3">
+          <Clock className="mt-0.5 shrink-0 text-slate-400" size={16} strokeWidth={2} />
+          <p className="text-[12px] leading-snug text-slate-500">
+            Estimated download ≈ {setupEstimate.downloadMb} MB · {setupEstimate.label}
+            {setupEstimate.measured ? ' on your connection' : ' on a typical connection'}.
+            <span className="block text-slate-400">
+              Approximate — actual time depends on your network and host.
+            </span>
+          </p>
+        </div>
+      )}
+
       <div className={`shrink-0 mt-6 grid gap-3 ${installing || hasPendingWork ? 'grid-cols-[0.75fr_1.25fr]' : 'grid-cols-1'}`}>
         {(installing || hasPendingWork) && (
           <button
-            onClick={installing ? cancelInstall : podmanShouldPrepare ? skipPodman : onFinish}
+            onClick={installing ? cancelInstall : podmanShouldPrepare ? skipPodman : () => finishOnboarding()}
             className="w-full py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold text-[15px] hover:bg-slate-50 transition-colors flex justify-center items-center"
           >
             {installing ? 'Cancel' : podmanShouldPrepare ? 'Skip Podman for now' : 'Skip for now'}
