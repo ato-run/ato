@@ -843,6 +843,12 @@ fn podman_cli_command() -> tokio::process::Command {
     if let Some(path_env) = &invocation.path_env {
         command.env("PATH", path_env);
     }
+    // An Ato-managed Podman carries its own containers.conf pointing at the
+    // bundled machine helpers (gvproxy/vfkit); honour it so the machine the CLI
+    // runs against matches what runtime-setup configured.
+    if let Some(containers_conf) = &invocation.containers_conf {
+        command.env("CONTAINERS_CONF", containers_conf);
+    }
     command
 }
 
