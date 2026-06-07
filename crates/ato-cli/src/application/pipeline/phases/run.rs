@@ -3202,6 +3202,7 @@ where
                 request.reporter.clone(),
                 &launch_ctx,
                 request.strict_realization,
+                receipt_graph_id_sink.as_ref(),
             )
             .await?;
             if exit != 0 {
@@ -3268,6 +3269,7 @@ where
             request.reporter.clone(),
             &launch_ctx,
             request.strict_realization,
+            receipt_graph_id_sink.as_ref(),
         )
         .await?;
         if exit != 0 {
