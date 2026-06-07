@@ -53,6 +53,12 @@ pub struct CapsuleProcess {
     pub event_rx: Option<Receiver<LifecycleEvent>>,
     pub workload_pid: Option<u32>,
     pub log_path: Option<PathBuf>,
+    /// The working directory the executor actually `current_dir`'d the workload
+    /// into (#490 runtime observation). `Some` when the executor knows its
+    /// realized cwd (the host source executor, via `resolve_host_execution_cwd`);
+    /// `None` when it is not reported, in which case the observer falls back to
+    /// the launch context's effective cwd. Never an estimate.
+    pub execution_cwd: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -127,6 +133,8 @@ pub fn execute(
         event_rx: Some(event_rx),
         workload_pid: exec_meta.pid,
         log_path: exec_meta.log_path,
+        // Nacelle-managed exec: realized cwd not reported for observation in v1.
+        execution_cwd: None,
     })
 }
 
@@ -315,6 +323,10 @@ pub fn execute_host(
         event_rx,
         workload_pid: None,
         log_path: None,
+        // #490: report the realized host execution cwd (the same value passed to
+        // `cmd.current_dir` above) so observation records the actual cwd, not the
+        // caller's ambient cwd.
+        execution_cwd: Some(execution_cwd.clone()),
     })
 }
 
@@ -352,6 +364,8 @@ pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsulePr
         event_rx: None,
         workload_pid: None,
         log_path: None,
+        // Desktop "open path" launch: no source execution cwd to observe.
+        execution_cwd: None,
     })
 }
 

@@ -4,8 +4,10 @@
 //! (`execution_identity::diff_receipt_documents`), and prints either a
 //! human-readable, class-grouped summary or `--json` machine output. The diff
 //! reports which nodes / edges / facet fields changed and classifies each as
-//! `DeclaredDrift` or `ResolvedDrift`. It performs no runtime observation —
-//! `ObservedDrift` is reserved and never emitted (#496).
+//! `DeclaredDrift`, `ResolvedDrift`, or — for the runtime-observed launch
+//! envelope (#490/#496) — `ObservedDrift`. It compares only the observed
+//! *envelope* (never diagnostic facts or per-node lifecycle status), so it never
+//! claims runtime behaviour equivalence.
 
 use std::path::PathBuf;
 
@@ -67,9 +69,9 @@ fn print_human_report(report: &ReceiptDriftReport) {
         println!("  new: {}", optional_id(&report.new_execution_id));
     }
 
-    // Group by class so DeclaredDrift and ResolvedDrift are visibly distinct.
-    // ObservedDrift is reserved and never present in v1, but iterate the full
-    // set so any future class still renders rather than being silently dropped.
+    // Group by class so each drift domain is visibly distinct. ObservedDrift is
+    // present only when both receipts carry a runtime-observed envelope (#496);
+    // iterate the full set so every class renders rather than being dropped.
     for class in [
         DriftClass::DeclaredDrift,
         DriftClass::ResolvedDrift,
