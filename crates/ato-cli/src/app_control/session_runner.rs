@@ -1133,6 +1133,23 @@ impl SessionStartPhaseRunner {
                     err
                 );
             }
+            // Runtime observation v1 (#490): once the workload is ready, stamp
+            // the observed launch envelope (captured by start_runtime_session)
+            // onto the receipt and surface the derived observed_execution_id on
+            // the session. Only a fresh spawn that produced real evidence is
+            // stamped — reuse/warm-start carries no evidence (`take` → None),
+            // and a non-V2 receipt or insufficient evidence is a no-op.
+            if let Some(evidence) = info.take_observed_runtime() {
+                match execution_receipts::mark_v2_receipt_observed(&metadata.execution_id, evidence)
+                {
+                    Ok(observed_id @ Some(_)) => info.set_observed_execution_id(observed_id),
+                    Ok(None) => {}
+                    Err(err) => eprintln!(
+                        "ATO-WARN failed to stamp runtime observation onto execution receipt: {}",
+                        err
+                    ),
+                }
+            }
         }
 
         if fresh_spawn && let Some(run_config_hash) = self.expected_run_config_hash.as_deref() {

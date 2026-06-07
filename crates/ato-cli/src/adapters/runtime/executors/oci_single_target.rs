@@ -41,10 +41,22 @@ pub(crate) async fn execute_single_target(
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     strict_realization: bool,
+    // #501: boundary receipt sink, so a strict-gate failure receipt persisted
+    // here suppresses the boundary's duplicate partial. `None` outside the
+    // boundary-wrapped pipeline (e.g. tests).
+    receipt_sink: Option<&crate::application::receipt_boundary::ReceiptGraphIdSink>,
 ) -> Result<i32> {
     let selector = DefaultOciProviderSelector;
     let provider = selector.select_provider();
-    execute_with_provider(plan, reporter, launch_ctx, &provider, strict_realization).await
+    execute_with_provider(
+        plan,
+        reporter,
+        launch_ctx,
+        &provider,
+        strict_realization,
+        receipt_sink,
+    )
+    .await
 }
 
 /// Assemble the env map handed to `create_container`, in precedence order: the
@@ -124,6 +136,9 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     launch_ctx: &RuntimeLaunchContext,
     provider: &P,
     strict_realization: bool,
+    // #501: boundary receipt sink (see `execute_single_target`). `None` in the
+    // provider-injection tests, which never wrap a boundary.
+    receipt_sink: Option<&crate::application::receipt_boundary::ReceiptGraphIdSink>,
 ) -> Result<i32> {
     // ── Gate 1: OCI policy envelope from the lock-compiled execution plan ────
     // Compile the full plan once; it is reused for the launch receipt so the
@@ -237,13 +252,26 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     // required policy facet cannot be enforced by PodmanProvider, the image is
     // unpinned, or a host-bound mount fallback is required. Normal mode is a
     // no-op here. This is distinct from Gate 4 (`OciPolicyMode::Strict`).
-    enforce_strict_oci_launch(&oci_envelope, &container_request, strict_realization)?;
+    let strict_gate =
+        enforce_strict_oci_launch(&oci_envelope, &container_request, strict_realization);
 
     // Persist a durable prelaunch receipt with the OCI provider evidence (#501),
     // BEFORE any pull/create, so the resolved launch envelope is recorded
-    // independent of the live container. Best-effort: a receipt issue must never
-    // regress an OCI launch.
-    persist_oci_launch_receipt(plan, &execution_plan, launch_ctx, None, &reporter).await;
+    // independent of the live container — INCLUDING when the strict gate blocks
+    // the launch, in which case the receipt is marked as a typed failure (with
+    // its real declared/resolved ids + provider evidence). Best-effort: a receipt
+    // issue must never regress an OCI launch.
+    persist_oci_launch_receipt(
+        plan,
+        &execution_plan,
+        launch_ctx,
+        None,
+        strict_gate.as_ref().err(),
+        receipt_sink,
+        &reporter,
+    )
+    .await;
+    strict_gate?;
 
     reporter
         .notify(format!(
@@ -439,6 +467,16 @@ pub(crate) async fn persist_oci_launch_receipt(
     provider_projections_override: Option<
         Vec<capsule_core::execution_identity::OciProviderReceiptEvidence>,
     >,
+    // #501: when the strict-realization gate blocked the launch before any
+    // pull/create, the gate error is threaded here so the persisted receipt is
+    // marked as a typed failure (keeping its real declared/resolved ids + provider
+    // evidence) instead of a success. `None` for a normal (passing) launch.
+    strict_gate_failure: Option<&anyhow::Error>,
+    // #501: the boundary's receipt sink. When this call durably persists a
+    // strict-gate *failure* receipt, it flags the sink so the top-level
+    // `emit_receipt_on_result` boundary does NOT also write a generic partial
+    // receipt for the same propagated gate error (one launch → one receipt).
+    receipt_sink: Option<&crate::application::receipt_boundary::ReceiptGraphIdSink>,
     reporter: &Arc<CliReporter>,
 ) {
     let result = crate::application::execution_receipt_builder::build_oci_launch_receipt(
@@ -446,12 +484,22 @@ pub(crate) async fn persist_oci_launch_receipt(
         execution_plan,
         launch_ctx,
         provider_projections_override,
+        strict_gate_failure,
     )
     .and_then(|document| {
         crate::application::execution_receipts::write_receipt_document_atomic(&document)
     });
     match result {
         Ok(path) => {
+            // A strict-gate failure receipt is now durably on disk → tell the
+            // boundary to stand down so it does not double-emit. Only on the
+            // failure path: a passing launch must leave the boundary free to
+            // record any *later* failure.
+            if strict_gate_failure.is_some()
+                && let Some(sink) = receipt_sink
+            {
+                sink.mark_receipt_emitted();
+            }
             let _ = reporter
                 .notify(format!("RECEIPT: {}", path.display()))
                 .await;

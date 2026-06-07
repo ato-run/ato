@@ -26,7 +26,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TryRecvError;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -1304,6 +1304,109 @@ pub fn start_boot_launch(
         .detach();
 }
 
+/// A Desktop installed relaunch that has spawned `ato launch --detached-session`
+/// but has not yet handed off to an open app window (its runtime may still be
+/// becoming ready). Tracked process-globally so `stop_active_session` can stop a
+/// relaunch *before readiness completes*, and so an aborted/timed-out launch
+/// reaps its runtime instead of orphaning it on the resolved port.
+struct InflightInstalledLaunch {
+    install_profile_key: String,
+    /// PID of the `ato launch` wrapper. It is its own process-group leader (see
+    /// `orchestrator::spawn_installed_launch`), so `kill(-wrapper_pid)` reaps the
+    /// wrapper and the detached runtime it started as one group.
+    wrapper_pid: u32,
+    /// Shared with `ensure_installed_session`'s poll loop and the boot window, so
+    /// setting it tears the launch down through the existing abort path (which
+    /// also closes the boot window).
+    abort: Arc<AtomicBool>,
+}
+
+fn inflight_installed_launches() -> &'static Mutex<Vec<InflightInstalledLaunch>> {
+    static REGISTRY: OnceLock<Mutex<Vec<InflightInstalledLaunch>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn register_inflight_installed_launch(ipk: &str, wrapper_pid: u32, abort: Arc<AtomicBool>) {
+    if let Ok(mut reg) = inflight_installed_launches().lock() {
+        // One in-flight launch per ipk: drop any stale entry for the same app.
+        reg.retain(|e| e.install_profile_key != ipk);
+        reg.push(InflightInstalledLaunch {
+            install_profile_key: ipk.to_string(),
+            wrapper_pid,
+            abort,
+        });
+    }
+}
+
+fn deregister_inflight_installed_launch(ipk: &str, wrapper_pid: u32) {
+    if let Ok(mut reg) = inflight_installed_launches().lock() {
+        reg.retain(|e| !(e.install_profile_key == ipk && e.wrapper_pid == wrapper_pid));
+    }
+}
+
+/// RAII guard so an in-flight launch is always deregistered when
+/// `ensure_installed_session` returns (success, failure, or panic).
+struct InflightLaunchGuard {
+    install_profile_key: String,
+    wrapper_pid: u32,
+}
+
+impl Drop for InflightLaunchGuard {
+    fn drop(&mut self) {
+        deregister_inflight_installed_launch(&self.install_profile_key, self.wrapper_pid);
+    }
+}
+
+/// Kill the `ato launch` wrapper *and* the detached runtime it started, as a
+/// single process group. Reaps the runtime even after the wrapper has exited 0
+/// (the group persists while the runtime is in it), so an aborted / timed-out /
+/// stopped relaunch never leaves a process listening on the resolved port.
+pub(crate) fn kill_installed_launch_process_group(wrapper_pid: u32) {
+    #[cfg(unix)]
+    {
+        if wrapper_pid > 1 {
+            // Negative pid → the whole process group led by `wrapper_pid`.
+            unsafe {
+                libc::kill(-(wrapper_pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Best-effort elsewhere: the caller still kills the wrapper child handle.
+        let _ = wrapper_pid;
+    }
+}
+
+/// Abort every in-flight installed relaunch, returning how many were signalled.
+/// Called by `stop_active_session` when no windowed capsule session is active,
+/// so a relaunch whose runtime has been spawned but is not yet shown can still
+/// be stopped — and `had_active_session` reported honestly.
+///
+/// This only flips each launch's abort flag; the owning `ensure_installed_session`
+/// task observes it on its next poll tick and reaps the wrapper + runtime as a
+/// group on its own thread (where the wrapper PID is guaranteed un-recycled),
+/// which also closes the boot window through the existing abort path. Reaping
+/// from here would risk a cross-thread PID-reuse race.
+pub(crate) fn stop_inflight_installed_launches() -> usize {
+    let aborts: Vec<(String, Arc<AtomicBool>)> = match inflight_installed_launches().lock() {
+        Ok(reg) => reg
+            .iter()
+            .map(|e| (e.install_profile_key.clone(), e.abort.clone()))
+            .collect(),
+        Err(_) => return 0,
+    };
+    for (ipk, abort) in &aborts {
+        abort.store(true, Ordering::Release);
+        tracing::info!(
+            install_profile_key = %ipk,
+            "stop_active_session: aborting in-flight installed launch (pre-readiness); \
+             its launch task will reap the runtime"
+        );
+    }
+    aborts.len()
+}
+
 /// Launch an installed app **without** the first-run consent wizard.
 ///
 /// Installed apps are pre-consented (see `ato launch` / `dangerously_skip_permissions`),
@@ -1370,7 +1473,7 @@ pub fn start_installed_launch(
             // Spawn `ato launch` and wait for its session record off the UI thread.
             let result = be
                 .spawn(
-                    async move { ensure_installed_session(&ensure_ipk, &ensure_handle, &abort_bg) },
+                    async move { ensure_installed_session(&ensure_ipk, &ensure_handle, abort_bg) },
                 )
                 .await;
             let aborted = abort_flag.load(Ordering::Acquire);
@@ -1467,7 +1570,7 @@ fn log_installed_handle_mismatch(
 fn ensure_installed_session(
     install_profile_key: &str,
     handle: &str,
-    abort: &AtomicBool,
+    abort: Arc<AtomicBool>,
 ) -> Result<crate::orchestrator::CapsuleLaunchSession> {
     // 1. Reuse an already-live installed session before spawning anything. This
     //    avoids a redundant `ato launch` child when the app is already running
@@ -1489,6 +1592,20 @@ fn ensure_installed_session(
     //    store/runtime the Desktop is using.
     let mut launched = crate::orchestrator::spawn_installed_launch(install_profile_key)
         .map_err(|e| anyhow::anyhow!("start `ato launch` for installed app: {e:#}"))?;
+
+    // Track this launch as in-flight so `stop_active_session` can stop it before
+    // its runtime is shown in a window (required behavior: had_active_session is
+    // honest even before readiness completes), and so the teardown below can reap
+    // the detached runtime as a group. The guard deregisters on every return.
+    let wrapper_pid = launched.child.id();
+    register_inflight_installed_launch(install_profile_key, wrapper_pid, Arc::clone(&abort));
+    let _inflight_guard = InflightLaunchGuard {
+        install_profile_key: install_profile_key.to_string(),
+        wrapper_pid,
+    };
+    // True once `try_wait` has reaped the wrapper — after which its PID may be
+    // recycled, making a group-directed kill unsafe (see teardown below).
+    let mut wrapper_reaped = false;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
     let outcome = loop {
@@ -1516,6 +1633,7 @@ fn ensure_installed_session(
         }
         match launched.child.try_wait() {
             Ok(Some(status)) => {
+                wrapper_reaped = true;
                 // `ato launch` now starts the installed app as a *detached*
                 // session and exits 0 once the session record is written (#565),
                 // so a clean exit is the normal success handoff rather than an
@@ -1558,8 +1676,19 @@ fn ensure_installed_session(
         std::thread::sleep(Duration::from_millis(200));
     };
 
-    // Failure/abort: don't leave a stuck launch process behind.
+    // Failure/abort/timeout teardown. If the wrapper is still running (not yet
+    // reaped by `try_wait`), reap it *and* the detached runtime it started as a
+    // process group — otherwise a relaunch aborted or timed-out mid-startup would
+    // orphan its runtime on the resolved port (the AddrInUse-on-retry failure
+    // mode). When the wrapper already exited (`wrapper_reaped`), its PID may have
+    // been recycled, so a group-directed kill is unsafe and unnecessary:
+    // `ato launch` tears its own runtime down on a readiness failure before
+    // exiting non-zero.
+    if !wrapper_reaped {
+        kill_installed_launch_process_group(launched.child.id());
+    }
     let _ = launched.child.kill();
+    let _ = launched.child.wait();
     outcome
 }
 
@@ -1902,5 +2031,78 @@ mod tests {
             }
             other => panic!("expected Handle, got {other:?}"),
         }
+    }
+
+    fn count_inflight_for_ipk(ipk: &str) -> usize {
+        inflight_installed_launches()
+            .lock()
+            .map(|reg| reg.iter().filter(|e| e.install_profile_key == ipk).count())
+            .unwrap_or(0)
+    }
+
+    /// `stop_inflight_installed_launches` flips every registered launch's abort
+    /// flag — this is what lets `stop_active_session` stop a Desktop relaunch
+    /// whose runtime was spawned but is not yet shown (had_active_session must be
+    /// honest before readiness completes). Uses unique ipks so the assertions are
+    /// independent of any launches other parallel tests may register.
+    #[test]
+    fn stop_inflight_installed_launches_aborts_registered_launches() {
+        let ipk_a = "ipk_test_inflight_aaaa000000000000000000000000a1";
+        let ipk_b = "ipk_test_inflight_bbbb000000000000000000000000b2";
+        let abort_a = Arc::new(AtomicBool::new(false));
+        let abort_b = Arc::new(AtomicBool::new(false));
+
+        register_inflight_installed_launch(ipk_a, 424242, Arc::clone(&abort_a));
+        register_inflight_installed_launch(ipk_b, 424243, Arc::clone(&abort_b));
+
+        let stopped = stop_inflight_installed_launches();
+        assert!(
+            stopped >= 2,
+            "stop must report at least our two in-flight launches, got {stopped}"
+        );
+        assert!(
+            abort_a.load(Ordering::Acquire),
+            "stop must flip launch A's abort flag"
+        );
+        assert!(
+            abort_b.load(Ordering::Acquire),
+            "stop must flip launch B's abort flag"
+        );
+
+        // Cleanup so the global registry does not leak across tests.
+        deregister_inflight_installed_launch(ipk_a, 424242);
+        deregister_inflight_installed_launch(ipk_b, 424243);
+    }
+
+    /// The registry holds one entry per ipk (a re-spawn replaces the prior one),
+    /// and deregistration only removes the matching (ipk, wrapper_pid) pair.
+    #[test]
+    fn inflight_registry_dedupes_by_ipk_and_deregisters_by_pid() {
+        let ipk = "ipk_test_inflight_dedupe_0000000000000000000000c3";
+        assert_eq!(count_inflight_for_ipk(ipk), 0);
+
+        register_inflight_installed_launch(ipk, 111, Arc::new(AtomicBool::new(false)));
+        register_inflight_installed_launch(ipk, 222, Arc::new(AtomicBool::new(false)));
+        assert_eq!(
+            count_inflight_for_ipk(ipk),
+            1,
+            "a re-spawn for the same ipk replaces the prior in-flight entry"
+        );
+
+        // Deregistering a stale (wrong) pid is a no-op.
+        deregister_inflight_installed_launch(ipk, 111);
+        assert_eq!(count_inflight_for_ipk(ipk), 1);
+
+        deregister_inflight_installed_launch(ipk, 222);
+        assert_eq!(count_inflight_for_ipk(ipk), 0);
+    }
+
+    /// The process-group reaper must never signal pid 0 (whole-session) or pid 1
+    /// (init) — a guard against accidentally killing the Desktop's own group when
+    /// a wrapper pid is missing/zeroed. Exercises only the safe no-op path.
+    #[test]
+    fn kill_installed_launch_process_group_ignores_unsafe_pids() {
+        kill_installed_launch_process_group(0);
+        kill_installed_launch_process_group(1);
     }
 }
