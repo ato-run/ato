@@ -33,6 +33,7 @@ pub(crate) mod projection;
 pub(crate) mod provider_cache;
 pub(crate) mod provider_projection;
 pub(crate) mod receipt_boundary;
+pub(crate) mod runtime_observation;
 pub(crate) mod runtime_prepare;
 pub(crate) mod runtime_setup;
 pub(crate) mod runtime_setup_launch;
