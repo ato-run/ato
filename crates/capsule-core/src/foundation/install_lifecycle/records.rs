@@ -301,10 +301,13 @@ pub struct InstallRevision {
     pub install_receipt: InstallReceipt,
     /// RFC 3339 creation timestamp.
     pub created_at: String,
-    // NOTE (Stage 2): `launch_templates: Vec<LaunchTemplate>` and
-    // `compatibility_index: Option<CompatibilityIndex>` are attached here once
-    // the launch-template module lands. They are additive, session-independent
-    // install outputs.
+    /// Reusable, session-independent launch templates frozen at install time.
+    /// Additive: pre-Stage-2 revisions deserialize with an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_templates: Vec<super::launch_template::LaunchTemplate>,
+    /// Runner-class / capability precheck frozen at install time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_index: Option<super::launch_template::CompatibilityIndex>,
 }
 
 #[cfg(test)]
@@ -430,6 +433,8 @@ mod tests {
                 occurred_at: "2026-06-08T00:00:00Z".into(),
             },
             created_at: "2026-06-08T00:00:00Z".into(),
+            launch_templates: vec![],
+            compatibility_index: None,
         };
 
         // The revision references the build id but is identified by the revision id.
