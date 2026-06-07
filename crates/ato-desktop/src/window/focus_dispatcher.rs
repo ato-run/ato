@@ -826,6 +826,27 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                     });
 
                                 let Some(entry) = active else {
+                                    // No windowed capsule session — but a Desktop
+                                    // installed relaunch may have spawned a runtime
+                                    // that has not yet been handed off to a window
+                                    // (readiness still in flight). Stop it so it
+                                    // cannot orphan on its resolved port, and report
+                                    // had_active_session honestly even pre-readiness.
+                                    let inflight =
+                                        crate::window::launch_window::stop_inflight_installed_launches();
+                                    if inflight > 0 {
+                                        tracing::info!(
+                                            inflight,
+                                            "Focus StopActiveSession: stopped in-flight installed launch(es)"
+                                        );
+                                        return Ok(serde_json::json!({
+                                            "ok": true,
+                                            "stopped": true,
+                                            "had_active_session": true,
+                                            "session_id": serde_json::Value::Null,
+                                            "handle": serde_json::Value::Null,
+                                        }));
+                                    }
                                     tracing::info!(
                                         "Focus StopActiveSession: no active capsule window"
                                     );
