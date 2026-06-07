@@ -739,10 +739,28 @@ mod tests {
 
     #[test]
     fn consumer_paths_do_not_spawn_git_commands() {
+        // The consumer install / run / preview / inference path must be gitless:
+        // `ato install github.com/<repo>` fetches a tarball via the GitHub API
+        // (no `git clone`), infers the manifest, and previews it without ever
+        // spawning `git`. This list covers the full path so a stray `git clone`
+        // (or a `run_git` helper call) cannot silently regress the gitless
+        // property a clean-VM user depends on. `git` is a publish/share-only
+        // requirement, never an install/run requirement.
         let files = [
             "src/cli/commands/run.rs",
+            "src/cli/dispatch/install.rs",
+            "src/cli/dispatch/run.rs",
             "src/application/engine/install/mod.rs",
+            "src/application/engine/install/support.rs",
+            "src/application/engine/install/local_source.rs",
+            "src/application/engine/install/provider_target.rs",
+            "src/application/source_inference/mod.rs",
             "src/application/search/mod.rs",
+            "src/adapters/preview/mod.rs",
+            "src/adapters/preview/draft.rs",
+            "src/adapters/preview/manifest.rs",
+            "src/community/mod.rs",
+            "src/community/submit.rs",
             "src/adapters/runtime/executors/deno.rs",
             "src/adapters/runtime/executors/node_compat.rs",
             "src/adapters/runtime/executors/open_web.rs",
