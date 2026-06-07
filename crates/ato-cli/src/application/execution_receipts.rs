@@ -7,6 +7,7 @@ use capsule_core::common::paths::ato_executions_dir;
 use capsule_core::execution_identity::{
     EXECUTION_IDENTITY_SCHEMA_VERSION, EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
     ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2, GraphReceipt,
+    ObservedRuntimeEvidence,
 };
 
 const RECEIPT_FILE_NAME: &str = "receipt.json";
@@ -122,6 +123,49 @@ pub(crate) fn mark_v2_receipt_readiness_passed(execution_id: &str) -> Result<()>
     ));
     write_receipt_document_atomic(&document)?;
     Ok(())
+}
+
+/// Stamp runtime observation v1 (#490) onto a persisted V2 receipt after the
+/// workload spawned and reached readiness.
+///
+/// Anchors the envelope to the receipt's own `resolved_execution_id` (so the
+/// observed id is derived from — never a copy of — the resolved id), derives
+/// `observed_execution_id`, and records the evidence + observed scope. Returns
+/// the new `observed_execution_id` so the caller can surface it on the session.
+///
+/// No-ops (returns `Ok(None)`) when the receipt is not V2, or when the evidence
+/// lacks minimal facts ([`ObservedLaunchEnvelope::has_minimal_evidence`]) — a
+/// failed/partial observation must never synthesize an observed id. Never
+/// emits `GraphCompleteness::Complete`.
+pub(crate) fn mark_v2_receipt_observed(
+    execution_id: &str,
+    evidence: ObservedRuntimeEvidence,
+) -> Result<Option<String>> {
+    mark_v2_receipt_observed_at(&default_receipt_root(), execution_id, evidence)
+}
+
+/// Root-aware [`mark_v2_receipt_observed`] (tests inject a tempdir root).
+pub(crate) fn mark_v2_receipt_observed_at(
+    root: &Path,
+    execution_id: &str,
+    mut evidence: ObservedRuntimeEvidence,
+) -> Result<Option<String>> {
+    let mut document = read_receipt_document_at(root, execution_id)?;
+    let ExecutionReceiptDocument::V2(receipt) = &mut document else {
+        return Ok(None);
+    };
+    // Anchor the envelope to this receipt's resolved id (one hash input, not a
+    // copy of the output).
+    evidence.envelope.resolved_execution_id = receipt.resolved_execution_id.clone();
+    if !evidence.envelope.has_minimal_evidence() {
+        // Not a real observation — leave the pre-observation receipt untouched.
+        return Ok(None);
+    }
+    let stamped = receipt.clone().with_observation(evidence);
+    let observed_id = stamped.observed_execution_id.clone();
+    *receipt = stamped;
+    write_receipt_document_atomic_at(root, &document)?;
+    Ok(observed_id)
 }
 
 pub(crate) fn read_receipt_document_at(
