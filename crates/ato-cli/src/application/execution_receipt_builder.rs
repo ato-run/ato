@@ -676,11 +676,18 @@ pub(crate) fn build_prelaunch_receipt_document_with_graph(
 /// projection with an explicit list — used by the multi-service path to record one
 /// evidence record per service. `None` keeps the builder's own
 /// `declared_oci_provider_projections` output (correct for single-target).
+///
+/// `strict_gate_failure` (#501): when the strict-realization gate blocked the
+/// launch before any pull/create, the gate error is threaded here and the built
+/// receipt is marked as a typed failure (preserving its real declared/resolved
+/// ids + provider evidence, never synthesizing an `observed_execution_id`).
+/// `None` for a normal (passing) launch.
 pub(crate) fn build_oci_launch_receipt(
     plan: &ManifestData,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     provider_projections_override: Option<Vec<OciProviderReceiptEvidence>>,
+    strict_gate_failure: Option<&anyhow::Error>,
 ) -> Result<ExecutionReceiptDocument> {
     let (mut receipt, _bundle) =
         build_prelaunch_receipt_v2_with_graph(plan, execution_plan, launch_ctx, None)?;
@@ -692,7 +699,36 @@ pub(crate) fn build_oci_launch_receipt(
     // causes. Strictly additive and pre-observation — graph stays `Partial`,
     // ObservationScope stays declared/resolved, no observed_execution_id.
     receipt = receipt.with_oci_provider_assessment();
+    if let Some(error) = strict_gate_failure {
+        receipt = mark_oci_launch_receipt_failed(receipt, error);
+    }
     Ok(ExecutionReceiptDocument::V2(receipt))
+}
+
+/// Mark a built OCI launch receipt as a strict-realization-gate failure (#501).
+///
+/// Applies the typed failure result-class + envelope derived from the gate error
+/// while preserving everything else the launch path already established: the real
+/// declared/resolved execution ids, the provider evidence, the `Partial` graph
+/// completeness, and the absent `observed_execution_id` (a blocked launch never
+/// ran, so it is never observed — `with_result` does not synthesize one). When
+/// the error carries no typed envelope the receipt is returned unchanged rather
+/// than fabricating a failure shape.
+fn mark_oci_launch_receipt_failed(
+    receipt: ExecutionReceiptV2,
+    error: &anyhow::Error,
+) -> ExecutionReceiptV2 {
+    use capsule_core::execution_identity::{ReceiptFailureKind, ReceiptResultClass};
+    match crate::application::receipt_boundary::build_failure_envelope(error) {
+        Some(envelope) => {
+            let class = match envelope.kind {
+                ReceiptFailureKind::Recoverable => ReceiptResultClass::RecoverableFailure,
+                ReceiptFailureKind::Aborted => ReceiptResultClass::Aborted,
+            };
+            receipt.with_result(class, Some(envelope))
+        }
+        None => receipt,
+    }
 }
 
 #[cfg(test)]
@@ -1544,6 +1580,94 @@ mod oci_launch_receipt_tests {
             Some(GraphCompleteness::Complete)
         );
         assert!(read_v2.observed_execution_id.is_none());
+    }
+
+    /// #501 blocker: a strict-realization gate block must flip a
+    /// *provider-evidence* OCI launch receipt to a typed failure WITHOUT dropping
+    /// the provider evidence or the declared/resolved ids, and without ever
+    /// fabricating an `observed_execution_id` or a `Complete` graph. Exercises the
+    /// exact transform `build_oci_launch_receipt(strict_gate_failure = Some(..))`
+    /// applies (`oci_receipt_with` mirrors the builder's output shape), then the
+    /// real atomic write/read-back path so the on-disk receipt is asserted too.
+    #[test]
+    fn strict_gate_failure_marks_provider_evidence_receipt_as_failed() {
+        use capsule_core::execution_identity::ReceiptResultClass;
+        use capsule_core::execution_plan::error::AtoExecutionError;
+
+        // A receipt shaped exactly like build_oci_launch_receipt's output: v2,
+        // provider projections present, graph Partial, no observed id. The real
+        // builder derives the graph ids; the test mirror leaves them `None`, so
+        // stamp sentinels to prove PRESENT ids survive the failure mark.
+        let mut receipt = oci_receipt_with(vec![evidence("web", "alpine:3.21")]);
+        receipt.declared_execution_id = Some("sha256:declared".to_string());
+        receipt.resolved_execution_id = Some("sha256:resolved".to_string());
+        let declared_before = receipt.declared_execution_id.clone();
+        let resolved_before = receipt.resolved_execution_id.clone();
+        let projections_before = receipt.provider_projections.clone();
+        assert!(
+            !projections_before.is_empty(),
+            "fixture must carry provider evidence to prove it survives the mark"
+        );
+        assert!(declared_before.is_some() && resolved_before.is_some());
+        assert!(receipt.observed_execution_id.is_none());
+
+        let err: anyhow::Error =
+            AtoExecutionError::lock_incomplete("strict realization gate blocked launch", None)
+                .into();
+        let marked = super::mark_oci_launch_receipt_failed(receipt, &err);
+
+        // Result flipped to a typed failure; envelope present.
+        assert!(
+            matches!(
+                marked.result,
+                ReceiptResultClass::RecoverableFailure | ReceiptResultClass::Aborted
+            ),
+            "a strict-gated launch must be a typed failure, got {:?}",
+            marked.result
+        );
+        assert!(marked.failure_envelope.is_some());
+        // Identity + provider evidence preserved through the mark.
+        assert_eq!(marked.declared_execution_id, declared_before);
+        assert_eq!(marked.resolved_execution_id, resolved_before);
+        assert_eq!(
+            marked.provider_projections, projections_before,
+            "#501: provider evidence must survive the failure mark"
+        );
+        // Never observed, never Complete.
+        assert!(
+            marked.observed_execution_id.is_none(),
+            "a blocked launch never ran, so it is never observed"
+        );
+        assert_ne!(marked.graph_completeness, Some(GraphCompleteness::Complete));
+
+        // Round-trip the marked receipt through the real persist path and assert
+        // the on-disk shape: provider evidence present, no observed id.
+        let exec_id = marked.execution_id.clone();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = crate::application::execution_receipts::write_receipt_document_atomic_at(
+            temp.path(),
+            &ExecutionReceiptDocument::V2(marked),
+        )
+        .expect("write");
+        let read =
+            crate::application::execution_receipts::read_receipt_document_at(temp.path(), &exec_id)
+                .expect("read");
+        let read_v2 = match read {
+            ExecutionReceiptDocument::V2(r) => r,
+            ExecutionReceiptDocument::V1(_) => panic!("v2"),
+        };
+        assert_eq!(read_v2.provider_projections, projections_before);
+        assert!(read_v2.failure_envelope.is_some());
+        assert!(read_v2.observed_execution_id.is_none());
+        let json = std::fs::read_to_string(&path).expect("read file");
+        assert!(
+            json.contains("provider_projections"),
+            "provider evidence must persist on disk for a strict-gated failure"
+        );
+        assert!(
+            !json.contains("observed_execution_id"),
+            "no observed id on disk for a blocked launch: {json}"
+        );
     }
 
     /// #490 production glue: `mark_v2_receipt_observed_at` persists an observed id
