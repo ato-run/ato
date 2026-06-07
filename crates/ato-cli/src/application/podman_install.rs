@@ -53,6 +53,16 @@ pub(crate) const PINNED_PODMAN_VERSION: &str = "5.2.3";
 const PROVENANCE_FILE: &str = "ato-podman-provenance.json";
 
 /// A pinned, digest-verified Podman release artifact for one OS/arch.
+///
+/// The `podman` CLI archive is **not** a complete macOS Podman *machine*
+/// runtime: `podman machine init/start` additionally needs helper binaries
+/// (`gvproxy` for networking, `vfkit` as the Apple Hypervisor VM provider).
+/// A working `podman --version` is therefore *not* sufficient — a clean macOS
+/// VM fails with `could not find "gvproxy"` unless the helpers are installed
+/// too. So a pinned artifact carries its required [`helpers`](Self::helpers),
+/// which Ato downloads, digest-verifies, and places in
+/// [`helper_binaries_rel_dir`](Self::helper_binaries_rel_dir) alongside the
+/// `podman` binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PinnedArtifact {
     /// Podman version (matches [`PINNED_PODMAN_VERSION`]).
@@ -70,7 +80,80 @@ pub(crate) struct PinnedArtifact {
     /// archives wrap everything in a top-level `podman-<ver>/` dir). Empty to
     /// strip nothing.
     pub strip_prefix: &'static str,
+    /// Helper binaries `podman machine` requires on this OS/arch (e.g.
+    /// `gvproxy`, `vfkit` on macOS). Each is downloaded + digest-verified and
+    /// installed into [`helper_binaries_rel_dir`](Self::helper_binaries_rel_dir).
+    /// Empty when the target needs no extra helpers.
+    pub helpers: &'static [HelperArtifact],
+    /// Directory (relative to the install dir) the helper binaries are placed
+    /// in *and* that the generated `containers.conf` points Podman at via
+    /// `[engine] helper_binaries_dir`. Kept next to the `podman` binary so a
+    /// single dir holds the whole runtime.
+    pub helper_binaries_rel_dir: &'static str,
 }
+
+/// A pinned, digest-verified `podman machine` helper binary (a single
+/// executable, not an archive). Downloaded and verified exactly like the main
+/// artifact, then written into the install's helper dir under [`name`](Self::name).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HelperArtifact {
+    /// File name the helper is installed as (the name Podman searches for, e.g.
+    /// `"gvproxy"`, `"vfkit"`).
+    pub name: &'static str,
+    /// Direct download URL of the helper binary.
+    pub url: &'static str,
+    /// Lowercase hex SHA256 of the helper at `url`. The security anchor.
+    pub sha256: &'static str,
+}
+
+// ── Pinned macOS machine helpers (the versions Podman v5.2.3 itself bundles) ──
+//
+// Podman's own macOS `.pkg` (`contrib/pkginstaller/Makefile` at the v5.2.3 tag)
+// bundles gvproxy 0.7.5 and vfkit 0.5.1. We pin the same versions so the Ato
+// machine runs the combination Podman expects. Both ship as **universal**
+// (x86_64 + arm64) Mach-O binaries, so one set serves both Mac architectures.
+//
+// Digests below were obtained by downloading each asset and hashing it; vfkit
+// uses the **signed** asset (carries the `com.apple.security.virtualization`
+// entitlement vfkit needs to boot a VM — the unsigned variant Podman re-signs
+// during packaging would be Gatekeeper-blocked as a standalone download).
+
+/// gvproxy 0.7.5 (universal darwin), the network helper.
+const GVPROXY_DARWIN_URL: &str =
+    "https://github.com/containers/gvisor-tap-vsock/releases/download/v0.7.5/gvproxy-darwin";
+const GVPROXY_DARWIN_SHA256: &str =
+    "ca881d38963456bdf56b596bc2d76dfa72b565e701acf584d749a1543915f800";
+
+/// vfkit 0.5.1 (universal darwin, **signed**), the Apple Hypervisor VM provider.
+const VFKIT_DARWIN_URL: &str =
+    "https://github.com/crc-org/vfkit/releases/download/v0.5.1/vfkit";
+const VFKIT_DARWIN_SHA256: &str =
+    "6adf8ab2fb0a3b7e7d778554bdc4ae8a8d9e8f984cebffd4e0c8ff8ea5f08447";
+
+/// The macOS `podman machine` helper bundle (shared by both architectures).
+const MACOS_PODMAN_HELPERS: &[HelperArtifact] = &[
+    HelperArtifact {
+        name: "gvproxy",
+        url: GVPROXY_DARWIN_URL,
+        sha256: GVPROXY_DARWIN_SHA256,
+    },
+    HelperArtifact {
+        name: "vfkit",
+        url: VFKIT_DARWIN_URL,
+        sha256: VFKIT_DARWIN_SHA256,
+    },
+];
+
+/// Podman machine provider Ato pins on macOS. `applehv` (Apple Hypervisor, via
+/// `vfkit`) is the default on modern macOS and needs no extra packages beyond
+/// `gvproxy` + `vfkit`; pinning it keeps the Ato machine off the `libkrun`
+/// (`krunkit`) path so the bundled helpers are sufficient.
+const MACOS_MACHINE_PROVIDER: &str = "applehv";
+
+/// File name of the Ato-generated Podman config written next to an install. It
+/// points Podman at the bundled helper dir so `podman machine` finds `gvproxy`
+/// and `vfkit` without relying on Homebrew/system search paths.
+const CONTAINERS_CONF_FILE: &str = "containers.conf";
 
 /// Supported release-archive formats.
 ///
@@ -111,6 +194,10 @@ pub(crate) fn pinned_artifact(os: &str, arch: &str) -> Option<PinnedArtifact> {
             format: ArtifactFormat::Zip,
             binary_rel_path: "usr/bin/podman",
             strip_prefix: "podman-5.2.3",
+            // The remote-client zip ships only `podman`; `podman machine` needs
+            // gvproxy + vfkit, so Ato installs them next to it.
+            helpers: MACOS_PODMAN_HELPERS,
+            helper_binaries_rel_dir: "usr/bin",
         }),
         ("macos", "x86_64") => Some(PinnedArtifact {
             version: PINNED_PODMAN_VERSION,
@@ -120,6 +207,8 @@ pub(crate) fn pinned_artifact(os: &str, arch: &str) -> Option<PinnedArtifact> {
             format: ArtifactFormat::Zip,
             binary_rel_path: "usr/bin/podman",
             strip_prefix: "podman-5.2.3",
+            helpers: MACOS_PODMAN_HELPERS,
+            helper_binaries_rel_dir: "usr/bin",
         }),
         // Windows/Linux keep their existing instruction-based path (they do not
         // hard-require Homebrew today). Ato-managed installs for those targets
@@ -184,6 +273,11 @@ pub(crate) enum PodmanInstallError {
     Extract { message: String },
     /// The expected podman binary was not present in the extracted archive.
     BinaryMissing { expected: PathBuf },
+    /// A required `podman machine` helper binary (e.g. `gvproxy`, `vfkit`) was
+    /// not present/executable in the install after staging. The install is
+    /// rejected **before promotion** — an incomplete runtime is never published.
+    /// This is an Ato packaging/runtime issue, not a user Homebrew/git issue.
+    HelperMissing { helper: String },
     /// Writing the provenance manifest failed.
     Provenance { message: String },
 }
@@ -214,6 +308,12 @@ impl std::fmt::Display for PodmanInstallError {
                 f,
                 "Podman archive did not contain the expected binary at '{}'",
                 expected.display()
+            ),
+            Self::HelperMissing { helper } => write!(
+                f,
+                "Ato-managed Podman is incomplete: required helper binary `{helper}` was not \
+                 found. This is an Ato packaging/runtime setup issue, not a user Homebrew/git \
+                 issue."
             ),
             Self::Provenance { message } => {
                 write!(f, "failed to record Podman install provenance: {message}")
@@ -265,6 +365,27 @@ pub(crate) struct PodmanProvenance {
     pub source_url: String,
     /// Path of the installed podman binary.
     pub binary_path: String,
+    /// Absolute directory the bundled `podman machine` helpers were installed
+    /// into and that the generated `containers.conf` points Podman at. Empty for
+    /// targets that need no helpers. `#[serde(default)]` keeps older provenance
+    /// files (written before the bundle existed) readable.
+    #[serde(default)]
+    pub helper_binaries_dir: String,
+    /// Provenance of each bundled helper (name + verified digest + source).
+    #[serde(default)]
+    pub helpers: Vec<HelperProvenance>,
+}
+
+/// Provenance of one bundled `podman machine` helper binary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HelperProvenance {
+    pub name: String,
+    /// Lowercase hex SHA256 of the verified helper binary.
+    pub sha256: String,
+    /// Source URL the helper was downloaded from.
+    pub source_url: String,
+    /// Path of the installed helper binary.
+    pub path: String,
 }
 
 /// Result of a successful Ato-managed install.
@@ -292,30 +413,48 @@ pub(crate) fn install_ato_managed_podman<F: PodmanArtifactFetcher>(
             arch: arch.to_string(),
         })?;
 
-    let bytes = fetcher
-        .fetch(artifact.url)
-        .map_err(|message| PodmanInstallError::Fetch {
-            url: artifact.url.to_string(),
-            message,
-        })?;
+    let bytes = fetch_and_verify(fetcher, artifact.url, artifact.sha256)?;
 
-    // Verify BEFORE touching disk: an unverified archive is never extracted.
-    let actual = sha256_hex(&bytes);
-    if !actual.eq_ignore_ascii_case(artifact.sha256) {
-        return Err(PodmanInstallError::DigestMismatch {
-            url: artifact.url.to_string(),
-            expected: artifact.sha256.to_string(),
-            actual,
-        });
+    // Fetch + digest-verify every required helper BEFORE touching disk too, so
+    // the whole machine runtime is fail-closed: a bad/missing helper aborts the
+    // install before any byte is written, never producing a half-runtime that
+    // `podman --version` would wrongly call "ready".
+    let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>)> = Vec::with_capacity(artifact.helpers.len());
+    for helper in artifact.helpers {
+        let helper_bytes = fetch_and_verify(fetcher, helper.url, helper.sha256)?;
+        helper_blobs.push((*helper, helper_bytes));
     }
 
     let install_dir = tools_dir.join(format!("podman-{}", artifact.version));
 
-    // Extract into a temp sibling dir, validate (binary present + runnable),
-    // write provenance, then atomically rename into place. Any failure removes
-    // the temp dir so a partial install is never left behind. The atomic rename
-    // means observers only ever see a fully-validated install dir.
-    install_into_temp_then_promote(&bytes, &artifact, tools_dir, &install_dir)
+    // Extract into a temp sibling dir, validate (binary present + runnable,
+    // helpers present + executable), write containers.conf + provenance, then
+    // atomically rename into place. Any failure removes the temp dir so a
+    // partial install is never left behind. The atomic rename means observers
+    // only ever see a fully-validated install dir.
+    install_into_temp_then_promote(&bytes, &artifact, &helper_blobs, tools_dir, &install_dir)
+}
+
+/// Download `url` and verify its SHA256 matches `expected_sha256` (fail-closed:
+/// a mismatch is a hard error before the bytes are used for anything).
+fn fetch_and_verify<F: PodmanArtifactFetcher>(
+    fetcher: &F,
+    url: &str,
+    expected_sha256: &str,
+) -> Result<Vec<u8>, PodmanInstallError> {
+    let bytes = fetcher.fetch(url).map_err(|message| PodmanInstallError::Fetch {
+        url: url.to_string(),
+        message,
+    })?;
+    let actual = sha256_hex(&bytes);
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        return Err(PodmanInstallError::DigestMismatch {
+            url: url.to_string(),
+            expected: expected_sha256.to_string(),
+            actual,
+        });
+    }
+    Ok(bytes)
 }
 
 /// Perform the disk-mutating half of an Ato-managed install atomically.
@@ -327,6 +466,7 @@ pub(crate) fn install_ato_managed_podman<F: PodmanArtifactFetcher>(
 fn install_into_temp_then_promote(
     bytes: &[u8],
     artifact: &PinnedArtifact,
+    helper_blobs: &[(HelperArtifact, Vec<u8>)],
     tools_dir: &Path,
     final_dir: &Path,
 ) -> Result<InstalledPodman, PodmanInstallError> {
@@ -364,12 +504,63 @@ fn install_into_temp_then_promote(
         // promote it. A non-zero exit (or spawn failure) fails the install.
         verify_binary_runs(&tmp_binary)?;
 
+        // Stage the machine helpers (gvproxy/vfkit) into the install's helper
+        // dir, then validate every required helper is present + executable. A
+        // missing/non-executable helper rejects the install BEFORE promotion —
+        // an incomplete machine runtime is never published.
+        let tmp_helper_dir = tmp_dir.join(artifact.helper_binaries_rel_dir);
+        let final_helper_dir = final_dir.join(artifact.helper_binaries_rel_dir);
+        let mut helper_provenance: Vec<HelperProvenance> = Vec::new();
+        if !helper_blobs.is_empty() {
+            std::fs::create_dir_all(&tmp_helper_dir).map_err(|e| PodmanInstallError::Extract {
+                message: e.to_string(),
+            })?;
+        }
+        for (helper, helper_bytes) in helper_blobs {
+            let dest = tmp_helper_dir.join(helper.name);
+            std::fs::write(&dest, helper_bytes).map_err(|e| PodmanInstallError::Extract {
+                message: format!("could not write helper `{}`: {e}", helper.name),
+            })?;
+            ensure_executable(&dest)
+                .map_err(|message| PodmanInstallError::Extract { message })?;
+            helper_provenance.push(HelperProvenance {
+                name: helper.name.to_string(),
+                sha256: helper.sha256.to_string(),
+                source_url: helper.url.to_string(),
+                path: final_helper_dir.join(helper.name).to_string_lossy().to_string(),
+            });
+        }
+        // The runtime is only as complete as its helpers: every helper the
+        // artifact declares must now exist and be executable in the helper dir.
+        for helper in artifact.helpers {
+            let staged = tmp_helper_dir.join(helper.name);
+            if !is_executable_file(&staged) {
+                return Err(PodmanInstallError::HelperMissing {
+                    helper: helper.name.to_string(),
+                });
+            }
+        }
+
+        // Point Podman at the bundled helper dir (and pin the VM provider) via
+        // an Ato-owned containers.conf, so `podman machine` finds gvproxy/vfkit
+        // without depending on Homebrew/system search paths. Written only when
+        // the target actually ships helpers.
+        if !helper_blobs.is_empty() {
+            write_containers_conf(&tmp_dir, &final_helper_dir)?;
+        }
+
         let final_binary = final_dir.join(artifact.binary_rel_path);
         let provenance = PodmanProvenance {
             version: artifact.version.to_string(),
             sha256: artifact.sha256.to_string(),
             source_url: artifact.url.to_string(),
             binary_path: final_binary.to_string_lossy().to_string(),
+            helper_binaries_dir: if helper_blobs.is_empty() {
+                String::new()
+            } else {
+                final_helper_dir.to_string_lossy().to_string()
+            },
+            helpers: helper_provenance,
         };
         write_provenance(&tmp_dir, &provenance)?;
         Ok((final_binary, provenance))
@@ -461,6 +652,99 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+/// Write the Ato-owned `containers.conf` that points Podman at the bundled
+/// helper dir and pins the macOS VM provider. `helper_dir` is the **final**
+/// (post-promotion) absolute path so the config is valid the instant the
+/// install dir is renamed into place.
+fn write_containers_conf(install_dir: &Path, helper_dir: &Path) -> Result<(), PodmanInstallError> {
+    let helper = toml_escape(&helper_dir.to_string_lossy());
+    let conf = format!(
+        "# Ato-managed Podman configuration — generated by ato, do not edit.\n\
+         # Points `podman machine` at the gvproxy/vfkit helpers Ato installed\n\
+         # alongside podman so the machine runtime works without Homebrew or\n\
+         # system search paths.\n\
+         [engine]\n\
+         helper_binaries_dir = [\"{helper}\"]\n\
+         \n\
+         [machine]\n\
+         provider = \"{provider}\"\n",
+        helper = helper,
+        provider = MACOS_MACHINE_PROVIDER,
+    );
+    std::fs::write(install_dir.join(CONTAINERS_CONF_FILE), conf).map_err(|e| {
+        PodmanInstallError::Provenance {
+            message: format!("could not write {CONTAINERS_CONF_FILE}: {e}"),
+        }
+    })
+}
+
+/// Escape a string for a TOML basic string (only `\` and `"` need handling for
+/// the filesystem paths we emit).
+fn toml_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Names of the `podman machine` helpers a pinned artifact for `(os, arch)`
+/// requires but that are **missing** (absent or non-executable) from an
+/// Ato-managed install's helper dir.
+///
+/// Returns empty when the runtime is complete, when the target needs no
+/// helpers, or when `podman_bin` is not an Ato-managed install — Ato only
+/// polices the layout it owns; a Homebrew/system Podman is trusted to bring its
+/// own helpers. This is the preflight that turns the clean-VM
+/// `could not find "gvproxy"` failure into an actionable, typed error *before*
+/// `podman machine init` runs.
+pub(crate) fn missing_helpers_for(podman_bin: &Path, os: &str, arch: &str) -> Vec<String> {
+    let Some(artifact) = pinned_artifact(os, arch) else {
+        return Vec::new();
+    };
+    if artifact.helpers.is_empty() || !is_ato_managed_install(podman_bin) {
+        return Vec::new();
+    }
+    let Some(install_dir) = install_root(podman_bin, artifact.binary_rel_path) else {
+        return Vec::new();
+    };
+    let helper_dir = install_dir.join(artifact.helper_binaries_rel_dir);
+    artifact
+        .helpers
+        .iter()
+        .filter(|h| !is_executable_file(&helper_dir.join(h.name)))
+        .map(|h| h.name.to_string())
+        .collect()
+}
+
+/// Whether `podman_bin` is an Ato-managed install (lives under `~/.ato/tools`).
+fn is_ato_managed_install(podman_bin: &Path) -> bool {
+    capsule_core::common::paths::ato_tools_dir()
+        .map(|tools| podman_bin.starts_with(&tools))
+        .unwrap_or(false)
+}
+
+/// Recover the install root from a podman binary path by popping the
+/// `binary_rel_path` components (e.g. `usr/bin/podman`) off the end.
+fn install_root(podman_bin: &Path, binary_rel_path: &str) -> Option<PathBuf> {
+    let mut dir = podman_bin.to_path_buf();
+    for _ in Path::new(binary_rel_path).components() {
+        if !dir.pop() {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Extract `bytes` (a `.tar.gz` or `.zip`) into `dest`, stripping a leading
@@ -594,6 +878,67 @@ mod tests {
         }
     }
 
+    /// Fetcher that serves canned bytes for several URLs (the main archive plus
+    /// each helper), for the machine-runtime-bundle tests.
+    struct MapFetcher {
+        responses: std::collections::HashMap<String, Vec<u8>>,
+    }
+
+    impl PodmanArtifactFetcher for MapFetcher {
+        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+            self.responses
+                .get(url)
+                .cloned()
+                .ok_or_else(|| format!("unexpected url: {url}"))
+        }
+    }
+
+    /// Leak `s` into a `&'static str` so it can live in a `&'static` artifact
+    /// field. Tests only.
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    /// Build a test artifact + a [`MapFetcher`] for a podman archive plus two
+    /// helper binaries, with digests that match the canned bytes. Returns the
+    /// artifact and the fetcher.
+    fn artifact_with_helpers(
+        archive: &[u8],
+        gvproxy: &[u8],
+        vfkit: &[u8],
+    ) -> (PinnedArtifact, MapFetcher) {
+        let archive_url = "https://example.test/podman.tar.gz";
+        let gvproxy_url = "https://example.test/gvproxy";
+        let vfkit_url = "https://example.test/vfkit";
+        let helpers: &'static [HelperArtifact] = Box::leak(Box::new([
+            HelperArtifact {
+                name: "gvproxy",
+                url: gvproxy_url,
+                sha256: leak(sha256_hex(gvproxy)),
+            },
+            HelperArtifact {
+                name: "vfkit",
+                url: vfkit_url,
+                sha256: leak(sha256_hex(vfkit)),
+            },
+        ]));
+        let artifact = PinnedArtifact {
+            version: "9.9.9-test",
+            url: archive_url,
+            sha256: leak(sha256_hex(archive)),
+            format: ArtifactFormat::TarGz,
+            binary_rel_path: "usr/bin/podman",
+            strip_prefix: "",
+            helpers,
+            helper_binaries_rel_dir: "usr/bin",
+        };
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(archive_url.to_string(), archive.to_vec());
+        responses.insert(gvproxy_url.to_string(), gvproxy.to_vec());
+        responses.insert(vfkit_url.to_string(), vfkit.to_vec());
+        (artifact, MapFetcher { responses })
+    }
+
     /// Build a tar.gz containing a single executable file at `inner_path`.
     fn tar_gz_with(inner_path: &str, contents: &[u8]) -> Vec<u8> {
         let mut header = tar::Header::new_gnu();
@@ -622,34 +967,32 @@ mod tests {
             format: ArtifactFormat::TarGz,
             binary_rel_path: "usr/bin/podman",
             strip_prefix: "",
+            // The base test artifact needs no helpers; bundle tests use
+            // [`artifact_with_helpers`].
+            helpers: &[],
+            helper_binaries_rel_dir: "usr/bin",
         }
     }
 
     /// Run [`install_ato_managed_podman`]'s body against an explicit artifact,
-    /// bypassing the OS/arch table so tests are host-independent.
+    /// bypassing the OS/arch table so tests are host-independent. Mirrors the
+    /// real flow: verify the archive, then fetch + verify each helper, then run
+    /// the atomic temp-then-promote path.
     fn install_with_artifact<F: PodmanArtifactFetcher>(
         fetcher: &F,
         artifact: &PinnedArtifact,
         tools_dir: &Path,
     ) -> Result<InstalledPodman, PodmanInstallError> {
-        let bytes = fetcher
-            .fetch(artifact.url)
-            .map_err(|message| PodmanInstallError::Fetch {
-                url: artifact.url.to_string(),
-                message,
-            })?;
-        let actual = sha256_hex(&bytes);
-        if !actual.eq_ignore_ascii_case(artifact.sha256) {
-            return Err(PodmanInstallError::DigestMismatch {
-                url: artifact.url.to_string(),
-                expected: artifact.sha256.to_string(),
-                actual,
-            });
+        let bytes = fetch_and_verify(fetcher, artifact.url, artifact.sha256)?;
+        let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>)> = Vec::new();
+        for helper in artifact.helpers {
+            let helper_bytes = fetch_and_verify(fetcher, helper.url, helper.sha256)?;
+            helper_blobs.push((*helper, helper_bytes));
         }
         let final_dir = tools_dir.join(format!("podman-{}", artifact.version));
         // Exercise the real atomic temp-then-promote path (with exec validation)
         // so tests cover what production runs.
-        install_into_temp_then_promote(&bytes, artifact, tools_dir, &final_dir)
+        install_into_temp_then_promote(&bytes, artifact, &helper_blobs, tools_dir, &final_dir)
     }
 
     /// Bytes of a tiny `podman` stub that exits 0 on `--version`, so the new
@@ -862,6 +1205,33 @@ mod tests {
             stdout.contains(PINNED_PODMAN_VERSION),
             "podman --version output should mention {PINNED_PODMAN_VERSION}: {stdout}"
         );
+
+        // The machine runtime is only complete with its helpers: a real install
+        // must also have downloaded + verified gvproxy and vfkit next to podman,
+        // and written a containers.conf pointing Podman at them.
+        let install_dir = tools.path().join(format!("podman-{PINNED_PODMAN_VERSION}"));
+        let helper_dir = install_dir.join("usr/bin");
+        for helper in ["gvproxy", "vfkit"] {
+            assert!(
+                is_executable_file(&helper_dir.join(helper)),
+                "real install must bundle an executable {helper}"
+            );
+        }
+        let conf = install_dir.join(CONTAINERS_CONF_FILE);
+        let conf_text = std::fs::read_to_string(&conf).expect("containers.conf written");
+        assert!(
+            conf_text.contains("helper_binaries_dir"),
+            "containers.conf must set helper_binaries_dir: {conf_text}"
+        );
+        assert!(
+            conf_text.contains(MACOS_MACHINE_PROVIDER),
+            "containers.conf must pin the machine provider: {conf_text}"
+        );
+        // And the resolved-binary preflight sees a complete runtime.
+        assert!(
+            missing_helpers_for(&installed.binary_path, "macos", "aarch64").is_empty(),
+            "a real install must report no missing helpers"
+        );
     }
 
     #[test]
@@ -871,6 +1241,140 @@ mod tests {
             assert_eq!(a.version, PINNED_PODMAN_VERSION);
             assert!(a.url.starts_with("https://"));
             assert_eq!(a.sha256.len(), 64, "digest must be a 64-hex SHA256");
+            // The `podman` archive is not a complete machine runtime: each macOS
+            // target must pin gvproxy + vfkit with real digests so the bundle is
+            // verifiable and fail-closed.
+            let names: Vec<&str> = a.helpers.iter().map(|h| h.name).collect();
+            assert!(names.contains(&"gvproxy"), "must bundle gvproxy: {names:?}");
+            assert!(names.contains(&"vfkit"), "must bundle vfkit: {names:?}");
+            for helper in a.helpers {
+                assert!(helper.url.starts_with("https://"), "{}", helper.name);
+                assert_eq!(
+                    helper.sha256.len(),
+                    64,
+                    "helper {} digest must be 64-hex SHA256",
+                    helper.name
+                );
+            }
+            assert!(
+                !a.helper_binaries_rel_dir.is_empty(),
+                "helper dir must be set when helpers are pinned"
+            );
         }
+    }
+
+    #[test]
+    fn ato_managed_installer_bundles_helpers_and_writes_containers_conf() {
+        let archive = tar_gz_with("usr/bin/podman", podman_stub_script());
+        let (artifact, fetcher) =
+            artifact_with_helpers(&archive, b"#!/bin/sh\nexit 0\n", b"#!/bin/sh\nexit 0\n");
+        let tools = tempfile::tempdir().unwrap();
+        let installed = install_with_artifact(&fetcher, &artifact, tools.path())
+            .expect("install with a complete helper bundle succeeds");
+
+        // Helpers landed next to podman and are executable.
+        let helper_dir = installed.binary_path.parent().unwrap();
+        for helper in ["gvproxy", "vfkit"] {
+            assert!(
+                is_executable_file(&helper_dir.join(helper)),
+                "{helper} must be installed + executable"
+            );
+        }
+        // containers.conf points Podman at the (final) helper dir + provider.
+        let install_dir = tools.path().join("podman-9.9.9-test");
+        let conf = std::fs::read_to_string(install_dir.join(CONTAINERS_CONF_FILE))
+            .expect("containers.conf written");
+        assert!(conf.contains("helper_binaries_dir"), "{conf}");
+        assert!(
+            conf.contains(&helper_dir.to_string_lossy().to_string()),
+            "containers.conf must reference the install helper dir: {conf}"
+        );
+        assert!(conf.contains(MACOS_MACHINE_PROVIDER), "{conf}");
+
+        // Provenance records the helper digests + dir for audit.
+        assert_eq!(installed.provenance.helpers.len(), 2);
+        assert_eq!(
+            installed.provenance.helper_binaries_dir,
+            helper_dir.to_string_lossy().to_string()
+        );
+        let on_disk = read_provenance(&install_dir).expect("provenance file");
+        assert_eq!(on_disk, installed.provenance);
+    }
+
+    #[test]
+    fn ato_managed_installer_rejects_helper_digest_mismatch_before_promotion() {
+        let archive = tar_gz_with("usr/bin/podman", podman_stub_script());
+        let (mut artifact, fetcher) =
+            artifact_with_helpers(&archive, b"real-gvproxy", b"real-vfkit");
+        // Corrupt the gvproxy digest so its download fails closed.
+        let helpers: &'static [HelperArtifact] = Box::leak(Box::new([
+            HelperArtifact {
+                name: "gvproxy",
+                url: artifact.helpers[0].url,
+                sha256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0",
+            },
+            artifact.helpers[1],
+        ]));
+        artifact.helpers = helpers;
+        let tools = tempfile::tempdir().unwrap();
+        let err = install_with_artifact(&fetcher, &artifact, tools.path())
+            .expect_err("a bad helper digest must fail closed");
+        assert!(
+            matches!(err, PodmanInstallError::DigestMismatch { .. }),
+            "{err:?}"
+        );
+        // No partial install: neither the final dir nor a temp dir survives.
+        assert!(!tools.path().join("podman-9.9.9-test").exists());
+        let any_tmp = std::fs::read_dir(tools.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp-"));
+        assert!(!any_tmp, "no temp install dir may remain after a failed helper");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_completeness_check_flags_a_removed_helper() {
+        // Install a complete bundle, then delete gvproxy to simulate an
+        // incomplete runtime. The same present-and-executable predicate the
+        // preflight uses must then flag gvproxy as missing. (Host-independent:
+        // `missing_helpers_for` itself keys off the real `~/.ato/tools`, so we
+        // exercise its predicate against an explicit helper dir here.)
+        let archive = tar_gz_with("usr/bin/podman", podman_stub_script());
+        let (artifact, fetcher) =
+            artifact_with_helpers(&archive, b"#!/bin/sh\nexit 0\n", b"#!/bin/sh\nexit 0\n");
+        let tools = tempfile::tempdir().unwrap();
+        let installed = install_with_artifact(&fetcher, &artifact, tools.path()).expect("install");
+        let helper_dir = installed.binary_path.parent().unwrap().to_path_buf();
+        // Complete runtime → nothing missing.
+        assert!(
+            artifact
+                .helpers
+                .iter()
+                .all(|h| is_executable_file(&helper_dir.join(h.name)))
+        );
+        std::fs::remove_file(helper_dir.join("gvproxy")).unwrap();
+        let missing: Vec<&str> = artifact
+            .helpers
+            .iter()
+            .filter(|h| !is_executable_file(&helper_dir.join(h.name)))
+            .map(|h| h.name)
+            .collect();
+        assert_eq!(missing, vec!["gvproxy"]);
+    }
+
+    #[test]
+    fn missing_helpers_for_ignores_non_managed_podman() {
+        // A Homebrew/system podman path (not under ~/.ato/tools) is trusted: the
+        // preflight returns no missing helpers regardless of what's beside it.
+        let missing = missing_helpers_for(Path::new("/opt/homebrew/bin/podman"), "macos", "aarch64");
+        assert!(missing.is_empty(), "non-managed podman must not be policed: {missing:?}");
+    }
+
+    #[test]
+    fn toml_escape_handles_quotes_and_backslashes() {
+        assert_eq!(toml_escape("/Users/a b/tools"), "/Users/a b/tools");
+        assert_eq!(toml_escape(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(toml_escape(r"a\b"), r"a\\b");
     }
 }
