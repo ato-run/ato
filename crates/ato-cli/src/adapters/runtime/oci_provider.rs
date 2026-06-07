@@ -625,6 +625,11 @@ impl OciCommandRunner for SystemCommandRunner {
             if let Some(path_env) = &invocation.path_env {
                 command.env("PATH", path_env);
             }
+            // Direct an Ato-managed Podman at its bundled machine helpers via the
+            // containers.conf the installer wrote next to it.
+            if let Some(containers_conf) = &invocation.containers_conf {
+                command.env("CONTAINERS_CONF", containers_conf);
+            }
             command
         } else {
             Command::new(program)
