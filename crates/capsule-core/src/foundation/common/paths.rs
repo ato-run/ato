@@ -114,6 +114,23 @@ pub fn engine_cache_dir() -> Result<PathBuf> {
     Ok(nacelle_home_dir()?.join("engines"))
 }
 
+/// Returns the host-runtime tools cache directory.
+///
+/// Layout: `~/.ato/tools`
+///
+/// This is where Ato-managed *host runtimes* (e.g. a Podman binary installed
+/// without Homebrew) are extracted. It is distinct from
+/// [`toolchain_cache_dir`] (`~/.ato/toolchains`, language runtimes fetched via
+/// `RuntimeFetcher`): host runtimes never go through the toolchain cache.
+pub fn ato_tools_dir() -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join("tools"))
+}
+
+/// Best-effort [`ato_tools_dir`] that never falls back to `/tmp`.
+pub fn ato_tools_dir_or_workspace_tmp() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("tools")
+}
+
 /// Returns the shared cache directory for ephemeral CLI-managed artifacts.
 ///
 /// Layout: `~/.ato/cache`

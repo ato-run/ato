@@ -174,8 +174,63 @@ fn invocation_from(resolved: Result<ResolvedPodman, PodmanResolveError>) -> Podm
 }
 
 /// OS-specific known podman install locations, newest-preferred first.
+///
+/// Ato-managed installs (`~/.ato/tools/podman-<version>/…`, created without
+/// Homebrew) are searched *before* the system locations so a freshly
+/// Ato-installed Podman is found on a clean machine that has no brew/system
+/// copy. The system Homebrew / Program Files / `bin` locations follow.
 pub fn known_podman_locations() -> Vec<PathBuf> {
-    known_locations_for(std::env::consts::OS)
+    let mut locations = ato_managed_podman_locations();
+    locations.extend(known_locations_for(std::env::consts::OS));
+    locations
+}
+
+/// File name of the podman binary on the current OS.
+fn podman_binary_name() -> &'static str {
+    if std::env::consts::OS == "windows" {
+        "podman.exe"
+    } else {
+        "podman"
+    }
+}
+
+/// Candidate binary paths for any Ato-managed Podman install under
+/// `~/.ato/tools`. Each `podman-<version>` directory is probed both for a
+/// top-level binary and a `bin/` subdir (release archives vary). Newest
+/// versions are preferred (descending sort). Returns empty when the tools dir
+/// does not exist or the ato home cannot be determined.
+fn ato_managed_podman_locations() -> Vec<PathBuf> {
+    let Ok(tools_dir) = crate::common::paths::ato_tools_dir() else {
+        return Vec::new();
+    };
+    let bin = podman_binary_name();
+    let mut versions: Vec<PathBuf> = match std::fs::read_dir(&tools_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("podman-"))
+            })
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    // Lexical descending order approximates newest-first for `podman-<version>`.
+    versions.sort();
+    versions.reverse();
+
+    let mut out = Vec::new();
+    for dir in versions {
+        // Probe the layouts Ato-managed installs may use. The macOS release
+        // zips place the binary at `usr/bin/podman` under the version dir;
+        // `bin/podman` and a top-level `podman` cover other archive shapes.
+        out.push(dir.join("usr").join("bin").join(bin));
+        out.push(dir.join("bin").join(bin));
+        out.push(dir.join(bin));
+    }
+    out
 }
 
 // ── Internal, testable helpers ───────────────────────────────────────────────
@@ -290,9 +345,42 @@ fn read_podman_version(bin: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn always_usable(_: &Path) -> bool {
         true
+    }
+
+    /// Serialize tests that mutate `ATO_HOME` (process-global env).
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock")
+    }
+
+    /// RAII guard that sets an env var to a path and restores it on drop.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 
     #[test]
@@ -435,5 +523,46 @@ mod tests {
     #[test]
     fn unknown_os_has_no_known_locations() {
         assert!(known_locations_for("plan9").is_empty());
+    }
+
+    #[test]
+    fn ato_managed_locations_probe_known_install_layouts() {
+        // An Ato-managed install places the binary under a `podman-<version>/`
+        // dir; resolution must probe the `usr/bin`, `bin`, and top-level
+        // layouts so a freshly Ato-installed Podman is found on a brew-less
+        // host. Drive the pure helper against a temp tools dir via ATO_HOME.
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", temp.path());
+
+        let install = temp.path().join("tools").join("podman-5.2.3");
+        std::fs::create_dir_all(install.join("usr").join("bin")).expect("mkdir");
+
+        let locs = super::ato_managed_podman_locations();
+        let bin = super::podman_binary_name();
+        assert!(
+            locs.contains(&install.join("usr").join("bin").join(bin)),
+            "must probe usr/bin layout: {locs:?}"
+        );
+        assert!(locs.contains(&install.join("bin").join(bin)));
+        assert!(locs.contains(&install.join(bin)));
+    }
+
+    #[test]
+    fn ato_managed_locations_prefer_newest_version() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", temp.path());
+        let tools = temp.path().join("tools");
+        std::fs::create_dir_all(tools.join("podman-5.1.0")).expect("mkdir");
+        std::fs::create_dir_all(tools.join("podman-5.2.3")).expect("mkdir");
+
+        let locs = super::ato_managed_podman_locations();
+        // The first probed path must be under the newest version dir.
+        let first = locs.first().expect("at least one location");
+        assert!(
+            first.to_string_lossy().contains("podman-5.2.3"),
+            "newest version should be probed first: {first:?}"
+        );
     }
 }
