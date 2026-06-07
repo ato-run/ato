@@ -34,21 +34,21 @@ pub(crate) fn build_observed_runtime_evidence(
     execution_cwd: Option<&Path>,
     bound_port: Option<u16>,
 ) -> ObservedRuntimeEvidence {
-    // The executor's realized cwd is authoritative — the host source executor
-    // reports `resolve_host_execution_cwd(...)` via `CapsuleProcess.execution_cwd`,
-    // which can differ from the caller's ambient cwd. Fall back to the launch
-    // context's effective cwd only when the executor did not report one (e.g.
-    // node/deno, whose cwd is `effective_cwd().unwrap_or(runtime_dir)`); never an
-    // ambient estimate beyond that.
-    let actual_cwd = execution_cwd.or_else(|| launch_ctx.effective_cwd().map(|p| p.as_path()));
     let envelope = ObservedLaunchEnvelope {
         // Anchored by mark_v2_receipt_observed from the receipt itself.
         resolved_execution_id: None,
         runtime_kind: observed_runtime_kind(plan),
         runtime_identity: observed_runtime_identity(plan),
         entrypoint: observed_entrypoint(launch),
+        // Derived ONLY from the executor's *realized* cwd
+        // (`CapsuleProcess.execution_cwd`): the host source executor reports
+        // `resolve_host_execution_cwd(...)` and the shell executor reports its
+        // `working_dir`. Executors that do not report one (node/deno/static, which
+        // run in an internal `runtime_dir`) yield `None` here — the cwd is omitted
+        // from the identity rather than estimated from the caller's ambient cwd,
+        // so `observed_execution_id` never commits to a cwd we did not observe.
         working_directory: observed_working_directory(
-            actual_cwd,
+            execution_cwd,
             launch_ctx.workspace_root().map(|p| p.as_path()),
         ),
         env_keys: launch_ctx.env_permission_keys(),
