@@ -69,7 +69,9 @@ pub enum RevalidationOutcome {
     Failed(RevalidationFailure),
     /// Subsystem not yet implemented; carries the reason it was skipped. This is
     /// explicit and testable — it is never treated as a success.
-    Skipped { reason: String },
+    Skipped {
+        reason: String,
+    },
 }
 
 impl RevalidationOutcome {
@@ -241,7 +243,9 @@ mod tests {
             network_policy_hash: "blake3:net".into(),
             capability_policy_hash: "blake3:cap".into(),
             state_contract_hash: "blake3:state".into(),
-            runner_compatibility_class: RunnerCompatibilityClass::new("managed_runner/linux-x86_64"),
+            runner_compatibility_class: RunnerCompatibilityClass::new(
+                "managed_runner/linux-x86_64",
+            ),
         }
     }
 
