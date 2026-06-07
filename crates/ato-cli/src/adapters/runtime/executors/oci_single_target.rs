@@ -15,9 +15,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use capsule_core::CapsuleReporter;
-use capsule_core::execution_identity::{
-    ExecutionReceiptDocument, ReceiptFailureKind, ReceiptResultClass,
-};
 use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
 use capsule_core::router::ManifestData;
 use capsule_core::runtime::oci::{OciContainerRequest, OciLogChunk, OciPortSpec};
@@ -44,10 +41,22 @@ pub(crate) async fn execute_single_target(
     reporter: Arc<CliReporter>,
     launch_ctx: &RuntimeLaunchContext,
     strict_realization: bool,
+    // #501: boundary receipt sink, so a strict-gate failure receipt persisted
+    // here suppresses the boundary's duplicate partial. `None` outside the
+    // boundary-wrapped pipeline (e.g. tests).
+    receipt_sink: Option<&crate::application::receipt_boundary::ReceiptGraphIdSink>,
 ) -> Result<i32> {
     let selector = DefaultOciProviderSelector;
     let provider = selector.select_provider();
-    execute_with_provider(plan, reporter, launch_ctx, &provider, strict_realization).await
+    execute_with_provider(
+        plan,
+        reporter,
+        launch_ctx,
+        &provider,
+        strict_realization,
+        receipt_sink,
+    )
+    .await
 }
 
 /// Assemble the env map handed to `create_container`, in precedence order: the
@@ -127,6 +136,9 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
     launch_ctx: &RuntimeLaunchContext,
     provider: &P,
     strict_realization: bool,
+    // #501: boundary receipt sink (see `execute_single_target`). `None` in the
+    // provider-injection tests, which never wrap a boundary.
+    receipt_sink: Option<&crate::application::receipt_boundary::ReceiptGraphIdSink>,
 ) -> Result<i32> {
     // ── Gate 1: OCI policy envelope from the lock-compiled execution plan ────
     // Compile the full plan once; it is reused for the launch receipt so the
@@ -255,6 +267,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
         launch_ctx,
         None,
         strict_gate.as_ref().err(),
+        receipt_sink,
         &reporter,
     )
     .await;
@@ -447,32 +460,6 @@ fn enforce_strict_oci_launch(
 /// issue must never regress an OCI launch. `provider_projections_override` lets the
 /// multi-service path supply one evidence record per service; `None` keeps the
 /// builder's single declared projection (single-target).
-/// Mark a built OCI launch receipt as a strict-realization-gate failure (#501).
-///
-/// Applies the typed failure envelope/result class derived from the gate error
-/// while preserving everything else: the real declared/resolved execution ids,
-/// the provider evidence, the `Partial` graph completeness, and the absent
-/// `observed_execution_id` (the launch never ran, so it is never observed). A v1
-/// document or an error with no typed envelope is returned unchanged.
-fn mark_oci_receipt_failed(
-    document: ExecutionReceiptDocument,
-    error: &anyhow::Error,
-) -> ExecutionReceiptDocument {
-    let ExecutionReceiptDocument::V2(receipt) = document else {
-        return document;
-    };
-    match crate::application::receipt_boundary::build_failure_envelope(error) {
-        Some(envelope) => {
-            let class = match envelope.kind {
-                ReceiptFailureKind::Recoverable => ReceiptResultClass::RecoverableFailure,
-                ReceiptFailureKind::Aborted => ReceiptResultClass::Aborted,
-            };
-            ExecutionReceiptDocument::V2(receipt.with_result(class, Some(envelope)))
-        }
-        None => ExecutionReceiptDocument::V2(receipt),
-    }
-}
-
 pub(crate) async fn persist_oci_launch_receipt(
     plan: &ManifestData,
     execution_plan: &capsule_core::execution_plan::model::ExecutionPlan,
@@ -485,6 +472,11 @@ pub(crate) async fn persist_oci_launch_receipt(
     // marked as a typed failure (keeping its real declared/resolved ids + provider
     // evidence) instead of a success. `None` for a normal (passing) launch.
     strict_gate_failure: Option<&anyhow::Error>,
+    // #501: the boundary's receipt sink. When this call durably persists a
+    // strict-gate *failure* receipt, it flags the sink so the top-level
+    // `emit_receipt_on_result` boundary does NOT also write a generic partial
+    // receipt for the same propagated gate error (one launch → one receipt).
+    receipt_sink: Option<&crate::application::receipt_boundary::ReceiptGraphIdSink>,
     reporter: &Arc<CliReporter>,
 ) {
     let result = crate::application::execution_receipt_builder::build_oci_launch_receipt(
@@ -492,16 +484,22 @@ pub(crate) async fn persist_oci_launch_receipt(
         execution_plan,
         launch_ctx,
         provider_projections_override,
+        strict_gate_failure,
     )
-    .map(|document| match strict_gate_failure {
-        Some(error) => mark_oci_receipt_failed(document, error),
-        None => document,
-    })
     .and_then(|document| {
         crate::application::execution_receipts::write_receipt_document_atomic(&document)
     });
     match result {
         Ok(path) => {
+            // A strict-gate failure receipt is now durably on disk → tell the
+            // boundary to stand down so it does not double-emit. Only on the
+            // failure path: a passing launch must leave the boundary free to
+            // record any *later* failure.
+            if strict_gate_failure.is_some()
+                && let Some(sink) = receipt_sink
+            {
+                sink.mark_receipt_emitted();
+            }
             let _ = reporter
                 .notify(format!("RECEIPT: {}", path.display()))
                 .await;
@@ -676,62 +674,6 @@ mod tests {
         assert!(
             rendered.contains("OPENAI_API_KEY"),
             "the env name is not sensitive and may appear"
-        );
-    }
-
-    /// #501: a strict-realization gate block produces a persisted *failure*
-    /// receipt. `mark_oci_receipt_failed` applies the typed result/envelope while
-    /// preserving the declared/resolved ids and never synthesizing an
-    /// `observed_execution_id` (the launch never ran), and never `Complete`.
-    #[test]
-    fn strict_gate_failure_marks_oci_receipt_without_observed_id() {
-        use capsule_core::execution_identity::{
-            ExecutionReceiptDocument, ExecutionReceiptV2, GraphCompleteness, ReceiptResultClass,
-        };
-        use capsule_core::execution_plan::error::AtoExecutionError;
-
-        let err: anyhow::Error =
-            AtoExecutionError::lock_incomplete("strict realization gate blocked launch", None)
-                .into();
-        let envelope = crate::application::receipt_boundary::build_failure_envelope(&err)
-            .expect("typed failure envelope");
-        let baseline = ExecutionReceiptV2::partial_failure(
-            "2026-06-07T00:00:00Z".to_string(),
-            ReceiptResultClass::RecoverableFailure,
-            envelope,
-            Some("sha256:declared".to_string()),
-            Some("sha256:resolved".to_string()),
-            None,
-        );
-        assert!(baseline.observed_execution_id.is_none());
-
-        let marked = mark_oci_receipt_failed(ExecutionReceiptDocument::V2(baseline), &err);
-        let ExecutionReceiptDocument::V2(receipt) = marked else {
-            panic!("expected v2 receipt");
-        };
-        assert!(
-            matches!(
-                receipt.result,
-                ReceiptResultClass::RecoverableFailure | ReceiptResultClass::Aborted
-            ),
-            "a strict-gated launch must be a typed failure"
-        );
-        assert!(receipt.failure_envelope.is_some());
-        assert_eq!(
-            receipt.declared_execution_id.as_deref(),
-            Some("sha256:declared")
-        );
-        assert_eq!(
-            receipt.resolved_execution_id.as_deref(),
-            Some("sha256:resolved")
-        );
-        assert!(
-            receipt.observed_execution_id.is_none(),
-            "a blocked launch never ran, so it is never observed"
-        );
-        assert_ne!(
-            receipt.graph_completeness,
-            Some(GraphCompleteness::Complete)
         );
     }
 
