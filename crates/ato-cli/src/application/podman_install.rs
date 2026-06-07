@@ -164,6 +164,12 @@ const MACOS_PODMAN_HELPERS: &[HelperArtifact] = &[
 /// (`krunkit`) path so the bundled helpers are sufficient.
 const MACOS_MACHINE_PROVIDER: &str = "applehv";
 
+/// Whether the Ato machine enables Podman's Rosetta guest share. `false`:
+/// Rosetta must never be a hidden prerequisite of an Ato-managed runtime (it
+/// would prompt for a host Rosetta install on a clean Apple Silicon VM and fail
+/// vfkit when declined). See [`write_containers_conf`].
+const MACOS_MACHINE_ROSETTA: bool = false;
+
 /// File name of the Ato-generated Podman config written next to an install. It
 /// points Podman at the bundled helper dir so `podman machine` finds `gvproxy`
 /// and `vfkit` without relying on Homebrew/system search paths.
@@ -292,6 +298,15 @@ pub(crate) enum PodmanInstallError {
     /// rejected **before promotion** — an incomplete runtime is never published.
     /// This is an Ato packaging/runtime issue, not a user Homebrew/git issue.
     HelperMissing { helper: String },
+    /// A bundled binary (podman or a helper) is a Mach-O that does **not**
+    /// contain a native slice for the host architecture, so running it would
+    /// require Rosetta on Apple Silicon — a hidden prerequisite Ato must never
+    /// introduce. Rejected **before promotion**. Packaging issue, not a user
+    /// issue.
+    NotNativeArch {
+        binary: String,
+        host_arch: String,
+    },
     /// Writing the provenance manifest failed.
     Provenance { message: String },
 }
@@ -328,6 +343,12 @@ impl std::fmt::Display for PodmanInstallError {
                 "Ato-managed Podman is incomplete: required helper binary `{helper}` was not \
                  found. This is an Ato packaging/runtime setup issue, not a user Homebrew/git \
                  issue."
+            ),
+            Self::NotNativeArch { binary, host_arch } => write!(
+                f,
+                "Ato-managed Podman binary `{binary}` has no native {host_arch} build (it would \
+                 require Rosetta on Apple Silicon); refusing to install a non-native runtime. \
+                 This is an Ato packaging/runtime setup issue, not a user issue."
             ),
             Self::Provenance { message } => {
                 write!(f, "failed to record Podman install provenance: {message}")
@@ -400,6 +421,11 @@ pub(crate) struct HelperProvenance {
     pub source_url: String,
     /// Path of the installed helper binary.
     pub path: String,
+    /// Host architecture the helper was validated to contain a native Mach-O
+    /// slice for (`std::env::consts::ARCH` spelling). `#[serde(default)]` keeps
+    /// older provenance files readable.
+    #[serde(default)]
+    pub required_arch: String,
 }
 
 /// Result of a successful Ato-managed install.
@@ -436,17 +462,20 @@ pub(crate) fn install_ato_managed_podman<F: PodmanArtifactFetcher>(
     let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>)> = Vec::with_capacity(artifact.helpers.len());
     for helper in artifact.helpers {
         let helper_bytes = fetch_and_verify(fetcher, helper.url, helper.sha256)?;
+        // Native-arch gate (fail-closed): a helper that is a Mach-O without the
+        // host's slice would run under Rosetta — never install it.
+        validate_native_arch(&helper_bytes, arch, helper.name)?;
         helper_blobs.push((*helper, helper_bytes));
     }
 
     let install_dir = tools_dir.join(format!("podman-{}", artifact.version));
 
-    // Extract into a temp sibling dir, validate (binary present + runnable,
-    // helpers present + executable), write containers.conf + provenance, then
-    // atomically rename into place. Any failure removes the temp dir so a
-    // partial install is never left behind. The atomic rename means observers
-    // only ever see a fully-validated install dir.
-    install_into_temp_then_promote(&bytes, &artifact, &helper_blobs, tools_dir, &install_dir)
+    // Extract into a temp sibling dir, validate (binary present + runnable +
+    // native arch, helpers present + executable), write containers.conf +
+    // provenance, then atomically rename into place. Any failure removes the
+    // temp dir so a partial install is never left behind. The atomic rename
+    // means observers only ever see a fully-validated install dir.
+    install_into_temp_then_promote(&bytes, &artifact, &helper_blobs, arch, tools_dir, &install_dir)
 }
 
 /// Download `url` and verify its SHA256 matches `expected_sha256` (fail-closed:
@@ -481,6 +510,7 @@ fn install_into_temp_then_promote(
     bytes: &[u8],
     artifact: &PinnedArtifact,
     helper_blobs: &[(HelperArtifact, Vec<u8>)],
+    host_arch: &str,
     tools_dir: &Path,
     final_dir: &Path,
 ) -> Result<InstalledPodman, PodmanInstallError> {
@@ -514,6 +544,12 @@ fn install_into_temp_then_promote(
         }
         ensure_executable(&tmp_binary)
             .map_err(|message| PodmanInstallError::Extract { message })?;
+        // The podman binary must be native too — a non-native podman would also
+        // pull in Rosetta. Validate before running it.
+        let podman_bytes = std::fs::read(&tmp_binary).map_err(|e| PodmanInstallError::Extract {
+            message: format!("could not read extracted podman for arch check: {e}"),
+        })?;
+        validate_native_arch(&podman_bytes, host_arch, "podman")?;
         // Prove the extracted binary actually runs on this host before we
         // promote it. A non-zero exit (or spawn failure) fails the install.
         verify_binary_runs(&tmp_binary)?;
@@ -542,6 +578,7 @@ fn install_into_temp_then_promote(
                 sha256: helper.sha256.to_string(),
                 source_url: helper.url.to_string(),
                 path: final_helper_dir.join(helper.name).to_string_lossy().to_string(),
+                required_arch: host_arch.to_string(),
             });
         }
         // The runtime is only as complete as its helpers: every helper the
@@ -668,6 +705,101 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// A CPU architecture we care about for native-execution validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BinArch {
+    X86_64,
+    Arm64,
+    /// Some other / unrecognized Mach-O cputype.
+    Other,
+}
+
+/// Map the host arch string (`std::env::consts::ARCH` spelling) to the arch a
+/// native binary must contain. `None` for arches we don't gate.
+fn host_bin_arch(host_arch: &str) -> Option<BinArch> {
+    match host_arch {
+        "aarch64" => Some(BinArch::Arm64),
+        "x86_64" => Some(BinArch::X86_64),
+        _ => None,
+    }
+}
+
+fn arch_from_cputype(cputype: u32) -> BinArch {
+    // CPU_TYPE_X86_64 = 0x0100_0007, CPU_TYPE_ARM64 = CPU_TYPE_ARM(12) | ABI64.
+    match cputype {
+        0x0100_0007 => BinArch::X86_64,
+        0x0100_000C => BinArch::Arm64,
+        _ => BinArch::Other,
+    }
+}
+
+/// Architectures present in a Mach-O image (thin or fat/universal).
+///
+/// Returns `None` when `bytes` is **not** a Mach-O at all (a shell script, an
+/// ELF, etc.) — callers then skip the native-arch gate, since it only applies
+/// to macOS Mach-O binaries. A minimal header parser: no external `lipo`/Xcode
+/// CLT dependency, so a clean VM needs no developer tooling.
+fn macho_archs(bytes: &[u8]) -> Option<Vec<BinArch>> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let be = |o: usize| u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    let le = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    // The on-disk first word read big-endian distinguishes every variant.
+    match be(0) {
+        // Fat / universal: magic + cputype fields are big-endian. FAT_MAGIC(_64).
+        0xCAFE_BABE | 0xCAFE_BABF => {
+            let is_64 = be(0) == 0xCAFE_BABF;
+            let entry = if is_64 { 32 } else { 20 };
+            let n = be(4) as usize;
+            let mut archs = Vec::new();
+            let mut off = 8usize;
+            for _ in 0..n {
+                if off + 4 > bytes.len() {
+                    break;
+                }
+                archs.push(arch_from_cputype(be(off)));
+                off += entry;
+            }
+            Some(archs)
+        }
+        // Thin 64-bit, big-endian image (MH_MAGIC_64): cputype is big-endian.
+        0xFEED_FACF => Some(vec![arch_from_cputype(be(4))]),
+        // Thin 64-bit, little-endian image (MH_CIGAM_64) — the normal arm64 /
+        // x86_64 layout on Apple: cputype is little-endian.
+        0xCFFA_EDFE => Some(vec![arch_from_cputype(le(4))]),
+        // Thin 32-bit (BE / LE). Neither arm64 nor x86_64, but recognize them so
+        // a 32-bit binary is treated as a Mach-O (and thus arch-gated), not skipped.
+        0xFEED_FACE => Some(vec![arch_from_cputype(be(4))]),
+        0xCEFA_EDFE => Some(vec![arch_from_cputype(le(4))]),
+        _ => None,
+    }
+}
+
+/// Reject a bundled binary that is a Mach-O lacking a native slice for
+/// `host_arch` (it would run under Rosetta). Non-Mach-O inputs and un-gated
+/// host arches pass — the gate only constrains real macOS binaries.
+fn validate_native_arch(
+    bytes: &[u8],
+    host_arch: &str,
+    binary: &str,
+) -> Result<(), PodmanInstallError> {
+    let Some(want) = host_bin_arch(host_arch) else {
+        return Ok(());
+    };
+    let Some(archs) = macho_archs(bytes) else {
+        return Ok(());
+    };
+    if archs.contains(&want) {
+        Ok(())
+    } else {
+        Err(PodmanInstallError::NotNativeArch {
+            binary: binary.to_string(),
+            host_arch: host_arch.to_string(),
+        })
+    }
+}
+
 /// Write the Ato-owned `containers.conf` that points Podman at the bundled
 /// helper dir and pins the macOS VM provider. `helper_dir` is the **final**
 /// (post-promotion) absolute path so the config is valid the instant the
@@ -683,9 +815,19 @@ fn write_containers_conf(install_dir: &Path, helper_dir: &Path) -> Result<(), Po
          helper_binaries_dir = [\"{helper}\"]\n\
          \n\
          [machine]\n\
-         provider = \"{provider}\"\n",
+         provider = \"{provider}\"\n\
+         # Podman defaults `rosetta = true` on Apple Silicon (applehv), which makes\n\
+         # `podman machine start` set up a Rosetta guest share and so requires the\n\
+         # user to install Rosetta on the host — a hidden prerequisite that breaks\n\
+         # the clean-VM promise (it surfaces as a Rosetta install prompt and\n\
+         # `vfkit exited unexpectedly with exit code 1` on a Rosetta-less VM).\n\
+         # Ato disables it: the machine boots natively (arm64) with no host\n\
+         # Rosetta. x86_64 Linux images are emulated in-guest rather than via\n\
+         # host Rosetta.\n\
+         rosetta = {rosetta}\n",
         helper = helper,
         provider = MACOS_MACHINE_PROVIDER,
+        rosetta = MACOS_MACHINE_ROSETTA,
     );
     std::fs::write(install_dir.join(CONTAINERS_CONF_FILE), conf).map_err(|e| {
         PodmanInstallError::Provenance {
@@ -997,16 +1139,62 @@ mod tests {
         artifact: &PinnedArtifact,
         tools_dir: &Path,
     ) -> Result<InstalledPodman, PodmanInstallError> {
+        // Use an un-gated host arch by default so script-stub fixtures (not
+        // Mach-O) are unaffected; arch-specific tests call the variant below.
+        install_with_artifact_on(fetcher, artifact, "ato-test-arch", tools_dir)
+    }
+
+    fn install_with_artifact_on<F: PodmanArtifactFetcher>(
+        fetcher: &F,
+        artifact: &PinnedArtifact,
+        host_arch: &str,
+        tools_dir: &Path,
+    ) -> Result<InstalledPodman, PodmanInstallError> {
         let bytes = fetch_and_verify(fetcher, artifact.url, artifact.sha256)?;
         let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>)> = Vec::new();
         for helper in artifact.helpers {
             let helper_bytes = fetch_and_verify(fetcher, helper.url, helper.sha256)?;
+            validate_native_arch(&helper_bytes, host_arch, helper.name)?;
             helper_blobs.push((*helper, helper_bytes));
         }
         let final_dir = tools_dir.join(format!("podman-{}", artifact.version));
         // Exercise the real atomic temp-then-promote path (with exec validation)
         // so tests cover what production runs.
-        install_into_temp_then_promote(&bytes, artifact, &helper_blobs, tools_dir, &final_dir)
+        install_into_temp_then_promote(&bytes, artifact, &helper_blobs, host_arch, tools_dir, &final_dir)
+    }
+
+    /// Bytes of a minimal **thin** Mach-O header for `arch` — just enough for
+    /// the header parser (magic + cputype). Not a runnable binary; helpers are
+    /// never executed, so this exercises the arch gate hermetically.
+    fn thin_macho(arch: BinArch) -> Vec<u8> {
+        let cputype: u32 = match arch {
+            BinArch::X86_64 => 0x0100_0007,
+            BinArch::Arm64 => 0x0100_000C,
+            BinArch::Other => 0x0000_0007,
+        };
+        let mut v = Vec::new();
+        // MH_CIGAM_64 on disk (little-endian image): bytes CF FA ED FE.
+        v.extend_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]);
+        v.extend_from_slice(&cputype.to_le_bytes()); // cputype, little-endian
+        v.extend_from_slice(&[0u8; 24]); // pad out a plausible header
+        v
+    }
+
+    /// Bytes of a minimal **fat/universal** Mach-O header covering `archs`.
+    fn fat_macho(archs: &[BinArch]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes()); // FAT_MAGIC
+        v.extend_from_slice(&(archs.len() as u32).to_be_bytes());
+        for a in archs {
+            let cputype: u32 = match a {
+                BinArch::X86_64 => 0x0100_0007,
+                BinArch::Arm64 => 0x0100_000C,
+                BinArch::Other => 0x0000_0007,
+            };
+            v.extend_from_slice(&cputype.to_be_bytes()); // cputype (big-endian)
+            v.extend_from_slice(&[0u8; 16]); // cpusubtype/offset/size/align
+        }
+        v
     }
 
     /// Bytes of a tiny `podman` stub that exits 0 on `--version`, so the new
@@ -1226,9 +1414,18 @@ mod tests {
         let install_dir = tools.path().join(format!("podman-{PINNED_PODMAN_VERSION}"));
         let helper_dir = install_dir.join("usr/bin");
         for helper in ["gvproxy", "vfkit"] {
+            let path = helper_dir.join(helper);
             assert!(
-                is_executable_file(&helper_dir.join(helper)),
+                is_executable_file(&path),
                 "real install must bundle an executable {helper}"
+            );
+            // Real evidence the pinned helpers are native arm64 (NOT Intel-only,
+            // so no Rosetta) — the #578 concern, checked against the actual bytes.
+            let bytes = std::fs::read(&path).expect("read helper");
+            let archs = macho_archs(&bytes).expect("helper is a Mach-O");
+            assert!(
+                archs.contains(&BinArch::Arm64),
+                "{helper} must contain a native arm64 slice: {archs:?}"
             );
         }
         let conf = install_dir.join(CONTAINERS_CONF_FILE);
@@ -1304,6 +1501,12 @@ mod tests {
             "containers.conf must reference the install helper dir: {conf}"
         );
         assert!(conf.contains(MACOS_MACHINE_PROVIDER), "{conf}");
+        // Rosetta must be disabled so a clean Apple Silicon VM is never prompted
+        // to install Rosetta (the #578 clean-VM failure).
+        assert!(
+            conf.contains("rosetta = false"),
+            "containers.conf must disable Rosetta: {conf}"
+        );
 
         // Provenance records the helper digests + dir for audit.
         assert_eq!(installed.provenance.helpers.len(), 2);
@@ -1344,6 +1547,82 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().contains(".tmp-"));
         assert!(!any_tmp, "no temp install dir may remain after a failed helper");
+    }
+
+    #[test]
+    fn macho_parser_reads_thin_and_fat_archs() {
+        assert_eq!(macho_archs(&thin_macho(BinArch::Arm64)), Some(vec![BinArch::Arm64]));
+        assert_eq!(macho_archs(&thin_macho(BinArch::X86_64)), Some(vec![BinArch::X86_64]));
+        assert_eq!(
+            macho_archs(&fat_macho(&[BinArch::X86_64, BinArch::Arm64])),
+            Some(vec![BinArch::X86_64, BinArch::Arm64])
+        );
+        // A shell script (the helper-stub shape) is not a Mach-O → None (skipped).
+        assert_eq!(macho_archs(b"#!/bin/sh\nexit 0\n"), None);
+    }
+
+    #[test]
+    fn validate_native_arch_rejects_non_native_macho_but_skips_scripts() {
+        // x86_64-only Mach-O on an arm64 host → rejected (would need Rosetta).
+        let x86 = thin_macho(BinArch::X86_64);
+        assert!(matches!(
+            validate_native_arch(&x86, "aarch64", "vfkit"),
+            Err(PodmanInstallError::NotNativeArch { .. })
+        ));
+        // Universal passes on both hosts.
+        let fat = fat_macho(&[BinArch::X86_64, BinArch::Arm64]);
+        assert!(validate_native_arch(&fat, "aarch64", "vfkit").is_ok());
+        assert!(validate_native_arch(&fat, "x86_64", "vfkit").is_ok());
+        // Native thin passes.
+        assert!(validate_native_arch(&thin_macho(BinArch::Arm64), "aarch64", "vfkit").is_ok());
+        // Non-Mach-O (script) is not gated.
+        assert!(validate_native_arch(b"#!/bin/sh\n", "aarch64", "vfkit").is_ok());
+        // Un-gated host arch is not constrained.
+        assert!(validate_native_arch(&x86, "riscv64", "vfkit").is_ok());
+    }
+
+    #[test]
+    fn install_rejects_x86_only_helper_on_arm64_before_promotion() {
+        // The #578-hypothesized failure mode: a helper that is x86_64-only on an
+        // arm64 host must be rejected BEFORE promotion (it would pull in Rosetta),
+        // with a typed packaging error — never a generic failure.
+        let archive = tar_gz_with("usr/bin/podman", podman_stub_script());
+        let (artifact, fetcher) = artifact_with_helpers(
+            &archive,
+            &thin_macho(BinArch::X86_64), // gvproxy: x86_64-only
+            &fat_macho(&[BinArch::X86_64, BinArch::Arm64]),
+        );
+        let tools = tempfile::tempdir().unwrap();
+        let err = install_with_artifact_on(&fetcher, &artifact, "aarch64", tools.path())
+            .expect_err("x86_64-only helper on arm64 must be rejected");
+        assert!(
+            matches!(err, PodmanInstallError::NotNativeArch { ref binary, .. } if binary == "gvproxy"),
+            "{err:?}"
+        );
+        assert!(err.to_string().to_lowercase().contains("rosetta"), "{err}");
+        // Fail-closed: no promotion, no temp dir.
+        assert!(!tools.path().join("podman-9.9.9-test").exists());
+        let any_tmp = std::fs::read_dir(tools.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp-"));
+        assert!(!any_tmp, "no temp install dir may remain after a non-native helper");
+    }
+
+    #[test]
+    fn install_accepts_universal_helpers_on_both_arm64_and_x86_64() {
+        for host in ["aarch64", "x86_64"] {
+            let archive = tar_gz_with("usr/bin/podman", podman_stub_script());
+            let (artifact, fetcher) = artifact_with_helpers(
+                &archive,
+                &fat_macho(&[BinArch::X86_64, BinArch::Arm64]),
+                &fat_macho(&[BinArch::X86_64, BinArch::Arm64]),
+            );
+            let tools = tempfile::tempdir().unwrap();
+            let installed = install_with_artifact_on(&fetcher, &artifact, host, tools.path())
+                .unwrap_or_else(|e| panic!("universal helpers must install on {host}: {e:?}"));
+            assert_eq!(installed.provenance.helpers[0].required_arch, host);
+        }
     }
 
     #[cfg(unix)]
