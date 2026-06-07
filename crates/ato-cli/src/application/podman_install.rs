@@ -108,15 +108,29 @@ pub(crate) struct HelperArtifact {
 
 // ── Pinned macOS machine helpers (the versions Podman v5.2.3 itself bundles) ──
 //
-// Podman's own macOS `.pkg` (`contrib/pkginstaller/Makefile` at the v5.2.3 tag)
-// bundles gvproxy 0.7.5 and vfkit 0.5.1. We pin the same versions so the Ato
-// machine runs the combination Podman expects. Both ship as **universal**
-// (x86_64 + arm64) Mach-O binaries, so one set serves both Mac architectures.
+// Source of the versions (authoritative): Podman's own macOS `.pkg` definition
+// at the release tag pins these. Verify with:
 //
-// Digests below were obtained by downloading each asset and hashing it; vfkit
-// uses the **signed** asset (carries the `com.apple.security.virtualization`
-// entitlement vfkit needs to boot a VM — the unsigned variant Podman re-signs
-// during packaging would be Gatekeeper-blocked as a standalone download).
+//   curl -sL https://raw.githubusercontent.com/containers/podman/v5.2.3/contrib/pkginstaller/Makefile \
+//     | grep -E 'GVPROXY_VERSION|VFKIT_VERSION'
+//   # => GVPROXY_VERSION ?= 0.7.5   VFKIT_VERSION ?= 0.5.1
+//
+// We pin the same versions so the Ato machine runs the combination Podman
+// expects. Both ship as **universal** (x86_64 + arm64) Mach-O binaries, so one
+// set serves both Mac architectures.
+//
+// Digests were obtained by downloading each asset and hashing it. Re-verify a
+// pin (or a bump) with, e.g.:
+//
+//   curl -sL -o gvproxy https://github.com/containers/gvisor-tap-vsock/releases/download/v0.7.5/gvproxy-darwin
+//   curl -sL -o vfkit   https://github.com/crc-org/vfkit/releases/download/v0.5.1/vfkit
+//   shasum -a 256 gvproxy vfkit
+//
+// vfkit uses the **signed** `vfkit` asset (not `vfkit-unsigned`): it carries the
+// `com.apple.security.virtualization` entitlement vfkit needs to boot a VM —
+// confirm with `codesign -d --entitlements - vfkit`. The unsigned variant that
+// Podman re-signs during packaging would be Gatekeeper-blocked as a standalone
+// download. gvproxy needs no special entitlement.
 
 /// gvproxy 0.7.5 (universal darwin), the network helper.
 const GVPROXY_DARWIN_URL: &str =
