@@ -1545,4 +1545,85 @@ mod oci_launch_receipt_tests {
         );
         assert!(read_v2.observed_execution_id.is_none());
     }
+
+    /// #490 production glue: `mark_v2_receipt_observed_at` persists an observed id
+    /// onto a V2 receipt ONLY when real evidence is present. Insufficient
+    /// evidence is a no-op (id stays `None`); real evidence stamps an id anchored
+    /// to the receipt's resolved id, flips the scope to `Observed`, and never
+    /// emits `Complete`.
+    #[test]
+    fn mark_v2_receipt_observed_persists_only_with_real_evidence() {
+        use crate::application::execution_receipts::{
+            mark_v2_receipt_observed_at, read_receipt_document_at, write_receipt_document_atomic_at,
+        };
+        use capsule_core::execution_identity::{
+            ObservationScope, ObservedLaunchEnvelope, ObservedRuntimeEvidence, RuntimeObservation,
+        };
+
+        let mut receipt = oci_receipt_with(vec![]);
+        receipt.resolved_execution_id = Some("sha256:resolved-anchor".to_string());
+        receipt.observation_scope = Some(ObservationScope::declared_resolved());
+        receipt.graph_completeness = Some(GraphCompleteness::Partial);
+        receipt.observed_execution_id = None;
+        let exec_id = receipt.execution_id.clone();
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_receipt_document_atomic_at(temp.path(), &ExecutionReceiptDocument::V2(receipt))
+            .expect("write");
+
+        // Insufficient evidence → no-op; the pre-observation receipt is untouched.
+        let empty = ObservedRuntimeEvidence::new(ObservedLaunchEnvelope::default());
+        let got = mark_v2_receipt_observed_at(temp.path(), &exec_id, empty).expect("stamp");
+        assert!(
+            got.is_none(),
+            "insufficient evidence must not synthesize an observed id"
+        );
+        let after_noop = match read_receipt_document_at(temp.path(), &exec_id).unwrap() {
+            ExecutionReceiptDocument::V2(r) => r,
+            _ => panic!("v2"),
+        };
+        assert!(after_noop.observed_execution_id.is_none());
+        assert_eq!(
+            after_noop.observation_scope.unwrap().observed,
+            RuntimeObservation::NotObserved
+        );
+
+        // Real evidence → stamps an observed id derived from the envelope
+        // anchored to the receipt's resolved id.
+        let env = ObservedLaunchEnvelope {
+            runtime_kind: "source/node".to_string(),
+            entrypoint: vec!["node".to_string(), "server.js".to_string()],
+            env_keys: vec!["PORT".to_string()],
+            ..Default::default()
+        };
+        let id = mark_v2_receipt_observed_at(
+            temp.path(),
+            &exec_id,
+            ObservedRuntimeEvidence::new(env.clone()),
+        )
+        .expect("stamp")
+        .expect("observed id");
+        let mut anchored = env;
+        anchored.resolved_execution_id = Some("sha256:resolved-anchor".to_string());
+        assert_eq!(
+            id,
+            anchored.compute_observed_execution_id(),
+            "observed id must be the anchored-envelope digest"
+        );
+
+        let after = match read_receipt_document_at(temp.path(), &exec_id).unwrap() {
+            ExecutionReceiptDocument::V2(r) => r,
+            _ => panic!("v2"),
+        };
+        assert_eq!(after.observed_execution_id.as_deref(), Some(id.as_str()));
+        assert_ne!(
+            after.observed_execution_id, after.resolved_execution_id,
+            "observed id must not be a copy of resolved id"
+        );
+        assert_eq!(
+            after.observation_scope.unwrap().observed,
+            RuntimeObservation::Observed
+        );
+        assert!(after.observed_runtime.is_some());
+        assert_ne!(after.graph_completeness, Some(GraphCompleteness::Complete));
+    }
 }
