@@ -442,6 +442,22 @@ pub(crate) fn is_stale_remote_zip_install(install_dir: &Path) -> bool {
 
 // ── macOS pkg extraction ──────────────────────────────────────────────────────
 
+/// Build a process-unique temp install dir path under `tools_dir`. The name
+/// embeds the pid plus a monotonic counter so repeated attempts within one
+/// process (e.g. retry, or sequential calls in tests) never collide on the same
+/// path — the previous `podman-<ver>.tmp-<pid>` scheme reused one path per pid.
+fn unique_tmp_install_dir(tools_dir: &Path, version: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    tools_dir.join(format!(
+        "podman-{}.tmp-{}-{}",
+        version,
+        std::process::id(),
+        n
+    ))
+}
+
 /// Install from a verified macOS `.pkg` installer.
 ///
 /// Expands the pkg with `pkgutil --expand-full`, searches the expanded tree
@@ -460,11 +476,7 @@ fn install_from_pkg(
         message: e.to_string(),
     })?;
 
-    let tmp_dir = tools_dir.join(format!(
-        "podman-{}.tmp-{}",
-        artifact.version,
-        std::process::id()
-    ));
+    let tmp_dir = unique_tmp_install_dir(tools_dir, artifact.version);
     if tmp_dir.exists() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
@@ -510,12 +522,11 @@ fn install_from_pkg_inner(
     tmp_dir: &Path,
 ) -> Result<InstalledPodman, PodmanInstallError> {
     // Expand the pkg into a dedicated sub-dir of tmp so the expanded contents
-    // don't interfere with the Ato install layout.
+    // don't interfere with the Ato install layout. NOTE: the destination must
+    // NOT exist before `pkgutil --expand-full` runs — pkgutil refuses to write
+    // into an existing directory ("File exists"). `expand_pkg` owns creating the
+    // parent and clearing any stale destination, so do not pre-create it here.
     let expand_dir = tmp_dir.join("pkg-expanded");
-    std::fs::create_dir_all(&expand_dir).map_err(|e| PodmanInstallError::Extract {
-        message: e.to_string(),
-    })?;
-
     expand_pkg(pkg_bytes, &expand_dir)?;
 
     let bin_dir = tmp_dir.join(artifact.helper_binaries_rel_dir);
@@ -609,7 +620,31 @@ fn install_from_pkg_inner(
 /// Expand a macOS `.pkg` file by writing it to a temp file and running
 /// `pkgutil --expand-full`. `pkgutil` is an OS-provided tool (not part of
 /// Xcode CLT) and is always available on macOS.
+/// Prepare the destination path for `pkgutil --expand-full`.
+///
+/// `pkgutil --expand-full` *creates* `dest` itself and aborts with "File exists"
+/// if it is already present (this was the PR #584 clean-VM regression: the caller
+/// pre-created `pkg-expanded`). So this creates only the *parent* directory and
+/// clears any stale `dest` left by a previous interrupted attempt — it must NOT
+/// create `dest` itself.
+fn prepare_expand_dest(dest: &Path) -> Result<(), PodmanInstallError> {
+    let parent = dest.parent().ok_or_else(|| PodmanInstallError::Extract {
+        message: format!("pkg expansion destination has no parent: {}", dest.display()),
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| PodmanInstallError::Extract {
+        message: format!("could not create pkg expansion parent dir: {e}"),
+    })?;
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).map_err(|e| PodmanInstallError::Extract {
+            message: format!("could not clear stale pkg expansion dir: {e}"),
+        })?;
+    }
+    Ok(())
+}
+
 fn expand_pkg(pkg_bytes: &[u8], dest: &Path) -> Result<(), PodmanInstallError> {
+    prepare_expand_dest(dest)?;
+
     let pkg_file = dest.with_extension("tmp.pkg");
     std::fs::write(&pkg_file, pkg_bytes).map_err(|e| PodmanInstallError::Extract {
         message: format!("could not write pkg to disk for expansion: {e}"),
@@ -702,11 +737,7 @@ fn install_into_temp_then_promote(
         message: e.to_string(),
     })?;
 
-    let tmp_dir = tools_dir.join(format!(
-        "podman-{}.tmp-{}",
-        artifact.version,
-        std::process::id()
-    ));
+    let tmp_dir = unique_tmp_install_dir(tools_dir, artifact.version);
     if tmp_dir.exists() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
@@ -1640,6 +1671,58 @@ mod tests {
             find_binary_in_tree(root.path(), "absent").is_none(),
             "missing binary returns None"
         );
+    }
+
+    // ── pkg expansion destination handling (PR #584 regression) ───────────────
+
+    // `pkgutil --expand-full` aborts with "File exists" if its destination is
+    // pre-created. `prepare_expand_dest` must create only the parent and leave
+    // `dest` itself absent.
+    #[test]
+    fn prepare_expand_dest_creates_parent_but_not_dest() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("tmp-install").join("pkg-expanded");
+
+        prepare_expand_dest(&dest).unwrap();
+
+        assert!(
+            dest.parent().unwrap().is_dir(),
+            "parent dir must exist for pkgutil to write into"
+        );
+        assert!(
+            !dest.exists(),
+            "dest must NOT be pre-created — pkgutil refuses an existing destination"
+        );
+    }
+
+    // A stale `pkg-expanded` from a previous interrupted attempt must be cleared
+    // (this is the exact clean-VM failure: re-running install hit "File exists").
+    #[test]
+    fn prepare_expand_dest_clears_stale_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("tmp-install").join("pkg-expanded");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("leftover"), b"stale").unwrap();
+        assert!(dest.exists());
+
+        prepare_expand_dest(&dest).unwrap();
+
+        assert!(
+            !dest.exists(),
+            "a pre-existing dest must be removed before expansion"
+        );
+        assert!(dest.parent().unwrap().is_dir());
+    }
+
+    // Each call must yield a distinct temp dir within one process, so a retry or
+    // concurrent attempt never collides on the same path.
+    #[test]
+    fn unique_tmp_install_dir_is_distinct_per_call() {
+        let root = tempfile::tempdir().unwrap();
+        let a = unique_tmp_install_dir(root.path(), "5.8.2");
+        let b = unique_tmp_install_dir(root.path(), "5.8.2");
+        assert_ne!(a, b, "two calls must produce different temp dirs");
+        assert!(a.file_name().unwrap().to_string_lossy().starts_with("podman-5.8.2.tmp-"));
     }
 
     // ── Stale install detection ───────────────────────────────────────────────
