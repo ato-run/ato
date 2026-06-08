@@ -238,7 +238,7 @@ mod tests {
         LaunchTemplateKey {
             install_revision_id: InstallRevisionId::new("rev_aaaa"),
             profile_hash: "blake3:prof".into(),
-            requirement_graph_hash: "blake3:graph".into(),
+            requirement_graph_snapshot_hash: "blake3:graphsnap".into(),
             binding_set_hash: "blake3:bind".into(),
             network_policy_hash: "blake3:net".into(),
             capability_policy_hash: "blake3:cap".into(),
