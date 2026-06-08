@@ -37,6 +37,7 @@ use thiserror::Error;
 use super::launch_inputs::{LaunchTemplateReadiness, ValidatedInstallReusableInputs};
 use super::launch_template::{
     LaunchTemplate, LaunchTemplateKey, LaunchTemplateKeyInputs, RunnerCompatibilityClass,
+    RunnerCompatibilityClassParseError,
 };
 use super::records::{
     RequirementGraphCompletenessPolicy, RequirementGraphSnapshotIdentityError,
@@ -91,6 +92,20 @@ pub enum LaunchTemplateBuildError {
     /// practice; it exists so the builder can never emit a template without one.
     #[error("no compatible runner class for the launch template")]
     NoCompatibleRunnerClass,
+    /// The *requested* `runner_compatibility_class` could not be parsed into a
+    /// coarse [`RunnerClass`](super::launch_template::RunnerClass), so it cannot
+    /// be checked against the compatibility index.
+    #[error("requested runner compatibility class is unparsable: {0}")]
+    RunnerCompatibilityClassUnparsable(#[source] RunnerCompatibilityClassParseError),
+    /// The *requested* `runner_compatibility_class` resolves to a runner class
+    /// that the [`CompatibilityIndex`](super::launch_template::CompatibilityIndex)
+    /// does not support (absent from the supported set, or denied — deny wins). A
+    /// template must be built only for a class the revision is proven to support;
+    /// `has_compatible_runner_class()` (some class is usable) is not sufficient.
+    #[error(
+        "requested runner compatibility class '{runner_compatibility_class}' is not supported by the compatibility index"
+    )]
+    RunnerCompatibilityClassNotSupported { runner_compatibility_class: String },
     /// The requirement-graph snapshot identity failed the
     /// `RequireComplete` recompute-and-compare check during key construction
     /// (e.g. a `Partial` graph, or an empty/raw/stale snapshot hash).
@@ -137,8 +152,8 @@ pub fn build_launch_template(
         return Err(LaunchTemplateBuildError::InputsNotReady { readiness });
     }
 
-    // 2. Defensive: `Ready` already implies a compatible runner class, but assert
-    //    it explicitly so the builder can never emit a template without one
+    // 2. Defensive: `Ready` already implies *some* compatible runner class, but
+    //    assert it explicitly so the builder can never emit a template without one
     //    (deny-wins logic lives in `CompatibilityIndex::has_compatible_runner_class`).
     if !reusable_inputs
         .compatibility_index
@@ -147,7 +162,26 @@ pub fn build_launch_template(
         return Err(LaunchTemplateBuildError::NoCompatibleRunnerClass);
     }
 
-    // 3. Derive the stable identity inputs from the validated records (not from
+    // 3. The *requested* class must itself be supported — not merely that some
+    //    class is. Otherwise a `browser_runner/...` template could be minted for a
+    //    revision whose index only supports `managed_runner`. Parse the requested
+    //    compatibility class to its coarse `RunnerClass` and check it against the
+    //    index (deny wins).
+    let requested_runner_class = runner_compatibility_class
+        .runner_class()
+        .map_err(LaunchTemplateBuildError::RunnerCompatibilityClassUnparsable)?;
+    if !reusable_inputs
+        .compatibility_index
+        .is_supported(&requested_runner_class)
+    {
+        return Err(
+            LaunchTemplateBuildError::RunnerCompatibilityClassNotSupported {
+                runner_compatibility_class: runner_compatibility_class.as_str().to_owned(),
+            },
+        );
+    }
+
+    // 4. Derive the stable identity inputs from the validated records (not from
     //    caller-supplied copies that could drift from what was persisted).
     let install_revision_id = reusable_inputs.install_revision.install_revision_id.clone();
     let binding_set_hash = reusable_inputs
@@ -159,7 +193,7 @@ pub fn build_launch_template(
             detail: format!("{e:#}"),
         })?;
 
-    // 4. Build the key. `RequireComplete` is enforced here regardless of how the
+    // 5. Build the key. `RequireComplete` is enforced here regardless of how the
     //    inputs were loaded (4B loads under AllowPartial): a Partial graph that
     //    slipped past readiness would still be rejected at key construction.
     let key = LaunchTemplateKey::from_inputs(LaunchTemplateKeyInputs {
@@ -182,7 +216,7 @@ pub fn build_launch_template(
         },
     )?;
 
-    // 5. Project the template payload from stable, content-addressed install
+    // 6. Project the template payload from stable, content-addressed install
     //    facts. The filesystem-view template hash is derived from the frozen
     //    artifact build id + persisted output hashes — content identity, never a
     //    materialized per-session view. Policy-template hashes mirror the
@@ -505,6 +539,78 @@ mod tests {
             },
             other => panic!("expected InputsNotReady, got {other:?}"),
         }
+    }
+
+    // ── Requested runner compatibility class must itself be supported ─────────
+
+    #[test]
+    fn build_template_rejects_runner_compatibility_class_not_supported_by_index() {
+        let (dir, store, app, profile) = setup();
+        let (_rev, mut v) = load_standard(&store, &app, &profile, dir.path(), "ba13");
+        make_ready(&mut v); // index supports ManagedRunner only
+
+        // Request a browser_runner template — the index does not support it, even
+        // though it *does* have a compatible class (ManagedRunner). The build must
+        // refuse, not silently mint a BrowserRunner template.
+        let mut input = build_input("ltmpl", v);
+        input.runner_compatibility_class = RunnerCompatibilityClass::new("browser_runner/wasm");
+
+        let err = build_launch_template(input).unwrap_err();
+        match err {
+            LaunchTemplateBuildError::RunnerCompatibilityClassNotSupported {
+                runner_compatibility_class,
+            } => assert_eq!(runner_compatibility_class, "browser_runner/wasm"),
+            other => panic!("expected RunnerCompatibilityClassNotSupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_template_rejects_runner_compatibility_class_denied_by_index() {
+        let (dir, store, app, profile) = setup();
+        let (_rev, mut v) = load_standard(&store, &app, &profile, dir.path(), "ba14");
+        make_ready(&mut v);
+        // Index supports ManagedRunner + BrowserRunner, but denies BrowserRunner
+        // (deny wins). `has_compatible_runner_class()` is still true (ManagedRunner),
+        // so the build reaches the requested-class check.
+        v.compatibility_index = CompatibilityIndex::new(
+            "cidx:deny_browser",
+            vec![RunnerClass::ManagedRunner, RunnerClass::BrowserRunner],
+            vec![RunnerClass::BrowserRunner],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_completeness(CompatibilityIndexCompleteness::Complete)
+        .unwrap();
+
+        let mut input = build_input("ltmpl", v);
+        input.runner_compatibility_class = RunnerCompatibilityClass::new("browser_runner/wasm");
+
+        let err = build_launch_template(input).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LaunchTemplateBuildError::RunnerCompatibilityClassNotSupported { .. }
+            ),
+            "a denied runner class must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_template_accepts_runner_compatibility_class_matching_supported_runner() {
+        let (dir, store, app, profile) = setup();
+        let (_rev, mut v) = load_standard(&store, &app, &profile, dir.path(), "ba15");
+        make_ready(&mut v); // index supports ManagedRunner
+
+        let mut input = build_input("ltmpl", v);
+        input.runner_compatibility_class =
+            RunnerCompatibilityClass::new("managed_runner/linux-x86_64");
+
+        let out = build_launch_template(input).expect("requested class is supported → builds");
+        assert_eq!(
+            out.launch_template.runner_compatibility_class.as_str(),
+            "managed_runner/linux-x86_64"
+        );
     }
 
     #[test]
