@@ -12,13 +12,18 @@
 //! ```text
 //! install_revision_id
 //! profile_hash
-//! requirement_graph_hash
+//! requirement_graph_snapshot_hash   (graph content + profile defaults + completeness)
 //! binding_set_hash
 //! network_policy_hash
 //! capability_policy_hash
 //! state_contract_hash
 //! runner_compatibility_class
 //! ```
+//!
+//! The requirement-graph input is the **snapshot** hash, not `graph_hash` alone:
+//! it folds in [`RequirementGraphCompleteness`](super::records::RequirementGraphCompleteness)
+//! so a `Partial` requirement graph can never produce the same launch-template
+//! identity as a `Complete` one (#581 wave 3B).
 //!
 //! It must **never** contain a `session_id`, dynamic port, process / container
 //! id, live route, log cursor, observed status, timestamp, or secret value.
@@ -208,7 +213,13 @@ impl CompatibilityIndex {
 pub struct LaunchTemplateKey {
     pub install_revision_id: InstallRevisionId,
     pub profile_hash: String,
-    pub requirement_graph_hash: String,
+    /// Snapshot-level requirement-graph identity
+    /// ([`RequirementGraphSnapshot::requirement_graph_snapshot_hash`](super::records::RequirementGraphSnapshot::requirement_graph_snapshot_hash)):
+    /// graph content + profile defaults + completeness. Using the snapshot hash
+    /// rather than the content-only `graph_hash` means a `Partial` requirement
+    /// graph never yields the same launch-template identity as a `Complete` one
+    /// (#581 wave 3B).
+    pub requirement_graph_snapshot_hash: String,
     pub binding_set_hash: String,
     pub network_policy_hash: String,
     pub capability_policy_hash: String,
@@ -303,7 +314,7 @@ mod tests {
         LaunchTemplateKey {
             install_revision_id: InstallRevisionId::new("rev_aaaa"),
             profile_hash: "blake3:prof".into(),
-            requirement_graph_hash: "blake3:graph".into(),
+            requirement_graph_snapshot_hash: "blake3:graphsnap".into(),
             binding_set_hash: "blake3:bind".into(),
             network_policy_hash: "blake3:net".into(),
             capability_policy_hash: "blake3:cap".into(),
@@ -354,11 +365,11 @@ mod tests {
         );
 
         let mut k = sample_key();
-        k.requirement_graph_hash = "blake3:graph2".into();
+        k.requirement_graph_snapshot_hash = "blake3:graphsnap2".into();
         assert_ne!(
             base,
             k.key_hash().unwrap(),
-            "requirement_graph_hash must affect key"
+            "requirement_graph_snapshot_hash must affect key"
         );
 
         let mut k = sample_key();
@@ -383,6 +394,49 @@ mod tests {
             base,
             k.key_hash().unwrap(),
             "install_revision_id must affect key"
+        );
+    }
+
+    // ── #581 wave 3B: Partial and Complete graphs are not key-equivalent ──────
+
+    #[test]
+    fn partial_and_complete_graph_snapshots_are_not_launch_template_equivalent() {
+        use crate::foundation::install_lifecycle::records::{
+            RequirementGraph, RequirementGraphCompleteness, RequirementGraphCompletenessReason,
+            RequirementGraphSnapshot,
+        };
+
+        // Same graph content + profile defaults; only completeness differs.
+        let graph = RequirementGraph {
+            graph_id: "g".into(),
+            nodes: vec![],
+            edges: vec![],
+        };
+        let partial = RequirementGraphSnapshot::new("s", graph.clone(), None, "blake3:prof")
+            .unwrap()
+            .with_completeness(RequirementGraphCompleteness::Partial {
+                reasons: vec![RequirementGraphCompletenessReason::ManifestFactsUnavailable],
+            })
+            .unwrap();
+        let complete = RequirementGraphSnapshot::new("s", graph, None, "blake3:prof")
+            .unwrap()
+            .with_completeness(RequirementGraphCompleteness::Complete)
+            .unwrap();
+
+        // Content-only graph_hash is identical (so keying on it alone would be unsafe).
+        assert_eq!(partial.graph_hash, complete.graph_hash);
+
+        let key_for = |snapshot_hash: &str| LaunchTemplateKey {
+            requirement_graph_snapshot_hash: snapshot_hash.into(),
+            ..sample_key()
+        };
+        let partial_key = key_for(&partial.requirement_graph_snapshot_hash);
+        let complete_key = key_for(&complete.requirement_graph_snapshot_hash);
+
+        assert_ne!(
+            partial_key.key_hash().unwrap(),
+            complete_key.key_hash().unwrap(),
+            "a Partial requirement graph must not be launch-template-equivalent to a Complete one"
         );
     }
 
