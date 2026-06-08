@@ -658,6 +658,15 @@ pub struct InstallReceipt {
     /// Output content hashes produced by the install.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_hashes: Vec<String>,
+    /// Hash of the binding-assignment set generated at install time, if any
+    /// (#581 wave 4A). Audit metadata only — a content hash, never a secret or
+    /// observed value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_set_hash: Option<String>,
+    /// Precheck hash of the compatibility index generated at install time, if
+    /// any (#581 wave 4A). Audit metadata only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_precheck_hash: Option<String>,
     /// RFC 3339 timestamp of when the install completed.
     pub occurred_at: String,
 }
@@ -682,6 +691,12 @@ pub struct InstallRevision {
     pub install_receipt: InstallReceipt,
     /// RFC 3339 creation timestamp.
     pub created_at: String,
+    /// Normalized binding-assignment set frozen at install time (#581 wave 4A).
+    /// Additive: pre-4A revisions deserialize as `None`. On the standard install
+    /// path the set is present but has empty `assignments` (no requirement
+    /// bindings are resolved until the manifest is parsed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_assignment_set: Option<super::launch_template::BindingAssignmentSet>,
     /// Reusable, session-independent launch templates frozen at install time.
     /// Additive: pre-Stage-2 revisions deserialize with an empty vec.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -814,9 +829,12 @@ mod tests {
                 artifact_build_id: build_id.clone(),
                 resolved_input_refs: vec!["/secrets/sec_db".into()],
                 output_hashes: vec!["blake3:3333".into()],
+                binding_set_hash: None,
+                compatibility_precheck_hash: None,
                 occurred_at: "2026-06-08T00:00:00Z".into(),
             },
             created_at: "2026-06-08T00:00:00Z".into(),
+            binding_assignment_set: None,
             launch_templates: vec![],
             compatibility_index: None,
         };

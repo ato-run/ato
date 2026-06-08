@@ -28,7 +28,8 @@ pub use launch_reuse::{
     RevalidationOutcome, VolatileRevalidation, evaluate_launch_reuse,
 };
 pub use launch_template::{
-    BindingAssignmentSet, BindingAssignmentSource, CompatibilityIndex, LaunchTemplate,
+    BindingAssignmentSet, BindingAssignmentSource, CompatibilityIndex,
+    CompatibilityIndexCompleteness, CompatibilityIndexCompletenessReason, LaunchTemplate,
     LaunchTemplateKey, LaunchTemplateKeyInputs, RequirementBinding, RequirementBindingKind,
     RunnerClass, RunnerCompatibilityClass,
 };
