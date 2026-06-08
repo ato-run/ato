@@ -24,6 +24,10 @@ use super::ids::{
     ArtifactBuildId, InstallProfileKey, InstallRevisionId, InstalledAppId, ProfileId,
     derive_install_profile_key, revision_id_for_build,
 };
+use super::launch_template::{
+    BindingAssignmentSet, BindingAssignmentSource, CompatibilityIndex,
+    CompatibilityIndexCompleteness, CompatibilityIndexCompletenessReason,
+};
 use super::records::{
     ArtifactBuild, InstallReceipt, InstallRevision, RequirementGraphSnapshot, StateContractSnapshot,
 };
@@ -287,6 +291,41 @@ impl<'s> InstallRevisionFinalizer<'s> {
             }
         };
 
+        // 8c2. CompatibilityIndex — conservative for the standard install path
+        //      (#581 wave 4A). Runtime/capability requirements are not parsed
+        //      yet, so nothing is proven supported: empty supported/denied
+        //      classes + an explicitly `Partial` completeness. is_supported(_)
+        //      returns false for every class — it never claims managed/desktop/
+        //      browser runner support without facts.
+        let compatibility_index = CompatibilityIndex::new(
+            format!("cidx:{}", install_revision_id.as_str()),
+            Vec::new(), // supported: nothing proven supported
+            Vec::new(), // denied
+            Vec::new(), // required capabilities
+            Vec::new(), // optional capabilities
+        )?
+        .with_completeness(CompatibilityIndexCompleteness::Partial {
+            reasons: vec![
+                CompatibilityIndexCompletenessReason::RuntimeRequirementsNotCompiled,
+                CompatibilityIndexCompletenessReason::CapabilitiesNotAnalyzed,
+            ],
+        })?;
+
+        // 8c3. BindingAssignmentSet — the normalized resolved bindings (#581
+        //      wave 4A). On the standard path no requirement bindings are
+        //      resolved (the requirement graph is Partial / manifest not parsed),
+        //      so the set is explicitly empty — no fabricated runtime/storage/
+        //      secret/network bindings. It references the requirement-graph
+        //      CONTENT hash (`graph_hash`), not the snapshot identity: bindings
+        //      depend on the requirement nodes/edges, not on completeness.
+        let binding_assignment_set = BindingAssignmentSet::new(
+            format!("bset:{}", install_revision_id.as_str()),
+            install_profile_key.clone(),
+            requirement_graph.graph_hash.clone(),
+            Vec::new(),
+            BindingAssignmentSource::ProfileExplicit,
+        )?;
+
         // 8d. InstallReceipt — install-time audit record (NOT the execution
         //     receipt). Deterministic id per revision.
         let install_receipt = InstallReceipt {
@@ -298,13 +337,17 @@ impl<'s> InstallRevisionFinalizer<'s> {
             // Driven off the typed Option: empty when no content hash was
             // supplied, otherwise exactly the one hash.
             output_hashes: output_content_hash.iter().cloned().collect(),
+            // Audit metadata: which binding/compat records were generated.
+            binding_set_hash: Some(binding_assignment_set.binding_set_hash.clone()),
+            compatibility_precheck_hash: Some(compatibility_index.precheck_hash.clone()),
             occurred_at: created_at.clone(),
         };
 
-        // 8e. InstallRevision — self-contained authority binding the above.
-        //     Launch templates + compatibility index require resolved bindings,
-        //     runtime requirements, and runner placement and are deferred to the
-        //     next #581 wave: persisted empty/None here, never a fake template.
+        // 8e. InstallRevision — self-contained authority binding the above,
+        //     including the (empty) binding set and the (Partial) compatibility
+        //     index. `launch_templates` stays empty: a real LaunchTemplate needs
+        //     resolved bindings + runner placement, which are later waves — never
+        //     a fake template here.
         let install_revision = InstallRevision {
             install_revision_id: install_revision_id.clone(),
             install_profile_key: install_profile_key.clone(),
@@ -313,8 +356,9 @@ impl<'s> InstallRevisionFinalizer<'s> {
             state_contracts: state_contracts.clone(),
             install_receipt: install_receipt.clone(),
             created_at: created_at.clone(),
+            binding_assignment_set: Some(binding_assignment_set.clone()),
             launch_templates: vec![],
-            compatibility_index: None,
+            compatibility_index: Some(compatibility_index.clone()),
         };
 
         // 8f. Re-finalize safety: drop any existing marker so the revision is
@@ -334,6 +378,18 @@ impl<'s> InstallRevisionFinalizer<'s> {
         )?;
         self.store
             .write_state_contracts(app, profile, &install_revision_id, &state_contracts)?;
+        self.store.write_binding_assignment_set(
+            app,
+            profile,
+            &install_revision_id,
+            &binding_assignment_set,
+        )?;
+        self.store.write_compatibility_index(
+            app,
+            profile,
+            &install_revision_id,
+            &compatibility_index,
+        )?;
         self.store
             .write_install_receipt(app, profile, &install_revision_id, &install_receipt)?;
         self.store
@@ -458,6 +514,7 @@ fn safe_copy_output_tree_inner(
 mod tests {
     use super::*;
     use crate::foundation::install_lifecycle::ids::InstallRevisionId;
+    use crate::foundation::install_lifecycle::launch_template::RunnerClass;
     use crate::foundation::install_lifecycle::records::{
         ArtifactBuild, RequirementGraphCompleteness, RequirementGraphCompletenessReason,
     };
@@ -800,6 +857,19 @@ mod tests {
                 .exists(),
             "state-contracts.json must be written"
         );
+        // #581 wave 4A: binding + compatibility records.
+        assert!(
+            store
+                .revision_binding_assignment_set_path(&app, &profile_id, rev)
+                .exists(),
+            "binding-assignments.json must be written"
+        );
+        assert!(
+            store
+                .revision_compatibility_index_path(&app, &profile_id, rev)
+                .exists(),
+            "compatibility-index.json must be written"
+        );
         // The pre-existing (shared, content-keyed) artifact_manifest.json is still written too.
         assert!(store.revision_artifact_manifest_path(rev).exists());
         assert!(store.is_revision_finalized(&app, &profile_id, rev));
@@ -915,6 +985,8 @@ mod tests {
             store.revision_requirement_graph_path(&app, &profile_id, rev),
             store.revision_state_contracts_path(&app, &profile_id, rev),
             store.revision_install_receipt_path(&app, &profile_id, rev),
+            store.revision_binding_assignment_set_path(&app, &profile_id, rev),
+            store.revision_compatibility_index_path(&app, &profile_id, rev),
         ] {
             let raw = fs::read_to_string(&path).unwrap();
             for term in forbidden {
@@ -1052,10 +1124,21 @@ mod tests {
             revision.launch_templates.is_empty(),
             "no fake launch templates are persisted"
         );
-        assert!(
-            revision.compatibility_index.is_none(),
-            "no fake compatibility index is persisted"
-        );
+        // #581 wave 4A: a conservative compatibility index IS persisted — Partial,
+        // with nothing proven supported (never a fake "supports everything").
+        let compat = revision
+            .compatibility_index
+            .as_ref()
+            .expect("compatibility index persisted");
+        assert!(!compat.completeness.is_complete());
+        assert!(compat.supported_runner_classes.is_empty());
+        assert!(!compat.is_supported(&RunnerClass::ManagedRunner));
+        // And an explicit empty binding set (no fabricated bindings).
+        let bindings = revision
+            .binding_assignment_set
+            .as_ref()
+            .expect("binding assignment set persisted");
+        assert!(bindings.assignments.is_empty());
     }
 
     // Required test 9 (store guard): a revision without revision.json is not finalized.
@@ -1349,5 +1432,153 @@ mod tests {
             !store.is_revision_finalized(&app, &profile_id, &rev),
             "an errored finalize must not leave the revision finalized"
         );
+    }
+
+    // ── #581 wave 4A: binding assignments + compatibility index ─────────────
+
+    // Tests 3-5: readback reconstructs the binding/compat records and they equal
+    // the copies embedded in revision.json.
+    #[test]
+    fn readback_reconstructs_binding_and_compat_records() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("b1c1"),
+            Some(sample_facts()),
+        );
+        let rev = &out.install_revision_id;
+
+        let bindings = store
+            .read_binding_assignment_set(&app, &profile_id, rev)
+            .unwrap();
+        let compat = store
+            .read_compatibility_index(&app, &profile_id, rev)
+            .unwrap();
+
+        // Standalone files equal the copies embedded in revision.json + the
+        // record the finalizer returned.
+        assert_eq!(
+            Some(&bindings),
+            out.install_revision.binding_assignment_set.as_ref()
+        );
+        assert_eq!(
+            Some(&compat),
+            out.install_revision.compatibility_index.as_ref()
+        );
+        let revision = store.read_install_revision(&app, &profile_id, rev).unwrap();
+        assert_eq!(revision.binding_assignment_set.as_ref(), Some(&bindings));
+        assert_eq!(revision.compatibility_index.as_ref(), Some(&compat));
+
+        // The receipt records the generated records' hashes (audit metadata).
+        let receipt = store.read_install_receipt(&app, &profile_id, rev).unwrap();
+        assert_eq!(
+            receipt.binding_set_hash.as_deref(),
+            Some(bindings.binding_set_hash.as_str())
+        );
+        assert_eq!(
+            receipt.compatibility_precheck_hash.as_deref(),
+            Some(compat.precheck_hash.as_str())
+        );
+    }
+
+    // Tests 7 + 8: standard install does not fabricate bindings, and the
+    // compatibility index is conservative when runtime facts are unavailable.
+    #[test]
+    fn standard_install_binding_and_compat_are_conservative() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("b2c2"),
+            Some(sample_facts()),
+        );
+        let rev = &out.install_revision_id;
+
+        let bindings = store
+            .read_binding_assignment_set(&app, &profile_id, rev)
+            .unwrap();
+        // No fabricated runtime/storage/secret/network bindings.
+        assert!(bindings.assignments.is_empty());
+        // It references the requirement-graph CONTENT hash, not the snapshot hash.
+        assert_eq!(
+            bindings.requirement_graph_hash,
+            out.install_revision.requirement_graph.graph_hash
+        );
+        assert_ne!(
+            bindings.requirement_graph_hash,
+            out.install_revision
+                .requirement_graph
+                .requirement_graph_snapshot_hash
+        );
+
+        let compat = store
+            .read_compatibility_index(&app, &profile_id, rev)
+            .unwrap();
+        // Conservative: explicitly Partial, nothing proven supported.
+        assert!(!compat.completeness.is_complete());
+        assert!(compat.supported_runner_classes.is_empty());
+        for class in [
+            RunnerClass::ManagedRunner,
+            RunnerClass::DesktopRunner,
+            RunnerClass::BrowserRunner,
+            RunnerClass::ExternalRunner,
+            RunnerClass::BrowserPreviewRunner,
+        ] {
+            assert!(
+                !compat.is_supported(&class),
+                "{class:?} must not be claimed supported without facts"
+            );
+        }
+        match &compat.completeness {
+            CompatibilityIndexCompleteness::Partial { reasons } => {
+                assert!(reasons.contains(
+                    &CompatibilityIndexCompletenessReason::RuntimeRequirementsNotCompiled
+                ))
+            }
+            CompatibilityIndexCompleteness::Complete => panic!("must be partial"),
+        }
+    }
+
+    // Tests 6 + 9: re-finalizing the same inputs is deterministic for the binding
+    // set hash and the compatibility precheck hash.
+    #[test]
+    fn refinalize_binding_and_compat_hashes_are_stable() {
+        let (dir, store, app, profile_id) = setup();
+        let build_id = valid_build_id("b3c3");
+        let o1 = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            build_id.clone(),
+            Some(sample_facts()),
+        );
+        let o2 = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(&dir.path().join("second")),
+            build_id,
+            Some(sample_facts()),
+        );
+        let b1 = store
+            .read_binding_assignment_set(&app, &profile_id, &o1.install_revision_id)
+            .unwrap();
+        let b2 = store
+            .read_binding_assignment_set(&app, &profile_id, &o2.install_revision_id)
+            .unwrap();
+        assert_eq!(b1.binding_set_hash, b2.binding_set_hash);
+        let c1 = store
+            .read_compatibility_index(&app, &profile_id, &o1.install_revision_id)
+            .unwrap();
+        let c2 = store
+            .read_compatibility_index(&app, &profile_id, &o2.install_revision_id)
+            .unwrap();
+        assert_eq!(c1.precheck_hash, c2.precheck_hash);
     }
 }
