@@ -157,6 +157,50 @@ impl BindingAssignmentSet {
 
 // ── CompatibilityIndex ───────────────────────────────────────────────────────
 
+/// Why a compatibility index is not yet a complete analysis (#581 wave 4A).
+///
+/// Typed so a conservative "not analyzed" index can never be mistaken for a
+/// proven-complete one. Standard install is `Partial` because the capsule
+/// manifest's runtime/capability requirements are not parsed yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityIndexCompletenessReason {
+    RuntimeRequirementsNotCompiled,
+    CapabilitiesNotAnalyzed,
+}
+
+/// How complete a [`CompatibilityIndex`] analysis is (#581 wave 4A).
+///
+/// `Complete` only when runner-class + capability compatibility was actually
+/// analyzed. The standard install path is `Partial` and must never be presented
+/// as `Complete`; an empty `supported_runner_classes` under `Partial` means
+/// "nothing proven supported", not "supports everything" (`is_supported`
+/// returns `false` for every class).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CompatibilityIndexCompleteness {
+    Complete,
+    Partial {
+        reasons: Vec<CompatibilityIndexCompletenessReason>,
+    },
+}
+
+impl Default for CompatibilityIndexCompleteness {
+    /// Conservative default (for pre-4A indexes / `new` without explicit
+    /// completeness): not `Complete`.
+    fn default() -> Self {
+        Self::Partial {
+            reasons: Vec::new(),
+        }
+    }
+}
+
+impl CompatibilityIndexCompleteness {
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
 /// A precheck record for which runner classes / capabilities can launch a
 /// revision (RFC `CompatibilityIndex`). Built once at install time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +210,13 @@ pub struct CompatibilityIndex {
     pub denied_runner_classes: Vec<RunnerClass>,
     pub required_capabilities: Vec<String>,
     pub optional_capabilities: Vec<String>,
+    /// How complete this analysis is (#581 wave 4A). `#[serde(default)]` →
+    /// pre-4A indexes load as `Partial { reasons: [] }`, never `Complete`.
+    #[serde(default)]
+    pub completeness: CompatibilityIndexCompleteness,
+    /// `blake3:<hex>` over the supported/denied classes, required/optional
+    /// capabilities, AND completeness — so a `Partial` index is never identical
+    /// to a `Complete` one with the same classes.
     pub precheck_hash: String,
 }
 
@@ -177,20 +228,42 @@ impl CompatibilityIndex {
         required_capabilities: Vec<String>,
         optional_capabilities: Vec<String>,
     ) -> Result<Self> {
-        let precheck_hash = canonical_hash(&(
+        let completeness = CompatibilityIndexCompleteness::default();
+        let precheck_hash = compute_compatibility_precheck_hash(
             &supported_runner_classes,
             &denied_runner_classes,
             &required_capabilities,
             &optional_capabilities,
-        ))?;
+            &completeness,
+        )?;
         Ok(Self {
             index_id: index_id.into(),
             supported_runner_classes,
             denied_runner_classes,
             required_capabilities,
             optional_capabilities,
+            completeness,
             precheck_hash,
         })
+    }
+
+    /// Set the typed completeness and recompute `precheck_hash` (consuming
+    /// builder). Recomputing is mandatory: completeness is a `precheck_hash`
+    /// input, so a stale hash would make a `Partial` index look identical to a
+    /// `Complete` one.
+    pub fn with_completeness(
+        mut self,
+        completeness: CompatibilityIndexCompleteness,
+    ) -> Result<Self> {
+        self.precheck_hash = compute_compatibility_precheck_hash(
+            &self.supported_runner_classes,
+            &self.denied_runner_classes,
+            &self.required_capabilities,
+            &self.optional_capabilities,
+            &completeness,
+        )?;
+        self.completeness = completeness;
+        Ok(self)
     }
 
     /// Explicit precheck: is `class` allowed to launch this revision?
@@ -204,6 +277,36 @@ impl CompatibilityIndex {
         }
         self.supported_runner_classes.contains(class)
     }
+}
+
+/// Compute a [`CompatibilityIndex`] precheck hash over its classes/capabilities
+/// + completeness (#581 wave 4A). Completeness reasons are sorted + de-duplicated
+/// so reason order never affects identity. Pure content/policy/completeness
+/// inputs — no session/observed/secret value.
+fn compute_compatibility_precheck_hash(
+    supported_runner_classes: &[RunnerClass],
+    denied_runner_classes: &[RunnerClass],
+    required_capabilities: &[String],
+    optional_capabilities: &[String],
+    completeness: &CompatibilityIndexCompleteness,
+) -> Result<String> {
+    let normalized = match completeness {
+        CompatibilityIndexCompleteness::Complete => CompatibilityIndexCompleteness::Complete,
+        CompatibilityIndexCompleteness::Partial { reasons } => {
+            let mut reasons = reasons.clone();
+            reasons.sort();
+            reasons.dedup();
+            CompatibilityIndexCompleteness::Partial { reasons }
+        }
+    };
+    canonical_hash(&(
+        "ato.compatibility_index.v1",
+        supported_runner_classes,
+        denied_runner_classes,
+        required_capabilities,
+        optional_capabilities,
+        &normalized,
+    ))
 }
 
 // ── LaunchTemplateKey ─────────────────────────────────────────────────────────
@@ -832,6 +935,49 @@ mod tests {
         )
         .unwrap();
         assert!(!idx.is_supported(&RunnerClass::BrowserRunner));
+    }
+
+    // #581 wave 4A: completeness participates in the compatibility identity.
+    #[test]
+    fn compatibility_index_completeness_affects_precheck_hash() {
+        let base = CompatibilityIndex::new("cidx", vec![], vec![], vec![], vec![]).unwrap();
+        let partial = base
+            .clone()
+            .with_completeness(CompatibilityIndexCompleteness::Partial {
+                reasons: vec![CompatibilityIndexCompletenessReason::RuntimeRequirementsNotCompiled],
+            })
+            .unwrap();
+        let complete = base
+            .clone()
+            .with_completeness(CompatibilityIndexCompleteness::Complete)
+            .unwrap();
+        // Same classes, different completeness ⇒ different precheck hash.
+        assert_ne!(partial.precheck_hash, complete.precheck_hash);
+        assert!(!partial.completeness.is_complete());
+        assert!(complete.completeness.is_complete());
+    }
+
+    #[test]
+    fn compatibility_index_completeness_reason_order_independent() {
+        let a = CompatibilityIndex::new("cidx", vec![], vec![], vec![], vec![])
+            .unwrap()
+            .with_completeness(CompatibilityIndexCompleteness::Partial {
+                reasons: vec![
+                    CompatibilityIndexCompletenessReason::RuntimeRequirementsNotCompiled,
+                    CompatibilityIndexCompletenessReason::CapabilitiesNotAnalyzed,
+                ],
+            })
+            .unwrap();
+        let b = CompatibilityIndex::new("cidx", vec![], vec![], vec![], vec![])
+            .unwrap()
+            .with_completeness(CompatibilityIndexCompleteness::Partial {
+                reasons: vec![
+                    CompatibilityIndexCompletenessReason::CapabilitiesNotAnalyzed,
+                    CompatibilityIndexCompletenessReason::RuntimeRequirementsNotCompiled,
+                ],
+            })
+            .unwrap();
+        assert_eq!(a.precheck_hash, b.precheck_hash);
     }
 
     #[test]
