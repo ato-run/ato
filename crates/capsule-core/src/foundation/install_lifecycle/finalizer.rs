@@ -20,14 +20,15 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::hashing::canonical_hash;
 use super::ids::{
     ArtifactBuildId, InstallProfileKey, InstallRevisionId, InstalledAppId, ProfileId,
     derive_install_profile_key, revision_id_for_build,
 };
 use super::records::{
-    ArtifactBuild, InstallReceipt, InstallRevision, RequirementGraph, RequirementGraphSnapshot,
-    StateContractSnapshot,
+    ArtifactBuild, InstallReceipt, InstallRevision, RequirementGraphSnapshot, StateContractSnapshot,
+};
+use super::requirement_graph::{
+    NormalizedProfile, RequirementGraphCompileInput, compile_requirement_graph,
 };
 use super::store::InstallInstanceStore;
 
@@ -53,13 +54,14 @@ pub struct InstallBuildFacts {
     pub dependency_output_hash: Option<String>,
     /// Build platform profile (`"linux/x86_64"`, …).
     pub platform: Option<String>,
-    /// A fully compiled requirement-graph snapshot, if the caller has one.
-    /// When `None`, the finalizer persists an explicitly-minimal empty graph.
+    /// A fully compiled requirement-graph snapshot, if the caller has one. When
+    /// `None`, the finalizer compiles one from available facts (profile read
+    /// from the store + these build facts) via
+    /// [`compile_requirement_graph`](super::requirement_graph::compile_requirement_graph),
+    /// yielding an explicitly `Partial` graph rather than an opaque placeholder.
     pub requirement_graph: Option<RequirementGraphSnapshot>,
     /// State-contract snapshots. Empty until the install path analyses storage.
     pub state_contracts: Vec<StateContractSnapshot>,
-    /// Hash of the normalized profile defaults, if computed by the caller.
-    pub profile_defaults_hash: Option<String>,
 }
 
 /// Everything the finalizer needs to promote a build output into a revision.
@@ -229,7 +231,7 @@ impl<'s> InstallRevisionFinalizer<'s> {
             artifact_build_id: input.artifact_build_id.clone(),
             capsule_ref: build_facts.capsule_ref.clone(),
             source_provenance_ref: build_facts.source_provenance_ref.clone(),
-            output_ref,
+            output_ref: output_ref.clone(),
             output_content_hash: output_content_hash.clone(),
             dependency_output_hash: build_facts.dependency_output_hash.clone(),
             platform: build_facts.platform.clone(),
@@ -239,20 +241,51 @@ impl<'s> InstallRevisionFinalizer<'s> {
             created_at: created_at.clone(),
         };
 
-        // 8b. RequirementGraphSnapshot — the caller's compiled graph if present,
-        //     otherwise an explicitly-minimal, deterministic empty graph (the
-        //     requirement-graph compiler is a later #581 wave).
-        let requirement_graph = match build_facts.requirement_graph.clone() {
-            Some(snapshot) => snapshot,
-            None => minimal_requirement_graph_snapshot(
-                &install_revision_id,
-                build_facts.profile_defaults_hash.as_deref(),
-            )?,
-        };
-
         // 8c. StateContractSnapshot[] — empty until the install path analyses
         //     storage contracts (later wave). Persisted explicitly as `[]`.
         let state_contracts = build_facts.state_contracts.clone();
+
+        // 8b. RequirementGraphSnapshot — use the caller's compiled graph if it
+        //     supplied one; otherwise compile a deterministic graph from the
+        //     facts available at install time (#581 wave 3A). The standard
+        //     install path has no parsed manifest, so the compiled graph is
+        //     explicitly `Partial` with typed reasons — never the old opaque
+        //     placeholder, and never a fabricated requirement.
+        let requirement_graph = match build_facts.requirement_graph.clone() {
+            Some(snapshot) => snapshot,
+            None => {
+                // The launch profile is written before finalize() runs (by
+                // `try_register_lifecycle`, and by every test's bootstrap), so it
+                // MUST be readable here. A read failure means a corrupted /
+                // mismatched store or malformed JSON — NOT a genuinely-absent
+                // profile. Fail rather than silently degrading to a `Partial`
+                // graph with a missing profile-defaults node and a misleading
+                // `ProfileFactsUnavailable` reason. (The compiler keeps its
+                // `profile: None` path for direct callers that legitimately have
+                // no profile; the finalizer is not one of them.)
+                let profile = self
+                    .store
+                    .read_profile(&input.installed_app_id, &input.profile_id)
+                    .with_context(|| {
+                        format!(
+                            "read launch profile {}/{} for requirement-graph compilation",
+                            input.installed_app_id.as_str(),
+                            input.profile_id.as_str()
+                        )
+                    })?;
+                compile_requirement_graph(RequirementGraphCompileInput {
+                    install_revision_id: Some(install_revision_id.clone()),
+                    profile: Some(NormalizedProfile::from_launch_profile(&profile)),
+                    capsule_ref: build_facts.capsule_ref.clone(),
+                    artifact_output_ref: output_ref.clone(),
+                    output_content_hash: build_facts.output_content_hash.clone(),
+                    source_provenance_ref: build_facts.source_provenance_ref.clone(),
+                    state_contracts: state_contracts.clone(),
+                    manifest_facts: None,
+                })?
+                .snapshot
+            }
+        };
 
         // 8d. InstallReceipt — install-time audit record (NOT the execution
         //     receipt). Deterministic id per revision.
@@ -344,34 +377,6 @@ fn artifact_output_ref(content_hash: &str) -> String {
     }
 }
 
-/// Build an explicitly-minimal, deterministic requirement-graph snapshot for an
-/// install path that does not yet compile a real application requirement graph.
-///
-/// Deterministic from the revision id, so re-finalizing the same build yields
-/// the same `graph_hash` (no timestamp or host-specific input). The empty graph
-/// + `reqgraph-…-minimal:<rev>` ids make the placeholder explicit; it is not a
-/// successful compiled graph.
-fn minimal_requirement_graph_snapshot(
-    rev: &InstallRevisionId,
-    profile_defaults_hash: Option<&str>,
-) -> Result<RequirementGraphSnapshot> {
-    let graph = RequirementGraph {
-        graph_id: format!("reqgraph-minimal:{}", rev.as_str()),
-        nodes: vec![],
-        edges: vec![],
-    };
-    let profile_defaults_hash = match profile_defaults_hash {
-        Some(h) => h.to_string(),
-        None => canonical_hash(&"ato.install.profile_defaults.minimal.v0")?,
-    };
-    RequirementGraphSnapshot::new(
-        format!("reqgraph-snapshot-minimal:{}", rev.as_str()),
-        graph,
-        Some(rev.as_str().to_string()),
-        profile_defaults_hash,
-    )
-}
-
 /// Safely copy the build output tree into a frozen revision directory.
 ///
 /// Safety rules:
@@ -453,7 +458,9 @@ fn safe_copy_output_tree_inner(
 mod tests {
     use super::*;
     use crate::foundation::install_lifecycle::ids::InstallRevisionId;
-    use crate::foundation::install_lifecycle::records::ArtifactBuild;
+    use crate::foundation::install_lifecycle::records::{
+        ArtifactBuild, RequirementGraphCompleteness, RequirementGraphCompletenessReason,
+    };
     use crate::foundation::install_lifecycle::store::{
         AppRecord, InstallInstanceStore, LaunchProfile,
     };
@@ -725,7 +732,6 @@ mod tests {
             platform: Some("linux/x86_64".into()),
             requirement_graph: None,
             state_contracts: vec![],
-            profile_defaults_hash: None,
         }
     }
 
@@ -1192,5 +1198,120 @@ mod tests {
             "staging profile's record must keep its own install_profile_key"
         );
         assert_ne!(r_default.install_profile_key, r_staging.install_profile_key);
+    }
+
+    // #581 wave 3A: standard finalize persists a COMPILED, explicitly-partial
+    // requirement graph (not the old opaque minimal placeholder), and the
+    // standalone file equals the copy embedded in revision.json.
+    #[test]
+    fn finalize_writes_compiled_partial_requirement_graph() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("a7a7"),
+            Some(sample_facts()),
+        );
+        let rev = &out.install_revision_id;
+        let graph = store
+            .read_requirement_graph_snapshot(&app, &profile_id, rev)
+            .unwrap();
+
+        // Not the old opaque minimal placeholder.
+        assert!(
+            graph.snapshot_id.starts_with("reqgraph:"),
+            "snapshot id should be the compiler's: {}",
+            graph.snapshot_id
+        );
+        assert!(!graph.snapshot_id.contains("minimal"));
+
+        // Compiled nodes from genuinely-available facts.
+        let ids: Vec<&str> = graph.graph.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"req:profile-defaults"));
+        assert!(ids.contains(&"req:artifact-output"));
+
+        // Explicitly partial (no parsed manifest on the standard path), with
+        // typed reasons — never silently Complete.
+        match &graph.completeness {
+            RequirementGraphCompleteness::Partial { reasons } => {
+                assert!(
+                    reasons.contains(&RequirementGraphCompletenessReason::ManifestFactsUnavailable)
+                );
+                assert!(
+                    reasons.contains(
+                        &RequirementGraphCompletenessReason::RuntimeRequirementNotCompiled
+                    )
+                );
+                assert!(
+                    reasons
+                        .contains(&RequirementGraphCompletenessReason::StateContractsNotAnalyzed)
+                );
+            }
+            RequirementGraphCompleteness::Complete => {
+                panic!("standard install path must be partial")
+            }
+        }
+
+        // Test 8: revision.json embeds the same graph as the standalone file.
+        let revision = store.read_install_revision(&app, &profile_id, rev).unwrap();
+        assert_eq!(revision.requirement_graph, graph);
+
+        // Graph reflects the profile: re-reading the profile and recompiling the
+        // hash matches the persisted profile_defaults_hash.
+        let profile = store.read_profile(&app, &profile_id).unwrap();
+        let expected_profile_hash = NormalizedProfile::from_launch_profile(&profile)
+            .profile_hash()
+            .unwrap();
+        assert_eq!(graph.profile_defaults_hash, expected_profile_hash);
+    }
+
+    // #581 wave 3A: a profile that cannot be read at finalize time is a real
+    // error (corrupted / mismatched store), NOT a genuinely-absent profile.
+    // finalize() must fail rather than silently degrade to a Partial graph with
+    // a missing profile-defaults node, and must not finalize the revision.
+    #[test]
+    fn finalize_fails_when_profile_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = InstallInstanceStore::new(dir.path()).unwrap();
+        let app = InstalledAppId::new("app_no_profile");
+        let profile_id = ProfileId::new("default");
+
+        // Bootstrap the app record but NOT the profile, so read_profile fails.
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app.clone(),
+                publisher: "test".into(),
+                slug: "no-profile".into(),
+                capsule_handle: "test/no-profile".into(),
+                version: "1.0.0".into(),
+                installed_at: "2026-06-08T00:00:00Z".into(),
+                updated_at: "2026-06-08T00:00:00Z".into(),
+            })
+            .unwrap();
+
+        let build_id = valid_build_id("9090");
+        let result = InstallRevisionFinalizer::new(&store).finalize(FinalizerInput {
+            installed_app_id: app.clone(),
+            profile_id: profile_id.clone(),
+            artifact_build_id: build_id.clone(),
+            output_dir: make_output_dir(dir.path()),
+            artifact_manifest_json: None,
+            source_provenance_json: None,
+            oci_lock_json: None,
+            // No caller-supplied graph, so the finalizer must read the profile.
+            build_facts: Some(sample_facts()),
+        });
+
+        assert!(
+            result.is_err(),
+            "finalize must fail (not silently degrade) when the profile cannot be read"
+        );
+        let rev = revision_id_for_build(&build_id);
+        assert!(
+            !store.is_revision_finalized(&app, &profile_id, &rev),
+            "an errored finalize must not leave the revision finalized"
+        );
     }
 }
