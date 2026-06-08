@@ -277,6 +277,20 @@ impl CompatibilityIndex {
         }
         self.supported_runner_classes.contains(class)
     }
+
+    /// True if at least one runner class is compatible — present in
+    /// `supported_runner_classes` and not in `denied_runner_classes` (deny wins).
+    ///
+    /// Distinct from [`completeness`](Self::completeness): a `Complete` analysis
+    /// with an empty (or only-denied) supported set means the revision cannot
+    /// launch on any known runner — which is *not* the same as "not analyzed yet".
+    /// A launch template must not be considered ready without a proven-compatible
+    /// runner class.
+    pub fn has_compatible_runner_class(&self) -> bool {
+        self.supported_runner_classes
+            .iter()
+            .any(|class| self.is_supported(class))
+    }
 }
 
 /// Compute a [`CompatibilityIndex`] precheck hash over its classes/capabilities
@@ -935,6 +949,35 @@ mod tests {
         )
         .unwrap();
         assert!(!idx.is_supported(&RunnerClass::BrowserRunner));
+    }
+
+    #[test]
+    fn compatibility_index_has_compatible_runner_class() {
+        // At least one supported-and-not-denied class → compatible.
+        let usable = CompatibilityIndex::new(
+            "cidx_ok",
+            vec![RunnerClass::ManagedRunner],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        assert!(usable.has_compatible_runner_class());
+
+        // Empty supported set → nothing compatible.
+        let empty = CompatibilityIndex::new("cidx_empty", vec![], vec![], vec![], vec![]).unwrap();
+        assert!(!empty.has_compatible_runner_class());
+
+        // The only supported class is also denied (deny wins) → nothing compatible.
+        let denied = CompatibilityIndex::new(
+            "cidx_denied",
+            vec![RunnerClass::ManagedRunner],
+            vec![RunnerClass::ManagedRunner],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        assert!(!denied.has_compatible_runner_class());
     }
 
     // #581 wave 4A: completeness participates in the compatibility identity.
