@@ -1254,9 +1254,22 @@ mod tests {
             }
         }
 
-        // Test 8: revision.json embeds the same graph as the standalone file.
+        // #581 wave 3B: the persisted graph carries a non-empty snapshot-level
+        // hash (graph content + profile defaults + completeness).
+        assert!(
+            graph.has_snapshot_hash()
+                && graph.requirement_graph_snapshot_hash.starts_with("blake3:"),
+            "persisted requirement graph must carry a snapshot-level hash"
+        );
+
+        // Test 8: revision.json embeds the same graph (incl. snapshot hash) as
+        // the standalone file.
         let revision = store.read_install_revision(&app, &profile_id, rev).unwrap();
         assert_eq!(revision.requirement_graph, graph);
+        assert_eq!(
+            revision.requirement_graph.requirement_graph_snapshot_hash,
+            graph.requirement_graph_snapshot_hash
+        );
 
         // Graph reflects the profile: re-reading the profile and recompiling the
         // hash matches the persisted profile_defaults_hash.
