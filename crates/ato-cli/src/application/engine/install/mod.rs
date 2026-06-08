@@ -2266,7 +2266,6 @@ fn build_facts_for_install(
         )),
         requirement_graph: None,
         state_contracts: Vec::new(),
-        profile_defaults_hash: None,
     }
 }
 
