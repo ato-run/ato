@@ -59,6 +59,12 @@ pub struct LaunchMaterializationBuildInput {
     /// `(app, profile)` context) — it is part of the canonical instance-key
     /// triple, never a session/observed fact.
     pub install_profile_key: InstallProfileKey,
+    /// The requirement graph **content** hash (`graph_hash`) for receipt/diff
+    /// correlation. Not present on the template key (which carries only the
+    /// snapshot identity), so it is supplied by the caller from the validated
+    /// install records. Kept distinct from the snapshot hash (#581 wave 3A/3B):
+    /// it is recorded as-is for correlation and is not an identity input here.
+    pub requirement_graph_hash: String,
     /// Control-plane-global session reference (not a runner-local pid). The
     /// session-scoped component of the materialization identity.
     pub session_ref: String,
@@ -144,6 +150,7 @@ pub fn build_launch_materialization(
     let LaunchMaterializationBuildInput {
         launch_template,
         install_profile_key,
+        requirement_graph_hash,
         session_ref,
         selected_runner_class,
         selected_runner_ref,
@@ -231,6 +238,10 @@ pub fn build_launch_materialization(
         install_profile_key,
         launch_template.key.install_revision_id.clone(),
         launch_template.key.profile_hash.clone(),
+        // Content `graph_hash` (correlation) vs snapshot identity — kept distinct
+        // (#581 wave 3A/3B): the content hash is the caller-supplied value, the
+        // snapshot hash comes from the template key.
+        requirement_graph_hash,
         launch_template
             .key
             .requirement_graph_snapshot_hash
@@ -455,13 +466,25 @@ mod tests {
         }
     }
 
+    /// A valid `blake3:<64 hex>` digest from a short hex seed (right-padded).
+    fn digest(seed_hex: &str) -> String {
+        let body = format!("{seed_hex:0<64}");
+        format!("blake3:{}", &body[..64])
+    }
+
     fn sample_digests() -> Vec<ProjectionDigest> {
         vec![
-            projection_digest("artifact", "/artifacts/blake3/3333", "blake3:a47d16aa"),
-            projection_digest("secret", "/secrets/sec_db", "blake3:5ecd16bb"),
-            projection_digest("network_policy", "/policies/net", "blake3:0e7d16cc"),
+            projection_digest("artifact", "/artifacts/blake3/3333", &digest("a47d16")),
+            projection_digest("secret", "/secrets/sec_db", &digest("5ecd16")),
+            projection_digest("network_policy", "/policies/net", &digest("0e7d16")),
         ]
     }
+
+    /// A fixed, valid `blake3:<64 hex>` standing in for the requirement graph
+    /// **content** hash (`graph_hash`). The builder records it as-is (correlation
+    /// only); tests assert it is kept distinct from the snapshot identity.
+    const GRAPH_CONTENT_HASH: &str =
+        "blake3:1111111111111111111111111111111111111111111111111111111111111111";
 
     fn build_input(
         template: LaunchTemplate,
@@ -473,6 +496,7 @@ mod tests {
         LaunchMaterializationBuildInput {
             launch_template: template,
             install_profile_key: derive_install_profile_key(ipk_app, ipk_profile),
+            requirement_graph_hash: GRAPH_CONTENT_HASH.into(),
             session_ref: session_ref.into(),
             selected_runner_class: RunnerClass::ManagedRunner,
             selected_runner_ref: "/runners/run_managed_1".into(),
@@ -510,6 +534,67 @@ mod tests {
             out.record.selected_runner_class,
             Some(RunnerClass::ManagedRunner)
         );
+    }
+
+    // ── Graph content hash vs snapshot hash are distinct fields (#588) ───────
+
+    #[test]
+    fn materialization_record_distinguishes_graph_hash_from_snapshot_hash() {
+        let (dir, store, app, profile) = setup();
+        let template = ready_template(&store, &app, &profile, dir.path(), "da01b");
+        let snapshot_hash = template
+            .key
+            .requirement_graph_snapshot_hash
+            .as_str()
+            .to_owned();
+
+        let out = build_launch_materialization(build_input(
+            template,
+            &app,
+            &profile,
+            "ses_distinct",
+            sample_digests(),
+        ))
+        .unwrap();
+
+        // The content `graph_hash` field holds the caller-supplied content hash…
+        assert_eq!(out.record.requirement_graph_hash, GRAPH_CONTENT_HASH);
+        // …and the snapshot identity is recorded in its own field, from the key.
+        assert_eq!(out.record.requirement_graph_snapshot_hash, snapshot_hash);
+        // They are genuinely different values (the snapshot folds in profile
+        // defaults + completeness on top of the content hash, #581 wave 3B).
+        assert_ne!(
+            out.record.requirement_graph_hash,
+            out.record.requirement_graph_snapshot_hash
+        );
+    }
+
+    #[test]
+    fn materialization_builder_does_not_store_snapshot_hash_in_requirement_graph_hash() {
+        let (dir, store, app, profile) = setup();
+        let template = ready_template(&store, &app, &profile, dir.path(), "da01c");
+        let snapshot_hash = template
+            .key
+            .requirement_graph_snapshot_hash
+            .as_str()
+            .to_owned();
+
+        let out = build_launch_materialization(build_input(
+            template,
+            &app,
+            &profile,
+            "ses_nostore",
+            sample_digests(),
+        ))
+        .unwrap();
+
+        // The `requirement_graph_hash` field must NOT be the snapshot hash — that
+        // would make a reader mistake the snapshot identity for the content hash.
+        assert_ne!(
+            out.record.requirement_graph_hash, snapshot_hash,
+            "requirement_graph_hash must not carry the snapshot hash"
+        );
+        assert_eq!(out.record.requirement_graph_hash, GRAPH_CONTENT_HASH);
     }
 
     // ── 2. Validates template integrity ──────────────────────────────────────
@@ -605,17 +690,18 @@ mod tests {
 
         // A well-formed secret *projection digest* (a hash of the projection
         // shape, NOT the secret value).
+        let secret_digest = digest("5ec5e7");
         let digests = vec![projection_digest(
             "secret",
             "/secrets/sec_db",
-            "blake3:5ec5e7d16e57",
+            &secret_digest,
         )];
         let out =
             build_launch_materialization(build_input(template, &app, &profile, "ses_f", digests))
                 .unwrap();
 
         let json = serde_json::to_string(&out.record).unwrap();
-        assert!(json.contains("blake3:5ec5e7d16e57"));
+        assert!(json.contains(&secret_digest));
         for forbidden in ["hunter2", "password", "swordfish"] {
             assert!(
                 !json.contains(forbidden),
@@ -673,7 +759,7 @@ mod tests {
         .unwrap();
 
         let mut changed = sample_digests();
-        changed[0].digest = "blake3:d1ffe7ed".into();
+        changed[0].digest = digest("d1ffe7ed");
         let other =
             build_launch_materialization(build_input(template, &app, &profile, "ses_x", changed))
                 .unwrap();
