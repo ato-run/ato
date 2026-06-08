@@ -254,14 +254,28 @@ impl<'s> InstallRevisionFinalizer<'s> {
         let requirement_graph = match build_facts.requirement_graph.clone() {
             Some(snapshot) => snapshot,
             None => {
+                // The launch profile is written before finalize() runs (by
+                // `try_register_lifecycle`, and by every test's bootstrap), so it
+                // MUST be readable here. A read failure means a corrupted /
+                // mismatched store or malformed JSON — NOT a genuinely-absent
+                // profile. Fail rather than silently degrading to a `Partial`
+                // graph with a missing profile-defaults node and a misleading
+                // `ProfileFactsUnavailable` reason. (The compiler keeps its
+                // `profile: None` path for direct callers that legitimately have
+                // no profile; the finalizer is not one of them.)
                 let profile = self
                     .store
                     .read_profile(&input.installed_app_id, &input.profile_id)
-                    .ok()
-                    .map(|p| NormalizedProfile::from_launch_profile(&p));
+                    .with_context(|| {
+                        format!(
+                            "read launch profile {}/{} for requirement-graph compilation",
+                            input.installed_app_id.as_str(),
+                            input.profile_id.as_str()
+                        )
+                    })?;
                 compile_requirement_graph(RequirementGraphCompileInput {
                     install_revision_id: Some(install_revision_id.clone()),
-                    profile,
+                    profile: Some(NormalizedProfile::from_launch_profile(&profile)),
                     capsule_ref: build_facts.capsule_ref.clone(),
                     artifact_output_ref: output_ref.clone(),
                     output_content_hash: build_facts.output_content_hash.clone(),
@@ -1251,5 +1265,53 @@ mod tests {
             .profile_hash()
             .unwrap();
         assert_eq!(graph.profile_defaults_hash, expected_profile_hash);
+    }
+
+    // #581 wave 3A: a profile that cannot be read at finalize time is a real
+    // error (corrupted / mismatched store), NOT a genuinely-absent profile.
+    // finalize() must fail rather than silently degrade to a Partial graph with
+    // a missing profile-defaults node, and must not finalize the revision.
+    #[test]
+    fn finalize_fails_when_profile_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = InstallInstanceStore::new(dir.path()).unwrap();
+        let app = InstalledAppId::new("app_no_profile");
+        let profile_id = ProfileId::new("default");
+
+        // Bootstrap the app record but NOT the profile, so read_profile fails.
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app.clone(),
+                publisher: "test".into(),
+                slug: "no-profile".into(),
+                capsule_handle: "test/no-profile".into(),
+                version: "1.0.0".into(),
+                installed_at: "2026-06-08T00:00:00Z".into(),
+                updated_at: "2026-06-08T00:00:00Z".into(),
+            })
+            .unwrap();
+
+        let build_id = valid_build_id("9090");
+        let result = InstallRevisionFinalizer::new(&store).finalize(FinalizerInput {
+            installed_app_id: app.clone(),
+            profile_id: profile_id.clone(),
+            artifact_build_id: build_id.clone(),
+            output_dir: make_output_dir(dir.path()),
+            artifact_manifest_json: None,
+            source_provenance_json: None,
+            oci_lock_json: None,
+            // No caller-supplied graph, so the finalizer must read the profile.
+            build_facts: Some(sample_facts()),
+        });
+
+        assert!(
+            result.is_err(),
+            "finalize must fail (not silently degrade) when the profile cannot be read"
+        );
+        let rev = revision_id_for_build(&build_id);
+        assert!(
+            !store.is_revision_finalized(&app, &profile_id, &rev),
+            "an errored finalize must not leave the revision finalized"
+        );
     }
 }
