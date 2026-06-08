@@ -217,29 +217,20 @@ impl<'s> InstallRevisionFinalizer<'s> {
 
         // 8a. ArtifactBuild — keyed by the build id passed in (content-addressed
         //     by the caller), never a re-derived one, so the revision id stays
-        //     deterministic. No session/runtime/observed fields.
+        //     deterministic. No session/runtime/observed fields. Every optional
+        //     fact is passed through as-is: an absent fact is persisted as
+        //     `None`, never an in-band `"unknown"`/`"unset"` sentinel.
         let output_content_hash = build_facts.output_content_hash.clone();
-        let output_ref = output_content_hash
-            .as_deref()
-            .map(artifact_output_ref)
-            .unwrap_or_else(|| format!("/revisions/{}/output", install_revision_id.as_str()));
+        // The content-addressed output ref exists only when we have a content
+        // hash; otherwise it is genuinely unresolved (the frozen output still
+        // lives at the shared revisions/<rev>/output, reachable via the store).
+        let output_ref = output_content_hash.as_deref().map(artifact_output_ref);
         let artifact_build = ArtifactBuild {
             artifact_build_id: input.artifact_build_id.clone(),
-            capsule_ref: build_facts
-                .capsule_ref
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            source_provenance_ref: build_facts
-                .source_provenance_ref
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
+            capsule_ref: build_facts.capsule_ref.clone(),
+            source_provenance_ref: build_facts.source_provenance_ref.clone(),
             output_ref,
-            // Explicit display placeholder when the caller supplied no content
-            // hash. Never conflated with a real hash: `output_hashes` below is
-            // driven off the typed Option, not this string.
-            output_content_hash: output_content_hash
-                .clone()
-                .unwrap_or_else(|| "unset".to_string()),
+            output_content_hash: output_content_hash.clone(),
             dependency_output_hash: build_facts.dependency_output_hash.clone(),
             platform: build_facts.platform.clone(),
             // TODO(#581): no typed build-receipt ref is produced by the current
@@ -831,9 +822,15 @@ mod tests {
 
         let build = store.read_artifact_build(&app, &profile_id, rev).unwrap();
         assert_eq!(build.artifact_build_id, out.artifact_build_id);
-        assert_eq!(build.output_content_hash, "blake3:cafef00d");
-        assert_eq!(build.output_ref, "/artifacts/blake3/cafef00d");
-        assert_eq!(build.capsule_ref, "acme/pgweb@1.2.3");
+        assert_eq!(
+            build.output_content_hash.as_deref(),
+            Some("blake3:cafef00d")
+        );
+        assert_eq!(
+            build.output_ref.as_deref(),
+            Some("/artifacts/blake3/cafef00d")
+        );
+        assert_eq!(build.capsule_ref.as_deref(), Some("acme/pgweb@1.2.3"));
         assert_eq!(build.platform.as_deref(), Some("linux/x86_64"));
 
         // The standalone sub-record files must equal the copies embedded in
@@ -1016,10 +1013,25 @@ mod tests {
         let build = store
             .read_artifact_build(&app, &profile_id, &out.install_revision_id)
             .unwrap();
-        // Explicit placeholders, not fabricated values.
-        assert_eq!(build.output_content_hash, "unset");
-        assert_eq!(build.capsule_ref, "unknown");
+        // Absent facts are persisted as None — never an in-band "unset"/"unknown"
+        // sentinel that a reader could mistake for a real value.
+        assert_eq!(build.output_content_hash, None);
+        assert_eq!(build.output_ref, None);
+        assert_eq!(build.capsule_ref, None);
+        assert_eq!(build.source_provenance_ref, None);
+        assert_eq!(build.dependency_output_hash, None);
         assert_eq!(build.platform, None, "no platform persisted without facts");
+        // And the raw JSON must contain no sentinel strings.
+        let raw = fs::read_to_string(store.revision_artifact_build_path(
+            &app,
+            &profile_id,
+            &out.install_revision_id,
+        ))
+        .unwrap();
+        assert!(
+            !raw.contains("unset") && !raw.contains("unknown"),
+            "no in-band sentinel may be persisted: {raw}"
+        );
         let receipt = store
             .read_install_receipt(&app, &profile_id, &out.install_revision_id)
             .unwrap();
@@ -1054,10 +1066,10 @@ mod tests {
                 &rev,
                 &ArtifactBuild {
                     artifact_build_id: valid_build_id("a1b2"),
-                    capsule_ref: "acme/x@1".into(),
-                    source_provenance_ref: "blake3:00".into(),
-                    output_ref: "/artifacts/blake3/00".into(),
-                    output_content_hash: "blake3:00".into(),
+                    capsule_ref: Some("acme/x@1".into()),
+                    source_provenance_ref: Some("blake3:00".into()),
+                    output_ref: Some("/artifacts/blake3/00".into()),
+                    output_content_hash: Some("blake3:00".into()),
                     dependency_output_hash: None,
                     platform: None,
                     build_receipt_ref: None,
