@@ -58,7 +58,8 @@ pub use launch_template_reuse::{
     validate_launch_template_for_reuse,
 };
 pub use materialization::{
-    LaunchMaterializationRecord, ProjectionDigest, ProjectionDigestInvalidReason,
+    LaunchMaterializationRecord, MaterializationRecordInvalidReason, ProjectionDigest,
+    ProjectionDigestInvalidReason,
 };
 pub use records::{
     ArtifactBuild, ArtifactBuildIdentityInputs, InstallReceipt, InstallRevision, RequirementGraph,
