@@ -29,6 +29,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::ids::{InstallRevisionId, InstalledAppId, ProfileId};
+use super::launch_template::{BindingAssignmentSet, CompatibilityIndex};
 use super::records::{
     ArtifactBuild, InstallReceipt, InstallRevision, RequirementGraphSnapshot, StateContractSnapshot,
 };
@@ -484,6 +485,26 @@ impl InstallInstanceStore {
             .join("install-receipt.json")
     }
 
+    pub fn revision_binding_assignment_set_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("binding-assignments.json")
+    }
+
+    pub fn revision_compatibility_index_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("compatibility-index.json")
+    }
+
     /// Atomically write any revision-scoped JSON record, creating the record
     /// directory if needed.
     fn write_revision_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<()> {
@@ -533,6 +554,34 @@ impl InstallInstanceStore {
         self.write_revision_json(
             &self.revision_state_contracts_path(app, profile, rev),
             &contracts,
+        )
+    }
+
+    /// Persist the [`BindingAssignmentSet`] for a revision (atomic).
+    pub fn write_binding_assignment_set(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        bindings: &BindingAssignmentSet,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_binding_assignment_set_path(app, profile, rev),
+            bindings,
+        )
+    }
+
+    /// Persist the [`CompatibilityIndex`] for a revision (atomic).
+    pub fn write_compatibility_index(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        index: &CompatibilityIndex,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_compatibility_index_path(app, profile, rev),
+            index,
         )
     }
 
@@ -650,6 +699,30 @@ impl InstallInstanceStore {
         rev: &InstallRevisionId,
     ) -> Result<Vec<StateContractSnapshot>> {
         let path = self.revision_state_contracts_path(app, profile, rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`BindingAssignmentSet`] for a `(app, profile, revision)`.
+    pub fn read_binding_assignment_set(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<BindingAssignmentSet> {
+        let path = self.revision_binding_assignment_set_path(app, profile, rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`CompatibilityIndex`] for a `(app, profile, revision)`.
+    pub fn read_compatibility_index(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<CompatibilityIndex> {
+        let path = self.revision_compatibility_index_path(app, profile, rev);
         let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
     }
