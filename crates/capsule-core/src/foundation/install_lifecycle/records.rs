@@ -197,6 +197,54 @@ impl RequirementGraph {
     }
 }
 
+/// Why a compiled requirement graph is not yet complete (#581 wave 3A).
+///
+/// Typed so a partial graph can never be mistaken for a complete one and so the
+/// specific missing analysis is auditable. Not a hash input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementGraphCompletenessReason {
+    RuntimeRequirementNotCompiled,
+    EntrypointRequirementNotCompiled,
+    StateContractsNotAnalyzed,
+    NetworkPolicyNotAnalyzed,
+    SecretRequirementsNotAnalyzed,
+    StorageRequirementsNotAnalyzed,
+    ManifestFactsUnavailable,
+    ProfileFactsUnavailable,
+}
+
+/// How complete a compiled [`RequirementGraphSnapshot`] is.
+///
+/// A snapshot is `Complete` only when every requirement class was analyzed.
+/// The standard install path is `Partial` (no parsed manifest yet) and must
+/// never be presented as `Complete`. This is **not** a `graph_hash` input —
+/// `graph_hash` is over `graph` only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RequirementGraphCompleteness {
+    Complete,
+    Partial {
+        reasons: Vec<RequirementGraphCompletenessReason>,
+    },
+}
+
+impl Default for RequirementGraphCompleteness {
+    /// Conservative default for snapshots written before the completeness field
+    /// existed (or constructed without explicit completeness): not `Complete`.
+    fn default() -> Self {
+        Self::Partial {
+            reasons: Vec::new(),
+        }
+    }
+}
+
+impl RequirementGraphCompleteness {
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
 /// A stable snapshot of compiled application requirements + profile defaults.
 ///
 /// Session-independent. The `graph_hash` and `profile_defaults_hash` are the
@@ -209,10 +257,17 @@ pub struct RequirementGraphSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_revision_ref: Option<String>,
     pub profile_defaults_hash: String,
+    /// How complete the compiled graph is. Defaults (for pre-3A snapshots) to
+    /// `Partial { reasons: [] }` — never silently `Complete`. Not a `graph_hash`
+    /// input.
+    #[serde(default)]
+    pub completeness: RequirementGraphCompleteness,
 }
 
 impl RequirementGraphSnapshot {
-    /// Build a snapshot, computing `graph_hash` from `graph`.
+    /// Build a snapshot, computing `graph_hash` from `graph`. Completeness
+    /// defaults to `Partial { reasons: [] }`; set it explicitly with
+    /// [`RequirementGraphSnapshot::with_completeness`].
     pub fn new(
         snapshot_id: impl Into<String>,
         graph: RequirementGraph,
@@ -226,7 +281,14 @@ impl RequirementGraphSnapshot {
             graph_hash,
             source_revision_ref,
             profile_defaults_hash: profile_defaults_hash.into(),
+            completeness: RequirementGraphCompleteness::default(),
         })
+    }
+
+    /// Set the typed completeness (consuming builder).
+    pub fn with_completeness(mut self, completeness: RequirementGraphCompleteness) -> Self {
+        self.completeness = completeness;
+        self
     }
 }
 
