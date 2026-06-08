@@ -15,7 +15,7 @@ pub mod materialization;
 pub mod records;
 pub mod store;
 
-pub use finalizer::{FinalizerInput, FinalizerOutput, InstallRevisionFinalizer};
+pub use finalizer::{FinalizerInput, FinalizerOutput, InstallBuildFacts, InstallRevisionFinalizer};
 pub use hashing::canonical_hash;
 pub use ids::{
     ArtifactBuildId, CapsuleInstanceKey, ExecutionId, InstallProfileKey, InstallRevisionId,
