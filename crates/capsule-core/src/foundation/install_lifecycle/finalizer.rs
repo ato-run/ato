@@ -161,12 +161,14 @@ impl<'s> InstallRevisionFinalizer<'s> {
             )
         })?;
 
-        // 5. Write artifact_manifest.json.
-        let finalized_at = iso8601_now();
+        // 5. Write artifact_manifest.json. One timestamp is computed for the
+        //    whole finalize() so the manifest and the typed records below carry
+        //    the same instant for this install event.
+        let now = iso8601_now();
         let rev_manifest = ArtifactRevisionManifest {
             install_revision_id: install_revision_id.clone(),
             artifact_build_id: input.artifact_build_id.clone(),
-            finalized_at,
+            finalized_at: now.clone(),
             artifact_manifest: input
                 .artifact_manifest_json
                 .as_deref()
@@ -211,17 +213,13 @@ impl<'s> InstallRevisionFinalizer<'s> {
         // 8. Build and persist the typed install-output records (#581 wave 2).
         //    Written before the current_revision swap so an interruption leaves
         //    the revision un-finalized (revision.json is the marker).
-        let created_at = iso8601_now();
+        let created_at = now;
 
         // 8a. ArtifactBuild — keyed by the build id passed in (content-addressed
         //     by the caller), never a re-derived one, so the revision id stays
         //     deterministic. No session/runtime/observed fields.
-        let output_content_hash = build_facts
-            .output_content_hash
-            .clone()
-            .unwrap_or_else(|| "unset".to_string());
-        let output_ref = build_facts
-            .output_content_hash
+        let output_content_hash = build_facts.output_content_hash.clone();
+        let output_ref = output_content_hash
             .as_deref()
             .map(artifact_output_ref)
             .unwrap_or_else(|| format!("/revisions/{}/output", install_revision_id.as_str()));
@@ -236,8 +234,14 @@ impl<'s> InstallRevisionFinalizer<'s> {
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
             output_ref,
-            output_content_hash: output_content_hash.clone(),
+            // Explicit display placeholder when the caller supplied no content
+            // hash. Never conflated with a real hash: `output_hashes` below is
+            // driven off the typed Option, not this string.
+            output_content_hash: output_content_hash
+                .clone()
+                .unwrap_or_else(|| "unset".to_string()),
             dependency_output_hash: build_facts.dependency_output_hash.clone(),
+            platform: build_facts.platform.clone(),
             // TODO(#581): no typed build-receipt ref is produced by the current
             // install path; populate once the artifact build producer surfaces one.
             build_receipt_ref: None,
@@ -267,11 +271,9 @@ impl<'s> InstallRevisionFinalizer<'s> {
             install_revision_id: install_revision_id.clone(),
             artifact_build_id: input.artifact_build_id.clone(),
             resolved_input_refs: vec![],
-            output_hashes: if output_content_hash == "unset" {
-                vec![]
-            } else {
-                vec![output_content_hash.clone()]
-            },
+            // Driven off the typed Option: empty when no content hash was
+            // supplied, otherwise exactly the one hash.
+            output_hashes: output_content_hash.iter().cloned().collect(),
             occurred_at: created_at.clone(),
         };
 
@@ -291,16 +293,27 @@ impl<'s> InstallRevisionFinalizer<'s> {
             compatibility_index: None,
         };
 
-        // 8f. Persist sub-records first, then the revision.json marker last.
+        // 8f. Re-finalize safety: drop any existing marker so the revision is
+        //     transiently un-finalized while sub-records are rewritten. Then
+        //     persist the sub-records, and write the revision.json marker LAST.
+        let app = &input.installed_app_id;
+        let profile = &input.profile_id;
         self.store
-            .write_artifact_build(&install_revision_id, &artifact_build)?;
+            .remove_install_revision_marker(app, profile, &install_revision_id)?;
         self.store
-            .write_requirement_graph_snapshot(&install_revision_id, &requirement_graph)?;
+            .write_artifact_build(app, profile, &install_revision_id, &artifact_build)?;
+        self.store.write_requirement_graph_snapshot(
+            app,
+            profile,
+            &install_revision_id,
+            &requirement_graph,
+        )?;
         self.store
-            .write_state_contracts(&install_revision_id, &state_contracts)?;
+            .write_state_contracts(app, profile, &install_revision_id, &state_contracts)?;
         self.store
-            .write_install_receipt(&install_revision_id, &install_receipt)?;
-        self.store.write_install_revision(&install_revision)?;
+            .write_install_receipt(app, profile, &install_revision_id, &install_receipt)?;
+        self.store
+            .write_install_revision(app, profile, &install_revision)?;
 
         // 9. Atomically swap current_revision (the commit point).
         self.store.set_current_revision(
@@ -761,28 +774,38 @@ mod tests {
         );
         let rev = &out.install_revision_id;
         assert!(
-            store.revision_install_record_path(rev).exists(),
+            store
+                .revision_install_record_path(&app, &profile_id, rev)
+                .exists(),
             "revision.json must be written"
         );
         assert!(
-            store.revision_artifact_build_path(rev).exists(),
+            store
+                .revision_artifact_build_path(&app, &profile_id, rev)
+                .exists(),
             "artifact-build.json must be written"
         );
         assert!(
-            store.revision_requirement_graph_path(rev).exists(),
+            store
+                .revision_requirement_graph_path(&app, &profile_id, rev)
+                .exists(),
             "requirement-graph.json must be written"
         );
         assert!(
-            store.revision_install_receipt_path(rev).exists(),
+            store
+                .revision_install_receipt_path(&app, &profile_id, rev)
+                .exists(),
             "install-receipt.json must be written"
         );
         assert!(
-            store.revision_state_contracts_path(rev).exists(),
+            store
+                .revision_state_contracts_path(&app, &profile_id, rev)
+                .exists(),
             "state-contracts.json must be written"
         );
-        // The pre-existing artifact_manifest.json is still written too.
+        // The pre-existing (shared, content-keyed) artifact_manifest.json is still written too.
         assert!(store.revision_artifact_manifest_path(rev).exists());
-        assert!(store.is_revision_finalized(rev));
+        assert!(store.is_revision_finalized(&app, &profile_id, rev));
     }
 
     // Required test 5: readback reconstructs the same typed records.
@@ -799,26 +822,32 @@ mod tests {
         );
         let rev = &out.install_revision_id;
 
-        let revision = store.read_install_revision(rev).unwrap();
+        let revision = store.read_install_revision(&app, &profile_id, rev).unwrap();
         assert_eq!(revision.install_revision_id, *rev);
         assert_eq!(revision.artifact_build_id, out.artifact_build_id);
         assert_eq!(revision.install_profile_key, out.install_profile_key);
         // The on-disk record round-trips to exactly what the finalizer returned.
         assert_eq!(revision, out.install_revision);
 
-        let build = store.read_artifact_build(rev).unwrap();
+        let build = store.read_artifact_build(&app, &profile_id, rev).unwrap();
         assert_eq!(build.artifact_build_id, out.artifact_build_id);
         assert_eq!(build.output_content_hash, "blake3:cafef00d");
         assert_eq!(build.output_ref, "/artifacts/blake3/cafef00d");
         assert_eq!(build.capsule_ref, "acme/pgweb@1.2.3");
+        assert_eq!(build.platform.as_deref(), Some("linux/x86_64"));
 
-        let graph = store.read_requirement_graph_snapshot(rev).unwrap();
-        assert_eq!(graph.graph_hash, revision.requirement_graph.graph_hash);
-
-        let receipt = store.read_install_receipt(rev).unwrap();
-        assert_eq!(receipt.install_revision_id, *rev);
-        assert_eq!(receipt.artifact_build_id, out.artifact_build_id);
+        // The standalone sub-record files must equal the copies embedded in
+        // revision.json (they are written from the same in-memory values, so
+        // they cannot diverge — assert it rather than assume it).
+        let graph = store
+            .read_requirement_graph_snapshot(&app, &profile_id, rev)
+            .unwrap();
+        assert_eq!(graph, revision.requirement_graph);
+        let receipt = store.read_install_receipt(&app, &profile_id, rev).unwrap();
+        assert_eq!(receipt, revision.install_receipt);
         assert_eq!(receipt.output_hashes, vec!["blake3:cafef00d".to_string()]);
+        let contracts = store.read_state_contracts(&app, &profile_id, rev).unwrap();
+        assert_eq!(contracts, revision.state_contracts);
 
         // Launch reuse readback chain: (app, profile) -> current revision -> records.
         #[cfg(unix)]
@@ -842,7 +871,9 @@ mod tests {
             valid_build_id("cc33"),
             Some(sample_facts()),
         );
-        let build = store.read_artifact_build(&out.install_revision_id).unwrap();
+        let build = store
+            .read_artifact_build(&app, &profile_id, &out.install_revision_id)
+            .unwrap();
         assert!(build.artifact_build_id.as_str().starts_with("build_"));
         assert!(out.install_revision_id.as_str().starts_with("rev_"));
         assert_ne!(
@@ -876,11 +907,11 @@ mod tests {
             "secret_value",
         ];
         for path in [
-            store.revision_install_record_path(rev),
-            store.revision_artifact_build_path(rev),
-            store.revision_requirement_graph_path(rev),
-            store.revision_state_contracts_path(rev),
-            store.revision_install_receipt_path(rev),
+            store.revision_install_record_path(&app, &profile_id, rev),
+            store.revision_artifact_build_path(&app, &profile_id, rev),
+            store.revision_requirement_graph_path(&app, &profile_id, rev),
+            store.revision_state_contracts_path(&app, &profile_id, rev),
+            store.revision_install_receipt_path(&app, &profile_id, rev),
         ] {
             let raw = fs::read_to_string(&path).unwrap();
             for term in forbidden {
@@ -891,8 +922,6 @@ mod tests {
                     term
                 );
             }
-            // The content hash we passed is not a secret value.
-            assert!(!raw.contains("hunter2"));
         }
     }
 
@@ -910,7 +939,7 @@ mod tests {
             Some(sample_facts()),
         );
         let g1 = store
-            .read_requirement_graph_snapshot(&o1.install_revision_id)
+            .read_requirement_graph_snapshot(&app, &profile_id, &o1.install_revision_id)
             .unwrap();
 
         let o2 = finalize_default(
@@ -922,7 +951,7 @@ mod tests {
             Some(sample_facts()),
         );
         let g2 = store
-            .read_requirement_graph_snapshot(&o2.install_revision_id)
+            .read_requirement_graph_snapshot(&app, &profile_id, &o2.install_revision_id)
             .unwrap();
 
         assert_eq!(
@@ -935,7 +964,9 @@ mod tests {
             "requirement graph hash stable across re-finalize (no timestamp/host input)"
         );
         // Receipt id is deterministic per revision (timestamps differ but are not identity).
-        let r = store.read_install_receipt(&o1.install_revision_id).unwrap();
+        let r = store
+            .read_install_receipt(&app, &profile_id, &o1.install_revision_id)
+            .unwrap();
         assert_eq!(
             r.receipt_id,
             format!("irecpt-{}", o1.install_revision_id.as_str())
@@ -955,14 +986,18 @@ mod tests {
             Some(sample_facts()),
         );
         let contracts = store
-            .read_state_contracts(&out.install_revision_id)
+            .read_state_contracts(&app, &profile_id, &out.install_revision_id)
             .unwrap();
         assert!(
             contracts.is_empty(),
             "no state contracts are resolved on the standard install path yet"
         );
-        let raw = fs::read_to_string(store.revision_state_contracts_path(&out.install_revision_id))
-            .unwrap();
+        let raw = fs::read_to_string(store.revision_state_contracts_path(
+            &app,
+            &profile_id,
+            &out.install_revision_id,
+        ))
+        .unwrap();
         assert_eq!(raw.trim(), "[]", "empty list persisted explicitly");
     }
 
@@ -978,12 +1013,22 @@ mod tests {
             valid_build_id("1234"),
             None,
         );
-        let build = store.read_artifact_build(&out.install_revision_id).unwrap();
-        // Explicit placeholder, not a fabricated value.
+        let build = store
+            .read_artifact_build(&app, &profile_id, &out.install_revision_id)
+            .unwrap();
+        // Explicit placeholders, not fabricated values.
         assert_eq!(build.output_content_hash, "unset");
         assert_eq!(build.capsule_ref, "unknown");
+        assert_eq!(build.platform, None, "no platform persisted without facts");
+        let receipt = store
+            .read_install_receipt(&app, &profile_id, &out.install_revision_id)
+            .unwrap();
+        assert!(
+            receipt.output_hashes.is_empty(),
+            "no output hash recorded when no content hash was supplied"
+        );
         let revision = store
-            .read_install_revision(&out.install_revision_id)
+            .read_install_revision(&app, &profile_id, &out.install_revision_id)
             .unwrap();
         assert!(
             revision.launch_templates.is_empty(),
@@ -995,16 +1040,17 @@ mod tests {
         );
     }
 
-    // Required test 9: a partially written revision is not treated as finalized.
+    // Required test 9 (store guard): a revision without revision.json is not finalized.
     #[test]
     fn partial_revision_is_not_treated_as_finalized() {
-        let (_dir, store, _app, _profile_id) = setup();
-        // Scaffold a revision and write only one sub-record — never the
-        // revision.json marker — to simulate an interrupted finalize.
+        let (_dir, store, app, profile_id) = setup();
+        // Write only one sub-record — never the revision.json marker — to
+        // simulate an interrupted finalize.
         let rev = InstallRevisionId::new(format!("rev_{}", "a".repeat(32)));
-        store.scaffold_revision(&rev).unwrap();
         store
             .write_artifact_build(
+                &app,
+                &profile_id,
                 &rev,
                 &ArtifactBuild {
                     artifact_build_id: valid_build_id("a1b2"),
@@ -1013,6 +1059,7 @@ mod tests {
                     output_ref: "/artifacts/blake3/00".into(),
                     output_content_hash: "blake3:00".into(),
                     dependency_output_hash: None,
+                    platform: None,
                     build_receipt_ref: None,
                     created_at: "2026-06-08T00:00:00Z".into(),
                 },
@@ -1020,12 +1067,118 @@ mod tests {
             .unwrap();
 
         assert!(
-            !store.is_revision_finalized(&rev),
+            !store.is_revision_finalized(&app, &profile_id, &rev),
             "a revision without revision.json must not be considered finalized"
         );
         assert!(
-            store.read_install_revision(&rev).is_err(),
+            store
+                .read_install_revision(&app, &profile_id, &rev)
+                .is_err(),
             "reading an un-finalized revision must fail rather than silently succeed"
         );
+    }
+
+    // Required test 9 (finalize ordering): if a sub-record write fails mid-way,
+    // the revision.json marker is never written, so the revision stays
+    // un-finalized. This exercises the finalizer's "marker written last"
+    // guarantee through finalize(), not just the store read guard above.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_failure_midway_leaves_revision_unfinalized() {
+        let (dir, store, app, profile_id) = setup();
+        let build_id = valid_build_id("9f9f");
+        let rev = revision_id_for_build(&build_id);
+
+        // Sabotage the requirement-graph record path by pre-creating a directory
+        // where the file should go, so its atomic write (rename) fails.
+        let rev_records_dir = store.profile_revision_dir(&app, &profile_id, &rev);
+        fs::create_dir_all(&rev_records_dir).unwrap();
+        fs::create_dir_all(rev_records_dir.join("requirement-graph.json")).unwrap();
+
+        let result = InstallRevisionFinalizer::new(&store).finalize(FinalizerInput {
+            installed_app_id: app.clone(),
+            profile_id: profile_id.clone(),
+            artifact_build_id: build_id,
+            output_dir: make_output_dir(dir.path()),
+            artifact_manifest_json: None,
+            source_provenance_json: None,
+            oci_lock_json: None,
+            build_facts: Some(sample_facts()),
+        });
+
+        assert!(
+            result.is_err(),
+            "finalize must fail when a sub-record write fails"
+        );
+        // The earlier sub-record was written, but the marker was not — proving
+        // revision.json is written only after all sub-records succeed.
+        assert!(
+            store
+                .revision_artifact_build_path(&app, &profile_id, &rev)
+                .exists(),
+            "the sub-record written before the failure exists"
+        );
+        assert!(
+            !store.is_revision_finalized(&app, &profile_id, &rev),
+            "marker must not exist when a prior sub-record write failed"
+        );
+    }
+
+    // Regression for the cross-(app,profile) clobber: two profiles installing the
+    // SAME artifact content share one content-keyed revision id, but their
+    // install-output records live in per-(app,profile) dirs and must not clobber.
+    #[cfg(unix)]
+    #[test]
+    fn same_artifact_across_profiles_does_not_clobber_records() {
+        let (dir, store, app, default_profile) = setup();
+        let staging = ProfileId::new("staging");
+        store
+            .write_profile(
+                &app,
+                &LaunchProfile {
+                    profile_id: staging.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Same build id (same artifact content) for both profiles.
+        let build_id = valid_build_id("c0ffee");
+        let o_default = finalize_default(
+            &store,
+            &app,
+            &default_profile,
+            make_output_dir(&dir.path().join("d")),
+            build_id.clone(),
+            Some(sample_facts()),
+        );
+        let o_staging = finalize_default(
+            &store,
+            &app,
+            &staging,
+            make_output_dir(&dir.path().join("s")),
+            build_id,
+            Some(sample_facts()),
+        );
+
+        // Same revision id (content-addressed), different install_profile_key.
+        assert_eq!(o_default.install_revision_id, o_staging.install_revision_id);
+        assert_ne!(o_default.install_profile_key, o_staging.install_profile_key);
+
+        // Each profile reads back ITS OWN install_profile_key — no clobber.
+        let rev = &o_default.install_revision_id;
+        let r_default = store
+            .read_install_revision(&app, &default_profile, rev)
+            .unwrap();
+        let r_staging = store.read_install_revision(&app, &staging, rev).unwrap();
+        assert_eq!(
+            r_default.install_profile_key, o_default.install_profile_key,
+            "default profile's record must keep its own install_profile_key"
+        );
+        assert_eq!(
+            r_staging.install_profile_key, o_staging.install_profile_key,
+            "staging profile's record must keep its own install_profile_key"
+        );
+        assert_ne!(r_default.install_profile_key, r_staging.install_profile_key);
     }
 }

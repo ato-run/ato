@@ -2236,6 +2236,40 @@ pub async fn suggest_scoped_capsules(
 #[cfg(test)]
 mod tests;
 
+/// Build the [`InstallBuildFacts`] for a standard (pre-built registry artifact)
+/// install.
+///
+/// For a pre-built registry artifact the content hash is both the output
+/// content hash and a legitimate provenance reference (it is the immutable
+/// artifact identity, not a secret). `capsule_ref` is the scoped handle +
+/// version; `platform` is the install host as a conservative stand-in until the
+/// producer surfaces the build platform — it is descriptive metadata only and
+/// feeds no id/cache key. No requirement graph or state contracts are resolved
+/// on this path yet, so those are left to the finalizer's typed placeholders.
+///
+/// Extracted as a pure function so the field mapping is unit-testable without an
+/// isolated `~/.ato` (see tests).
+fn build_facts_for_install(
+    scoped_id: &str,
+    version: &str,
+    content_hash: &str,
+) -> InstallBuildFacts {
+    InstallBuildFacts {
+        capsule_ref: Some(format!("{scoped_id}@{version}")),
+        source_provenance_ref: Some(content_hash.to_owned()),
+        output_content_hash: Some(content_hash.to_owned()),
+        dependency_output_hash: None,
+        platform: Some(format!(
+            "{}/{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )),
+        requirement_graph: None,
+        state_contracts: Vec::new(),
+        profile_defaults_hash: None,
+    }
+}
+
 /// Try to register the install with the lifecycle instance store.
 ///
 /// Returns `Some(InstallLifecycleInfo)` on success, `None` on any failure
@@ -2317,28 +2351,6 @@ fn try_register_lifecycle(
         .unwrap_or(installed_path)
         .to_path_buf();
 
-    // Build facts available for the pre-built registry artifact. The content
-    // hash is both the output content hash and a legitimate provenance ref for
-    // a pre-built artifact (it is the immutable artifact identity, not a secret).
-    // capsule_ref is the scoped handle + version; platform is the install host
-    // as a conservative stand-in until the producer surfaces the build platform.
-    // No requirement graph / state contracts are resolved on the standard
-    // install path yet, so those are left to the finalizer's typed placeholders.
-    let build_facts = InstallBuildFacts {
-        capsule_ref: Some(format!("{scoped_id}@{version}")),
-        source_provenance_ref: Some(content_hash.to_owned()),
-        output_content_hash: Some(content_hash.to_owned()),
-        dependency_output_hash: None,
-        platform: Some(format!(
-            "{}/{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        )),
-        requirement_graph: None,
-        state_contracts: Vec::new(),
-        profile_defaults_hash: None,
-    };
-
     // 3. Finalize: copy build output → immutable revision, persist install-output
     //    records, swap current_revision.
     let finalizer = InstallRevisionFinalizer::new(&store);
@@ -2350,7 +2362,7 @@ fn try_register_lifecycle(
         artifact_manifest_json: None,
         source_provenance_json: None,
         oci_lock_json: None,
-        build_facts: Some(build_facts),
+        build_facts: Some(build_facts_for_install(scoped_id, version, content_hash)),
     }) {
         Ok(o) => o,
         Err(e) => {
