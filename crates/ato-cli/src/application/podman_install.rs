@@ -458,6 +458,58 @@ fn unique_tmp_install_dir(tools_dir: &Path, version: &str) -> PathBuf {
     ))
 }
 
+/// Move a validated temp install dir into its final location, preserving the
+/// previous install until the swap succeeds.
+///
+/// This is **not** a single atomic syscall — there is no portable atomic
+/// directory replace. Instead it minimises the data-loss window: any existing
+/// install is renamed to a sibling backup, the new dir is renamed into place,
+/// and only then is the backup removed. If the promotion rename fails the backup
+/// is restored. So a failure leaves either the new or the previous install in
+/// `final_dir` — never an empty/half-removed directory (the hazard of the old
+/// `remove_dir_all(final_dir)` → `rename` sequence). On all error paths the temp
+/// dir is cleaned up.
+fn promote_install_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), PodmanInstallError> {
+    let name = final_dir.file_name().ok_or_else(|| PodmanInstallError::Extract {
+        message: format!("install dir has no file name: {}", final_dir.display()),
+    })?;
+    let mut backup_name = name.to_os_string();
+    backup_name.push(format!(".bak-{}", std::process::id()));
+    let backup = final_dir.with_file_name(backup_name);
+
+    // Stash any existing install out of the way (don't delete it yet).
+    let had_existing = final_dir.exists();
+    if had_existing {
+        if backup.exists() {
+            let _ = std::fs::remove_dir_all(&backup);
+        }
+        if let Err(e) = std::fs::rename(final_dir, &backup) {
+            let _ = std::fs::remove_dir_all(tmp_dir);
+            return Err(PodmanInstallError::Extract {
+                message: format!("could not stash existing install dir: {e}"),
+            });
+        }
+    }
+
+    // Move the new install into place.
+    if let Err(e) = std::fs::rename(tmp_dir, final_dir) {
+        // Restore the previous install so `final_dir` is never left empty.
+        if had_existing {
+            let _ = std::fs::rename(&backup, final_dir);
+        }
+        let _ = std::fs::remove_dir_all(tmp_dir);
+        return Err(PodmanInstallError::Extract {
+            message: format!("could not promote install dir: {e}"),
+        });
+    }
+
+    // New install is live; drop the backup.
+    if had_existing {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+    Ok(())
+}
+
 /// Install from a verified macOS `.pkg` installer.
 ///
 /// Expands the pkg with `pkgutil --expand-full`, searches the expanded tree
@@ -495,21 +547,8 @@ fn install_from_pkg(
         }
     };
 
-    // Atomic promotion.
-    if final_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(final_dir) {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            return Err(PodmanInstallError::Extract {
-                message: format!("could not clear existing install dir: {e}"),
-            });
-        }
-    }
-    if let Err(e) = std::fs::rename(&tmp_dir, final_dir) {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(PodmanInstallError::Extract {
-            message: format!("could not promote install dir: {e}"),
-        });
-    }
+    // Promote (preserves the previous install if the swap fails).
+    promote_install_dir(&tmp_dir, final_dir)?;
 
     Ok(installed)
 }
@@ -617,9 +656,19 @@ fn install_from_pkg_inner(
     })
 }
 
-/// Expand a macOS `.pkg` file by writing it to a temp file and running
-/// `pkgutil --expand-full`. `pkgutil` is an OS-provided tool (not part of
-/// Xcode CLT) and is always available on macOS.
+/// Removes a path on drop, so a temporary file is cleaned up on *every* exit
+/// path — success, error return, or panic. Used to guarantee the temp `.pkg`
+/// is deleted even when `pkgutil` cannot be launched (a plain `remove_file`
+/// after the call is skipped on early return; that is exactly the kind of leak
+/// that breeds stale-path bugs).
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Prepare the destination path for `pkgutil --expand-full`.
 ///
 /// `pkgutil --expand-full` *creates* `dest` itself and aborts with "File exists"
@@ -627,6 +676,12 @@ fn install_from_pkg_inner(
 /// pre-created `pkg-expanded`). So this creates only the *parent* directory and
 /// clears any stale `dest` left by a previous interrupted attempt — it must NOT
 /// create `dest` itself.
+///
+/// The stale destination may be a directory, a regular file, a symlink, or a
+/// broken symlink. `Path::exists` follows symlinks and silently misses broken
+/// ones, so inspect the path entry itself with `symlink_metadata` and remove
+/// directories with `remove_dir_all`, everything else (files / symlinks) with
+/// `remove_file` (which unlinks the symlink, not its target).
 fn prepare_expand_dest(dest: &Path) -> Result<(), PodmanInstallError> {
     let parent = dest.parent().ok_or_else(|| PodmanInstallError::Extract {
         message: format!("pkg expansion destination has no parent: {}", dest.display()),
@@ -634,46 +689,89 @@ fn prepare_expand_dest(dest: &Path) -> Result<(), PodmanInstallError> {
     std::fs::create_dir_all(parent).map_err(|e| PodmanInstallError::Extract {
         message: format!("could not create pkg expansion parent dir: {e}"),
     })?;
-    if dest.exists() {
-        std::fs::remove_dir_all(dest).map_err(|e| PodmanInstallError::Extract {
-            message: format!("could not clear stale pkg expansion dir: {e}"),
-        })?;
+
+    match std::fs::symlink_metadata(dest) {
+        Ok(meta) => {
+            let removed = if meta.is_dir() {
+                std::fs::remove_dir_all(dest)
+            } else {
+                std::fs::remove_file(dest)
+            };
+            removed.map_err(|e| PodmanInstallError::Extract {
+                message: format!("could not clear stale pkg expansion path: {e}"),
+            })?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(PodmanInstallError::Extract {
+                message: format!("could not inspect pkg expansion path: {e}"),
+            });
+        }
     }
     Ok(())
 }
 
+/// Outcome of invoking the pkg-expansion command. Split from the live `pkgutil`
+/// call so tests can drive `expand_pkg_with_runner` without a real `.pkg`.
+struct ExpandRun {
+    success: bool,
+    status: String,
+    stderr: String,
+}
+
+/// Expand a macOS `.pkg` file by writing it to a temp file and running
+/// `pkgutil --expand-full`. `pkgutil` is an OS-provided tool (not part of
+/// Xcode CLT) and is always available on macOS.
 fn expand_pkg(pkg_bytes: &[u8], dest: &Path) -> Result<(), PodmanInstallError> {
+    expand_pkg_with_runner(pkg_bytes, dest, |pkg_file, dest| {
+        let output = std::process::Command::new("pkgutil")
+            .args([
+                "--expand-full",
+                &pkg_file.to_string_lossy(),
+                &dest.to_string_lossy(),
+            ])
+            .output()
+            .map_err(|e| PodmanInstallError::Extract {
+                message: format!(
+                    "`pkgutil --expand-full` could not be launched: {e}. \
+                     pkgutil is part of macOS and should always be available."
+                ),
+            })?;
+        Ok(ExpandRun {
+            success: output.status.success(),
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    })
+}
+
+/// Core of [`expand_pkg`] with the command invocation injected as `runner`, so
+/// the destination-prep + temp-file-cleanup contract is testable without a real
+/// `pkgutil` / `.pkg`. The temp `.pkg` is removed on every exit path (success,
+/// non-zero exit, or launch error) via [`RemoveOnDrop`].
+fn expand_pkg_with_runner<R>(
+    pkg_bytes: &[u8],
+    dest: &Path,
+    runner: R,
+) -> Result<(), PodmanInstallError>
+where
+    R: FnOnce(&Path, &Path) -> Result<ExpandRun, PodmanInstallError>,
+{
     prepare_expand_dest(dest)?;
 
     let pkg_file = dest.with_extension("tmp.pkg");
     std::fs::write(&pkg_file, pkg_bytes).map_err(|e| PodmanInstallError::Extract {
         message: format!("could not write pkg to disk for expansion: {e}"),
     })?;
+    // Guard ensures the temp pkg is deleted even if `runner` returns a launch
+    // error before we reach any explicit cleanup.
+    let _cleanup = RemoveOnDrop(pkg_file.clone());
 
-    let output = std::process::Command::new("pkgutil")
-        .args([
-            "--expand-full",
-            &pkg_file.to_string_lossy(),
-            &dest.to_string_lossy(),
-        ])
-        .output()
-        .map_err(|e| PodmanInstallError::Extract {
-            message: format!(
-                "`pkgutil --expand-full` could not be launched: {e}. \
-                 pkgutil is part of macOS and should always be available."
-            ),
-        })?;
+    let run = runner(&pkg_file, dest)?;
 
-    let _ = std::fs::remove_file(&pkg_file);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !run.success {
         return Err(PodmanInstallError::Extract {
-            message: format!(
-                "`pkgutil --expand-full` exited {}: {}",
-                output.status,
-                stderr.trim()
-            ),
+            message: format!("`pkgutil --expand-full` exited {}: {}", run.status, run.stderr),
         });
     }
     Ok(())
@@ -823,20 +921,8 @@ fn install_into_temp_then_promote(
         }
     };
 
-    if final_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(final_dir) {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            return Err(PodmanInstallError::Extract {
-                message: format!("could not clear existing install dir: {e}"),
-            });
-        }
-    }
-    if let Err(e) = std::fs::rename(&tmp_dir, final_dir) {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(PodmanInstallError::Extract {
-            message: format!("could not promote install dir: {e}"),
-        });
-    }
+    // Promote (preserves the previous install if the swap fails).
+    promote_install_dir(&tmp_dir, final_dir)?;
 
     Ok(InstalledPodman {
         binary_path: final_binary,
@@ -1723,6 +1809,161 @@ mod tests {
         let b = unique_tmp_install_dir(root.path(), "5.8.2");
         assert_ne!(a, b, "two calls must produce different temp dirs");
         assert!(a.file_name().unwrap().to_string_lossy().starts_with("podman-5.8.2.tmp-"));
+    }
+
+    // A stale destination that is a regular file (not a dir) must also be cleared
+    // — `exists()` + `remove_dir_all` alone would fail with "Not a directory".
+    #[test]
+    fn prepare_expand_dest_clears_stale_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("tmp-install").join("pkg-expanded");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"i am a file, not a dir").unwrap();
+
+        prepare_expand_dest(&dest).unwrap();
+
+        assert!(!dest.exists(), "a stale regular file at dest must be removed");
+        assert!(dest.parent().unwrap().is_dir());
+    }
+
+    // A stale (even broken) symlink at dest must be unlinked — `exists()` follows
+    // symlinks and misses broken ones, so this guards the symlink_metadata path.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_expand_dest_clears_stale_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("tmp-install").join("pkg-expanded");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        // Symlink to a non-existent target → broken symlink.
+        std::os::unix::fs::symlink(root.path().join("does-not-exist"), &dest).unwrap();
+        assert!(std::fs::symlink_metadata(&dest).is_ok(), "symlink entry exists");
+
+        prepare_expand_dest(&dest).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&dest).is_err(),
+            "a stale (broken) symlink at dest must be unlinked"
+        );
+        assert!(dest.parent().unwrap().is_dir());
+    }
+
+    // ── expand_pkg_with_runner contract ───────────────────────────────────────
+
+    // On a successful run: the runner sees an absent dest with an existing parent,
+    // and the temp `.pkg` is cleaned up afterwards.
+    #[test]
+    fn expand_pkg_runner_sees_absent_dest_and_cleans_temp_on_success() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("tmp-install").join("pkg-expanded");
+
+        let mut observed_dest_absent = false;
+        let mut observed_parent_present = false;
+        let mut observed_pkg_written = false;
+        let res = expand_pkg_with_runner(b"fake pkg bytes", &dest, |pkg_file, d| {
+            observed_dest_absent = !d.exists();
+            observed_parent_present = d.parent().unwrap().is_dir();
+            observed_pkg_written = pkg_file.is_file();
+            Ok(ExpandRun { success: true, status: "exit status: 0".into(), stderr: String::new() })
+        });
+
+        assert!(res.is_ok());
+        assert!(observed_dest_absent, "runner must see dest absent (pkgutil creates it)");
+        assert!(observed_parent_present, "runner must see parent present");
+        assert!(observed_pkg_written, "temp pkg must exist while runner runs");
+        assert!(
+            !dest.with_extension("tmp.pkg").exists(),
+            "temp pkg must be removed after success"
+        );
+    }
+
+    // A non-zero exit returns an error AND still removes the temp `.pkg`.
+    #[test]
+    fn expand_pkg_runner_nonzero_exit_errors_and_cleans_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("tmp-install").join("pkg-expanded");
+
+        let res = expand_pkg_with_runner(b"fake", &dest, |_pkg_file, _d| {
+            Ok(ExpandRun {
+                success: false,
+                status: "exit status: 1".into(),
+                stderr: "boom".into(),
+            })
+        });
+
+        assert!(matches!(res, Err(PodmanInstallError::Extract { .. })));
+        assert!(
+            !dest.with_extension("tmp.pkg").exists(),
+            "temp pkg must be removed even on non-zero exit"
+        );
+    }
+
+    // The headline leak fix: a launch error (runner returns Err before any
+    // explicit cleanup) must STILL remove the temp `.pkg`.
+    #[test]
+    fn expand_pkg_runner_launch_error_still_cleans_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("tmp-install").join("pkg-expanded");
+
+        let res = expand_pkg_with_runner(b"fake", &dest, |_pkg_file, _d| {
+            Err(PodmanInstallError::Extract {
+                message: "could not be launched".into(),
+            })
+        });
+
+        assert!(matches!(res, Err(PodmanInstallError::Extract { .. })));
+        assert!(
+            !dest.with_extension("tmp.pkg").exists(),
+            "temp pkg must be removed even when the runner cannot launch the command"
+        );
+    }
+
+    // ── promote_install_dir preserves the previous install ─────────────────────
+
+    // A successful promotion moves tmp into place and leaves no temp/backup dirs.
+    #[test]
+    fn promote_install_dir_swaps_and_leaves_no_residue() {
+        let root = tempfile::tempdir().unwrap();
+        let tmp = root.path().join("podman-5.8.2.tmp-1-0");
+        let final_dir = root.path().join("podman-5.8.2");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("marker"), b"new").unwrap();
+
+        promote_install_dir(&tmp, &final_dir).unwrap();
+
+        assert!(final_dir.join("marker").is_file(), "new install is live");
+        assert!(!tmp.exists(), "temp dir consumed by rename");
+        // No leftover backup siblings.
+        let leftovers: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no backup dir should remain");
+    }
+
+    // Promoting over an existing install replaces it; the old contents are gone
+    // and the new contents are live (no empty-window data loss).
+    #[test]
+    fn promote_install_dir_replaces_existing_install() {
+        let root = tempfile::tempdir().unwrap();
+        let tmp = root.path().join("podman-5.8.2.tmp-1-1");
+        let final_dir = root.path().join("podman-5.8.2");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("new-marker"), b"new").unwrap();
+        std::fs::create_dir_all(&final_dir).unwrap();
+        std::fs::write(final_dir.join("old-marker"), b"old").unwrap();
+
+        promote_install_dir(&tmp, &final_dir).unwrap();
+
+        assert!(final_dir.join("new-marker").is_file(), "new contents live");
+        assert!(!final_dir.join("old-marker").exists(), "old contents replaced");
+        assert!(!tmp.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
+            .collect();
+        assert!(leftovers.is_empty(), "backup removed after successful swap");
     }
 
     // ── Stale install detection ───────────────────────────────────────────────
