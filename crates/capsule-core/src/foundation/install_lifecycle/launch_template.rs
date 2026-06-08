@@ -37,6 +37,9 @@ use serde::{Deserialize, Serialize};
 
 use super::hashing::canonical_hash;
 use super::ids::InstallRevisionId;
+use super::records::{
+    RequirementGraphCompletenessPolicy, RequirementGraphSnapshot, RequirementGraphSnapshotHash,
+};
 
 // ── Runner class / compatibility class ───────────────────────────────────────
 
@@ -213,13 +216,20 @@ impl CompatibilityIndex {
 pub struct LaunchTemplateKey {
     pub install_revision_id: InstallRevisionId,
     pub profile_hash: String,
-    /// Snapshot-level requirement-graph identity
+    /// Validated snapshot-level requirement-graph identity
     /// ([`RequirementGraphSnapshot::requirement_graph_snapshot_hash`](super::records::RequirementGraphSnapshot::requirement_graph_snapshot_hash)):
     /// graph content + profile defaults + completeness. Using the snapshot hash
     /// rather than the content-only `graph_hash` means a `Partial` requirement
     /// graph never yields the same launch-template identity as a `Complete` one
     /// (#581 wave 3B).
-    pub requirement_graph_snapshot_hash: String,
+    ///
+    /// The field is a [`RequirementGraphSnapshotHash`] newtype (#581 wave 3C),
+    /// so it cannot hold an empty (pre-3B) or non-`blake3:` value — construct it
+    /// via [`LaunchTemplateKey::from_inputs`] or
+    /// [`RequirementGraphSnapshot::validate_for_launch_template`], never from a
+    /// raw `graph_hash`. `#[serde(transparent)]` keeps `key_hash()` byte-identical
+    /// to the pre-3C `String` field.
+    pub requirement_graph_snapshot_hash: RequirementGraphSnapshotHash,
     pub binding_set_hash: String,
     pub network_policy_hash: String,
     pub capability_policy_hash: String,
@@ -227,7 +237,52 @@ pub struct LaunchTemplateKey {
     pub runner_compatibility_class: RunnerCompatibilityClass,
 }
 
+/// Inputs to the safe [`LaunchTemplateKey::from_inputs`] constructor (#581 wave 3C).
+///
+/// Carries the whole [`RequirementGraphSnapshot`] (not a pre-extracted hash
+/// string) plus the completeness policy, so the constructor — not the caller —
+/// extracts and validates the requirement-graph snapshot identity. This makes it
+/// impossible to pass a raw `graph_hash` or an empty/pre-3B hash.
+pub struct LaunchTemplateKeyInputs {
+    pub install_revision_id: InstallRevisionId,
+    pub profile_hash: String,
+    pub requirement_graph: RequirementGraphSnapshot,
+    pub binding_set_hash: String,
+    pub network_policy_hash: String,
+    pub capability_policy_hash: String,
+    pub state_contract_hash: String,
+    pub runner_compatibility_class: RunnerCompatibilityClass,
+    pub completeness_policy: RequirementGraphCompletenessPolicy,
+}
+
 impl LaunchTemplateKey {
+    /// Safely construct a key, deriving the requirement-graph identity from the
+    /// snapshot under a completeness policy (#581 wave 3C).
+    ///
+    /// This is the blessed construction path: it
+    /// - reads the snapshot's validated `requirement_graph_snapshot_hash`
+    ///   (never the content-only `graph_hash`),
+    /// - rejects an empty (pre-3B) or malformed snapshot hash, and
+    /// - rejects a `Partial` graph when the policy is `RequireComplete`.
+    ///
+    /// Repair a pre-3B snapshot first with
+    /// [`RequirementGraphSnapshot::ensure_snapshot_hash`].
+    pub fn from_inputs(inputs: LaunchTemplateKeyInputs) -> Result<Self> {
+        let requirement_graph_snapshot_hash = inputs
+            .requirement_graph
+            .validate_for_launch_template(inputs.completeness_policy)?;
+        Ok(Self {
+            install_revision_id: inputs.install_revision_id,
+            profile_hash: inputs.profile_hash,
+            requirement_graph_snapshot_hash,
+            binding_set_hash: inputs.binding_set_hash,
+            network_policy_hash: inputs.network_policy_hash,
+            capability_policy_hash: inputs.capability_policy_hash,
+            state_contract_hash: inputs.state_contract_hash,
+            runner_compatibility_class: inputs.runner_compatibility_class,
+        })
+    }
+
     /// Stable `blake3:<hex>` digest of the key, used for cache lookup / equality
     /// of templates. Two launches with identical install-time inputs produce the
     /// same digest; changing any stable input changes it.
@@ -314,7 +369,10 @@ mod tests {
         LaunchTemplateKey {
             install_revision_id: InstallRevisionId::new("rev_aaaa"),
             profile_hash: "blake3:prof".into(),
-            requirement_graph_snapshot_hash: "blake3:graphsnap".into(),
+            requirement_graph_snapshot_hash: RequirementGraphSnapshotHash::parse(
+                "blake3:graphsnap",
+            )
+            .unwrap(),
             binding_set_hash: "blake3:bind".into(),
             network_policy_hash: "blake3:net".into(),
             capability_policy_hash: "blake3:cap".into(),
@@ -365,7 +423,8 @@ mod tests {
         );
 
         let mut k = sample_key();
-        k.requirement_graph_snapshot_hash = "blake3:graphsnap2".into();
+        k.requirement_graph_snapshot_hash =
+            RequirementGraphSnapshotHash::parse("blake3:graphsnap2").unwrap();
         assert_ne!(
             base,
             k.key_hash().unwrap(),
@@ -397,46 +456,201 @@ mod tests {
         );
     }
 
-    // ── #581 wave 3B: Partial and Complete graphs are not key-equivalent ──────
+    // ── #581 wave 3B/3C: Partial and Complete graphs are not key-equivalent ──
 
-    #[test]
-    fn partial_and_complete_graph_snapshots_are_not_launch_template_equivalent() {
-        use crate::foundation::install_lifecycle::records::{
-            RequirementGraph, RequirementGraphCompleteness, RequirementGraphCompletenessReason,
-            RequirementGraphSnapshot,
-        };
+    use crate::foundation::install_lifecycle::records::{
+        RequirementGraph, RequirementGraphCompleteness, RequirementGraphCompletenessPolicy,
+        RequirementGraphCompletenessReason, RequirementGraphSnapshot,
+        RequirementGraphSnapshotIdentityError,
+    };
 
-        // Same graph content + profile defaults; only completeness differs.
+    fn graph_snapshot(completeness: RequirementGraphCompleteness) -> RequirementGraphSnapshot {
         let graph = RequirementGraph {
             graph_id: "g".into(),
             nodes: vec![],
             edges: vec![],
         };
-        let partial = RequirementGraphSnapshot::new("s", graph.clone(), None, "blake3:prof")
+        RequirementGraphSnapshot::new("s", graph, None, "blake3:prof")
             .unwrap()
-            .with_completeness(RequirementGraphCompleteness::Partial {
-                reasons: vec![RequirementGraphCompletenessReason::ManifestFactsUnavailable],
-            })
-            .unwrap();
-        let complete = RequirementGraphSnapshot::new("s", graph, None, "blake3:prof")
+            .with_completeness(completeness)
             .unwrap()
-            .with_completeness(RequirementGraphCompleteness::Complete)
-            .unwrap();
+    }
+
+    fn inputs_for(
+        requirement_graph: RequirementGraphSnapshot,
+        completeness_policy: RequirementGraphCompletenessPolicy,
+    ) -> LaunchTemplateKeyInputs {
+        LaunchTemplateKeyInputs {
+            install_revision_id: InstallRevisionId::new("rev_aaaa"),
+            profile_hash: "blake3:prof".into(),
+            requirement_graph,
+            binding_set_hash: "blake3:bind".into(),
+            network_policy_hash: "blake3:net".into(),
+            capability_policy_hash: "blake3:cap".into(),
+            state_contract_hash: "blake3:state".into(),
+            runner_compatibility_class: RunnerCompatibilityClass::new(
+                "managed_runner/linux-x86_64",
+            ),
+            completeness_policy,
+        }
+    }
+
+    #[test]
+    fn partial_and_complete_graph_snapshots_are_not_launch_template_equivalent() {
+        let partial = graph_snapshot(RequirementGraphCompleteness::Partial {
+            reasons: vec![RequirementGraphCompletenessReason::ManifestFactsUnavailable],
+        });
+        let complete = graph_snapshot(RequirementGraphCompleteness::Complete);
 
         // Content-only graph_hash is identical (so keying on it alone would be unsafe).
         assert_eq!(partial.graph_hash, complete.graph_hash);
 
-        let key_for = |snapshot_hash: &str| LaunchTemplateKey {
-            requirement_graph_snapshot_hash: snapshot_hash.into(),
-            ..sample_key()
-        };
-        let partial_key = key_for(&partial.requirement_graph_snapshot_hash);
-        let complete_key = key_for(&complete.requirement_graph_snapshot_hash);
+        // Built via the safe constructor under AllowPartial for both.
+        let partial_key = LaunchTemplateKey::from_inputs(inputs_for(
+            partial,
+            RequirementGraphCompletenessPolicy::AllowPartial,
+        ))
+        .unwrap();
+        let complete_key = LaunchTemplateKey::from_inputs(inputs_for(
+            complete,
+            RequirementGraphCompletenessPolicy::AllowPartial,
+        ))
+        .unwrap();
 
         assert_ne!(
             partial_key.key_hash().unwrap(),
             complete_key.key_hash().unwrap(),
             "a Partial requirement graph must not be launch-template-equivalent to a Complete one"
+        );
+    }
+
+    // ── #581 wave 3C: safe constructor guards ─────────────────────────────────
+
+    #[test]
+    fn from_inputs_uses_snapshot_hash_not_graph_hash() {
+        let complete = graph_snapshot(RequirementGraphCompleteness::Complete);
+        // The snapshot hash differs from the content-only graph_hash.
+        assert_ne!(
+            complete.requirement_graph_snapshot_hash,
+            complete.graph_hash
+        );
+        let expected_snapshot_hash = complete.requirement_graph_snapshot_hash.clone();
+        let graph_hash = complete.graph_hash.clone();
+
+        let key = LaunchTemplateKey::from_inputs(inputs_for(
+            complete,
+            RequirementGraphCompletenessPolicy::RequireComplete,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            key.requirement_graph_snapshot_hash.as_str(),
+            expected_snapshot_hash,
+            "constructor must use the snapshot hash"
+        );
+        assert_ne!(
+            key.requirement_graph_snapshot_hash.as_str(),
+            graph_hash,
+            "constructor must NOT use the content-only graph_hash"
+        );
+    }
+
+    #[test]
+    fn from_inputs_rejects_partial_when_complete_required() {
+        let partial = graph_snapshot(RequirementGraphCompleteness::Partial {
+            reasons: vec![RequirementGraphCompletenessReason::ManifestFactsUnavailable],
+        });
+        let err = LaunchTemplateKey::from_inputs(inputs_for(
+            partial,
+            RequirementGraphCompletenessPolicy::RequireComplete,
+        ))
+        .unwrap_err();
+        assert!(
+            err.downcast_ref::<RequirementGraphSnapshotIdentityError>()
+                .is_some_and(|e| matches!(
+                    e,
+                    RequirementGraphSnapshotIdentityError::PartialGraphRejected { .. }
+                )),
+            "RequireComplete must reject Partial with a typed reason, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_inputs_accepts_partial_under_allow_partial() {
+        let partial = graph_snapshot(RequirementGraphCompleteness::Partial {
+            reasons: vec![RequirementGraphCompletenessReason::ManifestFactsUnavailable],
+        });
+        let snapshot_hash = partial.requirement_graph_snapshot_hash.clone();
+        let key = LaunchTemplateKey::from_inputs(inputs_for(
+            partial,
+            RequirementGraphCompletenessPolicy::AllowPartial,
+        ))
+        .unwrap();
+        assert_eq!(key.requirement_graph_snapshot_hash.as_str(), snapshot_hash);
+    }
+
+    #[test]
+    fn from_inputs_accepts_complete_under_require_complete() {
+        let complete = graph_snapshot(RequirementGraphCompleteness::Complete);
+        assert!(
+            LaunchTemplateKey::from_inputs(inputs_for(
+                complete,
+                RequirementGraphCompletenessPolicy::RequireComplete,
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn from_inputs_rejects_empty_pre_3b_snapshot_hash() {
+        let mut pre_3b = graph_snapshot(RequirementGraphCompleteness::Complete);
+        pre_3b.requirement_graph_snapshot_hash = String::new();
+        let err = LaunchTemplateKey::from_inputs(inputs_for(
+            pre_3b,
+            RequirementGraphCompletenessPolicy::AllowPartial,
+        ))
+        .unwrap_err();
+        assert!(
+            err.downcast_ref::<RequirementGraphSnapshotIdentityError>()
+                .is_some_and(|e| matches!(
+                    e,
+                    RequirementGraphSnapshotIdentityError::MissingSnapshotHash
+                )),
+            "empty pre-3B snapshot hash must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_inputs_rejects_invalid_hash_format() {
+        let mut bad = graph_snapshot(RequirementGraphCompleteness::Complete);
+        bad.requirement_graph_snapshot_hash = "not-a-blake3-hash".into();
+        let err = LaunchTemplateKey::from_inputs(inputs_for(
+            bad,
+            RequirementGraphCompletenessPolicy::AllowPartial,
+        ))
+        .unwrap_err();
+        assert!(
+            err.downcast_ref::<RequirementGraphSnapshotIdentityError>()
+                .is_some_and(|e| matches!(
+                    e,
+                    RequirementGraphSnapshotIdentityError::InvalidSnapshotHashFormat { .. }
+                )),
+            "non-blake3 snapshot hash must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_inputs_accepts_repaired_pre_3b_snapshot() {
+        let mut pre_3b = graph_snapshot(RequirementGraphCompleteness::Complete);
+        pre_3b.requirement_graph_snapshot_hash = String::new();
+        // Explicit repair, then the safe constructor accepts it.
+        pre_3b.ensure_snapshot_hash().unwrap();
+        assert!(
+            LaunchTemplateKey::from_inputs(inputs_for(
+                pre_3b,
+                RequirementGraphCompletenessPolicy::RequireComplete,
+            ))
+            .is_ok()
         );
     }
 

@@ -1261,6 +1261,29 @@ mod tests {
                 && graph.requirement_graph_snapshot_hash.starts_with("blake3:"),
             "persisted requirement graph must carry a snapshot-level hash"
         );
+        // #581 wave 3C: the persisted snapshot hash is a VALID launch-template
+        // identity (the standard install path persists a usable identity, even
+        // though it is Partial — AllowPartial accepts it, RequireComplete rejects).
+        assert!(
+            graph.validated_snapshot_hash().is_ok(),
+            "standard install must persist a valid (validatable) snapshot hash"
+        );
+        assert!(
+            graph
+                .validate_for_launch_template(
+                    crate::foundation::install_lifecycle::records::RequirementGraphCompletenessPolicy::AllowPartial
+                )
+                .is_ok(),
+            "standard install's Partial graph is acceptable under AllowPartial"
+        );
+        assert!(
+            graph
+                .validate_for_launch_template(
+                    crate::foundation::install_lifecycle::records::RequirementGraphCompletenessPolicy::RequireComplete
+                )
+                .is_err(),
+            "standard install's Partial graph is rejected under RequireComplete"
+        );
 
         // Test 8: revision.json embeds the same graph (incl. snapshot hash) as
         // the standalone file.
