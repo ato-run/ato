@@ -102,6 +102,11 @@ pub enum PrepareSessionCommandBuildError {
     /// The command-request id is empty.
     #[error("command request id is empty")]
     CommandRequestIdMissing,
+    /// The materialization has no pinned runner (both `selected_runner_class` and
+    /// `selected_runner_ref` are absent). `PrepareSession` is the post-placement
+    /// boundary, so a pre-placement materialization cannot be prepared.
+    #[error("materialization has no pinned runner (placement has not selected one)")]
+    MaterializationRunnerNotPinned,
     /// The requested runner ref does not match the runner the materialization
     /// already pinned at placement time.
     #[error(
@@ -131,7 +136,20 @@ pub fn build_prepare_session_command(
         .validate()
         .map_err(PrepareSessionCommandBuildError::InvalidMaterialization)?;
 
-    // 2. Required command metadata.
+    // 2. The materialization must come from completed placement: both the runner
+    //    class and ref must be pinned. `validate()` already rejected the
+    //    one-present-one-absent case (RunnerSelectionInconsistent), so the only
+    //    remaining unpinned shape here is both-absent — a pre-placement record
+    //    that cannot be prepared.
+    let record_runner_ref = match (
+        materialization.selected_runner_ref.as_deref(),
+        materialization.selected_runner_class,
+    ) {
+        (Some(record_runner), Some(_class)) => record_runner,
+        _ => return Err(PrepareSessionCommandBuildError::MaterializationRunnerNotPinned),
+    };
+
+    // 3. Required command metadata.
     if runner_ref.is_empty() {
         return Err(PrepareSessionCommandBuildError::RunnerRefMissing);
     }
@@ -139,18 +157,15 @@ pub fn build_prepare_session_command(
         return Err(PrepareSessionCommandBuildError::CommandRequestIdMissing);
     }
 
-    // 3. The requested runner must match the runner the record pinned (if any).
-    //    `validate()` already guaranteed class/ref presence is consistent.
-    if let Some(record_runner) = materialization.selected_runner_ref.as_deref()
-        && record_runner != runner_ref
-    {
+    // 4. The requested runner must match the runner the record pinned.
+    if record_runner_ref != runner_ref {
         return Err(PrepareSessionCommandBuildError::RunnerRefMismatch {
-            record: record_runner.to_owned(),
+            record: record_runner_ref.to_owned(),
             requested: runner_ref,
         });
     }
 
-    // 4. Build the reference-only payload. The plan ref is content-addressed by
+    // 5. Build the reference-only payload. The plan ref is content-addressed by
     //    `capsule_instance_key`, so it changes whenever the materialization
     //    identity (incl. projection digests) changes.
     let materialization_plan = MaterializationPlanRef::new(format!(
@@ -308,6 +323,66 @@ mod tests {
             matches!(
                 err,
                 PrepareSessionCommandBuildError::RunnerRefMismatch { .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    // ── Rejects a materialization whose runner was not pinned by placement ───
+
+    #[test]
+    fn prepare_session_builder_rejects_materialization_without_selected_runner() {
+        // Both runner ref and class absent: pre-placement record. validate()
+        // accepts both-absent as consistent, so the builder's stronger pinned
+        // check is what must fire.
+        let mut rec = materialization("ses_unpinned", sample_digests());
+        rec.selected_runner_ref = None;
+        rec.selected_runner_class = None;
+        assert!(rec.validate().is_ok(), "both-absent is structurally valid");
+
+        let err = build_prepare_session_command(build_input(rec)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PrepareSessionCommandBuildError::MaterializationRunnerNotPinned
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn prepare_session_builder_rejects_materialization_without_selected_runner_class() {
+        // Ref present, class absent: a half-pinned record. validate() rejects this
+        // as RunnerSelectionInconsistent before the pinned check.
+        let mut rec = materialization("ses_noclass", sample_digests());
+        rec.selected_runner_class = None;
+
+        let err = build_prepare_session_command(build_input(rec)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PrepareSessionCommandBuildError::InvalidMaterialization(
+                    MaterializationRecordInvalidReason::RunnerSelectionInconsistent
+                )
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn prepare_session_builder_rejects_materialization_without_selected_runner_ref() {
+        // Class present, ref absent: the other half-pinned shape, also rejected by
+        // validate() as RunnerSelectionInconsistent.
+        let mut rec = materialization("ses_noref", sample_digests());
+        rec.selected_runner_ref = None;
+
+        let err = build_prepare_session_command(build_input(rec)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PrepareSessionCommandBuildError::InvalidMaterialization(
+                    MaterializationRecordInvalidReason::RunnerSelectionInconsistent
+                )
             ),
             "got {err:?}"
         );
