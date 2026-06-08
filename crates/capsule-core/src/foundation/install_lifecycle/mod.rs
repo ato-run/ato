@@ -29,16 +29,17 @@ pub use launch_reuse::{
 };
 pub use launch_template::{
     BindingAssignmentSet, BindingAssignmentSource, CompatibilityIndex, LaunchTemplate,
-    LaunchTemplateKey, RequirementBinding, RequirementBindingKind, RunnerClass,
-    RunnerCompatibilityClass,
+    LaunchTemplateKey, LaunchTemplateKeyInputs, RequirementBinding, RequirementBindingKind,
+    RunnerClass, RunnerCompatibilityClass,
 };
 pub use materialization::{LaunchMaterializationRecord, ProjectionDigest};
 pub use records::{
     ArtifactBuild, ArtifactBuildIdentityInputs, InstallReceipt, InstallRevision, RequirementGraph,
-    RequirementGraphCompleteness, RequirementGraphCompletenessReason, RequirementGraphEdge,
-    RequirementGraphNode, RequirementGraphSnapshot, RequirementKind, RequirementRelation,
-    StateContractSnapshot, combined_state_contract_hash, compute_requirement_graph_snapshot_hash,
-    derive_artifact_build_id,
+    RequirementGraphCompleteness, RequirementGraphCompletenessPolicy,
+    RequirementGraphCompletenessReason, RequirementGraphEdge, RequirementGraphNode,
+    RequirementGraphSnapshot, RequirementGraphSnapshotHash, RequirementGraphSnapshotIdentityError,
+    RequirementKind, RequirementRelation, StateContractSnapshot, combined_state_contract_hash,
+    compute_requirement_graph_snapshot_hash, derive_artifact_build_id,
 };
 pub use requirement_graph::{
     ManifestRequirementFacts, NetworkRequirementFact, NormalizedProfile,
