@@ -39,7 +39,7 @@ pub use launch_template::{
     BindingAssignmentSet, BindingAssignmentSource, CompatibilityIndex,
     CompatibilityIndexCompleteness, CompatibilityIndexCompletenessReason, LaunchTemplate,
     LaunchTemplateKey, LaunchTemplateKeyInputs, RequirementBinding, RequirementBindingKind,
-    RunnerClass, RunnerCompatibilityClass,
+    RunnerClass, RunnerCompatibilityClass, RunnerCompatibilityClassParseError,
 };
 pub use launch_template_builder::{
     LaunchTemplateBuildError, LaunchTemplateBuildInput, LaunchTemplateBuildOutput,
