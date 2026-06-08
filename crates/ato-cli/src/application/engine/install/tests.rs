@@ -3252,10 +3252,10 @@ fn build_facts_for_install_maps_fields() {
     );
     assert!(facts.platform.is_some(), "platform stand-in is recorded");
     assert!(facts.dependency_output_hash.is_none());
-    // Not resolved on the standard install path yet.
+    // Not resolved on the standard install path yet; the finalizer compiles a
+    // partial requirement graph from available facts (no caller-supplied graph).
     assert!(facts.requirement_graph.is_none());
     assert!(facts.state_contracts.is_empty());
-    assert!(facts.profile_defaults_hash.is_none());
 }
 
 #[test]
@@ -3328,5 +3328,36 @@ fn build_facts_for_install_persist_and_read_back() {
     assert_eq!(
         build.output_ref.as_deref(),
         Some(format!("/artifacts/blake3/{}", "a".repeat(64)).as_str())
+    );
+
+    // #581 wave 3A: the persisted requirement graph is the compiled, explicitly
+    // partial graph (not the old opaque minimal placeholder).
+    let graph = store
+        .read_requirement_graph_snapshot(&app, &profile, &out.install_revision_id)
+        .unwrap();
+    assert!(
+        graph.snapshot_id.starts_with("reqgraph:") && !graph.snapshot_id.contains("minimal"),
+        "snapshot id: {}",
+        graph.snapshot_id
+    );
+    assert!(
+        !graph.completeness.is_complete(),
+        "standard install path is partial"
+    );
+    assert!(
+        graph
+            .graph
+            .nodes
+            .iter()
+            .any(|n| n.id == "req:profile-defaults"),
+        "profile-defaults node compiled from the launch profile"
+    );
+    assert!(
+        graph
+            .graph
+            .nodes
+            .iter()
+            .any(|n| n.id == "req:artifact-output"),
+        "artifact-output node compiled from the build facts"
     );
 }
