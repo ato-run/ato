@@ -136,6 +136,13 @@ pub(crate) enum PrepareError {
     VerifyFailed(String),
     /// Podman preparation is not supported on this platform.
     Unsupported(String),
+    /// Podman installed fine, but this host cannot start a Podman *machine*
+    /// because the platform virtualization backend is unavailable — e.g. macOS
+    /// `vfkit` is present and runnable but Apple's Virtualization.framework is
+    /// not usable (no `kern.hv_support`, as in a nested/virtual-macOS environment
+    /// without nested virtualization). This is an environment limitation, not an
+    /// Ato packaging bug; carries the optional underlying message.
+    RuntimeVirtualizationUnavailable(Option<String>),
 }
 
 impl std::fmt::Display for PrepareError {
@@ -172,6 +179,20 @@ impl std::fmt::Display for PrepareError {
             }
             Self::VerifyFailed(m) => write!(f, "podman readiness check failed: {m}"),
             Self::Unsupported(m) => write!(f, "{m}"),
+            Self::RuntimeVirtualizationUnavailable(detail) => {
+                write!(
+                    f,
+                    "Podman installed successfully, but this macOS environment cannot start a \
+                     Podman machine: hardware virtualization (Apple Virtualization.framework) is \
+                     not available here. This usually means a virtual macOS without nested \
+                     virtualization. Run on a physical Mac, or a VM host that exposes nested \
+                     virtualization, then re-run runtime setup."
+                )?;
+                if let Some(detail) = detail {
+                    write!(f, " (underlying error: {detail})")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -292,6 +313,15 @@ trait PrepareEnv {
     fn missing_machine_helpers(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Whether this host can actually start a Podman *machine* — i.e. the
+    /// platform's hardware-virtualization backend is usable. On macOS this is
+    /// `kern.hv_support == 1` (Apple Virtualization.framework / vfkit). Default
+    /// `true` so non-macOS hosts and tests are unaffected; only a host that can
+    /// definitively answer "no" should return false, so we never block a host we
+    /// can't assess.
+    fn host_virtualization_available(&self) -> bool {
+        true
+    }
 }
 
 /// Real host environment: spawns processes, resolving podman through PR #436's
@@ -373,6 +403,27 @@ impl PrepareEnv for SystemPrepareEnv {
             }
             Err(_) => Vec::new(),
         }
+    }
+
+    fn host_virtualization_available(&self) -> bool {
+        host_virtualization_available()
+    }
+}
+
+/// Whether hardware virtualization is usable on this host. On macOS reads
+/// `sysctl -n kern.hv_support` (1 = usable). On any non-macOS host, or if the
+/// probe can't run / is unparseable, returns `true` so we never block a host we
+/// cannot definitively assess (the actual `machine init/start` still guards us).
+fn host_virtualization_available() -> bool {
+    if std::env::consts::OS != "macos" {
+        return true;
+    }
+    match Command::new("sysctl").args(["-n", "kern.hv_support"]).output() {
+        Ok(out) if out.status.success() => {
+            // "1" = supported, "0" = not. Anything unexpected → don't block.
+            String::from_utf8_lossy(&out.stdout).trim() != "0"
+        }
+        _ => true,
     }
 }
 
@@ -655,6 +706,7 @@ fn prepare_machine<E: PrepareEnv, R: PrepareReporter>(
         MachinePlan::UseAto | MachinePlan::UseDefault => {}
         MachinePlan::StartAto => {
             ensure_machine_helpers(env, reporter)?;
+            ensure_virtualization_available(env)?;
             start_ato_machine(env, reporter)?;
         }
         MachinePlan::InitAndStartAto => {
@@ -662,6 +714,11 @@ fn prepare_machine<E: PrepareEnv, R: PrepareReporter>(
             // partial #577-era install) reaches a working machine, not an opaque
             // mid-init `could not find "gvproxy"`.
             ensure_machine_helpers(env, reporter)?;
+            // Then make sure the host can actually boot a VM before we try —
+            // otherwise a virtual macOS without nested virtualization fails deep
+            // inside `machine init` (vfkit can't reach Virtualization.framework)
+            // and the cause is easy to misread as an Ato packaging bug.
+            ensure_virtualization_available(env)?;
             init_ato_machine(env, reporter)?;
             start_ato_machine(env, reporter)?;
         }
@@ -739,6 +796,65 @@ fn helper_name_in_machine_error(message: &str) -> Option<String> {
         .map(|helper| helper.to_string())
 }
 
+/// Preflight: refuse to attempt `machine init/start` when the host's hardware
+/// virtualization backend is unavailable, so a virtual-macOS-without-nested-virt
+/// environment gets a clear, typed [`PrepareError::RuntimeVirtualizationUnavailable`]
+/// instead of an opaque mid-init vfkit failure that reads like a packaging bug.
+fn ensure_virtualization_available<E: PrepareEnv>(env: &E) -> Result<(), PrepareError> {
+    if env.host_virtualization_available() {
+        return Ok(());
+    }
+    Err(PrepareError::RuntimeVirtualizationUnavailable(None))
+}
+
+/// Whether a `podman machine` error indicates the platform virtualization layer
+/// is the problem (vfkit/Virtualization.framework/hypervisor) rather than a
+/// missing helper or generic failure. Defense-in-depth behind the preflight: a
+/// host can report `kern.hv_support == 1` yet still fail to boot a VM (e.g.
+/// restricted nested virt), and that should still read as an environment limit.
+fn is_virtualization_machine_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    // vfkit/VZ-specific and generic virtualization-unavailable markers. Guard
+    // against the helper-missing case (handled separately) so a `could not find
+    // "vfkit"` packaging error is NOT misclassified as a virtualization limit.
+    if lower.contains("could not find") || lower.contains("not find") {
+        return false;
+    }
+    [
+        "virtualization.framework",
+        "hv_support",
+        "hypervisor",
+        "vz_error",
+        "vzerror",
+        "operation not permitted",
+        "unsupported",
+        "failed to start vm",
+        "nested virtual",
+        "no such hypervisor",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        // vfkit named together with a failure (but not a "could not find" miss).
+        || (lower.contains("vfkit") && (lower.contains("exited") || lower.contains("failed")))
+}
+
+/// Map a failed `machine init/start` message to the most specific typed error:
+/// a missing helper → [`PrepareError::RuntimeProviderIncomplete`]; a
+/// virtualization-backend problem → [`PrepareError::RuntimeVirtualizationUnavailable`];
+/// otherwise `fallback` (init- or start-specific).
+fn classify_machine_error(
+    message: String,
+    fallback: impl FnOnce(String) -> PrepareError,
+) -> PrepareError {
+    if let Some(helper) = helper_name_in_machine_error(&message) {
+        return PrepareError::RuntimeProviderIncomplete { helper };
+    }
+    if is_virtualization_machine_error(&message) {
+        return PrepareError::RuntimeVirtualizationUnavailable(Some(message));
+    }
+    fallback(message)
+}
+
 fn init_ato_machine<E: PrepareEnv, R: PrepareReporter>(
     env: &E,
     reporter: &R,
@@ -751,11 +867,10 @@ fn init_ato_machine<E: PrepareEnv, R: PrepareReporter>(
         .run_podman(&["machine", "init", ATO_PODMAN_MACHINE_NAME])
         .map_err(|err| PrepareError::MachineInitFailed(err.to_string()))?;
     if !out.success() {
-        let message = out.message();
-        if let Some(helper) = helper_name_in_machine_error(&message) {
-            return Err(PrepareError::RuntimeProviderIncomplete { helper });
-        }
-        return Err(PrepareError::MachineInitFailed(message));
+        return Err(classify_machine_error(
+            out.message(),
+            PrepareError::MachineInitFailed,
+        ));
     }
     Ok(())
 }
@@ -772,11 +887,10 @@ fn start_ato_machine<E: PrepareEnv, R: PrepareReporter>(
         .run_podman(&["machine", "start", ATO_PODMAN_MACHINE_NAME])
         .map_err(|err| PrepareError::MachineStartFailed(err.to_string()))?;
     if !out.success() {
-        let message = out.message();
-        if let Some(helper) = helper_name_in_machine_error(&message) {
-            return Err(PrepareError::RuntimeProviderIncomplete { helper });
-        }
-        return Err(PrepareError::MachineStartFailed(message));
+        return Err(classify_machine_error(
+            out.message(),
+            PrepareError::MachineStartFailed,
+        ));
     }
     Ok(())
 }
@@ -904,6 +1018,9 @@ mod tests {
         managed_install: Option<Result<(), PodmanInstallError>>,
         /// Force the managed path (skip Homebrew even when brew is present).
         force_managed: bool,
+        /// Whether the fake host's virtualization backend is usable. Default true
+        /// so existing machine tests are unaffected.
+        virtualization_available: bool,
         /// Helper binaries the resolved Podman is missing (drives the machine
         /// preflight/repair). Empty = complete runtime. A successful Ato-managed
         /// (re)install clears it, simulating the bundle's helpers being placed.
@@ -922,9 +1039,17 @@ mod tests {
                 managed_available: false,
                 managed_install: None,
                 force_managed: false,
+                virtualization_available: true,
                 missing_helpers: RefCell::new(Vec::new()),
                 calls: RefCell::new(Vec::new()),
             }
+        }
+
+        /// Model a host whose virtualization backend is unavailable (e.g. a
+        /// virtual macOS without nested virtualization).
+        fn with_virtualization_available(mut self, available: bool) -> Self {
+            self.virtualization_available = available;
+            self
         }
 
         /// Configure the machine-helper preflight/repair: which required helpers
@@ -1069,6 +1194,10 @@ mod tests {
 
         fn missing_machine_helpers(&self) -> Vec<String> {
             self.missing_helpers.borrow().clone()
+        }
+
+        fn host_virtualization_available(&self) -> bool {
+            self.virtualization_available
         }
     }
 
@@ -1444,6 +1573,73 @@ mod tests {
                 "podman --connection ato-podman info --format json",
             ]
         );
+    }
+
+    #[test]
+    fn no_virtualization_blocks_machine_init_with_typed_error() {
+        // vfkit etc. are present (no missing helpers), but the host can't run a
+        // VM. Preflight must fail with the typed virtualization error BEFORE
+        // attempting `machine init`, so it never reads as a packaging bug.
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_virtualization_available(false)
+            .with_podman("machine list --format json", 0, "[]");
+        let reporter = RecordingReporter::default();
+        let err = prepare_podman(&env, &reporter).expect_err("must refuse without virtualization");
+        assert!(
+            matches!(err, PrepareError::RuntimeVirtualizationUnavailable(_)),
+            "expected RuntimeVirtualizationUnavailable, got {err:?}"
+        );
+        // We must NOT have attempted to boot a VM.
+        let calls = env.calls();
+        assert!(
+            !calls.iter().any(|c| c.contains("machine init")),
+            "machine init must not run when virtualization is unavailable: {calls:?}"
+        );
+        // Message is environment-oriented, not "Ato packaging bug".
+        let msg = err.to_string();
+        assert!(msg.contains("virtualization"), "{msg}");
+        assert!(msg.contains("physical Mac"), "{msg}");
+        assert!(!err.is_retryable(), "environment limit is not a simple retry");
+    }
+
+    #[test]
+    fn machine_init_virtualization_error_is_reclassified() {
+        // Even when the preflight passed (host reports virtualization), a vfkit /
+        // Virtualization.framework failure during init must surface as the typed
+        // virtualization error, not a generic MachineInitFailed.
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_podman("machine list --format json", 0, "[]")
+            .with_podman(
+                "machine init ato-podman",
+                1,
+                "vfkit exited unexpectedly: Virtualization.framework: operation not permitted",
+            );
+        let reporter = RecordingReporter::default();
+        let err = prepare_podman(&env, &reporter).expect_err("init should fail");
+        assert!(
+            matches!(err, PrepareError::RuntimeVirtualizationUnavailable(Some(_))),
+            "vfkit/VZ failure must map to virtualization error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn virtualization_error_classifier_distinguishes_cases() {
+        // Virtualization-backend failures → true.
+        for msg in [
+            "vfkit exited unexpectedly with exit code 1",
+            "could not access Virtualization.framework",
+            "operation not permitted",
+            "failed to start VM",
+        ] {
+            assert!(is_virtualization_machine_error(msg), "should match: {msg}");
+        }
+        // A missing-helper packaging error must NOT be misread as virtualization.
+        assert!(
+            !is_virtualization_machine_error("could not find \"vfkit\""),
+            "missing-helper error is a packaging issue, not virtualization"
+        );
+        // A generic/unrelated failure → false.
+        assert!(!is_virtualization_machine_error("disk image is corrupt"));
     }
 
     #[test]
