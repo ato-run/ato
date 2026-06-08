@@ -37,7 +37,8 @@ pub use records::{
     ArtifactBuild, ArtifactBuildIdentityInputs, InstallReceipt, InstallRevision, RequirementGraph,
     RequirementGraphCompleteness, RequirementGraphCompletenessReason, RequirementGraphEdge,
     RequirementGraphNode, RequirementGraphSnapshot, RequirementKind, RequirementRelation,
-    StateContractSnapshot, combined_state_contract_hash, derive_artifact_build_id,
+    StateContractSnapshot, combined_state_contract_hash, compute_requirement_graph_snapshot_hash,
+    derive_artifact_build_id,
 };
 pub use requirement_graph::{
     ManifestRequirementFacts, NetworkRequirementFact, NormalizedProfile,

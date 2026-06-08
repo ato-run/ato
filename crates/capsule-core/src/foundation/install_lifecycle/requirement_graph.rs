@@ -415,6 +415,11 @@ pub fn compile_requirement_graph(
     let completeness = if reasons.is_empty() {
         RequirementGraphCompleteness::Complete
     } else {
+        // Normalize reason order so the stored completeness (and the snapshot
+        // hash derived from it) is deterministic regardless of the order reasons
+        // were pushed.
+        reasons.sort();
+        reasons.dedup();
         RequirementGraphCompleteness::Partial { reasons }
     };
 
@@ -433,7 +438,7 @@ pub fn compile_requirement_graph(
         source_revision_ref,
         profile_hash.clone(),
     )?
-    .with_completeness(completeness.clone());
+    .with_completeness(completeness.clone())?;
 
     Ok(RequirementGraphCompileOutput {
         snapshot,
@@ -778,5 +783,34 @@ mod tests {
         let back: RequirementGraphSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.completeness, out.snapshot.completeness);
         assert_eq!(back.graph_hash, out.snapshot.graph_hash);
+        // #581 wave 3B: the snapshot-level hash also round-trips.
+        assert_eq!(
+            back.requirement_graph_snapshot_hash,
+            out.snapshot.requirement_graph_snapshot_hash
+        );
+    }
+
+    // #581 wave 3B: the compiled snapshot carries a non-empty, deterministic
+    // snapshot-level hash distinct from the content-only graph_hash.
+    #[test]
+    fn compiled_snapshot_has_snapshot_level_hash() {
+        let a = compile_requirement_graph(standard_input()).unwrap();
+        let b = compile_requirement_graph(standard_input()).unwrap();
+        assert!(a.snapshot.has_snapshot_hash());
+        assert!(
+            a.snapshot
+                .requirement_graph_snapshot_hash
+                .starts_with("blake3:")
+        );
+        // Deterministic across compiles of the same input.
+        assert_eq!(
+            a.snapshot.requirement_graph_snapshot_hash,
+            b.snapshot.requirement_graph_snapshot_hash
+        );
+        // Snapshot hash folds in more than graph content, so it differs from graph_hash.
+        assert_ne!(
+            a.snapshot.requirement_graph_snapshot_hash, a.snapshot.graph_hash,
+            "snapshot hash binds profile + completeness, not just graph content"
+        );
     }
 }
