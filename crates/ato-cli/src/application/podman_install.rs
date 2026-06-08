@@ -165,9 +165,9 @@ const CONTAINERS_CONF_FILE: &str = "containers.conf";
 // These are the security anchors — FILL THEM IN before merging.
 
 const MACOS_ARM64_PKG_SHA256: &str =
-    "FILL_IN_FROM_RELEASE_shasum_-a_256_podman-installer-macos-arm64.pkg__64hex";
+    "8aeaa329cd86c502156d9ca6608776e9b72d0f6cc082255c31c8a936f64bbc8c";
 const MACOS_AMD64_PKG_SHA256: &str =
-    "FILL_IN_FROM_RELEASE_shasum_-a_256_podman-installer-macos-amd64.pkg__64hex";
+    "2312f91523aeb168709f35d41576ade763c891c3991befe7173aac0edf133af9";
 
 /// Resolve the pinned artifact for an `(os, arch)` pair, or `None` when Ato
 /// has no pinned managed install for that target.
@@ -1729,7 +1729,7 @@ mod tests {
     ///
     /// Run:  cargo test -p ato-cli --lib -- --ignored real_pkg_install
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    #[ignore = "real network download; run manually on macOS arm64 after filling in SHA256s"]
+    #[ignore = "real network download; run manually on macOS arm64 (SHA256s are pinned)"]
     #[test]
     fn real_pkg_install_downloads_and_runs() {
         let tools = tempfile::tempdir().unwrap();
