@@ -396,9 +396,10 @@ impl PodmanArtifactFetcher for ReqwestArtifactFetcher {
         let client = reqwest::blocking::Client::builder()
             .user_agent(concat!("ato-cli/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
-            // macOS .pkg installers are larger (~200 MB) than the former remote
-            // CLI zip (~25 MB); 600 s gives headroom on slow connections.
-            .timeout(Duration::from_secs(600))
+            // Per-request cap. macOS .pkg installers are ~60 MB; 300 s tolerates
+            // a slow link while keeping the worst-case retry budget bounded
+            // (see DOWNLOAD_MAX_TOTAL, which caps the total across attempts).
+            .timeout(Duration::from_secs(300))
             .build()
             // A client build failure is a local config problem, not transient.
             .map_err(|e| FetchError::permanent(format!("HTTP client build failed: {e}")))?;
@@ -482,24 +483,25 @@ pub(crate) fn install_ato_managed_podman<F: PodmanArtifactFetcher>(
     clear_all_stale_remote_zip_installs(tools_dir);
     let install_dir = tools_dir.join(format!("podman-{}", artifact.version));
 
-    let bytes = fetch_and_verify(fetcher, &artifact.source_urls(), artifact.sha256)?;
+    let download = fetch_and_verify(fetcher, &artifact.source_urls(), artifact.sha256)?;
 
     match artifact.format {
         ArtifactFormat::MacosPkg => {
-            install_from_pkg(&bytes, &artifact, arch, tools_dir, &install_dir)
+            install_from_pkg(&download.bytes, &artifact, &download.source_url, arch, tools_dir, &install_dir)
         }
         ArtifactFormat::TarGz | ArtifactFormat::Zip => {
             // Archive path: fetch + verify each helper separately, then promote.
-            let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>)> =
+            let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>, String)> =
                 Vec::with_capacity(artifact.helpers.len());
             for helper in artifact.helpers {
-                let helper_bytes = fetch_and_verify(fetcher, &[helper.url], helper.sha256)?;
-                validate_native_arch(&helper_bytes, arch, helper.name)?;
-                helper_blobs.push((*helper, helper_bytes));
+                let helper_dl = fetch_and_verify(fetcher, &[helper.url], helper.sha256)?;
+                validate_native_arch(&helper_dl.bytes, arch, helper.name)?;
+                helper_blobs.push((*helper, helper_dl.bytes, helper_dl.source_url));
             }
             install_into_temp_then_promote(
-                &bytes,
+                &download.bytes,
                 &artifact,
+                &download.source_url,
                 &helper_blobs,
                 arch,
                 tools_dir,
@@ -660,6 +662,7 @@ fn promote_install_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), PodmanIns
 fn install_from_pkg(
     pkg_bytes: &[u8],
     artifact: &PinnedArtifact,
+    source_url: &str,
     host_arch: &str,
     tools_dir: &Path,
     final_dir: &Path,
@@ -677,7 +680,7 @@ fn install_from_pkg(
     })?;
 
     let result =
-        install_from_pkg_inner(pkg_bytes, artifact, host_arch, final_dir, &tmp_dir);
+        install_from_pkg_inner(pkg_bytes, artifact, source_url, host_arch, final_dir, &tmp_dir);
 
     let installed = match result {
         Ok(v) => v,
@@ -696,6 +699,7 @@ fn install_from_pkg(
 fn install_from_pkg_inner(
     pkg_bytes: &[u8],
     artifact: &PinnedArtifact,
+    source_url: &str,
     host_arch: &str,
     final_dir: &Path,
     tmp_dir: &Path,
@@ -758,7 +762,8 @@ fn install_from_pkg_inner(
         helper_provenance.push(HelperProvenance {
             name: helper_name.to_string(),
             sha256: sha256_hex(&helper_bytes),
-            source_url: artifact.url.to_string(),
+            // Helpers come from the same pkg, so they share its actual source.
+            source_url: source_url.to_string(),
             path: final_bin_dir.join(helper_name).to_string_lossy().to_string(),
             required_arch: host_arch.to_string(),
         });
@@ -780,7 +785,8 @@ fn install_from_pkg_inner(
     let provenance = PodmanProvenance {
         version: artifact.version.to_string(),
         sha256: artifact.sha256.to_string(),
-        source_url: artifact.url.to_string(),
+        // The URL the bytes actually came from (primary or fallback mirror).
+        source_url: source_url.to_string(),
         binary_path: final_binary.to_string_lossy().to_string(),
         helper_binaries_dir: final_bin_dir.to_string_lossy().to_string(),
         helpers: helper_provenance,
@@ -932,6 +938,23 @@ const DOWNLOAD_RETRY_BACKOFFS: &[Duration] = &[
     Duration::from_secs(5),
 ];
 
+/// Overall wall-clock budget for a download, across every source and retry. The
+/// per-request timeout (300 s, [`ReqwestArtifactFetcher`]) bounds a single
+/// in-flight attempt; this bounds the total so a body-stall failure mode can't
+/// stack `attempts × per-request-timeout`. Checked between attempts (an already
+/// in-flight request still runs to its own timeout). Worst case ≈ this budget +
+/// one per-request timeout.
+const DOWNLOAD_MAX_TOTAL: Duration = Duration::from_secs(420); // 7 min
+
+/// A verified download plus the source it actually came from (primary or a
+/// fallback mirror), so provenance can record the true origin — the digest is
+/// the trust anchor, but the recorded URL should not lie about the source.
+#[derive(Debug)]
+struct VerifiedDownload {
+    bytes: Vec<u8>,
+    source_url: String,
+}
+
 /// Download `expected_sha256`-verified bytes from the first source that works,
 /// retrying transient failures and falling through to the next source.
 ///
@@ -940,6 +963,8 @@ const DOWNLOAD_RETRY_BACKOFFS: &[Duration] = &[
 /// - For each URL, retry on a [`FetchErrorKind::Transient`] failure with the
 ///   `backoffs` schedule; a [`FetchErrorKind::Permanent`] failure (404/403 …)
 ///   skips straight to the next URL with no retry.
+/// - Stop starting new attempts once `max_total` wall-clock has elapsed (a
+///   bound on the body-stall failure mode; the first attempt always runs).
 /// - On a successful download, verify the digest. A **mismatch fails closed** —
 ///   it never falls through to another source (a wrong-digest body is a hard
 ///   stop, not a reason to shop around).
@@ -947,31 +972,40 @@ const DOWNLOAD_RETRY_BACKOFFS: &[Duration] = &[
 ///   when any attempt was transient (actionable: retry), else a permanent
 ///   [`PodmanInstallError::Fetch`].
 ///
-/// `sleep` is injected so tests run with no real delay; production passes a
-/// jittered `thread::sleep`.
+/// Returns the verified bytes and the URL they came from. `sleep` is injected so
+/// tests run with no real delay; production passes a jittered `thread::sleep`.
 fn download_verified<F, S>(
     fetcher: &F,
     urls: &[&str],
     expected_sha256: &str,
     backoffs: &[Duration],
+    max_total: Duration,
     mut sleep: S,
-) -> Result<Vec<u8>, PodmanInstallError>
+) -> Result<VerifiedDownload, PodmanInstallError>
 where
     F: PodmanArtifactFetcher,
     S: FnMut(Duration),
 {
     let attempts = backoffs.len() + 1;
+    let start = std::time::Instant::now();
+    let mut started_any = false;
     let mut last_url = urls.last().copied().unwrap_or_default().to_string();
     let mut last_transient: Option<String> = None;
     let mut last_permanent: Option<String> = None;
 
-    for &url in urls {
+    'sources: for &url in urls {
         last_url = url.to_string();
         // `attempt` indexes `backoffs` (len = attempts - 1) only on the retry
         // path; the final attempt has no backoff. enumerate() over `backoffs`
         // can't express that extra trailing attempt, so a range loop is correct.
         #[allow(clippy::needless_range_loop)]
         for attempt in 0..attempts {
+            // Budget guard: always allow the very first attempt, then stop
+            // starting work once the overall wall-clock budget is spent.
+            if started_any && start.elapsed() >= max_total {
+                break 'sources;
+            }
+            started_any = true;
             match fetcher.fetch(url) {
                 Ok(bytes) => {
                     let actual = sha256_hex(&bytes);
@@ -983,7 +1017,7 @@ where
                             actual,
                         });
                     }
-                    return Ok(bytes);
+                    return Ok(VerifiedDownload { bytes, source_url: url.to_string() });
                 }
                 Err(e) if e.is_transient() => {
                     last_transient = Some(e.message);
@@ -1016,23 +1050,32 @@ where
     }
 }
 
-/// Production wrapper: retry/fallback download with a real jittered sleep.
+/// Production wrapper: retry/fallback download with a real jittered sleep and the
+/// production backoff schedule + wall-clock budget.
 fn fetch_and_verify<F: PodmanArtifactFetcher>(
     fetcher: &F,
     urls: &[&str],
     expected_sha256: &str,
-) -> Result<Vec<u8>, PodmanInstallError> {
-    download_verified(fetcher, urls, expected_sha256, DOWNLOAD_RETRY_BACKOFFS, |delay| {
-        // Jitter (0–500 ms) de-correlates concurrent clients retrying together.
-        let jitter = Duration::from_millis(rand::random::<u64>() % 500);
-        std::thread::sleep(delay + jitter);
-    })
+) -> Result<VerifiedDownload, PodmanInstallError> {
+    download_verified(
+        fetcher,
+        urls,
+        expected_sha256,
+        DOWNLOAD_RETRY_BACKOFFS,
+        DOWNLOAD_MAX_TOTAL,
+        |delay| {
+            // Jitter (0–500 ms) de-correlates concurrent clients retrying together.
+            let jitter = Duration::from_millis(rand::random::<u64>() % 500);
+            std::thread::sleep(delay + jitter);
+        },
+    )
 }
 
 fn install_into_temp_then_promote(
     bytes: &[u8],
     artifact: &PinnedArtifact,
-    helper_blobs: &[(HelperArtifact, Vec<u8>)],
+    source_url: &str,
+    helper_blobs: &[(HelperArtifact, Vec<u8>, String)],
     host_arch: &str,
     tools_dir: &Path,
     final_dir: &Path,
@@ -1075,7 +1118,7 @@ fn install_into_temp_then_promote(
                 message: e.to_string(),
             })?;
         }
-        for (helper, helper_bytes) in helper_blobs {
+        for (helper, helper_bytes, helper_source_url) in helper_blobs {
             let dest = tmp_helper_dir.join(helper.name);
             std::fs::write(&dest, helper_bytes).map_err(|e| PodmanInstallError::Extract {
                 message: format!("could not write helper `{}`: {e}", helper.name),
@@ -1085,7 +1128,7 @@ fn install_into_temp_then_promote(
             helper_provenance.push(HelperProvenance {
                 name: helper.name.to_string(),
                 sha256: helper.sha256.to_string(),
-                source_url: helper.url.to_string(),
+                source_url: helper_source_url.clone(),
                 path: final_helper_dir.join(helper.name).to_string_lossy().to_string(),
                 required_arch: host_arch.to_string(),
             });
@@ -1106,7 +1149,7 @@ fn install_into_temp_then_promote(
         let provenance = PodmanProvenance {
             version: artifact.version.to_string(),
             sha256: artifact.sha256.to_string(),
-            source_url: artifact.url.to_string(),
+            source_url: source_url.to_string(),
             binary_path: final_binary.to_string_lossy().to_string(),
             helper_binaries_dir: if helper_blobs.is_empty() {
                 String::new()
@@ -1669,6 +1712,10 @@ mod tests {
     const TEST_BACKOFFS: &[Duration] =
         &[Duration::ZERO, Duration::ZERO, Duration::ZERO];
 
+    // Large enough never to trip in retry tests (they use no_sleep, so elapsed
+    // wall-clock stays ~0 anyway).
+    const TEST_MAX_TOTAL: Duration = Duration::from_secs(3600);
+
     fn t504() -> FetchError {
         FetchError::transient("HTTP 504 Gateway Timeout")
     }
@@ -1686,10 +1733,11 @@ mod tests {
             vec![Err(t504()), Ok(body.clone())],
         )]);
 
-        let got = download_verified(&fetcher, &["https://primary/pkg"], &sha, TEST_BACKOFFS, no_sleep)
+        let got = download_verified(&fetcher, &["https://primary/pkg"], &sha, TEST_BACKOFFS, TEST_MAX_TOTAL, no_sleep)
             .expect("second attempt should succeed");
 
-        assert_eq!(got, body);
+        assert_eq!(got.bytes, body);
+        assert_eq!(got.source_url, "https://primary/pkg");
         assert_eq!(fetcher.call_count(), 2, "exactly one retry");
     }
 
@@ -1702,7 +1750,7 @@ mod tests {
             vec![Err(t504()), Err(t504()), Err(t504()), Err(t504())],
         )]);
 
-        let err = download_verified(&fetcher, &["https://primary/pkg"], "deadbeef", TEST_BACKOFFS, no_sleep)
+        let err = download_verified(&fetcher, &["https://primary/pkg"], "deadbeef", TEST_BACKOFFS, TEST_MAX_TOTAL, no_sleep)
             .unwrap_err();
 
         match err {
@@ -1714,12 +1762,51 @@ mod tests {
         assert_eq!(fetcher.call_count(), 4);
     }
 
+    // Retry-policy shape is bounded: total attempts per source = backoffs + 1.
+    #[test]
+    fn production_retry_policy_is_bounded() {
+        assert_eq!(
+            DOWNLOAD_RETRY_BACKOFFS.len(),
+            3,
+            "3 retries → 4 attempts per source"
+        );
+        // Worst-case wall-clock is bounded by the budget, not attempts × per-req.
+        assert!(DOWNLOAD_MAX_TOTAL <= Duration::from_secs(600));
+    }
+
+    // The wall-clock budget stops new attempts: with a zero budget only the first
+    // attempt runs even though more retries are scripted.
+    #[test]
+    fn download_budget_caps_attempts() {
+        let fetcher = ScriptedFetcher::new(vec![(
+            "https://primary/pkg",
+            vec![Err(t504()), Err(t504()), Err(t504()), Err(t504())],
+        )]);
+
+        let err = download_verified(
+            &fetcher,
+            &["https://primary/pkg"],
+            "deadbeef",
+            TEST_BACKOFFS,
+            Duration::ZERO,
+            no_sleep,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, PodmanInstallError::TransientDownloadFailed { .. }));
+        assert_eq!(
+            fetcher.call_count(),
+            1,
+            "a spent budget must stop after the first attempt"
+        );
+    }
+
     // 404 is permanent: no retry on that source.
     #[test]
     fn download_404_does_not_retry() {
         let fetcher = ScriptedFetcher::new(vec![("https://primary/pkg", vec![Err(p404())])]);
 
-        let err = download_verified(&fetcher, &["https://primary/pkg"], "deadbeef", TEST_BACKOFFS, no_sleep)
+        let err = download_verified(&fetcher, &["https://primary/pkg"], "deadbeef", TEST_BACKOFFS, TEST_MAX_TOTAL, no_sleep)
             .unwrap_err();
 
         assert!(
@@ -1745,6 +1832,7 @@ mod tests {
             &["https://primary/pkg", "https://mirror/pkg"],
             &sha,
             TEST_BACKOFFS,
+            TEST_MAX_TOTAL,
             no_sleep,
         )
         .unwrap_err();
@@ -1760,7 +1848,8 @@ mod tests {
         );
     }
 
-    // Primary exhausts transient retries, mirror succeeds → digest verified → ok.
+    // Primary exhausts transient retries, mirror succeeds → digest verified → the
+    // verified result records the MIRROR as the actual source (provenance).
     #[test]
     fn download_falls_through_to_mirror_after_primary_504() {
         let body = b"mirror-served-pkg".to_vec();
@@ -1778,11 +1867,16 @@ mod tests {
             &["https://primary/pkg", "https://mirror/pkg"],
             &sha,
             TEST_BACKOFFS,
+            TEST_MAX_TOTAL,
             no_sleep,
         )
         .expect("mirror should serve the verified pkg");
 
-        assert_eq!(got, body);
+        assert_eq!(got.bytes, body);
+        assert_eq!(
+            got.source_url, "https://mirror/pkg",
+            "provenance must record the actual (mirror) source, not the primary"
+        );
         assert_eq!(fetcher.call_count(), 5, "4 on primary + 1 on mirror");
     }
 
@@ -1813,15 +1907,23 @@ mod tests {
         host_arch: &str,
         tools_dir: &Path,
     ) -> Result<InstalledPodman, PodmanInstallError> {
-        let bytes = fetch_and_verify(fetcher, &artifact.source_urls(), artifact.sha256)?;
-        let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>)> = Vec::new();
+        let download = fetch_and_verify(fetcher, &artifact.source_urls(), artifact.sha256)?;
+        let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>, String)> = Vec::new();
         for helper in artifact.helpers {
-            let helper_bytes = fetch_and_verify(fetcher, &[helper.url], helper.sha256)?;
-            validate_native_arch(&helper_bytes, host_arch, helper.name)?;
-            helper_blobs.push((*helper, helper_bytes));
+            let helper_dl = fetch_and_verify(fetcher, &[helper.url], helper.sha256)?;
+            validate_native_arch(&helper_dl.bytes, host_arch, helper.name)?;
+            helper_blobs.push((*helper, helper_dl.bytes, helper_dl.source_url));
         }
         let final_dir = tools_dir.join(format!("podman-{}", artifact.version));
-        install_into_temp_then_promote(&bytes, artifact, &helper_blobs, host_arch, tools_dir, &final_dir)
+        install_into_temp_then_promote(
+            &download.bytes,
+            artifact,
+            &download.source_url,
+            &helper_blobs,
+            host_arch,
+            tools_dir,
+            &final_dir,
+        )
     }
 
     fn thin_macho(arch: BinArch) -> Vec<u8> {
