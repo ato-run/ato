@@ -34,6 +34,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::hashing::canonical_hash;
 use super::ids::InstallRevisionId;
@@ -71,6 +72,52 @@ impl RunnerCompatibilityClass {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The coarse [`RunnerClass`] this compatibility class refines, parsed from
+    /// the segment before the first `/`. For example
+    /// `"managed_runner/linux-x86_64"` → [`RunnerClass::ManagedRunner`].
+    ///
+    /// The leading segment is the snake_case [`RunnerClass`] serde name. Used by
+    /// the launch-template builder to verify the *requested* class is actually
+    /// supported by the [`CompatibilityIndex`] (not merely that some class is) —
+    /// so a `browser_runner/...` template can never be built for a revision whose
+    /// index only supports `managed_runner`.
+    pub fn runner_class(
+        &self,
+    ) -> std::result::Result<RunnerClass, RunnerCompatibilityClassParseError> {
+        let segment = self.0.split('/').next().unwrap_or("");
+        if segment.is_empty() {
+            return Err(RunnerCompatibilityClassParseError::Empty);
+        }
+        let class = match segment {
+            "managed_runner" => RunnerClass::ManagedRunner,
+            "desktop_runner" => RunnerClass::DesktopRunner,
+            "external_runner" => RunnerClass::ExternalRunner,
+            "browser_runner" => RunnerClass::BrowserRunner,
+            "browser_preview_runner" => RunnerClass::BrowserPreviewRunner,
+            other => {
+                return Err(RunnerCompatibilityClassParseError::UnknownRunnerClass {
+                    segment: other.to_owned(),
+                    class: self.0.clone(),
+                });
+            }
+        };
+        Ok(class)
+    }
+}
+
+/// Why a [`RunnerCompatibilityClass`] could not be resolved to a [`RunnerClass`].
+///
+/// Typed (never an in-band sentinel): a malformed or unknown class is a hard
+/// error, not a silently-"unknown" runner.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RunnerCompatibilityClassParseError {
+    /// The compatibility class string is empty / has no leading segment.
+    #[error("runner compatibility class is empty")]
+    Empty,
+    /// The leading segment is not a recognized [`RunnerClass`] serde name.
+    #[error("unrecognized runner class segment '{segment}' in compatibility class '{class}'")]
+    UnknownRunnerClass { segment: String, class: String },
 }
 
 // ── BindingAssignmentSet ─────────────────────────────────────────────────────
@@ -1021,6 +1068,45 @@ mod tests {
             })
             .unwrap();
         assert_eq!(a.precheck_hash, b.precheck_hash);
+    }
+
+    #[test]
+    fn runner_compatibility_class_parses_to_runner_class() {
+        assert_eq!(
+            RunnerCompatibilityClass::new("managed_runner/linux-x86_64")
+                .runner_class()
+                .unwrap(),
+            RunnerClass::ManagedRunner
+        );
+        assert_eq!(
+            RunnerCompatibilityClass::new("browser_runner/wasm")
+                .runner_class()
+                .unwrap(),
+            RunnerClass::BrowserRunner
+        );
+        // browser_preview_runner must not be confused with browser_runner.
+        assert_eq!(
+            RunnerCompatibilityClass::new("browser_preview_runner/wasm")
+                .runner_class()
+                .unwrap(),
+            RunnerClass::BrowserPreviewRunner
+        );
+        // A class with no '/' separator still parses on the whole segment.
+        assert_eq!(
+            RunnerCompatibilityClass::new("desktop_runner")
+                .runner_class()
+                .unwrap(),
+            RunnerClass::DesktopRunner
+        );
+        // Unknown / empty segments are typed errors, never a silent default.
+        assert!(matches!(
+            RunnerCompatibilityClass::new("nope_runner/x").runner_class(),
+            Err(RunnerCompatibilityClassParseError::UnknownRunnerClass { .. })
+        ));
+        assert!(matches!(
+            RunnerCompatibilityClass::new("").runner_class(),
+            Err(RunnerCompatibilityClassParseError::Empty)
+        ));
     }
 
     #[test]
