@@ -5,10 +5,13 @@
 //! - [`ids`]: typed identifiers (`InstalledAppId`, `ProfileId`, `InstallProfileKey`, …)
 //! - [`store`]: [`InstallInstanceStore`] — filesystem layout for instances and revisions
 //! - [`finalizer`]: [`InstallRevisionFinalizer`] — promotes producer output into a revision
+//! - [`launch_inputs`]: [`ValidatedInstallReusableInputs`] — read-validates finalized
+//!   records into a safe input boundary for a future launch-template wave
 
 pub mod finalizer;
 pub mod hashing;
 pub mod ids;
+pub mod launch_inputs;
 pub mod launch_reuse;
 pub mod launch_template;
 pub mod materialization;
@@ -22,6 +25,10 @@ pub use ids::{
     ArtifactBuildId, CapsuleInstanceKey, ExecutionId, InstallProfileKey, InstallRevisionId,
     InstalledAppId, ProfileId, derive_capsule_instance_key, derive_install_profile_key,
     path_safe_app_id, revision_id_for_build,
+};
+pub use launch_inputs::{
+    InstallReusableInputValidationError, LaunchTemplateReadiness, LaunchTemplateReadinessReason,
+    ValidatedInstallReusableInputs,
 };
 pub use launch_reuse::{
     LaunchReuseDecision, LaunchReuseInputs, RevalidationFailure, RevalidationFailureKind,
