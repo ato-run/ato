@@ -599,6 +599,111 @@ impl InstallInstanceStore {
         )
     }
 
+    // ── Launch templates (#581 wave 4C) ──────────────────────────────────────
+    //
+    // Reusable, session-independent launch templates are persisted as standalone
+    // per-template files keyed by the template's `LaunchTemplateKey::key_hash`,
+    // under the per-`(app, profile, revision)` record dir:
+    //
+    //   instances/<app>/profiles/<profile>/revisions/<rev>/
+    //     launch-templates/
+    //       <sanitized key_hash>.json   -> LaunchTemplate
+    //
+    // This mirrors the standalone-file pattern the other revision records use and
+    // keeps the `revision.json` finalization marker untouched (a launch template
+    // is a later, additive output — it is not part of finalization). The file is
+    // keyed by the stable `key_hash`, so rebuilding a template from the same
+    // stable inputs overwrites in place rather than duplicating. Templates carry
+    // only install-time identity; never a session/runtime/observed/secret value.
+
+    /// Directory holding the standalone launch-template records for one
+    /// `(app, profile, revision)`.
+    pub fn revision_launch_templates_dir(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("launch-templates")
+    }
+
+    /// Path of the standalone launch-template file for `key_hash`.
+    ///
+    /// `key_hash` is a `blake3:<hex>` digest; the `:` is replaced with `-` so the
+    /// filename is portable (Windows forbids `:` in filenames). The mapping is
+    /// total and collision-free over `blake3:` hashes.
+    pub fn revision_launch_template_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        key_hash: &str,
+    ) -> PathBuf {
+        self.revision_launch_templates_dir(app, profile, rev)
+            .join(format!("{}.json", launch_template_filename(key_hash)))
+    }
+
+    /// Persist a [`LaunchTemplate`] (atomic), keyed by its
+    /// [`LaunchTemplateKey::key_hash`](super::launch_template::LaunchTemplateKey::key_hash).
+    pub fn write_launch_template(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        template: &super::launch_template::LaunchTemplate,
+    ) -> Result<()> {
+        let key_hash = template.key.key_hash()?;
+        self.write_revision_json(
+            &self.revision_launch_template_path(app, profile, rev, &key_hash),
+            template,
+        )
+    }
+
+    /// Read a single [`LaunchTemplate`] by its `key_hash`.
+    pub fn read_launch_template(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        key_hash: &str,
+    ) -> Result<super::launch_template::LaunchTemplate> {
+        let path = self.revision_launch_template_path(app, profile, rev, key_hash);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read every persisted [`LaunchTemplate`] for a `(app, profile, revision)`.
+    ///
+    /// Returns an empty vec if the `launch-templates/` dir does not exist (the
+    /// standard install path never writes one). Results are sorted by `key_hash`
+    /// filename for a deterministic order.
+    pub fn read_launch_templates(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<Vec<super::launch_template::LaunchTemplate>> {
+        let dir = self.revision_launch_templates_dir(app, profile, rev);
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+            .with_context(|| format!("read launch-templates dir {}", dir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+            .collect();
+        entries.sort();
+        let mut templates = Vec::with_capacity(entries.len());
+        for path in entries {
+            let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let template: super::launch_template::LaunchTemplate = serde_json::from_slice(&raw)
+                .with_context(|| format!("parse {}", path.display()))?;
+            templates.push(template);
+        }
+        Ok(templates)
+    }
+
     /// Persist the [`InstallRevision`] marker (atomic). Must be written only
     /// after every sub-record above has been written successfully.
     pub fn write_install_revision(
@@ -990,6 +1095,12 @@ impl InstallInstanceStore {
         }
         Ok(profiles)
     }
+}
+
+/// Map a `blake3:<hex>` key hash to a portable filename stem (replace `:` with
+/// `-`). Total and collision-free over `blake3:` hashes.
+fn launch_template_filename(key_hash: &str) -> String {
+    key_hash.replace(':', "-")
 }
 
 // ── Atomic write helper ────────────────────────────────────────────────────
