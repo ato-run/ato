@@ -442,20 +442,50 @@ pub(crate) fn is_stale_remote_zip_install(install_dir: &Path) -> bool {
 
 // ── macOS pkg extraction ──────────────────────────────────────────────────────
 
+/// A `<pid>-<n>` suffix that is unique for every call within a process. Used to
+/// name temp / backup paths so retries, sequential calls, and (defensively)
+/// concurrent attempts never collide on the same path.
+fn process_unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}", std::process::id(), n)
+}
+
+/// Remove a stale filesystem entry of *any* type — directory, regular file,
+/// symlink, or broken symlink — if it exists. A missing path is success.
+///
+/// `Path::exists` follows symlinks and silently misses broken ones, and
+/// `remove_dir_all` fails on a non-directory ("Not a directory"). So inspect the
+/// entry itself with `symlink_metadata` and pick the matching unlink call
+/// (`remove_file` unlinks a symlink, not its target). This is the single robust
+/// remover used wherever a stale path could otherwise block a create/rename —
+/// the class of bug behind the original `pkg-expanded` "File exists" failure.
+fn remove_stale_path(path: &Path) -> Result<(), PodmanInstallError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let removed = if meta.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            removed.map_err(|e| PodmanInstallError::Extract {
+                message: format!("could not remove stale path {}: {e}", path.display()),
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(PodmanInstallError::Extract {
+            message: format!("could not inspect path {}: {e}", path.display()),
+        }),
+    }
+}
+
 /// Build a process-unique temp install dir path under `tools_dir`. The name
 /// embeds the pid plus a monotonic counter so repeated attempts within one
 /// process (e.g. retry, or sequential calls in tests) never collide on the same
 /// path — the previous `podman-<ver>.tmp-<pid>` scheme reused one path per pid.
 fn unique_tmp_install_dir(tools_dir: &Path, version: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    tools_dir.join(format!(
-        "podman-{}.tmp-{}-{}",
-        version,
-        std::process::id(),
-        n
-    ))
+    tools_dir.join(format!("podman-{}.tmp-{}", version, process_unique_suffix()))
 }
 
 /// Move a validated temp install dir into its final location, preserving the
@@ -469,19 +499,25 @@ fn unique_tmp_install_dir(tools_dir: &Path, version: &str) -> PathBuf {
 /// `final_dir` — never an empty/half-removed directory (the hazard of the old
 /// `remove_dir_all(final_dir)` → `rename` sequence). On all error paths the temp
 /// dir is cleaned up.
+///
+/// The backup path is process-unique and any stale backup of any type is cleared
+/// via [`remove_stale_path`] before use, so promotion cannot wedge on a leftover
+/// backup (the same stale-path hazard fixed for pkg expansion).
 fn promote_install_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), PodmanInstallError> {
     let name = final_dir.file_name().ok_or_else(|| PodmanInstallError::Extract {
         message: format!("install dir has no file name: {}", final_dir.display()),
     })?;
     let mut backup_name = name.to_os_string();
-    backup_name.push(format!(".bak-{}", std::process::id()));
+    backup_name.push(format!(".bak-{}", process_unique_suffix()));
     let backup = final_dir.with_file_name(backup_name);
 
     // Stash any existing install out of the way (don't delete it yet).
     let had_existing = final_dir.exists();
     if had_existing {
-        if backup.exists() {
-            let _ = std::fs::remove_dir_all(&backup);
+        // Clear any stale backup (dir/file/symlink) before we rename onto it.
+        if let Err(e) = remove_stale_path(&backup) {
+            let _ = std::fs::remove_dir_all(tmp_dir);
+            return Err(e);
         }
         if let Err(e) = std::fs::rename(final_dir, &backup) {
             let _ = std::fs::remove_dir_all(tmp_dir);
@@ -505,7 +541,7 @@ fn promote_install_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), PodmanIns
 
     // New install is live; drop the backup.
     if had_existing {
-        let _ = std::fs::remove_dir_all(&backup);
+        let _ = remove_stale_path(&backup);
     }
     Ok(())
 }
@@ -677,11 +713,9 @@ impl Drop for RemoveOnDrop {
 /// clears any stale `dest` left by a previous interrupted attempt — it must NOT
 /// create `dest` itself.
 ///
-/// The stale destination may be a directory, a regular file, a symlink, or a
-/// broken symlink. `Path::exists` follows symlinks and silently misses broken
-/// ones, so inspect the path entry itself with `symlink_metadata` and remove
-/// directories with `remove_dir_all`, everything else (files / symlinks) with
-/// `remove_file` (which unlinks the symlink, not its target).
+/// Any stale destination (directory, regular file, symlink, or broken symlink)
+/// is cleared via [`remove_stale_path`] — `Path::exists` would follow symlinks
+/// and miss broken ones.
 fn prepare_expand_dest(dest: &Path) -> Result<(), PodmanInstallError> {
     let parent = dest.parent().ok_or_else(|| PodmanInstallError::Extract {
         message: format!("pkg expansion destination has no parent: {}", dest.display()),
@@ -689,26 +723,7 @@ fn prepare_expand_dest(dest: &Path) -> Result<(), PodmanInstallError> {
     std::fs::create_dir_all(parent).map_err(|e| PodmanInstallError::Extract {
         message: format!("could not create pkg expansion parent dir: {e}"),
     })?;
-
-    match std::fs::symlink_metadata(dest) {
-        Ok(meta) => {
-            let removed = if meta.is_dir() {
-                std::fs::remove_dir_all(dest)
-            } else {
-                std::fs::remove_file(dest)
-            };
-            removed.map_err(|e| PodmanInstallError::Extract {
-                message: format!("could not clear stale pkg expansion path: {e}"),
-            })?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(PodmanInstallError::Extract {
-                message: format!("could not inspect pkg expansion path: {e}"),
-            });
-        }
-    }
-    Ok(())
+    remove_stale_path(dest)
 }
 
 /// Outcome of invoking the pkg-expansion command. Split from the live `pkgutil`
@@ -1509,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn ato_managed_installer_promotes_atomically_and_leaves_no_temp_dir() {
+    fn ato_managed_installer_promotes_and_leaves_no_temp_dir() {
         let bytes = tar_gz_with("usr/bin/podman", podman_stub_script());
         let artifact = test_artifact_for(&bytes);
         let fetcher = FakeFetcher {
@@ -1964,6 +1979,75 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
             .collect();
         assert!(leftovers.is_empty(), "backup removed after successful swap");
+    }
+
+    // The core safety claim: if the promotion rename fails (here: the temp dir
+    // does not exist, so `rename(tmp, final_dir)` errors), the previous install
+    // is restored and is NOT left only as a `.bak-` sibling.
+    #[test]
+    fn promote_install_dir_restores_previous_on_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let tmp = root.path().join("podman-5.8.2.tmp-does-not-exist");
+        let final_dir = root.path().join("podman-5.8.2");
+        std::fs::create_dir_all(&final_dir).unwrap();
+        std::fs::write(final_dir.join("old-marker"), b"old").unwrap();
+
+        let res = promote_install_dir(&tmp, &final_dir);
+
+        assert!(res.is_err(), "missing temp dir must fail promotion");
+        assert!(
+            final_dir.join("old-marker").is_file(),
+            "previous install must be restored to final_dir"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the only copy must be final_dir, not a stranded backup"
+        );
+    }
+
+    // A stale backup of any type must not wedge promotion. The backup name is
+    // process-unique so it rarely pre-exists, but cleanup delegates to
+    // `remove_stale_path`, which is exercised directly here for dir/file/symlink.
+    #[test]
+    fn remove_stale_path_handles_dir_file_and_missing() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Missing path → Ok.
+        remove_stale_path(&root.path().join("absent")).unwrap();
+
+        // Directory (with contents) → removed.
+        let d = root.path().join("a-dir");
+        std::fs::create_dir_all(d.join("nested")).unwrap();
+        std::fs::write(d.join("nested").join("f"), b"x").unwrap();
+        remove_stale_path(&d).unwrap();
+        assert!(!d.exists());
+
+        // Regular file → removed.
+        let f = root.path().join("a-file");
+        std::fs::write(&f, b"x").unwrap();
+        remove_stale_path(&f).unwrap();
+        assert!(!f.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_stale_path_unlinks_broken_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join("a-link");
+        std::os::unix::fs::symlink(root.path().join("missing-target"), &link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+
+        remove_stale_path(&link).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "broken symlink must be unlinked, not followed"
+        );
     }
 
     // ── Stale install detection ───────────────────────────────────────────────
