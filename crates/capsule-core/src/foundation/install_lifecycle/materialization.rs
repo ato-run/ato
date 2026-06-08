@@ -25,6 +25,7 @@
 //! execution drift by default.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::ids::{
     CapsuleInstanceKey, ExecutionId, InstallProfileKey, InstallRevisionId,
@@ -46,6 +47,58 @@ pub struct ProjectionDigest {
     pub projection_kind: String,
     /// Content digest of the projection (`blake3:<hex>`). Never a secret value.
     pub digest: String,
+}
+
+/// Why a [`ProjectionDigest`] is not a valid materialization input.
+///
+/// Typed (never an in-band sentinel). The `digest` must be a `blake3:<hex>`
+/// content hash — requiring that prefix is what structurally prevents a raw
+/// secret value from being accepted as a "digest".
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProjectionDigestInvalidReason {
+    /// `source_ref` is empty.
+    #[error("projection digest source_ref is empty")]
+    EmptySourceRef,
+    /// `projection_kind` is empty.
+    #[error("projection digest projection_kind is empty")]
+    EmptyKind,
+    /// `digest` is empty.
+    #[error("projection digest digest is empty")]
+    EmptyDigest,
+    /// `digest` is not a `blake3:<hex>` content hash — it could be a raw value.
+    #[error("projection digest '{digest}' is not a blake3:<hex> content hash")]
+    DigestNotContentHash { digest: String },
+}
+
+impl ProjectionDigest {
+    /// Validate that this is a well-formed projection digest safe to fold into a
+    /// materialization identity: non-empty fields and a `blake3:<hex>` content
+    /// hash (so a raw secret value can never masquerade as a digest).
+    pub fn validate(&self) -> Result<(), ProjectionDigestInvalidReason> {
+        if self.source_ref.is_empty() {
+            return Err(ProjectionDigestInvalidReason::EmptySourceRef);
+        }
+        if self.projection_kind.is_empty() {
+            return Err(ProjectionDigestInvalidReason::EmptyKind);
+        }
+        if self.digest.is_empty() {
+            return Err(ProjectionDigestInvalidReason::EmptyDigest);
+        }
+        if !is_blake3_content_hash(&self.digest) {
+            return Err(ProjectionDigestInvalidReason::DigestNotContentHash {
+                digest: self.digest.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// True if `s` is a `blake3:<hex>` content hash (non-empty lowercase hex body).
+fn is_blake3_content_hash(s: &str) -> bool {
+    match s.strip_prefix("blake3:") {
+        Some(hex) => !hex.is_empty() && hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+        None => false,
+    }
 }
 
 /// A per-session record of what was actually projected onto a concrete session
