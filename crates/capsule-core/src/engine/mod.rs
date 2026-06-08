@@ -9,6 +9,7 @@ pub mod oci_engine_select;
 pub mod orchestration;
 pub mod runner;
 pub mod runner_command;
+pub mod runner_command_builder;
 pub mod runtime;
 pub mod share;
 pub use engine_impl::*;
