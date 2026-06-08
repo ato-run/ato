@@ -13,6 +13,7 @@ pub mod launch_reuse;
 pub mod launch_template;
 pub mod materialization;
 pub mod records;
+pub mod requirement_graph;
 pub mod store;
 
 pub use finalizer::{FinalizerInput, FinalizerOutput, InstallBuildFacts, InstallRevisionFinalizer};
@@ -34,8 +35,13 @@ pub use launch_template::{
 pub use materialization::{LaunchMaterializationRecord, ProjectionDigest};
 pub use records::{
     ArtifactBuild, ArtifactBuildIdentityInputs, InstallReceipt, InstallRevision, RequirementGraph,
-    RequirementGraphEdge, RequirementGraphNode, RequirementGraphSnapshot, RequirementKind,
-    RequirementRelation, StateContractSnapshot, combined_state_contract_hash,
-    derive_artifact_build_id,
+    RequirementGraphCompleteness, RequirementGraphCompletenessReason, RequirementGraphEdge,
+    RequirementGraphNode, RequirementGraphSnapshot, RequirementKind, RequirementRelation,
+    StateContractSnapshot, combined_state_contract_hash, derive_artifact_build_id,
+};
+pub use requirement_graph::{
+    ManifestRequirementFacts, NetworkRequirementFact, NormalizedProfile,
+    RequirementGraphCompileInput, RequirementGraphCompileOutput, RuntimeRequirementFact,
+    SecretRequirementFact, StorageRequirementFact, compile_requirement_graph,
 };
 pub use store::{AppRecord, InstallInstanceStore, LaunchProfile};
