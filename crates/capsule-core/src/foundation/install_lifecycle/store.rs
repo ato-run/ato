@@ -29,6 +29,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::ids::{InstallRevisionId, InstalledAppId, ProfileId};
+use super::records::{
+    ArtifactBuild, InstallReceipt, InstallRevision, RequirementGraphSnapshot, StateContractSnapshot,
+};
 
 // ── AppRecord ──────────────────────────────────────────────────────────────
 
@@ -383,6 +386,175 @@ impl InstallInstanceStore {
         let val = serde_json::from_slice(&raw)
             .with_context(|| format!("parse artifact manifest {}", path.display()))?;
         Ok(Some(val))
+    }
+
+    // ── Install output records (#581 wave 2) ────────────────────────────────
+    //
+    // The typed launch-reuse records an install revision produces, persisted
+    // alongside the existing `artifact_manifest.json` / `output/` layout under
+    // `revisions/<install_revision_id>/`:
+    //
+    //   revision.json            -> InstallRevision (self-contained authority)
+    //   artifact-build.json      -> ArtifactBuild
+    //   requirement-graph.json   -> RequirementGraphSnapshot
+    //   state-contracts.json     -> Vec<StateContractSnapshot>
+    //   install-receipt.json     -> InstallReceipt
+    //
+    // `revision.json` is written *last* by the finalizer and is the per-revision
+    // finalization marker: a revision whose sub-records were only partially
+    // written (no `revision.json`) is not considered finalized — see
+    // [`is_revision_finalized`] / [`read_install_revision`].
+    //
+    // These records carry only install-time identity/metadata. They never hold
+    // secret values, nor any session/runtime/observed fact (session id, dynamic
+    // port, pid, container id, live route, log cursor, observed status).
+
+    pub fn revision_install_record_path(&self, rev: &InstallRevisionId) -> PathBuf {
+        self.revision_dir(rev).join("revision.json")
+    }
+
+    pub fn revision_artifact_build_path(&self, rev: &InstallRevisionId) -> PathBuf {
+        self.revision_dir(rev).join("artifact-build.json")
+    }
+
+    pub fn revision_requirement_graph_path(&self, rev: &InstallRevisionId) -> PathBuf {
+        self.revision_dir(rev).join("requirement-graph.json")
+    }
+
+    pub fn revision_state_contracts_path(&self, rev: &InstallRevisionId) -> PathBuf {
+        self.revision_dir(rev).join("state-contracts.json")
+    }
+
+    pub fn revision_install_receipt_path(&self, rev: &InstallRevisionId) -> PathBuf {
+        self.revision_dir(rev).join("install-receipt.json")
+    }
+
+    /// Atomically write any revision-scoped JSON record, creating the revision
+    /// directory if needed.
+    fn write_revision_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create revision dir {}", parent.display()))?;
+        }
+        let json = serde_json::to_string_pretty(value)
+            .with_context(|| format!("serialize record {}", path.display()))?;
+        atomic_write(path, json.as_bytes())
+    }
+
+    /// Persist the [`ArtifactBuild`] record for a revision (atomic).
+    pub fn write_artifact_build(
+        &self,
+        rev: &InstallRevisionId,
+        build: &ArtifactBuild,
+    ) -> Result<()> {
+        self.write_revision_json(&self.revision_artifact_build_path(rev), build)
+    }
+
+    /// Persist the [`RequirementGraphSnapshot`] for a revision (atomic).
+    pub fn write_requirement_graph_snapshot(
+        &self,
+        rev: &InstallRevisionId,
+        snapshot: &RequirementGraphSnapshot,
+    ) -> Result<()> {
+        self.write_revision_json(&self.revision_requirement_graph_path(rev), snapshot)
+    }
+
+    /// Persist the state-contract snapshots for a revision (atomic). An empty
+    /// slice is persisted explicitly as `[]`.
+    pub fn write_state_contracts(
+        &self,
+        rev: &InstallRevisionId,
+        contracts: &[StateContractSnapshot],
+    ) -> Result<()> {
+        self.write_revision_json(&self.revision_state_contracts_path(rev), &contracts)
+    }
+
+    /// Persist the [`InstallReceipt`] for a revision (atomic).
+    pub fn write_install_receipt(
+        &self,
+        rev: &InstallRevisionId,
+        receipt: &InstallReceipt,
+    ) -> Result<()> {
+        self.write_revision_json(&self.revision_install_receipt_path(rev), receipt)
+    }
+
+    /// Persist the [`InstallRevision`] marker (atomic). Must be written only
+    /// after every sub-record above has been written successfully.
+    pub fn write_install_revision(&self, revision: &InstallRevision) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_install_record_path(&revision.install_revision_id),
+            revision,
+        )
+    }
+
+    /// True if `revision.json` exists for this revision — i.e. finalization
+    /// reached the marker write. A scaffolded-but-incomplete revision (output
+    /// copied, sub-records partially written) returns `false`.
+    pub fn is_revision_finalized(&self, rev: &InstallRevisionId) -> bool {
+        self.revision_install_record_path(rev).exists()
+    }
+
+    /// Read the [`InstallRevision`] for a revision. Errors if `revision.json`
+    /// is missing (revision not finalized) or malformed.
+    pub fn read_install_revision(&self, rev: &InstallRevisionId) -> Result<InstallRevision> {
+        let path = self.revision_install_record_path(rev);
+        if !path.exists() {
+            anyhow::bail!(
+                "revision '{}' is not finalized: revision.json is missing",
+                rev.as_str()
+            );
+        }
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`ArtifactBuild`] record for a revision.
+    pub fn read_artifact_build(&self, rev: &InstallRevisionId) -> Result<ArtifactBuild> {
+        let path = self.revision_artifact_build_path(rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`RequirementGraphSnapshot`] for a revision.
+    pub fn read_requirement_graph_snapshot(
+        &self,
+        rev: &InstallRevisionId,
+    ) -> Result<RequirementGraphSnapshot> {
+        let path = self.revision_requirement_graph_path(rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the state-contract snapshots for a revision.
+    pub fn read_state_contracts(
+        &self,
+        rev: &InstallRevisionId,
+    ) -> Result<Vec<StateContractSnapshot>> {
+        let path = self.revision_state_contracts_path(rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`InstallReceipt`] for a revision.
+    pub fn read_install_receipt(&self, rev: &InstallRevisionId) -> Result<InstallReceipt> {
+        let path = self.revision_install_receipt_path(rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Convenience readback for launch reuse: follow the `current_revision`
+    /// pointer for `(app, profile)` and load the finalized [`InstallRevision`].
+    ///
+    /// `(app, profile)` determines the [`InstallProfileKey`](super::ids::InstallProfileKey),
+    /// so this is the `install_profile_key -> current revision -> records` chain
+    /// a launcher needs without recomputing the install.
+    pub fn read_current_install_revision(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+    ) -> Result<InstallRevision> {
+        let rev = self.current_revision(app, profile)?;
+        self.read_install_revision(&rev)
     }
 
     // ── Profile list ──────────────────────────────────────────────────────
