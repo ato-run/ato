@@ -191,6 +191,89 @@ impl LaunchMaterializationRecord {
             materialized_at: materialized_at.into(),
         }
     }
+
+    /// Validate that the record is structurally sound enough to build a
+    /// downstream command payload from (#581 wave 5C).
+    ///
+    /// Checks the identity fields are present and well-formed, the projection
+    /// digests are valid `blake3:<hex>` content digests, and the selected
+    /// runner class/ref are consistent (both present or both absent). This is a
+    /// *structural* check; it does not re-derive identity (the materialization
+    /// builder already froze it) and reads no runtime/observed fact.
+    pub fn validate(&self) -> Result<(), MaterializationRecordInvalidReason> {
+        use MaterializationRecordInvalidReason as E;
+        if self.session_ref.is_empty() {
+            return Err(E::SessionRefEmpty);
+        }
+        if self.capsule_instance_key.as_str().is_empty() {
+            return Err(E::CapsuleInstanceKeyEmpty);
+        }
+        if self.install_revision_id.as_str().is_empty() {
+            return Err(E::InstallRevisionIdEmpty);
+        }
+        self.execution_id
+            .validate()
+            .map_err(|detail| E::ExecutionIdInvalid { detail })?;
+        if self.requirement_graph_hash.is_empty() {
+            return Err(E::RequirementGraphHashEmpty);
+        }
+        if self.requirement_graph_snapshot_hash.is_empty() {
+            return Err(E::RequirementGraphSnapshotHashEmpty);
+        }
+        if self.projection_digests.is_empty() {
+            return Err(E::NoProjectionDigests);
+        }
+        for (index, digest) in self.projection_digests.iter().enumerate() {
+            digest
+                .validate()
+                .map_err(|reason| E::ProjectionDigestInvalid { index, reason })?;
+        }
+        // Runner class and ref are a pair: placement either selected a runner
+        // (both present) or it has not (both absent). One without the other is a
+        // malformed record.
+        if self.selected_runner_class.is_some() != self.selected_runner_ref.is_some() {
+            return Err(E::RunnerSelectionInconsistent);
+        }
+        Ok(())
+    }
+}
+
+/// Why a [`LaunchMaterializationRecord`] is not structurally valid (#581 wave 5C).
+///
+/// Typed (never an in-band sentinel). Carries only content hashes / detail
+/// strings, never a secret or observed value.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MaterializationRecordInvalidReason {
+    /// `session_ref` is empty.
+    #[error("materialization session_ref is empty")]
+    SessionRefEmpty,
+    /// `capsule_instance_key` is empty.
+    #[error("materialization capsule_instance_key is empty")]
+    CapsuleInstanceKeyEmpty,
+    /// `install_revision_id` is empty.
+    #[error("materialization install_revision_id is empty")]
+    InstallRevisionIdEmpty,
+    /// `execution_id` is malformed (not `exec_<≥32 hex>`).
+    #[error("materialization execution_id is invalid: {detail}")]
+    ExecutionIdInvalid { detail: String },
+    /// `requirement_graph_hash` (content hash) is empty.
+    #[error("materialization requirement_graph_hash is empty")]
+    RequirementGraphHashEmpty,
+    /// `requirement_graph_snapshot_hash` (snapshot identity) is empty.
+    #[error("materialization requirement_graph_snapshot_hash is empty")]
+    RequirementGraphSnapshotHashEmpty,
+    /// No projection digests were captured.
+    #[error("materialization has no projection digests")]
+    NoProjectionDigests,
+    /// A projection digest is malformed.
+    #[error("materialization projection digest at index {index} is invalid: {reason}")]
+    ProjectionDigestInvalid {
+        index: usize,
+        reason: ProjectionDigestInvalidReason,
+    },
+    /// `selected_runner_class` and `selected_runner_ref` disagree on presence.
+    #[error("materialization selected runner class/ref are inconsistent (one present, one absent)")]
+    RunnerSelectionInconsistent,
 }
 
 #[cfg(test)]
