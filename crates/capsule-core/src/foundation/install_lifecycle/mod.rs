@@ -15,6 +15,7 @@ pub mod launch_inputs;
 pub mod launch_reuse;
 pub mod launch_template;
 pub mod launch_template_builder;
+pub mod launch_template_reuse;
 pub mod materialization;
 pub mod records;
 pub mod requirement_graph;
@@ -38,12 +39,18 @@ pub use launch_reuse::{
 pub use launch_template::{
     BindingAssignmentSet, BindingAssignmentSource, CompatibilityIndex,
     CompatibilityIndexCompleteness, CompatibilityIndexCompletenessReason, LaunchTemplate,
-    LaunchTemplateKey, LaunchTemplateKeyInputs, RequirementBinding, RequirementBindingKind,
-    RunnerClass, RunnerCompatibilityClass, RunnerCompatibilityClassParseError,
+    LaunchTemplateIntegrityError, LaunchTemplateKey, LaunchTemplateKeyInputs, RequirementBinding,
+    RequirementBindingKind, RunnerClass, RunnerCompatibilityClass,
+    RunnerCompatibilityClassParseError,
 };
 pub use launch_template_builder::{
     LaunchTemplateBuildError, LaunchTemplateBuildInput, LaunchTemplateBuildOutput,
     build_launch_template,
+};
+pub use launch_template_reuse::{
+    LaunchTemplateReuseInput, PersistedLaunchTemplateReuseBlocker,
+    PersistedLaunchTemplateReuseDecision, evaluate_persisted_launch_template_reuse,
+    validate_launch_template_for_reuse,
 };
 pub use materialization::{LaunchMaterializationRecord, ProjectionDigest};
 pub use records::{
