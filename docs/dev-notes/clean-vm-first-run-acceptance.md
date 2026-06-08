@@ -161,3 +161,17 @@ which bundles `podman`, `gvproxy`, and `vfkit` in one verified download. Expansi
 via `pkgutil --expand-full` (OS built-in, no Xcode CLT). Old remote-zip installs
 (5.2.3) are auto-cleared on next install. pkg SHA256s are pinned (arm64
 `8aeaa329…bbc8c`, amd64 `2312f915…33af9`) from the official v5.8.2 release.
+
+Follow-up, 2026-06-08 (artifact fetch resilience): clean-VM runtime setup hit a
+one-off GitHub `504 Gateway Timeout` on the pkg download and immediately told the
+user to install Podman manually. The fetcher is now resilient: transient failures
+(408/429/5xx, timeout, connection reset) retry with exponential backoff + jitter
+(4 attempts), `PinnedArtifact` carries ordered `fallback_urls` mirrors (tried
+after the primary; digest is the trust anchor regardless of source), and a
+repeated-transient outcome surfaces a distinct `TransientDownloadFailed` error
+("…usually transient — re-run runtime setup") instead of "install manually".
+Digest mismatch still fails closed and never falls through to a mirror. Remaining
+infra step: provision the Ato-controlled mirror (`artifacts.ato.run/podman/v5.8.2/…`)
+and wire its URLs into `MACOS_*_PKG_MIRRORS` (the fetch/retry/fallback code already
+consumes them); Desktop should keep the Runtime Setup card enabled with a Retry
+action on `TransientDownloadFailed`.

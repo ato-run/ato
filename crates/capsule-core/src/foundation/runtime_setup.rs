@@ -560,6 +560,12 @@ pub struct InstallProgress {
     pub tool: ToolKind,
     pub phase: InstallPhase,
     pub message: String,
+    /// True when a `Failed` event is a transient condition the user can retry
+    /// (e.g. a 504 from the release CDN), so a consuming UI can offer a Retry
+    /// action instead of a dead end. Omitted from the wire when false to keep
+    /// the existing event shape unchanged for the common case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retryable: bool,
 }
 
 impl InstallProgress {
@@ -568,13 +574,38 @@ impl InstallProgress {
             tool,
             phase,
             message: message.into(),
+            retryable: false,
         }
+    }
+
+    /// Mark this event as a retryable (transient) failure.
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_progress_retryable_wire_shape() {
+        // Default (false) is omitted from the wire — existing consumers unchanged.
+        let plain = InstallProgress::new(ToolKind::Podman, InstallPhase::Failed, "boom");
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("retryable"), "false must be omitted: {json}");
+
+        // A transient failure carries `retryable: true` for the UI's Retry action.
+        let retry = InstallProgress::new(ToolKind::Podman, InstallPhase::Failed, "504").retryable(true);
+        let json = serde_json::to_string(&retry).unwrap();
+        assert!(json.contains("\"retryable\":true"), "true must be present: {json}");
+
+        // Round-trips, and a missing field deserializes to false.
+        let back: InstallProgress =
+            serde_json::from_str(r#"{"tool":"podman","phase":"failed","message":"x"}"#).unwrap();
+        assert!(!back.retryable);
+    }
 
     #[test]
     fn install_strategy_routes_each_tool() {
