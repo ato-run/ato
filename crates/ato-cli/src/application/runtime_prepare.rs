@@ -25,10 +25,10 @@ use capsule_core::runtime_setup::{InstallPhase, InstallStrategy, ToolKind};
 
 use crate::adapters::runtime::podman_machine::{PodmanMachine, parse_machine_entries};
 use crate::application::podman_install::{
-    PodmanInstallStrategy, ReqwestArtifactFetcher, install_ato_managed_podman, install_strategies,
-    missing_helpers_for, pinned_artifact,
+    PodmanInstallError, PodmanInstallStrategy, ReqwestArtifactFetcher, install_ato_managed_podman,
+    install_strategies, missing_helpers_for, pinned_artifact,
 };
-use crate::application::runtime_setup::{emit_progress, install_tools};
+use crate::application::runtime_setup::{emit_failure, emit_progress, install_tools};
 
 /// Public entry for `ato internal runtime prepare --tools … [--emit-json]`.
 ///
@@ -59,7 +59,7 @@ pub(crate) fn prepare_tools(tools: Vec<ToolKind>, json: bool) -> Result<()> {
         // Only Podman is a host runtime today; `prepare_podman` is generic over
         // the env so it stays unit-testable without a real podman.
         if let Err(err) = prepare_podman(&env, &reporter) {
-            emit_progress(tool, InstallPhase::Failed, err.to_string(), json);
+            emit_failure(tool, err.to_string(), err.is_retryable(), json);
             failures.push(format!("{}: {err}", tool.as_str()));
         }
     }
@@ -109,6 +109,11 @@ pub(crate) enum PrepareError {
     /// Podman is missing and Ato could not install it here (no strategy
     /// succeeded); carries Homebrew-free, actionable instructions.
     InstallUnavailable(String),
+    /// The Ato-managed download failed with a *transient* error (e.g. repeated
+    /// 504 from the release CDN) after retries. Kept distinct from
+    /// `InstallUnavailable` so the UI can offer a Retry instead of telling the
+    /// user to install Podman manually. Carries the actionable message.
+    TransientRuntimeDownload(String),
     /// After installing, Podman still could not be resolved (likely a PATH
     /// refresh / restart is required).
     StillMissingAfterInstall(String),
@@ -138,6 +143,7 @@ impl std::fmt::Display for PrepareError {
         match self {
             Self::InvalidOverride(m) => write!(f, "{m}"),
             Self::InstallUnavailable(m) => write!(f, "{m}"),
+            Self::TransientRuntimeDownload(m) => write!(f, "{m}"),
             Self::StillMissingAfterInstall(m) => write!(f, "{m}"),
             Self::MachineQueryFailed(m) => write!(f, "could not read podman machines: {m}"),
             Self::RuntimeProviderIncomplete { helper } => write!(
@@ -171,6 +177,15 @@ impl std::fmt::Display for PrepareError {
 }
 
 impl std::error::Error for PrepareError {}
+
+impl PrepareError {
+    /// Whether this failure is a transient condition the user can simply retry
+    /// (vs. a dead end needing manual action). Drives the `retryable` flag on the
+    /// emitted progress so a UI can show a Retry action.
+    pub(crate) fn is_retryable(&self) -> bool {
+        matches!(self, Self::TransientRuntimeDownload(_))
+    }
+}
 
 /// Host platform for prepare decisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,9 +272,17 @@ trait PrepareEnv {
         pinned_artifact(self.host_os(), self.host_arch()).is_some()
     }
     /// Download, digest-verify, and extract an Ato-managed Podman into the tools
-    /// cache. Returns the install error string on failure (already actionable
-    /// and never a "install Homebrew" instruction).
-    fn install_ato_managed_podman(&self) -> Result<(), String>;
+    /// cache. Returns the typed [`PodmanInstallError`] on failure so callers can
+    /// distinguish a transient download failure (retryable) from a permanent
+    /// one; the error is already actionable and never an "install Homebrew" one.
+    fn install_ato_managed_podman(&self) -> Result<(), PodmanInstallError>;
+    /// Whether to skip the Homebrew strategy and force the Ato-managed verified-
+    /// download path even when brew is present (clean-VM testing / opt-out of a
+    /// brew-managed Podman). Abstracted here so the strategy loop stays testable
+    /// instead of reading process env directly.
+    fn force_managed_podman(&self) -> bool {
+        false
+    }
     /// Names of required `podman machine` helper binaries that are MISSING from
     /// the resolved Podman's helper dir. Empty when complete or not applicable
     /// (a non-Ato-managed Podman is trusted to bring its own helpers). Used as a
@@ -324,14 +347,20 @@ impl PrepareEnv for SystemPrepareEnv {
         std::env::consts::ARCH
     }
 
-    fn install_ato_managed_podman(&self) -> Result<(), String> {
-        let tools_dir =
-            capsule_core::common::paths::ato_tools_dir().map_err(|err| err.to_string())?;
-        std::fs::create_dir_all(&tools_dir).map_err(|err| err.to_string())?;
+    fn install_ato_managed_podman(&self) -> Result<(), PodmanInstallError> {
+        let tools_dir = capsule_core::common::paths::ato_tools_dir().map_err(|err| {
+            PodmanInstallError::Extract { message: err.to_string() }
+        })?;
+        std::fs::create_dir_all(&tools_dir).map_err(|err| PodmanInstallError::Extract {
+            message: err.to_string(),
+        })?;
         let fetcher = ReqwestArtifactFetcher;
         install_ato_managed_podman(&fetcher, self.host_os(), self.host_arch(), &tools_dir)
             .map(|_| ())
-            .map_err(|err| err.to_string())
+    }
+
+    fn force_managed_podman(&self) -> bool {
+        std::env::var_os("ATO_FORCE_MANAGED_PODMAN").is_some()
     }
 
     fn missing_machine_helpers(&self) -> Vec<String> {
@@ -527,7 +556,10 @@ fn install_podman_macos<E: PrepareEnv, R: PrepareReporter>(
     env: &E,
     reporter: &R,
 ) -> Result<(), PrepareError> {
-    let brew_present = env.brew_bin().is_some();
+    // Forcing the managed path skips Homebrew even when brew is present (clean-VM
+    // testing / opt-out of a brew-managed Podman). The decision is on `PrepareEnv`
+    // so the strategy loop stays unit-testable instead of reading process env.
+    let brew_present = env.brew_bin().is_some() && !env.force_managed_podman();
     let managed_available = env.managed_podman_available();
     let mut attempt_errors: Vec<String> = Vec::new();
 
@@ -550,6 +582,14 @@ fn install_podman_macos<E: PrepareEnv, R: PrepareReporter>(
                 );
                 match env.install_ato_managed_podman() {
                     Ok(()) => return Ok(()),
+                    // A transient download failure (e.g. repeated 504) is retryable
+                    // — surface it structurally instead of collapsing it into the
+                    // generic "install Podman manually" message. AtoManaged is the
+                    // last install strategy before ManualInstructions, so there is
+                    // nothing else to try anyway.
+                    Err(err @ PodmanInstallError::TransientDownloadFailed { .. }) => {
+                        return Err(PrepareError::TransientRuntimeDownload(err.to_string()));
+                    }
                     Err(err) => attempt_errors.push(format!("Ato-managed install: {err}")),
                 }
             }
@@ -665,10 +705,15 @@ fn ensure_machine_helpers<E: PrepareEnv, R: PrepareReporter>(
         InstallPhase::Downloading,
         "Completing the Podman machine runtime (downloading verified helpers)…",
     );
-    // Reinstall the full bundle in place. A failure here means we genuinely could
-    // not complete the runtime — report it as such, not as "re-run setup".
-    env.install_ato_managed_podman()
-        .map_err(PrepareError::InstallUnavailable)?;
+    // Reinstall the full bundle in place. A transient download failure stays
+    // retryable; any other failure means we genuinely could not complete the
+    // runtime — report that as such, not as "re-run setup".
+    env.install_ato_managed_podman().map_err(|e| match e {
+        PodmanInstallError::TransientDownloadFailed { .. } => {
+            PrepareError::TransientRuntimeDownload(e.to_string())
+        }
+        other => PrepareError::InstallUnavailable(other.to_string()),
+    })?;
 
     // Re-resolve + re-check (each env call resolves fresh) — the freshly written
     // containers.conf is now in place too, so subsequent podman invocations pick
@@ -856,7 +901,9 @@ mod tests {
         managed_available: bool,
         /// Result of the Ato-managed install (`Ok` = success). `None` means the
         /// strategy is never expected to run in this test.
-        managed_install: Option<Result<(), String>>,
+        managed_install: Option<Result<(), PodmanInstallError>>,
+        /// Force the managed path (skip Homebrew even when brew is present).
+        force_managed: bool,
         /// Helper binaries the resolved Podman is missing (drives the machine
         /// preflight/repair). Empty = complete runtime. A successful Ato-managed
         /// (re)install clears it, simulating the bundle's helpers being placed.
@@ -874,6 +921,7 @@ mod tests {
                 brew_install: None,
                 managed_available: false,
                 managed_install: None,
+                force_managed: false,
                 missing_helpers: RefCell::new(Vec::new()),
                 calls: RefCell::new(Vec::new()),
             }
@@ -890,9 +938,19 @@ mod tests {
 
         /// Configure the Ato-managed installer: whether a build is pinned for
         /// the host and, when run, whether it succeeds.
-        fn with_managed(mut self, available: bool, result: Option<Result<(), String>>) -> Self {
+        fn with_managed(
+            mut self,
+            available: bool,
+            result: Option<Result<(), PodmanInstallError>>,
+        ) -> Self {
             self.managed_available = available;
             self.managed_install = result;
+            self
+        }
+
+        /// Force the Ato-managed path even when brew is present.
+        fn with_force_managed(mut self, force: bool) -> Self {
+            self.force_managed = force;
             self
         }
 
@@ -988,20 +1046,25 @@ mod tests {
             self.managed_available
         }
 
-        fn install_ato_managed_podman(&self) -> Result<(), String> {
+        fn install_ato_managed_podman(&self) -> Result<(), PodmanInstallError> {
             self.calls
                 .borrow_mut()
                 .push("ato-managed install podman".to_string());
-            let result = self
-                .managed_install
-                .clone()
-                .unwrap_or_else(|| Err("ato-managed install not configured".to_string()));
+            let result = self.managed_install.clone().unwrap_or_else(|| {
+                Err(PodmanInstallError::Extract {
+                    message: "ato-managed install not configured".to_string(),
+                })
+            });
             // A successful (re)install places the bundled helpers — model that by
             // clearing the missing set so the post-repair re-check passes.
             if result.is_ok() {
                 self.missing_helpers.borrow_mut().clear();
             }
             result
+        }
+
+        fn force_managed_podman(&self) -> bool {
+            self.force_managed
         }
 
         fn missing_machine_helpers(&self) -> Vec<String> {
@@ -1233,7 +1296,13 @@ mod tests {
                 searched: Vec::new(),
             })])
             .with_brew(None, None)
-            .with_managed(true, Some(Err("network unreachable".to_string())));
+            .with_managed(
+                true,
+                Some(Err(PodmanInstallError::Fetch {
+                    url: "https://example.test/pkg".to_string(),
+                    message: "network unreachable".to_string(),
+                })),
+            );
         let reporter = RecordingReporter::default();
         let err = prepare_podman(&env, &reporter).expect_err("managed install failed");
         let PrepareError::InstallUnavailable(msg) = &err else {
@@ -1251,6 +1320,69 @@ mod tests {
         assert!(
             msg.contains("podman.io"),
             "should point at official installer: {msg}"
+        );
+    }
+
+    #[test]
+    fn force_managed_skips_homebrew_even_when_present() {
+        // brew IS present, but force-managed must skip it and use the Ato-managed
+        // verified-download path instead.
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_resolves(vec![
+                Err(PodmanResolveError::NotFound { searched: Vec::new() }),
+                Ok(resolved()),
+            ])
+            .with_brew(Some("/opt/homebrew/bin/brew"), Some(0))
+            .with_force_managed(true)
+            .with_managed(true, Some(Ok(())))
+            .with_podman("machine list --format json", 0, "[]")
+            .with_podman("machine init ato-podman", 0, "")
+            .with_podman("machine start ato-podman", 0, "")
+            .with_podman("--connection ato-podman info --format json", 0, "{}");
+        let reporter = RecordingReporter::default();
+        prepare_podman(&env, &reporter).expect("force-managed install should prepare");
+
+        let calls = env.calls();
+        assert!(
+            calls.iter().any(|c| c == "ato-managed install podman"),
+            "managed path must run: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("brew install")),
+            "Homebrew must be skipped when force-managed: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn transient_managed_download_failure_is_typed_not_install_manually() {
+        // A repeated-504-style transient download failure must surface as a
+        // distinct, retryable PrepareError — not collapsed into the generic
+        // "install Podman manually" InstallUnavailable.
+        let env = FakeEnv::new(PreparePlatform::Macos)
+            .with_resolves(vec![Err(PodmanResolveError::NotFound { searched: Vec::new() })])
+            .with_brew(None, None)
+            .with_managed(
+                true,
+                Some(Err(PodmanInstallError::TransientDownloadFailed {
+                    url: "https://example.test/pkg".to_string(),
+                    attempts: 4,
+                    message: "HTTP 504 Gateway Timeout".to_string(),
+                })),
+            );
+        let reporter = RecordingReporter::default();
+        let err = prepare_podman(&env, &reporter).expect_err("transient download must error");
+        assert!(
+            matches!(err, PrepareError::TransientRuntimeDownload(_)),
+            "expected TransientRuntimeDownload, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("re-run runtime setup"),
+            "must carry the retryable hint: {msg}"
+        );
+        assert!(
+            !msg.contains("Install Podman manually"),
+            "must NOT be the generic install-manually message: {msg}"
         );
     }
 
@@ -1354,7 +1486,12 @@ mod tests {
         // If the repair reinstall itself fails, surface a typed error and never
         // attempt machine init — and never loop on reinstall.
         let env = FakeEnv::new(PreparePlatform::Macos)
-            .with_managed(true, Some(Err("download failed".to_string())))
+            .with_managed(
+                true,
+                Some(Err(PodmanInstallError::Extract {
+                    message: "download failed".to_string(),
+                })),
+            )
             .with_missing_helpers(&["gvproxy"])
             .with_podman("machine list --format json", 0, "[]");
         let reporter = RecordingReporter::default();
