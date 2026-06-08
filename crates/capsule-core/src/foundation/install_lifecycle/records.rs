@@ -93,6 +93,14 @@ pub struct ArtifactBuild {
     /// Content hash of resolved dependency outputs, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_output_hash: Option<String>,
+    /// Build platform profile (`"linux/x86_64"`, `"wasm32-unknown"`, …).
+    ///
+    /// Descriptive metadata only — the build identity is `artifact_build_id`
+    /// (content-addressed by the producer); `ArtifactBuild` is never hashed, so
+    /// this field never feeds an id or cache key. (The id-derivation path uses
+    /// [`ArtifactBuildIdentityInputs::platform`] instead.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// Reference to the build receipt (not the execution receipt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_receipt_ref: Option<String>,
@@ -490,6 +498,7 @@ mod tests {
             output_ref: "/artifacts/blake3/3333".into(),
             output_content_hash: "blake3:3333".into(),
             dependency_output_hash: Some("blake3:2222".into()),
+            platform: Some("linux/x86_64".into()),
             build_receipt_ref: None,
             created_at: "2026-06-08T00:00:00Z".into(),
         };
