@@ -718,6 +718,64 @@ impl InstallInstanceStore {
         )
     }
 
+    // ── Per-session launch materialization records (#581 wave 5B) ─────────────
+    //
+    // A `LaunchMaterializationRecord` is session-scoped (frozen per session,
+    // never reused as a launch template). It is stored under the existing
+    // app-scoped sessions dir, indexed by `capsule_instance_key` (the session's
+    // canonical replay key — see the directory-structure doc at the top of this
+    // file: "sessions/  # session records (indexed by capsule_instance_key)"):
+    //
+    //   instances/<app>/sessions/<capsule_instance_key>/materialization.json
+    //
+    // The record carries only stable identity + projection *digests* — never a
+    // secret value, dynamic port, pid, container id, live route, log cursor, or
+    // observed/readiness status.
+
+    /// Directory holding one session's records, keyed by `capsule_instance_key`.
+    pub fn session_dir(
+        &self,
+        app: &InstalledAppId,
+        capsule_instance_key: &super::ids::CapsuleInstanceKey,
+    ) -> PathBuf {
+        self.sessions_dir(app).join(capsule_instance_key.as_str())
+    }
+
+    /// Path of a session's `materialization.json`.
+    pub fn session_materialization_path(
+        &self,
+        app: &InstalledAppId,
+        capsule_instance_key: &super::ids::CapsuleInstanceKey,
+    ) -> PathBuf {
+        self.session_dir(app, capsule_instance_key)
+            .join("materialization.json")
+    }
+
+    /// Persist a [`LaunchMaterializationRecord`](super::materialization::LaunchMaterializationRecord)
+    /// for its session (atomic), keyed by the record's `capsule_instance_key`.
+    pub fn write_launch_materialization_record(
+        &self,
+        app: &InstalledAppId,
+        record: &super::materialization::LaunchMaterializationRecord,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.session_materialization_path(app, &record.capsule_instance_key),
+            record,
+        )
+    }
+
+    /// Read a session's [`LaunchMaterializationRecord`](super::materialization::LaunchMaterializationRecord)
+    /// by its `capsule_instance_key`.
+    pub fn read_launch_materialization_record(
+        &self,
+        app: &InstalledAppId,
+        capsule_instance_key: &super::ids::CapsuleInstanceKey,
+    ) -> Result<super::materialization::LaunchMaterializationRecord> {
+        let path = self.session_materialization_path(app, capsule_instance_key);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
     /// Remove the `revision.json` finalization marker if present (best effort).
     ///
     /// Called before re-finalizing an existing revision so that the revision is
