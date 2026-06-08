@@ -954,4 +954,235 @@ mod tests {
             );
         }
     }
+
+    // ── 13. Bridge contract (#581 ↔ #593) ────────────────────────────────────
+    //
+    // These tests cover `engine::launch_preparation_bridge`, the
+    // control-plane-facing JSON projection. They reuse this module's harness and
+    // are named `launch_preparation_bridge_*` so the `--lib launch_preparation`
+    // filter picks them up alongside the plan tests.
+
+    use crate::engine::launch_preparation_bridge::{
+        LaunchPreparationBridgeResult, bridge_blocker_code,
+    };
+
+    /// A deterministic *prepared* bridge result for fixtures/assertions.
+    ///
+    /// `build_suffix` is fixed so the derived `rev_`/`exec_`/`cik_` ids are stable
+    /// across runs — the golden fixture is byte-stable.
+    fn prepared_bridge_result() -> LaunchPreparationBridgeResult {
+        let (dir, store, app, profile) = setup();
+        let rev = persist_ready_on_disk(&store, &app, &profile, dir.path(), "b41d9e");
+        let decision = prepare_launch(
+            &store,
+            prep_input(&app, &profile, &rev, all_ok(), sample_digests()),
+        );
+        assert!(decision.is_prepared(), "fixture must be prepared");
+        LaunchPreparationBridgeResult::from_decision(&decision)
+    }
+
+    /// A deterministic *not_prepared* bridge result: a standard (NotReady) install
+    /// with no persisted launch template.
+    fn not_prepared_bridge_result() -> LaunchPreparationBridgeResult {
+        let (dir, store, app, profile) = setup();
+        let out = finalize_standard(&store, &app, &profile, dir.path(), "b42a01");
+        let rev = out.install_revision_id.clone();
+        let decision = prepare_launch(
+            &store,
+            prep_input(&app, &profile, &rev, all_ok(), sample_digests()),
+        );
+        assert!(!decision.is_prepared(), "fixture must not be prepared");
+        LaunchPreparationBridgeResult::from_decision(&decision)
+    }
+
+    fn bridge_fixture_path(name: &str) -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/launch_preparation")
+            .join(format!("{name}.json"))
+    }
+
+    #[test]
+    fn launch_preparation_bridge_prepared_invariants() {
+        let result = prepared_bridge_result();
+        let plan = match &result {
+            LaunchPreparationBridgeResult::Prepared { plan } => plan,
+            other => panic!("expected prepared, got {other:?}"),
+        };
+
+        // selected_runner_class is managed_runner for the fixture.
+        assert_eq!(plan.selected_runner_class, RunnerClass::ManagedRunner);
+        // requirement_graph_hash and snapshot_hash are distinct (#588/#596).
+        assert_ne!(
+            plan.requirement_graph_hash, plan.requirement_graph_snapshot_hash,
+            "content hash and snapshot hash must stay distinct"
+        );
+        assert!(plan.requirement_graph_hash.starts_with("blake3:"));
+        assert!(plan.requirement_graph_snapshot_hash.starts_with("blake3:"));
+        // prepare_command is PrepareSession only.
+        assert!(
+            matches!(
+                plan.prepare_command,
+                crate::engine::runner_command::RunnerCommandPayload::PrepareSession { .. }
+            ),
+            "bridge plan must carry only PrepareSession, got {:?}",
+            plan.prepare_command
+        );
+        // Flat ids keep their typed shape.
+        assert!(plan.install_revision_id.starts_with("rev_"));
+        assert!(plan.capsule_instance_key.starts_with("cik_"));
+        assert!(plan.execution_id.starts_with("exec_"));
+
+        // No secrets / observed diagnostics in the serialized bridge result.
+        let json = serde_json::to_string(&result).unwrap();
+        for forbidden in ["hunter2", "password", "swordfish"] {
+            assert!(
+                !json.contains(forbidden),
+                "bridge result must never carry a raw secret value ({forbidden:?})"
+            );
+        }
+        for forbidden in [
+            "observed_status",
+            "readiness_status",
+            "dynamic_port",
+            "process_id",
+            "container_id",
+            "log_cursor",
+            "live_route",
+        ] {
+            assert!(
+                !json.contains(forbidden),
+                "bridge result must not contain observed/runtime field {forbidden:?}"
+            );
+        }
+        // The bridge intentionally drops the nested template / materialization
+        // records (checked precisely on object keys, not substrings — the
+        // PrepareSession ref legitimately ends in ".../materialization").
+        let value = serde_json::to_value(&result).unwrap();
+        let plan_obj = value
+            .get("plan")
+            .and_then(|p| p.as_object())
+            .expect("prepared result has a plan object");
+        assert!(
+            !plan_obj.contains_key("launch_template"),
+            "bridge plan must not export the nested launch_template record"
+        );
+        assert!(
+            !plan_obj.contains_key("materialization"),
+            "bridge plan must not export the nested materialization record"
+        );
+    }
+
+    #[test]
+    fn launch_preparation_bridge_not_prepared_has_stable_codes() {
+        let result = not_prepared_bridge_result();
+        let blockers = match &result {
+            LaunchPreparationBridgeResult::NotPrepared { blockers } => blockers,
+            other => panic!("expected not_prepared, got {other:?}"),
+        };
+        assert!(
+            blockers
+                .iter()
+                .any(|b| b.code == "launch_template_not_reusable"),
+            "expected launch_template_not_reusable, got {blockers:?}"
+        );
+        // No raw secret leaks through the detail text.
+        let json = serde_json::to_string(&result).unwrap();
+        for forbidden in ["hunter2", "password", "swordfish"] {
+            assert!(!json.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn launch_preparation_bridge_blocker_codes_are_stable() {
+        // Lock the #581 → control-plane vocabulary so a rename is a conscious,
+        // contract-breaking change.
+        let (dir, store, app, profile) = setup();
+        let out = finalize_standard(&store, &app, &profile, dir.path(), "b43c02");
+        let rev = out.install_revision_id.clone();
+        let decision = prepare_launch(
+            &store,
+            prep_input(&app, &profile, &rev, all_ok(), sample_digests()),
+        );
+        match decision {
+            LaunchPreparationDecision::NotPrepared { blockers } => {
+                for b in &blockers {
+                    assert!(
+                        matches!(
+                            bridge_blocker_code(b),
+                            "reusable_inputs_invalid"
+                                | "launch_template_not_reusable"
+                                | "launch_materialization_failed"
+                                | "prepare_session_command_failed"
+                                | "launch_preparation_unavailable"
+                        ),
+                        "unexpected bridge code for {b:?}"
+                    );
+                }
+            }
+            other => panic!("expected not_prepared, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn launch_preparation_bridge_roundtrips() {
+        let result = prepared_bridge_result();
+        let json = serde_json::to_string(&result).unwrap();
+        let back: LaunchPreparationBridgeResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, back, "bridge result must survive serde round-trip");
+    }
+
+    #[test]
+    fn launch_preparation_bridge_prepared_matches_golden() {
+        let fresh = serde_json::to_value(prepared_bridge_result()).unwrap();
+        let path = bridge_fixture_path("prepared_managed_runner");
+        let raw = fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "read golden {} ({e}); regenerate with `cargo test -p capsule-core --lib \
+                 regenerate_launch_preparation_bridge_golden_fixtures -- --ignored`",
+                path.display()
+            )
+        });
+        let golden: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            fresh,
+            golden,
+            "prepared bridge JSON drifted from golden {}; regenerate if intended",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn launch_preparation_bridge_not_prepared_matches_golden() {
+        let fresh = serde_json::to_value(not_prepared_bridge_result()).unwrap();
+        let path = bridge_fixture_path("not_prepared_standard_install");
+        let raw = fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("read golden {} ({e})", path.display())
+        });
+        let golden: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            fresh,
+            golden,
+            "not_prepared bridge JSON drifted from golden {}; regenerate if intended",
+            path.display()
+        );
+    }
+
+    /// Regenerate the committed golden bridge fixtures. Ignored by default; run
+    /// explicitly after an intentional contract change:
+    /// `cargo test -p capsule-core --lib \
+    ///  regenerate_launch_preparation_bridge_golden_fixtures -- --ignored`.
+    #[test]
+    #[ignore = "writes golden fixtures into the source tree; run explicitly"]
+    fn regenerate_launch_preparation_bridge_golden_fixtures() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/launch_preparation");
+        fs::create_dir_all(&dir).unwrap();
+        for (name, result) in [
+            ("prepared_managed_runner", prepared_bridge_result()),
+            ("not_prepared_standard_install", not_prepared_bridge_result()),
+        ] {
+            let json = serde_json::to_string_pretty(&result).unwrap();
+            fs::write(dir.join(format!("{name}.json")), format!("{json}\n")).unwrap();
+        }
+    }
 }
