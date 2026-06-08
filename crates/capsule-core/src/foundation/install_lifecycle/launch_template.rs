@@ -527,6 +527,73 @@ impl LaunchTemplate {
             runner_compatibility_class,
         })
     }
+
+    /// Recompute `template_hash` from the current fields, using the same recipe
+    /// as [`LaunchTemplate::new`]: the key digest plus the three template-shape
+    /// hashes. A freshly-built template satisfies
+    /// `recompute_template_hash()? == template_hash`; a tampered or stale payload
+    /// does not.
+    pub fn recompute_template_hash(&self) -> Result<String> {
+        canonical_hash(&(
+            self.key.key_hash()?,
+            &self.filesystem_view_template_hash,
+            &self.network_policy_template_hash,
+            &self.capability_policy_template_hash,
+        ))
+    }
+
+    /// Validate that the template is internally consistent (#581 wave 5A).
+    ///
+    /// Detects a tampered/stale `template_hash` (recompute-and-compare) and a
+    /// `runner_compatibility_class` field that has drifted from the one inside
+    /// `key` (the field is a denormalized copy of `key.runner_compatibility_class`
+    /// — they must agree). This is a *self-consistency* check; it does not by
+    /// itself prove the template is the right one for a given launch (that is the
+    /// caller's key-hash / key comparison).
+    pub fn validate_integrity(&self) -> std::result::Result<(), LaunchTemplateIntegrityError> {
+        if self.runner_compatibility_class != self.key.runner_compatibility_class {
+            return Err(
+                LaunchTemplateIntegrityError::RunnerCompatibilityClassMismatch {
+                    field: self.runner_compatibility_class.as_str().to_owned(),
+                    key: self.key.runner_compatibility_class.as_str().to_owned(),
+                },
+            );
+        }
+        let recomputed = self.recompute_template_hash().map_err(|e| {
+            LaunchTemplateIntegrityError::TemplateHashRecomputeFailed {
+                detail: format!("{e:#}"),
+            }
+        })?;
+        if recomputed != self.template_hash {
+            return Err(LaunchTemplateIntegrityError::TemplateHashMismatch {
+                expected: recomputed,
+                actual: self.template_hash.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Why a [`LaunchTemplate`] failed its self-consistency check (#581 wave 5A).
+///
+/// Typed (never an in-band sentinel). Carries only content hashes / class
+/// strings — never a secret or observed value.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LaunchTemplateIntegrityError {
+    /// The `runner_compatibility_class` field disagrees with the one in `key`.
+    #[error(
+        "template runner_compatibility_class field '{field}' does not match key.runner_compatibility_class '{key}'"
+    )]
+    RunnerCompatibilityClassMismatch { field: String, key: String },
+    /// The stored `template_hash` does not match a fresh recompute from the
+    /// template's own fields — the payload or hash was tampered with or is stale.
+    #[error("template_hash mismatch: recomputed {expected}, stored {actual}")]
+    TemplateHashMismatch { expected: String, actual: String },
+    /// Recomputing the `template_hash` itself failed (e.g. a canonicalization
+    /// error). Distinct from [`Self::TemplateHashMismatch`] so a rare internal
+    /// failure is never mislabelled as tampering.
+    #[error("template_hash could not be recomputed: {detail}")]
+    TemplateHashRecomputeFailed { detail: String },
 }
 
 #[cfg(test)]
