@@ -3315,12 +3315,18 @@ fn build_facts_for_install_persist_and_read_back() {
     let build = store
         .read_artifact_build(&app, &profile, &out.install_revision_id)
         .unwrap();
-    assert_eq!(build.output_content_hash, content_hash);
-    assert_eq!(build.capsule_ref, "koh0920/sample@2.3.4");
-    assert_eq!(build.source_provenance_ref, content_hash);
+    assert_eq!(
+        build.output_content_hash.as_deref(),
+        Some(content_hash.as_str())
+    );
+    assert_eq!(build.capsule_ref.as_deref(), Some("koh0920/sample@2.3.4"));
+    assert_eq!(
+        build.source_provenance_ref.as_deref(),
+        Some(content_hash.as_str())
+    );
     assert!(build.platform.is_some());
     assert_eq!(
-        build.output_ref,
-        format!("/artifacts/blake3/{}", "a".repeat(64))
+        build.output_ref.as_deref(),
+        Some(format!("/artifacts/blake3/{}", "a".repeat(64)).as_str())
     );
 }
