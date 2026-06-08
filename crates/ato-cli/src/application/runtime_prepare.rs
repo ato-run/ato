@@ -527,7 +527,12 @@ fn install_podman_macos<E: PrepareEnv, R: PrepareReporter>(
     env: &E,
     reporter: &R,
 ) -> Result<(), PrepareError> {
-    let brew_present = env.brew_bin().is_some();
+    // `ATO_FORCE_MANAGED_PODMAN=1` skips the Homebrew strategy even when brew is
+    // present, forcing the Ato-managed verified-download path. This is how a
+    // brew-equipped dev box exercises the exact install a brew-less clean VM
+    // would take (and lets users who don't want a brew-managed Podman opt out).
+    let force_managed = std::env::var_os("ATO_FORCE_MANAGED_PODMAN").is_some();
+    let brew_present = env.brew_bin().is_some() && !force_managed;
     let managed_available = env.managed_podman_available();
     let mut attempt_errors: Vec<String> = Vec::new();
 
