@@ -12,6 +12,7 @@ pub mod finalizer;
 pub mod hashing;
 pub mod ids;
 pub mod launch_inputs;
+pub mod launch_materialization_builder;
 pub mod launch_reuse;
 pub mod launch_template;
 pub mod launch_template_builder;
@@ -31,6 +32,10 @@ pub use ids::{
 pub use launch_inputs::{
     InstallReusableInputValidationError, LaunchTemplateReadiness, LaunchTemplateReadinessReason,
     ValidatedInstallReusableInputs,
+};
+pub use launch_materialization_builder::{
+    LaunchMaterializationBuildError, LaunchMaterializationBuildInput,
+    LaunchMaterializationBuildOutput, build_launch_materialization,
 };
 pub use launch_reuse::{
     LaunchReuseDecision, LaunchReuseInputs, RevalidationFailure, RevalidationFailureKind,
@@ -52,7 +57,9 @@ pub use launch_template_reuse::{
     PersistedLaunchTemplateReuseDecision, evaluate_persisted_launch_template_reuse,
     validate_launch_template_for_reuse,
 };
-pub use materialization::{LaunchMaterializationRecord, ProjectionDigest};
+pub use materialization::{
+    LaunchMaterializationRecord, ProjectionDigest, ProjectionDigestInvalidReason,
+};
 pub use records::{
     ArtifactBuild, ArtifactBuildIdentityInputs, InstallReceipt, InstallRevision, RequirementGraph,
     RequirementGraphCompleteness, RequirementGraphCompletenessPolicy,
