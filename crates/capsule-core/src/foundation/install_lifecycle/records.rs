@@ -82,17 +82,34 @@ pub fn derive_artifact_build_id(inputs: &ArtifactBuildIdentityInputs) -> Result<
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactBuild {
     pub artifact_build_id: ArtifactBuildId,
-    /// Canonical capsule reference this build came from.
-    pub capsule_ref: String,
-    /// Source provenance reference (git commit / release tag).
-    pub source_provenance_ref: String,
+    /// Canonical capsule reference this build came from. `None` when the caller
+    /// did not supply it (never an in-band `"unknown"` sentinel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_ref: Option<String>,
+    /// Source provenance reference (git commit / release tag, or the registry
+    /// content hash for a pre-built artifact). `None` when unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_provenance_ref: Option<String>,
     /// Content-addressed output artifact ref (e.g. `/artifacts/blake3/<hex>`).
-    pub output_ref: String,
-    /// Content hash of the produced output.
-    pub output_content_hash: String,
+    /// `None` when no content hash is known yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+    /// Content hash of the produced output. `None` when unresolved — never a
+    /// `"unset"` sentinel, so a reader can never mistake a placeholder for a
+    /// real hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_content_hash: Option<String>,
     /// Content hash of resolved dependency outputs, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_output_hash: Option<String>,
+    /// Build platform profile (`"linux/x86_64"`, `"wasm32-unknown"`, …).
+    ///
+    /// Descriptive metadata only — the build identity is `artifact_build_id`
+    /// (content-addressed by the producer); `ArtifactBuild` is never hashed, so
+    /// this field never feeds an id or cache key. (The id-derivation path uses
+    /// [`ArtifactBuildIdentityInputs::platform`] instead.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// Reference to the build receipt (not the execution receipt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_receipt_ref: Option<String>,
@@ -485,16 +502,36 @@ mod tests {
     fn records_serde_roundtrip() {
         let build = ArtifactBuild {
             artifact_build_id: derive_artifact_build_id(&sample_inputs()).unwrap(),
-            capsule_ref: "ato.run/acme/pgweb/1.2.3".into(),
-            source_provenance_ref: "github.com/acme/pgweb@abc123".into(),
-            output_ref: "/artifacts/blake3/3333".into(),
-            output_content_hash: "blake3:3333".into(),
+            capsule_ref: Some("ato.run/acme/pgweb/1.2.3".into()),
+            source_provenance_ref: Some("github.com/acme/pgweb@abc123".into()),
+            output_ref: Some("/artifacts/blake3/3333".into()),
+            output_content_hash: Some("blake3:3333".into()),
             dependency_output_hash: Some("blake3:2222".into()),
+            platform: Some("linux/x86_64".into()),
             build_receipt_ref: None,
             created_at: "2026-06-08T00:00:00Z".into(),
         };
         let json = serde_json::to_string(&build).unwrap();
         let back: ArtifactBuild = serde_json::from_str(&json).unwrap();
         assert_eq!(build, back);
+
+        // A build with no resolved facts serializes without the optional keys
+        // (no in-band sentinels) and round-trips to all-None.
+        let bare = ArtifactBuild {
+            artifact_build_id: derive_artifact_build_id(&sample_inputs()).unwrap(),
+            capsule_ref: None,
+            source_provenance_ref: None,
+            output_ref: None,
+            output_content_hash: None,
+            dependency_output_hash: None,
+            platform: None,
+            build_receipt_ref: None,
+            created_at: "2026-06-08T00:00:00Z".into(),
+        };
+        let bare_json = serde_json::to_string(&bare).unwrap();
+        assert!(!bare_json.contains("unset") && !bare_json.contains("unknown"));
+        assert!(!bare_json.contains("output_content_hash"));
+        let bare_back: ArtifactBuild = serde_json::from_str(&bare_json).unwrap();
+        assert_eq!(bare, bare_back);
     }
 }
