@@ -53,8 +53,13 @@ use super::store::InstallInstanceStore;
 /// Typed failure when loading/validating reusable install inputs (#581 wave 4B).
 ///
 /// Every variant is a structured, auditable reason — there is no opaque
-/// `anyhow!("invalid")` path. The `*Mismatch` variants carry the conflicting
-/// **content hashes** (never secrets) so a caller can log precisely what diverged.
+/// `anyhow!("invalid")` path. The cross-check mismatch variants
+/// ([`BindingRequirementGraphMismatch`](Self::BindingRequirementGraphMismatch),
+/// [`ReceiptBindingHashMismatch`](Self::ReceiptBindingHashMismatch),
+/// [`ReceiptCompatibilityHashMismatch`](Self::ReceiptCompatibilityHashMismatch))
+/// carry the conflicting **content hashes** (never secrets) so a caller can log
+/// precisely what diverged; the embedded-vs-standalone mismatches are unit
+/// variants (the divergence is "these two records are not byte-equal").
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InstallReusableInputValidationError {
     /// `revision.json` is absent: the revision was never finalized (the marker is
@@ -150,9 +155,13 @@ pub enum InstallReusableInputValidationError {
 pub enum LaunchTemplateReadinessReason {
     /// The compiled requirement graph is still `Partial`.
     RequirementGraphPartial,
-    /// The compatibility index is still `Partial` — no runner class is proven
-    /// supported.
+    /// The compatibility index is still `Partial` — the analysis is not finished,
+    /// so no runner class is proven either way.
     CompatibilityIndexPartial,
+    /// The compatibility index is `Complete` but no runner class is compatible
+    /// (the supported set is empty, or every supported class is also denied). A
+    /// finished analysis that proves nothing launchable must not be `Ready`.
+    NoCompatibleRunnerClass,
     /// The binding-assignment set has no resolved bindings.
     NoResolvedBindings,
 }
@@ -164,8 +173,9 @@ pub enum LaunchTemplateReadinessReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LaunchTemplateReadiness {
-    /// Requirement graph and compatibility index are `Complete` and at least one
-    /// binding is resolved. (Unreachable on the standard install path today.)
+    /// Requirement graph and compatibility index are `Complete`, at least one
+    /// runner class is compatible, and at least one binding is resolved.
+    /// (Unreachable on the standard install path today.)
     Ready,
     /// Not yet usable for a real launch template; `reasons` lists why.
     NotReady {
@@ -350,7 +360,14 @@ impl ValidatedInstallReusableInputs {
         if !self.requirement_graph.completeness.is_complete() {
             reasons.push(LaunchTemplateReadinessReason::RequirementGraphPartial);
         }
-        if !self.compatibility_index.completeness.is_complete() {
+        // `Complete` means the compatibility analysis finished — NOT that anything
+        // is launchable. Even a finished analysis must prove at least one
+        // compatible runner class (supported and not denied) before it is `Ready`.
+        if self.compatibility_index.completeness.is_complete() {
+            if !self.compatibility_index.has_compatible_runner_class() {
+                reasons.push(LaunchTemplateReadinessReason::NoCompatibleRunnerClass);
+            }
+        } else {
             reasons.push(LaunchTemplateReadinessReason::CompatibilityIndexPartial);
         }
         if self.binding_assignment_set.assignments.is_empty() {
@@ -371,6 +388,11 @@ mod tests {
         FinalizerInput, FinalizerOutput, InstallBuildFacts, InstallRevisionFinalizer,
     };
     use crate::foundation::install_lifecycle::ids::ArtifactBuildId;
+    use crate::foundation::install_lifecycle::launch_template::{
+        CompatibilityIndex, CompatibilityIndexCompleteness, RequirementBinding,
+        RequirementBindingKind, RunnerClass,
+    };
+    use crate::foundation::install_lifecycle::records::RequirementGraphCompleteness;
     use crate::foundation::install_lifecycle::store::{AppRecord, LaunchProfile};
     use std::fs;
     use std::io::Write;
@@ -747,5 +769,115 @@ mod tests {
             err,
             InstallReusableInputValidationError::RevisionNotFinalized
         );
+    }
+
+    // ── #581 wave 4B (review): Ready requires a compatible runner class ──────
+
+    /// Load a standard install, then force the requirement graph to `Complete`
+    /// and add one resolved binding — so `launch_template_readiness()` depends
+    /// solely on the compatibility index. (In-memory mutation of the validated
+    /// view to exercise the readiness gate, not the load/persist path.)
+    fn loaded_with_complete_graph_and_binding(
+        store: &InstallInstanceStore,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        out_base: &std::path::Path,
+        build_suffix: &str,
+    ) -> ValidatedInstallReusableInputs {
+        let out = finalize_standard(store, app, profile, out_base, build_suffix);
+        let mut v =
+            ValidatedInstallReusableInputs::load(store, app, profile, &out.install_revision_id)
+                .unwrap();
+        v.requirement_graph = v
+            .requirement_graph
+            .clone()
+            .with_completeness(RequirementGraphCompleteness::Complete)
+            .unwrap();
+        v.binding_assignment_set
+            .assignments
+            .push(RequirementBinding {
+                requirement_id: "req-runtime".into(),
+                binding_kind: RequirementBindingKind::Resource,
+                resolved_resource_ref: Some("/ns/example/resource".into()),
+                resolved_resource_refs: vec![],
+                affects_execution_identity: false,
+            });
+        v
+    }
+
+    #[test]
+    fn complete_compatibility_with_no_supported_runner_is_not_ready() {
+        let (dir, store, app, profile) = setup();
+        let mut v =
+            loaded_with_complete_graph_and_binding(&store, &app, &profile, dir.path(), "ab01");
+        // Analysis finished, but nothing is proven supported.
+        v.compatibility_index =
+            CompatibilityIndex::new("cidx:empty", vec![], vec![], vec![], vec![])
+                .unwrap()
+                .with_completeness(CompatibilityIndexCompleteness::Complete)
+                .unwrap();
+
+        // Graph is Complete and a binding is resolved, so the ONLY blocker is the
+        // absence of a compatible runner class — a Complete index alone is not Ready.
+        assert_eq!(
+            v.launch_template_readiness(),
+            LaunchTemplateReadiness::NotReady {
+                reasons: vec![LaunchTemplateReadinessReason::NoCompatibleRunnerClass],
+            }
+        );
+    }
+
+    #[test]
+    fn complete_compatibility_with_only_denied_runner_is_not_ready() {
+        let (dir, store, app, profile) = setup();
+        let mut v =
+            loaded_with_complete_graph_and_binding(&store, &app, &profile, dir.path(), "ab02");
+        // The only listed class is both supported and denied — deny wins, so no
+        // runner class is actually usable.
+        v.compatibility_index = CompatibilityIndex::new(
+            "cidx:denied",
+            vec![RunnerClass::ManagedRunner],
+            vec![RunnerClass::ManagedRunner],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_completeness(CompatibilityIndexCompleteness::Complete)
+        .unwrap();
+
+        assert!(
+            !v.compatibility_index
+                .is_supported(&RunnerClass::ManagedRunner)
+        );
+        assert_eq!(
+            v.launch_template_readiness(),
+            LaunchTemplateReadiness::NotReady {
+                reasons: vec![LaunchTemplateReadinessReason::NoCompatibleRunnerClass],
+            }
+        );
+    }
+
+    #[test]
+    fn complete_inputs_with_compatible_runner_are_ready() {
+        let (dir, store, app, profile) = setup();
+        let mut v =
+            loaded_with_complete_graph_and_binding(&store, &app, &profile, dir.path(), "ab03");
+        // Complete analysis with a supported, non-denied class → genuinely Ready.
+        v.compatibility_index = CompatibilityIndex::new(
+            "cidx:ok",
+            vec![RunnerClass::ManagedRunner],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_completeness(CompatibilityIndexCompleteness::Complete)
+        .unwrap();
+
+        assert_eq!(
+            v.launch_template_readiness(),
+            LaunchTemplateReadiness::Ready
+        );
+        assert!(v.launch_template_readiness().is_ready());
     }
 }
