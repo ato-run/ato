@@ -12,7 +12,7 @@ and come back."_
 | Desktop/CLI run with **Homebrew not installed** | ✅ | Running Ato never needed brew; provider *install* no longer hard-requires it (#574). |
 | **git not installed** → public GitHub source **fetch + manifest inference** works | ✅ | Already tarball-based (`download_github_repository_at_ref`, `ATO_GITHUB_API_BASE_URL`); `source_tree_hash` excludes `.git`. Verified empirically with `git` scrubbed from PATH (#575 `gitless_github_source_install_e2e`) and locked by the extended `consumer_paths_do_not_spawn_git_commands` guard. |
 | OCI target with **no provider** → routed to Runtime Setup, **not** "install Homebrew" | ✅ | `install_podman` now yields a typed actionable error presenting the Ato-managed installer, never a brew instruction (#574). |
-| When Podman is needed, **Ato presents a verified installer strategy** | ✅ (download→bundle→run); ⏳ (machine init/start) | Ordered strategies (Homebrew-if-present → Ato-managed verified download → manual) + digest-fail-closed, **atomic** installer with timeouts. The Ato-managed install now uses the **official macOS `.pkg` installer** from `podman-container-tools/podman` releases (v5.8.2), replacing the former remote-zip + hand-assembled helper approach. The pkg is expanded with `pkgutil --expand-full` (OS built-in, no Xcode CLT), then `podman`, `gvproxy`, and `vfkit` are found by recursive search, arch-validated, and staged into `~/.ato/tools/podman-5.8.2/bin/`. The pkg SHA256s are pinned from the official v5.8.2 release and verified fail-closed before extraction (see "Required before merge"). Old remote-zip installs (5.2.3) are automatically cleared on next install. The host-mutating **machine** path (`machine init/start/info` + OCI Ready) is **NOT yet validated** — see "Required before merge". |
+| When Podman is needed, **Ato presents a verified installer strategy** | ✅ (download→bundle→run); ⏳ (machine init/start) | Ordered strategies (Homebrew-if-present → Ato-managed verified download → manual) + digest-fail-closed, **atomic** installer with timeouts. The Ato-managed install now uses the **official macOS `.pkg` installer** from `podman-container-tools/podman` releases (v5.8.2), replacing the former remote-zip + hand-assembled helper approach. The pkg is expanded with `pkgutil --expand-full` (OS built-in, no Xcode CLT), then `podman`, `gvproxy`, and `vfkit` are found by recursive search, arch-validated, and staged into `~/.ato/tools/podman-5.8.2/bin/`. The pkg SHA256s are pinned from the official v5.8.2 release and verified fail-closed before extraction (see "Required before merge"). Old remote-zip installs (5.2.3) are automatically cleared on next install. The host-mutating **machine** path (`machine init/start/info` + OCI Ready) is now **validated on a physical Mac** and gated separately (Gate B) from install (Gate A); a host that can't run a VM fails fast with a typed `RuntimeVirtualizationUnavailable` rather than an opaque vfkit error — see "Required before merge". |
 | **`podman --version` is NOT sufficient** for a macOS machine runtime | ✅ (enforced) | `podman machine init/start` needs `gvproxy` + `vfkit`; the remote-client zip ships neither. The installer validates the helpers are present + executable **before promotion** (rejecting an incomplete bundle), and a preflight self-repairs / fails with a typed `RuntimeProviderIncomplete` (`could not find "gvproxy"` → typed, not a generic mid-init failure) before `machine init` runs. |
 | **Helpers must be native arch — exists + executable is NOT sufficient** | ✅ (enforced) | A Mach-O helper lacking the host's slice would run under Rosetta (hidden prerequisite). The installer parses each bundled Mach-O (minimal fat/thin header reader, no `lipo`/Xcode CLT) and rejects any podman/helper without a native slice for the host arch **before promotion** (`NotNativeArch`). The pinned gvproxy 0.7.5 / vfkit 0.5.1 are verified universal (arm64 + x86_64) by the real smoke. |
 | **Ato-managed runtime must never require Rosetta** | ✅ (config) | Podman's `applehv` defaults `rosetta = true`, so `podman machine start` on Apple Silicon sets up a Rosetta guest share and prompts to install Rosetta on a clean VM (then `vfkit exited unexpectedly with exit code 1` if declined). Ato's generated `containers.conf` sets `rosetta = false`, so the machine boots natively with no host Rosetta. x86_64 Linux images are emulated in-guest, not via host Rosetta. |
@@ -42,15 +42,37 @@ shasum -a 256 amd64.pkg   # must match MACOS_AMD64_PKG_SHA256
 The code fails closed on any mismatch (returns `DigestMismatch` before a single
 byte is extracted).
 
-**2. Real clean-VM macOS smoke** (no brew/git/ATO_HOME/podman) verifying
-download → sha → pkg expansion → resolve-from-`~/.ato/tools` → `podman machine
-init ato-podman` → `machine start` → `podman --connection ato-podman info
---format json` → an OCI sample reaches Ready.
+**2. Clean-VM smoke — split into two gates.** The end-to-end path has two
+distinct failure domains, and they need *different* environments to validate.
+Conflating them led to misreading a virtualization-environment limit as an Ato
+packaging bug.
 
-**Status: NOT yet validated end-to-end.** The host-mutating `machine init/start`
-path is a required pre-merge manual clean-VM smoke and has NOT been run. Running
-`podman machine init/start` mutates the real host, so it is deliberately left to
-the clean-VM gate.
+**Gate A — Ato-managed install** (validatable even in a *virtual* macOS):
+`download → sha → pkg expansion → resolve-from-`~/.ato/tools` → `podman`/`gvproxy`/
+`vfkit` extracted → native-arch validated → `containers.conf` + provenance`.
+This touches no hypervisor and passes in a nested/virtual macOS.
+**Status: validated** — real arm64 run (download → digest → pkgutil → helpers →
+native arch → `podman --version`); plus a forced-managed end-to-end on a physical
+Mac (primary 504 → mirror → install).
+
+**Gate B — Podman machine** (needs real Apple `Virtualization.framework`):
+`machine init ato-podman → machine start → podman --connection ato-podman info
+--format json → an OCI sample reaches Ready`. `vfkit` boots a Linux VM via
+Virtualization.framework, so this requires `kern.hv_support == 1`. **A virtual
+macOS without nested virtualization will fail Gate B even though Gate A passed —
+that is an environment limit, not an Ato packaging blocker.**
+**Status: validated on a physical Mac** (arm64, macOS 15.7.4): `machine
+init/start` → `info` → `quay.io/podman/hello` ran on `ato-podman`. Must be run on
+bare-metal Mac (or a nested-virt-capable host), never used as a packaging gate
+inside a plain macOS VM.
+
+Ato now **distinguishes the two**: before `machine init`, a preflight checks
+`host_virtualization_available()` (`sysctl -n kern.hv_support`); if a host can't
+run a VM it fails with the typed `RuntimeVirtualizationUnavailable` ("Podman
+installed… but this macOS environment cannot start a Podman machine… run on a
+physical Mac…") instead of an opaque mid-init `vfkit` error. A `vfkit` /
+`Virtualization.framework` failure during init/start is reclassified to the same
+typed error as defense-in-depth.
 
 With the SHA256s pinned, run the smoke test:
 
@@ -175,3 +197,16 @@ infra step: provision the Ato-controlled mirror (`artifacts.ato.run/podman/v5.8.
 and wire its URLs into `MACOS_*_PKG_MIRRORS` (the fetch/retry/fallback code already
 consumes them); Desktop should keep the Runtime Setup card enabled with a Retry
 action on `TransientDownloadFailed`.
+
+Follow-up, 2026-06-08 (machine virtualization preflight): a "Clean VM" that is a
+*virtual* macOS without nested virtualization installs Podman fine (Gate A) but
+cannot boot the Podman machine VM (Gate B) — `vfkit` is present and runnable, yet
+Apple `Virtualization.framework` is unavailable (`kern.hv_support == 0`), so
+`machine init/start` fails in a way that's easy to misread as an Ato packaging
+bug. Ato now preflights `host_virtualization_available()` before `machine init`
+and fails with a typed `RuntimeVirtualizationUnavailable` ("Podman installed…
+this macOS environment cannot start a Podman machine… run on a physical Mac or a
+nested-virt-capable host"); a `vfkit`/`Virtualization.framework` failure during
+init/start is reclassified to the same typed error. Consequence for this gate:
+**Gate B must run on bare-metal Mac**, and a Gate-B failure inside a plain macOS
+VM is not an Ato blocker.
