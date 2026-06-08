@@ -201,7 +201,7 @@ impl RequirementGraph {
 ///
 /// Typed so a partial graph can never be mistaken for a complete one and so the
 /// specific missing analysis is auditable. Not a hash input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequirementGraphCompletenessReason {
     RuntimeRequirementNotCompiled,
@@ -259,14 +259,29 @@ pub struct RequirementGraphSnapshot {
     pub profile_defaults_hash: String,
     /// How complete the compiled graph is. Defaults (for pre-3A snapshots) to
     /// `Partial { reasons: [] }` — never silently `Complete`. Not a `graph_hash`
-    /// input.
+    /// input (but it IS a [`requirement_graph_snapshot_hash`](Self::requirement_graph_snapshot_hash) input).
     #[serde(default)]
     pub completeness: RequirementGraphCompleteness,
+    /// Snapshot-level identity (`blake3:<hex>`) binding `graph_hash` +
+    /// `profile_defaults_hash` + `completeness` (#581 wave 3B). This — NOT
+    /// `graph_hash` alone — is what launch-template identity keys on, so a
+    /// `Partial` graph can never be reused as if it were `Complete`.
+    ///
+    /// `#[serde(default)]` is the empty string for pre-3B snapshots on disk. An
+    /// empty hash is NOT equivalent to any real snapshot (a real `blake3:` hash
+    /// is never empty) and must be recomputed via
+    /// [`recompute_snapshot_hash`](Self::recompute_snapshot_hash) before use for
+    /// launch-template identity — never silently treated as equivalent. Never a
+    /// hash of secret values or observed diagnostics.
+    #[serde(default)]
+    pub requirement_graph_snapshot_hash: String,
 }
 
 impl RequirementGraphSnapshot {
-    /// Build a snapshot, computing `graph_hash` from `graph`. Completeness
-    /// defaults to `Partial { reasons: [] }`; set it explicitly with
+    /// Build a snapshot, computing `graph_hash` from `graph` and the
+    /// snapshot-level hash from `graph_hash` + `profile_defaults_hash` +
+    /// completeness. Completeness defaults to `Partial { reasons: [] }`; set it
+    /// (and recompute the snapshot hash) with
     /// [`RequirementGraphSnapshot::with_completeness`].
     pub fn new(
         snapshot_id: impl Into<String>,
@@ -275,21 +290,88 @@ impl RequirementGraphSnapshot {
         profile_defaults_hash: impl Into<String>,
     ) -> Result<Self> {
         let graph_hash = graph.graph_hash()?;
+        let profile_defaults_hash = profile_defaults_hash.into();
+        let completeness = RequirementGraphCompleteness::default();
+        let requirement_graph_snapshot_hash = compute_requirement_graph_snapshot_hash(
+            &graph_hash,
+            &profile_defaults_hash,
+            &completeness,
+        )?;
         Ok(Self {
             snapshot_id: snapshot_id.into(),
             graph,
             graph_hash,
             source_revision_ref,
-            profile_defaults_hash: profile_defaults_hash.into(),
-            completeness: RequirementGraphCompleteness::default(),
+            profile_defaults_hash,
+            completeness,
+            requirement_graph_snapshot_hash,
         })
     }
 
-    /// Set the typed completeness (consuming builder).
-    pub fn with_completeness(mut self, completeness: RequirementGraphCompleteness) -> Self {
+    /// Set the typed completeness and recompute the snapshot-level hash
+    /// (consuming builder). Recomputing is mandatory: completeness is a
+    /// snapshot-hash input, so a stale hash would make a `Partial` graph look
+    /// identical to a `Complete` one.
+    pub fn with_completeness(mut self, completeness: RequirementGraphCompleteness) -> Result<Self> {
+        self.requirement_graph_snapshot_hash = compute_requirement_graph_snapshot_hash(
+            &self.graph_hash,
+            &self.profile_defaults_hash,
+            &completeness,
+        )?;
         self.completeness = completeness;
-        self
+        Ok(self)
     }
+
+    /// Recompute `requirement_graph_snapshot_hash` from the current fields. Use
+    /// after deserializing a pre-3B snapshot (empty snapshot hash) before using
+    /// it for launch-template identity.
+    pub fn recompute_snapshot_hash(&mut self) -> Result<()> {
+        self.requirement_graph_snapshot_hash = compute_requirement_graph_snapshot_hash(
+            &self.graph_hash,
+            &self.profile_defaults_hash,
+            &self.completeness,
+        )?;
+        Ok(())
+    }
+
+    /// True if the snapshot carries a (non-empty) snapshot-level hash.
+    pub fn has_snapshot_hash(&self) -> bool {
+        !self.requirement_graph_snapshot_hash.is_empty()
+    }
+}
+
+/// Compute the snapshot-level identity hash binding graph-content identity +
+/// profile defaults + completeness (#581 wave 3B).
+///
+/// This is what launch-template identity keys on — NOT `graph_hash` alone — so a
+/// `Partial` graph can never be reused as a `Complete` one. Completeness reasons
+/// are sorted + de-duplicated so reason order never affects identity. By
+/// construction the inputs are content/config/completeness hashes only: no
+/// session id, port, pid, container id, route, log cursor, observed status,
+/// timestamp, or secret value. `source_revision_ref` is intentionally excluded —
+/// the revision is keyed separately in
+/// [`super::launch_template::LaunchTemplateKey`], and this hash is the identity
+/// of the *requirements + completeness*, not provenance.
+pub fn compute_requirement_graph_snapshot_hash(
+    graph_hash: &str,
+    profile_defaults_hash: &str,
+    completeness: &RequirementGraphCompleteness,
+) -> Result<String> {
+    let normalized = match completeness {
+        RequirementGraphCompleteness::Complete => RequirementGraphCompleteness::Complete,
+        RequirementGraphCompleteness::Partial { reasons } => {
+            let mut reasons = reasons.clone();
+            reasons.sort();
+            reasons.dedup();
+            RequirementGraphCompleteness::Partial { reasons }
+        }
+    };
+    canonical_hash(&(
+        "ato.requirement_graph_snapshot.v1",
+        graph_hash,
+        profile_defaults_hash,
+        &normalized,
+    ))
 }
 
 // ── StateContractSnapshot ────────────────────────────────────────────────────
@@ -546,6 +628,139 @@ mod tests {
         let mut g2 = g.clone();
         g2.nodes[0].required = false;
         assert_ne!(g.graph_hash().unwrap(), g2.graph_hash().unwrap());
+    }
+
+    // ── #581 wave 3B: snapshot-level hash (completeness-aware) ──────────────
+
+    fn sample_graph() -> RequirementGraph {
+        RequirementGraph {
+            graph_id: "g".into(),
+            nodes: vec![RequirementGraphNode {
+                id: "req:profile-defaults".into(),
+                kind: RequirementKind::Policy,
+                name: "profile-defaults".into(),
+                attributes: BTreeMap::new(),
+                required: true,
+            }],
+            edges: vec![],
+        }
+    }
+
+    #[test]
+    fn snapshot_hash_distinguishes_partial_from_complete() {
+        let partial = RequirementGraphSnapshot::new("s", sample_graph(), None, "blake3:prof")
+            .unwrap()
+            .with_completeness(RequirementGraphCompleteness::Partial {
+                reasons: vec![RequirementGraphCompletenessReason::ManifestFactsUnavailable],
+            })
+            .unwrap();
+        let complete = RequirementGraphSnapshot::new("s", sample_graph(), None, "blake3:prof")
+            .unwrap()
+            .with_completeness(RequirementGraphCompleteness::Complete)
+            .unwrap();
+
+        // graph_hash is content-only: identical for both (same graph).
+        assert_eq!(
+            partial.graph_hash, complete.graph_hash,
+            "graph_hash must not change when only completeness changes"
+        );
+        // snapshot hash distinguishes Partial from Complete.
+        assert_ne!(
+            partial.requirement_graph_snapshot_hash, complete.requirement_graph_snapshot_hash,
+            "snapshot hash must distinguish Partial from Complete"
+        );
+        assert!(
+            partial
+                .requirement_graph_snapshot_hash
+                .starts_with("blake3:")
+        );
+        assert!(
+            complete
+                .requirement_graph_snapshot_hash
+                .starts_with("blake3:")
+        );
+    }
+
+    #[test]
+    fn snapshot_hash_is_reason_order_independent() {
+        let a = RequirementGraphSnapshot::new("s", sample_graph(), None, "blake3:prof")
+            .unwrap()
+            .with_completeness(RequirementGraphCompleteness::Partial {
+                reasons: vec![
+                    RequirementGraphCompletenessReason::RuntimeRequirementNotCompiled,
+                    RequirementGraphCompletenessReason::NetworkPolicyNotAnalyzed,
+                ],
+            })
+            .unwrap();
+        let b = RequirementGraphSnapshot::new("s", sample_graph(), None, "blake3:prof")
+            .unwrap()
+            .with_completeness(RequirementGraphCompleteness::Partial {
+                reasons: vec![
+                    RequirementGraphCompletenessReason::NetworkPolicyNotAnalyzed,
+                    RequirementGraphCompletenessReason::RuntimeRequirementNotCompiled,
+                ],
+            })
+            .unwrap();
+        assert_eq!(
+            a.requirement_graph_snapshot_hash, b.requirement_graph_snapshot_hash,
+            "completeness reason order must not affect the snapshot hash"
+        );
+    }
+
+    #[test]
+    fn snapshot_hash_changes_when_profile_defaults_change() {
+        let a = RequirementGraphSnapshot::new("s", sample_graph(), None, "blake3:prof_a").unwrap();
+        let b = RequirementGraphSnapshot::new("s", sample_graph(), None, "blake3:prof_b").unwrap();
+        assert_eq!(a.graph_hash, b.graph_hash, "graph content is identical");
+        assert_ne!(
+            a.requirement_graph_snapshot_hash, b.requirement_graph_snapshot_hash,
+            "snapshot hash must change when profile_defaults_hash changes"
+        );
+    }
+
+    #[test]
+    fn snapshot_hash_excludes_source_revision_ref() {
+        // The revision is keyed separately in LaunchTemplateKey; two snapshots
+        // differing only in source_revision_ref share a snapshot hash.
+        let a =
+            RequirementGraphSnapshot::new("a", sample_graph(), Some("rev_a".into()), "blake3:p")
+                .unwrap();
+        let b =
+            RequirementGraphSnapshot::new("b", sample_graph(), Some("rev_b".into()), "blake3:p")
+                .unwrap();
+        assert_eq!(
+            a.requirement_graph_snapshot_hash,
+            b.requirement_graph_snapshot_hash
+        );
+    }
+
+    #[test]
+    fn recompute_snapshot_hash_repairs_pre_3b_snapshot() {
+        let snap = RequirementGraphSnapshot::new("s", sample_graph(), None, "blake3:prof")
+            .unwrap()
+            .with_completeness(RequirementGraphCompleteness::Complete)
+            .unwrap();
+        // Simulate a pre-3B on-disk snapshot: empty snapshot hash via serde default.
+        let mut json: serde_json::Value = serde_json::to_value(&snap).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("requirement_graph_snapshot_hash");
+        let mut loaded: RequirementGraphSnapshot = serde_json::from_value(json).unwrap();
+        assert!(
+            !loaded.has_snapshot_hash(),
+            "pre-3B snapshot deserializes with an empty (not fabricated) snapshot hash"
+        );
+        // Conservative: empty hash is not equal to the real one, never silently equivalent.
+        assert_ne!(
+            loaded.requirement_graph_snapshot_hash,
+            snap.requirement_graph_snapshot_hash
+        );
+        loaded.recompute_snapshot_hash().unwrap();
+        assert!(loaded.has_snapshot_hash());
+        assert_eq!(
+            loaded.requirement_graph_snapshot_hash, snap.requirement_graph_snapshot_hash,
+            "recompute reproduces the original snapshot hash from the stable fields"
+        );
     }
 
     #[test]
