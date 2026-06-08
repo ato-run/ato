@@ -811,8 +811,26 @@ pub(crate) fn emit_progress(
     message: impl Into<String>,
     json: bool,
 ) {
+    emit_event(InstallProgress::new(tool, phase, message), json);
+}
+
+/// Emit a `Failed` event, tagging it `retryable` so a consuming UI can offer a
+/// Retry action for transient conditions (e.g. a 504 download). Same wire shape
+/// as [`emit_progress`], plus the `retryable` flag when true.
+pub(crate) fn emit_failure(
+    tool: ToolKind,
+    message: impl Into<String>,
+    retryable: bool,
+    json: bool,
+) {
+    emit_event(
+        InstallProgress::new(tool, InstallPhase::Failed, message).retryable(retryable),
+        json,
+    );
+}
+
+fn emit_event(event: InstallProgress, json: bool) {
     use std::io::Write;
-    let event = InstallProgress::new(tool, phase, message);
     let mut stdout = std::io::stdout().lock();
     if json {
         if let Ok(line) = serde_json::to_string(&event) {
