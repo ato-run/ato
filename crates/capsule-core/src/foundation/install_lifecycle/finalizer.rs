@@ -20,13 +20,47 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::hashing::canonical_hash;
 use super::ids::{
     ArtifactBuildId, InstallProfileKey, InstallRevisionId, InstalledAppId, ProfileId,
     derive_install_profile_key, revision_id_for_build,
 };
+use super::records::{
+    ArtifactBuild, InstallReceipt, InstallRevision, RequirementGraph, RequirementGraphSnapshot,
+    StateContractSnapshot,
+};
 use super::store::InstallInstanceStore;
 
 // ── Input ──────────────────────────────────────────────────────────────────
+
+/// Structured build facts a caller may supply so the finalizer can persist
+/// meaningful install-output records (#581 wave 2).
+///
+/// Every field is optional/defaulted: callers that do not yet have a fact omit
+/// it and the finalizer persists an explicit, typed placeholder rather than
+/// fabricating one. None of these are session/runtime/observed facts, and none
+/// is a secret value — they describe the build artifact and its requirements.
+#[derive(Debug, Clone, Default)]
+pub struct InstallBuildFacts {
+    /// Canonical capsule reference (e.g. `"<publisher>/<slug>@<version>"`).
+    pub capsule_ref: Option<String>,
+    /// Source provenance reference (git commit/tag, or the registry content
+    /// hash for a pre-built artifact). Never a secret.
+    pub source_provenance_ref: Option<String>,
+    /// Content hash of the produced output (`blake3:<hex>`).
+    pub output_content_hash: Option<String>,
+    /// Content hash of resolved dependency outputs, if any.
+    pub dependency_output_hash: Option<String>,
+    /// Build platform profile (`"linux/x86_64"`, …).
+    pub platform: Option<String>,
+    /// A fully compiled requirement-graph snapshot, if the caller has one.
+    /// When `None`, the finalizer persists an explicitly-minimal empty graph.
+    pub requirement_graph: Option<RequirementGraphSnapshot>,
+    /// State-contract snapshots. Empty until the install path analyses storage.
+    pub state_contracts: Vec<StateContractSnapshot>,
+    /// Hash of the normalized profile defaults, if computed by the caller.
+    pub profile_defaults_hash: Option<String>,
+}
 
 /// Everything the finalizer needs to promote a build output into a revision.
 #[derive(Debug)]
@@ -43,6 +77,10 @@ pub struct FinalizerInput {
     pub source_provenance_json: Option<String>,
     /// Optional OCI lock content (JSON string).
     pub oci_lock_json: Option<String>,
+    /// Optional structured build facts used to persist typed install-output
+    /// records (#581 wave 2). When absent, conservative typed placeholders are
+    /// persisted.
+    pub build_facts: Option<InstallBuildFacts>,
 }
 
 // ── Output ─────────────────────────────────────────────────────────────────
@@ -63,6 +101,10 @@ pub struct FinalizerOutput {
     pub artifact_build_id: ArtifactBuildId,
     /// Absolute path to the frozen revision directory.
     pub revision_dir: PathBuf,
+    /// The persisted install-output revision record (#581 wave 2). Self-contained
+    /// authority binding the artifact build, requirement graph, state contracts,
+    /// and install receipt for this revision.
+    pub install_revision: InstallRevision,
 }
 
 // ── ArtifactRevisionManifest ───────────────────────────────────────────────
@@ -94,7 +136,7 @@ impl<'s> InstallRevisionFinalizer<'s> {
     }
 
     /// Run the finalization pipeline.
-    pub fn finalize(&self, input: FinalizerInput) -> Result<FinalizerOutput> {
+    pub fn finalize(&self, mut input: FinalizerInput) -> Result<FinalizerOutput> {
         // 1. Validate build id.
         if let Err(e) = input.artifact_build_id.validate() {
             anyhow::bail!("invalid artifact_build_id: {e}");
@@ -104,6 +146,7 @@ impl<'s> InstallRevisionFinalizer<'s> {
         let install_profile_key =
             derive_install_profile_key(&input.installed_app_id, &input.profile_id);
         let install_revision_id = revision_id_for_build(&input.artifact_build_id);
+        let build_facts = input.build_facts.take().unwrap_or_default();
 
         // 3. Scaffold the immutable revision root.
         self.store.scaffold_revision(&install_revision_id)?;
@@ -165,13 +208,108 @@ impl<'s> InstallRevisionFinalizer<'s> {
             fs::write(&lock_path, lock.as_bytes())?;
         }
 
-        // 8. Atomically swap current_revision.
+        // 8. Build and persist the typed install-output records (#581 wave 2).
+        //    Written before the current_revision swap so an interruption leaves
+        //    the revision un-finalized (revision.json is the marker).
+        let created_at = iso8601_now();
+
+        // 8a. ArtifactBuild — keyed by the build id passed in (content-addressed
+        //     by the caller), never a re-derived one, so the revision id stays
+        //     deterministic. No session/runtime/observed fields.
+        let output_content_hash = build_facts
+            .output_content_hash
+            .clone()
+            .unwrap_or_else(|| "unset".to_string());
+        let output_ref = build_facts
+            .output_content_hash
+            .as_deref()
+            .map(artifact_output_ref)
+            .unwrap_or_else(|| format!("/revisions/{}/output", install_revision_id.as_str()));
+        let artifact_build = ArtifactBuild {
+            artifact_build_id: input.artifact_build_id.clone(),
+            capsule_ref: build_facts
+                .capsule_ref
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            source_provenance_ref: build_facts
+                .source_provenance_ref
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            output_ref,
+            output_content_hash: output_content_hash.clone(),
+            dependency_output_hash: build_facts.dependency_output_hash.clone(),
+            // TODO(#581): no typed build-receipt ref is produced by the current
+            // install path; populate once the artifact build producer surfaces one.
+            build_receipt_ref: None,
+            created_at: created_at.clone(),
+        };
+
+        // 8b. RequirementGraphSnapshot — the caller's compiled graph if present,
+        //     otherwise an explicitly-minimal, deterministic empty graph (the
+        //     requirement-graph compiler is a later #581 wave).
+        let requirement_graph = match build_facts.requirement_graph.clone() {
+            Some(snapshot) => snapshot,
+            None => minimal_requirement_graph_snapshot(
+                &install_revision_id,
+                build_facts.profile_defaults_hash.as_deref(),
+            )?,
+        };
+
+        // 8c. StateContractSnapshot[] — empty until the install path analyses
+        //     storage contracts (later wave). Persisted explicitly as `[]`.
+        let state_contracts = build_facts.state_contracts.clone();
+
+        // 8d. InstallReceipt — install-time audit record (NOT the execution
+        //     receipt). Deterministic id per revision.
+        let install_receipt = InstallReceipt {
+            receipt_id: format!("irecpt-{}", install_revision_id.as_str()),
+            install_profile_key: install_profile_key.clone(),
+            install_revision_id: install_revision_id.clone(),
+            artifact_build_id: input.artifact_build_id.clone(),
+            resolved_input_refs: vec![],
+            output_hashes: if output_content_hash == "unset" {
+                vec![]
+            } else {
+                vec![output_content_hash.clone()]
+            },
+            occurred_at: created_at.clone(),
+        };
+
+        // 8e. InstallRevision — self-contained authority binding the above.
+        //     Launch templates + compatibility index require resolved bindings,
+        //     runtime requirements, and runner placement and are deferred to the
+        //     next #581 wave: persisted empty/None here, never a fake template.
+        let install_revision = InstallRevision {
+            install_revision_id: install_revision_id.clone(),
+            install_profile_key: install_profile_key.clone(),
+            artifact_build_id: input.artifact_build_id.clone(),
+            requirement_graph: requirement_graph.clone(),
+            state_contracts: state_contracts.clone(),
+            install_receipt: install_receipt.clone(),
+            created_at: created_at.clone(),
+            launch_templates: vec![],
+            compatibility_index: None,
+        };
+
+        // 8f. Persist sub-records first, then the revision.json marker last.
+        self.store
+            .write_artifact_build(&install_revision_id, &artifact_build)?;
+        self.store
+            .write_requirement_graph_snapshot(&install_revision_id, &requirement_graph)?;
+        self.store
+            .write_state_contracts(&install_revision_id, &state_contracts)?;
+        self.store
+            .write_install_receipt(&install_revision_id, &install_receipt)?;
+        self.store.write_install_revision(&install_revision)?;
+
+        // 9. Atomically swap current_revision (the commit point).
         self.store.set_current_revision(
             &input.installed_app_id,
             &input.profile_id,
             &install_revision_id,
         )?;
 
+        // 10. Return.
         let revision_dir = self.store.revision_dir(&install_revision_id);
         Ok(FinalizerOutput {
             installed_app_id: input.installed_app_id,
@@ -180,6 +318,7 @@ impl<'s> InstallRevisionFinalizer<'s> {
             install_revision_id,
             artifact_build_id: input.artifact_build_id,
             revision_dir,
+            install_revision,
         })
     }
 }
@@ -189,6 +328,44 @@ impl<'s> InstallRevisionFinalizer<'s> {
 fn iso8601_now() -> String {
     // Use chrono if available; fall back to a placeholder.
     chrono::Utc::now().to_rfc3339()
+}
+
+/// Map a content hash like `blake3:<hex>` to a content-addressed artifact ref
+/// `/artifacts/blake3/<hex>` (RFC ResourcePath form). Falls back to a single
+/// `/artifacts/<hash>` segment when the hash has no `algo:hex` shape.
+fn artifact_output_ref(content_hash: &str) -> String {
+    match content_hash.split_once(':') {
+        Some((algo, hex)) => format!("/artifacts/{algo}/{hex}"),
+        None => format!("/artifacts/{content_hash}"),
+    }
+}
+
+/// Build an explicitly-minimal, deterministic requirement-graph snapshot for an
+/// install path that does not yet compile a real application requirement graph.
+///
+/// Deterministic from the revision id, so re-finalizing the same build yields
+/// the same `graph_hash` (no timestamp or host-specific input). The empty graph
+/// + `reqgraph-…-minimal:<rev>` ids make the placeholder explicit; it is not a
+/// successful compiled graph.
+fn minimal_requirement_graph_snapshot(
+    rev: &InstallRevisionId,
+    profile_defaults_hash: Option<&str>,
+) -> Result<RequirementGraphSnapshot> {
+    let graph = RequirementGraph {
+        graph_id: format!("reqgraph-minimal:{}", rev.as_str()),
+        nodes: vec![],
+        edges: vec![],
+    };
+    let profile_defaults_hash = match profile_defaults_hash {
+        Some(h) => h.to_string(),
+        None => canonical_hash(&"ato.install.profile_defaults.minimal.v0")?,
+    };
+    RequirementGraphSnapshot::new(
+        format!("reqgraph-snapshot-minimal:{}", rev.as_str()),
+        graph,
+        Some(rev.as_str().to_string()),
+        profile_defaults_hash,
+    )
 }
 
 /// Safely copy the build output tree into a frozen revision directory.
@@ -271,6 +448,8 @@ fn safe_copy_output_tree_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::foundation::install_lifecycle::ids::InstallRevisionId;
+    use crate::foundation::install_lifecycle::records::ArtifactBuild;
     use crate::foundation::install_lifecycle::store::{
         AppRecord, InstallInstanceStore, LaunchProfile,
     };
@@ -338,6 +517,7 @@ mod tests {
                 artifact_manifest_json: None,
                 source_provenance_json: None,
                 oci_lock_json: None,
+                build_facts: None,
             })
             .unwrap();
 
@@ -363,6 +543,7 @@ mod tests {
                 artifact_manifest_json: None,
                 source_provenance_json: None,
                 oci_lock_json: None,
+                build_facts: None,
             })
             .unwrap();
 
@@ -376,6 +557,7 @@ mod tests {
                 artifact_manifest_json: None,
                 source_provenance_json: None,
                 oci_lock_json: None,
+                build_facts: None,
             })
             .unwrap();
 
@@ -397,6 +579,7 @@ mod tests {
                 artifact_manifest_json: None,
                 source_provenance_json: None,
                 oci_lock_json: None,
+                build_facts: None,
             })
             .unwrap();
 
@@ -409,6 +592,7 @@ mod tests {
                 artifact_manifest_json: None,
                 source_provenance_json: None,
                 oci_lock_json: None,
+                build_facts: None,
             })
             .unwrap();
 
@@ -440,6 +624,7 @@ mod tests {
             artifact_manifest_json: None,
             source_provenance_json: None,
             oci_lock_json: None,
+            build_facts: None,
         });
         assert!(err.is_err(), "should reject exec_-prefixed build id");
     }
@@ -459,6 +644,7 @@ mod tests {
                 artifact_manifest_json: Some(r#"{"name":"test"}"#.into()),
                 source_provenance_json: Some(r#"{"git_ref":"main"}"#.into()),
                 oci_lock_json: None,
+                build_facts: None,
             })
             .unwrap();
 
@@ -520,5 +706,326 @@ mod tests {
         safe_copy_output_tree(&src, &dst).unwrap();
         assert!(dst.join("a.txt").exists());
         assert!(dst.join("sub").join("b.txt").exists());
+    }
+
+    // ── #581 wave 2: install-output record persistence ──────────────────────
+
+    fn sample_facts() -> InstallBuildFacts {
+        InstallBuildFacts {
+            capsule_ref: Some("acme/pgweb@1.2.3".into()),
+            // For a pre-built registry artifact the content hash is a legitimate
+            // provenance ref; it is not a secret.
+            source_provenance_ref: Some("blake3:cafef00d".into()),
+            output_content_hash: Some("blake3:cafef00d".into()),
+            dependency_output_hash: None,
+            platform: Some("linux/x86_64".into()),
+            requirement_graph: None,
+            state_contracts: vec![],
+            profile_defaults_hash: None,
+        }
+    }
+
+    fn finalize_default(
+        store: &InstallInstanceStore,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        output_dir: PathBuf,
+        build_id: ArtifactBuildId,
+        facts: Option<InstallBuildFacts>,
+    ) -> FinalizerOutput {
+        InstallRevisionFinalizer::new(store)
+            .finalize(FinalizerInput {
+                installed_app_id: app.clone(),
+                profile_id: profile.clone(),
+                artifact_build_id: build_id,
+                output_dir,
+                artifact_manifest_json: None,
+                source_provenance_json: None,
+                oci_lock_json: None,
+                build_facts: facts,
+            })
+            .unwrap()
+    }
+
+    // Required tests 1-4: finalizer writes each record file.
+    #[test]
+    fn finalizer_writes_install_output_record_files() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("aa11"),
+            Some(sample_facts()),
+        );
+        let rev = &out.install_revision_id;
+        assert!(
+            store.revision_install_record_path(rev).exists(),
+            "revision.json must be written"
+        );
+        assert!(
+            store.revision_artifact_build_path(rev).exists(),
+            "artifact-build.json must be written"
+        );
+        assert!(
+            store.revision_requirement_graph_path(rev).exists(),
+            "requirement-graph.json must be written"
+        );
+        assert!(
+            store.revision_install_receipt_path(rev).exists(),
+            "install-receipt.json must be written"
+        );
+        assert!(
+            store.revision_state_contracts_path(rev).exists(),
+            "state-contracts.json must be written"
+        );
+        // The pre-existing artifact_manifest.json is still written too.
+        assert!(store.revision_artifact_manifest_path(rev).exists());
+        assert!(store.is_revision_finalized(rev));
+    }
+
+    // Required test 5: readback reconstructs the same typed records.
+    #[test]
+    fn readback_reconstructs_typed_records() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("bb22"),
+            Some(sample_facts()),
+        );
+        let rev = &out.install_revision_id;
+
+        let revision = store.read_install_revision(rev).unwrap();
+        assert_eq!(revision.install_revision_id, *rev);
+        assert_eq!(revision.artifact_build_id, out.artifact_build_id);
+        assert_eq!(revision.install_profile_key, out.install_profile_key);
+        // The on-disk record round-trips to exactly what the finalizer returned.
+        assert_eq!(revision, out.install_revision);
+
+        let build = store.read_artifact_build(rev).unwrap();
+        assert_eq!(build.artifact_build_id, out.artifact_build_id);
+        assert_eq!(build.output_content_hash, "blake3:cafef00d");
+        assert_eq!(build.output_ref, "/artifacts/blake3/cafef00d");
+        assert_eq!(build.capsule_ref, "acme/pgweb@1.2.3");
+
+        let graph = store.read_requirement_graph_snapshot(rev).unwrap();
+        assert_eq!(graph.graph_hash, revision.requirement_graph.graph_hash);
+
+        let receipt = store.read_install_receipt(rev).unwrap();
+        assert_eq!(receipt.install_revision_id, *rev);
+        assert_eq!(receipt.artifact_build_id, out.artifact_build_id);
+        assert_eq!(receipt.output_hashes, vec!["blake3:cafef00d".to_string()]);
+
+        // Launch reuse readback chain: (app, profile) -> current revision -> records.
+        #[cfg(unix)]
+        {
+            let via_current = store
+                .read_current_install_revision(&app, &profile_id)
+                .unwrap();
+            assert_eq!(via_current.install_revision_id, *rev);
+        }
+    }
+
+    // Required test 6: artifact_build_id distinct from install_revision_id.
+    #[test]
+    fn artifact_build_id_distinct_from_install_revision_id_on_disk() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("cc33"),
+            Some(sample_facts()),
+        );
+        let build = store.read_artifact_build(&out.install_revision_id).unwrap();
+        assert!(build.artifact_build_id.as_str().starts_with("build_"));
+        assert!(out.install_revision_id.as_str().starts_with("rev_"));
+        assert_ne!(
+            build.artifact_build_id.as_str(),
+            out.install_revision_id.as_str(),
+            "revision identity must not alias the build identity"
+        );
+    }
+
+    // Required test 7: install-time records contain no session/runtime/observed fields.
+    #[test]
+    fn install_records_have_no_session_or_observed_fields() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("dd44"),
+            Some(sample_facts()),
+        );
+        let rev = &out.install_revision_id;
+        let forbidden = [
+            "session_id",
+            "dynamic_port",
+            "process_id",
+            "container_id",
+            "live_route",
+            "log_cursor",
+            "observed_status",
+            "secret_value",
+        ];
+        for path in [
+            store.revision_install_record_path(rev),
+            store.revision_artifact_build_path(rev),
+            store.revision_requirement_graph_path(rev),
+            store.revision_state_contracts_path(rev),
+            store.revision_install_receipt_path(rev),
+        ] {
+            let raw = fs::read_to_string(&path).unwrap();
+            for term in forbidden {
+                assert!(
+                    !raw.contains(term),
+                    "persisted record {} must not contain '{}'",
+                    path.display(),
+                    term
+                );
+            }
+            // The content hash we passed is not a secret value.
+            assert!(!raw.contains("hunter2"));
+        }
+    }
+
+    // Required test 8: re-finalizing the same deterministic inputs ⇒ stable hashes.
+    #[test]
+    fn refinalize_same_inputs_produces_stable_hashes() {
+        let (dir, store, app, profile_id) = setup();
+        let build_id = valid_build_id("ee55");
+        let o1 = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            build_id.clone(),
+            Some(sample_facts()),
+        );
+        let g1 = store
+            .read_requirement_graph_snapshot(&o1.install_revision_id)
+            .unwrap();
+
+        let o2 = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(&dir.path().join("second")),
+            build_id,
+            Some(sample_facts()),
+        );
+        let g2 = store
+            .read_requirement_graph_snapshot(&o2.install_revision_id)
+            .unwrap();
+
+        assert_eq!(
+            o1.install_revision_id, o2.install_revision_id,
+            "revision id deterministic from build id"
+        );
+        assert_eq!(o1.artifact_build_id, o2.artifact_build_id);
+        assert_eq!(
+            g1.graph_hash, g2.graph_hash,
+            "requirement graph hash stable across re-finalize (no timestamp/host input)"
+        );
+        // Receipt id is deterministic per revision (timestamps differ but are not identity).
+        let r = store.read_install_receipt(&o1.install_revision_id).unwrap();
+        assert_eq!(
+            r.receipt_id,
+            format!("irecpt-{}", o1.install_revision_id.as_str())
+        );
+    }
+
+    // State contracts persisted as an explicit empty list (no fabricated contracts).
+    #[test]
+    fn state_contracts_persisted_as_explicit_empty_list() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("ff66"),
+            Some(sample_facts()),
+        );
+        let contracts = store
+            .read_state_contracts(&out.install_revision_id)
+            .unwrap();
+        assert!(
+            contracts.is_empty(),
+            "no state contracts are resolved on the standard install path yet"
+        );
+        let raw = fs::read_to_string(store.revision_state_contracts_path(&out.install_revision_id))
+            .unwrap();
+        assert_eq!(raw.trim(), "[]", "empty list persisted explicitly");
+    }
+
+    // Records are written even when no build facts are supplied (typed placeholders).
+    #[test]
+    fn finalizer_persists_records_without_build_facts() {
+        let (dir, store, app, profile_id) = setup();
+        let out = finalize_default(
+            &store,
+            &app,
+            &profile_id,
+            make_output_dir(dir.path()),
+            valid_build_id("1234"),
+            None,
+        );
+        let build = store.read_artifact_build(&out.install_revision_id).unwrap();
+        // Explicit placeholder, not a fabricated value.
+        assert_eq!(build.output_content_hash, "unset");
+        assert_eq!(build.capsule_ref, "unknown");
+        let revision = store
+            .read_install_revision(&out.install_revision_id)
+            .unwrap();
+        assert!(
+            revision.launch_templates.is_empty(),
+            "no fake launch templates are persisted"
+        );
+        assert!(
+            revision.compatibility_index.is_none(),
+            "no fake compatibility index is persisted"
+        );
+    }
+
+    // Required test 9: a partially written revision is not treated as finalized.
+    #[test]
+    fn partial_revision_is_not_treated_as_finalized() {
+        let (_dir, store, _app, _profile_id) = setup();
+        // Scaffold a revision and write only one sub-record — never the
+        // revision.json marker — to simulate an interrupted finalize.
+        let rev = InstallRevisionId::new(format!("rev_{}", "a".repeat(32)));
+        store.scaffold_revision(&rev).unwrap();
+        store
+            .write_artifact_build(
+                &rev,
+                &ArtifactBuild {
+                    artifact_build_id: valid_build_id("a1b2"),
+                    capsule_ref: "acme/x@1".into(),
+                    source_provenance_ref: "blake3:00".into(),
+                    output_ref: "/artifacts/blake3/00".into(),
+                    output_content_hash: "blake3:00".into(),
+                    dependency_output_hash: None,
+                    build_receipt_ref: None,
+                    created_at: "2026-06-08T00:00:00Z".into(),
+                },
+            )
+            .unwrap();
+
+        assert!(
+            !store.is_revision_finalized(&rev),
+            "a revision without revision.json must not be considered finalized"
+        );
+        assert!(
+            store.read_install_revision(&rev).is_err(),
+            "reading an un-finalized revision must fail rather than silently succeed"
+        );
     }
 }
