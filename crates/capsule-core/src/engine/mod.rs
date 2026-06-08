@@ -5,6 +5,7 @@ pub mod execution_identity;
 pub mod execution_plan;
 pub mod executors;
 pub mod launch_preparation;
+pub mod launch_preparation_bridge;
 pub mod lifecycle;
 pub mod oci_engine_select;
 pub mod orchestration;
