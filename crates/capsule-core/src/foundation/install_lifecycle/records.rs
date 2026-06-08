@@ -339,16 +339,18 @@ impl RequirementGraphSnapshot {
         !self.requirement_graph_snapshot_hash.is_empty()
     }
 
-    /// Validate the *stored* snapshot hash and return it as a typed
-    /// [`RequirementGraphSnapshotHash`] (#581 wave 3C).
+    /// Validate the **format** of the stored snapshot hash and return it as a
+    /// typed [`RequirementGraphSnapshotHash`] (#581 wave 3C).
     ///
-    /// Errors with [`RequirementGraphSnapshotIdentityError::MissingSnapshotHash`]
-    /// for a pre-3B snapshot (empty hash) — it is never silently accepted — and
-    /// with [`RequirementGraphSnapshotIdentityError::InvalidSnapshotHashFormat`]
-    /// for a non-`blake3:` value (e.g. a raw `graph_hash` accidentally stored
-    /// here). Use [`ensure_snapshot_hash`](Self::ensure_snapshot_hash) /
-    /// [`recomputed_snapshot_hash`](Self::recomputed_snapshot_hash) to repair a
-    /// pre-3B snapshot first.
+    /// This is a *shallow* check: it errors with
+    /// [`RequirementGraphSnapshotIdentityError::MissingSnapshotHash`] for a pre-3B
+    /// snapshot (empty hash) and
+    /// [`RequirementGraphSnapshotIdentityError::InvalidSnapshotHashFormat`] for a
+    /// non-`blake3:` value, but it does **not** verify that the stored hash
+    /// actually matches the graph + profile + completeness. A raw `graph_hash`
+    /// (also `blake3:<hex>`) or a stale hash would pass this check — use
+    /// [`validate_for_launch_template`](Self::validate_for_launch_template) for
+    /// the recompute-checked identity that launch-template construction needs.
     pub fn validated_snapshot_hash(
         &self,
     ) -> std::result::Result<RequirementGraphSnapshotHash, RequirementGraphSnapshotIdentityError>
@@ -378,52 +380,89 @@ impl RequirementGraphSnapshot {
     }
 
     /// Validate this snapshot for use as launch-template identity under a
-    /// completeness policy (#581 wave 3C), returning the typed snapshot hash.
+    /// completeness policy (#581 wave 3C), returning the validated snapshot hash.
     ///
-    /// - [`RequirementGraphCompletenessPolicy::RequireComplete`] rejects a
-    ///   `Partial` graph with
-    ///   [`RequirementGraphSnapshotIdentityError::PartialGraphRejected`].
-    /// - [`RequirementGraphCompletenessPolicy::AllowPartial`] accepts `Partial`,
-    ///   but the snapshot hash must still be valid (non-empty, `blake3:`).
+    /// This is the **authoritative** check for launch-template construction. In
+    /// order:
+    ///
+    /// 1. [`RequirementGraphCompletenessPolicy::RequireComplete`] rejects a
+    ///    `Partial` graph with
+    ///    [`RequirementGraphSnapshotIdentityError::PartialGraphRejected`]
+    ///    ([`AllowPartial`](RequirementGraphCompletenessPolicy::AllowPartial)
+    ///    permits `Partial`).
+    /// 2. The stored hash must be well-formed (non-empty, `blake3:`) — else
+    ///    `MissingSnapshotHash` / `InvalidSnapshotHashFormat`.
+    /// 3. The stored hash must **equal a fresh recompute** from `graph_hash` +
+    ///    `profile_defaults_hash` + `completeness` — else
+    ///    [`RequirementGraphSnapshotIdentityError::SnapshotHashMismatch`]. This
+    ///    recompute-and-compare is what actually rejects a raw content-only
+    ///    `graph_hash` (which is also `blake3:<hex>`, so a format check alone
+    ///    cannot) and a stale hash (e.g. `completeness` mutated via the public
+    ///    field without recomputing). Repair a pre-3B / stale snapshot first with
+    ///    [`ensure_snapshot_hash`](Self::ensure_snapshot_hash).
     ///
     /// This does not make the standard install path `Complete`; it lets the
     /// (future) launch-reuse caller decide whether `Partial` is acceptable.
     pub fn validate_for_launch_template(
         &self,
         policy: RequirementGraphCompletenessPolicy,
-    ) -> std::result::Result<RequirementGraphSnapshotHash, RequirementGraphSnapshotIdentityError>
-    {
+    ) -> Result<RequirementGraphSnapshotHash> {
         if policy == RequirementGraphCompletenessPolicy::RequireComplete
             && let RequirementGraphCompleteness::Partial { reasons } = &self.completeness
         {
             return Err(
                 RequirementGraphSnapshotIdentityError::PartialGraphRejected {
                     reasons: reasons.clone(),
-                },
+                }
+                .into(),
             );
         }
-        self.validated_snapshot_hash()
+        let stored =
+            RequirementGraphSnapshotHash::parse(self.requirement_graph_snapshot_hash.clone())?;
+        let expected = compute_requirement_graph_snapshot_hash(
+            &self.graph_hash,
+            &self.profile_defaults_hash,
+            &self.completeness,
+        )?;
+        if stored.as_str() != expected {
+            return Err(
+                RequirementGraphSnapshotIdentityError::SnapshotHashMismatch {
+                    stored: stored.as_str().to_owned(),
+                    expected,
+                }
+                .into(),
+            );
+        }
+        Ok(stored)
     }
 }
 
-/// A validated requirement-graph **snapshot** identity (#581 wave 3C).
+/// A well-formed requirement-graph **snapshot** identity (#581 wave 3C).
 ///
-/// Construction goes through [`RequirementGraphSnapshotHash::parse`], which
-/// rejects an empty (pre-3B) hash and any non-`blake3:` value (e.g. a raw
-/// content-only `graph_hash`). Because the inner string is private and there is
-/// no unvalidated constructor, a value of this type is always a well-formed
-/// snapshot identity — so a [`super::launch_template::LaunchTemplateKey`] field
-/// of this type cannot hold an empty or raw `graph_hash`.
+/// Every construction path — [`RequirementGraphSnapshotHash::parse`] and the
+/// custom [`Deserialize`] impl below — enforces the same invariant: non-empty
+/// and `blake3:`-prefixed with a non-empty digest. The inner string is private
+/// and there is no unvalidated constructor (the `Deserialize` derive is **not**
+/// used, precisely because `#[serde(transparent)]` derive would bypass `parse`),
+/// so a value of this type is always *format*-valid.
+///
+/// Format validity does **not** by itself prove the value is the correct
+/// snapshot hash: a raw content-only `graph_hash` is also `blake3:<hex>` and
+/// would parse. The "this is genuinely the snapshot hash for this graph" check
+/// is the recompute-and-compare in
+/// [`RequirementGraphSnapshot::validate_for_launch_template`], which is what
+/// launch-template construction uses.
 ///
 /// `#[serde(transparent)]`: serializes as the bare string, so embedding it in a
 /// key leaves the key's `key_hash()` byte-identical to the pre-3C `String` field.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct RequirementGraphSnapshotHash(String);
 
 impl RequirementGraphSnapshotHash {
-    /// Parse + validate a snapshot identity: must be non-empty and `blake3:`-
-    /// prefixed with a non-empty digest.
+    /// Parse + validate the *format* of a snapshot identity: must be non-empty
+    /// and `blake3:`-prefixed with a non-empty digest. Does not verify the value
+    /// is the correct snapshot hash for any graph (see the type docs).
     pub fn parse(
         value: impl Into<String>,
     ) -> std::result::Result<Self, RequirementGraphSnapshotIdentityError> {
@@ -441,6 +480,20 @@ impl RequirementGraphSnapshotHash {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+// Custom `Deserialize` so that *every* construction (including serde) is forced
+// through `parse()`. A `#[derive(Deserialize)] + #[serde(transparent)]` would be
+// an unvalidated constructor that could place an empty or non-`blake3:` value
+// inside the newtype.
+impl<'de> Deserialize<'de> for RequirementGraphSnapshotHash {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        RequirementGraphSnapshotHash::parse(raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -465,9 +518,14 @@ pub enum RequirementGraphCompletenessPolicy {
 pub enum RequirementGraphSnapshotIdentityError {
     /// The snapshot hash is empty (a pre-3B snapshot that was never repaired).
     MissingSnapshotHash,
-    /// The snapshot hash is not a `blake3:`-prefixed digest (e.g. a raw
-    /// content-only `graph_hash` was placed here).
+    /// The snapshot hash is not a `blake3:`-prefixed digest.
     InvalidSnapshotHashFormat { found: String },
+    /// The stored snapshot hash does not match a fresh recompute from the graph
+    /// content + profile defaults + completeness. This catches a raw
+    /// content-only `graph_hash` stored as the snapshot identity, and a stale
+    /// hash left behind after mutating `completeness` (or another field) without
+    /// recomputing.
+    SnapshotHashMismatch { stored: String, expected: String },
     /// A `Partial` graph was rejected under `RequireComplete`.
     PartialGraphRejected {
         reasons: Vec<RequirementGraphCompletenessReason>,
@@ -483,8 +541,13 @@ impl std::fmt::Display for RequirementGraphSnapshotIdentityError {
             ),
             Self::InvalidSnapshotHashFormat { found } => write!(
                 f,
-                "requirement-graph snapshot hash is not a blake3: digest (got {found:?}); a raw \
-                 graph_hash must not be used as launch-template identity"
+                "requirement-graph snapshot hash is not a blake3: digest (got {found:?})"
+            ),
+            Self::SnapshotHashMismatch { stored, expected } => write!(
+                f,
+                "requirement-graph snapshot hash does not match the graph (stored {stored:?}, \
+                 expected {expected:?}); a raw graph_hash or a stale hash must not be used as \
+                 launch-template identity"
             ),
             Self::PartialGraphRejected { reasons } => write!(
                 f,
@@ -961,17 +1024,45 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_hash_deserialize_is_validated_not_bypassed() {
+        // Valid value round-trips as the bare string (transparent serialize).
+        let h = RequirementGraphSnapshotHash::parse("blake3:abc123").unwrap();
+        let json = serde_json::to_string(&h).unwrap();
+        assert_eq!(json, "\"blake3:abc123\"");
+        assert_eq!(
+            serde_json::from_str::<RequirementGraphSnapshotHash>(&json).unwrap(),
+            h
+        );
+        // The custom Deserialize routes through parse(): empty / non-blake3
+        // values are REJECTED, not silently constructed (a derive(Deserialize) +
+        // serde(transparent) would have accepted them).
+        assert!(serde_json::from_str::<RequirementGraphSnapshotHash>("\"\"").is_err());
+        assert!(serde_json::from_str::<RequirementGraphSnapshotHash>("\"deadbeef\"").is_err());
+        assert!(serde_json::from_str::<RequirementGraphSnapshotHash>("\"blake3:\"").is_err());
+    }
+
+    /// Downcast an `anyhow::Error` to the typed identity error for assertions.
+    fn identity_err(e: &anyhow::Error) -> &RequirementGraphSnapshotIdentityError {
+        e.downcast_ref::<RequirementGraphSnapshotIdentityError>()
+            .unwrap_or_else(|| panic!("expected RequirementGraphSnapshotIdentityError, got {e:?}"))
+    }
+
+    #[test]
     fn validated_snapshot_hash_rejects_empty_hash() {
         let mut snap = partial_snapshot();
         snap.requirement_graph_snapshot_hash = String::new();
+        // Shallow format check rejects empty.
         assert_eq!(
             snap.validated_snapshot_hash(),
             Err(RequirementGraphSnapshotIdentityError::MissingSnapshotHash)
         );
-        // The same empty-hash snapshot is rejected for launch-template use too.
+        // The launch-template path (recompute-checked) also rejects empty.
+        let err = snap
+            .validate_for_launch_template(RequirementGraphCompletenessPolicy::AllowPartial)
+            .unwrap_err();
         assert_eq!(
-            snap.validate_for_launch_template(RequirementGraphCompletenessPolicy::AllowPartial),
-            Err(RequirementGraphSnapshotIdentityError::MissingSnapshotHash)
+            identity_err(&err),
+            &RequirementGraphSnapshotIdentityError::MissingSnapshotHash
         );
     }
 
@@ -1003,15 +1094,66 @@ mod tests {
     #[test]
     fn validate_for_launch_template_require_complete_rejects_partial() {
         let snap = partial_snapshot();
-        match snap.validate_for_launch_template(RequirementGraphCompletenessPolicy::RequireComplete)
-        {
-            Err(RequirementGraphSnapshotIdentityError::PartialGraphRejected { reasons }) => {
+        let err = snap
+            .validate_for_launch_template(RequirementGraphCompletenessPolicy::RequireComplete)
+            .unwrap_err();
+        match identity_err(&err) {
+            RequirementGraphSnapshotIdentityError::PartialGraphRejected { reasons } => {
                 assert!(
                     reasons.contains(&RequirementGraphCompletenessReason::ManifestFactsUnavailable)
                 );
             }
             other => panic!("expected PartialGraphRejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn validate_for_launch_template_rejects_raw_graph_hash() {
+        // A raw content-only graph_hash IS `blake3:<hex>`, so it passes the
+        // format check — but it is NOT the snapshot hash, so recompute-and-compare
+        // rejects it. This is the core safety property of wave 3C.
+        let mut snap = complete_snapshot();
+        assert_ne!(snap.graph_hash, snap.requirement_graph_snapshot_hash);
+        snap.requirement_graph_snapshot_hash = snap.graph_hash.clone();
+        // Format check alone would wrongly accept it:
+        assert!(snap.validated_snapshot_hash().is_ok());
+        // The launch-template path rejects it via mismatch:
+        let err = snap
+            .validate_for_launch_template(RequirementGraphCompletenessPolicy::AllowPartial)
+            .unwrap_err();
+        assert!(
+            matches!(
+                identity_err(&err),
+                RequirementGraphSnapshotIdentityError::SnapshotHashMismatch { .. }
+            ),
+            "raw graph_hash must be rejected by recompute-and-compare, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_for_launch_template_rejects_stale_hash_after_completeness_mutation() {
+        // Stored hash was computed for Complete; mutate completeness to Partial
+        // via the public field WITHOUT recomputing -> stale -> rejected.
+        let mut snap = complete_snapshot();
+        snap.completeness = RequirementGraphCompleteness::Partial {
+            reasons: vec![RequirementGraphCompletenessReason::ManifestFactsUnavailable],
+        };
+        let err = snap
+            .validate_for_launch_template(RequirementGraphCompletenessPolicy::AllowPartial)
+            .unwrap_err();
+        assert!(
+            matches!(
+                identity_err(&err),
+                RequirementGraphSnapshotIdentityError::SnapshotHashMismatch { .. }
+            ),
+            "stale snapshot hash must be rejected, got {err:?}"
+        );
+        // After explicit repair it validates again.
+        snap.ensure_snapshot_hash().unwrap();
+        assert!(
+            snap.validate_for_launch_template(RequirementGraphCompletenessPolicy::AllowPartial)
+                .is_ok()
+        );
     }
 
     #[test]

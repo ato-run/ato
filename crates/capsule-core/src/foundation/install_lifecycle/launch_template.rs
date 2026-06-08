@@ -259,13 +259,17 @@ impl LaunchTemplateKey {
     /// Safely construct a key, deriving the requirement-graph identity from the
     /// snapshot under a completeness policy (#581 wave 3C).
     ///
-    /// This is the blessed construction path: it
-    /// - reads the snapshot's validated `requirement_graph_snapshot_hash`
-    ///   (never the content-only `graph_hash`),
+    /// This is the blessed construction path: via
+    /// [`RequirementGraphSnapshot::validate_for_launch_template`] it
+    /// - rejects a `Partial` graph when the policy is `RequireComplete`,
     /// - rejects an empty (pre-3B) or malformed snapshot hash, and
-    /// - rejects a `Partial` graph when the policy is `RequireComplete`.
+    /// - recomputes the snapshot hash from the graph + profile + completeness and
+    ///   rejects it on mismatch — which is what rejects a raw content-only
+    ///   `graph_hash` (also `blake3:<hex>`, so a format check alone cannot) or a
+    ///   stale hash. The field is filled from the validated snapshot identity,
+    ///   never from `graph_hash`.
     ///
-    /// Repair a pre-3B snapshot first with
+    /// Repair a pre-3B / stale snapshot first with
     /// [`RequirementGraphSnapshot::ensure_snapshot_hash`].
     pub fn from_inputs(inputs: LaunchTemplateKeyInputs) -> Result<Self> {
         let requirement_graph_snapshot_hash = inputs
