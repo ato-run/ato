@@ -12,7 +12,7 @@ and come back."_
 | Desktop/CLI run with **Homebrew not installed** | ✅ | Running Ato never needed brew; provider *install* no longer hard-requires it (#574). |
 | **git not installed** → public GitHub source **fetch + manifest inference** works | ✅ | Already tarball-based (`download_github_repository_at_ref`, `ATO_GITHUB_API_BASE_URL`); `source_tree_hash` excludes `.git`. Verified empirically with `git` scrubbed from PATH (#575 `gitless_github_source_install_e2e`) and locked by the extended `consumer_paths_do_not_spawn_git_commands` guard. |
 | OCI target with **no provider** → routed to Runtime Setup, **not** "install Homebrew" | ✅ | `install_podman` now yields a typed actionable error presenting the Ato-managed installer, never a brew instruction (#574). |
-| When Podman is needed, **Ato presents a verified installer strategy** | ✅ (download→bundle→run); ⏳ (machine init/start) | Ordered strategies (Homebrew-if-present → Ato-managed verified download → manual) + digest-fail-closed, **atomic** installer with timeouts (#574). The Ato-managed install is now a **full macOS machine-runtime bundle**, not just the `podman` CLI: it also downloads + digest-verifies **gvproxy 0.7.5** and **vfkit 0.5.1** (the helpers Podman v5.2.3 itself bundles), installs them next to `podman`, and writes an Ato-owned `containers.conf` (`helper_binaries_dir` + `provider = "applehv"`). The real production fetcher was run on macOS arm64: download → digest match (podman + gvproxy + vfkit) → extract → `podman --version` = `podman version 5.2.3`, helpers executable, `containers.conf` written, preflight reports a complete runtime (throwaway tools dir). The host-mutating **machine** path (`machine init/start/info` + OCI Ready) is **NOT yet validated** — see "Required before merge". |
+| When Podman is needed, **Ato presents a verified installer strategy** | ✅ (download→bundle→run); ⏳ (machine init/start) | Ordered strategies (Homebrew-if-present → Ato-managed verified download → manual) + digest-fail-closed, **atomic** installer with timeouts. The Ato-managed install now uses the **official macOS `.pkg` installer** from `podman-container-tools/podman` releases (v5.8.2), replacing the former remote-zip + hand-assembled helper approach. The pkg is expanded with `pkgutil --expand-full` (OS built-in, no Xcode CLT), then `podman`, `gvproxy`, and `vfkit` are found by recursive search, arch-validated, and staged into `~/.ato/tools/podman-5.8.2/bin/`. The pkg SHA256s are pinned from the official v5.8.2 release and verified fail-closed before extraction (see "Required before merge"). Old remote-zip installs (5.2.3) are automatically cleared on next install. The host-mutating **machine** path (`machine init/start/info` + OCI Ready) is **NOT yet validated** — see "Required before merge". |
 | **`podman --version` is NOT sufficient** for a macOS machine runtime | ✅ (enforced) | `podman machine init/start` needs `gvproxy` + `vfkit`; the remote-client zip ships neither. The installer validates the helpers are present + executable **before promotion** (rejecting an incomplete bundle), and a preflight self-repairs / fails with a typed `RuntimeProviderIncomplete` (`could not find "gvproxy"` → typed, not a generic mid-init failure) before `machine init` runs. |
 | **Helpers must be native arch — exists + executable is NOT sufficient** | ✅ (enforced) | A Mach-O helper lacking the host's slice would run under Rosetta (hidden prerequisite). The installer parses each bundled Mach-O (minimal fat/thin header reader, no `lipo`/Xcode CLT) and rejects any podman/helper without a native slice for the host arch **before promotion** (`NotNativeArch`). The pinned gvproxy 0.7.5 / vfkit 0.5.1 are verified universal (arm64 + x86_64) by the real smoke. |
 | **Ato-managed runtime must never require Rosetta** | ✅ (config) | Podman's `applehv` defaults `rosetta = true`, so `podman machine start` on Apple Silicon sets up a Rosetta guest share and prompts to install Rosetta on a clean VM (then `vfkit exited unexpectedly with exit code 1` if declined). Ato's generated `containers.conf` sets `rosetta = false`, so the machine boots natively with no host Rosetta. x86_64 Linux images are emulated in-guest, not via host Rosetta. |
@@ -20,38 +20,47 @@ and come back."_
 
 ## Required before merge
 
-A real clean-VM macOS smoke (no brew/git/ATO_HOME/podman) verifying
-download → sha → resolve-from-`~/.ato/tools` → `podman machine init ato-podman` →
-`machine start` → `podman --connection ato-podman info --format json` →
-an OCI sample reaches Ready.
+**1. pkg SHA256s — DONE.** The pinned digests in
+`crates/ato-cli/src/application/podman_install.rs` were computed from the
+official v5.8.2 release assets:
 
-**Status: NOT yet validated end-to-end.** The no-brew Podman **machine** path
-(`machine init`/`start`/`info` + an OCI sample reaching Ready) is a required
-pre-merge manual clean-VM smoke and has NOT been run. Running
+```
+arm64 (podman-installer-macos-arm64.pkg): 8aeaa329cd86c502156d9ca6608776e9b72d0f6cc082255c31c8a936f64bbc8c
+amd64 (podman-installer-macos-amd64.pkg): 2312f91523aeb168709f35d41576ade763c891c3991befe7173aac0edf133af9
+```
+
+To re-verify independently:
+
+```bash
+curl -L -o arm64.pkg https://github.com/podman-container-tools/podman/releases/download/v5.8.2/podman-installer-macos-arm64.pkg
+shasum -a 256 arm64.pkg   # must match MACOS_ARM64_PKG_SHA256
+
+curl -L -o amd64.pkg https://github.com/podman-container-tools/podman/releases/download/v5.8.2/podman-installer-macos-amd64.pkg
+shasum -a 256 amd64.pkg   # must match MACOS_AMD64_PKG_SHA256
+```
+
+The code fails closed on any mismatch (returns `DigestMismatch` before a single
+byte is extracted).
+
+**2. Real clean-VM macOS smoke** (no brew/git/ATO_HOME/podman) verifying
+download → sha → pkg expansion → resolve-from-`~/.ato/tools` → `podman machine
+init ato-podman` → `machine start` → `podman --connection ato-podman info
+--format json` → an OCI sample reaches Ready.
+
+**Status: NOT yet validated end-to-end.** The host-mutating `machine init/start`
+path is a required pre-merge manual clean-VM smoke and has NOT been run. Running
 `podman machine init/start` mutates the real host, so it is deliberately left to
-the clean-VM gate and was NOT executed on the development machine.
+the clean-VM gate.
 
-What **is** now verified (real, on macOS arm64, against a throwaway tools dir —
-not the user's `~/.ato`) by the
-`real_ato_managed_install_downloads_verifies_and_runs` smoke (ignored by
-default; needs network + macOS arm64): the production fetcher downloads the
-**full machine-runtime bundle** and digest-verifies every piece —
+With the SHA256s pinned, run the smoke test:
 
-- podman v5.2.3 darwin archive (~25 MB), SHA256
-  `1449ceb220907ca94407ca3a2a7d5d7909602657d3f5ea9cab26e4dd7c366b69`;
-- **gvproxy 0.7.5** (`gvproxy-darwin`), SHA256
-  `ca881d38963456bdf56b596bc2d76dfa72b565e701acf584d749a1543915f800`;
-- **vfkit 0.5.1** (signed `vfkit`, carries `com.apple.security.virtualization`),
-  SHA256 `6adf8ab2fb0a3b7e7d778554bdc4ae8a8d9e8f984cebffd4e0c8ff8ea5f08447`;
+```bash
+cargo test -p ato-cli --lib -- --ignored real_pkg_install
+```
 
-then extracts, confirms `podman --version` = `podman version 5.2.3`, confirms
-gvproxy + vfkit are installed next to podman and executable, writes the Ato-owned
-`containers.conf` (`helper_binaries_dir` + `provider = "applehv"`), and confirms
-the helper preflight reports a **complete** runtime. The install is **atomic**
-(extract into a temp sibling dir, validate podman runs + every helper is present,
-write `containers.conf` + provenance, then `rename` into place; remove the temp
-dir on any failure — an incomplete bundle is never promoted) and the fetcher has
-connect/total HTTP timeouts (15s/300s).
+This downloads the pkg, verifies the digest, expands it with `pkgutil`,
+locates `podman` + `gvproxy` + `vfkit`, validates native arch, and runs
+`podman --version` (throwaway tools dir, not user's `~/.ato`).
 
 **Why this matters:** the earlier hotfix verified only `podman --version`, which
 is *not sufficient* — a clean macOS VM still failed with `could not find
@@ -103,28 +112,29 @@ ato install github.com/<an OCI sample>
 #         prompt — NOT "install Homebrew (brew.sh) and re-run"
 
 # 4. Ato auto-installs the full Podman machine-runtime bundle with no brew
-#    (podman + native gvproxy + native vfkit + containers.conf), then:
+#    (pkg → pkgutil expand → podman + native gvproxy + native vfkit + containers.conf)
 ato internal runtime prepare --tools podman
 #    Sanity-check the bundled helpers are native (no Rosetta), e.g.:
-file ~/.ato/tools/podman-5.2.3/usr/bin/vfkit     # must list arm64
-file ~/.ato/tools/podman-5.2.3/usr/bin/gvproxy   # must list arm64
-grep rosetta ~/.ato/tools/podman-5.2.3/containers.conf   # rosetta = false
+file ~/.ato/tools/podman-5.8.2/bin/vfkit     # must list arm64
+file ~/.ato/tools/podman-5.8.2/bin/gvproxy   # must list arm64
+grep rosetta ~/.ato/tools/podman-5.8.2/containers.conf   # rosetta = false
 podman --connection ato-podman info --format json   # must succeed
 #    then the OCI app reaches Ready. Expect NO Rosetta install prompt and NO
 #    `could not find "gvproxy"`.
+#    If an old podman-5.2.3 dir exists, it should have been auto-cleared.
 ```
 
 Automated per-property gates that DO pass today:
 - `cargo test -p ato-cli --test gitless_github_source_install_e2e` (no-git fetch/inference)
 - `cargo test -p ato-cli --lib consumer_paths_do_not_spawn_git_commands` (no git on consumer paths)
 - `cargo test -p ato-cli --lib podman_install` (brew-optional strategy ordering, digest fail-closed,
-  helper bundle install + `containers.conf` with `rosetta = false`, incomplete-bundle rejected before
-  promotion, native-arch Mach-O validation — x86_64-only helper rejected on arm64, universal accepted)
-- `cargo test -p ato-cli --lib runtime_prepare` (helper preflight → typed `RuntimeProviderIncomplete`;
-  `could not find "gvproxy"` machine error mapped to the typed category, not a generic failure)
+  MacosPkg format, `find_binary_in_tree` recursive search, stale remote-zip detection, `containers.conf`
+  with `rosetta = false`, incomplete-bundle rejected before promotion, native-arch Mach-O validation)
+- `cargo test -p ato-cli --lib runtime_prepare` (helper preflight → typed `RuntimeProviderIncomplete`)
 - `cargo test -p capsule-core --lib podman` (Ato-managed `containers.conf` resolved → `CONTAINERS_CONF`)
-- `cargo test -p ato-cli --lib -- --ignored real_ato_managed_install` (macOS arm64 + network: real
-  download + digest-verify of podman + gvproxy + vfkit, helpers executable, `containers.conf` written)
+- `cargo test -p ato-cli --lib -- --ignored real_pkg_install` (macOS arm64 + network: real download +
+  digest-verify of pkg, pkgutil expand, helpers found, arch-validated, `podman --version` runs,
+  `containers.conf` written) — SHA256s are pinned; needs macOS arm64 + network to run
 
 A fully-green end-to-end clean-VM gate (steps 2–4 automated) lands once the
 host-mutating `podman machine init/start` path is run and confirmed on a VM.
@@ -132,19 +142,22 @@ host-mutating `podman machine init/start` path is run and confirmed on a VM.
 ## Provenance
 v0.6 first-run-blocker hotfix, 2026-06-07: #575 (gitless install + typed git error),
 #574 (Homebrew-free provider bootstrap), this acceptance doc.
-Follow-up, 2026-06-07: Ato-managed macOS Podman is now a full **machine-runtime
+
+Follow-up, 2026-06-07 (#577): Ato-managed macOS Podman is now a full **machine-runtime
 bundle** (podman + gvproxy 0.7.5 + vfkit 0.5.1 + Ato-owned `containers.conf`),
 with a helper preflight that turns the clean-VM `could not find "gvproxy"`
-failure into a typed, actionable error (and self-repairs an incomplete install).
-`podman --version` is explicitly documented as insufficient for a macOS machine
-runtime.
+failure into a typed, actionable error.
 
-Follow-up, 2026-06-08 (PR #578 review): a second clean-VM run hit a Rosetta
-install prompt + `vfkit exited unexpectedly with exit code 1`. Root cause was
-Podman's `applehv` default `rosetta = true` (a host-Rosetta prerequisite), **not**
-an Intel-only vfkit (`lipo`/real smoke confirm the pinned helpers are universal
-with native arm64). Fix: `containers.conf` now sets `rosetta = false`, and the
-installer additionally enforces native-arch validation on every bundled Mach-O
-before promotion (typed `NotNativeArch`, fail-closed; no `lipo`/Xcode CLT needed).
-Recorded: `helper exists + executable` is still insufficient — macOS helpers must
-be native for the host arch and must not require Rosetta.
+Follow-up, 2026-06-08 (#578–#579): clean-VM hit Rosetta install prompt + `vfkit
+exited unexpectedly with exit code 1`. Root cause: `applehv` defaults `rosetta = true`.
+Fix: `containers.conf` now sets `rosetta = false`; installer enforces native-arch
+Mach-O validation before promotion.
+
+Follow-up, 2026-06-08 (this PR): Despite #577–#579, clean-VM installs continued
+failing because the remote-zip + hand-assembled helper approach was too fragile
+(separate downloads from three repos, each a new failure mode). Switched to the
+**official `.pkg` installer** from `podman-container-tools/podman` releases (v5.8.2),
+which bundles `podman`, `gvproxy`, and `vfkit` in one verified download. Expansion
+via `pkgutil --expand-full` (OS built-in, no Xcode CLT). Old remote-zip installs
+(5.2.3) are auto-cleared on next install. pkg SHA256s are pinned (arm64
+`8aeaa329…bbc8c`, amd64 `2312f915…33af9`) from the official v5.8.2 release.
