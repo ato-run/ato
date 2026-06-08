@@ -25,6 +25,7 @@
 //! execution drift by default.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::ids::{
     CapsuleInstanceKey, ExecutionId, InstallProfileKey, InstallRevisionId,
@@ -48,6 +49,62 @@ pub struct ProjectionDigest {
     pub digest: String,
 }
 
+/// Why a [`ProjectionDigest`] is not a valid materialization input.
+///
+/// Typed (never an in-band sentinel). The `digest` must be a `blake3:<hex>`
+/// content hash — requiring that prefix is what structurally prevents a raw
+/// secret value from being accepted as a "digest".
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProjectionDigestInvalidReason {
+    /// `source_ref` is empty.
+    #[error("projection digest source_ref is empty")]
+    EmptySourceRef,
+    /// `projection_kind` is empty.
+    #[error("projection digest projection_kind is empty")]
+    EmptyKind,
+    /// `digest` is empty.
+    #[error("projection digest digest is empty")]
+    EmptyDigest,
+    /// `digest` is not a `blake3:<64 lowercase hex>` content hash — it could be a
+    /// raw value or a truncated/malformed hash.
+    #[error("projection digest '{digest}' is not a blake3:<64 hex> content hash")]
+    DigestNotContentHash { digest: String },
+}
+
+impl ProjectionDigest {
+    /// Validate that this is a well-formed projection digest safe to fold into a
+    /// materialization identity: non-empty fields and a `blake3:<hex>` content
+    /// hash (so a raw secret value can never masquerade as a digest).
+    pub fn validate(&self) -> Result<(), ProjectionDigestInvalidReason> {
+        if self.source_ref.is_empty() {
+            return Err(ProjectionDigestInvalidReason::EmptySourceRef);
+        }
+        if self.projection_kind.is_empty() {
+            return Err(ProjectionDigestInvalidReason::EmptyKind);
+        }
+        if self.digest.is_empty() {
+            return Err(ProjectionDigestInvalidReason::EmptyDigest);
+        }
+        if !is_blake3_content_hash(&self.digest) {
+            return Err(ProjectionDigestInvalidReason::DigestNotContentHash {
+                digest: self.digest.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// True if `s` is a `blake3:<64 lowercase hex>` content hash — the exact shape
+/// [`super::hashing::canonical_hash`] emits for BLAKE3-256. Requiring the full
+/// 64-char hex body (not just a non-empty prefix) is what makes it impossible
+/// for a raw value or a truncated digest to pass as a content hash.
+fn is_blake3_content_hash(s: &str) -> bool {
+    match s.strip_prefix("blake3:") {
+        Some(hex) => hex.len() == 64 && hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+        None => false,
+    }
+}
+
 /// A per-session record of what was actually projected onto a concrete session
 /// / runner. Frozen per session; never reused for a subsequent launch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +115,19 @@ pub struct LaunchMaterializationRecord {
     pub install_revision_id: InstallRevisionId,
     /// Stable identity inputs carried for receipt/diff correlation.
     pub profile_hash: String,
+    /// Requirement graph **content** hash (`graph_hash`) — identity of the
+    /// compiled graph alone (#581 wave 3A). Carried for receipt/diff correlation.
+    /// This is NOT the snapshot-level identity; see
+    /// [`requirement_graph_snapshot_hash`](Self::requirement_graph_snapshot_hash).
     pub requirement_graph_hash: String,
+    /// Requirement graph **snapshot** identity
+    /// (`requirement_graph_snapshot_hash` = graph content + profile defaults +
+    /// completeness, #581 wave 3B) — the value that feeds launch-template
+    /// identity. Distinct from [`requirement_graph_hash`](Self::requirement_graph_hash)
+    /// so a reader never mistakes the snapshot identity for the bare content hash.
+    /// `#[serde(default)]`: pre-5B records load as empty.
+    #[serde(default)]
+    pub requirement_graph_snapshot_hash: String,
     pub binding_set_hash: String,
     /// The runner selected for this session, if placement has run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +163,7 @@ impl LaunchMaterializationRecord {
         install_revision_id: InstallRevisionId,
         profile_hash: impl Into<String>,
         requirement_graph_hash: impl Into<String>,
+        requirement_graph_snapshot_hash: impl Into<String>,
         binding_set_hash: impl Into<String>,
         selected_runner_ref: Option<String>,
         selected_runner_class: Option<RunnerClass>,
@@ -110,6 +180,7 @@ impl LaunchMaterializationRecord {
             install_revision_id,
             profile_hash: profile_hash.into(),
             requirement_graph_hash: requirement_graph_hash.into(),
+            requirement_graph_snapshot_hash: requirement_graph_snapshot_hash.into(),
             binding_set_hash: binding_set_hash.into(),
             selected_runner_ref,
             selected_runner_class,
@@ -143,6 +214,7 @@ mod tests {
             InstallRevisionId::new("rev_aaaa"),
             "blake3:prof",
             "blake3:graph",
+            "blake3:graphsnap",
             "blake3:bind",
             Some("/runners/run_managed_1".into()),
             Some(RunnerClass::ManagedRunner),
