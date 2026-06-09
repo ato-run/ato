@@ -225,6 +225,87 @@ pub fn generate_landlock_policy(target: &SourceTarget) -> crate::system::sandbox
     policy
 }
 
+/// Build the Landlock policy applied to the workload *inside* the sandbox by
+/// the `nacelle sandbox-exec` shim. Paths are guest paths (the capsule source
+/// is mounted at `/app`).
+///
+/// Reads are granted broadly (`/`) because bubblewrap already limits what is
+/// visible inside the sandbox to the bind set — granting read on `/` exposes
+/// nothing beyond those mounts, and keeps the read set complete (interpreter,
+/// stdlib, shared libraries, source) without enumerating every bound path.
+/// Landlock's contribution on this path is the *write* restriction: only the
+/// workload's scratch space (`/tmp`), the source dir (already read-only-bound
+/// by bwrap), injected writable mounts, and IPC sockets are writable.
+fn guest_landlock_policy(target: &SourceTarget) -> crate::system::sandbox::SandboxPolicy {
+    use crate::system::sandbox::SandboxPolicy;
+
+    let mut policy = SandboxPolicy::default();
+    policy.read_only_paths = vec![PathBuf::from("/")];
+    policy.read_write_paths = vec![
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+        // Source is mounted read-only at /app; mirror the prior policy's intent
+        // of treating the capsule's own dir as writable. bwrap's read-only bind
+        // still wins, so this grants nothing extra.
+        PathBuf::from("/app"),
+    ];
+    for mount in &target.injected_mounts {
+        if !mount.readonly {
+            policy.read_write_paths.push(mount.target.clone());
+        }
+    }
+    policy.ipc_socket_paths = target.ipc_socket_paths.clone();
+    policy.allow_network = target
+        .isolation
+        .as_ref()
+        .map(|iso| iso.network_enabled)
+        .unwrap_or(true);
+    policy.development_mode = target.dev_mode;
+    policy
+}
+
+/// Stage the in-sandbox Landlock shim. Serializes the guest policy to a file and
+/// bind-mounts both the `nacelle` binary and that policy file (read-only) into
+/// the sandbox, returning their guest paths `(nacelle_binary, policy_file)` for
+/// the workload command line. bwrap then execs
+/// `<nacelle> sandbox-exec --policy <policy> -- <workload>`, which applies
+/// Landlock to the workload after bwrap's namespace setup.
+fn prepare_landlock_shim(
+    runtime: &SourceRuntime,
+    workload_id: &str,
+    target: &SourceTarget,
+    cmd: &mut Command,
+) -> Result<(String, String), RuntimeError> {
+    const GUEST_NACELLE: &str = "/nacelle";
+    const GUEST_POLICY: &str = "/nacelle-landlock.json";
+
+    let nacelle_bin = std::env::current_exe().map_err(|e| RuntimeError::Io {
+        path: PathBuf::from("<current_exe>"),
+        source: e,
+    })?;
+    let nacelle_bin = nacelle_bin.to_string_lossy().to_string();
+
+    let policy = guest_landlock_policy(target);
+    let policy_json = serde_json::to_vec(&policy).map_err(|e| RuntimeError::CommandExecution {
+        operation: "serialize landlock policy".to_string(),
+        source: std::io::Error::other(e.to_string()),
+    })?;
+    let policy_host = runtime
+        .config
+        .log_dir
+        .join(format!("{workload_id}.landlock.json"));
+    std::fs::write(&policy_host, &policy_json).map_err(|e| RuntimeError::Io {
+        path: policy_host.clone(),
+        source: e,
+    })?;
+    let policy_host_str = policy_host.to_string_lossy().to_string();
+
+    cmd.args(["--ro-bind", &nacelle_bin, GUEST_NACELLE]);
+    cmd.args(["--ro-bind", &policy_host_str, GUEST_POLICY]);
+
+    Ok((GUEST_NACELLE.to_string(), GUEST_POLICY.to_string()))
+}
+
 /// Add bubblewrap arguments that hide sensitive paths inside the namespace.
 ///
 /// When the user's bind-mount set would expose a sensitive directory
@@ -497,8 +578,33 @@ pub async fn launch_with_bubblewrap(
         cmd.args(["--ro-bind-try", &base, &base]);
     }
 
+    // Landlock is applied to the *workload*, not the bwrap wrapper, via an
+    // in-sandbox shim (`nacelle sandbox-exec`). bwrap sets up the user
+    // namespace first (writing /proc/self/uid_map); the shim then applies
+    // Landlock and execs the workload. Applying Landlock to bwrap directly
+    // would deny that /proc write and break user-namespace setup.
+    let landlock_shim = if crate::system::sandbox::is_sandbox_supported() {
+        match prepare_landlock_shim(runtime, request.workload_id, target, &mut cmd) {
+            Ok(shim) => Some(shim),
+            Err(err) => {
+                warn!(
+                    "Landlock shim setup failed ({err}); workload runs with bubblewrap \
+                     namespace isolation only"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Add the actual command
     cmd.arg("--");
+    if let Some((ref shim_bin, ref policy_guest)) = landlock_shim {
+        // bwrap execs the shim, which applies Landlock then execs the workload.
+        cmd.arg(shim_bin);
+        cmd.args(["sandbox-exec", "--policy", policy_guest, "--"]);
+    }
     if let Some(explicit_cmd) = target.cmd.as_ref() {
         if let Some((binary, args)) = explicit_cmd.split_first() {
             let binary_path = match binary.as_str() {
@@ -582,37 +688,13 @@ pub async fn launch_with_bubblewrap(
 
     debug!("Executing bwrap command: {:?}", cmd);
 
-    // Apply Landlock inside the forked child (before bwrap execs).
-    // This adds a filesystem-access layer on top of bwrap's namespace isolation.
-    // Landlock survives exec, so it stays active for the capsule workload.
-    {
-        use crate::system::sandbox::{apply_sandbox, is_sandbox_supported};
-        if is_sandbox_supported() {
-            let policy = generate_landlock_policy(target);
-            // Safety: pre_exec callback runs after fork() in the child process,
-            // before exec(). apply_sandbox calls restrict_self() which is safe
-            // to call post-fork. We capture the policy by value.
-            unsafe {
-                cmd.pre_exec(move || {
-                    // Set PR_SET_NO_NEW_PRIVS so Landlock doesn't require CAP_SYS_ADMIN.
-                    let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                    if ret != 0 {
-                        eprintln!(
-                            "[nacelle] PR_SET_NO_NEW_PRIVS failed: {}",
-                            std::io::Error::last_os_error()
-                        );
-                    }
-                    if let Err(e) = apply_sandbox(&policy) {
-                        eprintln!("[nacelle] Landlock apply_sandbox failed: {e}");
-                        // Non-fatal: proceed with namespace isolation only.
-                    }
-                    Ok(())
-                });
-            }
-        } else {
-            debug!("Landlock not supported on this kernel; skipping pre_exec hook");
-        }
-    }
+    // NOTE: Landlock is intentionally NOT applied here via `pre_exec`. Doing so
+    // restricts the *bwrap wrapper* before it sets up the user namespace, and a
+    // policy that (correctly) does not grant write access to `/proc` denies
+    // bwrap's `/proc/self/uid_map` write — bwrap then fails with
+    // "setting up uid map: Permission denied". Instead, Landlock is applied to
+    // the *workload* from inside the sandbox by the `nacelle sandbox-exec` shim
+    // (staged above via `prepare_landlock_shim`), after bwrap's namespace setup.
 
     // Put the bwrap wrapper in its own process group (mirror of macos.rs
     // `launch_with_sandbox_exec` and `launch_direct`). Without this the
@@ -1045,5 +1127,50 @@ mod tests {
             assert_eq!(src, dst, "system binds are identity-mapped");
             assert!(src.starts_with('/'), "bind target must be absolute: {src}");
         }
+    }
+
+    #[test]
+    fn guest_landlock_policy_restricts_writes_not_reads() {
+        // The in-sandbox policy uses guest paths and grants read on `/` while
+        // keeping writes to scratch space only. This is what the `sandbox-exec`
+        // shim applies to the workload (Landlock applied to bwrap would break
+        // user-namespace setup).
+        let target = python_target(PathBuf::from("/host/src"));
+        let policy = guest_landlock_policy(&target);
+        assert_eq!(
+            policy.read_only_paths,
+            vec![PathBuf::from("/")],
+            "reads granted on / (bwrap already limits what is visible)"
+        );
+        assert!(policy.read_write_paths.contains(&PathBuf::from("/tmp")));
+        assert!(policy.read_write_paths.contains(&PathBuf::from("/app")));
+        assert!(
+            !policy.read_write_paths.contains(&PathBuf::from("/usr")),
+            "/usr must not be writable"
+        );
+        assert!(
+            !policy
+                .read_write_paths
+                .contains(&PathBuf::from("/host/src")),
+            "policy must use guest paths (/app), not the host source dir"
+        );
+        assert!(
+            policy.allow_network,
+            "isolation None defaults to network allowed"
+        );
+    }
+
+    #[test]
+    fn guest_landlock_policy_serde_roundtrips() {
+        // The shim reads the policy back from a JSON file bound into the sandbox.
+        let target = python_target(PathBuf::from("/host/src"));
+        let policy = guest_landlock_policy(&target);
+        let json = serde_json::to_vec(&policy).expect("serialize");
+        let back: crate::system::sandbox::SandboxPolicy =
+            serde_json::from_slice(&json).expect("deserialize");
+        assert_eq!(back.read_only_paths, policy.read_only_paths);
+        assert_eq!(back.read_write_paths, policy.read_write_paths);
+        assert_eq!(back.ipc_socket_paths, policy.ipc_socket_paths);
+        assert_eq!(back.allow_network, policy.allow_network);
     }
 }
