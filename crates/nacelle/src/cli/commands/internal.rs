@@ -601,15 +601,6 @@ fn emit_service_exited(service: &str, status: &std::process::ExitStatus) {
     .emit();
 }
 
-fn emit_service_ready(service: &str) {
-    NacelleEvent::IpcReady {
-        service: service.to_string(),
-        endpoint: "command://ready".to_string(),
-        port: None,
-    }
-    .emit();
-}
-
 fn readiness_endpoint(
     probe: &ReadinessProbeConfig,
     ipc_socket_paths: &[PathBuf],
@@ -1388,7 +1379,16 @@ async fn execute_prepared_launch(
                 }
             }
         } else {
-            emit_service_ready(&manifest.name);
+            // No readiness signal (no probe declared, and ato-cli synthesizes a
+            // conservative probe only when a port is declared). Report
+            // *Started*, NOT Ready — faking readiness from process spawn alone
+            // hides crashes-after-launch and produces a dishonest receipt.
+            NacelleEvent::ServiceStarted {
+                service: manifest.name.clone(),
+                endpoint: None,
+                port: None,
+            }
+            .emit();
         }
 
         let status = wait_for_child_exit(&mut child).await?;
