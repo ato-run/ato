@@ -1,0 +1,130 @@
+# Nightly release pipeline — builds the `nightly` branch on demand, no main, no tags.
+#
+# Why a `release-nightly` trigger branch:
+#   GitHub's `workflow_dispatch` can only be invoked when the workflow lives on
+#   the DEFAULT branch (main). We deliberately do not touch main, so instead this
+#   workflow lives on a dedicated `release-nightly` branch and fires on `push` to
+#   it. The branch's tree is irrelevant — the build always checks out and builds
+#   the `nightly` branch (the `ref` input, default `nightly`).
+#
+# Cut a nightly build (manual trigger = push to release-nightly):
+#   git push origin release-nightly            # if it moved
+#   # or to re-fire without code changes:
+#   git commit --allow-empty -m "nightly build" && git push origin HEAD:release-nightly
+#
+# Output: a GitHub PRE-release tagged `nightly-v<base>-<date>.<run>-g<sha>` with
+# aarch64 + x86_64 Linux `ato`+`nacelle` tarballs. Never a stable release.
+name: nightly-release
+
+on:
+  push:
+    branches: [release-nightly]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or ref to build the nightly from"
+        required: true
+        default: "nightly"
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'nightly' }}
+      - id: v
+        run: |
+          set -euo pipefail
+          base=$(grep -m1 '^version' crates/ato-cli/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short=8 HEAD)
+          date=$(date -u +%Y%m%d)
+          tag="nightly-v${base}-${date}.${{ github.run_number }}-g${short}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Nightly tag: $tag  (ref=${{ inputs.ref || 'nightly' }}, sha=$short)"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'nightly' }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-${{ matrix.target }}
+      - name: Build ato + nacelle (dist profile)
+        run: |
+          set -euo pipefail
+          cargo build --profile dist -p ato-cli --bin ato --target ${{ matrix.target }}
+          cargo build --profile dist -p nacelle --bin nacelle --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="ato-nightly-${{ matrix.target }}"
+          mkdir -p "dist/$out"
+          cp "target/${{ matrix.target }}/dist/ato" "dist/$out/"
+          cp "target/${{ matrix.target }}/dist/nacelle" "dist/$out/"
+          cp README.md "dist/$out/" 2>/dev/null || true
+          tar -C dist -czf "dist/$out.tar.gz" "$out"
+          ( cd dist && sha256sum "$out.tar.gz" > "$out.tar.gz.sha256" )
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish nightly prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.version.outputs.tag }}"
+          ref="${{ inputs.ref || 'nightly' }}"
+          mapfile -t files < <(find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) | sort)
+          echo "Publishing $tag with ${#files[@]} assets:"; printf '  %s\n' "${files[@]}"
+          flags=(--target "${{ needs.version.outputs.sha }}"
+                 --title "ato nightly $tag"
+                 --notes "Automated nightly build of \`$ref\` at ${{ needs.version.outputs.sha }}. Experimental — not a stable release.")
+          if [ "${{ inputs.prerelease }}" != "false" ]; then flags+=(--prerelease); fi
+          gh release create "$tag" "${files[@]}" "${flags[@]}" --repo "${{ github.repository }}"
+          echo "Released: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag"
