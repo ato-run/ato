@@ -27,6 +27,7 @@ use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 use crate::runtime::provider_workspace;
+use crate::runtime::provisioning::dependency_root;
 
 use capsule_core::engine;
 use capsule_core::isolation::HostIsolationContext;
@@ -936,6 +937,13 @@ impl NacelleExecAdapter {
                     .collect::<Vec<_>>(),
                 "ipc_env": ipc_env,
                 "ipc_socket_paths": ipc_socket_paths,
+                // Bind the real materialized source root (with app/ + .venv) at
+                // the guest root, decoupled from the synthesized manifest's
+                // location. The manifest stays in a pool dir (outside the source
+                // tree) so it cannot perturb the source-tree hash / execution
+                // identity; this tells nacelle which directory to actually mount.
+                // Honored on the Linux V1 source path; ignored elsewhere.
+                "source_dir": dependency_root(plan).display().to_string(),
             }),
             cleanup_paths: vec![normalized_manifest_path],
         })
@@ -944,13 +952,11 @@ impl NacelleExecAdapter {
 
 fn runtime_cwd_payload(launch_ctx: &RuntimeLaunchContext, working_dir: &Path) -> Option<String> {
     if cfg!(target_os = "linux") {
-        // The Linux sandbox bind-mounts the materialized workspace at
-        // /workspace, so the cwd inside the sandbox is always /workspace
-        // regardless of the host effective_cwd. Subdirectories like
-        // working_dir.relative_to(workspace) are not yet routed here —
-        // the orchestrator's existing /workspace contract preserves the
-        // historical behaviour.
-        return Some("/workspace".to_string());
+        // The Linux sandbox bind-mounts the capsule's dependency_root (its
+        // working dir, which holds app code + the build-phase `.venv`) at /app,
+        // so the cwd inside the sandbox is /app. The venv is then at /app/.venv
+        // and bare-module entrypoints resolve from /app.
+        return Some("/app".to_string());
     }
     // macOS sandbox runs in the host filesystem namespace, so apply the
     // same caller-vs-workspace resolution the host execution path uses
@@ -1004,7 +1010,16 @@ fn write_normalized_manifest(
     let is_provider_workspace = provider_workspace::is_provider_workspace(&plan.manifest_dir);
 
     let (normalized_entrypoint, command) = if is_python {
-        if is_provider_workspace {
+        // Run `python3` directly when the dependencies are already materialized:
+        //   - provider workspaces expose deps via site-packages/PYTHONPATH;
+        //   - a build-phase `.venv` is run via nacelle's bare-`python3`->venv
+        //     mapping (the launcher mounts `dependency_root` at /app, so the venv
+        //     is reachable at /app/.venv and its base CPython install is bound).
+        // `uv run` is only a fallback for when neither is present: it cannot work
+        // inside the sandbox (no `uv` binary is bind-mounted, the requirements
+        // path is a host path absent inside, and there is no writable venv), so
+        // it must not be the default for venv-backed capsules.
+        if is_provider_workspace || venv_python_binary(&dependency_root(plan)).is_some() {
             let mut tokens = vec![sandbox_entrypoint.clone()];
             tokens.extend(cmd_args.iter().cloned());
             (
@@ -1283,10 +1298,17 @@ fn python_runtime_selector_env(
 }
 
 fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
-    let relative = sandbox_source_entrypoint_relative(plan, entrypoint);
     if cfg!(target_os = "linux") {
-        Path::new("/workspace").join(relative).display().to_string()
+        // Linux V1: dependency_root (the capsule's working dir) is bind-mounted
+        // at /app, and a declared entrypoint is relative to that working dir, so
+        // it maps directly under /app. (The `source/<working_dir>` prefixing used
+        // off-Linux is an artifact of mounting the manifest_dir-rooted workspace;
+        // here we mount dependency_root itself, which already absorbs it.)
+        let trimmed = entrypoint.trim();
+        let rel = trimmed.strip_prefix("./").unwrap_or(trimmed);
+        Path::new("/app").join(rel).display().to_string()
     } else {
+        let relative = sandbox_source_entrypoint_relative(plan, entrypoint);
         Path::new(".").join(relative).display().to_string()
     }
 }
@@ -1712,7 +1734,8 @@ mod tests {
         let entrypoint = sandbox_source_entrypoint(&plan, "run.sh");
 
         if cfg!(target_os = "linux") {
-            assert_eq!(entrypoint, "/workspace/run.sh");
+            // dependency_root is mounted at /app; the entrypoint is relative to it.
+            assert_eq!(entrypoint, "/app/run.sh");
         } else {
             assert!(entrypoint.starts_with("./"));
             assert!(entrypoint.ends_with("run.sh"));
@@ -2214,6 +2237,115 @@ mod tests {
         assert!(
             !normalized.contains("source/-m") && !normalized.contains("source\\\\-m"),
             "normalized={normalized}"
+        );
+    }
+
+    /// When the build phase produced a `.venv`, the sandbox manifest must run the
+    /// venv interpreter directly (`python3` → nacelle maps it to /app/.venv) and
+    /// NOT `uv run` (which cannot work inside the sandbox). Regression for the
+    /// mount-contract fix.
+    #[serial_test::serial]
+    #[test]
+    fn write_normalized_manifest_uses_python3_directly_when_venv_present() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempdir().unwrap();
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = tempdir().unwrap();
+        // Simulate the build-phase venv in the dependency root.
+        let venv_bin = dir.path().join(".venv").join("bin");
+        fs::create_dir_all(&venv_bin).unwrap();
+        fs::write(venv_bin.join("python"), "#!/bin/sh\n").unwrap();
+
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            run_command = "python -m uvicorn app.main:app --host 127.0.0.1"
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).unwrap();
+        let normalized = fs::read_to_string(&normalized_path).unwrap();
+
+        assert!(
+            normalized.contains("entrypoint = \"python3\""),
+            "venv present must run python3 directly: {normalized}"
+        );
+        assert!(
+            !normalized.contains("entrypoint = \"uv\""),
+            "must not fall back to `uv run` when a venv exists: {normalized}"
+        );
+        assert!(
+            normalized.contains("-m uvicorn app.main:app --host 127.0.0.1"),
+            "{normalized}"
+        );
+        assert!(
+            !normalized.contains("--with-requirements"),
+            "no host requirements path in the manifest: {normalized}"
+        );
+    }
+
+    #[test]
+    fn runtime_cwd_payload_is_app_on_linux() {
+        let cwd = runtime_cwd_payload(&RuntimeLaunchContext::empty(), Path::new("/unused"));
+        if cfg!(target_os = "linux") {
+            assert_eq!(cwd.as_deref(), Some("/app"));
+        }
+        // macOS resolves a host path (covered by resolve_host_execution_cwd tests).
+    }
+
+    /// The envelope must send `source_dir` = the real materialized dependency
+    /// root, while the synthesized manifest stays in the pool dir (so it cannot
+    /// perturb the source-tree hash / execution identity). Covers the
+    /// mount-contract + identity invariants.
+    #[serial_test::serial]
+    #[test]
+    fn adapter_sends_source_dir_and_keeps_manifest_in_pool() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempdir().unwrap();
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("main.py"), "print('ok')\n").unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            entrypoint = "main.py"
+            "#,
+            "dev",
+        );
+
+        let adapter = NacelleExecAdapter::for_plan(
+            &plan,
+            ExecuteMode::Foreground,
+            &RuntimeLaunchContext::empty(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            adapter.payload["source_dir"].as_str(),
+            Some(dependency_root(&plan).display().to_string().as_str()),
+            "source_dir must be the real materialized dependency root"
+        );
+        let manifest_path = adapter.payload["workload"]["manifest"]
+            .as_str()
+            .expect("manifest path");
+        assert!(
+            manifest_path.contains("nacelle-manifests"),
+            "manifest must stay in the pool dir (identity-safe): {manifest_path}"
+        );
+        assert!(
+            !manifest_path.starts_with(dir.path().to_string_lossy().as_ref()),
+            "manifest must NOT be written inside the source tree: {manifest_path}"
         );
     }
 
