@@ -153,6 +153,23 @@ fn toolchain_install_root(toolchain_path: &std::path::Path) -> Option<PathBuf> {
     Some(root.to_path_buf())
 }
 
+/// Env keys the runtime re-applies inside the production sandbox after
+/// `--clearenv`. This is a STRICT allowlist — only keys the runtime itself
+/// synthesizes for the sandbox contract (the writable session data dir), never
+/// general user/host env. `--clearenv` deliberately drops everything else.
+const SANDBOX_RUNTIME_ENV_ALLOWLIST: &[&str] = &["ATO_DATA_DIR", "DATABASE_PATH"];
+
+/// Select the entries of the workload env that the runtime is allowed to
+/// re-inject past `--clearenv`. Order is preserved; bwrap's `--setenv` applies
+/// last-write-wins for duplicate keys.
+fn sandbox_runtime_setenv_pairs(env: Option<&[(String, String)]>) -> Vec<(String, String)> {
+    env.into_iter()
+        .flatten()
+        .filter(|(key, _)| SANDBOX_RUNTIME_ENV_ALLOWLIST.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
 fn ensure_bwrap_dirs(cmd: &mut Command, path: &std::path::Path) {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -566,6 +583,14 @@ pub async fn launch_with_bubblewrap(
         cmd.args(["--setenv", "PATH", "/usr/bin:/bin"]);
         cmd.args(["--setenv", "HOME", "/tmp"]);
         cmd.args(["--setenv", "LANG", "C.UTF-8"]);
+
+        // Re-apply runtime-owned env that must survive --clearenv. Strict
+        // allowlist (SANDBOX_RUNTIME_ENV_ALLOWLIST) — e.g. ATO_DATA_DIR /
+        // DATABASE_PATH for the writable session data dir. General user/host env
+        // stays dropped.
+        for (key, value) in sandbox_runtime_setenv_pairs(request.env.as_deref()) {
+            cmd.args(["--setenv", &key, &value]);
+        }
 
         // Apply sidecar (SOCKS5 proxy) environment variables
         if let Some(ref sidecar) = runtime.config.sidecar_config {
@@ -1177,6 +1202,29 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_runtime_env_allowlist_filters_to_runtime_keys() {
+        // Only runtime-owned keys survive --clearenv; general user/host env is
+        // dropped (no FOO/secret leak into the sandbox).
+        let env = vec![
+            ("ATO_DATA_DIR".to_string(), "/runs/ato/session".to_string()),
+            (
+                "DATABASE_PATH".to_string(),
+                "/runs/ato/session/app.db".to_string(),
+            ),
+            ("FOO".to_string(), "bar".to_string()),
+            ("SECRET_TOKEN".to_string(), "shhh".to_string()),
+        ];
+        let pairs = sandbox_runtime_setenv_pairs(Some(&env));
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["ATO_DATA_DIR", "DATABASE_PATH"]);
+        assert!(
+            !keys.contains(&"FOO") && !keys.contains(&"SECRET_TOKEN"),
+            "general user/host env must not survive --clearenv"
+        );
+        assert!(sandbox_runtime_setenv_pairs(None).is_empty());
+    }
+
+    #[test]
     fn lib64_bind_is_non_fatal_but_usr_is_strict() {
         // Regression guard for aarch64: `/lib64` does not exist there, and a
         // strict `--ro-bind` would abort the whole sandbox during mount setup.
@@ -1228,6 +1276,40 @@ mod tests {
         assert!(
             policy.allow_network,
             "isolation None defaults to network allowed"
+        );
+    }
+
+    #[test]
+    fn guest_landlock_policy_grants_write_to_injected_writable_mount() {
+        // The writable session data dir (/runs/ato/session) is injected as a
+        // non-readonly mount; the Landlock guest policy must allow writes there,
+        // while a read-only injected mount must NOT become writable.
+        let mut target = python_target(PathBuf::from("/host/src"));
+        target.injected_mounts = vec![
+            crate::launcher::InjectedMount {
+                source: PathBuf::from("/host/session-data/run-1"),
+                target: PathBuf::from("/runs/ato/session"),
+                readonly: false,
+            },
+            crate::launcher::InjectedMount {
+                source: PathBuf::from("/host/ro"),
+                target: PathBuf::from("/ro-grant"),
+                readonly: true,
+            },
+        ];
+        let policy = guest_landlock_policy(&target);
+        assert!(
+            policy
+                .read_write_paths
+                .contains(&PathBuf::from("/runs/ato/session")),
+            "writable injected mount must be in the Landlock write allowlist: {:?}",
+            policy.read_write_paths
+        );
+        assert!(
+            !policy
+                .read_write_paths
+                .contains(&PathBuf::from("/ro-grant")),
+            "read-only injected mount must not be writable"
         );
     }
 
