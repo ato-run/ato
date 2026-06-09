@@ -186,6 +186,14 @@ pub struct ExecEnvelope {
     /// Requested working directory for the process.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Explicit source directory to bind-mount at the guest root (Linux V1).
+    /// When set, nacelle uses this as `source_dir` instead of the manifest's
+    /// parent — letting ato-cli keep the synthesized manifest in a pool dir
+    /// (outside the source tree, for stable identity) while still mounting the
+    /// real materialized source (with `app/` + `.venv`). Optional and
+    /// backward-compatible (older nacelle ignores it; spec_version unchanged).
+    #[serde(default)]
+    pub source_dir: Option<String>,
     /// Additional host mounts injected by ato-cli.
     #[serde(default)]
     pub mounts: Vec<ExecMount>,
@@ -1010,6 +1018,7 @@ fn prepare_v1_launch(envelope: ExecEnvelope) -> Result<EnvironmentWorkspace> {
             readonly: mount.readonly,
         })
         .collect();
+    let source_dir_override = envelope.source_dir.map(PathBuf::from);
 
     EnvironmentWorkspace::for_manifest(
         format!("exec-{}", std::process::id()),
@@ -1019,7 +1028,8 @@ fn prepare_v1_launch(envelope: ExecEnvelope) -> Result<EnvironmentWorkspace> {
         merged_env,
         ipc_socket_paths,
         injected_mounts,
-    )
+    )?
+    .with_source_dir_override(source_dir_override)
 }
 
 fn prepare_v2_launch(envelope: ExecEnvelopeV2) -> Result<EnvironmentWorkspace> {
@@ -1402,6 +1412,19 @@ mod tests {
         assert!(envelope.ipc_env.is_none());
         assert!(envelope.ipc_socket_paths.is_none());
         assert_eq!(envelope.env.as_ref().unwrap().len(), 1);
+        // Backward-compatible: absent source_dir deserializes to None.
+        assert!(envelope.source_dir.is_none());
+    }
+
+    #[test]
+    fn test_exec_envelope_parses_source_dir_override() {
+        let json = r#"{
+            "spec_version": "0.1.0",
+            "workload": { "type": "source", "manifest": "/pool/x.toml" },
+            "source_dir": "/materialized/app"
+        }"#;
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.source_dir.as_deref(), Some("/materialized/app"));
     }
 
     #[test]
