@@ -2,6 +2,9 @@
 
 pub mod commands;
 
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -32,6 +35,22 @@ enum Commands {
 
         #[command(subcommand)]
         command: InternalCommands,
+    },
+
+    /// (Hidden) In-sandbox Landlock shim: apply the policy, then exec the
+    /// workload. Invoked by the Linux source launcher *inside* bubblewrap so
+    /// Landlock restricts the workload rather than the bwrap wrapper.
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    SandboxExec {
+        /// Path (inside the sandbox) to the serialized SandboxPolicy JSON.
+        #[arg(long)]
+        policy: PathBuf,
+
+        /// The workload command line to exec after applying Landlock.
+        /// Everything after `--` is captured verbatim.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        argv: Vec<String>,
     },
 
     /// (Hidden: legacy command, use ato dev instead)
@@ -71,6 +90,8 @@ pub async fn execute() -> anyhow::Result<()> {
             })
             .await
         }
+        #[cfg(target_os = "linux")]
+        Commands::SandboxExec { policy, argv } => commands::sandbox_exec::run(policy, argv),
         Commands::Dev => {
             anyhow::bail!("`nacelle dev` is deprecated. Use `ato dev` instead.");
         }
