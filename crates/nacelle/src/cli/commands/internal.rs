@@ -880,14 +880,31 @@ fn detect_language_from_extension(path: &str) -> Option<String> {
 }
 
 /// Find the most likely entrypoint file from command tokens
+/// Source-file extensions the launcher may need to rewrite to the in-sandbox
+/// path. A token is only treated as an entrypoint file if it is an explicit
+/// relative path (`./…`) or carries one of these extensions. We deliberately do
+/// NOT treat every dotted token as a file: an ASGI/WSGI app spec like
+/// `app.main:app` (extension parsed as `main:app`) or a dotted version such as
+/// `127.0.0.1` is an argument, not an entrypoint, and rewriting it to `/app/…`
+/// breaks the command (e.g. `uvicorn app.main:app`).
+const ENTRYPOINT_SOURCE_EXTS: &[&str] = &[
+    "py", "pyw", "js", "mjs", "cjs", "ts", "tsx", "jsx", "rb", "sh", "bash", "php", "pl", "lua",
+];
+
 fn find_entrypoint_file(tokens: &[String]) -> String {
-    // Look for file-like arguments (has extension or starts with ./)
+    // Look for file-like arguments (explicit relative path, or a known
+    // source-file extension).
     for token in tokens.iter().skip(1) {
         if token.starts_with("./") || token.starts_with("../") {
             return token.clone();
         }
-        if std::path::Path::new(token).extension().is_some() {
-            return token.clone();
+        if let Some(ext) = std::path::Path::new(token)
+            .extension()
+            .and_then(|ext| ext.to_str())
+        {
+            if ENTRYPOINT_SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+                return token.clone();
+            }
         }
     }
     // Fallback: use first token
@@ -1388,6 +1405,39 @@ async fn execute_prepared_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_entrypoint_file_ignores_module_specs_and_versions() {
+        // `uvicorn app.main:app` — the app spec must NOT be treated as the
+        // entrypoint file (it would otherwise be rewritten to /app/app.main:app
+        // and break the command).
+        let tokens: Vec<String> = [
+            "python3",
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "python3");
+
+        // A real script entrypoint IS picked up.
+        let tokens: Vec<String> = ["python3", "app/main.py"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "app/main.py");
+
+        // Explicit relative path is picked up.
+        let tokens: Vec<String> = ["node", "./server.js"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "./server.js");
+    }
 
     #[test]
     fn test_exec_envelope_without_ipc_fields() {
