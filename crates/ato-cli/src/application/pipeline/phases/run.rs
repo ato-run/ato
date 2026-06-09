@@ -1630,6 +1630,27 @@ fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMod
     }
 }
 
+/// Build the runtime-owned data-directory env for a sandboxed source run.
+///
+/// Sets `ATO_DATA_DIR` to the writable session guest dir and `DATABASE_PATH` to
+/// `<guest_dir>/app.db`, but ONLY for keys that `already_set` reports as absent
+/// — the runtime never overrides a value the capsule manifest or the user
+/// provided. These keys are re-applied past the sandbox `--clearenv` by the
+/// nacelle launcher's runtime allowlist.
+fn sandbox_session_data_env(
+    guest_dir: &str,
+    already_set: impl Fn(&str) -> bool,
+) -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+    if !already_set("ATO_DATA_DIR") {
+        env.insert("ATO_DATA_DIR".to_string(), guest_dir.to_string());
+    }
+    if !already_set("DATABASE_PATH") {
+        env.insert("DATABASE_PATH".to_string(), format!("{guest_dir}/app.db"));
+    }
+    env
+}
+
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -1917,6 +1938,53 @@ where
                 })
                 .collect(),
         );
+
+        // Writable per-run session data directory. Sandboxed source runs mount
+        // the capsule at /app read-only, so a stateful capsule (e.g. one that
+        // writes SQLite) has nowhere to persist. Mount a fresh per-run host dir
+        // at the guest path /runs/ato/session — chosen so it classifies as
+        // SessionLocal (ephemeral) rather than PersistentState, keeping the
+        // receipt honest — and point the common data-path env vars at it ONLY
+        // when the capsule/user has not already set them. The dir is ephemeral
+        // (registered for run cleanup); it lives OUTSIDE the materialized source
+        // tree so it does not perturb the source-tree hash.
+        const SESSION_DATA_GUEST: &str = "/runs/ato/session";
+        let host_session_dir = capsule_core::common::paths::ato_runs_dir()
+            .join("session-data")
+            .join(format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos())
+                    .unwrap_or(0)
+            ));
+        std::fs::create_dir_all(&host_session_dir).with_context(|| {
+            format!(
+                "Failed to create sandbox session data dir: {}",
+                host_session_dir.display()
+            )
+        })?;
+        if let Some(attempt) = attempt.as_mut() {
+            let mut scope = attempt.cleanup_scope();
+            scope.register_remove_dir(host_session_dir.clone());
+        }
+        launch_ctx = launch_ctx.with_injected_mounts(vec![InjectedMount {
+            source: host_session_dir,
+            target: SESSION_DATA_GUEST.to_string(),
+            readonly: false,
+        }]);
+
+        // Inject data-path env only when neither the capsule manifest env nor an
+        // earlier injection already provides it — never override user/capsule.
+        let plan_env = decision.plan.execution_env();
+        let merged_env = launch_ctx.merged_env();
+        let session_env = sandbox_session_data_env(SESSION_DATA_GUEST, |key| {
+            plan_env.contains_key(key) || merged_env.contains_key(key)
+        });
+        if !session_env.is_empty() {
+            launch_ctx = launch_ctx.with_injected_env(session_env);
+        }
     }
     let mut agent_attempted = false;
 
@@ -4299,7 +4367,8 @@ mod tests {
         PreparedRunContext, RunPipelineState, ServiceRequiredAsset, normalize_existing_path,
         normalize_write_path, parent_package_id, parse_external_service_contracts,
         parse_reuse_if_present_service_preflights, reconcile_compat_manifest_targets,
-        resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
+        resolve_sandbox_grants, sandbox_session_data_env, unavailable_service_message,
+        validate_sandbox_grants_best_effort,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -4310,6 +4379,33 @@ mod tests {
     use std::sync::Arc;
 
     use crate::reporters::CliReporter;
+
+    #[test]
+    fn sandbox_session_data_env_sets_absent_keys_only() {
+        // Nothing set: both runtime keys injected, pointing at the guest dir.
+        let env = sandbox_session_data_env("/runs/ato/session", |_| false);
+        assert_eq!(
+            env.get("ATO_DATA_DIR").map(String::as_str),
+            Some("/runs/ato/session")
+        );
+        assert_eq!(
+            env.get("DATABASE_PATH").map(String::as_str),
+            Some("/runs/ato/session/app.db")
+        );
+
+        // Capsule/user already set DATABASE_PATH: do NOT override it; still set
+        // ATO_DATA_DIR.
+        let env = sandbox_session_data_env("/runs/ato/session", |k| k == "DATABASE_PATH");
+        assert!(
+            !env.contains_key("DATABASE_PATH"),
+            "must not override DATABASE_PATH"
+        );
+        assert!(env.contains_key("ATO_DATA_DIR"));
+
+        // Both already set: inject nothing.
+        let env = sandbox_session_data_env("/runs/ato/session", |_| true);
+        assert!(env.is_empty());
+    }
 
     fn empty_host_env() -> crate::application::dependency_credentials::MapHostEnv {
         crate::application::dependency_credentials::MapHostEnv::new(&[])
