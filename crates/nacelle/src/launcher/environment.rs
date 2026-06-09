@@ -128,6 +128,26 @@ impl EnvironmentWorkspace {
         })
     }
 
+    /// Override the bind-mounted source directory (V1 source path).
+    ///
+    /// By default `source_dir` is the manifest's parent. ato-cli synthesizes the
+    /// run manifest in a pool dir *outside* the materialized source tree — to
+    /// keep the source-tree hash / execution identity stable and avoid polluting
+    /// the user's working tree — so it passes the real materialized source root
+    /// explicitly. When `Some`, that directory is what gets bind-mounted at
+    /// `/app` (and is where `sandbox_venv_python` probes for `.venv`).
+    pub fn with_source_dir_override(mut self, source_dir: Option<PathBuf>) -> Result<Self> {
+        if let Some(dir) = source_dir {
+            self.source_dir = fs::canonicalize(&dir).with_context(|| {
+                format!(
+                    "Failed to canonicalize source_dir override: {}",
+                    dir.display()
+                )
+            })?;
+        }
+        Ok(self)
+    }
+
     pub fn runtime_config(&self, dev_mode: bool) -> SourceRuntimeConfig {
         SourceRuntimeConfig {
             dev_mode,
@@ -856,6 +876,46 @@ sandbox = false
     fn normalize_workspace_target_rejects_parent_escape() {
         let err = normalize_workspace_target(Path::new("../escape")).unwrap_err();
         assert!(err.to_string().contains("target escapes workspace root"));
+    }
+
+    #[test]
+    fn with_source_dir_override_replaces_manifest_parent() {
+        let temp = TempDir::new().unwrap();
+        // The synthesized manifest lives in a pool dir (NOT the source tree).
+        let pool = temp.path().join("pool");
+        fs::create_dir_all(&pool).unwrap();
+        let manifest_path = write_manifest(&pool);
+        // The real materialized source tree that should actually be mounted.
+        let source = temp.path().join("materialized-source");
+        fs::create_dir_all(&source).unwrap();
+
+        // No override: source_dir defaults to the manifest's parent (pool dir).
+        let ws = EnvironmentWorkspace::for_manifest(
+            "run-default".to_string(),
+            "0.1.0".to_string(),
+            manifest_path.clone(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(ws.source_dir, fs::canonicalize(&pool).unwrap());
+
+        // Override: source_dir becomes the real source tree; None is a no-op.
+        let ws = EnvironmentWorkspace::for_manifest(
+            "run-override".to_string(),
+            "0.1.0".to_string(),
+            manifest_path,
+            None,
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_source_dir_override(Some(source.clone()))
+        .unwrap();
+        assert_eq!(ws.source_dir, fs::canonicalize(&source).unwrap());
     }
 
     #[test]
