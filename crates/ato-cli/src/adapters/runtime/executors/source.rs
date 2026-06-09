@@ -1139,6 +1139,28 @@ fn write_normalized_manifest(
         manifest.insert("language".to_string(), toml::Value::Table(language));
     }
 
+    // Readiness probe: honor an author-declared probe if present, else
+    // synthesize a conservative TCP probe from a declared server port. This is
+    // what lets the runtime report Ready only after the port actually accepts,
+    // instead of faking readiness from process spawn. Capsules with NEITHER a
+    // probe NOR a port honestly report StartedWithoutReadiness (the launcher no
+    // longer fakes ready). Generic — applied to every source capsule, never
+    // special-cased per capsule.
+    if let Some(probe) = plan
+        .manifest
+        .get("readiness_probe")
+        .and_then(|value| value.as_table())
+    {
+        manifest.insert(
+            "readiness_probe".to_string(),
+            toml::Value::Table(probe.clone()),
+        );
+    } else if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+        let mut probe = toml::map::Map::new();
+        probe.insert("port".to_string(), toml::Value::String(port.to_string()));
+        manifest.insert("readiness_probe".to_string(), toml::Value::Table(probe));
+    }
+
     // Phase A0 source non-pollution: write the synthetic nacelle manifest into
     // ~/.ato/runs/nacelle-manifests/ instead of plan.manifest_dir so it cannot
     // perturb the source_tree_hash observation. The file lifetime is still
@@ -2287,6 +2309,59 @@ mod tests {
         assert!(
             !normalized.contains("--with-requirements"),
             "no host requirements path in the manifest: {normalized}"
+        );
+    }
+
+    /// A declared server port synthesizes a conservative TCP [readiness_probe]
+    /// so the runtime reports Ready only after the port accepts; no port means
+    /// no probe (the capsule honestly reports StartedWithoutReadiness).
+    #[serial_test::serial]
+    #[test]
+    fn write_normalized_manifest_synthesizes_readiness_probe_from_declared_port() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempdir().unwrap();
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+
+        // With a declared port -> [readiness_probe] port = "8000".
+        let dir = tempdir().unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            port = 8000
+            run_command = "python -m uvicorn app.main:app --host 127.0.0.1"
+            "#,
+            "dev",
+        );
+        let normalized =
+            fs::read_to_string(write_normalized_manifest(&plan, &[], &[]).unwrap()).unwrap();
+        assert!(
+            normalized.contains("[readiness_probe]") && normalized.contains("port = \"8000\""),
+            "declared port must synthesize a TCP readiness probe: {normalized}"
+        );
+
+        // No declared port -> no readiness_probe (honest StartedWithoutReadiness).
+        let dir2 = tempdir().unwrap();
+        let plan2 = plan_from_manifest(
+            &dir2,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            run_command = "python -m uvicorn app.main:app --host 127.0.0.1"
+            "#,
+            "dev",
+        );
+        let normalized2 =
+            fs::read_to_string(write_normalized_manifest(&plan2, &[], &[]).unwrap()).unwrap();
+        assert!(
+            !normalized2.contains("[readiness_probe]"),
+            "no declared port must NOT synthesize a probe: {normalized2}"
         );
     }
 
