@@ -476,6 +476,20 @@ fn persist_background_native_event(
             info.last_event = Some("ready".to_string());
             info.last_error = None;
         }
+        LifecycleEvent::Started { .. } => {
+            // Launched without a readiness signal: the process is Running but
+            // NOT confirmed ready. Do not set Ready/ready_at — that would be a
+            // false-ready. (Background readiness then resolves via the normal
+            // wait/timeout path; a follow-up may add a dedicated outcome.)
+            if matches!(
+                info.status,
+                crate::runtime::process::ProcessStatus::Starting
+            ) {
+                info.status = crate::runtime::process::ProcessStatus::Running;
+            }
+            info.last_event = Some("started".to_string());
+            info.last_error = None;
+        }
         LifecycleEvent::Exited { service, exit_code } => {
             info.exit_code = *exit_code;
             info.last_event = Some("exited".to_string());
@@ -599,6 +613,25 @@ pub(super) fn foreground_native_event_messages(
                 format!("❌ Service '{service}' exited before readiness (exit code: {exit_code})")
             };
             vec![ForegroundEventMessage::Warn(message)]
+        }
+        LifecycleEvent::Started { service, .. } if !ready_reported => {
+            // Launched, but NO readiness signal (no probe / no declared port).
+            // Honest "started, not ready" — never printed as ready. A later
+            // Exited still surfaces "exited before readiness" (ready_reported
+            // stays false).
+            let message = if is_one_shot {
+                format!("[•] Command '{service}' started (no readiness signal)")
+            } else if service == "main" {
+                "[•] Service launched — no readiness signal, not confirmed ready".to_string()
+            } else {
+                format!(
+                    "[•] Service '{service}' launched — no readiness signal, not confirmed ready"
+                )
+            };
+            vec![
+                ForegroundEventMessage::Notify(message),
+                ForegroundEventMessage::Notify("    Streaming logs...".to_string()),
+            ]
         }
         _ => Vec::new(),
     }
