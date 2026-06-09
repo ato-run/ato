@@ -1187,6 +1187,11 @@ fn poll_local_readiness_events(local: &mut RunningLocalService) -> Result<LocalR
             local.readiness_state = LocalReadinessState::Ready;
             Ok(local.readiness_state)
         }
+        Ok(LifecycleEvent::Started { .. }) => {
+            // Launched without a readiness signal — NOT ready. Leave readiness
+            // state unchanged (Pending) so we never treat "started" as ready.
+            Ok(local.readiness_state)
+        }
         Ok(LifecycleEvent::Exited { exit_code, .. }) => {
             local.readiness_state = LocalReadinessState::Exited(exit_code.unwrap_or(1));
             Ok(local.readiness_state)

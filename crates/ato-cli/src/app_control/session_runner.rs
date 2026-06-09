@@ -1125,11 +1125,23 @@ impl SessionStartPhaseRunner {
         //    spawn) so observers see a clean workspace.
         if let Some(metadata) = prelaunch_receipt.as_ref() {
             info.attach_execution_receipt_metadata(metadata);
-            if let Err(err) =
+            // Stamp the readiness gate from the OBSERVED readiness signal, not
+            // unconditionally at spawn. A session with a readiness signal (a
+            // declared port — the same signal that drives probe synthesis) only
+            // reaches here after start_*_session confirmed it via
+            // wait_for_http_ready (it bails otherwise); a session with no
+            // readiness signal is honestly StartedWithoutReadiness rather than a
+            // false readiness-passed.
+            let stamp_result = if plan.execution_port().is_some() {
                 execution_receipts::mark_v2_receipt_readiness_passed(&metadata.execution_id)
-            {
+            } else {
+                execution_receipts::mark_v2_receipt_started_without_readiness(
+                    &metadata.execution_id,
+                )
+            };
+            if let Err(err) = stamp_result {
                 eprintln!(
-                    "ATO-WARN failed to mark session execution receipt readiness-passed: {}",
+                    "ATO-WARN failed to mark session execution receipt readiness gate: {}",
                     err
                 );
             }
