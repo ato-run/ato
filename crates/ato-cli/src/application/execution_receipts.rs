@@ -124,6 +124,23 @@ pub(crate) fn mark_v2_receipt_readiness_passed(execution_id: &str) -> Result<()>
     Ok(())
 }
 
+/// Stamp the receipt's readiness gate as `started-without-readiness`: the
+/// workload launched but no readiness signal was available, so readiness was
+/// never confirmed. Honest alternative to falsely claiming readiness-passed.
+pub(crate) fn mark_v2_receipt_started_without_readiness(execution_id: &str) -> Result<()> {
+    let mut document = read_receipt_document(execution_id)?;
+    let ExecutionReceiptDocument::V2(receipt) = &mut document else {
+        return Ok(());
+    };
+    receipt.graph_receipt = Some(GraphReceipt::started_without_readiness(
+        receipt.declared_execution_id.clone(),
+        receipt.resolved_execution_id.clone(),
+        receipt.observed_execution_id.clone(),
+    ));
+    write_receipt_document_atomic(&document)?;
+    Ok(())
+}
+
 pub(crate) fn read_receipt_document_at(
     root: &Path,
     execution_id: &str,
