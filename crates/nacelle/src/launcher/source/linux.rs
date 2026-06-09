@@ -46,6 +46,87 @@ fn sandbox_entrypoint_path(target: &SourceTarget) -> String {
     PathBuf::from("/app").join(normalized).display().to_string()
 }
 
+/// Read-only bind-mounts for host system paths the sandboxed workload needs.
+///
+/// `/usr` must exist on any supported host, so it is a hard `--ro-bind` (a
+/// missing source there is a real error). The rest are host-environment
+/// dependent and legitimately absent on some systems:
+///   - `/lib64` does not exist on aarch64 (and other non-amd64 arches),
+///   - `/lib` is absent on pure /usr-merge layouts,
+///   - `/etc/resolv.conf` / `/etc/hosts` / `/etc/ssl` are absent in minimal
+///     container/base images.
+///
+/// A strict `--ro-bind` against a non-existent source makes bwrap abort the
+/// *entire* sandbox during mount setup ("Can't find source path …", exit 1,
+/// before the workload ever execs). `--ro-bind-try` skips a missing optional
+/// source instead of killing the launch. This does not weaken isolation — a
+/// source that does not exist cannot be exposed.
+fn system_ro_binds() -> [[&'static str; 3]; 6] {
+    [
+        ["--ro-bind-try", "/lib", "/lib"],
+        ["--ro-bind-try", "/lib64", "/lib64"],
+        ["--ro-bind", "/usr", "/usr"],
+        ["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"],
+        ["--ro-bind-try", "/etc/hosts", "/etc/hosts"],
+        ["--ro-bind-try", "/etc/ssl", "/etc/ssl"],
+    ]
+}
+
+/// In-sandbox interpreter selection for a project virtualenv.
+struct SandboxVenv {
+    /// Guest path of the venv interpreter (the source dir is mounted at `/app`).
+    guest_python: String,
+    /// Host path of the base CPython install the venv references, which must be
+    /// bind-mounted so the venv interpreter can exec and load its standard
+    /// library.
+    base_install: PathBuf,
+}
+
+/// Detect a project virtualenv created by the build phase
+/// (`<source_dir>/.venv`) and resolve the base CPython install it references.
+///
+/// A venv interpreter is a thin shim: it adds the venv's `site-packages` to
+/// `sys.path` but loads the standard library (and, for symlinked venvs, execs)
+/// from the base install named in `.venv/pyvenv.cfg` (`home = …/bin`). For the
+/// sandboxed interpreter to work, that base install must be visible inside the
+/// sandbox, so we surface its root for an additional bind-mount. Returns `None`
+/// when no venv interpreter exists (capsules with no third-party dependencies
+/// fall back to the base toolchain interpreter) or when the base install cannot
+/// be resolved.
+fn sandbox_venv_python(target: &SourceTarget) -> Option<SandboxVenv> {
+    let venv_dir = target.source_dir.join(".venv");
+    if !venv_dir.join("bin").join("python").exists() {
+        return None;
+    }
+    Some(SandboxVenv {
+        guest_python: "/app/.venv/bin/python".to_string(),
+        base_install: venv_base_install(&venv_dir)?,
+    })
+}
+
+/// Resolve the base CPython install root for a venv. Prefers the `home` key in
+/// `pyvenv.cfg` (which points at the base interpreter's `bin/`, whose parent is
+/// the install root); falls back to canonicalizing the venv `python` symlink.
+fn venv_base_install(venv_dir: &std::path::Path) -> Option<PathBuf> {
+    if let Ok(cfg) = std::fs::read_to_string(venv_dir.join("pyvenv.cfg")) {
+        for line in cfg.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim() == "home" {
+                    let home = PathBuf::from(value.trim());
+                    // `home` is the base interpreter's bin/ — bind its parent
+                    // (the install root) so stdlib under lib/ is also present.
+                    return Some(home.parent().map(|p| p.to_path_buf()).unwrap_or(home));
+                }
+            }
+        }
+    }
+    // Fallback: follow the venv python symlink to the real base binary.
+    std::fs::canonicalize(venv_dir.join("bin").join("python"))
+        .ok()
+        .and_then(|real| real.parent().map(|bin| bin.to_path_buf())) // …/bin
+        .and_then(|bin| bin.parent().map(|root| root.to_path_buf())) // install root
+}
+
 fn ensure_bwrap_dirs(cmd: &mut Command, path: &std::path::Path) {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -245,13 +326,11 @@ pub async fn launch_with_bubblewrap(
     cmd.args(["--dev", "/dev"]);
     cmd.args(["--tmpfs", "/tmp"]);
 
-    // Bind mount essential paths read-only
-    cmd.args(["--ro-bind", "/lib", "/lib"]);
-    cmd.args(["--ro-bind", "/lib64", "/lib64"]);
-    cmd.args(["--ro-bind", "/usr", "/usr"]);
-    cmd.args(["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"]);
-    cmd.args(["--ro-bind", "/etc/hosts", "/etc/hosts"]);
-    cmd.args(["--ro-bind", "/etc/ssl", "/etc/ssl"]);
+    // Bind mount essential host system paths read-only (see `system_ro_binds`
+    // for why most are non-fatal `--ro-bind-try`).
+    for [flag, src, dst] in system_ro_binds() {
+        cmd.args([flag, src, dst]);
+    }
 
     // Bind mount the toolchain binary
     let toolchain_path_str = toolchain_path.to_string_lossy();
@@ -404,12 +483,30 @@ pub async fn launch_with_bubblewrap(
         runtime.apply_sidecar_env(&mut cmd);
     }
 
+    // Resolve the interpreter, preferring a project virtualenv when the build
+    // phase produced one. A bare `python`/`python3` otherwise maps to the
+    // managed *base* toolchain interpreter, which carries only the standard
+    // library — the capsule's installed dependencies live in `.venv`, so the
+    // app would fail at import time (`ModuleNotFoundError`). When a venv exists
+    // we run its interpreter (`/app/.venv/bin/python`) and bind-mount the base
+    // CPython install it references (a venv python is a thin shim that loads
+    // stdlib and execs from that base install).
+    let venv_python = sandbox_venv_python(target);
+    if let Some(ref venv) = venv_python {
+        let base = venv.base_install.to_string_lossy();
+        cmd.args(["--ro-bind-try", &base, &base]);
+    }
+
     // Add the actual command
     cmd.arg("--");
     if let Some(explicit_cmd) = target.cmd.as_ref() {
         if let Some((binary, args)) = explicit_cmd.split_first() {
             let binary_path = match binary.as_str() {
-                "python" | "python3" | "node" | "deno" | "ruby" => toolchain_path.clone(),
+                "python" | "python3" => match &venv_python {
+                    Some(venv) => PathBuf::from(&venv.guest_python),
+                    None => toolchain_path.clone(),
+                },
+                "node" | "deno" | "ruby" => toolchain_path.clone(),
                 _ => which::which(binary).unwrap_or_else(|_| PathBuf::from(binary)),
             };
             cmd.arg(binary_path);
@@ -425,20 +522,28 @@ pub async fn launch_with_bubblewrap(
             }
         }
     } else {
-        cmd.arg(&toolchain_path);
-
+        // No explicit command: synthesize `<interpreter> <entrypoint>` from the
+        // declared language, preferring the venv interpreter for python.
+        let python_interp = match &venv_python {
+            Some(venv) => PathBuf::from(&venv.guest_python),
+            None => toolchain_path.clone(),
+        };
         match target.language.to_lowercase().as_str() {
             "python" => {
+                cmd.arg(&python_interp);
                 cmd.args(["-B", &sandbox_entrypoint_path(target)]);
             }
             "node" | "nodejs" => {
+                cmd.arg(&toolchain_path);
                 cmd.arg(sandbox_entrypoint_path(target));
             }
             "deno" => {
+                cmd.arg(&toolchain_path);
                 let sandbox_entrypoint = sandbox_entrypoint_path(target);
                 cmd.args(["run", "--allow-read=/app", &sandbox_entrypoint]);
             }
             _ => {
+                cmd.arg(&toolchain_path);
                 cmd.arg(sandbox_entrypoint_path(target));
             }
         }
@@ -849,5 +954,96 @@ mod tests {
 
         let policy = generate_landlock_policy(&target);
         assert!(policy.ipc_socket_paths.is_empty());
+    }
+
+    fn python_target(source_dir: PathBuf) -> SourceTarget {
+        SourceTarget {
+            language: "python".to_string(),
+            version: Some("3.11".to_string()),
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir,
+            requested_cwd: None,
+            cmd: Some(vec![
+                "python".to_string(),
+                "-m".to_string(),
+                "uvicorn".to_string(),
+                "app.main:app".to_string(),
+            ]),
+            dev_mode: false,
+            isolation: None,
+            ipc_socket_paths: vec![],
+            injected_mounts: vec![],
+            ..Default::default()
+        }
+    }
+
+    fn make_venv(root: &std::path::Path, home: &std::path::Path) {
+        let bin = root.join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            root.join(".venv").join("pyvenv.cfg"),
+            format!("home = {}\nversion = 3.11.15\n", home.display()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sandbox_venv_python_absent_when_no_venv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = python_target(tmp.path().to_path_buf());
+        // No `.venv` → fall back to the managed base toolchain interpreter.
+        assert!(sandbox_venv_python(&target).is_none());
+    }
+
+    #[test]
+    fn sandbox_venv_python_uses_guest_path_and_base_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        // pyvenv.cfg `home` points at the base interpreter's bin/; the install
+        // root (its parent) is what must be bind-mounted into the sandbox.
+        let base_bin = tmp.path().join("uv-python").join("bin");
+        std::fs::create_dir_all(&base_bin).unwrap();
+        make_venv(tmp.path(), &base_bin);
+
+        let target = python_target(tmp.path().to_path_buf());
+        let venv = sandbox_venv_python(&target).expect("venv must be detected");
+        assert_eq!(venv.guest_python, "/app/.venv/bin/python");
+        assert_eq!(venv.base_install, tmp.path().join("uv-python"));
+    }
+
+    #[test]
+    fn venv_base_install_prefers_pyvenv_cfg_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_bin = tmp.path().join("install-root").join("bin");
+        std::fs::create_dir_all(&base_bin).unwrap();
+        make_venv(tmp.path(), &base_bin);
+        let resolved = venv_base_install(&tmp.path().join(".venv")).unwrap();
+        assert_eq!(resolved, tmp.path().join("install-root"));
+    }
+
+    #[test]
+    fn lib64_bind_is_non_fatal_but_usr_is_strict() {
+        // Regression guard for aarch64: `/lib64` does not exist there, and a
+        // strict `--ro-bind` would abort the whole sandbox during mount setup.
+        let binds = system_ro_binds();
+        let flag_for = |path: &str| binds.iter().find(|b| b[1] == path).map(|b| b[0]);
+        assert_eq!(
+            flag_for("/lib64"),
+            Some("--ro-bind-try"),
+            "/lib64 is absent on aarch64; its bind must be non-fatal"
+        );
+        assert_eq!(
+            flag_for("/usr"),
+            Some("--ro-bind"),
+            "/usr must exist on any supported host and stays a hard bind"
+        );
+        assert_eq!(flag_for("/etc/resolv.conf"), Some("--ro-bind-try"));
+        // Every bind target must be absolute and self-mapped (src == dst).
+        for [_flag, src, dst] in binds {
+            assert_eq!(src, dst, "system binds are identity-mapped");
+            assert!(src.starts_with('/'), "bind target must be absolute: {src}");
+        }
     }
 }
