@@ -188,6 +188,14 @@ impl ProcessManager {
         Ok(Self { run_dir })
     }
 
+    /// Test-only constructor pinning the run directory to an explicit path, so
+    /// unit tests can exercise pid persistence against a tempdir without
+    /// touching the real ATO run directory.
+    #[cfg(test)]
+    pub(crate) fn with_run_dir_for_test(run_dir: PathBuf) -> Self {
+        Self { run_dir }
+    }
+
     #[allow(dead_code)]
     pub fn get_run_dir(&self) -> &Path {
         &self.run_dir
