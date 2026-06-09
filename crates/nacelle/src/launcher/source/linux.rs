@@ -545,6 +545,29 @@ pub async fn launch_with_bubblewrap(
     })
 }
 
+/// Arguments for the bubblewrap availability probe.
+///
+/// bubblewrap starts with an empty filesystem namespace. Probing `/bin/true`
+/// without binding a rootfs can fail even when bwrap/userns are usable — the
+/// target binary is simply not present inside the empty namespace, so bwrap
+/// exits non-zero with `execvp: No such file or directory`. The probe must
+/// match the real sandbox launcher enough to verify execution, so it binds the
+/// host rootfs read-only before exec. Missing bwrap, blocked user namespaces,
+/// or other bwrap failures still surface as "unavailable".
+fn bubblewrap_probe_args() -> [&'static str; 9] {
+    [
+        "--ro-bind",
+        "/",
+        "/", // rootfs must be present for /bin/true to exec
+        "--unshare-user",
+        "--uid",
+        "1000",
+        "--gid",
+        "1000", //
+        "/bin/true",
+    ]
+}
+
 /// Check if bubblewrap is available and properly configured
 #[allow(dead_code)]
 pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
@@ -553,16 +576,12 @@ pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
         RuntimeError::SandboxSetupFailed("bubblewrap (bwrap) not found in PATH".to_string())
     })?;
 
-    // Check if we can create user namespaces
+    // Probe a real (rootfs-bound) bwrap invocation so the result reflects actual
+    // sandbox usability — without the rootfs bind /bin/true is missing inside the
+    // empty namespace and the probe fails even when sandboxing works. See
+    // `bubblewrap_probe_args`.
     let output = Command::new(&bwrap_path)
-        .args([
-            "--unshare-user",
-            "--uid",
-            "1000",
-            "--gid",
-            "1000",
-            "/bin/true",
-        ])
+        .args(bubblewrap_probe_args())
         .output();
 
     match output {
@@ -598,6 +617,47 @@ pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
 mod tests {
     use super::*;
     use crate::launcher::IsolationPolicy;
+
+    #[test]
+    fn bubblewrap_probe_binds_rootfs_before_exec() {
+        // Without a rootfs bind the probe runs in an empty namespace where
+        // /bin/true does not exist, so it fails even when sandboxing works.
+        let args = bubblewrap_probe_args();
+        let rootfs = args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == "/" && w[2] == "/")
+            .expect("probe must bind the host rootfs read-only (--ro-bind / /)");
+        let exec = args
+            .iter()
+            .position(|a| *a == "/bin/true")
+            .expect("probe must exec a target binary");
+        assert!(
+            rootfs < exec,
+            "rootfs bind must precede the exec target: {args:?}"
+        );
+    }
+
+    #[test]
+    fn bubblewrap_probe_keeps_user_namespace_flags() {
+        let args = bubblewrap_probe_args();
+        assert!(
+            args.contains(&"--unshare-user"),
+            "probe must unshare user ns"
+        );
+        assert!(args.contains(&"--uid"), "probe must set a uid map");
+        assert!(args.contains(&"--gid"), "probe must set a gid map");
+    }
+
+    #[test]
+    fn bubblewrap_probe_does_not_require_landlock() {
+        // bwrap availability is independent of Landlock (a supplementary LSM);
+        // the probe must not depend on landlock support.
+        let args = bubblewrap_probe_args();
+        assert!(
+            !args.iter().any(|a| a.to_lowercase().contains("landlock")),
+            "bwrap probe must not reference landlock: {args:?}"
+        );
+    }
 
     #[test]
     fn test_bubblewrap_command_construction() {
