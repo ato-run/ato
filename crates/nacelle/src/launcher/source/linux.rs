@@ -127,6 +127,32 @@ fn venv_base_install(venv_dir: &std::path::Path) -> Option<PathBuf> {
         .and_then(|bin| bin.parent().map(|root| root.to_path_buf())) // install root
 }
 
+/// Resolve the install root for a managed toolchain interpreter so the launcher
+/// can bind the whole install (`bin/` + `lib/`), not just the binary file.
+///
+/// nacelle's managed interpreters live at `<root>/bin/<exe>` — e.g.
+/// `~/.capsule/toolchains/python-3.11/python/bin/python3` or
+/// `~/.ato/toolchains/node-20/<dist>/bin/node`. The runtime loader needs
+/// siblings under `<root>/lib/` (libpython*.so, node's `lib/`, …); binding only
+/// the binary leaves those absent and the interpreter cannot start
+/// (`error while loading shared libraries: libpython3.x.so.1.0`).
+///
+/// Returns `None` (caller keeps the binary-only bind) when the path is not in a
+/// `<root>/bin/<exe>` layout, or when the resolved root would be `/` or `/usr`
+/// — those are already provided by `system_ro_binds`, and binding them here
+/// would be redundant or over-broad.
+fn toolchain_install_root(toolchain_path: &std::path::Path) -> Option<PathBuf> {
+    let bin = toolchain_path.parent()?;
+    if bin.file_name().and_then(|n| n.to_str()) != Some("bin") {
+        return None;
+    }
+    let root = bin.parent()?;
+    if root == std::path::Path::new("/") || root == std::path::Path::new("/usr") {
+        return None;
+    }
+    Some(root.to_path_buf())
+}
+
 fn ensure_bwrap_dirs(cmd: &mut Command, path: &std::path::Path) {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -335,6 +361,16 @@ pub async fn launch_with_bubblewrap(
     // Bind mount the toolchain binary
     let toolchain_path_str = toolchain_path.to_string_lossy();
     cmd.args(["--ro-bind", &toolchain_path_str, &toolchain_path_str]);
+
+    // Also bind the toolchain's install ROOT (bin/ + lib/), not just the binary,
+    // so the interpreter can load its runtime — e.g. libpython*.so for a managed
+    // CPython, or node's lib/. Binding only the binary leaves those absent and
+    // the interpreter exits with "error while loading shared libraries".
+    // `--ro-bind-try` keeps it non-fatal; /usr and / are skipped (already bound).
+    if let Some(toolchain_root) = toolchain_install_root(&toolchain_path) {
+        let toolchain_root_str = toolchain_root.to_string_lossy();
+        cmd.args(["--ro-bind-try", &toolchain_root_str, &toolchain_root_str]);
+    }
 
     // Bind mount the source directory read-only
     let source_dir_str = target.source_dir.to_string_lossy();
@@ -1021,6 +1057,41 @@ mod tests {
         make_venv(tmp.path(), &base_bin);
         let resolved = venv_base_install(&tmp.path().join(".venv")).unwrap();
         assert_eq!(resolved, tmp.path().join("install-root"));
+    }
+
+    #[test]
+    fn toolchain_install_root_resolves_bin_parent() {
+        // Managed CPython layout: <root>/bin/<exe> -> <root> (so lib/ comes too).
+        assert_eq!(
+            toolchain_install_root(&PathBuf::from(
+                "/home/u/.capsule/toolchains/python-3.11/python/bin/python3"
+            )),
+            Some(PathBuf::from(
+                "/home/u/.capsule/toolchains/python-3.11/python"
+            ))
+        );
+        // Managed Node layout.
+        assert_eq!(
+            toolchain_install_root(&PathBuf::from(
+                "/home/u/.ato/toolchains/node-20/node-v20.20.2-linux-arm64/bin/node"
+            )),
+            Some(PathBuf::from(
+                "/home/u/.ato/toolchains/node-20/node-v20.20.2-linux-arm64"
+            ))
+        );
+    }
+
+    #[test]
+    fn toolchain_install_root_skips_system_and_nonbin_layouts() {
+        // System interpreter: root would be /usr, already covered by system binds.
+        assert_eq!(
+            toolchain_install_root(&PathBuf::from("/usr/bin/python3")),
+            None
+        );
+        // bin directly under / : root would be /, must not be bound here.
+        assert_eq!(toolchain_install_root(&PathBuf::from("/bin/python3")), None);
+        // Not a `<root>/bin/<exe>` layout: keep the binary-only bind.
+        assert_eq!(toolchain_install_root(&PathBuf::from("/opt/python3")), None);
     }
 
     #[test]
