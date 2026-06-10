@@ -694,6 +694,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         ready_without_events: bool,
         desktop_open_only: bool,
         compatibility_host_mode: CompatibilityHostMode,
+        execution_id: Option<String>,
         reporter: &Arc<CliReporter>,
     ) -> Result<()> {
         complete_background_source_process(
@@ -706,6 +707,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
                 ready_without_events,
                 desktop_open_only,
                 compatibility_host_mode,
+                execution_id,
             },
             reporter,
         )
@@ -721,6 +723,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
         ipc_socket_mapped: bool,
         desktop_open_only: bool,
         use_progressive_ui: bool,
+        execution_id: Option<String>,
     ) -> Result<i32> {
         complete_foreground_source_process(
             process,
@@ -730,6 +733,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
             ipc_socket_mapped,
             desktop_open_only,
             use_progressive_ui,
+            execution_id,
         )
         .await
     }
@@ -1493,6 +1497,12 @@ enum ForegroundEventMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackgroundStartupOutcome {
     Ready,
+    /// The workload launched but emitted no readiness signal (no declared port /
+    /// no probe). Honest "started, not confirmed ready" — distinct from a real
+    /// `TimedOut` (which means a readiness signal was expected but never
+    /// arrived). Surfaced promptly so a healthy no-port background run does not
+    /// stall to the ready-wait deadline.
+    StartedWithoutReadiness,
     CompletedSuccessfully,
     TimedOut,
     FailedBeforeReady,
