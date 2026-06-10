@@ -1155,7 +1155,13 @@ fn write_normalized_manifest(
             "readiness_probe".to_string(),
             toml::Value::Table(probe.clone()),
         );
-    } else if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+    } else if let Some(port) = plan.execution_port() {
+        // MANIFEST-DECLARED port only — never the auto-port override. The
+        // auto-allocated port is not communicated to the sandboxed workload
+        // (no --port injection inside the nacelle manifest run command), so a
+        // probe on it is doomed to time out and would fail an otherwise
+        // healthy no-port capsule. No declared port -> no probe -> honest
+        // StartedWithoutReadiness.
         let mut probe = toml::map::Map::new();
         probe.insert("port".to_string(), toml::Value::String(port.to_string()));
         manifest.insert("readiness_probe".to_string(), toml::Value::Table(probe));
@@ -2436,6 +2442,21 @@ mod tests {
         );
         let normalized2 =
             fs::read_to_string(write_normalized_manifest(&plan2, &[], &[]).unwrap()).unwrap();
+
+        // Even when the run-phase auto-port guard has installed a port
+        // override (ATO_UI_OVERRIDE_PORT), a plan with NO declared port must
+        // not get a probe: the sandboxed workload never learns that port, so
+        // the probe could only time out (live E2E regression, runner lease
+        // 01KTR0XPCC…: "Readiness probe timed out" on a healthy capsule).
+        {
+            let _auto_port = runtime_overrides::scoped_override_port(43219);
+            let normalized_auto =
+                fs::read_to_string(write_normalized_manifest(&plan2, &[], &[]).unwrap()).unwrap();
+            assert!(
+                !normalized_auto.contains("[readiness_probe]"),
+                "auto-port override must not synthesize a sandbox probe: {normalized_auto}"
+            );
+        }
         assert!(
             !normalized2.contains("[readiness_probe]"),
             "no declared port must NOT synthesize a probe: {normalized2}"
