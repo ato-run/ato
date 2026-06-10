@@ -1125,14 +1125,13 @@ impl SessionStartPhaseRunner {
         //    spawn) so observers see a clean workspace.
         if let Some(metadata) = prelaunch_receipt.as_ref() {
             info.attach_execution_receipt_metadata(metadata);
-            // Stamp the readiness gate from the OBSERVED readiness signal, not
-            // unconditionally at spawn. A session with a readiness signal (a
-            // declared port — the same signal that drives probe synthesis) only
-            // reaches here after start_*_session confirmed it via
-            // wait_for_http_ready (it bails otherwise); a session with no
-            // readiness signal is honestly StartedWithoutReadiness rather than a
-            // false readiness-passed.
-            let stamp_result = if plan.execution_port().is_some() {
+            // Stamp the readiness gate from the OBSERVED readiness outcome
+            // carried on the session record (set by start_*_session where
+            // wait_for_http_ready / the orchestrator readiness probes actually
+            // ran and passed; those paths bail on failure). A declared port is
+            // NOT proof: Terminal/Service strategies never probe it, and a
+            // declared-but-unbound port must never stamp readiness-passed.
+            let stamp_result = if info.readiness_confirmed() {
                 execution_receipts::mark_v2_receipt_readiness_passed(&metadata.execution_id)
             } else {
                 execution_receipts::mark_v2_receipt_started_without_readiness(
