@@ -38,6 +38,14 @@ pub struct StoredSessionInfo {
     pub manifest_path: String,
     pub target_label: String,
     pub notes: Vec<String>,
+    /// Whether session start OBSERVED a readiness confirmation before this
+    /// record was written (HTTP ready-wait on the bound port, or the
+    /// orchestrator's per-service readiness probes). `false` means the
+    /// session was started with NO readiness signal — and `false` is also
+    /// what records written before this field existed deserialize to:
+    /// absence of proof is not readiness.
+    #[serde(default)]
+    pub readiness_confirmed: bool,
     pub guest: Option<GuestSessionDisplay>,
     pub web: Option<WebSessionDisplay>,
     pub terminal: Option<TerminalSessionDisplay>,
@@ -431,6 +439,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec!["test".to_string()],
+            readiness_confirmed: false,
             guest: Some(GuestSessionDisplay {
                 adapter: "node".to_string(),
                 frontend_entry: "index.html".to_string(),
@@ -594,6 +603,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: Some(WebSessionDisplay {
                 local_url: "http://127.0.0.1:5173/".to_string(),
@@ -762,6 +772,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: None,
             terminal: None,
@@ -823,6 +834,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: None,
             terminal: None,
