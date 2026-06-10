@@ -426,6 +426,19 @@ pub(super) fn spawn_foreground_native_event_reporter(
                 }
             }
 
+            // Stable machine-readable lifecycle line (companion to "RECEIPT:"):
+            // lets non-TTY supervisors (the Connected Runner agent, CI) key on
+            // the honest ready signal — and its observed port — without
+            // parsing human strings. Printed once, and BEFORE the human
+            // message: supervisors settle on the first ready signal they see,
+            // so the structured line must win over the string fallback.
+            if let LifecycleEvent::Ready { port, .. } = &event
+                && !lifecycle_ready_printed
+            {
+                lifecycle_ready_printed = true;
+                println!("{}", lifecycle_ready_line(*port));
+            }
+
             for message in foreground_native_event_messages(&event, ready_reported, is_one_shot) {
                 match message {
                     ForegroundEventMessage::Notify(message) => {
@@ -447,17 +460,6 @@ pub(super) fn spawn_foreground_native_event_reporter(
                         }
                     }
                 }
-            }
-
-            // Stable machine-readable lifecycle line (companion to "RECEIPT:"):
-            // lets non-TTY supervisors (the Connected Runner agent, CI) key on
-            // the honest ready signal — and its observed port — without
-            // parsing human strings. Printed once, directly to stdout.
-            if let LifecycleEvent::Ready { port, .. } = &event
-                && !lifecycle_ready_printed
-            {
-                lifecycle_ready_printed = true;
-                println!("{}", lifecycle_ready_line(*port));
             }
 
             if matches!(event, LifecycleEvent::Ready { .. }) {
