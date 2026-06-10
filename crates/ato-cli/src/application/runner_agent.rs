@@ -525,6 +525,11 @@ pub async fn run_serve(
 /** Interval between lease polls while idle (seconds). */
 const LEASE_POLL_SECONDS: u64 = 5;
 const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
+/// After a port-LESS readiness signal (the human "[✓] ready" echo), hold this
+/// long for the canonical "LIFECYCLE: ready port=N" line — they race on separate
+/// streams and the port line usually lands within a line or two. Without this,
+/// whichever wins decides whether the proxy + ready_url come up.
+const READY_PORT_GRACE: Duration = Duration::from_millis(2500);
 /** Cap per-run log files so a chatty child cannot fill the disk. */
 const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
 
@@ -1326,6 +1331,9 @@ async fn run_lease_child(
     let mut execution_id: Option<String> = None;
     let mut settled = false;
     let mut saw_exited_before = false;
+    // Set when a port-LESS ready arrives; if the canonical port-bearing line
+    // does not follow before this instant, settle without a port.
+    let mut portless_ready_deadline: Option<tokio::time::Instant> = None;
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
@@ -1335,6 +1343,19 @@ async fn run_lease_child(
                     // Output streams closed; wait for the exit status.
                     let status = child.wait().await.ok();
                     if !settled {
+                        // A port-less ready was pending (grace not yet elapsed) when
+                        // the child's streams closed — e.g. a ready-then-exit child.
+                        // Honor it as ready (port-less), not a failure: we DID see a
+                        // verified ready signal.
+                        if let Some(execution_id) =
+                            portless_ready_deadline.and(execution_id.clone())
+                        {
+                            let _ = reports.send(LeaseReport::Ready {
+                                execution_id,
+                                port: None,
+                            });
+                            return;
+                        }
                         let code = status.and_then(|s| s.code());
                         let message = match (code, saw_exited_before) {
                             (Some(code), true) => format!(
@@ -1358,12 +1379,24 @@ async fn run_lease_child(
                         }
                     }
                     Some(ChildSignal::Ready { port }) if !settled => {
-                        match execution_id.clone() {
-                            Some(execution_id) => {
+                        match (execution_id.clone(), port) {
+                            (Some(execution_id), Some(_)) => {
+                                // Verified ready WITH an observed port — the best
+                                // signal; settle and let the proxy + ready_url come up.
                                 settled = true;
                                 let _ = reports.send(LeaseReport::Ready { execution_id, port });
                             }
-                            None => {
+                            (Some(_), None) => {
+                                // Verified ready but no port (the human "[✓] ready"
+                                // echo). The canonical "LIFECYCLE: ready port=N" line
+                                // races in on a separate stream — hold briefly for it
+                                // rather than settle portless and drop the ready_url.
+                                if portless_ready_deadline.is_none() {
+                                    portless_ready_deadline =
+                                        Some(tokio::time::Instant::now() + READY_PORT_GRACE);
+                                }
+                            }
+                            (None, _) => {
                                 // A ready we cannot tie to an execution receipt is
                                 // unverifiable — fail closed rather than report it.
                                 settled = true;
@@ -1383,6 +1416,19 @@ async fn run_lease_child(
                         saw_exited_before = true;
                     }
                     _ => {}
+                }
+            }
+            // Port-less ready grace elapsed without a port line — settle without a
+            // port (honest ready, no ready_url). Pending forever when unset.
+            _ = async {
+                match portless_ready_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if !settled => {
+                if let Some(execution_id) = execution_id.clone() {
+                    settled = true;
+                    let _ = reports.send(LeaseReport::Ready { execution_id, port: None });
                 }
             }
             _ = tokio::time::sleep_until(deadline), if !settled => {
@@ -2401,5 +2447,85 @@ mod tests {
             !cleanup.slot_released,
             "unconfirmed proxy teardown must keep the slot held",
         );
+    }
+
+    // ── Readiness port race (LIFECYCLE line vs human "[✓] ready" echo) ──
+
+    fn write_receipt(dir: &std::path::Path, execution_id: &str) -> PathBuf {
+        let receipt = dir.join("receipt.json");
+        std::fs::write(&receipt, format!("{{\"execution_id\":\"{execution_id}\"}}"))
+            .expect("write receipt");
+        receipt
+    }
+
+    async fn first_report(script: String) -> LeaseReport {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = cmd.spawn().expect("spawn child");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LeaseReport>();
+        tokio::spawn(run_lease_child(
+            child,
+            dir.path().join("run.log"),
+            Duration::from_secs(20),
+            tx,
+        ));
+        let report = tokio::time::timeout(Duration::from_secs(8), rx.recv())
+            .await
+            .expect("a report within 8s")
+            .expect("a report");
+        // Keep `dir` alive until after we have the report (receipt is read lazily).
+        drop(dir);
+        report
+    }
+
+    #[tokio::test]
+    async fn portless_ready_adopts_the_lifecycle_port_when_it_lands_late() {
+        // The race that dropped ready_url: the human "(ready event received)"
+        // line lands BEFORE the canonical "LIFECYCLE: ready port=N" line. The
+        // lease must still settle WITH the port so the proxy + ready_url come up.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let receipt = write_receipt(dir.path(), "blake3:abc");
+        let script = format!(
+            "echo 'RECEIPT: {}'; echo 'Service x is ready (ready event received)'; echo 'LIFECYCLE: ready port=8000'; sleep 2",
+            receipt.display(),
+        );
+        match first_report(script).await {
+            LeaseReport::Ready { execution_id, port } => {
+                assert_eq!(
+                    port,
+                    Some(8000),
+                    "a late LIFECYCLE port line must win over the portless echo"
+                );
+                assert_eq!(execution_id, "blake3:abc");
+            }
+            other => panic!("expected Ready with port 8000, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn portless_ready_settles_without_port_after_grace() {
+        // No LIFECYCLE port line ever arrives: after the grace window the lease
+        // settles as ready WITHOUT a port (honest ready, no ready_url) — the fix
+        // must not hang a genuinely port-less ready forever.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let receipt = write_receipt(dir.path(), "blake3:def");
+        let script = format!(
+            "echo 'RECEIPT: {}'; echo 'Service x is ready (ready event received)'; sleep 6",
+            receipt.display(),
+        );
+        match first_report(script).await {
+            LeaseReport::Ready { port, .. } => {
+                assert_eq!(
+                    port, None,
+                    "with no port line, settle portless after the grace"
+                );
+            }
+            other => panic!("expected a portless Ready, got {other:?}"),
+        }
     }
 }
