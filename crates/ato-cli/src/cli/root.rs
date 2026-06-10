@@ -870,6 +870,15 @@ pub(crate) enum Commands {
         command: crate::cli::IdentitySessionCommands,
     },
 
+    #[command(
+        hide = true,
+        about = "Connected Runner agent: enroll this host and keep it online"
+    )]
+    Runner {
+        #[command(subcommand)]
+        command: crate::cli::RunnerCommands,
+    },
+
     #[command(hide = true, about = "Login to Ato registry")]
     Login {
         #[arg(long)]

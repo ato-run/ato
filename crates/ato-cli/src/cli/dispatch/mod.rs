@@ -732,6 +732,34 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
 
         Commands::Session { command } => session::execute_session_command(command),
 
+        Commands::Runner { command } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            match command {
+                crate::cli::RunnerCommands::Login {
+                    api_base,
+                    site_base,
+                    display_name,
+                    public_base_url,
+                    headless,
+                } => rt.block_on(crate::application::runner_agent::run_login(
+                    api_base,
+                    site_base,
+                    display_name,
+                    public_base_url,
+                    headless,
+                )),
+                crate::cli::RunnerCommands::Serve {
+                    api_base,
+                    display_name,
+                    public_base_url,
+                } => rt.block_on(crate::application::runner_agent::run_serve(
+                    api_base,
+                    display_name,
+                    public_base_url,
+                )),
+            }
+        }
+
         Commands::Login {
             token,
             headless,
