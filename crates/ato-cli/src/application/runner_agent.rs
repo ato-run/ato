@@ -905,6 +905,8 @@ const STOP_POLL_SECONDS: u64 = 3;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 /// Window to confirm the group is reaped after SIGKILL.
 const STOP_KILL_GRACE: Duration = Duration::from_secs(3);
+/// Window to confirm the proxy task actually terminated after abort.
+const STOP_PROXY_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Deserialize)]
 struct LeaseControl {
@@ -1109,6 +1111,30 @@ async fn terminate_child_group(
     }
 }
 
+/// Stop the ready_url proxy and CONFIRM it actually stopped. `JoinHandle::abort()`
+/// only *requests* cancellation — the listener socket may still be bound the
+/// instant it returns — so we await the task's real termination before claiming
+/// `proxy_stopped`. A cancelled `JoinError` is the expected clean outcome; a
+/// timeout or any other error (e.g. a panicked task) is unconfirmed and maps to
+/// false so the caller fails closed. No proxy was ever up → vacuously stopped.
+async fn stop_proxy(handle: Option<tokio::task::JoinHandle<()>>) -> bool {
+    stop_proxy_within(handle, STOP_PROXY_GRACE).await
+}
+
+/// Core of [`stop_proxy`] with an injectable confirmation window (tests use a
+/// short one to exercise the unconfirmed/timeout path deterministically).
+async fn stop_proxy_within(handle: Option<tokio::task::JoinHandle<()>>, grace: Duration) -> bool {
+    let Some(handle) = handle else {
+        return true;
+    };
+    handle.abort();
+    match tokio::time::timeout(grace, handle).await {
+        Ok(Ok(())) => true,
+        Ok(Err(err)) if err.is_cancelled() => true,
+        _ => false,
+    }
+}
+
 /// Tear down an active run on owner request: terminate the workload group, stop
 /// the proxy, release the slot ONLY if both are confirmed, and ack /stopped.
 #[allow(clippy::too_many_arguments)]
@@ -1126,17 +1152,12 @@ async fn perform_stop_cleanup(
 
     let process_terminated = terminate_child_group(child_pid, monitor).await;
 
-    // Drop the proxy listener so the ready_url stops serving immediately; with
-    // the upstream killed, in-flight connections drain on their own. A run that
-    // never brought a proxy up (no port, or no public_base_url) is vacuously
-    // stopped.
-    let proxy_stopped = match proxy_handle {
-        Some(handle) => {
-            handle.abort();
-            true
-        }
-        None => true,
-    };
+    // Abort the proxy AND wait for the listener task to actually end before
+    // claiming it stopped — the upstream is already dead, so in-flight
+    // connections drain on their own once the listener is gone. A run that never
+    // brought a proxy up is vacuously stopped; an abort we cannot confirm is
+    // reported false (→ slot held).
+    let proxy_stopped = stop_proxy(proxy_handle).await;
 
     let cleanup = StopCleanup::from_teardown(process_terminated, proxy_stopped);
 
@@ -2311,7 +2332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aborting_proxy_releases_listener_port() {
+    async fn proxy_abort_must_be_awaited_before_clean_stop() {
         // Live upstream so the proxy comes up (it refuses bring-up otherwise).
         let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
         let upstream_port = upstream_listener.local_addr().expect("addr").port();
@@ -2331,21 +2352,54 @@ mod tests {
         let handle = start_root_proxy(&listen, upstream_port)
             .await
             .expect("proxy starts against a live upstream");
-        // Aborting the proxy drops its listener, freeing the bound port so new
-        // external connections are refused — the ready_url stops serving.
-        handle.abort();
-        let mut refused = false;
-        for _ in 0..100 {
-            if tokio::net::TcpStream::connect(&listen).await.is_err() {
-                refused = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+
+        // stop_proxy AWAITS the aborted task, so by the time it returns true the
+        // listener has been dropped and the port refuses connections WITHOUT any
+        // retry/poll loop. If abort were treated as fire-and-forget, this
+        // immediate connect could still succeed — the whole point of the fix.
+        let stopped = stop_proxy(Some(handle)).await;
         assert!(
-            refused,
-            "after the proxy is aborted its listen port must refuse connections"
+            stopped,
+            "a cleanly cancelled proxy task is a confirmed stop"
+        );
+        assert!(
+            tokio::net::TcpStream::connect(&listen).await.is_err(),
+            "once stop_proxy confirms termination the listen port must be released",
         );
         drop(upstream);
+    }
+
+    #[tokio::test]
+    async fn stop_proxy_with_no_proxy_is_vacuously_stopped() {
+        assert!(stop_proxy(None).await, "no proxy up == nothing to stop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_ack_reports_proxy_stopped_false_when_proxy_abort_not_confirmed() {
+        // A proxy task stuck in a blocking section cannot honor abort within the
+        // grace window, so stop_proxy times out. It must report the teardown
+        // UNCONFIRMED (false), and the slot must stay held (fail closed) rather
+        // than advertise a slot whose proxy we never proved was down — exactly
+        // the bug the await-the-abort fix closes.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            // Signal that we are running, THEN block past any await point so a
+            // later abort cannot cancel us pre-poll (which would be a clean
+            // cancellation, not the timeout this test needs to exercise).
+            let _ = started_tx.send(());
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        started_rx.await.expect("proxy task started");
+        let proxy_stopped = stop_proxy_within(Some(handle), Duration::from_millis(50)).await;
+        assert!(
+            !proxy_stopped,
+            "a proxy abort we cannot confirm within the grace must not be a clean stop",
+        );
+        let cleanup = StopCleanup::from_teardown(true, proxy_stopped);
+        assert!(!cleanup.proxy_stopped);
+        assert!(
+            !cleanup.slot_released,
+            "unconfirmed proxy teardown must keep the slot held",
+        );
     }
 }
