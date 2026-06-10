@@ -2973,6 +2973,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         ready_without_events: bool,
         desktop_open_only: bool,
         compatibility_host_mode: CompatibilityHostMode,
+        execution_id: Option<String>,
         reporter: &Arc<CliReporter>,
     ) -> Result<()>;
 
@@ -2985,6 +2986,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         ipc_socket_mapped: bool,
         desktop_open_only: bool,
         use_progressive_ui: bool,
+        execution_id: Option<String>,
     ) -> Result<i32>;
 
     async fn cleanup_existing_scoped_processes_before_run(
@@ -3648,6 +3650,10 @@ where
                         ready_without_events,
                         desktop_native_open_only,
                         compatibility_host_mode,
+                        // Host execution uses spawn_host_lifecycle_events; re-stamp
+                        // its receipt from the observed outcome. The nacelle-sandbox
+                        // path (!host_execution) keeps its launch-passed gate.
+                        host_execution.then(|| execution_id.clone()),
                         &request.reporter,
                     )
                     .await?;
@@ -3681,6 +3687,7 @@ where
                         .unwrap_or(false),
                     desktop_native_open_only,
                     use_progressive_ui,
+                    host_execution.then(|| execution_id.clone()),
                 )
                 .await?;
             sidecar_cleanup.stop_now();
@@ -3726,6 +3733,9 @@ where
                         ready_without_events,
                         false,
                         compatibility_host_mode,
+                        // NodeCompat uses spawn_host_lifecycle_events; re-stamp
+                        // its receipt from the observed readiness outcome.
+                        Some(execution_id.clone()),
                         &request.reporter,
                     )
                     .await?;
@@ -3755,6 +3765,7 @@ where
                         .unwrap_or(false),
                     false,
                     use_progressive_ui,
+                    Some(execution_id.clone()),
                 )
                 .await?;
             sidecar_cleanup.stop_now();
@@ -3894,6 +3905,9 @@ where
                         ready_without_events,
                         false,
                         compatibility_host_mode,
+                        // NodeCompat uses spawn_host_lifecycle_events; re-stamp
+                        // its receipt from the observed readiness outcome.
+                        Some(execution_id.clone()),
                         &request.reporter,
                     )
                     .await?;
