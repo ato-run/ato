@@ -1566,7 +1566,12 @@ pub(crate) fn spawn_host_lifecycle_events(
                 thread::sleep(Duration::from_millis(100));
             }
         } else {
-            let _ = ready_tx.send(LifecycleEvent::Ready {
+            // No declared readiness port: the process launched but there is no
+            // signal we can probe, so we must NOT claim readiness. Emit Started
+            // (honest "launched, not confirmed ready"), never Ready — mirroring
+            // the sandbox-path fix in #608. Consumers map Started -> Running /
+            // not-ready and never surface it as ready.
+            let _ = ready_tx.send(LifecycleEvent::Started {
                 service: "main".to_string(),
                 endpoint: None,
                 port: None,
@@ -1635,6 +1640,78 @@ mod tests {
                 unsafe {
                     std::env::remove_var(self.key);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_host_lifecycle_events_no_port_emits_started_not_ready() {
+        // Core honest-readiness guard for the HOST path: with no declared port
+        // there is no signal to probe, so the supervisor must emit Started
+        // ("launched, not confirmed ready"), NEVER Ready (the old false-ready).
+        // Our own PID is alive, so the thread reaches the no-port branch.
+        let rx = spawn_host_lifecycle_events(std::process::id(), None);
+        let event = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("expected a lifecycle event from the host supervisor");
+        assert!(
+            matches!(event, LifecycleEvent::Started { .. }),
+            "no-port host run must emit Started, got {event:?}"
+        );
+        assert!(
+            !matches!(event, LifecycleEvent::Ready { .. }),
+            "no-port host run must never emit Ready"
+        );
+    }
+
+    #[test]
+    fn spawn_host_lifecycle_events_listening_port_emits_ready() {
+        // Port branch is honest: Ready is emitted only after the declared port
+        // actually accepts a connection. A live listener makes the probe succeed
+        // deterministically.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let rx = spawn_host_lifecycle_events(std::process::id(), Some(port));
+        let event = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("expected a readiness event once the port accepts");
+        match event {
+            LifecycleEvent::Ready { port: observed, .. } => {
+                assert_eq!(observed, Some(port), "Ready must carry the probed port");
+            }
+            other => panic!("listening port must emit Ready, got {other:?}"),
+        }
+        drop(listener);
+    }
+
+    #[test]
+    fn spawn_host_lifecycle_events_exited_process_with_port_never_emits_ready() {
+        // Crash-before-ready: when the workload has already exited and the
+        // declared port never accepts, the supervisor must end WITHOUT emitting
+        // Ready. We reap a short-lived child first so its PID is dead, making the
+        // process-liveness check break the poll loop promptly (deterministic, no
+        // timeout/env mutation). A bound-then-dropped port is guaranteed closed.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived child");
+        let pid = child.id();
+        let _ = child.wait();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let closed_port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+
+        let rx = spawn_host_lifecycle_events(pid, Some(closed_port));
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            // Sender dropped without emitting anything: honest — a workload that
+            // never became reachable is never reported ready.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+            Ok(event) => panic!(
+                "exited process with a closed port must never emit a readiness event, got {event:?}"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("supervisor thread should have ended after the process exited")
             }
         }
     }
