@@ -225,13 +225,28 @@ mod tests {
         assert!(r.starts_with("blake3:"), "ref is a blake3 digest: {r}");
         assert_eq!(r, consent_ref(&base).expect("ref"), "stable for same input");
 
-        // Changing any identity-5-tuple field MUST change the ref.
-        let mut diff = base.clone();
-        diff.policy_segment_hash = "blake3:DIFFERENT".into();
-        assert_ne!(consent_ref(&diff).expect("ref"), r);
-        let mut diff2 = base.clone();
-        diff2.key.target_label = "web".into();
-        assert_ne!(consent_ref(&diff2).expect("ref"), r);
+        // Changing ANY of the identity 5-tuple fields MUST change the ref
+        // (exact binding is what the downstream owner-approval relies on).
+        let mutate: [(&str, fn(&mut Consent)); 5] = [
+            ("scoped_id", |c| c.key.scoped_id = "community/other".into()),
+            ("version", |c| c.key.version = "9.9.9".into()),
+            ("target_label", |c| c.key.target_label = "web".into()),
+            ("policy_segment_hash", |c| {
+                c.policy_segment_hash = "blake3:SEG2".into()
+            }),
+            ("provisioning_policy_hash", |c| {
+                c.provisioning_policy_hash = "blake3:PROV2".into()
+            }),
+        ];
+        for (field, apply) in mutate {
+            let mut c = base.clone();
+            apply(&mut c);
+            assert_ne!(
+                consent_ref(&c).expect("ref"),
+                r,
+                "consent_ref must change when {field} changes"
+            );
+        }
 
         // mount_set_algo_* is NOT part of the consent identity → ref unchanged.
         let mut algo = base.clone();

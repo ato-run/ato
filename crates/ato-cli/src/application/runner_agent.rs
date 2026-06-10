@@ -677,24 +677,36 @@ pub fn scrub_secrets(text: &str) -> String {
 /// hash (blake3(JCS(schema + 5-tuple))). The runner reports this as
 /// needs_consent and, only after the owner approves this exact `consent_ref`,
 /// calls the local `approve-execution-plan` primitive and retries.
+// All fields are required (no serde defaults): a CONSENT-REQUIRED line missing
+// any field fails to deserialize and is NOT treated as a consent signal — an
+// incomplete signal must never be reported to the control plane.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ConsentRequest {
-    #[serde(default)]
     pub schema: String,
-    #[serde(default)]
     pub consent_ref: String,
-    #[serde(default)]
     pub scoped_id: String,
-    #[serde(default)]
     pub version: String,
-    #[serde(default)]
     pub target_label: String,
-    #[serde(default)]
     pub policy_segment_hash: String,
-    #[serde(default)]
     pub provisioning_policy_hash: String,
-    #[serde(default)]
+    /// Human policy summary. Must be PRESENT (may be empty); a missing summary
+    /// fails to deserialize.
     pub summary: String,
+}
+
+impl ConsentRequest {
+    /// A consent signal is honored only if it is complete AND well-formed: the
+    /// exact schema, a blake3 consent_ref, a non-empty identity, and blake3
+    /// policy hashes. Anything less is not a valid consent gate.
+    fn is_valid(&self) -> bool {
+        self.schema == capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA
+            && self.consent_ref.starts_with("blake3:")
+            && !self.scoped_id.is_empty()
+            && !self.version.is_empty()
+            && !self.target_label.is_empty()
+            && self.policy_segment_hash.starts_with("blake3:")
+            && self.provisioning_policy_hash.starts_with("blake3:")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -728,9 +740,11 @@ pub fn parse_child_line(line: &str) -> Option<ChildSignal> {
             return Some(ChildSignal::Receipt(PathBuf::from(path)));
         }
     }
-    // Machine-readable consent gate (P4-A): "CONSENT-REQUIRED: <json>".
+    // Machine-readable consent gate (P4-A): "CONSENT-REQUIRED: <json>". Only a
+    // complete, well-formed signal is honored — incomplete payloads are ignored.
     if let Some(rest) = trimmed.strip_prefix("CONSENT-REQUIRED: ")
         && let Ok(request) = serde_json::from_str::<ConsentRequest>(rest.trim())
+        && request.is_valid()
     {
         return Some(ChildSignal::ConsentRequired(request));
     }
@@ -1893,9 +1907,9 @@ mod tests {
     }
 
     #[test]
-    fn consent_required_line_parses_into_signal() {
-        let json = r#"{"schema":"execution_plan_consent_v1","consent_ref":"blake3:ref","scoped_id":"community/hello-capsule","version":"0.3.0","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":"network: api.example.com\nfs-rw: /data"}"#;
-        match parse_child_line(&format!("CONSENT-REQUIRED: {json}")) {
+    fn consent_required_line_parses_only_complete_well_formed_signal() {
+        let valid = r#"{"schema":"execution_plan_consent_v1","consent_ref":"blake3:ref","scoped_id":"community/hello-capsule","version":"0.3.0","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":"network: api.example.com\nfs-rw: /data"}"#;
+        match parse_child_line(&format!("CONSENT-REQUIRED: {valid}")) {
             Some(ChildSignal::ConsentRequired(req)) => {
                 assert_eq!(req.consent_ref, "blake3:ref");
                 assert_eq!(req.scoped_id, "community/hello-capsule");
@@ -1907,8 +1921,36 @@ mod tests {
             }
             other => panic!("expected ConsentRequired, got {other:?}"),
         }
-        // Malformed JSON after the prefix must NOT misclassify as anything.
-        assert_eq!(parse_child_line("CONSENT-REQUIRED: not json"), None);
+
+        // summary present-but-empty is allowed; a MISSING summary is not.
+        let empty_summary = r#"{"schema":"execution_plan_consent_v1","consent_ref":"blake3:r","scoped_id":"a","version":"1","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":""}"#;
+        assert!(matches!(
+            parse_child_line(&format!("CONSENT-REQUIRED: {empty_summary}")),
+            Some(ChildSignal::ConsentRequired(_))
+        ));
+
+        // Incomplete or malformed signals must NEVER parse as a consent gate.
+        let rejects = [
+            "CONSENT-REQUIRED: not json",
+            "CONSENT-REQUIRED: {}",
+            // wrong schema
+            r#"CONSENT-REQUIRED: {"schema":"WRONG","consent_ref":"blake3:r","scoped_id":"a","version":"1","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":"s"}"#,
+            // missing consent_ref
+            r#"CONSENT-REQUIRED: {"schema":"execution_plan_consent_v1","scoped_id":"a","version":"1","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":"s"}"#,
+            // non-blake3 consent_ref
+            r#"CONSENT-REQUIRED: {"schema":"execution_plan_consent_v1","consent_ref":"sha256:r","scoped_id":"a","version":"1","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":"s"}"#,
+            // missing a 5-tuple field (target_label)
+            r#"CONSENT-REQUIRED: {"schema":"execution_plan_consent_v1","consent_ref":"blake3:r","scoped_id":"a","version":"1","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":"s"}"#,
+            // empty identity field (scoped_id)
+            r#"CONSENT-REQUIRED: {"schema":"execution_plan_consent_v1","consent_ref":"blake3:r","scoped_id":"","version":"1","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":"s"}"#,
+            // empty / non-blake3 policy hash
+            r#"CONSENT-REQUIRED: {"schema":"execution_plan_consent_v1","consent_ref":"blake3:r","scoped_id":"a","version":"1","target_label":"main","policy_segment_hash":"","provisioning_policy_hash":"blake3:q","summary":"s"}"#,
+            // missing summary (must be present)
+            r#"CONSENT-REQUIRED: {"schema":"execution_plan_consent_v1","consent_ref":"blake3:r","scoped_id":"a","version":"1","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q"}"#,
+        ];
+        for line in rejects {
+            assert_eq!(parse_child_line(line), None, "must reject: {line}");
+        }
     }
 
     #[test]
