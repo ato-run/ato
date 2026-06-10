@@ -271,6 +271,10 @@ pub struct SessionInfo {
     manifest_path: String,
     target_label: String,
     notes: Vec<String>,
+    /// Whether session start observed a real readiness confirmation
+    /// (HTTP ready-wait / orchestrator probes). Drives the honest
+    /// `status` ("ready" vs "started") and the receipt readiness gate.
+    readiness_confirmed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     adapter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,6 +316,10 @@ pub struct SessionInfo {
 impl SessionInfo {
     /// PID of the spawned process. Used by the App Session Materialization
     /// layer to enrich the freshly-written record with its process_start_time.
+    pub(crate) fn readiness_confirmed(&self) -> bool {
+        self.readiness_confirmed
+    }
+
     pub(crate) fn pid(&self) -> i32 {
         self.pid
     }
@@ -763,6 +771,7 @@ pub(super) fn start_guest_session(
         snapshot: resolution.snapshot.clone(),
         runtime: runtime.clone(),
         display_strategy: CapsuleDisplayStrategy::GuestWebview,
+        readiness_confirmed: true,
         pid: child.id() as i32,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
@@ -1011,6 +1020,10 @@ pub(super) fn start_runtime_session(
     } else {
         None
     };
+    // OBSERVED readiness: only the WebUrl strategy waits on the bound port
+    // (wait_for_http_ready above, which bails on failure). Terminal/Service
+    // strategies launch with no readiness signal — never claim ready for them.
+    let readiness_confirmed = local_url.is_some();
 
     if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
         notes.push(format!(
@@ -1029,7 +1042,12 @@ pub(super) fn start_runtime_session(
         name: session_name(plan, "capsule-session"),
         pid: runtime_process.child.id() as i32,
         workload_pid: runtime_process.workload_pid.map(|value| value as i32),
-        status: ProcessStatus::Ready,
+        status: if readiness_confirmed {
+            ProcessStatus::Ready
+        } else {
+            // Launched with no readiness signal: Running, never a fake Ready.
+            ProcessStatus::Running
+        },
         runtime: runtime
             .runtime
             .clone()
@@ -1046,8 +1064,15 @@ pub(super) fn start_runtime_session(
         target_label: Some(plan.selected_target_label().to_string()),
         requested_port: session_web_port.as_ref().map(|web_port| web_port.port),
         log_path: Some(log_path.clone()),
-        ready_at: Some(SystemTime::now()),
-        last_event: Some("ready".to_string()),
+        ready_at: readiness_confirmed.then(SystemTime::now),
+        last_event: Some(
+            if readiness_confirmed {
+                "ready"
+            } else {
+                "started"
+            }
+            .to_string(),
+        ),
         last_error: None,
         exit_code: None,
     };
@@ -1089,6 +1114,7 @@ pub(super) fn start_runtime_session(
         snapshot: resolution.snapshot.clone(),
         runtime: runtime.clone(),
         display_strategy: display_strategy.clone(),
+        readiness_confirmed,
         pid: runtime_process.child.id() as i32,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
@@ -1464,6 +1490,7 @@ pub(super) fn start_orchestration_session_in_process(
         snapshot: resolution.snapshot.clone(),
         runtime: runtime_descriptor,
         display_strategy: CapsuleDisplayStrategy::WebUrl,
+        readiness_confirmed: true,
         pid: leaf_local_pid,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
@@ -1694,6 +1721,7 @@ pub(super) fn start_orchestration_session_supervisor(
         snapshot: resolution.snapshot.clone(),
         runtime,
         display_strategy: CapsuleDisplayStrategy::WebUrl,
+        readiness_confirmed: true,
         pid: child.id() as i32,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
@@ -1968,7 +1996,14 @@ pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInf
         handle: session.handle,
         normalized_handle: session.normalized_handle,
         canonical_handle: session.canonical_handle,
-        status: "ready".to_string(),
+        status: if session.readiness_confirmed {
+            "ready".to_string()
+        } else {
+            // Honest "launched, not confirmed ready" — the start path had no
+            // readiness signal (or the record predates the field).
+            "started".to_string()
+        },
+        readiness_confirmed: session.readiness_confirmed,
         trust_state: session.trust_state,
         source: session.source,
         restricted: session.restricted,
@@ -3638,6 +3673,52 @@ mod tests {
     }
 
     #[test]
+    fn session_info_from_stored_status_is_honest_about_readiness() {
+        let base = serde_json::json!({
+            "session_id": "runtime-session-1",
+            "handle": "publisher/slug",
+            "normalized_handle": "publisher/slug",
+            "canonical_handle": null,
+            "trust_state": "trusted",
+            "source": "registry",
+            "restricted": false,
+            "snapshot": null,
+            "runtime": {
+                "target_label": "main",
+                "runtime": "node",
+                "driver": null,
+                "language": null,
+                "port": null
+            },
+            "display_strategy": "web_url",
+            "pid": 1234,
+            "log_path": ".tmp/runtime-session-1.log",
+            "manifest_path": "capsule.toml",
+            "target_label": "main",
+            "notes": [],
+            "guest": null,
+            "web": null,
+            "terminal": null,
+            "service": null
+        });
+
+        // Confirmed readiness (HTTP wait / orchestrator probes passed) → "ready".
+        let mut confirmed = base.clone();
+        confirmed["readiness_confirmed"] = serde_json::Value::Bool(true);
+        let stored: StoredSessionInfo = serde_json::from_value(confirmed).expect("stored record");
+        let info = session_info_from_stored(stored);
+        assert_eq!(info.status, "ready");
+        assert!(info.readiness_confirmed());
+
+        // No readiness signal — and equally a legacy record missing the field
+        // entirely — must surface as "started", never a fake "ready".
+        let stored: StoredSessionInfo = serde_json::from_value(base).expect("legacy stored record");
+        let info = session_info_from_stored(stored);
+        assert_eq!(info.status, "started");
+        assert!(!info.readiness_confirmed());
+    }
+
+    #[test]
     fn reserve_port_returns_requested_port_when_available() {
         let port = reserve_port(Some(43291)).expect("reserve port");
         assert_eq!(port, 43291);
@@ -3690,6 +3771,7 @@ mod tests {
                 normalized_handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
                 canonical_handle: Some("capsule://ato.run/koh0920/ato-onboarding".to_string()),
                 status: "ready".to_string(),
+                readiness_confirmed: true,
                 trust_state: TrustState::Untrusted,
                 source: Some("registry".to_string()),
                 restricted: true,
@@ -3837,6 +3919,7 @@ mod tests {
             manifest_path: "/tmp/capsule.toml".to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -3930,6 +4013,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4061,6 +4145,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4148,6 +4233,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4250,6 +4336,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4561,6 +4648,7 @@ mod tests {
                 manifest_path: temp.path().join("capsule.toml").display().to_string(),
                 target_label: "web".to_string(),
                 notes: vec![],
+                readiness_confirmed: true,
                 guest: None,
                 web: Some(WebSessionDisplay {
                     local_url: "http://127.0.0.1:9999/".to_string(),
@@ -4676,6 +4764,7 @@ mod tests {
                 manifest_path: temp.path().join("capsule.toml").display().to_string(),
                 target_label: "web".to_string(),
                 notes: vec![],
+                readiness_confirmed: true,
                 guest: None,
                 web: Some(WebSessionDisplay {
                     local_url: "http://127.0.0.1:9999/".to_string(),
@@ -4797,6 +4886,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4968,6 +5058,7 @@ mod tests {
                 manifest_path: temp.path().join("capsule.toml").display().to_string(),
                 target_label: "web".to_string(),
                 notes: vec![],
+                readiness_confirmed: true,
                 guest: None,
                 web: Some(WebSessionDisplay {
                     local_url: "http://127.0.0.1:5173/".to_string(),
@@ -5165,6 +5256,7 @@ mod tests {
             manifest_path: format!("/tmp/capsule-fallback-{port}.toml"),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -5442,6 +5534,7 @@ mod tests {
             manifest_path: format!("/tmp/capsule-pgroup-{port}.toml"),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
