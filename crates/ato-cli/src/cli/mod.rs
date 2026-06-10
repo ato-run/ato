@@ -17,6 +17,7 @@ mod profile;
 mod project;
 mod registry;
 mod root;
+mod runner;
 pub(crate) mod scoped_id_prompt;
 mod secrets;
 mod session;
@@ -53,6 +54,7 @@ pub(crate) use project::{ProjectCommands, ScaffoldCommands};
 pub(crate) use registry::RegistryCommands;
 pub(crate) use root::{Cli, Commands};
 #[allow(unused_imports)]
+pub(crate) use runner::RunnerCommands;
 pub(crate) use secrets::SecretsCommands;
 pub(crate) use session::IdentitySessionCommands;
 #[allow(unused_imports)]
