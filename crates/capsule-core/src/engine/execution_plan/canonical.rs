@@ -5,8 +5,40 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 
 use crate::execution_plan::error::AtoExecutionError;
-use crate::execution_plan::model::{NonInteractiveBehavior, Provisioning, Runtime, RuntimePolicy};
+use crate::execution_plan::model::{
+    Consent, NonInteractiveBehavior, Provisioning, Runtime, RuntimePolicy,
+};
 use crate::security::path::validate_path;
+
+/// Schema tag baked into the `consent_ref` hash input so a future change to the
+/// consent key structure cannot collide with or be misread as an older ref.
+pub const CONSENT_REF_SCHEMA: &str = "execution_plan_consent_v1";
+
+#[derive(Serialize)]
+struct ConsentRefInput<'a> {
+    schema: &'a str,
+    scoped_id: &'a str,
+    version: &'a str,
+    target_label: &'a str,
+    policy_segment_hash: &'a str,
+    provisioning_policy_hash: &'a str,
+}
+
+/// Stable, display-friendly reference for an ExecutionPlan consent decision:
+/// `blake3` over the JCS of the schema + the identity 5-tuple (scoped_id,
+/// version, target_label, policy_segment_hash, provisioning_policy_hash). The
+/// wire payload and host-local ledger keep the FULL 5-tuple — this ref is only
+/// for display and for binding an owner's approval to the exact policy.
+pub fn consent_ref(consent: &Consent) -> Result<String, AtoExecutionError> {
+    canonical_hash(&ConsentRefInput {
+        schema: CONSENT_REF_SCHEMA,
+        scoped_id: &consent.key.scoped_id,
+        version: &consent.key.version,
+        target_label: &consent.key.target_label,
+        policy_segment_hash: &consent.policy_segment_hash,
+        provisioning_policy_hash: &consent.provisioning_policy_hash,
+    })
+}
 
 #[derive(Serialize)]
 struct PolicyHashInput<'a> {
@@ -166,11 +198,47 @@ fn canonicalize_existing_or_ancestor(path: &Path) -> std::io::Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::execution_plan::model::{
-        NonInteractiveBehavior, Provisioning, ProvisioningNetwork, Runtime,
+        Consent, ConsentKey, NonInteractiveBehavior, Provisioning, ProvisioningNetwork, Runtime,
         RuntimeFilesystemPolicy, RuntimeNetworkPolicy, RuntimePolicy, RuntimeSecretsPolicy,
         SecretDelivery,
     };
     use std::sync::{Mutex, OnceLock};
+
+    fn sample_consent() -> Consent {
+        Consent {
+            key: ConsentKey {
+                scoped_id: "community/hello-capsule".into(),
+                version: "0.3.0".into(),
+                target_label: "main".into(),
+            },
+            policy_segment_hash: "blake3:seg".into(),
+            provisioning_policy_hash: "blake3:prov".into(),
+            mount_set_algo_id: "algo".into(),
+            mount_set_algo_version: 1,
+        }
+    }
+
+    #[test]
+    fn consent_ref_is_stable_schema_bound_and_field_sensitive() {
+        let base = sample_consent();
+        let r = consent_ref(&base).expect("ref");
+        assert!(r.starts_with("blake3:"), "ref is a blake3 digest: {r}");
+        assert_eq!(r, consent_ref(&base).expect("ref"), "stable for same input");
+
+        // Changing any identity-5-tuple field MUST change the ref.
+        let mut diff = base.clone();
+        diff.policy_segment_hash = "blake3:DIFFERENT".into();
+        assert_ne!(consent_ref(&diff).expect("ref"), r);
+        let mut diff2 = base.clone();
+        diff2.key.target_label = "web".into();
+        assert_ne!(consent_ref(&diff2).expect("ref"), r);
+
+        // mount_set_algo_* is NOT part of the consent identity → ref unchanged.
+        let mut algo = base.clone();
+        algo.mount_set_algo_version = 99;
+        algo.mount_set_algo_id = "other".into();
+        assert_eq!(consent_ref(&algo).expect("ref"), r);
+    }
 
     fn cwd_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
