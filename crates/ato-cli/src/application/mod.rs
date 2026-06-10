@@ -32,6 +32,7 @@ pub(crate) mod producer_input;
 pub(crate) mod projection;
 pub(crate) mod provider_cache;
 pub(crate) mod receipt_boundary;
+pub(crate) mod runner_agent;
 pub(crate) mod search;
 pub(crate) mod secrets;
 pub(crate) mod services;
