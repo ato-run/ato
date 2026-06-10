@@ -17,8 +17,12 @@
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 
@@ -407,6 +411,10 @@ pub async fn run_serve(
         .heartbeat_interval_seconds
         .max(MIN_HEARTBEAT_INTERVAL_SECS);
     let mut consecutive_failures: u32 = 0;
+    // One active run at a time (v0): while a dispatched child is alive the
+    // runner does not claim further leases — GET leases/next CLAIMS, so a
+    // busy runner must not even poll.
+    let busy = Arc::new(AtomicBool::new(false));
 
     loop {
         let capabilities = collect_capabilities();
@@ -452,11 +460,591 @@ pub async fn run_serve(
             }
         }
 
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
-            _ = tokio::time::sleep(Duration::from_secs(interval)) => {}
+        // Between heartbeats: poll for leases in short slices while idle.
+        let mut remaining = interval;
+        while remaining > 0 {
+            let slice = remaining.min(LEASE_POLL_SECONDS);
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
+                _ = tokio::time::sleep(Duration::from_secs(slice)) => {}
+            }
+            remaining = remaining.saturating_sub(slice);
+
+            if busy.load(Ordering::SeqCst) {
+                continue;
+            }
+            match fetch_next_lease(&client, &api_base, &creds.runner_id, &creds.runner_token).await
+            {
+                LeasePoll::None => {}
+                LeasePoll::Claimed(lease) => {
+                    handle_claimed_lease(
+                        &client,
+                        &api_base,
+                        &creds.runner_token,
+                        lease,
+                        Arc::clone(&busy),
+                    )
+                    .await;
+                }
+                LeasePoll::Revoked => {
+                    bail!(
+                        "this runner has been revoked by the account owner. Run `ato runner login` to enroll it again."
+                    );
+                }
+                LeasePoll::InvalidToken => {
+                    bail!(
+                        "the stored runner token was rejected (unknown or invalid). Run `ato runner login` to enroll this host again."
+                    );
+                }
+                LeasePoll::Transient(reason) => {
+                    eprintln!("⚠️  lease poll failed ({})", scrub_secrets(&reason));
+                }
+            }
         }
     }
+}
+
+// ─────────────────────────────────────────────
+// Lease execution (PR C2)
+//
+// The runner claims run leases from the control plane and executes EXACTLY
+// ONE supported command shape: { kind: "run_source_sandbox", source_url }.
+// The API can never make this host run an arbitrary shell command — anything
+// else is reported failed(unsupported_command) without executing.
+//
+// Status reports mirror the device's local honest-readiness chain
+// (ato#608–#611): ready is reported only on the real ready signal AND must
+// carry the observed execution_id (the control plane rejects it otherwise);
+// a workload with no readiness signal is reported running, never ready.
+// ─────────────────────────────────────────────
+
+/** Interval between lease polls while idle (seconds). */
+const LEASE_POLL_SECONDS: u64 = 5;
+const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
+/** Cap per-run log files so a chatty child cannot fill the disk. */
+const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
+
+pub const LEASE_COMMAND_KIND: &str = "run_source_sandbox";
+
+#[derive(Debug, Deserialize)]
+struct LeaseEnvelope {
+    lease: Option<LeaseDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LeaseDto {
+    pub id: String,
+    pub run_id: String,
+    #[serde(default)]
+    pub command: serde_json::Value,
+}
+
+#[derive(Debug)]
+enum LeasePoll {
+    None,
+    Claimed(LeaseDto),
+    Revoked,
+    InvalidToken,
+    Transient(String),
+}
+
+async fn fetch_next_lease(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_id: &str,
+    runner_token: &str,
+) -> LeasePoll {
+    let url = format!(
+        "{}/v1/runners/{}/leases/next",
+        api_base.trim_end_matches('/'),
+        runner_id
+    );
+    let response = match client.get(&url).bearer_auth(runner_token).send().await {
+        Ok(response) => response,
+        Err(err) => return LeasePoll::Transient(format!("request failed: {err}")),
+    };
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        let parsed: ApiErrorBody = response.json().await.unwrap_or_default();
+        return match parsed.error.as_deref() {
+            Some("runner_revoked") => LeasePoll::Revoked,
+            _ => LeasePoll::InvalidToken,
+        };
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return LeasePoll::Transient(format!("HTTP {status}: {body}"));
+    }
+    match response.json::<LeaseEnvelope>().await {
+        Ok(envelope) => match envelope.lease {
+            Some(lease) => LeasePoll::Claimed(lease),
+            None => LeasePoll::None,
+        },
+        Err(err) => LeasePoll::Transient(format!("invalid response: {err}")),
+    }
+}
+
+// ── Command validation ──
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidLeaseCommand {
+    pub source_url: String,
+    pub capsule_slug: Option<String>,
+}
+
+/// Validate the lease command. Only `run_source_sandbox` with an http(s)
+/// `source_url` is executable; everything else is rejected WITHOUT executing.
+pub fn parse_lease_command(
+    command: &serde_json::Value,
+) -> std::result::Result<ValidLeaseCommand, (String, String)> {
+    let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != LEASE_COMMAND_KIND {
+        return Err((
+            "unsupported_command".to_string(),
+            format!(
+                "unsupported lease command kind {kind:?}; this runner only executes {LEASE_COMMAND_KIND}"
+            ),
+        ));
+    }
+    let source_url = command
+        .get("source_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if source_url.is_empty() {
+        return Err((
+            "invalid_command".to_string(),
+            "lease command is missing source_url".to_string(),
+        ));
+    }
+    // The URL becomes an `ato run` positional argument: require an http(s)
+    // URL so the API can never smuggle a flag or a host-local path.
+    if !(source_url.starts_with("https://") || source_url.starts_with("http://")) {
+        return Err((
+            "invalid_command".to_string(),
+            format!("source_url must be an http(s) URL, got {source_url:?}"),
+        ));
+    }
+    let capsule_slug = command
+        .get("capsule_slug")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
+    Ok(ValidLeaseCommand {
+        source_url,
+        capsule_slug,
+    })
+}
+
+// ── Secret scrubbing ──
+
+/// Redact runner tokens from any text that leaves this process (error
+/// reports, log excerpts). The token never goes into child env, but scrub
+/// defensively anyway.
+pub fn scrub_secrets(text: &str) -> String {
+    const PREFIX: &str = "ato_rnr_";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find(PREFIX) {
+        out.push_str(&rest[..idx]);
+        out.push_str("ato_rnr_[REDACTED]");
+        let tail = &rest[idx + PREFIX.len()..];
+        let end = tail
+            .char_indices()
+            .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-'))
+            .map(|(i, _)| i)
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+// ── Child output signals ──
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChildSignal {
+    /// Stable machine-readable receipt pointer ("RECEIPT: <path>").
+    Receipt(PathBuf),
+    /// The honest ready signal (probe-confirmed; ato#608).
+    Ready,
+    /// Launched with NO readiness signal (StartedWithoutReadiness).
+    StartedNoReadiness,
+    /// The CLI announced the service exited before readiness.
+    ExitedBeforeReady,
+}
+
+/// Map one line of `ato run` output to a lifecycle signal.
+///
+/// `RECEIPT:` is the CLI's stable machine-readable line; the readiness lines
+/// are the human strings the CLI prints from its honest lifecycle events —
+/// accepted as a documented, test-covered fallback until the CLI emits a
+/// machine-readable lifecycle line (tracked follow-up).
+pub fn parse_child_line(line: &str) -> Option<ChildSignal> {
+    let trimmed = line.trim();
+    if let Some(path) = trimmed.strip_prefix("RECEIPT: ") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return Some(ChildSignal::Receipt(PathBuf::from(path)));
+        }
+    }
+    if trimmed.contains("(ready event received)") {
+        return Some(ChildSignal::Ready);
+    }
+    if trimmed.contains("no readiness signal") {
+        return Some(ChildSignal::StartedNoReadiness);
+    }
+    if trimmed.contains("exited before readiness")
+        || trimmed.contains("exited before start confirmation")
+    {
+        return Some(ChildSignal::ExitedBeforeReady);
+    }
+    None
+}
+
+/// Read the execution_id from a receipt file the child pointed at.
+pub fn execution_id_from_receipt(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("execution_id")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+// ── Reports ──
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LeaseReport {
+    Preparing,
+    Running,
+    Ready { execution_id: String },
+    Failed { code: String, message: String },
+}
+
+async fn report_lease_status(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    report: &LeaseReport,
+) -> Result<()> {
+    let url = format!(
+        "{}/v1/runner-leases/{}/status",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    let body = match report {
+        LeaseReport::Preparing => serde_json::json!({ "status": "preparing" }),
+        LeaseReport::Running => serde_json::json!({ "status": "running" }),
+        LeaseReport::Ready { execution_id } => serde_json::json!({
+            "status": "ready",
+            "execution_id": execution_id,
+        }),
+        LeaseReport::Failed { code, message } => serde_json::json!({
+            "status": "failed",
+            "error": { "code": code, "message": scrub_secrets(message) },
+        }),
+    };
+    let response = client
+        .post(&url)
+        .bearer_auth(runner_token)
+        .json(&body)
+        .send()
+        .await
+        .context("lease status request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("lease status report rejected (HTTP {status}): {body}");
+    }
+    Ok(())
+}
+
+// ── Child execution ──
+
+fn run_log_path(lease_id: &str) -> PathBuf {
+    let base = credentials_path();
+    let dir = base
+        .parent()
+        .map(|parent| parent.join("runs"))
+        .unwrap_or_else(|| PathBuf::from("runs"));
+    dir.join(format!("{lease_id}.log"))
+}
+
+fn ready_timeout() -> Duration {
+    let secs = std::env::var("ATO_RUNNER_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_READY_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn spawn_run_child(source_url: &str) -> Result<tokio::process::Child> {
+    let child_bin = match std::env::var("ATO_RUNNER_CHILD_BIN") {
+        Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
+        _ => std::env::current_exe().context("failed to resolve the ato binary path")?,
+    };
+    let mut cmd = tokio::process::Command::new(child_bin);
+    cmd.arg("run").arg(source_url).arg("--sandbox").arg("-y");
+    // Operator-controlled extras (e.g. --nacelle <path> on dev hosts). Comes
+    // from the runner host env, never from the lease payload.
+    if let Ok(extra) = std::env::var("ATO_RUNNER_RUN_ARGS") {
+        for arg in extra.split_whitespace() {
+            cmd.arg(arg);
+        }
+    }
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    // The runner token lives only in this process's memory and credentials
+    // file — it is never exported to the child environment.
+    cmd.kill_on_drop(true);
+    cmd.spawn().context("failed to spawn ato run child")
+}
+
+struct BoundedLog {
+    file: Option<std::fs::File>,
+    written: usize,
+    truncated: bool,
+}
+
+impl BoundedLog {
+    fn create(path: &Path) -> Self {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        Self {
+            file: std::fs::File::create(path).ok(),
+            written: 0,
+            truncated: false,
+        }
+    }
+
+    fn line(&mut self, line: &str) {
+        use std::io::Write as _;
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        if self.written >= MAX_RUN_LOG_BYTES {
+            if !self.truncated {
+                let _ = writeln!(file, "...[log truncated at {MAX_RUN_LOG_BYTES} bytes]");
+                self.truncated = true;
+            }
+            return;
+        }
+        let scrubbed = scrub_secrets(line);
+        self.written += scrubbed.len() + 1;
+        let _ = writeln!(file, "{scrubbed}");
+    }
+}
+
+/// Drive one dispatched child to a settled outcome, emitting honest reports.
+///
+/// Settles on the FIRST of: honest ready signal (→ Ready, requires the
+/// receipt-derived execution_id), no-readiness signal (→ Running), child
+/// exit (→ Failed), or the ready timeout (→ Failed + kill). After Ready or
+/// Running the child keeps serving and nothing is retroactively cleared;
+/// the function returns when the child exits.
+async fn run_lease_child(
+    mut child: tokio::process::Child,
+    log_path: PathBuf,
+    timeout: Duration,
+    reports: tokio::sync::mpsc::UnboundedSender<LeaseReport>,
+) {
+    let mut log = BoundedLog::create(&log_path);
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        let tx = line_tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let tx = line_tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(line_tx);
+
+    let mut execution_id: Option<String> = None;
+    let mut settled = false;
+    let mut saw_exited_before = false;
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        tokio::select! {
+            line = line_rx.recv() => {
+                let Some(line) = line else {
+                    // Output streams closed; wait for the exit status.
+                    let status = child.wait().await.ok();
+                    if !settled {
+                        let code = status.and_then(|s| s.code());
+                        let message = match (code, saw_exited_before) {
+                            (Some(code), true) => format!(
+                                "service exited before readiness (exit code {code})"
+                            ),
+                            (Some(code), false) => format!("exit code {code}"),
+                            (None, _) => "terminated by signal".to_string(),
+                        };
+                        let _ = reports.send(LeaseReport::Failed {
+                            code: "exit_before_ready".to_string(),
+                            message,
+                        });
+                    }
+                    return;
+                };
+                log.line(&line);
+                match parse_child_line(&line) {
+                    Some(ChildSignal::Receipt(path)) => {
+                        if execution_id.is_none() {
+                            execution_id = execution_id_from_receipt(&path);
+                        }
+                    }
+                    Some(ChildSignal::Ready) if !settled => {
+                        match execution_id.clone() {
+                            Some(execution_id) => {
+                                settled = true;
+                                let _ = reports.send(LeaseReport::Ready { execution_id });
+                            }
+                            None => {
+                                // A ready we cannot tie to an execution receipt is
+                                // unverifiable — fail closed rather than report it.
+                                settled = true;
+                                let _ = reports.send(LeaseReport::Failed {
+                                    code: "execution_id_unavailable".to_string(),
+                                    message: "child reported ready but no execution receipt was observed".to_string(),
+                                });
+                                let _ = child.start_kill();
+                            }
+                        }
+                    }
+                    Some(ChildSignal::StartedNoReadiness) if !settled => {
+                        settled = true;
+                        let _ = reports.send(LeaseReport::Running);
+                    }
+                    Some(ChildSignal::ExitedBeforeReady) => {
+                        saw_exited_before = true;
+                    }
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep_until(deadline), if !settled => {
+                settled = true;
+                let _ = reports.send(LeaseReport::Failed {
+                    code: "readiness_timeout".to_string(),
+                    message: format!(
+                        "no readiness signal within {}s",
+                        timeout.as_secs()
+                    ),
+                });
+                let _ = child.start_kill();
+            }
+        }
+    }
+}
+
+async fn handle_claimed_lease(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease: LeaseDto,
+    busy: Arc<AtomicBool>,
+) {
+    println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
+    let command = match parse_lease_command(&lease.command) {
+        Ok(command) => command,
+        Err((code, message)) => {
+            eprintln!("⚠️  lease {} rejected: {}", lease.id, message);
+            let report = LeaseReport::Failed { code, message };
+            if let Err(err) =
+                report_lease_status(client, api_base, runner_token, &lease.id, &report).await
+            {
+                eprintln!(
+                    "⚠️  failed to report lease failure: {}",
+                    scrub_secrets(&format!("{err:#}"))
+                );
+            }
+            return;
+        }
+    };
+
+    if let Err(err) = report_lease_status(
+        client,
+        api_base,
+        runner_token,
+        &lease.id,
+        &LeaseReport::Preparing,
+    )
+    .await
+    {
+        eprintln!(
+            "⚠️  failed to report preparing: {}",
+            scrub_secrets(&format!("{err:#}"))
+        );
+    }
+
+    let child = match spawn_run_child(&command.source_url) {
+        Ok(child) => child,
+        Err(err) => {
+            let report = LeaseReport::Failed {
+                code: "spawn_failed".to_string(),
+                message: format!("{err:#}"),
+            };
+            let _ = report_lease_status(client, api_base, runner_token, &lease.id, &report).await;
+            return;
+        }
+    };
+
+    let log_path = run_log_path(&lease.id);
+    println!(
+        "🚀 lease {}: ato run {} --sandbox (log: {})",
+        lease.id,
+        command.source_url,
+        log_path.display()
+    );
+
+    busy.store(true, Ordering::SeqCst);
+    let client = client.clone();
+    let api_base = api_base.to_string();
+    let runner_token = runner_token.to_string();
+    let lease_id = lease.id.clone();
+    tokio::spawn(async move {
+        let (report_tx, mut report_rx) = tokio::sync::mpsc::unbounded_channel::<LeaseReport>();
+        let monitor = tokio::spawn(run_lease_child(child, log_path, ready_timeout(), report_tx));
+        while let Some(report) = report_rx.recv().await {
+            let label = match &report {
+                LeaseReport::Preparing => "preparing".to_string(),
+                LeaseReport::Running => "running (launched, readiness not confirmed)".to_string(),
+                LeaseReport::Ready { execution_id } => format!("ready ({execution_id})"),
+                LeaseReport::Failed { code, .. } => format!("failed ({code})"),
+            };
+            println!("📨 lease {lease_id}: {label}");
+            if let Err(err) =
+                report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await
+            {
+                eprintln!(
+                    "⚠️  lease {lease_id}: report failed: {}",
+                    scrub_secrets(&format!("{err:#}"))
+                );
+            }
+        }
+        let _ = monitor.await;
+        busy.store(false, Ordering::SeqCst);
+        println!("📦 lease {lease_id}: child exited; runner is idle again");
+    });
 }
 
 #[cfg(test)]
@@ -552,6 +1140,249 @@ mod tests {
                 "heartbeat log must never include the runner token: {line}"
             );
         }
+    }
+
+    // ── Lease command validation ──
+
+    #[test]
+    fn lease_command_accepts_only_run_source_sandbox() {
+        let ok = parse_lease_command(&serde_json::json!({
+            "kind": "run_source_sandbox",
+            "source_url": "https://github.com/Koh0920/hello-capsule",
+            "capsule_slug": "hello-capsule",
+        }))
+        .expect("valid command");
+        assert_eq!(ok.source_url, "https://github.com/Koh0920/hello-capsule");
+        assert_eq!(ok.capsule_slug.as_deref(), Some("hello-capsule"));
+
+        let (code, _) = parse_lease_command(&serde_json::json!({
+            "kind": "shell",
+            "command": "rm -rf /",
+        }))
+        .unwrap_err();
+        assert_eq!(code, "unsupported_command");
+
+        let (code, _) =
+            parse_lease_command(&serde_json::json!({ "kind": "run_source_sandbox" })).unwrap_err();
+        assert_eq!(code, "invalid_command");
+
+        // A non-URL positional could be smuggled as a flag or local path.
+        for bad in [
+            "--help",
+            "-rf",
+            "/etc/passwd",
+            "file:///x",
+            "git@github.com:x/y",
+        ] {
+            let (code, _) = parse_lease_command(&serde_json::json!({
+                "kind": "run_source_sandbox",
+                "source_url": bad,
+            }))
+            .unwrap_err();
+            assert_eq!(code, "invalid_command", "must reject {bad}");
+        }
+    }
+
+    // ── Child output signal parsing (documented fallback, test-covered) ──
+
+    #[test]
+    fn child_lines_map_to_lifecycle_signals() {
+        assert_eq!(
+            parse_child_line("RECEIPT: /home/u/.ato/executions/x/receipt.json"),
+            Some(ChildSignal::Receipt(PathBuf::from(
+                "/home/u/.ato/executions/x/receipt.json"
+            )))
+        );
+        assert_eq!(
+            parse_child_line("[✓] Service 'hello-capsule' is ready (ready event received)"),
+            Some(ChildSignal::Ready)
+        );
+        assert_eq!(
+            parse_child_line("[✓] Command started (ready event received)"),
+            Some(ChildSignal::Ready)
+        );
+        assert_eq!(
+            parse_child_line("[•] Service launched — no readiness signal, not confirmed ready"),
+            Some(ChildSignal::StartedNoReadiness)
+        );
+        assert_eq!(
+            parse_child_line("❌ Service 'x' exited before readiness (exit code: 7)"),
+            Some(ChildSignal::ExitedBeforeReady)
+        );
+        assert_eq!(parse_child_line("Streaming logs..."), None);
+        // Heartbeat-style noise must never read as run readiness.
+        assert_eq!(
+            parse_child_line("[✓] heartbeat ok — online, next in 30s"),
+            None
+        );
+    }
+
+    #[test]
+    fn execution_id_read_from_receipt_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("receipt.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":2,"execution_id":"blake3:abc123","graph_receipt":{"gate":"launch-passed"}}"#,
+        )
+        .expect("write receipt");
+        assert_eq!(
+            execution_id_from_receipt(&path).as_deref(),
+            Some("blake3:abc123")
+        );
+        assert_eq!(
+            execution_id_from_receipt(&dir.path().join("none.json")),
+            None
+        );
+    }
+
+    #[test]
+    fn scrub_redacts_runner_tokens() {
+        let scrubbed = scrub_secrets("auth failed for Bearer ato_rnr_AbC-123_xyz while polling");
+        assert!(!scrubbed.contains("AbC-123_xyz"));
+        assert!(scrubbed.contains("ato_rnr_[REDACTED]"));
+        assert_eq!(scrub_secrets("no secrets here"), "no secrets here");
+    }
+
+    // ── Fake-child execution flows (no API, no network) ──
+
+    #[cfg(unix)]
+    fn fake_child(script: &str) -> tokio::process::Child {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(script);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
+        cmd.spawn().expect("spawn fake child")
+    }
+
+    #[cfg(unix)]
+    async fn collect_reports(
+        script: &str,
+        timeout: Duration,
+    ) -> (Vec<LeaseReport>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("run.log");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        run_lease_child(fake_child(script), log_path, timeout, tx).await;
+        let mut reports = Vec::new();
+        while let Ok(report) = rx.try_recv() {
+            reports.push(report);
+        }
+        (reports, dir)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ready_flow_reports_ready_with_execution_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let receipt = dir.path().join("receipt.json");
+        std::fs::write(&receipt, r#"{"execution_id":"blake3:ready-e2e"}"#).unwrap();
+        let script = format!(
+            "echo 'RECEIPT: {}'; echo \"[✓] Service 'x' is ready (ready event received)\"; exit 0",
+            receipt.display()
+        );
+        let (reports, _logdir) = collect_reports(&script, Duration::from_secs(20)).await;
+        assert_eq!(
+            reports,
+            vec![LeaseReport::Ready {
+                execution_id: "blake3:ready-e2e".to_string()
+            }],
+            "ready must be reported exactly once, with the receipt's execution_id, and the post-ready exit must not retroactively change it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ready_without_receipt_fails_closed() {
+        let script = "echo \"[✓] Service 'x' is ready (ready event received)\"; exec sleep 30";
+        let (reports, _logdir) = collect_reports(script, Duration::from_secs(20)).await;
+        assert_eq!(reports.len(), 1);
+        match &reports[0] {
+            LeaseReport::Failed { code, .. } => {
+                assert_eq!(code, "execution_id_unavailable");
+            }
+            other => panic!("unverifiable ready must fail closed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_readiness_signal_reports_running_never_ready() {
+        let script =
+            "echo '[•] Service launched — no readiness signal, not confirmed ready'; exit 0";
+        let (reports, _logdir) = collect_reports(script, Duration::from_secs(20)).await;
+        assert_eq!(
+            reports,
+            vec![LeaseReport::Running],
+            "StartedWithoutReadiness maps to running — never ready, and the post-settle exit adds nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn crash_before_ready_reports_failed_with_exit_code() {
+        let script = "echo 'building...'; exit 7";
+        let (reports, _logdir) = collect_reports(script, Duration::from_secs(20)).await;
+        assert_eq!(reports.len(), 1);
+        match &reports[0] {
+            LeaseReport::Failed { code, message } => {
+                assert_eq!(code, "exit_before_ready");
+                assert!(
+                    message.contains('7'),
+                    "message must carry the exit code: {message}"
+                );
+            }
+            other => panic!("crash must report failed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silent_child_hits_readiness_timeout() {
+        let script = "exec sleep 30";
+        let (reports, _logdir) = collect_reports(script, Duration::from_secs(1)).await;
+        assert_eq!(reports.len(), 1);
+        match &reports[0] {
+            LeaseReport::Failed { code, .. } => assert_eq!(code, "readiness_timeout"),
+            other => panic!("silent child must time out, got {other:?}"),
+        }
+    }
+
+    // ── Lease poll wire handling ──
+
+    #[tokio::test]
+    async fn lease_poll_parses_claimed_lease() {
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"lease\":{\"id\":\"01LEASE\",\"run_id\":\"01RUN\",\"command\":{\"kind\":\"run_source_sandbox\",\"source_url\":\"https://github.com/x/y\"}},\"next_poll_seconds\":5}",
+        );
+        let client = reqwest::Client::new();
+        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t").await;
+        let request = server.join().expect("server");
+        assert!(request.contains("GET /v1/runners/01R/leases/next"));
+        match outcome {
+            LeasePoll::Claimed(lease) => {
+                assert_eq!(lease.id, "01LEASE");
+                assert_eq!(lease.run_id, "01RUN");
+                let parsed = parse_lease_command(&lease.command).expect("valid");
+                assert_eq!(parsed.source_url, "https://github.com/x/y");
+            }
+            other => panic!("expected claimed lease, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_poll_revoked_is_terminal() {
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 401 Unauthorized",
+            "{\"error\":\"runner_revoked\",\"message\":\"revoked\"}",
+        );
+        let client = reqwest::Client::new();
+        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(outcome, LeasePoll::Revoked));
     }
 
     /// Minimal one-shot HTTP server: accepts a single connection, captures the
