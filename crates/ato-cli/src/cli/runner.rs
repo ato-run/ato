@@ -36,7 +36,10 @@ pub(crate) enum RunnerCommands {
         headless: bool,
     },
 
-    /// Send liveness heartbeats so this runner shows as online.
+    /// Serve as a Connected Runner: send liveness heartbeats and poll for
+    /// run leases, executing dispatched source runs sandboxed
+    /// (`ato run <source> --sandbox`). Honest readiness only: a run is
+    /// reported ready solely on the local probe-confirmed signal.
     #[command(name = "serve")]
     Serve {
         /// Override the API base stored at login
