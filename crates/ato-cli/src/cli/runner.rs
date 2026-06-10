@@ -54,5 +54,11 @@ pub(crate) enum RunnerCommands {
         /// Advertise this public base URL on every heartbeat
         #[arg(long, value_name = "URL")]
         public_base_url: Option<String>,
+
+        /// Local address the root proxy listens on when a run becomes ready
+        /// (the operator's tunnel/LB forwards public_base_url here).
+        /// Default: 127.0.0.1:8420
+        #[arg(long, value_name = "ADDR:PORT")]
+        proxy_listen: Option<String>,
     },
 }
