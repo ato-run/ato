@@ -781,13 +781,29 @@ fn ready_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// `ato run` requires GitHub refs in `github.com/owner/repo` form and
+/// rejects scheme-prefixed URLs. The lease payload carries the canonical
+/// repository URL, so strip the scheme for the child invocation; non-GitHub
+/// URLs pass through unchanged.
+pub fn child_run_ref(source_url: &str) -> String {
+    for prefix in ["https://github.com/", "http://github.com/"] {
+        if let Some(rest) = source_url.strip_prefix(prefix) {
+            return format!("github.com/{}", rest.trim_end_matches('/'));
+        }
+    }
+    source_url.to_string()
+}
+
 fn spawn_run_child(source_url: &str) -> Result<tokio::process::Child> {
     let child_bin = match std::env::var("ATO_RUNNER_CHILD_BIN") {
         Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
         _ => std::env::current_exe().context("failed to resolve the ato binary path")?,
     };
     let mut cmd = tokio::process::Command::new(child_bin);
-    cmd.arg("run").arg(source_url).arg("--sandbox").arg("-y");
+    cmd.arg("run")
+        .arg(child_run_ref(source_url))
+        .arg("--sandbox")
+        .arg("-y");
     // Operator-controlled extras (e.g. --nacelle <path> on dev hosts). Comes
     // from the runner host env, never from the lease payload.
     if let Ok(extra) = std::env::var("ATO_RUNNER_RUN_ARGS") {
@@ -1181,6 +1197,23 @@ mod tests {
             .unwrap_err();
             assert_eq!(code, "invalid_command", "must reject {bad}");
         }
+    }
+
+    #[test]
+    fn child_run_ref_strips_github_scheme_only() {
+        assert_eq!(
+            child_run_ref("https://github.com/Koh0920/hello-capsule"),
+            "github.com/Koh0920/hello-capsule"
+        );
+        assert_eq!(
+            child_run_ref("https://github.com/Koh0920/hello-capsule/"),
+            "github.com/Koh0920/hello-capsule"
+        );
+        assert_eq!(
+            child_run_ref("https://gitlab.com/x/y"),
+            "https://gitlab.com/x/y",
+            "non-GitHub URLs pass through unchanged"
+        );
     }
 
     // ── Child output signal parsing (documented fallback, test-covered) ──
