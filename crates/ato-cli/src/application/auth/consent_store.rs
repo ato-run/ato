@@ -118,20 +118,21 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
         // existing `approve-execution-plan` primitive and retry. This is purely
         // additive: the typed E302 below is still returned and the run still
         // fails closed until the exact policy is approved.
-        let consent_ref =
-            capsule_core::execution_plan::canonical::consent_ref(&plan.consent).unwrap_or_default();
-        let machine_line = serde_json::to_string(&ConsentRequiredLine {
-            schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA,
-            consent_ref: &consent_ref,
-            scoped_id: &scoped_id,
-            version: &version,
-            target_label: &target_label,
-            policy_segment_hash: &policy_segment_hash,
-            provisioning_policy_hash: &provisioning_policy_hash,
-            summary: &summary,
-        })
-        .unwrap_or_default();
-        if !machine_line.is_empty() {
+        // Emit the machine line ONLY when consent_ref computes and the payload
+        // serializes — never a malformed/empty-ref signal. On any failure we
+        // skip the line and still return the unchanged E302 below (fail closed).
+        if let Ok(consent_ref) = capsule_core::execution_plan::canonical::consent_ref(&plan.consent)
+            && let Ok(machine_line) = serde_json::to_string(&ConsentRequiredLine {
+                schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA,
+                consent_ref: &consent_ref,
+                scoped_id: &scoped_id,
+                version: &version,
+                target_label: &target_label,
+                policy_segment_hash: &policy_segment_hash,
+                provisioning_policy_hash: &provisioning_policy_hash,
+                summary: &summary,
+            })
+        {
             println!("CONSENT-REQUIRED: {machine_line}");
         }
 
