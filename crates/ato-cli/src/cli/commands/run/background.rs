@@ -393,6 +393,7 @@ pub(super) fn spawn_foreground_native_event_reporter(
 
     Ok(Some(std::thread::spawn(move || {
         let mut ready_reported = false;
+        let mut lifecycle_ready_printed = false;
         let mut readiness_stamped = false;
         for event in event_rx {
             // Re-stamp the receipt's readiness gate from the OBSERVED event
@@ -446,6 +447,17 @@ pub(super) fn spawn_foreground_native_event_reporter(
                         }
                     }
                 }
+            }
+
+            // Stable machine-readable lifecycle line (companion to "RECEIPT:"):
+            // lets non-TTY supervisors (the Connected Runner agent, CI) key on
+            // the honest ready signal — and its observed port — without
+            // parsing human strings. Printed once, directly to stdout.
+            if let LifecycleEvent::Ready { port, .. } = &event
+                && !lifecycle_ready_printed
+            {
+                lifecycle_ready_printed = true;
+                println!("{}", lifecycle_ready_line(*port));
             }
 
             if matches!(event, LifecycleEvent::Ready { .. }) {
@@ -685,6 +697,14 @@ pub(super) fn initial_foreground_native_messages(
     messages
 }
 
+/// Machine-readable ready line: `LIFECYCLE: ready` or `LIFECYCLE: ready port=N`.
+pub(super) fn lifecycle_ready_line(port: Option<u16>) -> String {
+    match port {
+        Some(port) => format!("LIFECYCLE: ready port={port}"),
+        None => "LIFECYCLE: ready".to_string(),
+    }
+}
+
 pub(super) fn foreground_native_event_messages(
     event: &LifecycleEvent,
     ready_reported: bool,
@@ -809,6 +829,15 @@ mod tests {
         };
         manager.write_pid(&info).expect("write pid record");
         (manager, dir)
+    }
+
+    #[test]
+    fn lifecycle_ready_line_is_stable_and_machine_readable() {
+        assert_eq!(
+            lifecycle_ready_line(Some(8000)),
+            "LIFECYCLE: ready port=8000"
+        );
+        assert_eq!(lifecycle_ready_line(None), "LIFECYCLE: ready");
     }
 
     #[test]

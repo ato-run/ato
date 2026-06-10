@@ -379,7 +379,9 @@ pub async fn run_serve(
     api_base: Option<String>,
     display_name: Option<String>,
     public_base_url: Option<String>,
+    proxy_listen: Option<String>,
 ) -> Result<()> {
+    let proxy_listen = proxy_listen.unwrap_or_else(|| DEFAULT_PROXY_LISTEN.to_string());
     let path = credentials_path();
     let creds = load_credentials(&path)?;
     let api_base = api_base
@@ -483,6 +485,8 @@ pub async fn run_serve(
                         &creds.runner_token,
                         lease,
                         Arc::clone(&busy),
+                        public_base_url.clone(),
+                        proxy_listen.clone(),
                     )
                     .await;
                 }
@@ -525,6 +529,7 @@ const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
 const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
 
 pub const LEASE_COMMAND_KIND: &str = "run_source_sandbox";
+pub const DEFAULT_PROXY_LISTEN: &str = "127.0.0.1:8420";
 
 #[derive(Debug, Deserialize)]
 struct LeaseEnvelope {
@@ -666,8 +671,9 @@ pub fn scrub_secrets(text: &str) -> String {
 pub enum ChildSignal {
     /// Stable machine-readable receipt pointer ("RECEIPT: <path>").
     Receipt(PathBuf),
-    /// The honest ready signal (probe-confirmed; ato#608).
-    Ready,
+    /// The honest ready signal (probe-confirmed; ato#608). Carries the
+    /// observed workload port when the lifecycle line reports one.
+    Ready { port: Option<u16> },
     /// Launched with NO readiness signal (StartedWithoutReadiness).
     StartedNoReadiness,
     /// The CLI announced the service exited before readiness.
@@ -688,8 +694,17 @@ pub fn parse_child_line(line: &str) -> Option<ChildSignal> {
             return Some(ChildSignal::Receipt(PathBuf::from(path)));
         }
     }
+    // Primary, machine-readable ready signal: "LIFECYCLE: ready[ port=N]".
+    if let Some(rest) = trimmed.strip_prefix("LIFECYCLE: ready") {
+        let port = rest
+            .trim()
+            .strip_prefix("port=")
+            .and_then(|value| value.trim().parse::<u16>().ok());
+        return Some(ChildSignal::Ready { port });
+    }
     if trimmed.contains("(ready event received)") {
-        return Some(ChildSignal::Ready);
+        // Human-string fallback (older child binaries): ready, port unknown.
+        return Some(ChildSignal::Ready { port: None });
     }
     if trimmed.contains("no readiness signal") {
         return Some(ChildSignal::StartedNoReadiness);
@@ -718,8 +733,16 @@ pub fn execution_id_from_receipt(path: &Path) -> Option<String> {
 pub enum LeaseReport {
     Preparing,
     Running,
-    Ready { execution_id: String },
-    Failed { code: String, message: String },
+    Ready {
+        execution_id: String,
+        /// Observed local workload port (from the lifecycle line); enables
+        /// the root proxy + ready_url. None -> ready without a URL.
+        port: Option<u16>,
+    },
+    Failed {
+        code: String,
+        message: String,
+    },
 }
 
 async fn report_lease_status(
@@ -737,10 +760,9 @@ async fn report_lease_status(
     let body = match report {
         LeaseReport::Preparing => serde_json::json!({ "status": "preparing" }),
         LeaseReport::Running => serde_json::json!({ "status": "running" }),
-        LeaseReport::Ready { execution_id } => serde_json::json!({
-            "status": "ready",
-            "execution_id": execution_id,
-        }),
+        LeaseReport::Ready { .. } => {
+            unreachable!("ready reports go through report_lease_ready (/ready endpoint)")
+        }
         LeaseReport::Failed { code, message } => serde_json::json!({
             "status": "failed",
             "error": { "code": code, "message": scrub_secrets(message) },
@@ -759,6 +781,111 @@ async fn report_lease_status(
         bail!("lease status report rejected (HTTP {status}): {body}");
     }
     Ok(())
+}
+
+// ── Ready reporting (/ready) + root proxy ──
+
+/// What the runner will claim on /ready. A ready_url appears ONLY when the
+/// full local chain is proven: public_base_url configured AND the observed
+/// workload port is known AND the local root proxy actually came up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadyPayload {
+    pub execution_id: String,
+    pub ready_url: Option<String>,
+    pub local_port: Option<u16>,
+}
+
+/// Decide the /ready payload from what was actually observed/achieved.
+/// `proxy_started` is the result of the proxy bring-up attempt (None = not
+/// attempted because base or port was missing).
+pub fn decide_ready_payload(
+    execution_id: String,
+    public_base_url: Option<&str>,
+    port: Option<u16>,
+    proxy_started: Option<bool>,
+) -> ReadyPayload {
+    let ready_url = match (public_base_url, port, proxy_started) {
+        (Some(base), Some(_), Some(true)) => Some(format!("{}/", base.trim_end_matches('/'))),
+        // Missing base, unknown port, or a proxy that failed to start: a URL
+        // would be a fabrication — report ready without one.
+        _ => None,
+    };
+    ReadyPayload {
+        execution_id,
+        ready_url,
+        local_port: port,
+    }
+}
+
+async fn report_lease_ready(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    payload: &ReadyPayload,
+) -> Result<()> {
+    let url = format!(
+        "{}/v1/runner-leases/{}/ready",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    let mut body = serde_json::json!({ "execution_id": payload.execution_id });
+    if let Some(ready_url) = payload.ready_url.as_deref() {
+        body["ready_url"] = serde_json::Value::String(ready_url.to_string());
+    }
+    if let Some(port) = payload.local_port {
+        body["local_port"] = serde_json::Value::Number(port.into());
+    }
+    let response = client
+        .post(&url)
+        .bearer_auth(runner_token)
+        .json(&body)
+        .send()
+        .await
+        .context("ready report request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("ready report rejected (HTTP {status}): {body}");
+    }
+    Ok(())
+}
+
+/// Single-slot root L4 proxy: every accepted connection is piped to the ONE
+/// fixed upstream `127.0.0.1:<workload_port>` — by construction this cannot
+/// be an open proxy (no caller-controlled upstream exists). Root proxying
+/// (not /runs/<id>/ path multiplexing) keeps root-relative app paths like
+/// /assets/* and /api/* working without HTML rewriting; fine while the
+/// runner is single-slot.
+pub async fn start_root_proxy(
+    listen: &str,
+    workload_port: u16,
+) -> Result<tokio::task::JoinHandle<()>> {
+    // Refuse to come up if the upstream is not actually accepting — a proxy
+    // in front of nothing would make ready_url a lie.
+    tokio::net::TcpStream::connect(("127.0.0.1", workload_port))
+        .await
+        .with_context(|| format!("workload 127.0.0.1:{workload_port} is not accepting"))?;
+
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("failed to bind proxy listener on {listen}"))?;
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut inbound, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let Ok(mut upstream) =
+                    tokio::net::TcpStream::connect(("127.0.0.1", workload_port)).await
+                else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
+            });
+        }
+    });
+    Ok(handle)
 }
 
 // ── Child execution ──
@@ -929,11 +1056,11 @@ async fn run_lease_child(
                             execution_id = execution_id_from_receipt(&path);
                         }
                     }
-                    Some(ChildSignal::Ready) if !settled => {
+                    Some(ChildSignal::Ready { port }) if !settled => {
                         match execution_id.clone() {
                             Some(execution_id) => {
                                 settled = true;
-                                let _ = reports.send(LeaseReport::Ready { execution_id });
+                                let _ = reports.send(LeaseReport::Ready { execution_id, port });
                             }
                             None => {
                                 // A ready we cannot tie to an execution receipt is
@@ -978,6 +1105,8 @@ async fn handle_claimed_lease(
     runner_token: &str,
     lease: LeaseDto,
     busy: Arc<AtomicBool>,
+    public_base_url: Option<String>,
+    proxy_listen: String,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
     let command = match parse_lease_command(&lease.command) {
@@ -1040,24 +1169,82 @@ async fn handle_claimed_lease(
     tokio::spawn(async move {
         let (report_tx, mut report_rx) = tokio::sync::mpsc::unbounded_channel::<LeaseReport>();
         let monitor = tokio::spawn(run_lease_child(child, log_path, ready_timeout(), report_tx));
+        let mut proxy_handle: Option<tokio::task::JoinHandle<()>> = None;
         while let Some(report) = report_rx.recv().await {
-            let label = match &report {
-                LeaseReport::Preparing => "preparing".to_string(),
-                LeaseReport::Running => "running (launched, readiness not confirmed)".to_string(),
-                LeaseReport::Ready { execution_id } => format!("ready ({execution_id})"),
-                LeaseReport::Failed { code, .. } => format!("failed ({code})"),
-            };
-            println!("📨 lease {lease_id}: {label}");
-            if let Err(err) =
-                report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await
-            {
-                eprintln!(
-                    "⚠️  lease {lease_id}: report failed: {}",
-                    scrub_secrets(&format!("{err:#}"))
-                );
+            match report {
+                LeaseReport::Ready { execution_id, port } => {
+                    // Bring the root proxy up BEFORE claiming a URL; a proxy
+                    // that failed (or was never attempted) means ready is
+                    // reported without ready_url — never a fabricated one.
+                    let proxy_started = match (public_base_url.as_deref(), port) {
+                        (Some(_), Some(workload_port)) => {
+                            match start_root_proxy(&proxy_listen, workload_port).await {
+                                Ok(handle) => {
+                                    proxy_handle = Some(handle);
+                                    println!(
+                                        "🔀 lease {lease_id}: root proxy {} -> 127.0.0.1:{}",
+                                        proxy_listen, workload_port
+                                    );
+                                    Some(true)
+                                }
+                                Err(err) => {
+                                    eprintln!(
+                                        "⚠️  lease {lease_id}: proxy failed; reporting ready WITHOUT ready_url: {}",
+                                        scrub_secrets(&format!("{err:#}"))
+                                    );
+                                    Some(false)
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
+                    let payload = decide_ready_payload(
+                        execution_id,
+                        public_base_url.as_deref(),
+                        port,
+                        proxy_started,
+                    );
+                    println!(
+                        "📨 lease {lease_id}: ready ({}, ready_url={})",
+                        payload.execution_id,
+                        payload.ready_url.as_deref().unwrap_or("none")
+                    );
+                    if let Err(err) =
+                        report_lease_ready(&client, &api_base, &runner_token, &lease_id, &payload)
+                            .await
+                    {
+                        eprintln!(
+                            "⚠️  lease {lease_id}: ready report failed: {}",
+                            scrub_secrets(&format!("{err:#}"))
+                        );
+                    }
+                }
+                other => {
+                    let label = match &other {
+                        LeaseReport::Preparing => "preparing".to_string(),
+                        LeaseReport::Running => {
+                            "running (launched, readiness not confirmed)".to_string()
+                        }
+                        LeaseReport::Failed { code, .. } => format!("failed ({code})"),
+                        LeaseReport::Ready { .. } => unreachable!(),
+                    };
+                    println!("📨 lease {lease_id}: {label}");
+                    if let Err(err) =
+                        report_lease_status(&client, &api_base, &runner_token, &lease_id, &other)
+                            .await
+                    {
+                        eprintln!(
+                            "⚠️  lease {lease_id}: report failed: {}",
+                            scrub_secrets(&format!("{err:#}"))
+                        );
+                    }
+                }
             }
         }
         let _ = monitor.await;
+        if let Some(handle) = proxy_handle {
+            handle.abort();
+        }
         busy.store(false, Ordering::SeqCst);
         println!("📦 lease {lease_id}: child exited; runner is idle again");
     });
@@ -1228,11 +1415,20 @@ mod tests {
         );
         assert_eq!(
             parse_child_line("[✓] Service 'hello-capsule' is ready (ready event received)"),
-            Some(ChildSignal::Ready)
+            Some(ChildSignal::Ready { port: None })
         );
         assert_eq!(
             parse_child_line("[✓] Command started (ready event received)"),
-            Some(ChildSignal::Ready)
+            Some(ChildSignal::Ready { port: None })
+        );
+        // Primary machine-readable line wins, with and without a port.
+        assert_eq!(
+            parse_child_line("LIFECYCLE: ready port=8000"),
+            Some(ChildSignal::Ready { port: Some(8000) })
+        );
+        assert_eq!(
+            parse_child_line("LIFECYCLE: ready"),
+            Some(ChildSignal::Ready { port: None })
         );
         assert_eq!(
             parse_child_line("[•] Service launched — no readiness signal, not confirmed ready"),
@@ -1320,7 +1516,8 @@ mod tests {
         assert_eq!(
             reports,
             vec![LeaseReport::Ready {
-                execution_id: "blake3:ready-e2e".to_string()
+                execution_id: "blake3:ready-e2e".to_string(),
+                port: None,
             }],
             "ready must be reported exactly once, with the receipt's execution_id, and the post-ready exit must not retroactively change it"
         );
@@ -1381,6 +1578,116 @@ mod tests {
             LeaseReport::Failed { code, .. } => assert_eq!(code, "readiness_timeout"),
             other => panic!("silent child must time out, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_line_carries_observed_port_through_ready_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let receipt = dir.path().join("receipt.json");
+        std::fs::write(&receipt, r#"{"execution_id":"blake3:port-e2e"}"#).unwrap();
+        let script = format!(
+            "echo 'RECEIPT: {}'; echo 'LIFECYCLE: ready port=8000'; exit 0",
+            receipt.display()
+        );
+        let (reports, _logdir) = collect_reports(&script, Duration::from_secs(20)).await;
+        assert_eq!(
+            reports,
+            vec![LeaseReport::Ready {
+                execution_id: "blake3:port-e2e".to_string(),
+                port: Some(8000),
+            }]
+        );
+    }
+
+    #[test]
+    fn ready_payload_only_claims_a_url_under_full_proof() {
+        let id = || "blake3:x".to_string();
+        // Full proof: base + port + proxy up -> root URL.
+        let payload =
+            decide_ready_payload(id(), Some("https://r.example.com"), Some(8000), Some(true));
+        assert_eq!(payload.ready_url.as_deref(), Some("https://r.example.com/"));
+        assert_eq!(payload.local_port, Some(8000));
+
+        // No public base -> no URL.
+        assert_eq!(
+            decide_ready_payload(id(), None, Some(8000), None).ready_url,
+            None
+        );
+        // Port unknown -> no URL.
+        assert_eq!(
+            decide_ready_payload(id(), Some("https://r.example.com"), None, None).ready_url,
+            None
+        );
+        // Proxy failed to start -> no URL (never fabricate reachability).
+        assert_eq!(
+            decide_ready_payload(id(), Some("https://r.example.com"), Some(8000), Some(false))
+                .ready_url,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_maps_root_to_observed_local_port_and_nothing_else() {
+        // Upstream HTTP server serving multiple connections — the proxy's
+        // bring-up probe consumes one connection before the real request.
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let upstream_port = upstream_listener.local_addr().expect("addr").port();
+        let upstream = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = upstream_listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = "{\"hello\":\"from-upstream\"}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        // Proxy on its own ephemeral port: bind via port 0 is not expressible
+        // through start_root_proxy's listen string with assertions, so pick a
+        // free port first.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+        let listen = listener.local_addr().expect("addr").to_string();
+        drop(listener);
+
+        let handle = start_root_proxy(&listen, upstream_port)
+            .await
+            .expect("proxy starts against a live upstream");
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{listen}/anything"))
+            .send()
+            .await
+            .expect("request through proxy");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.text().await.expect("body");
+        assert!(body.contains("from-upstream"));
+        drop(upstream); // serving thread parks on accept; process teardown reaps it
+        handle.abort();
+
+        // The only upstream the proxy can reach is the fixed workload port —
+        // there is no caller-controlled upstream input at the type level; a
+        // dead upstream refuses bring-up entirely:
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+        let dead_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("dead");
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        let listen2 = listener.local_addr().expect("addr").to_string();
+        drop(listener);
+        assert!(
+            start_root_proxy(&listen2, dead_port).await.is_err(),
+            "proxy must refuse to come up in front of a dead workload"
+        );
     }
 
     // ── Lease poll wire handling ──

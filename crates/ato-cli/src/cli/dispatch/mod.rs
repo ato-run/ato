@@ -752,10 +752,12 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     api_base,
                     display_name,
                     public_base_url,
+                    proxy_listen,
                 } => rt.block_on(crate::application::runner_agent::run_serve(
                     api_base,
                     display_name,
                     public_base_url,
+                    proxy_listen,
                 )),
             }
         }
