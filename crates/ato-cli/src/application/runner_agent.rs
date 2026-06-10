@@ -672,6 +672,31 @@ pub fn scrub_secrets(text: &str) -> String {
 
 // ── Child output signals ──
 
+/// Parsed payload of a `CONSENT-REQUIRED: <json>` line from `ato run` (P4-A).
+/// The full identity 5-tuple is the decision contract; `consent_ref` is its
+/// hash (blake3(JCS(schema + 5-tuple))). The runner reports this as
+/// needs_consent and, only after the owner approves this exact `consent_ref`,
+/// calls the local `approve-execution-plan` primitive and retries.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ConsentRequest {
+    #[serde(default)]
+    pub schema: String,
+    #[serde(default)]
+    pub consent_ref: String,
+    #[serde(default)]
+    pub scoped_id: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub target_label: String,
+    #[serde(default)]
+    pub policy_segment_hash: String,
+    #[serde(default)]
+    pub provisioning_policy_hash: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChildSignal {
     /// Stable machine-readable receipt pointer ("RECEIPT: <path>").
@@ -683,6 +708,10 @@ pub enum ChildSignal {
     StartedNoReadiness,
     /// The CLI announced the service exited before readiness.
     ExitedBeforeReady,
+    /// `ato run` requires consent for this ExecutionPlan ("CONSENT-REQUIRED:
+    /// <json>"). Carries the 5-tuple + consent_ref + summary for owner approval
+    /// (P4-A). Parsed here; the lease loop does not act on it yet (PR3 wires it).
+    ConsentRequired(ConsentRequest),
 }
 
 /// Map one line of `ato run` output to a lifecycle signal.
@@ -698,6 +727,12 @@ pub fn parse_child_line(line: &str) -> Option<ChildSignal> {
         if !path.is_empty() {
             return Some(ChildSignal::Receipt(PathBuf::from(path)));
         }
+    }
+    // Machine-readable consent gate (P4-A): "CONSENT-REQUIRED: <json>".
+    if let Some(rest) = trimmed.strip_prefix("CONSENT-REQUIRED: ")
+        && let Ok(request) = serde_json::from_str::<ConsentRequest>(rest.trim())
+    {
+        return Some(ChildSignal::ConsentRequired(request));
     }
     // Primary, machine-readable ready signal: "LIFECYCLE: ready[ port=N]".
     if let Some(rest) = trimmed.strip_prefix("LIFECYCLE: ready") {
@@ -1855,6 +1890,25 @@ mod tests {
             parse_child_line("[✓] heartbeat ok — online, next in 30s"),
             None
         );
+    }
+
+    #[test]
+    fn consent_required_line_parses_into_signal() {
+        let json = r#"{"schema":"execution_plan_consent_v1","consent_ref":"blake3:ref","scoped_id":"community/hello-capsule","version":"0.3.0","target_label":"main","policy_segment_hash":"blake3:p","provisioning_policy_hash":"blake3:q","summary":"network: api.example.com\nfs-rw: /data"}"#;
+        match parse_child_line(&format!("CONSENT-REQUIRED: {json}")) {
+            Some(ChildSignal::ConsentRequired(req)) => {
+                assert_eq!(req.consent_ref, "blake3:ref");
+                assert_eq!(req.scoped_id, "community/hello-capsule");
+                assert_eq!(req.version, "0.3.0");
+                assert_eq!(req.target_label, "main");
+                assert_eq!(req.policy_segment_hash, "blake3:p");
+                assert_eq!(req.provisioning_policy_hash, "blake3:q");
+                assert!(req.summary.contains("api.example.com"));
+            }
+            other => panic!("expected ConsentRequired, got {other:?}"),
+        }
+        // Malformed JSON after the prefix must NOT misclassify as anything.
+        assert_eq!(parse_child_line("CONSENT-REQUIRED: not json"), None);
     }
 
     #[test]
