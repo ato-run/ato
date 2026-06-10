@@ -888,6 +888,280 @@ pub async fn start_root_proxy(
     Ok(handle)
 }
 
+// ── Owner-initiated stop (P3-C) ──
+//
+// Stop is two-phase and honest: the PWA asks the API to stop, the API marks
+// the run `stopping` and records the request, and ONLY after this runner
+// terminates the workload, tears down the proxy, and frees its slot does it
+// POST /stopped — the single place the API may claim the run is stopped.
+// A teardown it cannot fully confirm is reported as such (partial cleanup),
+// never laundered into a clean stop.
+
+/// How often an active run polls the control channel for an owner stop. Snappy
+/// enough for a Stop button; at most one active run exists, so the load is one
+/// request every few seconds.
+const STOP_POLL_SECONDS: u64 = 3;
+/// Grace a SIGTERM'd workload group gets to exit before escalating to SIGKILL.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+/// Window to confirm the group is reaped after SIGKILL.
+const STOP_KILL_GRACE: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Deserialize)]
+struct LeaseControl {
+    #[serde(default)]
+    stop_requested: bool,
+}
+
+/// Watch the lease's control channel for an owner-initiated stop. Sets the flag
+/// and fires the notify the moment a stop is requested, then returns. Also
+/// returns quietly when the lease is gone (404) or the runner is no longer
+/// valid (401) so the task never spins; transient errors retry next tick.
+async fn poll_lease_control(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    stop_flag: Arc<AtomicBool>,
+    stop_notify: Arc<tokio::sync::Notify>,
+) {
+    let url = format!(
+        "{}/v1/runner-leases/{}/control",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    // Poll first, then sleep: an already-requested stop is observed within a
+    // network round-trip, and the sleep between ticks prevents a busy spin on
+    // persistent errors.
+    loop {
+        match poll_control_once(client, &url, runner_token).await {
+            ControlOutcome::Stop => {
+                stop_flag.store(true, Ordering::SeqCst);
+                stop_notify.notify_one();
+                return;
+            }
+            // Lease gone or runner invalid/revoked: nothing left to watch.
+            // Revocation teardown is the heartbeat loop's job; just stop here.
+            ControlOutcome::Done => return,
+            ControlOutcome::Continue => {}
+        }
+        tokio::time::sleep(Duration::from_secs(STOP_POLL_SECONDS)).await;
+    }
+}
+
+enum ControlOutcome {
+    /// No stop requested (or a transient error) — keep watching.
+    Continue,
+    /// The owner requested a stop.
+    Stop,
+    /// The lease/runner is gone (404/401) — stop watching.
+    Done,
+}
+
+/// One control poll. Transient transport/5xx errors map to Continue (retry);
+/// 404/401 map to Done; a `stop_requested` body maps to Stop.
+async fn poll_control_once(
+    client: &reqwest::Client,
+    url: &str,
+    runner_token: &str,
+) -> ControlOutcome {
+    let response = match client.get(url).bearer_auth(runner_token).send().await {
+        Ok(response) => response,
+        Err(_) => return ControlOutcome::Continue,
+    };
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::UNAUTHORIZED {
+        return ControlOutcome::Done;
+    }
+    if !status.is_success() {
+        return ControlOutcome::Continue;
+    }
+    match response.json::<LeaseControl>().await {
+        Ok(control) if control.stop_requested => ControlOutcome::Stop,
+        _ => ControlOutcome::Continue,
+    }
+}
+
+/// The teardown outcome the runner reports on /stopped. The slot is honestly
+/// free ONLY when both the workload process and the proxy are confirmed down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StopCleanup {
+    pub process_terminated: bool,
+    pub proxy_stopped: bool,
+    pub slot_released: bool,
+}
+
+impl StopCleanup {
+    /// Derive the cleanup record from what was actually achieved. `slot_released`
+    /// is never asserted independently: a slot is free only when the workload
+    /// is gone AND the proxy is down. Anything less keeps the slot held.
+    fn from_teardown(process_terminated: bool, proxy_stopped: bool) -> Self {
+        Self {
+            process_terminated,
+            proxy_stopped,
+            slot_released: process_terminated && proxy_stopped,
+        }
+    }
+}
+
+fn stopped_request_body(cleanup: &StopCleanup) -> serde_json::Value {
+    serde_json::json!({
+        "reason": "user_requested",
+        "cleanup": {
+            "process_terminated": cleanup.process_terminated,
+            "proxy_stopped": cleanup.proxy_stopped,
+            "slot_released": cleanup.slot_released,
+        },
+    })
+}
+
+/// Acknowledge teardown to the control plane. A 409 here is not a transport
+/// error: it is the API truthfully recording an incomplete cleanup as a failed
+/// stop. We accept it as a delivered ack rather than retrying.
+async fn report_lease_stopped(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    cleanup: &StopCleanup,
+) -> Result<()> {
+    let url = format!(
+        "{}/v1/runner-leases/{}/stopped",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    let response = client
+        .post(&url)
+        .bearer_auth(runner_token)
+        .json(&stopped_request_body(cleanup))
+        .send()
+        .await
+        .context("stopped ack request failed")?;
+    let status = response.status();
+    if !status.is_success() && status != reqwest::StatusCode::CONFLICT {
+        let body = response.text().await.unwrap_or_default();
+        bail!("stopped ack rejected (HTTP {status}): {body}");
+    }
+    Ok(())
+}
+
+/// Send `signal` to the whole process group led by `pid` (negative target).
+/// ESRCH (no such group) means the group already exited — the teardown we
+/// wanted — so it maps to Ok.
+#[cfg(unix)]
+fn kill_group(pid: u32, signal: libc::c_int) -> std::io::Result<()> {
+    let rc = unsafe { libc::kill(-(pid as libc::pid_t), signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(err)
+    }
+}
+
+/// True while any process in `pid`'s group still exists (signal 0 probes
+/// without delivering). The production teardown gates on the monitor reaping
+/// the child, not on this — zombies linger in the group until reaped — but it
+/// is a precise check for tests.
+#[cfg(all(unix, test))]
+fn process_group_alive(pid: u32) -> bool {
+    unsafe { libc::kill(-(pid as libc::pid_t), 0) == 0 }
+}
+
+/// Terminate the workload's process group and wait for it to be reaped.
+/// SIGTERM first (let the app shut down cleanly), escalate to SIGKILL after a
+/// bounded grace, and confirm via the monitor task draining the child's output
+/// and reaping it. Returns true only when termination is confirmed; an
+/// unconfirmable outcome returns false so the caller can fail closed.
+async fn terminate_child_group(
+    child_pid: Option<u32>,
+    mut monitor: tokio::task::JoinHandle<()>,
+) -> bool {
+    #[cfg(unix)]
+    {
+        let Some(pid) = child_pid else {
+            // No live PID means the child was already reaped — nothing to kill.
+            let _ = monitor.await;
+            return true;
+        };
+        // Polite first: SIGTERM the whole group so the app can shut down.
+        let _ = kill_group(pid, libc::SIGTERM);
+        tokio::select! {
+            _ = &mut monitor => return true,
+            _ = tokio::time::sleep(STOP_GRACE) => {}
+        }
+        // Still alive after the grace window: force-kill the group.
+        let _ = kill_group(pid, libc::SIGKILL);
+        // SIGKILL cannot be caught; the monitor should reap promptly. If it
+        // still does not return, we cannot confirm termination — fail closed.
+        (tokio::time::timeout(STOP_KILL_GRACE, &mut monitor).await).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child_pid;
+        // No process groups: abort the monitor; kill_on_drop reaps the direct
+        // child when its handle drops. Best effort on non-Unix hosts.
+        monitor.abort();
+        let _ = monitor.await;
+        true
+    }
+}
+
+/// Tear down an active run on owner request: terminate the workload group, stop
+/// the proxy, release the slot ONLY if both are confirmed, and ack /stopped.
+#[allow(clippy::too_many_arguments)]
+async fn perform_stop_cleanup(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    child_pid: Option<u32>,
+    monitor: tokio::task::JoinHandle<()>,
+    proxy_handle: Option<tokio::task::JoinHandle<()>>,
+    busy: &Arc<AtomicBool>,
+) {
+    println!("🛑 lease {lease_id}: owner requested stop; tearing down workload");
+
+    let process_terminated = terminate_child_group(child_pid, monitor).await;
+
+    // Drop the proxy listener so the ready_url stops serving immediately; with
+    // the upstream killed, in-flight connections drain on their own. A run that
+    // never brought a proxy up (no port, or no public_base_url) is vacuously
+    // stopped.
+    let proxy_stopped = match proxy_handle {
+        Some(handle) => {
+            handle.abort();
+            true
+        }
+        None => true,
+    };
+
+    let cleanup = StopCleanup::from_teardown(process_terminated, proxy_stopped);
+
+    // Free the single slot ONLY on a fully confirmed teardown. If we cannot
+    // confirm the workload is gone, stay busy (fail closed) rather than offer a
+    // slot a possibly-live workload still occupies.
+    if cleanup.slot_released {
+        busy.store(false, Ordering::SeqCst);
+        println!("🛑 lease {lease_id}: workload terminated, proxy stopped, slot released");
+    } else {
+        eprintln!(
+            "⚠️  lease {lease_id}: stop cleanup incomplete (process_terminated={}, proxy_stopped={}); slot held",
+            cleanup.process_terminated, cleanup.proxy_stopped
+        );
+    }
+
+    if let Err(err) = report_lease_stopped(client, api_base, runner_token, lease_id, &cleanup).await
+    {
+        eprintln!(
+            "⚠️  lease {lease_id}: stopped ack failed: {}",
+            scrub_secrets(&format!("{err:#}"))
+        );
+    }
+}
+
 // ── Child execution ──
 
 fn run_log_path(lease_id: &str) -> PathBuf {
@@ -941,6 +1215,12 @@ fn spawn_run_child(source_url: &str) -> Result<tokio::process::Child> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Lead a new process group (pgid == child pid) so a stop can signal the
+    // ENTIRE workload subtree — `ato run` forks nacelle → bwrap → the app —
+    // with a single kill(-pgid). Without this we could only reap the direct
+    // child and would orphan the sandboxed grandchildren.
+    #[cfg(unix)]
+    cmd.process_group(0);
     // The runner token lives only in this process's memory and credentials
     // file — it is never exported to the child environment.
     cmd.kill_on_drop(true);
@@ -1166,11 +1446,59 @@ async fn handle_claimed_lease(
     let api_base = api_base.to_string();
     let runner_token = runner_token.to_string();
     let lease_id = lease.id.clone();
+    // Capture the child's PID (== its process-group id, see spawn_run_child)
+    // before the child moves into the monitor task — a stop needs it to signal
+    // the whole workload group.
+    let child_pid = child.id();
     tokio::spawn(async move {
+        // Watch the control channel for an owner-initiated stop, concurrently
+        // with execution. The flag distinguishes "child exited because we
+        // stopped it" from a genuine failure; the notify wakes the loop.
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_notify = Arc::new(tokio::sync::Notify::new());
+        let control = tokio::spawn({
+            let client = client.clone();
+            let api_base = api_base.clone();
+            let runner_token = runner_token.clone();
+            let lease_id = lease_id.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let stop_notify = Arc::clone(&stop_notify);
+            async move {
+                poll_lease_control(
+                    &client,
+                    &api_base,
+                    &runner_token,
+                    &lease_id,
+                    stop_flag,
+                    stop_notify,
+                )
+                .await;
+            }
+        });
+
         let (report_tx, mut report_rx) = tokio::sync::mpsc::unbounded_channel::<LeaseReport>();
         let monitor = tokio::spawn(run_lease_child(child, log_path, ready_timeout(), report_tx));
         let mut proxy_handle: Option<tokio::task::JoinHandle<()>> = None;
-        while let Some(report) = report_rx.recv().await {
+        let mut stopping = false;
+        loop {
+            let report = tokio::select! {
+                biased;
+                _ = stop_notify.notified() => {
+                    stopping = true;
+                    break;
+                }
+                maybe = report_rx.recv() => match maybe {
+                    Some(report) => report,
+                    None => break,
+                },
+            };
+            // A stop that landed between ticks (flag set while a report was in
+            // flight): skip terminal churn and go straight to teardown so the
+            // run settles as stopped, not failed.
+            if stop_flag.load(Ordering::SeqCst) {
+                stopping = true;
+                break;
+            }
             match report {
                 LeaseReport::Ready { execution_id, port } => {
                     // Bring the root proxy up BEFORE claiming a URL; a proxy
@@ -1241,12 +1569,28 @@ async fn handle_claimed_lease(
                 }
             }
         }
-        let _ = monitor.await;
-        if let Some(handle) = proxy_handle {
-            handle.abort();
+        if stopping {
+            perform_stop_cleanup(
+                &client,
+                &api_base,
+                &runner_token,
+                &lease_id,
+                child_pid,
+                monitor,
+                proxy_handle,
+                &busy,
+            )
+            .await;
+        } else {
+            // Natural settle/exit: the child ran to completion on its own.
+            let _ = monitor.await;
+            if let Some(handle) = proxy_handle {
+                handle.abort();
+            }
+            busy.store(false, Ordering::SeqCst);
+            println!("📦 lease {lease_id}: child exited; runner is idle again");
         }
-        busy.store(false, Ordering::SeqCst);
-        println!("📦 lease {lease_id}: child exited; runner is idle again");
+        control.abort();
     });
 }
 
@@ -1804,5 +2148,204 @@ mod tests {
             matches!(outcome, HeartbeatOutcome::Revoked),
             "revoked must be terminal, got {outcome:?}"
         );
+    }
+
+    // ── Owner-initiated stop (P3-C) ──
+
+    #[test]
+    fn stop_cleanup_frees_slot_only_when_fully_torn_down() {
+        // Both teardowns confirmed -> the slot is honestly free.
+        assert!(StopCleanup::from_teardown(true, true).slot_released);
+        // Either teardown unconfirmed -> the slot stays held (fail closed).
+        // This is the cleanup_failure_does_not_release_slot_as_clean invariant.
+        assert!(!StopCleanup::from_teardown(false, true).slot_released);
+        assert!(!StopCleanup::from_teardown(true, false).slot_released);
+        assert!(!StopCleanup::from_teardown(false, false).slot_released);
+    }
+
+    #[test]
+    fn stopped_body_carries_reason_and_cleanup_flags() {
+        let clean = stopped_request_body(&StopCleanup::from_teardown(true, true));
+        assert_eq!(clean["reason"], "user_requested");
+        assert_eq!(clean["cleanup"]["process_terminated"], true);
+        assert_eq!(clean["cleanup"]["proxy_stopped"], true);
+        assert_eq!(clean["cleanup"]["slot_released"], true);
+
+        // A partial teardown reports the partial flags truthfully — the API,
+        // not the runner, decides that means "not a clean stop".
+        let partial = stopped_request_body(&StopCleanup::from_teardown(true, false));
+        assert_eq!(partial["cleanup"]["proxy_stopped"], false);
+        assert_eq!(partial["cleanup"]["slot_released"], false);
+    }
+
+    #[test]
+    fn lease_control_deserializes_stop_request() {
+        let stop: LeaseControl = serde_json::from_str(
+            "{\"lease_id\":\"01L\",\"status\":\"ready\",\"stop_requested\":true,\"stop_requested_at\":\"2026-06-10T00:00:00Z\"}",
+        )
+        .expect("parse");
+        assert!(stop.stop_requested);
+        let go: LeaseControl = serde_json::from_str("{\"stop_requested\":false}").expect("parse");
+        assert!(!go.stop_requested);
+        // A missing field is "no stop requested", never a parse error.
+        let empty: LeaseControl = serde_json::from_str("{}").expect("parse");
+        assert!(!empty.stop_requested);
+    }
+
+    #[tokio::test]
+    async fn poll_control_once_maps_status_to_outcome() {
+        let client = reqwest::Client::new();
+
+        // 200 + stop_requested true -> Stop, with runner-token bearer auth.
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"lease_id\":\"01L\",\"stop_requested\":true,\"stop_requested_at\":\"t\"}",
+        );
+        let url = format!("{base}/v1/runner-leases/01L/control");
+        let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
+        let request = server.join().expect("server");
+        assert!(request.contains("GET /v1/runner-leases/01L/control"));
+        assert!(
+            request
+                .to_lowercase()
+                .contains("authorization: bearer ato_rnr_t")
+        );
+        assert!(matches!(outcome, ControlOutcome::Stop));
+
+        // 404 (lease gone) -> Done: stop watching, do not spin.
+        let (base, server) = one_shot_http("HTTP/1.1 404 Not Found", "{\"error\":\"not_found\"}");
+        let url = format!("{base}/v1/runner-leases/01L/control");
+        let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(outcome, ControlOutcome::Done));
+
+        // 200 + stop_requested false -> Continue.
+        let (base, server) = one_shot_http("HTTP/1.1 200 OK", "{\"stop_requested\":false}");
+        let url = format!("{base}/v1/runner-leases/01L/control");
+        let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(outcome, ControlOutcome::Continue));
+    }
+
+    #[tokio::test]
+    async fn report_lease_stopped_posts_cleanup_and_accepts_409() {
+        // Partial cleanup -> the API answers 409 stop_cleanup_incomplete. That
+        // is a truthful outcome, not a transport failure: the ack must succeed.
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 409 Conflict",
+            "{\"error\":\"stop_cleanup_incomplete\",\"status\":\"failed\"}",
+        );
+        let client = reqwest::Client::new();
+        let cleanup = StopCleanup::from_teardown(true, false);
+        let result = report_lease_stopped(&client, &base, "ato_rnr_t", "01LEASE", &cleanup).await;
+        let request = server.join().expect("server");
+        assert!(request.contains("POST /v1/runner-leases/01LEASE/stopped"));
+        assert!(request.contains("\"process_terminated\":true"));
+        assert!(request.contains("\"proxy_stopped\":false"));
+        assert!(request.contains("\"slot_released\":false"));
+        assert!(
+            result.is_ok(),
+            "409 (recorded as a failed stop) is a delivered ack, not an error: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_lease_stopped_errors_on_unexpected_status() {
+        let (base, server) = one_shot_http("HTTP/1.1 500 Internal Server Error", "{}");
+        let client = reqwest::Client::new();
+        let cleanup = StopCleanup::from_teardown(true, true);
+        let result = report_lease_stopped(&client, &base, "ato_rnr_t", "01LEASE", &cleanup).await;
+        let _ = server.join();
+        assert!(
+            result.is_err(),
+            "an unexpected 5xx must surface, not be swallowed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_group_kills_whole_group_and_confirms() {
+        // `sh -c 'sleep 300 & sleep 300'` builds a group with >1 member, so a
+        // successful teardown proves we signal the GROUP (kill -pgid), not just
+        // the direct child — the requirement to reap the whole workload subtree.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 300 & sleep 300")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn process group");
+        let pid = child.id().expect("child pid");
+        // Drop the pipe read-ends so the child exiting closes them, mirroring
+        // run_lease_child's reap path.
+        child.stdout.take();
+        child.stderr.take();
+        assert!(
+            process_group_alive(pid),
+            "the workload group must be running before the stop"
+        );
+
+        let monitor = tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        let terminated = terminate_child_group(Some(pid), monitor).await;
+        assert!(
+            terminated,
+            "terminating the group must be confirmed (monitor reaps the leader)"
+        );
+
+        // The reparented grandchild is reaped by init shortly after; confirm the
+        // group is fully gone (no survivor occupies the slot).
+        for _ in 0..100 {
+            if !process_group_alive(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !process_group_alive(pid),
+            "no process in the workload group may survive the stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_proxy_releases_listener_port() {
+        // Live upstream so the proxy comes up (it refuses bring-up otherwise).
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let upstream_port = upstream_listener.local_addr().expect("addr").port();
+        let upstream = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = upstream_listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+            }
+        });
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+        let listen = probe.local_addr().expect("addr").to_string();
+        drop(probe);
+
+        let handle = start_root_proxy(&listen, upstream_port)
+            .await
+            .expect("proxy starts against a live upstream");
+        // Aborting the proxy drops its listener, freeing the bound port so new
+        // external connections are refused — the ready_url stops serving.
+        handle.abort();
+        let mut refused = false;
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(&listen).await.is_err() {
+                refused = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            refused,
+            "after the proxy is aborted its listen port must refuse connections"
+        );
+        drop(upstream);
     }
 }
