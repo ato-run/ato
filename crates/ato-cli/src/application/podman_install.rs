@@ -150,7 +150,9 @@ pub(crate) struct HelperArtifact {
 pub(crate) enum ArtifactFormat {
     #[cfg_attr(not(test), allow(dead_code))]
     TarGz,
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Constructed only by platform-specific artifact tables (Windows zips);
+    // on other targets it is still matched in extract paths.
+    #[allow(dead_code)]
     Zip,
     /// macOS `.pkg` installer. Expanded with `pkgutil --expand-full` (an OS
     /// built-in, no Xcode CLT required). After expansion the named binaries
@@ -1645,18 +1647,17 @@ mod tests {
     /// Fetcher driven by a per-URL queue of scripted outcomes, so a test can say
     /// "URL A: transient, transient, then bytes" or "URL B: 404". Each call pops
     /// the next outcome for that URL; an empty/unknown queue is a permanent miss.
+    type ScriptedOutcome = Result<Vec<u8>, FetchError>;
+
     struct ScriptedFetcher {
         scripts: std::cell::RefCell<
-            std::collections::HashMap<
-                String,
-                std::collections::VecDeque<Result<Vec<u8>, FetchError>>,
-            >,
+            std::collections::HashMap<String, std::collections::VecDeque<ScriptedOutcome>>,
         >,
         calls: std::cell::RefCell<Vec<String>>,
     }
 
     impl ScriptedFetcher {
-        fn new(scripts: Vec<(&str, Vec<Result<Vec<u8>, FetchError>>)>) -> Self {
+        fn new(scripts: Vec<(&str, Vec<ScriptedOutcome>)>) -> Self {
             let map = scripts
                 .into_iter()
                 .map(|(url, seq)| (url.to_string(), seq.into_iter().collect()))
