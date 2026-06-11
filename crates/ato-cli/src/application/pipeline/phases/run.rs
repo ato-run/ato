@@ -3924,13 +3924,38 @@ where
                 );
                 return Ok(());
             }
-            let exit = crate::executors::node_compat::execute(
+            // Foreground gets the same supervised spawn + event pump as the
+            // host-fallback branch above: TCP-probe the declared port and
+            // emit the honest `LIFECYCLE: ready port=N` line. Without this a
+            // Connected Runner dispatched node capsule could never report
+            // ready (#623).
+            let process = crate::executors::node_compat::spawn_foreground(
                 &decision.plan,
                 prepared.authoritative_lock.as_ref(),
                 &execution_plan,
                 &launch_ctx,
                 request.dangerously_skip_permissions,
             )?;
+            register_capsule_process_cleanup(
+                &mut attempt,
+                &process,
+                decision.plan.selected_target_label(),
+            );
+            let exit = hooks
+                .complete_foreground_source_process(
+                    process,
+                    request.reporter.clone(),
+                    is_one_shot,
+                    false,
+                    launch_ctx
+                        .socket_paths()
+                        .map(|paths| !paths.is_empty())
+                        .unwrap_or(false),
+                    false,
+                    use_progressive_ui,
+                    Some(execution_id.clone()),
+                )
+                .await?;
             sidecar_cleanup.stop_now();
             if exit != 0 {
                 if let Some(external_capsules) = external_capsules.as_mut() {
