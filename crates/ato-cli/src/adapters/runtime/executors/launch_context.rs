@@ -387,9 +387,37 @@ impl RuntimeLaunchContext {
 
 #[cfg(test)]
 mod tests {
-    use super::RuntimeLaunchContext;
+    use super::{InjectedMount, RuntimeLaunchContext};
     use crate::ipc::inject::IpcContext;
     use std::path::PathBuf;
+
+    #[test]
+    fn with_injected_mounts_appends_and_preserves_existing() {
+        // Regression: the sandbox path calls with_injected_mounts repeatedly
+        // (data-injection mounts, sandbox grants, then the writable session data
+        // dir). It MUST append, not replace — otherwise the session-data mount
+        // would clobber earlier grants.
+        let grant = InjectedMount {
+            source: PathBuf::from("/host/grant"),
+            target: "/grant".to_string(),
+            readonly: true,
+        };
+        let session = InjectedMount {
+            source: PathBuf::from("/host/session-data/run-1"),
+            target: "/runs/ato/session".to_string(),
+            readonly: false,
+        };
+        let ctx = RuntimeLaunchContext::empty()
+            .with_injected_mounts(vec![grant.clone()])
+            .with_injected_mounts(vec![session.clone()]);
+        let mounts = ctx.injected_mounts();
+        assert_eq!(mounts.len(), 2, "second call must append, not replace");
+        assert_eq!(mounts, &[grant, session]);
+        assert!(
+            !mounts[1].readonly,
+            "writable session data mount must stay writable"
+        );
+    }
 
     #[test]
     fn empty_context_does_not_apply_env() {

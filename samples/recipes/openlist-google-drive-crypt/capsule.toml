@@ -7,6 +7,9 @@ homepage = "https://doc.oplist.org/"
 
 default_target = "app"
 
+[source]
+repository = "openlistteam/openlist"
+
 [targets.app]
 runtime = "oci"
 image = "openlistteam/openlist:v4.2.2"
@@ -26,7 +29,7 @@ kind = "filesystem"
 durability = "persistent"
 purpose = "OpenList data, users, storage driver configuration, and local metadata"
 attach = "explicit"
-schema_id = "sha256:openlist-google-drive-crypt-data-v1"
+schema_id = "sha256:f0a7239ddde24e1335665ea7d15eef38035580e5df4b6f3f63de9ca7b39523db"
 
 [services.main]
 target = "app"
