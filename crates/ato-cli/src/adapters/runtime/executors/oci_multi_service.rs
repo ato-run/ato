@@ -1868,7 +1868,7 @@ mod tests {
     use crate::adapters::runtime::oci_provider::FakeOciProvider;
     use capsule_core::runtime::oci::{OciContainerInspect, engine_state_volume_name};
     use capsule_core::types::{
-        Mount, OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
+        OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
         ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
         ServiceConnectionInfo,
     };

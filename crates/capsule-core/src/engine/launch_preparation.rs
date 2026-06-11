@@ -118,7 +118,9 @@ pub struct LaunchPreparationInput {
 pub enum LaunchPreparationDecision {
     /// A launch can be prepared: the plan carries everything a future dispatch /
     /// API layer needs (but nothing has been dispatched or launched).
-    Prepared(LaunchPreparationPlan),
+    // Boxed: LaunchPreparationPlan dwarfs the NotPrepared variant
+    // (clippy::large_enum_variant).
+    Prepared(Box<LaunchPreparationPlan>),
     /// A launch cannot be prepared; `blockers` lists why (typically one, in the
     /// order the pipeline evaluates).
     NotPrepared {
@@ -281,7 +283,7 @@ pub fn prepare_launch(
     //    re-checks template integrity, runner-class compatibility, validates the
     //    projection digests, and pins the selected runner.
     let materialization = match build_launch_materialization(LaunchMaterializationBuildInput {
-        launch_template: launch_template.clone(),
+        launch_template: (*launch_template).clone(),
         install_profile_key,
         requirement_graph_hash: requirement_graph_hash.clone(),
         session_ref,
@@ -320,12 +322,12 @@ pub fn prepare_launch(
     };
 
     // 6. Assemble the prepared plan, preserving every identity ref distinctly.
-    LaunchPreparationDecision::Prepared(LaunchPreparationPlan {
+    LaunchPreparationDecision::Prepared(Box::new(LaunchPreparationPlan {
         requirement_graph_snapshot_hash: record.requirement_graph_snapshot_hash.clone(),
         capsule_instance_key: record.capsule_instance_key.clone(),
         materialization: record,
         prepare_command: prepared.payload,
-        launch_template,
+        launch_template: *launch_template,
         install_revision_id: revision,
         execution_id,
         requirement_graph_hash,
@@ -333,7 +335,7 @@ pub fn prepare_launch(
         command_request_id,
         selected_runner_class,
         selected_runner_ref,
-    })
+    }))
 }
 
 #[cfg(test)]
