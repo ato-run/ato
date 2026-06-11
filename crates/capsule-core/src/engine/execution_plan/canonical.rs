@@ -30,13 +30,35 @@ struct ConsentRefInput<'a> {
 /// wire payload and host-local ledger keep the FULL 5-tuple — this ref is only
 /// for display and for binding an owner's approval to the exact policy.
 pub fn consent_ref(consent: &Consent) -> Result<String, AtoExecutionError> {
+    consent_ref_from_parts(
+        &consent.key.scoped_id,
+        &consent.key.version,
+        &consent.key.target_label,
+        &consent.policy_segment_hash,
+        &consent.provisioning_policy_hash,
+    )
+}
+
+/// Recompute the consent_ref from the identity 5-tuple alone, without a full
+/// `Consent`. The connected runner uses this to verify an owner's approved
+/// consent_ref against the exact policy the child gated on, BEFORE it writes its
+/// host-local ledger: an approval bound to any other 5-tuple hashes to a
+/// different ref and is refused. Kept byte-identical to [`consent_ref`] by
+/// sharing `ConsentRefInput` + `CONSENT_REF_SCHEMA`.
+pub fn consent_ref_from_parts(
+    scoped_id: &str,
+    version: &str,
+    target_label: &str,
+    policy_segment_hash: &str,
+    provisioning_policy_hash: &str,
+) -> Result<String, AtoExecutionError> {
     canonical_hash(&ConsentRefInput {
         schema: CONSENT_REF_SCHEMA,
-        scoped_id: &consent.key.scoped_id,
-        version: &consent.key.version,
-        target_label: &consent.key.target_label,
-        policy_segment_hash: &consent.policy_segment_hash,
-        provisioning_policy_hash: &consent.provisioning_policy_hash,
+        scoped_id,
+        version,
+        target_label,
+        policy_segment_hash,
+        provisioning_policy_hash,
     })
 }
 
@@ -253,6 +275,36 @@ mod tests {
         algo.mount_set_algo_version = 99;
         algo.mount_set_algo_id = "other".into();
         assert_eq!(consent_ref(&algo).expect("ref"), r);
+    }
+
+    #[test]
+    fn consent_ref_from_parts_matches_consent_ref() {
+        // The connected runner recomputes the ref from the 5-tuple it received
+        // (no full Consent) to verify an owner's approval before writing its
+        // host-local ledger. That recompute MUST be byte-identical to the ref
+        // produced from the Consent, or every approval would falsely mismatch.
+        let base = sample_consent();
+        let from_consent = consent_ref(&base).expect("ref");
+        let from_parts = consent_ref_from_parts(
+            &base.key.scoped_id,
+            &base.key.version,
+            &base.key.target_label,
+            &base.policy_segment_hash,
+            &base.provisioning_policy_hash,
+        )
+        .expect("ref from parts");
+        assert_eq!(from_parts, from_consent);
+
+        // A different 5-tuple yields a different ref — the verification gate.
+        let other = consent_ref_from_parts(
+            &base.key.scoped_id,
+            "9.9.9",
+            &base.key.target_label,
+            &base.policy_segment_hash,
+            &base.provisioning_policy_hash,
+        )
+        .expect("ref from parts");
+        assert_ne!(other, from_consent);
     }
 
     fn cwd_lock() -> &'static Mutex<()> {
