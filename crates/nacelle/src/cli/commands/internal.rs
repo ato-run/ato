@@ -186,6 +186,14 @@ pub struct ExecEnvelope {
     /// Requested working directory for the process.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Explicit source directory to bind-mount at the guest root (Linux V1).
+    /// When set, nacelle uses this as `source_dir` instead of the manifest's
+    /// parent — letting ato-cli keep the synthesized manifest in a pool dir
+    /// (outside the source tree, for stable identity) while still mounting the
+    /// real materialized source (with `app/` + `.venv`). Optional and
+    /// backward-compatible (older nacelle ignores it; spec_version unchanged).
+    #[serde(default)]
+    pub source_dir: Option<String>,
     /// Additional host mounts injected by ato-cli.
     #[serde(default)]
     pub mounts: Vec<ExecMount>,
@@ -593,15 +601,6 @@ fn emit_service_exited(service: &str, status: &std::process::ExitStatus) {
     .emit();
 }
 
-fn emit_service_ready(service: &str) {
-    NacelleEvent::IpcReady {
-        service: service.to_string(),
-        endpoint: "command://ready".to_string(),
-        port: None,
-    }
-    .emit();
-}
-
 fn readiness_endpoint(
     probe: &ReadinessProbeConfig,
     ipc_socket_paths: &[PathBuf],
@@ -880,14 +879,31 @@ fn detect_language_from_extension(path: &str) -> Option<String> {
 }
 
 /// Find the most likely entrypoint file from command tokens
+/// Source-file extensions the launcher may need to rewrite to the in-sandbox
+/// path. A token is only treated as an entrypoint file if it is an explicit
+/// relative path (`./…`) or carries one of these extensions. We deliberately do
+/// NOT treat every dotted token as a file: an ASGI/WSGI app spec like
+/// `app.main:app` (extension parsed as `main:app`) or a dotted version such as
+/// `127.0.0.1` is an argument, not an entrypoint, and rewriting it to `/app/…`
+/// breaks the command (e.g. `uvicorn app.main:app`).
+const ENTRYPOINT_SOURCE_EXTS: &[&str] = &[
+    "py", "pyw", "js", "mjs", "cjs", "ts", "tsx", "jsx", "rb", "sh", "bash", "php", "pl", "lua",
+];
+
 fn find_entrypoint_file(tokens: &[String]) -> String {
-    // Look for file-like arguments (has extension or starts with ./)
+    // Look for file-like arguments (explicit relative path, or a known
+    // source-file extension).
     for token in tokens.iter().skip(1) {
         if token.starts_with("./") || token.starts_with("../") {
             return token.clone();
         }
-        if std::path::Path::new(token).extension().is_some() {
-            return token.clone();
+        if let Some(ext) = std::path::Path::new(token)
+            .extension()
+            .and_then(|ext| ext.to_str())
+        {
+            if ENTRYPOINT_SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+                return token.clone();
+            }
         }
     }
     // Fallback: use first token
@@ -1010,6 +1026,7 @@ fn prepare_v1_launch(envelope: ExecEnvelope) -> Result<EnvironmentWorkspace> {
             readonly: mount.readonly,
         })
         .collect();
+    let source_dir_override = envelope.source_dir.map(PathBuf::from);
 
     EnvironmentWorkspace::for_manifest(
         format!("exec-{}", std::process::id()),
@@ -1019,7 +1036,8 @@ fn prepare_v1_launch(envelope: ExecEnvelope) -> Result<EnvironmentWorkspace> {
         merged_env,
         ipc_socket_paths,
         injected_mounts,
-    )
+    )?
+    .with_source_dir_override(source_dir_override)
 }
 
 fn prepare_v2_launch(envelope: ExecEnvelopeV2) -> Result<EnvironmentWorkspace> {
@@ -1361,7 +1379,16 @@ async fn execute_prepared_launch(
                 }
             }
         } else {
-            emit_service_ready(&manifest.name);
+            // No readiness signal (no probe declared, and ato-cli synthesizes a
+            // conservative probe only when a port is declared). Report
+            // *Started*, NOT Ready — faking readiness from process spawn alone
+            // hides crashes-after-launch and produces a dishonest receipt.
+            NacelleEvent::ServiceStarted {
+                service: manifest.name.clone(),
+                endpoint: None,
+                port: None,
+            }
+            .emit();
         }
 
         let status = wait_for_child_exit(&mut child).await?;
@@ -1390,6 +1417,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn find_entrypoint_file_ignores_module_specs_and_versions() {
+        // `uvicorn app.main:app` — the app spec must NOT be treated as the
+        // entrypoint file (it would otherwise be rewritten to /app/app.main:app
+        // and break the command).
+        let tokens: Vec<String> = [
+            "python3",
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "python3");
+
+        // A real script entrypoint IS picked up.
+        let tokens: Vec<String> = ["python3", "app/main.py"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "app/main.py");
+
+        // Explicit relative path is picked up.
+        let tokens: Vec<String> = ["node", "./server.js"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "./server.js");
+    }
+
+    #[test]
     fn test_exec_envelope_without_ipc_fields() {
         let json = r#"{
             "spec_version": "0.1.0",
@@ -1402,6 +1462,19 @@ mod tests {
         assert!(envelope.ipc_env.is_none());
         assert!(envelope.ipc_socket_paths.is_none());
         assert_eq!(envelope.env.as_ref().unwrap().len(), 1);
+        // Backward-compatible: absent source_dir deserializes to None.
+        assert!(envelope.source_dir.is_none());
+    }
+
+    #[test]
+    fn test_exec_envelope_parses_source_dir_override() {
+        let json = r#"{
+            "spec_version": "0.1.0",
+            "workload": { "type": "source", "manifest": "/pool/x.toml" },
+            "source_dir": "/materialized/app"
+        }"#;
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.source_dir.as_deref(), Some("/materialized/app"));
     }
 
     #[test]
