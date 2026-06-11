@@ -499,6 +499,10 @@ fn auto_attach_state_args_for_community_toml_manifest(
 // types out so `ato-desktop` can read records without depending on
 // `ato-cli`.
 
+// The argument list maps 1:1 onto the `ato app session start` CLI flags
+// (dispatch/app.rs annotates each call site); a bag-of-options struct would
+// only relocate the width without making any call site clearer.
+#[allow(clippy::too_many_arguments)]
 pub fn start_session(
     handle: &str,
     target_label: Option<&str>,

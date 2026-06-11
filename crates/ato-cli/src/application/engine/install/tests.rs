@@ -1,3 +1,12 @@
+// The env guard from `acquire_test_env_lock()` is deliberately held across
+// `.await` points: it serialises process-global env vars while the code under
+// test (which reads them) is awaited. It delegates to the crate-wide
+// `crate::tests::env_lock()` std mutex shared with *sync* test modules, so it
+// cannot become an async-aware mutex without refactoring every ATO_HOME test
+// group; each test runs on its own current_thread runtime, so blocking other
+// test threads is the intended behavior and cannot self-deadlock.
+#![allow(clippy::await_holding_lock)]
+
 use super::github_inference::{
     auto_fix_github_install_preview_toml, reassign_github_install_preview_toml_port,
 };

@@ -512,11 +512,13 @@ pub(crate) fn prompt_community_candidate_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     // Serialises access to ATO_COMMUNITY_API_URL across all tests in this
-    // module (sync and async) so they don't race against each other.
-    pub(super) static COMMUNITY_URL_MUTEX: Mutex<()> = Mutex::new(());
+    // module (sync and async) so they don't race against each other. An
+    // async-aware mutex so async tests can hold it across `.await` points
+    // (clippy::await_holding_lock); sync tests use `blocking_lock()`.
+    pub(super) static COMMUNITY_URL_MUTEX: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
 
     #[test]
     fn trust_level_deserializes_community() {
@@ -750,7 +752,7 @@ mod tests {
 
     #[test]
     fn resolve_community_api_base_url_defaults() {
-        let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+        let _g = COMMUNITY_URL_MUTEX.blocking_lock();
         let url = resolve_community_api_base_url();
         assert_eq!(url, "https://api.ato.run");
     }
@@ -1071,7 +1073,7 @@ branch = "main"
         #[tokio::test]
         async fn fetch_candidates_parses_multiple_candidates() {
             {
-                let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+                let _g = COMMUNITY_URL_MUTEX.lock().await;
                 let body = r#"{"candidates":[
                 {"id":"c1","title":"Recipe One","source":"github.com/a/b","trust":"community","stars":10,"platforms":["macOS"],"lastVerifiedAt":null,"permissionsSummary":["network"],"capsuleTomlUrl":"http://x/c1","revision":null},
                 {"id":"c2","title":"Recipe Two","source":"github.com/a/b","trust":"owner","stars":5,"platforms":[],"lastVerifiedAt":null,"permissionsSummary":[],"capsuleTomlUrl":"http://x/c2","revision":null}
@@ -1095,7 +1097,7 @@ branch = "main"
         #[tokio::test]
         async fn fetch_candidates_404_returns_empty_vec() {
             {
-                let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+                let _g = COMMUNITY_URL_MUTEX.lock().await;
                 let base = mock_http(404, r#"{"error":"not found"}"#).await;
                 unsafe {
                     std::env::set_var("ATO_COMMUNITY_API_URL", &base);
@@ -1112,7 +1114,7 @@ branch = "main"
         #[tokio::test]
         async fn fetch_candidates_empty_array_returns_empty_vec() {
             {
-                let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+                let _g = COMMUNITY_URL_MUTEX.lock().await;
                 let base = mock_http(200, r#"{"candidates":[]}"#).await;
                 unsafe {
                     std::env::set_var("ATO_COMMUNITY_API_URL", &base);
@@ -1129,7 +1131,7 @@ branch = "main"
         #[tokio::test]
         async fn fetch_candidates_500_returns_error() {
             {
-                let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+                let _g = COMMUNITY_URL_MUTEX.lock().await;
                 let base = mock_http(500, r#"{"error":"internal"}"#).await;
                 unsafe {
                     std::env::set_var("ATO_COMMUNITY_API_URL", &base);
@@ -1151,7 +1153,7 @@ branch = "main"
         #[tokio::test]
         async fn fetch_candidates_invalid_json_returns_error() {
             {
-                let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+                let _g = COMMUNITY_URL_MUTEX.lock().await;
                 let base = mock_http(200, r#"not valid json at all"#).await;
                 unsafe {
                     std::env::set_var("ATO_COMMUNITY_API_URL", &base);
@@ -1167,7 +1169,7 @@ branch = "main"
         #[tokio::test]
         async fn fetch_capsule_toml_by_id_returns_content() {
             {
-                let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+                let _g = COMMUNITY_URL_MUTEX.lock().await;
                 let toml_body = "[source]\nrepository = \"github.com/a/b\"\n";
                 let base = mock_http(200, toml_body).await;
                 unsafe {
@@ -1186,7 +1188,7 @@ branch = "main"
         #[tokio::test]
         async fn fetch_capsule_toml_by_id_non_2xx_returns_error() {
             {
-                let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+                let _g = COMMUNITY_URL_MUTEX.lock().await;
                 let base = mock_http(404, r#"not found"#).await;
                 unsafe {
                     std::env::set_var("ATO_COMMUNITY_API_URL", &base);
@@ -1230,7 +1232,7 @@ branch = "main"
         #[tokio::test]
         async fn community_api_url_env_override_is_respected() {
             {
-                let _g = COMMUNITY_URL_MUTEX.lock().unwrap();
+                let _g = COMMUNITY_URL_MUTEX.lock().await;
                 // Verify that ATO_COMMUNITY_API_URL override actually routes requests
                 // to the specified server.  If the override is ignored the request would
                 // go to https://api.ato.run and fail / timeout in CI.

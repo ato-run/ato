@@ -2,11 +2,11 @@ use super::*;
 use axum::body::to_bytes;
 use std::io::{Cursor, ErrorKind, Write};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Mutex as StdMutex, OnceLock};
-
-fn env_lock() -> &'static StdMutex<()> {
-    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| StdMutex::new(()))
+// Serialises ATO_HOME-mutating tests in this file. Async-aware so the guard
+// can be held across `.await` points (clippy::await_holding_lock).
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
 }
 
 #[test]
@@ -851,7 +851,7 @@ async fn runtime_providers_returns_desktop_provider() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn sensitive_runtime_read_apis_require_auth_when_token_configured() {
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _ato_home = AtoHomeGuard::set("runtime-read-auth");
     let state = registry_test_state(Some("secret"));
 
@@ -899,7 +899,7 @@ async fn sensitive_runtime_read_apis_require_auth_when_token_configured() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn install_profiles_read_ato_home_instances_root() {
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _ato_home = AtoHomeGuard::set("install-profiles");
 
     let root = install_profile_store_root();
@@ -1377,7 +1377,7 @@ async fn runtime_stop_post_rejects_wrong_token() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_stop_post_unknown_session_returns_404() {
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _ato_home = AtoHomeGuard::set("stop-post-unknown");
     let state = registry_test_state(None);
     let response = handle_runtime_stop_session_post(
@@ -1392,7 +1392,7 @@ async fn runtime_stop_post_unknown_session_returns_404() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_launch_empty_key_returns_400() {
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _ato_home = AtoHomeGuard::set("launch-empty-key");
     let state = registry_test_state(None);
     let response = handle_runtime_launch_session(
@@ -1410,7 +1410,7 @@ async fn runtime_launch_empty_key_returns_400() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_launch_unknown_key_returns_404() {
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _ato_home = AtoHomeGuard::set("launch-unknown-key");
     let state = registry_test_state(None);
     let response = handle_runtime_launch_session(
@@ -1478,7 +1478,7 @@ async fn runtime_launch_non_default_profile_returns_501() {
     use capsule_core::foundation::install_lifecycle::{
         AppRecord, InstallInstanceStore, InstalledAppId, LaunchProfile, ProfileId,
     };
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _ato_home = AtoHomeGuard::set("launch-non-default-profile");
 
     // Register an app with a non-default profile.
@@ -1549,7 +1549,7 @@ async fn runtime_session_logs_sse_streams_beyond_channel_capacity() {
     // even when the log exceeds the channel capacity (512). Previously try_send
     // would have silently aborted the stream at 512 lines.
     use axum::http::header::ACCEPT;
-    let _lock = env_lock().lock().expect("env lock");
+    let _lock = env_lock().lock().await;
     let _ato_home = AtoHomeGuard::set("sse-backlog");
 
     // Write 600 lines — more than the channel capacity of 512.
@@ -1595,7 +1595,7 @@ async fn runtime_session_logs_sse_streams_beyond_channel_capacity() {
 #[tokio::test(flavor = "current_thread")]
 async fn persistent_state_local_api_registers_and_lists_records() {
     let (_home, _home_guard, manifest_path, bind_dir, state) = {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().await;
         let home = tempfile::tempdir().expect("home");
         let home_guard = HomeGuard::set(home.path());
 
