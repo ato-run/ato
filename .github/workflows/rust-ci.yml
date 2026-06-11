@@ -9,7 +9,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,12 +76,16 @@ jobs:
           sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
       - name: Build test binaries
+        shell: bash
         run: |
           cargo build -p ato-cli --bin ato
           cargo build -p nacelle --bin nacelle
           echo "$(pwd)/target/debug" >> $GITHUB_PATH
       - name: Run tests
+        shell: bash
         run: |
           cargo test -p ato-cli --no-fail-fast
           cargo test -p capsule-core --no-fail-fast
+          cargo test -p capsule-wire --no-fail-fast
+          cargo test -p ato-session-core --no-fail-fast
           cargo test -p lock-draft-engine --no-fail-fast
