@@ -1755,7 +1755,11 @@ fn detect_install_steps(
         acc.push(InstallStepSpec {
             id: step_id(relative_dir, "install"),
             cwd: relative_dir.to_string(),
-            run: "uv venv --seed && uv pip install -r requirements.txt 'setuptools<72'".to_string(),
+            // Double quotes group the constraint in both POSIX sh and cmd.exe;
+            // single quotes are literal characters to cmd.exe, which would
+            // parse the `<` as input redirection on Windows consumers.
+            run: "uv venv --seed && uv pip install -r requirements.txt \"setuptools<72\""
+                .to_string(),
             depends_on: Vec::new(),
             evidence: vec!["requirements.txt inferred into uv venv install".to_string()],
         });

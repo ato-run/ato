@@ -57,6 +57,28 @@ fn maps_entrypoint_failure_to_e101() {
 }
 
 #[test]
+fn maps_lifecycle_command_failure_report_to_e203() {
+    let report = "lifecycle_command_failed: phase=provision target=main exit_code=2\n\
+                  command: uv venv --seed --clear && uv pip install -r requirements.txt \"setuptools<72\"\n\
+                  cwd: C:\\Users\\koh\\.ato\\runs\\run-1\\workspace\n\
+                  stderr_tail:\nAccess is denied.\n\
+                  stdout_tail:\n(empty)";
+    let err = anyhow!("{report}").context("session start failed");
+    let diagnostic = from_anyhow(&err, CommandContext::Run);
+    assert_eq!(diagnostic.code, CliDiagnosticCode::E203);
+    assert!(
+        diagnostic.message.contains("phase=provision"),
+        "report must surface verbatim: {}",
+        diagnostic.message
+    );
+    assert!(
+        diagnostic.message.contains("stderr_tail"),
+        "tails must surface: {}",
+        diagnostic.message
+    );
+}
+
+#[test]
 fn maps_strict_manifest_error_to_e106() {
     let err = anyhow!(
         capsule_core::CapsuleError::StrictManifestFallbackNotAllowed(

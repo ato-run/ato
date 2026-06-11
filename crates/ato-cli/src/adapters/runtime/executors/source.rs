@@ -167,7 +167,12 @@ pub fn execute_host(
     let readiness_port = runtime_overrides::override_port(launch_spec.port);
     let host_command_path =
         resolve_host_command_path(&launch_spec.working_dir, &launch_spec.command);
-    let execution_cwd = resolve_host_execution_cwd(launch_ctx, &launch_spec.working_dir);
+    // Strip Windows `\\?\` extended-length prefixes (introduced by upstream
+    // canonicalization) before the path becomes the child's cwd — Python,
+    // Node, and cmd.exe-based tooling mis-handle extended-length cwds.
+    let execution_cwd = capsule_core::common::paths::windows_child_compatible_path(
+        &resolve_host_execution_cwd(launch_ctx, &launch_spec.working_dir),
+    );
 
     let mut cmd = if let Some(bundle_path) = desktop_open_bundle.as_ref() {
         build_desktop_open_command(bundle_path, &launch_spec.args)

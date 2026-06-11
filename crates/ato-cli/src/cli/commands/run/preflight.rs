@@ -714,7 +714,10 @@ fn provision_command_from_python_importer(
             // (e.g. gunicorn<21) that import pkg_resources still work.
             // Apps that explicitly pin setuptools>=72 in requirements.txt will
             // get a clear uv conflict error and can remove the implicit constraint.
-            "uv venv{python_pin} --seed --clear && uv pip install -r {requirements_arg} 'setuptools<72'"
+            // Double quotes, not single: cmd.exe treats single quotes as
+            // literal characters and would parse the `<` as input redirection;
+            // double quotes group the arg in both POSIX sh and cmd.exe.
+            "uv venv{python_pin} --seed --clear && uv pip install -r {requirements_arg} \"setuptools<72\""
         )));
     }
 
@@ -777,26 +780,17 @@ fn run_lifecycle_shell_command(
     working_dir: &Path,
     path_plan: &LifecyclePathPlan,
 ) -> Result<()> {
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut cmd = std::process::Command::new("cmd");
-        // `/D` disables AutoRun so a broken/foreign \Command Processor\AutoRun script
-        // cannot pollute output or leak a non-zero exit code into the lifecycle command.
-        cmd.args(["/D", "/C", command]);
-        cmd
-    };
+    // `cmd.exe /D /S /C "<command>"` on Windows, `sh -c <command>` elsewhere;
+    // never whitespace-split, so `&&` chains and quoting survive intact.
+    let mut cmd = crate::common::host_shell::lifecycle_shell_command(command);
 
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", command]);
-        cmd
-    };
+    // Ato canonicalizes workspace paths internally, which on Windows yields
+    // `\\?\C:\…` extended-length forms that cmd.exe/uv/npm/pnpm mis-handle.
+    // Children always get the normal spelling.
+    let child_cwd = capsule_core::common::paths::windows_child_compatible_path(working_dir);
 
-    cmd.current_dir(working_dir)
+    cmd.current_dir(&child_cwd)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
         .env("COREPACK_ENABLE_STRICT", "0")
         // Disable pnpm 10's auto-manage-package-manager-versions to prevent it from
         // attempting to download the pinned pnpm version in offline/CI environments.
@@ -813,21 +807,31 @@ fn run_lifecycle_shell_command(
     }
     launch_ctx.apply_allowlisted_env(&mut cmd)?;
 
-    let status = cmd
-        .status()
-        .with_context(|| format!("Failed to execute {} command", phase));
-
-    let status = status?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "{} command failed with exit code {}: {}",
-            phase,
-            status.code().unwrap_or(1),
-            command
-        ))
+    let output = crate::common::host_shell::run_streaming_with_tails(&mut cmd)
+        .with_context(|| format!("Failed to execute {} command", phase))?;
+    if output.status.success() {
+        return Ok(());
     }
+
+    let render_tail = |tail: &str| {
+        if tail.trim().is_empty() {
+            "(empty)".to_string()
+        } else {
+            tail.to_string()
+        }
+    };
+    Err(anyhow::anyhow!(
+        "lifecycle_command_failed: phase={phase} target={target} exit_code={exit_code}\n\
+         command: {command}\n\
+         cwd: {cwd}\n\
+         stderr_tail:\n{stderr_tail}\n\
+         stdout_tail:\n{stdout_tail}",
+        target = plan.selected_target_label(),
+        exit_code = output.status.code().unwrap_or(1),
+        cwd = child_cwd.display(),
+        stderr_tail = render_tail(&output.stderr_tail),
+        stdout_tail = render_tail(&output.stdout_tail),
+    ))
 }
 
 fn preflight_macos_compat(plan: &capsule_core::router::ManifestData) -> Result<()> {
@@ -1624,7 +1628,7 @@ run_command = "serve.py"
 
         assert_eq!(
             command,
-            "uv venv --python 3.11.10 --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
+            "uv venv --python 3.11.10 --seed --clear && uv pip install -r requirements.txt \"setuptools<72\""
         );
     }
 
@@ -1656,7 +1660,7 @@ run_command = "main.py"
 
         assert_eq!(
             command,
-            "uv venv --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
+            "uv venv --seed --clear && uv pip install -r requirements.txt \"setuptools<72\""
         );
     }
 

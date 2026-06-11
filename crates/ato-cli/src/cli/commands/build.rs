@@ -1359,12 +1359,10 @@ fn run_build_lifecycle_shell_command(
 
     #[cfg(windows)]
     let mut cmd = {
-        let mut cmd = std::process::Command::new("cmd");
-        // `/D` disables AutoRun (HKLM/HKCU \Command Processor\AutoRun). A broken or
-        // foreign-user AutoRun script otherwise runs on every `cmd /C`, prints its
-        // error, and leaks a non-zero exit code into the lifecycle command — failing
-        // the build/provision even when the actual command succeeded.
-        cmd.args(["/D", "/C", &effective_command]);
+        // `cmd.exe /D /S /C "<command>"` via raw_arg: deterministic quote
+        // handling, no std argv re-escaping (cmd.exe cannot parse `\"`), and
+        // shell operators like `&&` survive verbatim.
+        let mut cmd = crate::common::host_shell::windows_cmd_shell_command(&effective_command);
         if let Some(dir) = &managed_node_dir {
             let existing = std::env::var("PATH").unwrap_or_default();
             cmd.env("PATH", format!("{};{}", dir.display(), existing));
@@ -1379,7 +1377,9 @@ fn run_build_lifecycle_shell_command(
         cmd
     };
 
-    cmd.current_dir(plan.execution_working_directory())
+    cmd.current_dir(capsule_core::common::paths::windows_child_compatible_path(
+        &plan.execution_working_directory(),
+    ))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
