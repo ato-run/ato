@@ -132,8 +132,8 @@ fn url_encode(s: &str) -> String {
             | b'@' => out.push(byte as char),
             b => {
                 out.push('%');
-                let hi = (b >> 4) as u8;
-                let lo = (b & 0xf) as u8;
+                let hi = b >> 4;
+                let lo = b & 0xf;
                 out.push(char::from(if hi < 10 { b'0' + hi } else { b'A' + hi - 10 }));
                 out.push(char::from(if lo < 10 { b'0' + lo } else { b'A' + lo - 10 }));
             }
@@ -160,7 +160,7 @@ fn try_open_browser(url: &str) -> Result<()> {
             .arg(url)
             .spawn()
             .context("Failed to launch browser with `open`")?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

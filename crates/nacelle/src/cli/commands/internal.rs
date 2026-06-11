@@ -900,10 +900,9 @@ fn find_entrypoint_file(tokens: &[String]) -> String {
         if let Some(ext) = std::path::Path::new(token)
             .extension()
             .and_then(|ext| ext.to_str())
+            && ENTRYPOINT_SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str())
         {
-            if ENTRYPOINT_SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
-                return token.clone();
-            }
+            return token.clone();
         }
     }
     // Fallback: use first token
