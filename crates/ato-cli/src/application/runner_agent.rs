@@ -1184,6 +1184,33 @@ async fn poll_consent_once(
     }
 }
 
+/// What to do after the owner approves a needs_consent lease. The host-local
+/// ledger is written ONLY when the child's emitted ref, the recomputed ref (from
+/// the child's 5-tuple), and the owner's approved ref ALL agree. Any disagreement
+/// voids the approval — re-emit needs_consent rather than admit a different plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsentVerifyAction {
+    /// All three refs agree — record locally and retry.
+    Record,
+    /// Refs disagree — do NOT record; re-emit needs_consent (old approval void).
+    ReEmit,
+}
+
+fn consent_verify_action(
+    child_ref: &str,
+    recomputed_ref: &str,
+    approved_ref: &str,
+) -> ConsentVerifyAction {
+    let three_way_match = recomputed_ref == child_ref
+        && recomputed_ref == approved_ref
+        && approved_ref == child_ref;
+    if three_way_match {
+        ConsentVerifyAction::Record
+    } else {
+        ConsentVerifyAction::ReEmit
+    }
+}
+
 /// The teardown outcome the runner reports on /stopped. The slot is honestly
 /// free ONLY when both the workload process and the proxy are confirmed down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1800,14 +1827,23 @@ async fn handle_claimed_lease(
             // The child exited at the gate; reap its monitor before waiting.
             let _ = monitor.await;
             if round > MAX_CONSENT_ROUNDS {
+                // Bounded: the gate kept re-emitting (a persistent recompute
+                // mismatch, or a local approval that never clears it). Fail
+                // closed and release the slot rather than loop forever.
+                eprintln!(
+                    "⚠️  lease {lease_id}: consent gate did not clear in {MAX_CONSENT_ROUNDS} rounds"
+                );
                 let report = LeaseReport::Failed {
-                    code: "consent_verification_failed".to_string(),
-                    message: "consent gate did not clear after approval".to_string(),
+                    code: "consent_retry_exhausted".to_string(),
+                    message: format!(
+                        "consent gate did not clear within {MAX_CONSENT_ROUNDS} rounds"
+                    ),
                 };
                 let _ =
                     report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await;
                 control.abort();
                 busy.store(false, Ordering::SeqCst);
+                println!("🔓 lease {lease_id}: slot released");
                 return;
             }
             // Park needs_consent with the full 5-tuple for owner approval.
@@ -1844,8 +1880,9 @@ async fn handle_claimed_lease(
             } = outcome
             else {
                 // Rejected / Expired / Gone / Stop: the API has already settled
-                // the run terminal (or cancelled it on stop). Nothing is running
-                // (the child exited at the gate) — just release the slot.
+                // the run terminal (or cancelled it on stop). The child exited at
+                // the gate, so no workload/proxy exists — releasing the slot
+                // (busy=false) IS the honest teardown; there is nothing to /stop.
                 match outcome {
                     ConsentOutcome::Rejected => {
                         println!("🚫 lease {lease_id}: consent rejected by owner")
@@ -1860,14 +1897,14 @@ async fn handle_claimed_lease(
                 }
                 control.abort();
                 busy.store(false, Ordering::SeqCst);
+                println!("🔓 lease {lease_id}: slot released (no workload was running)");
                 return;
             };
 
-            // INVARIANT: never write the host-local ledger unless the recomputed
-            // key matches BOTH the child's emitted ref AND the owner's approved
-            // ref. An approval bound to any other policy hashes differently and
-            // is refused (fail closed) — no old/forged approval admits a
-            // different plan.
+            // INVARIANT: write the host-local ledger ONLY when the child's
+            // emitted ref, the recomputed ref (from the child's 5-tuple), and the
+            // owner's approved ref ALL agree. A recompute error is unrecoverable
+            // (cannot verify) → fail closed.
             let recomputed = match capsule_core::execution_plan::canonical::consent_ref_from_parts(
                 &request.scoped_id,
                 &request.version,
@@ -1888,27 +1925,27 @@ async fn handle_claimed_lease(
                     .await;
                     control.abort();
                     busy.store(false, Ordering::SeqCst);
+                    println!("🔓 lease {lease_id}: slot released");
                     return;
                 }
             };
-            if recomputed != approved_ref || recomputed != request.consent_ref {
+            if consent_verify_action(&request.consent_ref, &recomputed, &approved_ref)
+                == ConsentVerifyAction::ReEmit
+            {
+                // The child / recomputed / approved refs disagree. Do NOT write
+                // the ledger. Re-emit needs_consent: the next spawn re-gates and
+                // re-reports, superseding (voiding) the stale approval on the API.
+                // A persistent mismatch is bounded by MAX_CONSENT_ROUNDS above.
                 eprintln!(
-                    "⚠️  lease {lease_id}: consent_ref mismatch (recomputed != approved); refusing to record"
+                    "⚠️  lease {lease_id}: consent_ref mismatch (child/recomputed/approved disagree); re-emitting needs_consent, old approval void"
                 );
-                let report = LeaseReport::Failed {
-                    code: "consent_verification_failed".to_string(),
-                    message: "approved consent reference did not match the gated policy".to_string(),
-                };
-                let _ =
-                    report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await;
-                control.abort();
-                busy.store(false, Ordering::SeqCst);
-                return;
+                continue;
             }
-            // Verified: append to THIS host's local ledger, then retry. Do NOT
-            // re-report `preparing` — needs_consent → preparing is a backward
-            // transition the API refuses; the retried child's `running` report
-            // is the valid forward move.
+            // Verified: append to THIS host's local ledger, then retry. A ledger
+            // write failure is terminal — without the local record the child just
+            // re-gates, so fail closed and DO NOT retry. Do NOT re-report
+            // `preparing` — needs_consent → preparing is a backward transition the
+            // API refuses; the retried child's `running` report is the valid move.
             if let Err(err) = crate::application::auth::consent_store::approve_execution_plan_consent(
                 &request.scoped_id,
                 &request.version,
@@ -1925,6 +1962,7 @@ async fn handle_claimed_lease(
                     report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await;
                 control.abort();
                 busy.store(false, Ordering::SeqCst);
+                println!("🔓 lease {lease_id}: slot released");
                 return;
             }
             println!("✅ lease {lease_id}: consent approved + recorded locally; retrying run");
@@ -2857,6 +2895,35 @@ mod tests {
         let outcome = poll_consent_once(&client, &url_for(&base), "ato_rnr_t").await;
         let _ = server.join();
         assert!(matches!(outcome, Some(ConsentOutcome::Gone)));
+    }
+
+    #[test]
+    fn consent_verify_action_requires_three_way_match() {
+        let r = "blake3:ref";
+        // child == recomputed == approved → record locally + retry.
+        assert_eq!(consent_verify_action(r, r, r), ConsentVerifyAction::Record);
+        // ANY pair disagreeing → re-emit needs_consent, never record (the host
+        // ledger is never written for a plan the three refs don't all bind to).
+        assert_eq!(
+            consent_verify_action(r, r, "blake3:other"),
+            ConsentVerifyAction::ReEmit,
+            "approved differs"
+        );
+        assert_eq!(
+            consent_verify_action(r, "blake3:other", r),
+            ConsentVerifyAction::ReEmit,
+            "recomputed differs"
+        );
+        assert_eq!(
+            consent_verify_action("blake3:other", r, r),
+            ConsentVerifyAction::ReEmit,
+            "child differs"
+        );
+        assert_eq!(
+            consent_verify_action("a", "b", "c"),
+            ConsentVerifyAction::ReEmit,
+            "all differ"
+        );
     }
 
     #[tokio::test]
