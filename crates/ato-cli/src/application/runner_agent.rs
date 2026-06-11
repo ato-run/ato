@@ -409,6 +409,11 @@ pub async fn run_serve(
     }
 
     let client = reqwest::Client::new();
+
+    // Settle leases orphaned by a previous runner process BEFORE the first
+    // heartbeat/claim, so stop-requested zombies clear immediately on boot.
+    reconcile_open_leases(&client, &api_base, &creds.runner_id, &creds.runner_token).await;
+
     let mut interval = creds
         .heartbeat_interval_seconds
         .max(MIN_HEARTBEAT_INTERVAL_SECS);
@@ -1234,8 +1239,12 @@ impl StopCleanup {
 }
 
 fn stopped_request_body(cleanup: &StopCleanup) -> serde_json::Value {
+    stopped_request_body_with_reason(cleanup, "user_requested")
+}
+
+fn stopped_request_body_with_reason(cleanup: &StopCleanup, reason: &str) -> serde_json::Value {
     serde_json::json!({
-        "reason": "user_requested",
+        "reason": reason,
         "cleanup": {
             "process_terminated": cleanup.process_terminated,
             "proxy_stopped": cleanup.proxy_stopped,
@@ -1254,6 +1263,25 @@ async fn report_lease_stopped(
     lease_id: &str,
     cleanup: &StopCleanup,
 ) -> Result<()> {
+    report_lease_stopped_with_reason(
+        client,
+        api_base,
+        runner_token,
+        lease_id,
+        cleanup,
+        "user_requested",
+    )
+    .await
+}
+
+async fn report_lease_stopped_with_reason(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    cleanup: &StopCleanup,
+    reason: &str,
+) -> Result<()> {
     let url = format!(
         "{}/v1/runner-leases/{}/stopped",
         api_base.trim_end_matches('/'),
@@ -1262,7 +1290,7 @@ async fn report_lease_stopped(
     let response = client
         .post(&url)
         .bearer_auth(runner_token)
-        .json(&stopped_request_body(cleanup))
+        .json(&stopped_request_body_with_reason(cleanup, reason))
         .send()
         .await
         .context("stopped ack request failed")?;
@@ -1272,6 +1300,98 @@ async fn report_lease_stopped(
         bail!("stopped ack rejected (HTTP {status}): {body}");
     }
     Ok(())
+}
+
+/// Lease ids from a GET /v1/runners/:id/leases/open body. Tolerant: entries
+/// without a string `id` are skipped (a malformed row must not abort the
+/// whole reconciliation).
+fn parse_open_lease_ids(body: &serde_json::Value) -> Vec<String> {
+    body.get("leases")
+        .and_then(|v| v.as_array())
+        .map(|leases| {
+            leases
+                .iter()
+                .filter_map(|l| l.get("id").and_then(|id| id.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Startup reconciliation: a freshly started serve process runs ZERO
+/// workloads. Dispatched children live in this process's process group
+/// (and under systemd, its cgroup), so they did not survive the previous
+/// process's exit — "nothing is running here" is honest runner evidence,
+/// not an API fabrication. For every lease the API still considers open on
+/// this runner, ack /stopped with reason `runner_restarted` so zombie
+/// stop-requested runs settle and the control plane matches reality.
+/// INVARIANT this leans on: spawn_run_child keeps workloads in our process
+/// group / unit cgroup. If a future runner detaches workloads, this ack is
+/// no longer honest and must be gated on actual process evidence.
+/// Best-effort: a missing endpoint (older API) or a per-lease failure is
+/// logged and never blocks serving.
+async fn reconcile_open_leases(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_id: &str,
+    runner_token: &str,
+) {
+    let url = format!(
+        "{}/v1/runners/{}/leases/open",
+        api_base.trim_end_matches('/'),
+        runner_id
+    );
+    let response = match client.get(&url).bearer_auth(runner_token).send().await {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("⚠️  lease reconciliation skipped (request failed: {err})");
+            return;
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // Older API without the endpoint — nothing to reconcile against.
+        return;
+    }
+    if !response.status().is_success() {
+        eprintln!(
+            "⚠️  lease reconciliation skipped (HTTP {})",
+            response.status()
+        );
+        return;
+    }
+    let body: serde_json::Value = match response.json().await {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("⚠️  lease reconciliation skipped (bad response: {err})");
+            return;
+        }
+    };
+    let lease_ids = parse_open_lease_ids(&body);
+    if lease_ids.is_empty() {
+        return;
+    }
+    println!(
+        "🧹 reconciling {} stale lease(s) left from a previous runner process",
+        lease_ids.len()
+    );
+    // This process owns no workloads, so the slot is free and the previous
+    // children are gone: full-cleanup evidence.
+    let cleanup = StopCleanup::from_teardown(true, true);
+    for lease_id in lease_ids {
+        match report_lease_stopped_with_reason(
+            client,
+            api_base,
+            runner_token,
+            &lease_id,
+            &cleanup,
+            "runner_restarted",
+        )
+        .await
+        {
+            Ok(()) => println!("   ✓ lease {lease_id}: acked stopped (runner_restarted)"),
+            Err(err) => eprintln!("   ⚠️ lease {lease_id}: reconcile ack failed: {err}"),
+        }
+    }
 }
 
 /// Send `signal` to the whole process group led by `pid` (negative target).
@@ -2924,6 +3044,42 @@ mod tests {
             ConsentVerifyAction::ReEmit,
             "all differ"
         );
+    }
+
+    #[test]
+    fn stopped_request_body_with_reason_overrides_reason_only() {
+        let cleanup = StopCleanup::from_teardown(true, true);
+        let body = stopped_request_body_with_reason(&cleanup, "runner_restarted");
+        assert_eq!(body["reason"], "runner_restarted");
+        assert_eq!(body["cleanup"]["slot_released"], true);
+        // The default body keeps the user_requested reason.
+        assert_eq!(stopped_request_body(&cleanup)["reason"], "user_requested");
+    }
+
+    #[test]
+    fn parse_open_lease_ids_is_tolerant() {
+        let body: serde_json::Value = serde_json::json!({
+            "leases": [
+                { "id": "01LEASEA", "run_id": "r1", "status": "ready", "stop_requested": true },
+                { "run_id": "r2" },              // malformed: no id → skipped
+                { "id": 42 },                     // malformed: non-string → skipped
+                { "id": "01LEASEB", "status": "claimed" },
+            ],
+        });
+        assert_eq!(parse_open_lease_ids(&body), vec!["01LEASEA", "01LEASEB"]);
+        assert!(parse_open_lease_ids(&serde_json::json!({})).is_empty());
+        assert!(parse_open_lease_ids(&serde_json::json!({ "leases": "nope" })).is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_open_leases_hits_the_open_endpoint_and_tolerates_404() {
+        // Older API without the endpoint: reconcile must be a silent no-op.
+        let (base, server) = one_shot_http("HTTP/1.1 404 Not Found", "{\"error\":\"not_found\"}");
+        let client = reqwest::Client::new();
+        reconcile_open_leases(&client, &base, "01RUNNER", "ato_rnr_t").await;
+        let request = server.join().expect("server");
+        assert!(request.contains("GET /v1/runners/01RUNNER/leases/open"));
+        assert!(request.contains("authorization: Bearer ato_rnr_t") || request.contains("Authorization: Bearer ato_rnr_t"));
     }
 
     #[tokio::test]
