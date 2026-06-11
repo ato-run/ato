@@ -176,7 +176,16 @@ Never pass `--body` as an inline double-quoted string — backticks and `$` will
 
 ## After creation
 
-`gh issue create` prints the issue URL on success. Reply to the user with:
+`gh issue create` prints the issue URL on success.
+
+Also announce it to the Ato-Desktop **#issues** Discord channel (the owner asked for this) — owner is pinged automatically there:
+
+```bash
+node .claude/skills/store-apply-community/scripts/notify-discord.mjs --channel issues \
+  "🆕 issue起票: <title>\n<url>"
+```
+
+Then reply to the user with:
 
 - The URL.
 - The final title.
