@@ -10,6 +10,7 @@ use std::time::Instant;
 use tokio::sync::{Mutex, watch};
 
 use crate::egress::{EgressManager, policy::EgressPolicy};
+use crate::identity::RuntimeIdentity;
 use crate::ingress::IngressManager;
 
 /// Shared, cheaply-cloneable handle into the daemon's runtime state.
@@ -24,6 +25,9 @@ struct DaemonStateInner {
     ingress: Mutex<IngressManager>,
     /// HTTP CONNECT egress proxy. `None` until `init_egress` is called.
     egress: Mutex<Option<EgressManager>>,
+    /// Stable identity for this daemon installation.
+    /// Loaded (or generated) once at startup; never mutated.
+    runtime_identity: RuntimeIdentity,
     /// Non-lossy shutdown signal (see comment below).
     ///
     /// `watch::channel<bool>` closes the subscribe race: the value is sticky,
@@ -34,18 +38,26 @@ struct DaemonStateInner {
 
 impl DaemonState {
     /// Create a new `DaemonState`.  Loads the port allocator from
-    /// `${ato_home}/state/netd/stable_origin_ports.json`.
+    /// `${ato_home}/state/netd/stable_origin_ports.json` and the runtime
+    /// identity from `${ATO_HOME}/state/netd/runtime_identity.json`.
     pub async fn new(ato_home: PathBuf) -> anyhow::Result<Self> {
         let ingress = IngressManager::new(&ato_home).await?;
+        let runtime_identity = RuntimeIdentity::load_or_create(&ato_home)?;
         let (shutdown_tx, _) = watch::channel(false);
         Ok(Self {
             inner: Arc::new(DaemonStateInner {
                 started_at: Instant::now(),
                 ingress: Mutex::new(ingress),
                 egress: Mutex::new(None),
+                runtime_identity,
                 shutdown_tx,
             }),
         })
+    }
+
+    /// Return a clone of the stable runtime identity for this daemon.
+    pub fn runtime_identity(&self) -> RuntimeIdentity {
+        self.inner.runtime_identity.clone()
     }
 
     /// Start the egress CONNECT proxy using the system DNS resolver.

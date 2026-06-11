@@ -5,6 +5,7 @@ pub(crate) mod cache;
 pub(crate) mod commands;
 pub(crate) mod community;
 mod config;
+mod console;
 pub(crate) mod dispatch;
 mod import_cmd;
 mod inspect;
@@ -17,6 +18,7 @@ mod project;
 mod receipts;
 mod registry;
 mod root;
+mod runner;
 pub(crate) mod scoped_id_prompt;
 mod secrets;
 mod session;
@@ -55,6 +57,7 @@ pub(crate) use receipts::ReceiptsCommands;
 pub(crate) use registry::RegistryCommands;
 pub(crate) use root::{Cli, Commands};
 #[allow(unused_imports)]
+pub(crate) use runner::RunnerCommands;
 pub(crate) use secrets::SecretsCommands;
 pub(crate) use session::IdentitySessionCommands;
 #[allow(unused_imports)]

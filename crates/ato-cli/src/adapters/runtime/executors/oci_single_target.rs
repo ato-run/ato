@@ -670,7 +670,10 @@ mod tests {
     fn oci_secret_env_debug_redacted() {
         let entry = secret("OPENAI_API_KEY", "sk-live-secret");
         let rendered = format!("{entry:?}");
-        assert!(!rendered.contains("sk-live-secret"), "value must be redacted");
+        assert!(
+            !rendered.contains("sk-live-secret"),
+            "value must be redacted"
+        );
         assert!(
             rendered.contains("OPENAI_API_KEY"),
             "the env name is not sensitive and may appear"
@@ -716,7 +719,10 @@ mod tests {
         let ctx = RuntimeLaunchContext::default();
         assert!(ctx.secret_env().is_empty());
         let env = build_oci_container_env(base.clone(), &ctx);
-        assert_eq!(env, base, "no secret_env means env is unchanged by injection");
+        assert_eq!(
+            env, base,
+            "no secret_env means env is unchanged by injection"
+        );
     }
 
     // ── Policy gate tests ─────────────────────────────────────────────────────
