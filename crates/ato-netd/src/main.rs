@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 mod egress;
+mod identity;
 mod ingress;
 mod server;
 mod state;

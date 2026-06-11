@@ -12,6 +12,7 @@
 use capsule_wire::handle::{
     CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot, TrustState,
 };
+use capsule_wire::placement::PlacementFacets;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -37,6 +38,14 @@ pub struct StoredSessionInfo {
     pub manifest_path: String,
     pub target_label: String,
     pub notes: Vec<String>,
+    /// Whether session start OBSERVED a readiness confirmation before this
+    /// record was written (HTTP ready-wait on the bound port, or the
+    /// orchestrator's per-service readiness probes). `false` means the
+    /// session was started with NO readiness signal — and `false` is also
+    /// what records written before this field existed deserialize to:
+    /// absence of proof is not readiness.
+    #[serde(default)]
+    pub readiness_confirmed: bool,
     pub guest: Option<GuestSessionDisplay>,
     pub web: Option<WebSessionDisplay>,
     pub terminal: Option<TerminalSessionDisplay>,
@@ -146,6 +155,41 @@ pub struct StoredSessionInfo {
     /// the full execution closure (receipt / session / replay boundary).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule_instance_key: Option<String>,
+
+    /// Runtime placement provider kind (`desktop`, `managed`, `external`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_provider: Option<String>,
+
+    /// Stable provider instance id. This is provider-scoped and not a
+    /// transport route or API endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_provider_id: Option<String>,
+
+    /// Opaque stable placement id. Do not encode raw device or network
+    /// identifiers here; use `placement_fingerprint` for receipts/debug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_id: Option<String>,
+
+    /// Debug/receipt hash for placement comparison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_fingerprint: Option<String>,
+
+    /// Non-sensitive placement classes used for display and receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_facets: Option<PlacementFacets>,
+
+    /// User-visible URL for opening the session. Servers must return this
+    /// for clients to render; they must not open browsers on behalf of users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_visible_url: Option<String>,
+
+    /// Request source (`desktop_fe`, `web_console`, `cli`, `automation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by_client: Option<String>,
+
+    /// Runtime owner (`desktop_be`, `managed_runtime`, `external_runner`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,6 +409,14 @@ mod tests {
         assert!(parsed.launch_digest.is_none());
         assert!(parsed.process_start_time_unix_ms.is_none());
         assert!(parsed.dependency_contracts.is_none());
+        assert!(parsed.placement_provider.is_none());
+        assert!(parsed.placement_provider_id.is_none());
+        assert!(parsed.placement_id.is_none());
+        assert!(parsed.placement_fingerprint.is_none());
+        assert!(parsed.placement_facets.is_none());
+        assert!(parsed.user_visible_url.is_none());
+        assert!(parsed.requested_by_client.is_none());
+        assert!(parsed.runtime_owner.is_none());
 
         let reserialized = serde_json::to_string(&parsed).expect("reserialize");
         // None fields are skipped on serialize (skip_serializing_if), so a
@@ -373,6 +425,7 @@ mod tests {
         assert!(!reserialized.contains("launch_digest"));
         assert!(!reserialized.contains("process_start_time_unix_ms"));
         assert!(!reserialized.contains("dependency_contracts"));
+        assert!(!reserialized.contains("placement_provider"));
     }
 
     #[test]
@@ -394,6 +447,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec!["test".to_string()],
+            readiness_confirmed: false,
             guest: Some(GuestSessionDisplay {
                 adapter: "node".to_string(),
                 frontend_entry: "index.html".to_string(),
@@ -434,6 +488,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&json).expect("parse");
@@ -450,6 +512,76 @@ mod tests {
             Some("db")
         );
         assert!(parsed.orchestration_services.is_none());
+    }
+
+    #[test]
+    fn placement_fields_round_trip_additively() {
+        let json = r#"{
+            "session_id": "ato-desktop-session-placement",
+            "handle": "publisher/slug",
+            "normalized_handle": "publisher/slug",
+            "canonical_handle": null,
+            "trust_state": "trusted",
+            "source": "registry",
+            "restricted": false,
+            "snapshot": null,
+            "runtime": {
+                "target_label": "main",
+                "runtime": "node",
+                "driver": null,
+                "language": null,
+                "port": null
+            },
+            "display_strategy": "web_url",
+            "pid": 1234,
+            "log_path": "/workspace/.tmp/x.log",
+            "manifest_path": "/workspace/capsule.toml",
+            "target_label": "main",
+            "notes": [],
+            "guest": null,
+            "web": null,
+            "terminal": null,
+            "service": null,
+            "placement_provider": "desktop",
+            "placement_provider_id": "desktop:local",
+            "placement_id": "plc_local_desktop",
+            "placement_fingerprint": "sha256:abc",
+            "placement_facets": {
+                "provider_kind": "desktop",
+                "isolation_class": "local",
+                "storage_class": "local",
+                "network_class": "loopback",
+                "runner_version": "0.7.0-dev"
+            },
+            "user_visible_url": "http://127.0.0.1:3000",
+            "requested_by_client": "desktop_fe",
+            "runtime_owner": "desktop_be"
+        }"#;
+
+        let parsed: StoredSessionInfo = serde_json::from_str(json).expect("parse placement");
+        assert_eq!(parsed.placement_provider.as_deref(), Some("desktop"));
+        assert_eq!(
+            parsed.placement_provider_id.as_deref(),
+            Some("desktop:local")
+        );
+        assert_eq!(parsed.placement_id.as_deref(), Some("plc_local_desktop"));
+        assert_eq!(
+            parsed.user_visible_url.as_deref(),
+            Some("http://127.0.0.1:3000")
+        );
+        assert_eq!(parsed.requested_by_client.as_deref(), Some("desktop_fe"));
+        assert_eq!(parsed.runtime_owner.as_deref(), Some("desktop_be"));
+        assert_eq!(
+            parsed
+                .placement_facets
+                .as_ref()
+                .map(|facets| facets.isolation_class.as_str()),
+            Some("local")
+        );
+
+        let reserialized = serde_json::to_string(&parsed).expect("reserialize");
+        assert!(reserialized.contains("placement_provider"));
+        assert!(reserialized.contains("user_visible_url"));
     }
 
     /// PR-D round-trip: a record carrying `orchestration_services` (the
@@ -479,6 +611,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: Some(WebSessionDisplay {
                 local_url: "http://127.0.0.1:5173/".to_string(),
@@ -527,6 +660,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&json).expect("parse");
@@ -641,6 +782,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: None,
             terminal: None,
@@ -663,6 +805,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
         let first = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
@@ -694,6 +844,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: None,
             terminal: None,
@@ -720,6 +871,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
         let first = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");

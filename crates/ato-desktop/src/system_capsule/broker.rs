@@ -98,6 +98,9 @@ pub enum Capability {
     /// the single legitimate place to terminate the app on platforms
     /// without a native app menu (Windows).
     AppQuit,
+    /// Call the Runtime Control API (`ato serve`) to launch or stop
+    /// sessions on behalf of the user.  Granted only to `AtoStart`.
+    RuntimeControl,
 }
 
 /// Typed envelope: every privileged request from a system capsule

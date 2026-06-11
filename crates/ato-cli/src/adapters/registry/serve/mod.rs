@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
 use crate::artifact_hash::{
@@ -43,6 +45,7 @@ use crate::registry::store::{
 use crate::runtime::process::{ProcessInfo, ProcessManager, ProcessStatus};
 
 mod auth;
+mod cors_pna;
 mod http;
 mod local_api;
 mod local_capsule;
@@ -50,11 +53,13 @@ mod local_service;
 mod metadata_api;
 mod registry_storage;
 mod routes;
+mod runtime_api;
 mod runtime_support;
 #[cfg(feature = "webui")]
 mod ui;
 
 use auth::*;
+use cors_pna::{cors_pna_layer, parse_allowed_origins};
 use http::*;
 use local_api::*;
 use local_capsule::*;
@@ -62,6 +67,7 @@ use local_service::*;
 use metadata_api::*;
 use registry_storage::*;
 use routes::*;
+use runtime_api::*;
 use runtime_support::*;
 #[cfg(feature = "webui")]
 use ui::*;
@@ -572,21 +578,53 @@ pub async fn serve(config: RegistryServerConfig) -> Result<()> {
     #[cfg(not(feature = "webui"))]
     let ui_enabled = false;
 
+    // Persist the auth token so `ato console open` can read it without
+    // requiring the user to copy-paste it manually.
+    // The file is written 0600 (owner read/write only) to ensure the local
+    // bearer token is not readable by other users on the same machine.
+    let token_path = state.data_dir.join(".console-token");
+    match config.auth_token.as_deref() {
+        Some(tok) => {
+            if let Err(e) = write_private_file(&token_path, tok.as_bytes()) {
+                eprintln!("⚠️  Could not write console token file: {e}");
+            }
+        }
+        None => {
+            // No auth token configured — remove any stale token file so
+            // `ato console open` doesn't accidentally use an old credential.
+            let _ = std::fs::remove_file(&token_path);
+        }
+    }
+
     let mut app = build_app_router(ui_enabled).with_state(state);
 
-    if std::env::var_os("ATO_LOCAL_REGISTRY_DEV_CORS").is_some() {
-        app = app.layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods([
-                    Method::GET,
-                    Method::PUT,
-                    Method::POST,
-                    Method::DELETE,
-                    Method::OPTIONS,
-                ])
-                .allow_headers(Any),
-        );
+    // Allow the ato-desktop system-capsule origin (custom protocol) to make
+    // read-only GET requests so JS in the start page can call the Runtime
+    // Control read-path directly (session list, install profiles, SSE logs).
+    // Only GET is permitted; write operations go through the IPC bridge.
+    // This is safe because the registry is loopback-only and GET endpoints
+    // expose no sensitive state.
+    let desktop_origin = "capsule://desktop.ato.run"
+        .parse::<HeaderValue>()
+        .expect("valid header value");
+    app = app.layer(
+        CorsLayer::new()
+            .allow_origin(desktop_origin)
+            .allow_methods([Method::GET]),
+    );
+
+    // CORS + Private Network Access for the PWA web console and local dev.
+    // Uses an explicit allowlist (never wildcard) so bearer tokens can be
+    // sent from https://app.ato.run → http://127.0.0.1 without Fetch
+    // blocking the request.  The allowlist is configurable via
+    // ATO_REGISTRY_CORS_ORIGINS (see cors_pna module).
+    {
+        let allowed = parse_allowed_origins();
+        app = app.layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                cors_pna_layer(std::sync::Arc::clone(&allowed), req, next)
+            },
+        ));
     }
 
     app = app.layer(DefaultBodyLimit::max(512 * 1024 * 1024));
@@ -1930,6 +1968,30 @@ impl Default for RegistryIndex {
             capsules: vec![],
         }
     }
+}
+
+/// Write `contents` to `path` with 0600 permissions (owner read/write only).
+///
+/// On non-Unix targets the permissions flags are a no-op and the file is
+/// created with whatever the process umask dictates.  This is acceptable
+/// because the registry token is only sensitive on multi-user systems where
+/// Unix permissions are meaningful.
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all().ok();
+    // Unconditionally enforce 0600 on the open file descriptor so pre-existing
+    // files created with a looser umask are also corrected.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ mod attest;
 mod binding;
 mod cache;
 mod config;
+mod console;
 mod engine;
 mod explain_hash;
 mod fetch;
@@ -741,6 +742,36 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
 
         Commands::Session { command } => session::execute_session_command(command),
 
+        Commands::Runner { command } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            match command {
+                crate::cli::RunnerCommands::Login {
+                    api_base,
+                    site_base,
+                    display_name,
+                    public_base_url,
+                    headless,
+                } => rt.block_on(crate::application::runner_agent::run_login(
+                    api_base,
+                    site_base,
+                    display_name,
+                    public_base_url,
+                    headless,
+                )),
+                crate::cli::RunnerCommands::Serve {
+                    api_base,
+                    display_name,
+                    public_base_url,
+                    proxy_listen,
+                } => rt.block_on(crate::application::runner_agent::run_serve(
+                    api_base,
+                    display_name,
+                    public_base_url,
+                    proxy_listen,
+                )),
+            }
+        }
+
         Commands::Login {
             token,
             headless,
@@ -761,6 +792,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::DesktopAuthHandoff => auth::desktop_auth_handoff(),
 
         Commands::Whoami => auth::status(),
+
+        Commands::Console { command } => console::execute_console_command(command),
 
         Commands::Community { command } => match command {
             crate::cli::community::CommunityCommands::Submit {
