@@ -341,9 +341,9 @@ impl CompatibilityIndex {
 }
 
 /// Compute a [`CompatibilityIndex`] precheck hash over its classes/capabilities
-/// + completeness (#581 wave 4A). Completeness reasons are sorted + de-duplicated
-/// so reason order never affects identity. Pure content/policy/completeness
-/// inputs — no session/observed/secret value.
+/// and completeness (#581 wave 4A). Completeness reasons are sorted and
+/// de-duplicated so reason order never affects identity. Pure
+/// content/policy/completeness inputs — no session/observed/secret value.
 fn compute_compatibility_precheck_hash(
     supported_runner_classes: &[RunnerClass],
     denied_runner_classes: &[RunnerClass],

@@ -453,8 +453,7 @@ impl CapsuleInterface {
         self.provides.sort_by(|a, b| {
             (a.category(), a.logical_name()).cmp(&(b.category(), b.logical_name()))
         });
-        self.requires
-            .sort_by(|a, b| a.dedup_key().cmp(&b.dedup_key()));
+        self.requires.sort_by_key(|a| a.dedup_key());
     }
 
     /// Return a sorted clone. Convenience wrapper around [`Self::sort`].
@@ -507,12 +506,12 @@ impl CapsuleInterface {
             }
             // A secret's projection target (env var name / file path) must not
             // be empty — an empty target silently breaks injection at launch.
-            if let RequiredInterface::Secret(s) = r {
-                if s.projection.target().trim().is_empty() {
-                    return Err(InterfaceError::EmptySecretProjection {
-                        name: s.name.clone(),
-                    });
-                }
+            if let RequiredInterface::Secret(s) = r
+                && s.projection.target().trim().is_empty()
+            {
+                return Err(InterfaceError::EmptySecretProjection {
+                    name: s.name.clone(),
+                });
             }
             if !seen_requires.insert(r.dedup_key()) {
                 return Err(InterfaceError::DuplicateRequire {
