@@ -228,14 +228,13 @@ fn oci_orchestration_connects_native_to_redis_and_reaps_containers_on_sigterm() 
         if line.contains("bridge-ok") {
             bridge_ok = true;
         }
-        if let Some(rest) = line.split("http://127.0.0.1:").nth(1) {
-            if let Some(port) = rest
+        if let Some(rest) = line.split("http://127.0.0.1:").nth(1)
+            && let Some(port) = rest
                 .split('/')
                 .next()
                 .and_then(|value| value.parse::<u16>().ok())
-            {
-                main_port = Some(port);
-            }
+        {
+            main_port = Some(port);
         }
         if main_port.is_some() && bridge_ok {
             break;

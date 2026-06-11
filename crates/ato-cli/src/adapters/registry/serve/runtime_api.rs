@@ -327,11 +327,7 @@ async fn stream_session_logs_sse(session_id: String, _state: AppState) -> axum::
                     if file.read_to_string(&mut buf).is_ok() {
                         byte_offset += buf.len() as u64;
                         for line in buf.lines() {
-                            if tx
-                                .send(Ok(Event::default().data(line.to_string())))
-                                .await
-                                .is_err()
-                            {
+                            if tx.send(Ok(Event::default().data(line))).await.is_err() {
                                 return;
                             }
                         }
@@ -508,11 +504,7 @@ pub(super) async fn handle_runtime_launch_session(
             Err(_) => continue,
         };
         for profile_id in &profiles {
-            if derive_install_profile_key(app_id, profile_id)
-                .as_str()
-                .to_string()
-                == key
-            {
+            if derive_install_profile_key(app_id, profile_id).as_str() == key {
                 let handle = if app_record.capsule_handle.is_empty() {
                     format!("{}/{}", app_record.publisher, app_record.slug)
                 } else {
@@ -561,10 +553,10 @@ pub(super) async fn handle_runtime_launch_session(
     // Build the command: `ato app session start <handle> --json [--target <id>]`
     let mut cmd = tokio::process::Command::new(&ato_exe);
     cmd.args(["app", "session", "start", &capsule_handle, "--json"]);
-    if let Some(ref target) = request.target_label {
-        if !target.trim().is_empty() {
-            cmd.args(["--target", target.trim()]);
-        }
+    if let Some(ref target) = request.target_label
+        && !target.trim().is_empty()
+    {
+        cmd.args(["--target", target.trim()]);
     }
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -978,14 +970,14 @@ pub(super) async fn handle_runtime_add_capsule(
     };
 
     // Only default profile is supported for MVP.
-    if let Some(ref pid) = request.profile_id {
-        if pid != "default" {
-            return json_error(
-                StatusCode::NOT_IMPLEMENTED,
-                "non_default_profile_not_supported",
-                "only 'default' profile is supported for add-capsule at this time",
-            );
-        }
+    if let Some(ref pid) = request.profile_id
+        && pid != "default"
+    {
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "non_default_profile_not_supported",
+            "only 'default' profile is supported for add-capsule at this time",
+        );
     }
 
     // Resolve https://ato.run/s/<id> to publisher/slug.

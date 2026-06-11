@@ -385,7 +385,7 @@ fn sync_parent_directory(parent: &Path) -> Result<()> {
 mod tests {
     use std::fs;
     use std::io::{Read, Write};
-    use std::path::PathBuf;
+
     use std::sync::{Arc, Barrier};
     use std::thread;
 
