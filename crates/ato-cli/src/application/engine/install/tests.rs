@@ -4010,3 +4010,131 @@ fn storage_admission_errors_on_invalid_disk_requirement() {
         "malformed requirements.disk must error, not skip: {result:?}"
     );
 }
+
+// ── #581 wave 2: install build-facts mapping → persisted ArtifactBuild ──────
+
+#[test]
+fn build_facts_for_install_maps_fields() {
+    let facts = build_facts_for_install("koh0920/sample", "1.0.0", "blake3:deadbeef");
+    assert_eq!(facts.capsule_ref.as_deref(), Some("koh0920/sample@1.0.0"));
+    // The registry content hash doubles as the provenance ref for a pre-built
+    // artifact (immutable identity, not a secret) and the output content hash.
+    assert_eq!(
+        facts.source_provenance_ref.as_deref(),
+        Some("blake3:deadbeef")
+    );
+    assert_eq!(
+        facts.output_content_hash.as_deref(),
+        Some("blake3:deadbeef")
+    );
+    assert!(facts.platform.is_some(), "platform stand-in is recorded");
+    assert!(facts.dependency_output_hash.is_none());
+    // Not resolved on the standard install path yet; the finalizer compiles a
+    // partial requirement graph from available facts (no caller-supplied graph).
+    assert!(facts.requirement_graph.is_none());
+    assert!(facts.state_contracts.is_empty());
+}
+
+#[test]
+fn build_facts_for_install_persist_and_read_back() {
+    // Hermetic: drive the finalizer against a tempdir store (no ~/.ato), feeding
+    // the exact facts the production call site builds, and read the persisted
+    // ArtifactBuild back to prove the call-site field mapping reaches disk.
+    let dir = tempfile::tempdir().unwrap();
+    let store = InstallInstanceStore::new(dir.path()).unwrap();
+
+    let scoped_id = "koh0920/sample";
+    let version = "2.3.4";
+    let content_hash = format!("blake3:{}", "a".repeat(64));
+    let app = path_safe_app_id(scoped_id);
+    let profile = ProfileId::default();
+
+    store
+        .write_app_record(&AppRecord {
+            installed_app_id: app.clone(),
+            publisher: "koh0920".into(),
+            slug: "sample".into(),
+            capsule_handle: scoped_id.into(),
+            version: version.into(),
+            installed_at: "2026-06-08T00:00:00Z".into(),
+            updated_at: "2026-06-08T00:00:00Z".into(),
+        })
+        .unwrap();
+    store
+        .write_profile(
+            &app,
+            &LaunchProfile {
+                profile_id: profile.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let output_root = dir.path().join("payload");
+    std::fs::create_dir_all(&output_root).unwrap();
+    std::fs::write(output_root.join("index.js"), b"console.log(1)").unwrap();
+    let installed_path = output_root.join("index.js");
+
+    let build_id = ArtifactBuildId::new(format!("build_{}", "a".repeat(64)));
+    let out = InstallRevisionFinalizer::new(&store)
+        .finalize(FinalizerInput {
+            installed_app_id: app.clone(),
+            profile_id: profile.clone(),
+            artifact_build_id: build_id,
+            output_dir: installed_path.parent().unwrap().to_path_buf(),
+            artifact_manifest_json: None,
+            source_provenance_json: None,
+            oci_lock_json: None,
+            build_facts: Some(build_facts_for_install(scoped_id, version, &content_hash)),
+        })
+        .unwrap();
+
+    let build = store
+        .read_artifact_build(&app, &profile, &out.install_revision_id)
+        .unwrap();
+    assert_eq!(
+        build.output_content_hash.as_deref(),
+        Some(content_hash.as_str())
+    );
+    assert_eq!(build.capsule_ref.as_deref(), Some("koh0920/sample@2.3.4"));
+    assert_eq!(
+        build.source_provenance_ref.as_deref(),
+        Some(content_hash.as_str())
+    );
+    assert!(build.platform.is_some());
+    assert_eq!(
+        build.output_ref.as_deref(),
+        Some(format!("/artifacts/blake3/{}", "a".repeat(64)).as_str())
+    );
+
+    // #581 wave 3A: the persisted requirement graph is the compiled, explicitly
+    // partial graph (not the old opaque minimal placeholder).
+    let graph = store
+        .read_requirement_graph_snapshot(&app, &profile, &out.install_revision_id)
+        .unwrap();
+    assert!(
+        graph.snapshot_id.starts_with("reqgraph:") && !graph.snapshot_id.contains("minimal"),
+        "snapshot id: {}",
+        graph.snapshot_id
+    );
+    assert!(
+        !graph.completeness.is_complete(),
+        "standard install path is partial"
+    );
+    assert!(
+        graph
+            .graph
+            .nodes
+            .iter()
+            .any(|n| n.id == "req:profile-defaults"),
+        "profile-defaults node compiled from the launch profile"
+    );
+    assert!(
+        graph
+            .graph
+            .nodes
+            .iter()
+            .any(|n| n.id == "req:artifact-output"),
+        "artifact-output node compiled from the build facts"
+    );
+}

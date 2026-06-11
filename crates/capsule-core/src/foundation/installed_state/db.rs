@@ -2403,7 +2403,11 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(db.read_state_binding_target("/home/koh/data").unwrap().is_none());
+        assert!(
+            db.read_state_binding_target("/home/koh/data")
+                .unwrap()
+                .is_none()
+        );
         assert!(db.read_state_binding_target("file:///x").unwrap().is_none());
     }
 
@@ -2428,11 +2432,15 @@ mod tests {
     fn read_state_binding_target_error_or_debug_does_not_expose_target_path() {
         let (_dir, db) = temp_db();
         let raw = "/Users/koh/.local/share/app/private-state";
-        db.record_state_binding_target("user-data", "app", raw).unwrap();
+        db.record_state_binding_target("user-data", "app", raw)
+            .unwrap();
         let rec = db.read_state_binding_target("user-data").unwrap().unwrap();
         // The value is reachable via the typed field (the runtime needs it) but the
         // Debug surface of the read record must not expose it.
-        assert_eq!(rec.target_path, raw, "typed field still returns the real path");
+        assert_eq!(
+            rec.target_path, raw,
+            "typed field still returns the real path"
+        );
         assert!(
             !format!("{rec:?}").contains(raw),
             "Debug of the read record must not expose the raw target_path"
