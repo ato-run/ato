@@ -130,7 +130,9 @@ impl PinnedArtifact {
     /// The retry/fallback policy tries each in turn; the pinned digest is the
     /// trust anchor for whichever one delivers the bytes.
     fn source_urls(&self) -> Vec<&str> {
-        std::iter::once(self.url).chain(self.fallback_urls.iter().copied()).collect()
+        std::iter::once(self.url)
+            .chain(self.fallback_urls.iter().copied())
+            .collect()
     }
 }
 
@@ -263,8 +265,14 @@ pub(crate) fn install_strategies(
 /// Typed failures from the Ato-managed installer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PodmanInstallError {
-    NoPinnedArtifact { os: String, arch: String },
-    Fetch { url: String, message: String },
+    NoPinnedArtifact {
+        os: String,
+        arch: String,
+    },
+    Fetch {
+        url: String,
+        message: String,
+    },
     /// Every download attempt across every source failed with a *transient*
     /// error (e.g. repeated 504). Distinct from `Fetch` so the UI can offer a
     /// Retry instead of telling the user to install Podman manually.
@@ -278,17 +286,27 @@ pub(crate) enum PodmanInstallError {
         expected: String,
         actual: String,
     },
-    Extract { message: String },
-    BinaryMissing { expected: PathBuf },
+    Extract {
+        message: String,
+    },
+    BinaryMissing {
+        expected: PathBuf,
+    },
     /// A required binary (`podman`, `gvproxy`, `vfkit`) was not found anywhere
     /// in the expanded pkg tree. Ato packaging issue, not a user issue.
-    PkgBinaryNotFound { name: String },
-    HelperMissing { helper: String },
+    PkgBinaryNotFound {
+        name: String,
+    },
+    HelperMissing {
+        helper: String,
+    },
     NotNativeArch {
         binary: String,
         host_arch: String,
     },
-    Provenance { message: String },
+    Provenance {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for PodmanInstallError {
@@ -302,14 +320,22 @@ impl std::fmt::Display for PodmanInstallError {
             Self::Fetch { url, message } => {
                 write!(f, "failed to download Podman from {url}: {message}")
             }
-            Self::TransientDownloadFailed { url, attempts, message } => write!(
+            Self::TransientDownloadFailed {
+                url,
+                attempts,
+                message,
+            } => write!(
                 f,
                 "Ato could not download the verified Podman installer from {url} after {attempts} \
                  attempts because the server kept returning a temporary error ({message}). This is \
                  usually transient — re-run runtime setup to try again, or install Podman manually \
                  from https://podman.io/docs/installation if it persists."
             ),
-            Self::DigestMismatch { url, expected, actual } => write!(
+            Self::DigestMismatch {
+                url,
+                expected,
+                actual,
+            } => write!(
                 f,
                 "downloaded Podman from {url} but its SHA256 did not match the pinned \
                  digest (expected {expected}, got {actual}); refusing to use an \
@@ -366,10 +392,16 @@ pub(crate) struct FetchError {
 
 impl FetchError {
     pub(crate) fn transient(message: impl Into<String>) -> Self {
-        Self { kind: FetchErrorKind::Transient, message: message.into() }
+        Self {
+            kind: FetchErrorKind::Transient,
+            message: message.into(),
+        }
     }
     pub(crate) fn permanent(message: impl Into<String>) -> Self {
-        Self { kind: FetchErrorKind::Permanent, message: message.into() }
+        Self {
+            kind: FetchErrorKind::Permanent,
+            message: message.into(),
+        }
     }
     fn is_transient(&self) -> bool {
         self.kind == FetchErrorKind::Transient
@@ -486,9 +518,14 @@ pub(crate) fn install_ato_managed_podman<F: PodmanArtifactFetcher>(
     let download = fetch_and_verify(fetcher, &artifact.source_urls(), artifact.sha256)?;
 
     match artifact.format {
-        ArtifactFormat::MacosPkg => {
-            install_from_pkg(&download.bytes, &artifact, &download.source_url, arch, tools_dir, &install_dir)
-        }
+        ArtifactFormat::MacosPkg => install_from_pkg(
+            &download.bytes,
+            &artifact,
+            &download.source_url,
+            arch,
+            tools_dir,
+            &install_dir,
+        ),
         ArtifactFormat::TarGz | ArtifactFormat::Zip => {
             // Archive path: fetch + verify each helper separately, then promote.
             let mut helper_blobs: Vec<(HelperArtifact, Vec<u8>, String)> =
@@ -591,7 +628,11 @@ fn remove_stale_path(path: &Path) -> Result<(), PodmanInstallError> {
 /// process (e.g. retry, or sequential calls in tests) never collide on the same
 /// path — the previous `podman-<ver>.tmp-<pid>` scheme reused one path per pid.
 fn unique_tmp_install_dir(tools_dir: &Path, version: &str) -> PathBuf {
-    tools_dir.join(format!("podman-{}.tmp-{}", version, process_unique_suffix()))
+    tools_dir.join(format!(
+        "podman-{}.tmp-{}",
+        version,
+        process_unique_suffix()
+    ))
 }
 
 /// Move a validated temp install dir into its final location, preserving the
@@ -610,9 +651,11 @@ fn unique_tmp_install_dir(tools_dir: &Path, version: &str) -> PathBuf {
 /// via [`remove_stale_path`] before use, so promotion cannot wedge on a leftover
 /// backup (the same stale-path hazard fixed for pkg expansion).
 fn promote_install_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), PodmanInstallError> {
-    let name = final_dir.file_name().ok_or_else(|| PodmanInstallError::Extract {
-        message: format!("install dir has no file name: {}", final_dir.display()),
-    })?;
+    let name = final_dir
+        .file_name()
+        .ok_or_else(|| PodmanInstallError::Extract {
+            message: format!("install dir has no file name: {}", final_dir.display()),
+        })?;
     let mut backup_name = name.to_os_string();
     backup_name.push(format!(".bak-{}", process_unique_suffix()));
     let backup = final_dir.with_file_name(backup_name);
@@ -679,8 +722,9 @@ fn install_from_pkg(
         message: e.to_string(),
     })?;
 
-    let result =
-        install_from_pkg_inner(pkg_bytes, artifact, source_url, host_arch, final_dir, &tmp_dir);
+    let result = install_from_pkg_inner(
+        pkg_bytes, artifact, source_url, host_arch, final_dir, &tmp_dir,
+    );
 
     let installed = match result {
         Ok(v) => v,
@@ -733,8 +777,7 @@ fn install_from_pkg_inner(
     std::fs::write(&tmp_podman, &podman_bytes).map_err(|e| PodmanInstallError::Extract {
         message: format!("could not copy podman: {e}"),
     })?;
-    ensure_executable(&tmp_podman)
-        .map_err(|message| PodmanInstallError::Extract { message })?;
+    ensure_executable(&tmp_podman).map_err(|message| PodmanInstallError::Extract { message })?;
     verify_binary_runs(&tmp_podman)?;
 
     // Locate, arch-validate, and stage each declared helper.
@@ -754,8 +797,7 @@ fn install_from_pkg_inner(
         std::fs::write(&dest, &helper_bytes).map_err(|e| PodmanInstallError::Extract {
             message: format!("could not write helper `{helper_name}`: {e}"),
         })?;
-        ensure_executable(&dest)
-            .map_err(|message| PodmanInstallError::Extract { message })?;
+        ensure_executable(&dest).map_err(|message| PodmanInstallError::Extract { message })?;
 
         // For pkg installs the individual helper SHA256 is computed from the
         // extracted bytes (the pkg's overall digest is the security anchor).
@@ -764,7 +806,10 @@ fn install_from_pkg_inner(
             sha256: sha256_hex(&helper_bytes),
             // Helpers come from the same pkg, so they share its actual source.
             source_url: source_url.to_string(),
-            path: final_bin_dir.join(helper_name).to_string_lossy().to_string(),
+            path: final_bin_dir
+                .join(helper_name)
+                .to_string_lossy()
+                .to_string(),
             required_arch: host_arch.to_string(),
         });
     }
@@ -828,7 +873,10 @@ impl Drop for RemoveOnDrop {
 /// and miss broken ones.
 fn prepare_expand_dest(dest: &Path) -> Result<(), PodmanInstallError> {
     let parent = dest.parent().ok_or_else(|| PodmanInstallError::Extract {
-        message: format!("pkg expansion destination has no parent: {}", dest.display()),
+        message: format!(
+            "pkg expansion destination has no parent: {}",
+            dest.display()
+        ),
     })?;
     std::fs::create_dir_all(parent).map_err(|e| PodmanInstallError::Extract {
         message: format!("could not create pkg expansion parent dir: {e}"),
@@ -896,7 +944,10 @@ where
 
     if !run.success {
         return Err(PodmanInstallError::Extract {
-            message: format!("`pkgutil --expand-full` exited {}: {}", run.status, run.stderr),
+            message: format!(
+                "`pkgutil --expand-full` exited {}: {}",
+                run.status, run.stderr
+            ),
         });
     }
     Ok(())
@@ -1017,7 +1068,10 @@ where
                             actual,
                         });
                     }
-                    return Ok(VerifiedDownload { bytes, source_url: url.to_string() });
+                    return Ok(VerifiedDownload {
+                        bytes,
+                        source_url: url.to_string(),
+                    });
                 }
                 Err(e) if e.is_transient() => {
                     last_transient = Some(e.message);
@@ -1123,13 +1177,15 @@ fn install_into_temp_then_promote(
             std::fs::write(&dest, helper_bytes).map_err(|e| PodmanInstallError::Extract {
                 message: format!("could not write helper `{}`: {e}", helper.name),
             })?;
-            ensure_executable(&dest)
-                .map_err(|message| PodmanInstallError::Extract { message })?;
+            ensure_executable(&dest).map_err(|message| PodmanInstallError::Extract { message })?;
             helper_provenance.push(HelperProvenance {
                 name: helper.name.to_string(),
                 sha256: helper.sha256.to_string(),
                 source_url: helper_source_url.clone(),
-                path: final_helper_dir.join(helper.name).to_string_lossy().to_string(),
+                path: final_helper_dir
+                    .join(helper.name)
+                    .to_string_lossy()
+                    .to_string(),
                 required_arch: host_arch.to_string(),
             });
         }
@@ -1590,7 +1646,12 @@ mod tests {
     /// "URL A: transient, transient, then bytes" or "URL B: 404". Each call pops
     /// the next outcome for that URL; an empty/unknown queue is a permanent miss.
     struct ScriptedFetcher {
-        scripts: std::cell::RefCell<std::collections::HashMap<String, std::collections::VecDeque<Result<Vec<u8>, FetchError>>>>,
+        scripts: std::cell::RefCell<
+            std::collections::HashMap<
+                String,
+                std::collections::VecDeque<Result<Vec<u8>, FetchError>>,
+            >,
+        >,
         calls: std::cell::RefCell<Vec<String>>,
     }
 
@@ -1709,8 +1770,7 @@ mod tests {
     // ── download_verified: retry + fallback + fail-closed (504 resilience) ─────
 
     // 4 attempts per source (3 zero-delay retries) for deterministic tests.
-    const TEST_BACKOFFS: &[Duration] =
-        &[Duration::ZERO, Duration::ZERO, Duration::ZERO];
+    const TEST_BACKOFFS: &[Duration] = &[Duration::ZERO, Duration::ZERO, Duration::ZERO];
 
     // Large enough never to trip in retry tests (they use no_sleep, so elapsed
     // wall-clock stays ~0 anyway).
@@ -1733,8 +1793,15 @@ mod tests {
             vec![Err(t504()), Ok(body.clone())],
         )]);
 
-        let got = download_verified(&fetcher, &["https://primary/pkg"], &sha, TEST_BACKOFFS, TEST_MAX_TOTAL, no_sleep)
-            .expect("second attempt should succeed");
+        let got = download_verified(
+            &fetcher,
+            &["https://primary/pkg"],
+            &sha,
+            TEST_BACKOFFS,
+            TEST_MAX_TOTAL,
+            no_sleep,
+        )
+        .expect("second attempt should succeed");
 
         assert_eq!(got.bytes, body);
         assert_eq!(got.source_url, "https://primary/pkg");
@@ -1750,8 +1817,15 @@ mod tests {
             vec![Err(t504()), Err(t504()), Err(t504()), Err(t504())],
         )]);
 
-        let err = download_verified(&fetcher, &["https://primary/pkg"], "deadbeef", TEST_BACKOFFS, TEST_MAX_TOTAL, no_sleep)
-            .unwrap_err();
+        let err = download_verified(
+            &fetcher,
+            &["https://primary/pkg"],
+            "deadbeef",
+            TEST_BACKOFFS,
+            TEST_MAX_TOTAL,
+            no_sleep,
+        )
+        .unwrap_err();
 
         match err {
             PodmanInstallError::TransientDownloadFailed { attempts, .. } => {
@@ -1793,7 +1867,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, PodmanInstallError::TransientDownloadFailed { .. }));
+        assert!(matches!(
+            err,
+            PodmanInstallError::TransientDownloadFailed { .. }
+        ));
         assert_eq!(
             fetcher.call_count(),
             1,
@@ -1806,8 +1883,15 @@ mod tests {
     fn download_404_does_not_retry() {
         let fetcher = ScriptedFetcher::new(vec![("https://primary/pkg", vec![Err(p404())])]);
 
-        let err = download_verified(&fetcher, &["https://primary/pkg"], "deadbeef", TEST_BACKOFFS, TEST_MAX_TOTAL, no_sleep)
-            .unwrap_err();
+        let err = download_verified(
+            &fetcher,
+            &["https://primary/pkg"],
+            "deadbeef",
+            TEST_BACKOFFS,
+            TEST_MAX_TOTAL,
+            no_sleep,
+        )
+        .unwrap_err();
 
         assert!(
             matches!(err, PodmanInstallError::Fetch { .. }),
@@ -1897,7 +1981,11 @@ mod tests {
         };
         assert_eq!(
             artifact.source_urls(),
-            vec!["https://primary/pkg", "https://mirror-a/pkg", "https://mirror-b/pkg"]
+            vec![
+                "https://primary/pkg",
+                "https://mirror-a/pkg",
+                "https://mirror-b/pkg"
+            ]
         );
     }
 
@@ -2058,7 +2146,10 @@ mod tests {
         let tools = tempfile::tempdir().unwrap();
         let err = install_with_artifact(&fetcher, &artifact, tools.path())
             .expect_err("digest mismatch must fail closed");
-        assert!(matches!(err, PodmanInstallError::DigestMismatch { .. }), "{err:?}");
+        assert!(
+            matches!(err, PodmanInstallError::DigestMismatch { .. }),
+            "{err:?}"
+        );
         let install_dir = tools.path().join("podman-9.9.9-test");
         assert!(!install_dir.join("usr/bin/podman").exists());
     }
@@ -2090,7 +2181,10 @@ mod tests {
         let tools = tempfile::tempdir().unwrap();
         let err = install_ato_managed_podman(&fetcher, "plan9", "sparc", tools.path())
             .expect_err("unknown target");
-        assert!(matches!(err, PodmanInstallError::NoPinnedArtifact { .. }), "{err:?}");
+        assert!(
+            matches!(err, PodmanInstallError::NoPinnedArtifact { .. }),
+            "{err:?}"
+        );
         let msg = err.to_string();
         assert!(!msg.to_lowercase().contains("homebrew"), "{msg}");
         assert!(msg.contains("podman.io"), "{msg}");
@@ -2150,7 +2244,10 @@ mod tests {
         let tools = tempfile::tempdir().unwrap();
         let err = install_with_artifact(&fetcher, &artifact, tools.path())
             .expect_err("a bad helper digest must fail closed");
-        assert!(matches!(err, PodmanInstallError::DigestMismatch { .. }), "{err:?}");
+        assert!(
+            matches!(err, PodmanInstallError::DigestMismatch { .. }),
+            "{err:?}"
+        );
         assert!(!tools.path().join("podman-9.9.9-test").exists());
     }
 
@@ -2158,8 +2255,14 @@ mod tests {
 
     #[test]
     fn macho_parser_reads_thin_and_fat_archs() {
-        assert_eq!(macho_archs(&thin_macho(BinArch::Arm64)), Some(vec![BinArch::Arm64]));
-        assert_eq!(macho_archs(&thin_macho(BinArch::X86_64)), Some(vec![BinArch::X86_64]));
+        assert_eq!(
+            macho_archs(&thin_macho(BinArch::Arm64)),
+            Some(vec![BinArch::Arm64])
+        );
+        assert_eq!(
+            macho_archs(&thin_macho(BinArch::X86_64)),
+            Some(vec![BinArch::X86_64])
+        );
         assert_eq!(
             macho_archs(&fat_macho(&[BinArch::X86_64, BinArch::Arm64])),
             Some(vec![BinArch::X86_64, BinArch::Arm64])
@@ -2220,7 +2323,11 @@ mod tests {
     // ── Pkg format: find_binary_in_tree ───────────────────────────────────────
 
     fn make_fake_pkg_tree(root: &Path, binaries: &[(&str, &[u8])]) {
-        let payload_dir = root.join("io.podman.pkg").join("Payload").join("usr").join("bin");
+        let payload_dir = root
+            .join("io.podman.pkg")
+            .join("Payload")
+            .join("usr")
+            .join("bin");
         std::fs::create_dir_all(&payload_dir).unwrap();
         for (name, contents) in binaries {
             let path = payload_dir.join(name);
@@ -2238,7 +2345,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         make_fake_pkg_tree(
             root.path(),
-            &[("podman", b"#!/bin/sh\n"), ("gvproxy", b"x"), ("vfkit", b"y")],
+            &[
+                ("podman", b"#!/bin/sh\n"),
+                ("gvproxy", b"x"),
+                ("vfkit", b"y"),
+            ],
         );
         for name in ["podman", "gvproxy", "vfkit"] {
             let found = find_binary_in_tree(root.path(), name);
@@ -2300,7 +2411,12 @@ mod tests {
         let a = unique_tmp_install_dir(root.path(), "5.8.2");
         let b = unique_tmp_install_dir(root.path(), "5.8.2");
         assert_ne!(a, b, "two calls must produce different temp dirs");
-        assert!(a.file_name().unwrap().to_string_lossy().starts_with("podman-5.8.2.tmp-"));
+        assert!(
+            a.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("podman-5.8.2.tmp-")
+        );
     }
 
     // A stale destination that is a regular file (not a dir) must also be cleared
@@ -2314,7 +2430,10 @@ mod tests {
 
         prepare_expand_dest(&dest).unwrap();
 
-        assert!(!dest.exists(), "a stale regular file at dest must be removed");
+        assert!(
+            !dest.exists(),
+            "a stale regular file at dest must be removed"
+        );
         assert!(dest.parent().unwrap().is_dir());
     }
 
@@ -2328,7 +2447,10 @@ mod tests {
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         // Symlink to a non-existent target → broken symlink.
         std::os::unix::fs::symlink(root.path().join("does-not-exist"), &dest).unwrap();
-        assert!(std::fs::symlink_metadata(&dest).is_ok(), "symlink entry exists");
+        assert!(
+            std::fs::symlink_metadata(&dest).is_ok(),
+            "symlink entry exists"
+        );
 
         prepare_expand_dest(&dest).unwrap();
 
@@ -2355,13 +2477,23 @@ mod tests {
             observed_dest_absent = !d.exists();
             observed_parent_present = d.parent().unwrap().is_dir();
             observed_pkg_written = pkg_file.is_file();
-            Ok(ExpandRun { success: true, status: "exit status: 0".into(), stderr: String::new() })
+            Ok(ExpandRun {
+                success: true,
+                status: "exit status: 0".into(),
+                stderr: String::new(),
+            })
         });
 
         assert!(res.is_ok());
-        assert!(observed_dest_absent, "runner must see dest absent (pkgutil creates it)");
+        assert!(
+            observed_dest_absent,
+            "runner must see dest absent (pkgutil creates it)"
+        );
         assert!(observed_parent_present, "runner must see parent present");
-        assert!(observed_pkg_written, "temp pkg must exist while runner runs");
+        assert!(
+            observed_pkg_written,
+            "temp pkg must exist while runner runs"
+        );
         assert!(
             !dest.with_extension("tmp.pkg").exists(),
             "temp pkg must be removed after success"
@@ -2448,7 +2580,10 @@ mod tests {
         promote_install_dir(&tmp, &final_dir).unwrap();
 
         assert!(final_dir.join("new-marker").is_file(), "new contents live");
-        assert!(!final_dir.join("old-marker").exists(), "old contents replaced");
+        assert!(
+            !final_dir.join("old-marker").exists(),
+            "old contents replaced"
+        );
         assert!(!tmp.exists());
         let leftovers: Vec<_> = std::fs::read_dir(root.path())
             .unwrap()

@@ -77,6 +77,20 @@ pub enum AtoStartCommand {
     /// page — the only user-facing way to terminate the app in Focus View
     /// on platforms without a native app menu.
     Quit,
+    /// Launch a session for an installed app profile via the Runtime Control
+    /// API.  On success, the session URL is opened as a native app window.
+    /// Requires `RuntimeControl`.
+    RuntimeLaunchSession {
+        install_profile_key: String,
+        #[serde(default)]
+        target_label: Option<String>,
+    },
+    /// Stop a running session via the Runtime Control API.
+    /// Requires `RuntimeControl`.
+    RuntimeStopSession { session_id: String },
+    /// Open a session URL as a native app window.
+    /// Requires `WebviewCreate`.
+    RuntimeOpenSessionUrl { url: String },
 }
 
 impl AtoStartCommand {
@@ -92,6 +106,9 @@ impl AtoStartCommand {
             AtoStartCommand::OpenCommunityImport { .. } => Capability::WebviewCreate,
             AtoStartCommand::Close => Capability::WindowsClose,
             AtoStartCommand::Quit => Capability::AppQuit,
+            AtoStartCommand::RuntimeLaunchSession { .. } => Capability::RuntimeControl,
+            AtoStartCommand::RuntimeStopSession { .. } => Capability::RuntimeControl,
+            AtoStartCommand::RuntimeOpenSessionUrl { .. } => Capability::WebviewCreate,
         }
     }
 }
@@ -401,6 +418,9 @@ pub struct StartSnapshot {
     pub recent_capsules: Vec<StartHistoryEntry>,
     pub local_apps: Vec<LocalAppInfo>,
     pub featured_apps: Vec<FeaturedApp>,
+    /// Base URL for the `ato serve` Runtime Control API.
+    /// JS can call `${runtime_base_url}/v1/runtime/sessions` etc. directly.
+    pub runtime_base_url: String,
 }
 
 /// Map one `SessionViewEntry` (registry view model) to a Start-page running app
@@ -513,12 +533,19 @@ pub fn build_start_snapshot(
     let workspace_root_expanded = expand_tilde(workspace_root_raw);
     let local_apps = scan_local_apps(&workspace_root_expanded);
 
+    let runtime_base_url = crate::runtime_control_client::RuntimeControlClient::new(
+        config.registry.local_registry_port,
+    )
+    .base_url()
+    .to_string();
+
     StartSnapshot {
         open_windows,
         running_apps,
         recent_capsules,
         local_apps,
         featured_apps: static_featured_apps(locale),
+        runtime_base_url,
     }
 }
 
@@ -769,6 +796,112 @@ pub fn dispatch(
                 tracing::info!("ato_start: quit requested from Start page — quitting app");
                 cx.quit();
             });
+        }
+
+        AtoStartCommand::RuntimeLaunchSession {
+            install_profile_key,
+            target_label,
+        } => {
+            let async_app = cx.to_async();
+            let fe = cx.foreground_executor().clone();
+            let be = cx.background_executor().clone();
+            let port = cx
+                .try_global::<crate::config::LocalRegistryPort>()
+                .map(|g| g.0)
+                .unwrap_or_else(crate::config::default_local_registry_port);
+
+            fe.spawn(async move {
+                let key = install_profile_key.clone();
+                let label = target_label.clone();
+                let result = be
+                    .spawn(async move {
+                        crate::runtime_control_client::RuntimeControlClient::new(port)
+                            .launch_session(&key, label.as_deref())
+                    })
+                    .await;
+
+                crate::webview_init_guard::wait_until_idle(&be).await;
+                async_app.update(|cx| match result {
+                    Ok(resp) => {
+                        tracing::info!(
+                            session_id = %resp.session_id,
+                            url = ?resp.user_visible_url,
+                            "ato_start: runtime_launch_session succeeded"
+                        );
+                        if let Some(url_str) = resp.user_visible_url {
+                            match url::Url::parse(&url_str) {
+                                Ok(url) => {
+                                    let route = GuestRoute::ExternalUrl(url);
+                                    if let Err(err) = crate::window::open_app_window(cx, route) {
+                                        tracing::error!(
+                                            error = %err,
+                                            "ato_start: open session url failed"
+                                        );
+                                    }
+                                }
+                                Err(err) => tracing::warn!(
+                                    url = %url_str,
+                                    error = %err,
+                                    "ato_start: session url parse failed"
+                                ),
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            install_profile_key = %install_profile_key,
+                            "ato_start: runtime_launch_session failed"
+                        );
+                    }
+                });
+            })
+            .detach();
+        }
+
+        AtoStartCommand::RuntimeStopSession { session_id } => {
+            let be = cx.background_executor().clone();
+            let port = cx
+                .try_global::<crate::config::LocalRegistryPort>()
+                .map(|g| g.0)
+                .unwrap_or_else(crate::config::default_local_registry_port);
+
+            be.spawn(async move {
+                let result =
+                    crate::runtime_control_client::RuntimeControlClient::new(port)
+                        .stop_session(&session_id);
+                match result {
+                    Ok(()) => tracing::info!(
+                        session_id = %session_id,
+                        "ato_start: runtime_stop_session succeeded"
+                    ),
+                    Err(err) => tracing::error!(
+                        error = %err,
+                        session_id = %session_id,
+                        "ato_start: runtime_stop_session failed"
+                    ),
+                }
+            })
+            .detach();
+        }
+
+        AtoStartCommand::RuntimeOpenSessionUrl { url } => {
+            match url::Url::parse(&url) {
+                Ok(parsed) => {
+                    let route = GuestRoute::ExternalUrl(parsed);
+                    crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                        if let Err(err) = crate::window::open_app_window(cx, route) {
+                            tracing::error!(
+                                error = %err,
+                                "ato_start: runtime_open_session_url failed"
+                            );
+                        }
+                    });
+                }
+                Err(err) => {
+                    tracing::warn!(url = %url, error = %err, "ato_start: runtime_open_session_url — invalid URL");
+                }
+            }
         }
     }
     Ok(())

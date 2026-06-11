@@ -21,6 +21,7 @@ mod netd;
 mod orchestrator;
 mod proc_util;
 mod retention;
+mod runtime_control_client;
 mod runtime_setup;
 mod secret_bridge;
 mod settings;

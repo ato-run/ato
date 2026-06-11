@@ -379,7 +379,9 @@ impl PrepareEnv for SystemPrepareEnv {
 
     fn install_ato_managed_podman(&self) -> Result<(), PodmanInstallError> {
         let tools_dir = capsule_core::common::paths::ato_tools_dir().map_err(|err| {
-            PodmanInstallError::Extract { message: err.to_string() }
+            PodmanInstallError::Extract {
+                message: err.to_string(),
+            }
         })?;
         std::fs::create_dir_all(&tools_dir).map_err(|err| PodmanInstallError::Extract {
             message: err.to_string(),
@@ -398,9 +400,7 @@ impl PrepareEnv for SystemPrepareEnv {
         // podman can't be resolved, the install path handles that earlier; treat
         // it as "nothing to police" here.
         match podman::resolve_podman() {
-            Ok(resolved) => {
-                missing_helpers_for(&resolved.bin, self.host_os(), self.host_arch())
-            }
+            Ok(resolved) => missing_helpers_for(&resolved.bin, self.host_os(), self.host_arch()),
             Err(_) => Vec::new(),
         }
     }
@@ -418,7 +418,10 @@ fn host_virtualization_available() -> bool {
     if std::env::consts::OS != "macos" {
         return true;
     }
-    match Command::new("sysctl").args(["-n", "kern.hv_support"]).output() {
+    match Command::new("sysctl")
+        .args(["-n", "kern.hv_support"])
+        .output()
+    {
         Ok(out) if out.status.success() => {
             // "1" = supported, "0" = not. Anything unexpected → don't block.
             String::from_utf8_lossy(&out.stdout).trim() != "0"
@@ -1458,7 +1461,9 @@ mod tests {
         // verified-download path instead.
         let env = FakeEnv::new(PreparePlatform::Macos)
             .with_resolves(vec![
-                Err(PodmanResolveError::NotFound { searched: Vec::new() }),
+                Err(PodmanResolveError::NotFound {
+                    searched: Vec::new(),
+                }),
                 Ok(resolved()),
             ])
             .with_brew(Some("/opt/homebrew/bin/brew"), Some(0))
@@ -1488,7 +1493,9 @@ mod tests {
         // distinct, retryable PrepareError — not collapsed into the generic
         // "install Podman manually" InstallUnavailable.
         let env = FakeEnv::new(PreparePlatform::Macos)
-            .with_resolves(vec![Err(PodmanResolveError::NotFound { searched: Vec::new() })])
+            .with_resolves(vec![Err(PodmanResolveError::NotFound {
+                searched: Vec::new(),
+            })])
             .with_brew(None, None)
             .with_managed(
                 true,
@@ -1599,7 +1606,10 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("virtualization"), "{msg}");
         assert!(msg.contains("physical Mac"), "{msg}");
-        assert!(!err.is_retryable(), "environment limit is not a simple retry");
+        assert!(
+            !err.is_retryable(),
+            "environment limit is not a simple retry"
+        );
     }
 
     #[test]
@@ -1782,10 +1792,7 @@ mod tests {
             Some("vfkit")
         );
         // A generic machine failure is left alone (mapped to MachineInitFailed).
-        assert_eq!(
-            helper_name_in_machine_error("vm already exists"),
-            None
-        );
+        assert_eq!(helper_name_in_machine_error("vm already exists"), None);
         assert_eq!(
             helper_name_in_machine_error("could not find machine ato-podman"),
             None
