@@ -46,6 +46,130 @@ fn sandbox_entrypoint_path(target: &SourceTarget) -> String {
     PathBuf::from("/app").join(normalized).display().to_string()
 }
 
+/// Read-only bind-mounts for host system paths the sandboxed workload needs.
+///
+/// `/usr` must exist on any supported host, so it is a hard `--ro-bind` (a
+/// missing source there is a real error). The rest are host-environment
+/// dependent and legitimately absent on some systems:
+///   - `/lib64` does not exist on aarch64 (and other non-amd64 arches),
+///   - `/lib` is absent on pure /usr-merge layouts,
+///   - `/etc/resolv.conf` / `/etc/hosts` / `/etc/ssl` are absent in minimal
+///     container/base images.
+///
+/// A strict `--ro-bind` against a non-existent source makes bwrap abort the
+/// *entire* sandbox during mount setup ("Can't find source path …", exit 1,
+/// before the workload ever execs). `--ro-bind-try` skips a missing optional
+/// source instead of killing the launch. This does not weaken isolation — a
+/// source that does not exist cannot be exposed.
+fn system_ro_binds() -> [[&'static str; 3]; 6] {
+    [
+        ["--ro-bind-try", "/lib", "/lib"],
+        ["--ro-bind-try", "/lib64", "/lib64"],
+        ["--ro-bind", "/usr", "/usr"],
+        ["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"],
+        ["--ro-bind-try", "/etc/hosts", "/etc/hosts"],
+        ["--ro-bind-try", "/etc/ssl", "/etc/ssl"],
+    ]
+}
+
+/// In-sandbox interpreter selection for a project virtualenv.
+struct SandboxVenv {
+    /// Guest path of the venv interpreter (the source dir is mounted at `/app`).
+    guest_python: String,
+    /// Host path of the base CPython install the venv references, which must be
+    /// bind-mounted so the venv interpreter can exec and load its standard
+    /// library.
+    base_install: PathBuf,
+}
+
+/// Detect a project virtualenv created by the build phase
+/// (`<source_dir>/.venv`) and resolve the base CPython install it references.
+///
+/// A venv interpreter is a thin shim: it adds the venv's `site-packages` to
+/// `sys.path` but loads the standard library (and, for symlinked venvs, execs)
+/// from the base install named in `.venv/pyvenv.cfg` (`home = …/bin`). For the
+/// sandboxed interpreter to work, that base install must be visible inside the
+/// sandbox, so we surface its root for an additional bind-mount. Returns `None`
+/// when no venv interpreter exists (capsules with no third-party dependencies
+/// fall back to the base toolchain interpreter) or when the base install cannot
+/// be resolved.
+fn sandbox_venv_python(target: &SourceTarget) -> Option<SandboxVenv> {
+    let venv_dir = target.source_dir.join(".venv");
+    if !venv_dir.join("bin").join("python").exists() {
+        return None;
+    }
+    Some(SandboxVenv {
+        guest_python: "/app/.venv/bin/python".to_string(),
+        base_install: venv_base_install(&venv_dir)?,
+    })
+}
+
+/// Resolve the base CPython install root for a venv. Prefers the `home` key in
+/// `pyvenv.cfg` (which points at the base interpreter's `bin/`, whose parent is
+/// the install root); falls back to canonicalizing the venv `python` symlink.
+fn venv_base_install(venv_dir: &std::path::Path) -> Option<PathBuf> {
+    if let Ok(cfg) = std::fs::read_to_string(venv_dir.join("pyvenv.cfg")) {
+        for line in cfg.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim() == "home" {
+                    let home = PathBuf::from(value.trim());
+                    // `home` is the base interpreter's bin/ — bind its parent
+                    // (the install root) so stdlib under lib/ is also present.
+                    return Some(home.parent().map(|p| p.to_path_buf()).unwrap_or(home));
+                }
+            }
+        }
+    }
+    // Fallback: follow the venv python symlink to the real base binary.
+    std::fs::canonicalize(venv_dir.join("bin").join("python"))
+        .ok()
+        .and_then(|real| real.parent().map(|bin| bin.to_path_buf())) // …/bin
+        .and_then(|bin| bin.parent().map(|root| root.to_path_buf())) // install root
+}
+
+/// Resolve the install root for a managed toolchain interpreter so the launcher
+/// can bind the whole install (`bin/` + `lib/`), not just the binary file.
+///
+/// nacelle's managed interpreters live at `<root>/bin/<exe>` — e.g.
+/// `~/.capsule/toolchains/python-3.11/python/bin/python3` or
+/// `~/.ato/toolchains/node-20/<dist>/bin/node`. The runtime loader needs
+/// siblings under `<root>/lib/` (libpython*.so, node's `lib/`, …); binding only
+/// the binary leaves those absent and the interpreter cannot start
+/// (`error while loading shared libraries: libpython3.x.so.1.0`).
+///
+/// Returns `None` (caller keeps the binary-only bind) when the path is not in a
+/// `<root>/bin/<exe>` layout, or when the resolved root would be `/` or `/usr`
+/// — those are already provided by `system_ro_binds`, and binding them here
+/// would be redundant or over-broad.
+fn toolchain_install_root(toolchain_path: &std::path::Path) -> Option<PathBuf> {
+    let bin = toolchain_path.parent()?;
+    if bin.file_name().and_then(|n| n.to_str()) != Some("bin") {
+        return None;
+    }
+    let root = bin.parent()?;
+    if root == std::path::Path::new("/") || root == std::path::Path::new("/usr") {
+        return None;
+    }
+    Some(root.to_path_buf())
+}
+
+/// Env keys the runtime re-applies inside the production sandbox after
+/// `--clearenv`. This is a STRICT allowlist — only keys the runtime itself
+/// synthesizes for the sandbox contract (the writable session data dir), never
+/// general user/host env. `--clearenv` deliberately drops everything else.
+const SANDBOX_RUNTIME_ENV_ALLOWLIST: &[&str] = &["ATO_DATA_DIR", "DATABASE_PATH"];
+
+/// Select the entries of the workload env that the runtime is allowed to
+/// re-inject past `--clearenv`. Order is preserved; bwrap's `--setenv` applies
+/// last-write-wins for duplicate keys.
+fn sandbox_runtime_setenv_pairs(env: Option<&[(String, String)]>) -> Vec<(String, String)> {
+    env.into_iter()
+        .flatten()
+        .filter(|(key, _)| SANDBOX_RUNTIME_ENV_ALLOWLIST.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
 fn ensure_bwrap_dirs(cmd: &mut Command, path: &std::path::Path) {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -142,6 +266,87 @@ pub fn generate_landlock_policy(target: &SourceTarget) -> crate::system::sandbox
     }
 
     policy
+}
+
+/// Build the Landlock policy applied to the workload *inside* the sandbox by
+/// the `nacelle sandbox-exec` shim. Paths are guest paths (the capsule source
+/// is mounted at `/app`).
+///
+/// Reads are granted broadly (`/`) because bubblewrap already limits what is
+/// visible inside the sandbox to the bind set — granting read on `/` exposes
+/// nothing beyond those mounts, and keeps the read set complete (interpreter,
+/// stdlib, shared libraries, source) without enumerating every bound path.
+/// Landlock's contribution on this path is the *write* restriction: only the
+/// workload's scratch space (`/tmp`), the source dir (already read-only-bound
+/// by bwrap), injected writable mounts, and IPC sockets are writable.
+fn guest_landlock_policy(target: &SourceTarget) -> crate::system::sandbox::SandboxPolicy {
+    use crate::system::sandbox::SandboxPolicy;
+
+    let mut policy = SandboxPolicy::default();
+    policy.read_only_paths = vec![PathBuf::from("/")];
+    policy.read_write_paths = vec![
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+        // Source is mounted read-only at /app; mirror the prior policy's intent
+        // of treating the capsule's own dir as writable. bwrap's read-only bind
+        // still wins, so this grants nothing extra.
+        PathBuf::from("/app"),
+    ];
+    for mount in &target.injected_mounts {
+        if !mount.readonly {
+            policy.read_write_paths.push(mount.target.clone());
+        }
+    }
+    policy.ipc_socket_paths = target.ipc_socket_paths.clone();
+    policy.allow_network = target
+        .isolation
+        .as_ref()
+        .map(|iso| iso.network_enabled)
+        .unwrap_or(true);
+    policy.development_mode = target.dev_mode;
+    policy
+}
+
+/// Stage the in-sandbox Landlock shim. Serializes the guest policy to a file and
+/// bind-mounts both the `nacelle` binary and that policy file (read-only) into
+/// the sandbox, returning their guest paths `(nacelle_binary, policy_file)` for
+/// the workload command line. bwrap then execs
+/// `<nacelle> sandbox-exec --policy <policy> -- <workload>`, which applies
+/// Landlock to the workload after bwrap's namespace setup.
+fn prepare_landlock_shim(
+    runtime: &SourceRuntime,
+    workload_id: &str,
+    target: &SourceTarget,
+    cmd: &mut Command,
+) -> Result<(String, String), RuntimeError> {
+    const GUEST_NACELLE: &str = "/nacelle";
+    const GUEST_POLICY: &str = "/nacelle-landlock.json";
+
+    let nacelle_bin = std::env::current_exe().map_err(|e| RuntimeError::Io {
+        path: PathBuf::from("<current_exe>"),
+        source: e,
+    })?;
+    let nacelle_bin = nacelle_bin.to_string_lossy().to_string();
+
+    let policy = guest_landlock_policy(target);
+    let policy_json = serde_json::to_vec(&policy).map_err(|e| RuntimeError::CommandExecution {
+        operation: "serialize landlock policy".to_string(),
+        source: std::io::Error::other(e.to_string()),
+    })?;
+    let policy_host = runtime
+        .config
+        .log_dir
+        .join(format!("{workload_id}.landlock.json"));
+    std::fs::write(&policy_host, &policy_json).map_err(|e| RuntimeError::Io {
+        path: policy_host.clone(),
+        source: e,
+    })?;
+    let policy_host_str = policy_host.to_string_lossy().to_string();
+
+    cmd.args(["--ro-bind", &nacelle_bin, GUEST_NACELLE]);
+    cmd.args(["--ro-bind", &policy_host_str, GUEST_POLICY]);
+
+    Ok((GUEST_NACELLE.to_string(), GUEST_POLICY.to_string()))
 }
 
 /// Add bubblewrap arguments that hide sensitive paths inside the namespace.
@@ -245,17 +450,25 @@ pub async fn launch_with_bubblewrap(
     cmd.args(["--dev", "/dev"]);
     cmd.args(["--tmpfs", "/tmp"]);
 
-    // Bind mount essential paths read-only
-    cmd.args(["--ro-bind", "/lib", "/lib"]);
-    cmd.args(["--ro-bind", "/lib64", "/lib64"]);
-    cmd.args(["--ro-bind", "/usr", "/usr"]);
-    cmd.args(["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"]);
-    cmd.args(["--ro-bind", "/etc/hosts", "/etc/hosts"]);
-    cmd.args(["--ro-bind", "/etc/ssl", "/etc/ssl"]);
+    // Bind mount essential host system paths read-only (see `system_ro_binds`
+    // for why most are non-fatal `--ro-bind-try`).
+    for [flag, src, dst] in system_ro_binds() {
+        cmd.args([flag, src, dst]);
+    }
 
     // Bind mount the toolchain binary
     let toolchain_path_str = toolchain_path.to_string_lossy();
     cmd.args(["--ro-bind", &toolchain_path_str, &toolchain_path_str]);
+
+    // Also bind the toolchain's install ROOT (bin/ + lib/), not just the binary,
+    // so the interpreter can load its runtime — e.g. libpython*.so for a managed
+    // CPython, or node's lib/. Binding only the binary leaves those absent and
+    // the interpreter exits with "error while loading shared libraries".
+    // `--ro-bind-try` keeps it non-fatal; /usr and / are skipped (already bound).
+    if let Some(toolchain_root) = toolchain_install_root(&toolchain_path) {
+        let toolchain_root_str = toolchain_root.to_string_lossy();
+        cmd.args(["--ro-bind-try", &toolchain_root_str, &toolchain_root_str]);
+    }
 
     // Bind mount the source directory read-only
     let source_dir_str = target.source_dir.to_string_lossy();
@@ -371,6 +584,14 @@ pub async fn launch_with_bubblewrap(
         cmd.args(["--setenv", "HOME", "/tmp"]);
         cmd.args(["--setenv", "LANG", "C.UTF-8"]);
 
+        // Re-apply runtime-owned env that must survive --clearenv. Strict
+        // allowlist (SANDBOX_RUNTIME_ENV_ALLOWLIST) — e.g. ATO_DATA_DIR /
+        // DATABASE_PATH for the writable session data dir. General user/host env
+        // stays dropped.
+        for (key, value) in sandbox_runtime_setenv_pairs(request.env.as_deref()) {
+            cmd.args(["--setenv", &key, &value]);
+        }
+
         // Apply sidecar (SOCKS5 proxy) environment variables
         if let Some(ref sidecar) = runtime.config.sidecar_config {
             let proxy_url = format!("socks5h://127.0.0.1:{}", sidecar.socks_port);
@@ -404,12 +625,55 @@ pub async fn launch_with_bubblewrap(
         runtime.apply_sidecar_env(&mut cmd);
     }
 
+    // Resolve the interpreter, preferring a project virtualenv when the build
+    // phase produced one. A bare `python`/`python3` otherwise maps to the
+    // managed *base* toolchain interpreter, which carries only the standard
+    // library — the capsule's installed dependencies live in `.venv`, so the
+    // app would fail at import time (`ModuleNotFoundError`). When a venv exists
+    // we run its interpreter (`/app/.venv/bin/python`) and bind-mount the base
+    // CPython install it references (a venv python is a thin shim that loads
+    // stdlib and execs from that base install).
+    let venv_python = sandbox_venv_python(target);
+    if let Some(ref venv) = venv_python {
+        let base = venv.base_install.to_string_lossy();
+        cmd.args(["--ro-bind-try", &base, &base]);
+    }
+
+    // Landlock is applied to the *workload*, not the bwrap wrapper, via an
+    // in-sandbox shim (`nacelle sandbox-exec`). bwrap sets up the user
+    // namespace first (writing /proc/self/uid_map); the shim then applies
+    // Landlock and execs the workload. Applying Landlock to bwrap directly
+    // would deny that /proc write and break user-namespace setup.
+    let landlock_shim = if crate::system::sandbox::is_sandbox_supported() {
+        match prepare_landlock_shim(runtime, request.workload_id, target, &mut cmd) {
+            Ok(shim) => Some(shim),
+            Err(err) => {
+                warn!(
+                    "Landlock shim setup failed ({err}); workload runs with bubblewrap \
+                     namespace isolation only"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Add the actual command
     cmd.arg("--");
+    if let Some((ref shim_bin, ref policy_guest)) = landlock_shim {
+        // bwrap execs the shim, which applies Landlock then execs the workload.
+        cmd.arg(shim_bin);
+        cmd.args(["sandbox-exec", "--policy", policy_guest, "--"]);
+    }
     if let Some(explicit_cmd) = target.cmd.as_ref() {
         if let Some((binary, args)) = explicit_cmd.split_first() {
             let binary_path = match binary.as_str() {
-                "python" | "python3" | "node" | "deno" | "ruby" => toolchain_path.clone(),
+                "python" | "python3" => match &venv_python {
+                    Some(venv) => PathBuf::from(&venv.guest_python),
+                    None => toolchain_path.clone(),
+                },
+                "node" | "deno" | "ruby" => toolchain_path.clone(),
                 _ => which::which(binary).unwrap_or_else(|_| PathBuf::from(binary)),
             };
             cmd.arg(binary_path);
@@ -425,20 +689,28 @@ pub async fn launch_with_bubblewrap(
             }
         }
     } else {
-        cmd.arg(&toolchain_path);
-
+        // No explicit command: synthesize `<interpreter> <entrypoint>` from the
+        // declared language, preferring the venv interpreter for python.
+        let python_interp = match &venv_python {
+            Some(venv) => PathBuf::from(&venv.guest_python),
+            None => toolchain_path.clone(),
+        };
         match target.language.to_lowercase().as_str() {
             "python" => {
+                cmd.arg(&python_interp);
                 cmd.args(["-B", &sandbox_entrypoint_path(target)]);
             }
             "node" | "nodejs" => {
+                cmd.arg(&toolchain_path);
                 cmd.arg(sandbox_entrypoint_path(target));
             }
             "deno" => {
+                cmd.arg(&toolchain_path);
                 let sandbox_entrypoint = sandbox_entrypoint_path(target);
                 cmd.args(["run", "--allow-read=/app", &sandbox_entrypoint]);
             }
             _ => {
+                cmd.arg(&toolchain_path);
                 cmd.arg(sandbox_entrypoint_path(target));
             }
         }
@@ -477,37 +749,13 @@ pub async fn launch_with_bubblewrap(
 
     debug!("Executing bwrap command: {:?}", cmd);
 
-    // Apply Landlock inside the forked child (before bwrap execs).
-    // This adds a filesystem-access layer on top of bwrap's namespace isolation.
-    // Landlock survives exec, so it stays active for the capsule workload.
-    {
-        use crate::system::sandbox::{apply_sandbox, is_sandbox_supported};
-        if is_sandbox_supported() {
-            let policy = generate_landlock_policy(target);
-            // Safety: pre_exec callback runs after fork() in the child process,
-            // before exec(). apply_sandbox calls restrict_self() which is safe
-            // to call post-fork. We capture the policy by value.
-            unsafe {
-                cmd.pre_exec(move || {
-                    // Set PR_SET_NO_NEW_PRIVS so Landlock doesn't require CAP_SYS_ADMIN.
-                    let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                    if ret != 0 {
-                        eprintln!(
-                            "[nacelle] PR_SET_NO_NEW_PRIVS failed: {}",
-                            std::io::Error::last_os_error()
-                        );
-                    }
-                    if let Err(e) = apply_sandbox(&policy) {
-                        eprintln!("[nacelle] Landlock apply_sandbox failed: {e}");
-                        // Non-fatal: proceed with namespace isolation only.
-                    }
-                    Ok(())
-                });
-            }
-        } else {
-            debug!("Landlock not supported on this kernel; skipping pre_exec hook");
-        }
-    }
+    // NOTE: Landlock is intentionally NOT applied here via `pre_exec`. Doing so
+    // restricts the *bwrap wrapper* before it sets up the user namespace, and a
+    // policy that (correctly) does not grant write access to `/proc` denies
+    // bwrap's `/proc/self/uid_map` write — bwrap then fails with
+    // "setting up uid map: Permission denied". Instead, Landlock is applied to
+    // the *workload* from inside the sandbox by the `nacelle sandbox-exec` shim
+    // (staged above via `prepare_landlock_shim`), after bwrap's namespace setup.
 
     // Put the bwrap wrapper in its own process group (mirror of macos.rs
     // `launch_with_sandbox_exec` and `launch_direct`). Without this the
@@ -545,6 +793,29 @@ pub async fn launch_with_bubblewrap(
     })
 }
 
+/// Arguments for the bubblewrap availability probe.
+///
+/// bubblewrap starts with an empty filesystem namespace. Probing `/bin/true`
+/// without binding a rootfs can fail even when bwrap/userns are usable — the
+/// target binary is simply not present inside the empty namespace, so bwrap
+/// exits non-zero with `execvp: No such file or directory`. The probe must
+/// match the real sandbox launcher enough to verify execution, so it binds the
+/// host rootfs read-only before exec. Missing bwrap, blocked user namespaces,
+/// or other bwrap failures still surface as "unavailable".
+fn bubblewrap_probe_args() -> [&'static str; 9] {
+    [
+        "--ro-bind",
+        "/",
+        "/", // rootfs must be present for /bin/true to exec
+        "--unshare-user",
+        "--uid",
+        "1000",
+        "--gid",
+        "1000", //
+        "/bin/true",
+    ]
+}
+
 /// Check if bubblewrap is available and properly configured
 #[allow(dead_code)]
 pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
@@ -553,16 +824,12 @@ pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
         RuntimeError::SandboxSetupFailed("bubblewrap (bwrap) not found in PATH".to_string())
     })?;
 
-    // Check if we can create user namespaces
+    // Probe a real (rootfs-bound) bwrap invocation so the result reflects actual
+    // sandbox usability — without the rootfs bind /bin/true is missing inside the
+    // empty namespace and the probe fails even when sandboxing works. See
+    // `bubblewrap_probe_args`.
     let output = Command::new(&bwrap_path)
-        .args([
-            "--unshare-user",
-            "--uid",
-            "1000",
-            "--gid",
-            "1000",
-            "/bin/true",
-        ])
+        .args(bubblewrap_probe_args())
         .output();
 
     match output {
@@ -598,6 +865,47 @@ pub fn verify_bubblewrap_available() -> Result<(), RuntimeError> {
 mod tests {
     use super::*;
     use crate::launcher::IsolationPolicy;
+
+    #[test]
+    fn bubblewrap_probe_binds_rootfs_before_exec() {
+        // Without a rootfs bind the probe runs in an empty namespace where
+        // /bin/true does not exist, so it fails even when sandboxing works.
+        let args = bubblewrap_probe_args();
+        let rootfs = args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == "/" && w[2] == "/")
+            .expect("probe must bind the host rootfs read-only (--ro-bind / /)");
+        let exec = args
+            .iter()
+            .position(|a| *a == "/bin/true")
+            .expect("probe must exec a target binary");
+        assert!(
+            rootfs < exec,
+            "rootfs bind must precede the exec target: {args:?}"
+        );
+    }
+
+    #[test]
+    fn bubblewrap_probe_keeps_user_namespace_flags() {
+        let args = bubblewrap_probe_args();
+        assert!(
+            args.contains(&"--unshare-user"),
+            "probe must unshare user ns"
+        );
+        assert!(args.contains(&"--uid"), "probe must set a uid map");
+        assert!(args.contains(&"--gid"), "probe must set a gid map");
+    }
+
+    #[test]
+    fn bubblewrap_probe_does_not_require_landlock() {
+        // bwrap availability is independent of Landlock (a supplementary LSM);
+        // the probe must not depend on landlock support.
+        let args = bubblewrap_probe_args();
+        assert!(
+            !args.iter().any(|a| a.to_lowercase().contains("landlock")),
+            "bwrap probe must not reference landlock: {args:?}"
+        );
+    }
 
     #[test]
     fn test_bubblewrap_command_construction() {
@@ -789,5 +1097,233 @@ mod tests {
 
         let policy = generate_landlock_policy(&target);
         assert!(policy.ipc_socket_paths.is_empty());
+    }
+
+    fn python_target(source_dir: PathBuf) -> SourceTarget {
+        SourceTarget {
+            language: "python".to_string(),
+            version: Some("3.11".to_string()),
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir,
+            requested_cwd: None,
+            cmd: Some(vec![
+                "python".to_string(),
+                "-m".to_string(),
+                "uvicorn".to_string(),
+                "app.main:app".to_string(),
+            ]),
+            dev_mode: false,
+            isolation: None,
+            ipc_socket_paths: vec![],
+            injected_mounts: vec![],
+            ..Default::default()
+        }
+    }
+
+    fn make_venv(root: &std::path::Path, home: &std::path::Path) {
+        let bin = root.join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            root.join(".venv").join("pyvenv.cfg"),
+            format!("home = {}\nversion = 3.11.15\n", home.display()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sandbox_venv_python_absent_when_no_venv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = python_target(tmp.path().to_path_buf());
+        // No `.venv` → fall back to the managed base toolchain interpreter.
+        assert!(sandbox_venv_python(&target).is_none());
+    }
+
+    #[test]
+    fn sandbox_venv_python_uses_guest_path_and_base_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        // pyvenv.cfg `home` points at the base interpreter's bin/; the install
+        // root (its parent) is what must be bind-mounted into the sandbox.
+        let base_bin = tmp.path().join("uv-python").join("bin");
+        std::fs::create_dir_all(&base_bin).unwrap();
+        make_venv(tmp.path(), &base_bin);
+
+        let target = python_target(tmp.path().to_path_buf());
+        let venv = sandbox_venv_python(&target).expect("venv must be detected");
+        assert_eq!(venv.guest_python, "/app/.venv/bin/python");
+        assert_eq!(venv.base_install, tmp.path().join("uv-python"));
+    }
+
+    #[test]
+    fn venv_base_install_prefers_pyvenv_cfg_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_bin = tmp.path().join("install-root").join("bin");
+        std::fs::create_dir_all(&base_bin).unwrap();
+        make_venv(tmp.path(), &base_bin);
+        let resolved = venv_base_install(&tmp.path().join(".venv")).unwrap();
+        assert_eq!(resolved, tmp.path().join("install-root"));
+    }
+
+    #[test]
+    fn toolchain_install_root_resolves_bin_parent() {
+        // Managed CPython layout: <root>/bin/<exe> -> <root> (so lib/ comes too).
+        assert_eq!(
+            toolchain_install_root(&PathBuf::from(
+                "/home/u/.capsule/toolchains/python-3.11/python/bin/python3"
+            )),
+            Some(PathBuf::from(
+                "/home/u/.capsule/toolchains/python-3.11/python"
+            ))
+        );
+        // Managed Node layout.
+        assert_eq!(
+            toolchain_install_root(&PathBuf::from(
+                "/home/u/.ato/toolchains/node-20/node-v20.20.2-linux-arm64/bin/node"
+            )),
+            Some(PathBuf::from(
+                "/home/u/.ato/toolchains/node-20/node-v20.20.2-linux-arm64"
+            ))
+        );
+    }
+
+    #[test]
+    fn toolchain_install_root_skips_system_and_nonbin_layouts() {
+        // System interpreter: root would be /usr, already covered by system binds.
+        assert_eq!(
+            toolchain_install_root(&PathBuf::from("/usr/bin/python3")),
+            None
+        );
+        // bin directly under / : root would be /, must not be bound here.
+        assert_eq!(toolchain_install_root(&PathBuf::from("/bin/python3")), None);
+        // Not a `<root>/bin/<exe>` layout: keep the binary-only bind.
+        assert_eq!(toolchain_install_root(&PathBuf::from("/opt/python3")), None);
+    }
+
+    #[test]
+    fn sandbox_runtime_env_allowlist_filters_to_runtime_keys() {
+        // Only runtime-owned keys survive --clearenv; general user/host env is
+        // dropped (no FOO/secret leak into the sandbox).
+        let env = vec![
+            ("ATO_DATA_DIR".to_string(), "/runs/ato/session".to_string()),
+            (
+                "DATABASE_PATH".to_string(),
+                "/runs/ato/session/app.db".to_string(),
+            ),
+            ("FOO".to_string(), "bar".to_string()),
+            ("SECRET_TOKEN".to_string(), "shhh".to_string()),
+        ];
+        let pairs = sandbox_runtime_setenv_pairs(Some(&env));
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["ATO_DATA_DIR", "DATABASE_PATH"]);
+        assert!(
+            !keys.contains(&"FOO") && !keys.contains(&"SECRET_TOKEN"),
+            "general user/host env must not survive --clearenv"
+        );
+        assert!(sandbox_runtime_setenv_pairs(None).is_empty());
+    }
+
+    #[test]
+    fn lib64_bind_is_non_fatal_but_usr_is_strict() {
+        // Regression guard for aarch64: `/lib64` does not exist there, and a
+        // strict `--ro-bind` would abort the whole sandbox during mount setup.
+        let binds = system_ro_binds();
+        let flag_for = |path: &str| binds.iter().find(|b| b[1] == path).map(|b| b[0]);
+        assert_eq!(
+            flag_for("/lib64"),
+            Some("--ro-bind-try"),
+            "/lib64 is absent on aarch64; its bind must be non-fatal"
+        );
+        assert_eq!(
+            flag_for("/usr"),
+            Some("--ro-bind"),
+            "/usr must exist on any supported host and stays a hard bind"
+        );
+        assert_eq!(flag_for("/etc/resolv.conf"), Some("--ro-bind-try"));
+        // Every bind target must be absolute and self-mapped (src == dst).
+        for [_flag, src, dst] in binds {
+            assert_eq!(src, dst, "system binds are identity-mapped");
+            assert!(src.starts_with('/'), "bind target must be absolute: {src}");
+        }
+    }
+
+    #[test]
+    fn guest_landlock_policy_restricts_writes_not_reads() {
+        // The in-sandbox policy uses guest paths and grants read on `/` while
+        // keeping writes to scratch space only. This is what the `sandbox-exec`
+        // shim applies to the workload (Landlock applied to bwrap would break
+        // user-namespace setup).
+        let target = python_target(PathBuf::from("/host/src"));
+        let policy = guest_landlock_policy(&target);
+        assert_eq!(
+            policy.read_only_paths,
+            vec![PathBuf::from("/")],
+            "reads granted on / (bwrap already limits what is visible)"
+        );
+        assert!(policy.read_write_paths.contains(&PathBuf::from("/tmp")));
+        assert!(policy.read_write_paths.contains(&PathBuf::from("/app")));
+        assert!(
+            !policy.read_write_paths.contains(&PathBuf::from("/usr")),
+            "/usr must not be writable"
+        );
+        assert!(
+            !policy
+                .read_write_paths
+                .contains(&PathBuf::from("/host/src")),
+            "policy must use guest paths (/app), not the host source dir"
+        );
+        assert!(
+            policy.allow_network,
+            "isolation None defaults to network allowed"
+        );
+    }
+
+    #[test]
+    fn guest_landlock_policy_grants_write_to_injected_writable_mount() {
+        // The writable session data dir (/runs/ato/session) is injected as a
+        // non-readonly mount; the Landlock guest policy must allow writes there,
+        // while a read-only injected mount must NOT become writable.
+        let mut target = python_target(PathBuf::from("/host/src"));
+        target.injected_mounts = vec![
+            crate::launcher::InjectedMount {
+                source: PathBuf::from("/host/session-data/run-1"),
+                target: PathBuf::from("/runs/ato/session"),
+                readonly: false,
+            },
+            crate::launcher::InjectedMount {
+                source: PathBuf::from("/host/ro"),
+                target: PathBuf::from("/ro-grant"),
+                readonly: true,
+            },
+        ];
+        let policy = guest_landlock_policy(&target);
+        assert!(
+            policy
+                .read_write_paths
+                .contains(&PathBuf::from("/runs/ato/session")),
+            "writable injected mount must be in the Landlock write allowlist: {:?}",
+            policy.read_write_paths
+        );
+        assert!(
+            !policy
+                .read_write_paths
+                .contains(&PathBuf::from("/ro-grant")),
+            "read-only injected mount must not be writable"
+        );
+    }
+
+    #[test]
+    fn guest_landlock_policy_serde_roundtrips() {
+        // The shim reads the policy back from a JSON file bound into the sandbox.
+        let target = python_target(PathBuf::from("/host/src"));
+        let policy = guest_landlock_policy(&target);
+        let json = serde_json::to_vec(&policy).expect("serialize");
+        let back: crate::system::sandbox::SandboxPolicy =
+            serde_json::from_slice(&json).expect("deserialize");
+        assert_eq!(back.read_only_paths, policy.read_only_paths);
+        assert_eq!(back.read_write_paths, policy.read_write_paths);
+        assert_eq!(back.ipc_socket_paths, policy.ipc_socket_paths);
+        assert_eq!(back.allow_network, policy.allow_network);
     }
 }
