@@ -793,6 +793,11 @@ pub enum LeaseReport {
         /// the root proxy + ready_url. None -> ready without a URL.
         port: Option<u16>,
     },
+    /// `ato run` hit the ExecutionPlan consent gate (E302) and emitted the
+    /// machine signal. Carries the 5-tuple + consent_ref + summary; the lease
+    /// loop parks needs_consent and waits for the owner decision (P4-A). Routed
+    /// to /consent-required, never to /status.
+    ConsentRequired(ConsentRequest),
     Failed {
         code: String,
         message: String,
@@ -816,6 +821,9 @@ async fn report_lease_status(
         LeaseReport::Running => serde_json::json!({ "status": "running" }),
         LeaseReport::Ready { .. } => {
             unreachable!("ready reports go through report_lease_ready (/ready endpoint)")
+        }
+        LeaseReport::ConsentRequired(_) => {
+            unreachable!("consent gates go through report_consent_required (/consent-required)")
         }
         LeaseReport::Failed { code, message } => serde_json::json!({
             "status": "failed",
@@ -966,6 +974,16 @@ const STOP_PROXY_GRACE: Duration = Duration::from_secs(3);
 struct LeaseControl {
     #[serde(default)]
     stop_requested: bool,
+    /// The owner's consent decision for a needs_consent lease (P4-A). null until
+    /// the owner decides; the runner verifies consent_ref before acting on it.
+    #[serde(default)]
+    consent: Option<ConsentDecision>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ConsentDecision {
+    status: String,
+    consent_ref: String,
 }
 
 /// Watch the lease's control channel for an owner-initiated stop. Sets the flag
@@ -1034,6 +1052,162 @@ async fn poll_control_once(
     match response.json::<LeaseControl>().await {
         Ok(control) if control.stop_requested => ControlOutcome::Stop,
         _ => ControlOutcome::Continue,
+    }
+}
+
+// ── ExecutionPlan consent gate (P4-A) ──
+//
+// When `ato run` gates at E302 it emits the machine-readable CONSENT-REQUIRED
+// line; the runner reports it here (lease → needs_consent), waits for the owner
+// to approve the EXACT consent_ref, verifies the recomputed key against both the
+// child's emitted ref and the owner's approved ref, records the approval in THIS
+// host's local ledger, and retries. The API holds the owner decision only — it
+// never writes the host-local ledger.
+
+/// Max consent rounds before failing closed. The normal path is one round (gate
+/// → approve → retry runs). A child that keeps re-gating after a verified local
+/// approval (should never happen) is bounded here rather than looping forever.
+const MAX_CONSENT_ROUNDS: u32 = 3;
+
+/// Report the consent gate: park the lease `needs_consent` with the FULL 5-tuple
+/// + consent_ref + summary so the owner can approve the exact policy.
+async fn report_consent_required(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    request: &ConsentRequest,
+) -> Result<()> {
+    let url = format!(
+        "{}/v1/runner-leases/{}/consent-required",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    let body = serde_json::json!({
+        "schema": request.schema,
+        "consent_ref": request.consent_ref,
+        "scoped_id": request.scoped_id,
+        "version": request.version,
+        "target_label": request.target_label,
+        "policy_segment_hash": request.policy_segment_hash,
+        "provisioning_policy_hash": request.provisioning_policy_hash,
+        "summary": request.summary,
+    });
+    let response = client
+        .post(&url)
+        .bearer_auth(runner_token)
+        .json(&body)
+        .send()
+        .await
+        .context("consent-required request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("consent-required report rejected (HTTP {status}): {body}");
+    }
+    Ok(())
+}
+
+/// The owner's decision for a needs_consent lease, as observed on /control.
+enum ConsentOutcome {
+    /// Owner approved this consent_ref. The runner MUST still verify the
+    /// recomputed key before recording locally + retrying.
+    Approved { consent_ref: String },
+    /// Owner rejected — the API has already failed the run (consent_rejected).
+    Rejected,
+    /// TTL elapsed — the API has already failed the run (consent_timeout).
+    Expired,
+    /// Owner stopped the run while consent was pending.
+    Stop,
+    /// Lease/runner gone (404/401) — stop waiting.
+    Gone,
+}
+
+/// Poll /control until the owner's consent decision resolves. Pending/transient
+/// states keep polling on the stop cadence; the API's TTL is the deadline (a
+/// lazy expiry surfaces as `expired`), so the runner keeps no second clock.
+async fn poll_consent_decision(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+) -> ConsentOutcome {
+    let url = format!(
+        "{}/v1/runner-leases/{}/control",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    loop {
+        if let Some(outcome) = poll_consent_once(client, &url, runner_token).await {
+            return outcome;
+        }
+        tokio::time::sleep(Duration::from_secs(STOP_POLL_SECONDS)).await;
+    }
+}
+
+/// One consent-decision poll. None = still pending / transient (keep polling).
+/// A stop observed here resolves the wait too, so the decision poll is robust on
+/// its own even if the background stop watcher has already exited.
+async fn poll_consent_once(
+    client: &reqwest::Client,
+    url: &str,
+    runner_token: &str,
+) -> Option<ConsentOutcome> {
+    let response = match client.get(url).bearer_auth(runner_token).send().await {
+        Ok(response) => response,
+        Err(_) => return None,
+    };
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::UNAUTHORIZED {
+        return Some(ConsentOutcome::Gone);
+    }
+    if !status.is_success() {
+        return None;
+    }
+    let control = response.json::<LeaseControl>().await.ok()?;
+    if control.stop_requested {
+        return Some(ConsentOutcome::Stop);
+    }
+    match control.consent {
+        Some(decision) => match decision.status.as_str() {
+            "approved" => Some(ConsentOutcome::Approved {
+                consent_ref: decision.consent_ref,
+            }),
+            "rejected" => Some(ConsentOutcome::Rejected),
+            "expired" => Some(ConsentOutcome::Expired),
+            // "pending" or an unknown status: keep waiting.
+            _ => None,
+        },
+        // Consent cleared (e.g. a stop cleared it): keep waiting — a stop will
+        // surface via stop_requested above on a subsequent tick.
+        None => None,
+    }
+}
+
+/// What to do after the owner approves a needs_consent lease. The host-local
+/// ledger is written ONLY when the child's emitted ref, the recomputed ref (from
+/// the child's 5-tuple), and the owner's approved ref ALL agree. Any disagreement
+/// voids the approval — re-emit needs_consent rather than admit a different plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsentVerifyAction {
+    /// All three refs agree — record locally and retry.
+    Record,
+    /// Refs disagree — do NOT record; re-emit needs_consent (old approval void).
+    ReEmit,
+}
+
+fn consent_verify_action(
+    child_ref: &str,
+    recomputed_ref: &str,
+    approved_ref: &str,
+) -> ConsentVerifyAction {
+    let three_way_match = recomputed_ref == child_ref
+        && recomputed_ref == approved_ref
+        && approved_ref == child_ref;
+    if three_way_match {
+        ConsentVerifyAction::Record
+    } else {
+        ConsentVerifyAction::ReEmit
     }
 }
 
@@ -1464,6 +1638,15 @@ async fn run_lease_child(
                     Some(ChildSignal::ExitedBeforeReady) => {
                         saw_exited_before = true;
                     }
+                    Some(ChildSignal::ConsentRequired(request)) if !settled => {
+                        // The child gated at E302 and exits now. Surface the gate
+                        // and stop monitoring — the orchestrator parks needs_consent
+                        // and (on approval) re-spawns. Returning here (rather than
+                        // setting `settled`) skips the exit_before_ready path the
+                        // closing streams would otherwise take.
+                        let _ = reports.send(LeaseReport::ConsentRequired(request));
+                        return;
+                    }
                     _ => {}
                 }
             }
@@ -1537,39 +1720,19 @@ async fn handle_claimed_lease(
         );
     }
 
-    let child = match spawn_run_child(&command.source_url) {
-        Ok(child) => child,
-        Err(err) => {
-            let report = LeaseReport::Failed {
-                code: "spawn_failed".to_string(),
-                message: format!("{err:#}"),
-            };
-            let _ = report_lease_status(client, api_base, runner_token, &lease.id, &report).await;
-            return;
-        }
-    };
-
     let log_path = run_log_path(&lease.id);
-    println!(
-        "🚀 lease {}: ato run {} --sandbox (log: {})",
-        lease.id,
-        command.source_url,
-        log_path.display()
-    );
 
+    // The slot is held for the whole gated lifetime (preparing → optional
+    // needs_consent → running), released only on settle / stop / terminal.
     busy.store(true, Ordering::SeqCst);
     let client = client.clone();
     let api_base = api_base.to_string();
     let runner_token = runner_token.to_string();
     let lease_id = lease.id.clone();
-    // Capture the child's PID (== its process-group id, see spawn_run_child)
-    // before the child moves into the monitor task — a stop needs it to signal
-    // the whole workload group.
-    let child_pid = child.id();
+    let source_url = command.source_url.clone();
     tokio::spawn(async move {
-        // Watch the control channel for an owner-initiated stop, concurrently
-        // with execution. The flag distinguishes "child exited because we
-        // stopped it" from a genuine failure; the notify wakes the loop.
+        // One control watcher for the whole lease lifetime: it flips stop_flag +
+        // notifies on an owner stop in EITHER phase (needs_consent or running).
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_notify = Arc::new(tokio::sync::Notify::new());
         let control = tokio::spawn({
@@ -1592,20 +1755,237 @@ async fn handle_claimed_lease(
             }
         });
 
-        let (report_tx, mut report_rx) = tokio::sync::mpsc::unbounded_channel::<LeaseReport>();
-        let monitor = tokio::spawn(run_lease_child(child, log_path, ready_timeout(), report_tx));
-        let mut proxy_handle: Option<tokio::task::JoinHandle<()>> = None;
-        let mut stopping = false;
-        loop {
-            let report = tokio::select! {
+        // ── Consent gate (P4-A): spawn `ato run`; if it gates at E302, park
+        // needs_consent, wait for the owner decision, verify the exact key,
+        // record locally, and retry. The loop yields the run-phase handoff
+        // (report channel + monitor + first decisive report) once the child
+        // runs past the gate; terminal/stop outcomes return from the task. ──
+        let mut round: u32 = 0;
+        let (mut report_rx, monitor, child_pid, first_report) = loop {
+            round += 1;
+            let child = match spawn_run_child(&source_url) {
+                Ok(child) => child,
+                Err(err) => {
+                    let report = LeaseReport::Failed {
+                        code: "spawn_failed".to_string(),
+                        message: format!("{err:#}"),
+                    };
+                    let _ =
+                        report_lease_status(&client, &api_base, &runner_token, &lease_id, &report)
+                            .await;
+                    control.abort();
+                    busy.store(false, Ordering::SeqCst);
+                    return;
+                }
+            };
+            // PID == process-group id (see spawn_run_child); a stop signals the
+            // whole workload group.
+            let child_pid = child.id();
+            println!(
+                "🚀 lease {lease_id}: ato run {source_url} --sandbox (round {round}, log: {})",
+                log_path.display()
+            );
+            let (report_tx, mut report_rx) =
+                tokio::sync::mpsc::unbounded_channel::<LeaseReport>();
+            let monitor = tokio::spawn(run_lease_child(
+                child,
+                log_path.clone(),
+                ready_timeout(),
+                report_tx,
+            ));
+
+            // Wait for the first decisive signal, honoring a stop during
+            // preparing/gate.
+            let first = tokio::select! {
                 biased;
                 _ = stop_notify.notified() => {
-                    stopping = true;
-                    break;
+                    perform_stop_cleanup(
+                        &client, &api_base, &runner_token, &lease_id,
+                        child_pid, monitor, None, &busy,
+                    )
+                    .await;
+                    control.abort();
+                    return;
                 }
-                maybe = report_rx.recv() => match maybe {
-                    Some(report) => report,
-                    None => break,
+                maybe = report_rx.recv() => maybe,
+            };
+            let Some(first) = first else {
+                // Monitor closed without a decisive report (run_lease_child always
+                // reports before returning, so this is defensive). Idle out.
+                let _ = monitor.await;
+                control.abort();
+                busy.store(false, Ordering::SeqCst);
+                return;
+            };
+
+            let LeaseReport::ConsentRequired(request) = first else {
+                // Running / Ready / Failed: the child is past the gate — hand off
+                // to the run phase with the still-running monitor.
+                break (report_rx, monitor, child_pid, first);
+            };
+
+            // The child exited at the gate; reap its monitor before waiting.
+            let _ = monitor.await;
+            if round > MAX_CONSENT_ROUNDS {
+                // Bounded: the gate kept re-emitting (a persistent recompute
+                // mismatch, or a local approval that never clears it). Fail
+                // closed and release the slot rather than loop forever.
+                eprintln!(
+                    "⚠️  lease {lease_id}: consent gate did not clear in {MAX_CONSENT_ROUNDS} rounds"
+                );
+                let report = LeaseReport::Failed {
+                    code: "consent_retry_exhausted".to_string(),
+                    message: format!(
+                        "consent gate did not clear within {MAX_CONSENT_ROUNDS} rounds"
+                    ),
+                };
+                let _ =
+                    report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await;
+                control.abort();
+                busy.store(false, Ordering::SeqCst);
+                println!("🔓 lease {lease_id}: slot released");
+                return;
+            }
+            // Park needs_consent with the full 5-tuple for owner approval.
+            if let Err(err) =
+                report_consent_required(&client, &api_base, &runner_token, &lease_id, &request).await
+            {
+                eprintln!(
+                    "⚠️  lease {lease_id}: consent-required report failed: {}",
+                    scrub_secrets(&format!("{err:#}"))
+                );
+                let report = LeaseReport::Failed {
+                    code: "consent_report_failed".to_string(),
+                    message: "could not surface the consent gate to the control plane".to_string(),
+                };
+                let _ =
+                    report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await;
+                control.abort();
+                busy.store(false, Ordering::SeqCst);
+                return;
+            }
+            println!(
+                "⏸  lease {lease_id}: needs consent ({})",
+                request.consent_ref
+            );
+
+            // Wait for the owner decision; a stop during the wait wins.
+            let outcome = tokio::select! {
+                biased;
+                _ = stop_notify.notified() => ConsentOutcome::Stop,
+                decision = poll_consent_decision(&client, &api_base, &runner_token, &lease_id) => decision,
+            };
+            let ConsentOutcome::Approved {
+                consent_ref: approved_ref,
+            } = outcome
+            else {
+                // Rejected / Expired / Gone / Stop: the API has already settled
+                // the run terminal (or cancelled it on stop). The child exited at
+                // the gate, so no workload/proxy exists — releasing the slot
+                // (busy=false) IS the honest teardown; there is nothing to /stop.
+                match outcome {
+                    ConsentOutcome::Rejected => {
+                        println!("🚫 lease {lease_id}: consent rejected by owner")
+                    }
+                    ConsentOutcome::Expired => {
+                        println!("⌛ lease {lease_id}: consent timed out")
+                    }
+                    ConsentOutcome::Stop => {
+                        println!("🛑 lease {lease_id}: stopped by owner during consent")
+                    }
+                    _ => {}
+                }
+                control.abort();
+                busy.store(false, Ordering::SeqCst);
+                println!("🔓 lease {lease_id}: slot released (no workload was running)");
+                return;
+            };
+
+            // INVARIANT: write the host-local ledger ONLY when the child's
+            // emitted ref, the recomputed ref (from the child's 5-tuple), and the
+            // owner's approved ref ALL agree. A recompute error is unrecoverable
+            // (cannot verify) → fail closed.
+            let recomputed = match capsule_core::execution_plan::canonical::consent_ref_from_parts(
+                &request.scoped_id,
+                &request.version,
+                &request.target_label,
+                &request.policy_segment_hash,
+                &request.provisioning_policy_hash,
+            ) {
+                Ok(value) => value,
+                Err(err) => {
+                    eprintln!("⚠️  lease {lease_id}: consent_ref recompute failed: {err}");
+                    let report = LeaseReport::Failed {
+                        code: "consent_verification_failed".to_string(),
+                        message: "could not recompute the consent reference".to_string(),
+                    };
+                    let _ = report_lease_status(
+                        &client, &api_base, &runner_token, &lease_id, &report,
+                    )
+                    .await;
+                    control.abort();
+                    busy.store(false, Ordering::SeqCst);
+                    println!("🔓 lease {lease_id}: slot released");
+                    return;
+                }
+            };
+            if consent_verify_action(&request.consent_ref, &recomputed, &approved_ref)
+                == ConsentVerifyAction::ReEmit
+            {
+                // The child / recomputed / approved refs disagree. Do NOT write
+                // the ledger. Re-emit needs_consent: the next spawn re-gates and
+                // re-reports, superseding (voiding) the stale approval on the API.
+                // A persistent mismatch is bounded by MAX_CONSENT_ROUNDS above.
+                eprintln!(
+                    "⚠️  lease {lease_id}: consent_ref mismatch (child/recomputed/approved disagree); re-emitting needs_consent, old approval void"
+                );
+                continue;
+            }
+            // Verified: append to THIS host's local ledger, then retry. A ledger
+            // write failure is terminal — without the local record the child just
+            // re-gates, so fail closed and DO NOT retry. Do NOT re-report
+            // `preparing` — needs_consent → preparing is a backward transition the
+            // API refuses; the retried child's `running` report is the valid move.
+            if let Err(err) = crate::application::auth::consent_store::approve_execution_plan_consent(
+                &request.scoped_id,
+                &request.version,
+                &request.target_label,
+                &request.policy_segment_hash,
+                &request.provisioning_policy_hash,
+            ) {
+                eprintln!("⚠️  lease {lease_id}: local consent record failed: {err}");
+                let report = LeaseReport::Failed {
+                    code: "consent_local_record_failed".to_string(),
+                    message: "could not record the approved consent locally".to_string(),
+                };
+                let _ =
+                    report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await;
+                control.abort();
+                busy.store(false, Ordering::SeqCst);
+                println!("🔓 lease {lease_id}: slot released");
+                return;
+            }
+            println!("✅ lease {lease_id}: consent approved + recorded locally; retrying run");
+        };
+
+        // ── Run phase: the child is past the gate. Seed the first decisive
+        // report, then drive readiness/stop exactly as before. ──
+        let mut proxy_handle: Option<tokio::task::JoinHandle<()>> = None;
+        let mut stopping = false;
+        let mut pending: Option<LeaseReport> = Some(first_report);
+        loop {
+            let report = match pending.take() {
+                Some(report) => report,
+                None => tokio::select! {
+                    biased;
+                    _ = stop_notify.notified() => {
+                        stopping = true;
+                        break;
+                    }
+                    maybe = report_rx.recv() => match maybe {
+                        Some(report) => report,
+                        None => break,
+                    },
                 },
             };
             // A stop that landed between ticks (flag set while a report was in
@@ -1671,6 +2051,9 @@ async fn handle_claimed_lease(
                         }
                         LeaseReport::Failed { code, .. } => format!("failed ({code})"),
                         LeaseReport::Ready { .. } => unreachable!(),
+                        LeaseReport::ConsentRequired(_) => {
+                            unreachable!("consent gates are handled before the run phase")
+                        }
                     };
                     println!("📨 lease {lease_id}: {label}");
                     if let Err(err) =
@@ -2388,6 +2771,159 @@ mod tests {
         let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
         let _ = server.join();
         assert!(matches!(outcome, ControlOutcome::Continue));
+    }
+
+    // ── ExecutionPlan consent gate (P4-A) ──
+
+    #[test]
+    fn lease_control_deserializes_consent_decision() {
+        let approved: LeaseControl = serde_json::from_str(
+            "{\"stop_requested\":false,\"consent\":{\"status\":\"approved\",\"consent_ref\":\"blake3:ref\"}}",
+        )
+        .expect("parse");
+        let decision = approved.consent.expect("consent present");
+        assert_eq!(decision.status, "approved");
+        assert_eq!(decision.consent_ref, "blake3:ref");
+        // A null/absent consent is "no decision in play", never a parse error.
+        let none: LeaseControl =
+            serde_json::from_str("{\"stop_requested\":false,\"consent\":null}").expect("parse");
+        assert!(none.consent.is_none());
+        assert!(
+            serde_json::from_str::<LeaseControl>("{}")
+                .expect("parse")
+                .consent
+                .is_none()
+        );
+    }
+
+    fn sample_consent_request() -> ConsentRequest {
+        ConsentRequest {
+            schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
+            consent_ref: "blake3:ref".to_string(),
+            scoped_id: "community/hello-capsule".to_string(),
+            version: "0.3.0".to_string(),
+            target_label: "main".to_string(),
+            policy_segment_hash: "blake3:seg".to_string(),
+            provisioning_policy_hash: "blake3:prov".to_string(),
+            summary: "network: api.example.com\nfs-rw: /data".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn report_consent_required_posts_full_tuple() {
+        let (base, server) = one_shot_http("HTTP/1.1 200 OK", "{\"ok\":true}");
+        let client = reqwest::Client::new();
+        let request = sample_consent_request();
+        report_consent_required(&client, &base, "ato_rnr_t", "01L", &request)
+            .await
+            .expect("report ok");
+        let captured = server.join().expect("server");
+        assert!(captured.contains("POST /v1/runner-leases/01L/consent-required"));
+        assert!(
+            captured
+                .to_lowercase()
+                .contains("authorization: bearer ato_rnr_t")
+        );
+        // The FULL 5-tuple (the decision contract) + consent_ref + summary are on
+        // the wire — not just the binding hash.
+        for needle in [
+            "\"consent_ref\":\"blake3:ref\"",
+            "\"scoped_id\":\"community/hello-capsule\"",
+            "\"version\":\"0.3.0\"",
+            "\"target_label\":\"main\"",
+            "\"policy_segment_hash\":\"blake3:seg\"",
+            "\"provisioning_policy_hash\":\"blake3:prov\"",
+            "\"summary\":",
+        ] {
+            assert!(captured.contains(needle), "body missing {needle}: {captured}");
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_consent_once_maps_decisions() {
+        let client = reqwest::Client::new();
+        let url_for = |base: &str| format!("{base}/v1/runner-leases/01L/control");
+
+        // Approved carries the exact consent_ref the runner must verify.
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"consent\":{\"status\":\"approved\",\"consent_ref\":\"blake3:ref\"}}",
+        );
+        let outcome = poll_consent_once(&client, &url_for(&base), "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(
+            outcome,
+            Some(ConsentOutcome::Approved { consent_ref }) if consent_ref == "blake3:ref"
+        ));
+
+        // Rejected / expired are resolved terminals.
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"consent\":{\"status\":\"rejected\",\"consent_ref\":\"blake3:ref\"}}",
+        );
+        let outcome = poll_consent_once(&client, &url_for(&base), "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(outcome, Some(ConsentOutcome::Rejected)));
+
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"consent\":{\"status\":\"expired\",\"consent_ref\":\"blake3:ref\"}}",
+        );
+        let outcome = poll_consent_once(&client, &url_for(&base), "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(outcome, Some(ConsentOutcome::Expired)));
+
+        // Pending keeps polling (None).
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"consent\":{\"status\":\"pending\",\"consent_ref\":\"blake3:ref\"}}",
+        );
+        let outcome = poll_consent_once(&client, &url_for(&base), "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(outcome.is_none());
+
+        // A stop observed during the consent wait resolves it (even if the
+        // background stop watcher already exited).
+        let (base, server) =
+            one_shot_http("HTTP/1.1 200 OK", "{\"stop_requested\":true,\"consent\":null}");
+        let outcome = poll_consent_once(&client, &url_for(&base), "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(outcome, Some(ConsentOutcome::Stop)));
+
+        // Lease gone -> stop waiting.
+        let (base, server) = one_shot_http("HTTP/1.1 404 Not Found", "{\"error\":\"not_found\"}");
+        let outcome = poll_consent_once(&client, &url_for(&base), "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(outcome, Some(ConsentOutcome::Gone)));
+    }
+
+    #[test]
+    fn consent_verify_action_requires_three_way_match() {
+        let r = "blake3:ref";
+        // child == recomputed == approved → record locally + retry.
+        assert_eq!(consent_verify_action(r, r, r), ConsentVerifyAction::Record);
+        // ANY pair disagreeing → re-emit needs_consent, never record (the host
+        // ledger is never written for a plan the three refs don't all bind to).
+        assert_eq!(
+            consent_verify_action(r, r, "blake3:other"),
+            ConsentVerifyAction::ReEmit,
+            "approved differs"
+        );
+        assert_eq!(
+            consent_verify_action(r, "blake3:other", r),
+            ConsentVerifyAction::ReEmit,
+            "recomputed differs"
+        );
+        assert_eq!(
+            consent_verify_action("blake3:other", r, r),
+            ConsentVerifyAction::ReEmit,
+            "child differs"
+        );
+        assert_eq!(
+            consent_verify_action("a", "b", "c"),
+            ConsentVerifyAction::ReEmit,
+            "all differ"
+        );
     }
 
     #[tokio::test]
