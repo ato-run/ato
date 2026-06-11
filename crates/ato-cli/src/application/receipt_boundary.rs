@@ -290,17 +290,14 @@ where
     // launch path already persisted a rich failure receipt for this error (#501).
     if let Err(error) = outcome.as_ref()
         && !ctx.graph_id_sink.receipt_already_emitted()
+        && let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx)
+        && let Err(write_err) =
+            write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V2(receipt))
     {
-        if let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx) {
-            if let Err(write_err) =
-                write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V2(receipt))
-            {
-                eprintln!(
-                    "ATO-WARN failed to write partial execution receipt for {} boundary: {write_err}",
-                    ctx.boundary
-                );
-            }
-        }
+        eprintln!(
+            "ATO-WARN failed to write partial execution receipt for {} boundary: {write_err}",
+            ctx.boundary
+        );
     }
     outcome
 }

@@ -77,10 +77,10 @@ fn start_local_registry_or_skip(
 fn wait_for_well_known(base_url: &str) -> Result<()> {
     let url = format!("{}/.well-known/capsule.json", base_url);
     for _ in 0..60 {
-        if let Ok(resp) = reqwest::blocking::get(&url) {
-            if resp.status().is_success() {
-                return Ok(());
-            }
+        if let Ok(resp) = reqwest::blocking::get(&url)
+            && resp.status().is_success()
+        {
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
