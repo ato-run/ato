@@ -36,108 +36,6 @@ struct PreparedCommand {
     _secret_fd_guard: Option<std::fs::File>,
 }
 
-pub fn execute(
-    plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
-    execution_plan: &ExecutionPlan,
-    launch_ctx: &RuntimeLaunchContext,
-    dangerously_skip_permissions: bool,
-) -> Result<i32> {
-    verify_execution_plan_hashes(execution_plan)?;
-
-    let launch_spec = derive_launch_spec(plan)?;
-
-    // Package manager entrypoints (npm, yarn, pnpm, bun) run scripts directly — no lockfile needed.
-    if is_package_manager_entrypoint(&launch_spec.command) {
-        let PreparedCommand {
-            mut cmd,
-            #[cfg(unix)]
-            _secret_fd_guard,
-        } = build_package_manager_command(
-            plan,
-            authoritative_lock,
-            execution_plan,
-            &launch_spec.working_dir,
-            &launch_spec.command,
-            &launch_spec.args,
-            launch_ctx,
-        )?;
-        let status = cmd
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("Failed to execute package manager for node compat")?;
-        return Ok(status.code().unwrap_or(1));
-    }
-
-    let Some(_) = launch_spec.required_lockfile.as_ref() else {
-        return Err(AtoExecutionError::lock_incomplete(
-            "source/node Tier1 execution requires a Node lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, bun.lock, or bun.lockb)",
-            Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
-        )
-        .into());
-    };
-
-    if let Some(PreparedCommand {
-        mut cmd,
-        #[cfg(unix)]
-        _secret_fd_guard,
-    }) = maybe_build_direct_node_command(
-        plan,
-        authoritative_lock,
-        execution_plan,
-        &launch_spec.working_dir,
-        &launch_spec.command,
-        &launch_spec.args,
-        launch_ctx,
-    )? {
-        let status = cmd
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("Failed to execute direct node runtime for node compat")?;
-
-        return Ok(status.code().unwrap_or(1));
-    }
-
-    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
-
-    let use_compat_flag = deno_supports_compat_flag(&deno_bin)?;
-
-    run_provisioning(
-        &deno_bin,
-        &launch_spec.working_dir,
-        &launch_spec.command,
-        launch_ctx,
-    )?;
-    let PreparedCommand {
-        mut cmd,
-        #[cfg(unix)]
-        _secret_fd_guard,
-    } = build_runtime_command(
-        &deno_bin,
-        plan,
-        authoritative_lock,
-        execution_plan,
-        &launch_spec.working_dir,
-        &launch_spec.command,
-        &launch_spec.args,
-        launch_ctx,
-        use_compat_flag,
-        dangerously_skip_permissions,
-    )?;
-    let status = cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("Failed to execute deno run for node compat")?;
-
-    Ok(status.code().unwrap_or(1))
-}
-
 /// Variant of [`spawn`] that pins the runtime port to `selected_port`
 /// when `Some`. Used by the warm-launch fast path in
 /// `app_control::session` so the child runtime exposes the same port the
@@ -269,6 +167,48 @@ pub fn spawn_background(
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
 ) -> Result<super::source::CapsuleProcess> {
+    spawn_supervised(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        launch_ctx,
+        dangerously_skip_permissions,
+        false,
+    )
+}
+
+/// Spawn a NodeCompat process for supervised foreground execution.
+///
+/// Same port-based readiness detection as [`spawn_background`], with stdio
+/// inherited so logs stream to the caller. This is what gives foreground
+/// node-driver runs an honest readiness signal (`LIFECYCLE: ready port=N`
+/// from the caller's event pump) — without it, a Connected Runner dispatched
+/// node capsule can never report ready (#623).
+pub fn spawn_foreground(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+) -> Result<super::source::CapsuleProcess> {
+    spawn_supervised(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        launch_ctx,
+        dangerously_skip_permissions,
+        true,
+    )
+}
+
+fn spawn_supervised(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+    inherit_io: bool,
+) -> Result<super::source::CapsuleProcess> {
     verify_execution_plan_hashes(execution_plan)?;
 
     let launch_spec = derive_launch_spec(plan)?;
@@ -342,12 +282,18 @@ pub fn spawn_background(
         }
     };
 
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    if inherit_io {
+        cmd.stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    } else {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
     let child = cmd
         .spawn()
-        .context("Failed to spawn node compat process in background")?;
+        .context("Failed to spawn supervised node compat process")?;
     let event_rx = super::source::spawn_host_lifecycle_events(child.id(), readiness_port);
 
     Ok(super::source::CapsuleProcess {
