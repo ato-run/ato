@@ -11,6 +11,16 @@ pub enum LifecycleEvent {
         #[serde(default)]
         port: Option<u16>,
     },
+    /// Workload launched but no readiness signal exists (no probe / no port).
+    /// Honest "started, not ready" — must NOT be surfaced as ready.
+    #[serde(alias = "service_started")]
+    Started {
+        service: String,
+        #[serde(default)]
+        endpoint: Option<String>,
+        #[serde(default)]
+        port: Option<u16>,
+    },
     #[serde(alias = "service_exited")]
     Exited {
         service: String,
@@ -22,7 +32,9 @@ pub enum LifecycleEvent {
 impl LifecycleEvent {
     pub fn service(&self) -> &str {
         match self {
-            Self::Ready { service, .. } | Self::Exited { service, .. } => service,
+            Self::Ready { service, .. }
+            | Self::Started { service, .. }
+            | Self::Exited { service, .. } => service,
         }
     }
 }
@@ -45,6 +57,27 @@ mod tests {
                 endpoint: Some("unix:///tmp/main.sock".to_string()),
                 port: None,
             }
+        );
+    }
+
+    #[test]
+    fn parses_nacelle_service_started_as_started_event() {
+        // The honest "started, not ready" signal must parse to Started — never
+        // to Ready.
+        let event: LifecycleEvent =
+            serde_json::from_str(r#"{"event":"service_started","service":"hello-capsule"}"#)
+                .expect("parse started event");
+        assert_eq!(
+            event,
+            LifecycleEvent::Started {
+                service: "hello-capsule".to_string(),
+                endpoint: None,
+                port: None,
+            }
+        );
+        assert!(
+            !matches!(event, LifecycleEvent::Ready { .. }),
+            "service_started must never deserialize as Ready"
         );
     }
 

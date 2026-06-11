@@ -196,6 +196,7 @@ mod tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: Some(GuestSessionDisplay {
                 adapter: "node".to_string(),
                 frontend_entry: "index.html".to_string(),
@@ -225,6 +226,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         }
     }
 
