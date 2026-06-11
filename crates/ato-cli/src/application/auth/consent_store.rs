@@ -51,6 +51,22 @@ fn consent_record_for_plan(plan: &ExecutionPlan) -> ConsentRecord {
     )
 }
 
+/// Machine-readable `CONSENT-REQUIRED:` line payload (borrow-only). Emitted to
+/// stdout in non-interactive mode so the Connected Runner can parse it as
+/// `ChildSignal::ConsentRequired` (see runner_agent.rs). Carries the full
+/// identity 5-tuple plus the derived `consent_ref` and the human summary.
+#[derive(Serialize)]
+struct ConsentRequiredLine<'a> {
+    schema: &'a str,
+    consent_ref: &'a str,
+    scoped_id: &'a str,
+    version: &'a str,
+    target_label: &'a str,
+    policy_segment_hash: &'a str,
+    provisioning_policy_hash: &'a str,
+    summary: &'a str,
+}
+
 pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), AtoExecutionError> {
     if has_consent(plan)? {
         return Ok(());
@@ -94,6 +110,32 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
              Or open the launching app and click Approve in the modal.",
         );
 
+        let summary = consent_summary(plan);
+
+        // Emit a stable machine-readable line so the Connected Runner can parse
+        // it (ChildSignal::ConsentRequired), surface the policy to the owner,
+        // and — only after the owner approves this exact consent_ref — call the
+        // existing `approve-execution-plan` primitive and retry. This is purely
+        // additive: the typed E302 below is still returned and the run still
+        // fails closed until the exact policy is approved.
+        // Emit the machine line ONLY when consent_ref computes and the payload
+        // serializes — never a malformed/empty-ref signal. On any failure we
+        // skip the line and still return the unchanged E302 below (fail closed).
+        if let Ok(consent_ref) = capsule_core::execution_plan::canonical::consent_ref(&plan.consent)
+            && let Ok(machine_line) = serde_json::to_string(&ConsentRequiredLine {
+                schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA,
+                consent_ref: &consent_ref,
+                scoped_id: &scoped_id,
+                version: &version,
+                target_label: &target_label,
+                policy_segment_hash: &policy_segment_hash,
+                provisioning_policy_hash: &provisioning_policy_hash,
+                summary: &summary,
+            })
+        {
+            println!("CONSENT-REQUIRED: {machine_line}");
+        }
+
         return Err(AtoExecutionError::from_ato_error(
             AtoError::ExecutionPlanConsentRequired {
                 message,
@@ -103,7 +145,7 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
                 target_label,
                 policy_segment_hash,
                 provisioning_policy_hash,
-                summary: consent_summary(plan),
+                summary,
             },
         ));
     }
