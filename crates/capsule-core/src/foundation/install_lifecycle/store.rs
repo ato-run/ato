@@ -31,6 +31,10 @@ use serde::{Deserialize, Serialize};
 use super::ids::{
     InstallProfileKey, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
 };
+use super::launch_template::{BindingAssignmentSet, CompatibilityIndex};
+use super::records::{
+    ArtifactBuild, InstallReceipt, InstallRevision, RequirementGraphSnapshot, StateContractSnapshot,
+};
 
 // ── AppRecord ──────────────────────────────────────────────────────────────
 
@@ -385,6 +389,534 @@ impl InstallInstanceStore {
         let val = serde_json::from_slice(&raw)
             .with_context(|| format!("parse artifact manifest {}", path.display()))?;
         Ok(Some(val))
+    }
+
+    // ── Install output records (#581 wave 2) ────────────────────────────────
+    //
+    // The typed launch-reuse records an install revision produces, persisted
+    // per `(installed_app_id, profile_id, install_revision_id)` under the
+    // profile directory:
+    //
+    //   instances/<app>/profiles/<profile>/revisions/<rev>/
+    //     revision.json            -> InstallRevision (self-contained authority)
+    //     artifact-build.json      -> ArtifactBuild
+    //     requirement-graph.json   -> RequirementGraphSnapshot
+    //     state-contracts.json     -> Vec<StateContractSnapshot>
+    //     install-receipt.json     -> InstallReceipt
+    //
+    // Why under the profile dir and NOT the shared top-level `revisions/<rev>/`:
+    // `install_revision_id` is content-addressed from the artifact build id
+    // alone, so the shared `revisions/<rev>/` dir (which holds the frozen
+    // `output/` + `artifact_manifest.json`) is the same for every app/profile
+    // that installs the same artifact content. These records, however, embed
+    // app/profile-scoped identity (`install_profile_key`, `InstallReceipt`), so
+    // storing them in the shared dir would let two `(app, profile)` pairs
+    // installing the same content clobber each other's records. Scoping the
+    // record dir by `(app, profile)` keeps the shared dir purely
+    // content-addressed and the records faithful to their `(app, profile)`.
+    //
+    // `revision.json` is written *last* by the finalizer and is the per-revision
+    // finalization marker: a revision whose sub-records were only partially
+    // written (no `revision.json`) is not considered finalized — see
+    // [`is_revision_finalized`] / [`read_install_revision`].
+    //
+    // These records carry only install-time identity/metadata. They never hold
+    // secret values, nor any session/runtime/observed fact (session id, dynamic
+    // port, pid, container id, live route, log cursor, observed status).
+
+    /// Directory holding the install-output records for one
+    /// `(app, profile, revision)`: `instances/<app>/profiles/<profile>/revisions/<rev>/`.
+    pub fn profile_revision_dir(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_dir(app, profile)
+            .join("revisions")
+            .join(rev.as_str())
+    }
+
+    pub fn revision_install_record_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("revision.json")
+    }
+
+    pub fn revision_artifact_build_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("artifact-build.json")
+    }
+
+    pub fn revision_requirement_graph_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("requirement-graph.json")
+    }
+
+    pub fn revision_state_contracts_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("state-contracts.json")
+    }
+
+    pub fn revision_install_receipt_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("install-receipt.json")
+    }
+
+    pub fn revision_binding_assignment_set_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("binding-assignments.json")
+    }
+
+    pub fn revision_compatibility_index_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("compatibility-index.json")
+    }
+
+    /// Atomically write any revision-scoped JSON record, creating the record
+    /// directory if needed.
+    fn write_revision_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create revision record dir {}", parent.display()))?;
+        }
+        let json = serde_json::to_string_pretty(value)
+            .with_context(|| format!("serialize record {}", path.display()))?;
+        atomic_write(path, json.as_bytes())
+    }
+
+    /// Persist the [`ArtifactBuild`] record for a revision (atomic).
+    pub fn write_artifact_build(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        build: &ArtifactBuild,
+    ) -> Result<()> {
+        self.write_revision_json(&self.revision_artifact_build_path(app, profile, rev), build)
+    }
+
+    /// Persist the [`RequirementGraphSnapshot`] for a revision (atomic).
+    pub fn write_requirement_graph_snapshot(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        snapshot: &RequirementGraphSnapshot,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_requirement_graph_path(app, profile, rev),
+            snapshot,
+        )
+    }
+
+    /// Persist the state-contract snapshots for a revision (atomic). An empty
+    /// slice is persisted explicitly as `[]`.
+    pub fn write_state_contracts(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        contracts: &[StateContractSnapshot],
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_state_contracts_path(app, profile, rev),
+            &contracts,
+        )
+    }
+
+    /// Persist the [`BindingAssignmentSet`] for a revision (atomic).
+    pub fn write_binding_assignment_set(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        bindings: &BindingAssignmentSet,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_binding_assignment_set_path(app, profile, rev),
+            bindings,
+        )
+    }
+
+    /// Persist the [`CompatibilityIndex`] for a revision (atomic).
+    pub fn write_compatibility_index(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        index: &CompatibilityIndex,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_compatibility_index_path(app, profile, rev),
+            index,
+        )
+    }
+
+    /// Persist the [`InstallReceipt`] for a revision (atomic).
+    pub fn write_install_receipt(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        receipt: &InstallReceipt,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_install_receipt_path(app, profile, rev),
+            receipt,
+        )
+    }
+
+    // ── Launch templates (#581 wave 4C) ──────────────────────────────────────
+    //
+    // Reusable, session-independent launch templates are persisted as standalone
+    // per-template files keyed by the template's `LaunchTemplateKey::key_hash`,
+    // under the per-`(app, profile, revision)` record dir:
+    //
+    //   instances/<app>/profiles/<profile>/revisions/<rev>/
+    //     launch-templates/
+    //       <sanitized key_hash>.json   -> LaunchTemplate
+    //
+    // This mirrors the standalone-file pattern the other revision records use and
+    // keeps the `revision.json` finalization marker untouched (a launch template
+    // is a later, additive output — it is not part of finalization). The file is
+    // keyed by the stable `key_hash`, so rebuilding a template from the same
+    // stable inputs overwrites in place rather than duplicating. Templates carry
+    // only install-time identity; never a session/runtime/observed/secret value.
+
+    /// Directory holding the standalone launch-template records for one
+    /// `(app, profile, revision)`.
+    pub fn revision_launch_templates_dir(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> PathBuf {
+        self.profile_revision_dir(app, profile, rev)
+            .join("launch-templates")
+    }
+
+    /// Path of the standalone launch-template file for `key_hash`.
+    ///
+    /// `key_hash` is a `blake3:<hex>` digest; the `:` is replaced with `-` so the
+    /// filename is portable (Windows forbids `:` in filenames). The mapping is
+    /// total and collision-free over `blake3:` hashes.
+    pub fn revision_launch_template_path(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        key_hash: &str,
+    ) -> PathBuf {
+        self.revision_launch_templates_dir(app, profile, rev)
+            .join(format!("{}.json", launch_template_filename(key_hash)))
+    }
+
+    /// Persist a [`LaunchTemplate`] (atomic), keyed by its
+    /// [`LaunchTemplateKey::key_hash`](super::launch_template::LaunchTemplateKey::key_hash).
+    pub fn write_launch_template(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        template: &super::launch_template::LaunchTemplate,
+    ) -> Result<()> {
+        let key_hash = template.key.key_hash()?;
+        self.write_revision_json(
+            &self.revision_launch_template_path(app, profile, rev, &key_hash),
+            template,
+        )
+    }
+
+    /// Read a single [`LaunchTemplate`] by its `key_hash`.
+    pub fn read_launch_template(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+        key_hash: &str,
+    ) -> Result<super::launch_template::LaunchTemplate> {
+        let path = self.revision_launch_template_path(app, profile, rev, key_hash);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read every persisted [`LaunchTemplate`] for a `(app, profile, revision)`.
+    ///
+    /// Returns an empty vec if the `launch-templates/` dir does not exist (the
+    /// standard install path never writes one). Results are sorted by `key_hash`
+    /// filename for a deterministic order.
+    pub fn read_launch_templates(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<Vec<super::launch_template::LaunchTemplate>> {
+        let dir = self.revision_launch_templates_dir(app, profile, rev);
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+            .with_context(|| format!("read launch-templates dir {}", dir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+            .collect();
+        entries.sort();
+        let mut templates = Vec::with_capacity(entries.len());
+        for path in entries {
+            let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let template: super::launch_template::LaunchTemplate = serde_json::from_slice(&raw)
+                .with_context(|| format!("parse {}", path.display()))?;
+            templates.push(template);
+        }
+        Ok(templates)
+    }
+
+    /// Persist the [`InstallRevision`] marker (atomic). Must be written only
+    /// after every sub-record above has been written successfully.
+    pub fn write_install_revision(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        revision: &InstallRevision,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.revision_install_record_path(app, profile, &revision.install_revision_id),
+            revision,
+        )
+    }
+
+    // ── Per-session launch materialization records (#581 wave 5B) ─────────────
+    //
+    // A `LaunchMaterializationRecord` is session-scoped (frozen per session,
+    // never reused as a launch template). It is stored under the existing
+    // app-scoped sessions dir, indexed by `capsule_instance_key` (the session's
+    // canonical replay key — see the directory-structure doc at the top of this
+    // file: "sessions/  # session records (indexed by capsule_instance_key)"):
+    //
+    //   instances/<app>/sessions/<capsule_instance_key>/materialization.json
+    //
+    // The record carries only stable identity + projection *digests* — never a
+    // secret value, dynamic port, pid, container id, live route, log cursor, or
+    // observed/readiness status.
+
+    /// Directory holding one session's records, keyed by `capsule_instance_key`.
+    pub fn session_dir(
+        &self,
+        app: &InstalledAppId,
+        capsule_instance_key: &super::ids::CapsuleInstanceKey,
+    ) -> PathBuf {
+        self.sessions_dir(app).join(capsule_instance_key.as_str())
+    }
+
+    /// Path of a session's `materialization.json`.
+    pub fn session_materialization_path(
+        &self,
+        app: &InstalledAppId,
+        capsule_instance_key: &super::ids::CapsuleInstanceKey,
+    ) -> PathBuf {
+        self.session_dir(app, capsule_instance_key)
+            .join("materialization.json")
+    }
+
+    /// Persist a [`LaunchMaterializationRecord`](super::materialization::LaunchMaterializationRecord)
+    /// for its session (atomic), keyed by the record's `capsule_instance_key`.
+    pub fn write_launch_materialization_record(
+        &self,
+        app: &InstalledAppId,
+        record: &super::materialization::LaunchMaterializationRecord,
+    ) -> Result<()> {
+        self.write_revision_json(
+            &self.session_materialization_path(app, &record.capsule_instance_key),
+            record,
+        )
+    }
+
+    /// Read a session's [`LaunchMaterializationRecord`](super::materialization::LaunchMaterializationRecord)
+    /// by its `capsule_instance_key`.
+    pub fn read_launch_materialization_record(
+        &self,
+        app: &InstalledAppId,
+        capsule_instance_key: &super::ids::CapsuleInstanceKey,
+    ) -> Result<super::materialization::LaunchMaterializationRecord> {
+        let path = self.session_materialization_path(app, capsule_instance_key);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Remove the `revision.json` finalization marker if present (best effort).
+    ///
+    /// Called before re-finalizing an existing revision so that the revision is
+    /// transiently *un*-finalized while its sub-records are rewritten: a crash
+    /// mid-rewrite then leaves no marker (read fails closed) rather than a marker
+    /// pointing at half-rewritten sub-records.
+    pub fn remove_install_revision_marker(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<()> {
+        let path = self.revision_install_record_path(app, profile, rev);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("remove marker {}", path.display())),
+        }
+    }
+
+    /// True if `revision.json` exists for this `(app, profile, revision)` —
+    /// i.e. finalization reached the marker write. A scaffolded-but-incomplete
+    /// revision (output copied, sub-records partially written) returns `false`.
+    pub fn is_revision_finalized(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> bool {
+        self.revision_install_record_path(app, profile, rev)
+            .exists()
+    }
+
+    /// Read the [`InstallRevision`] for a `(app, profile, revision)`. Errors if
+    /// `revision.json` is missing (revision not finalized) or malformed.
+    pub fn read_install_revision(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<InstallRevision> {
+        let path = self.revision_install_record_path(app, profile, rev);
+        if !path.exists() {
+            anyhow::bail!(
+                "revision '{}' for {}/{} is not finalized: revision.json is missing",
+                rev.as_str(),
+                app.as_str(),
+                profile.as_str()
+            );
+        }
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`ArtifactBuild`] record for a `(app, profile, revision)`.
+    pub fn read_artifact_build(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<ArtifactBuild> {
+        let path = self.revision_artifact_build_path(app, profile, rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`RequirementGraphSnapshot`] for a `(app, profile, revision)`.
+    pub fn read_requirement_graph_snapshot(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<RequirementGraphSnapshot> {
+        let path = self.revision_requirement_graph_path(app, profile, rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the state-contract snapshots for a `(app, profile, revision)`.
+    pub fn read_state_contracts(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<Vec<StateContractSnapshot>> {
+        let path = self.revision_state_contracts_path(app, profile, rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`BindingAssignmentSet`] for a `(app, profile, revision)`.
+    pub fn read_binding_assignment_set(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<BindingAssignmentSet> {
+        let path = self.revision_binding_assignment_set_path(app, profile, rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`CompatibilityIndex`] for a `(app, profile, revision)`.
+    pub fn read_compatibility_index(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<CompatibilityIndex> {
+        let path = self.revision_compatibility_index_path(app, profile, rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Read the [`InstallReceipt`] for a `(app, profile, revision)`.
+    pub fn read_install_receipt(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<InstallReceipt> {
+        let path = self.revision_install_receipt_path(app, profile, rev);
+        let raw = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Convenience readback for launch reuse: follow the `current_revision`
+    /// pointer for `(app, profile)` and load the finalized [`InstallRevision`].
+    ///
+    /// `(app, profile)` determines the [`InstallProfileKey`](super::ids::InstallProfileKey),
+    /// so this is the `install_profile_key -> current revision -> records` chain
+    /// a launcher needs without recomputing the install.
+    pub fn read_current_install_revision(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+    ) -> Result<InstallRevision> {
+        let rev = self.current_revision(app, profile)?;
+        self.read_install_revision(app, profile, &rev)
     }
 
     // ── Profile list ──────────────────────────────────────────────────────
@@ -789,6 +1321,12 @@ fn record_handle_matches(record: &AppRecord, target: &str) -> bool {
         }
     }
     false
+}
+
+/// Map a `blake3:<hex>` key hash to a portable filename stem (replace `:` with
+/// `-`). Total and collision-free over `blake3:` hashes.
+fn launch_template_filename(key_hash: &str) -> String {
+    key_hash.replace(':', "-")
 }
 
 // ── Atomic write helper ────────────────────────────────────────────────────

@@ -34,6 +34,10 @@
 //! - [`config`] — [`ConfigField`] / [`ConfigKind`], the dynamic config-form
 //!   schema returned in the E103 missing-env envelope. Single-sourced from
 //!   M5.
+//! - [`placement`] — placement/runtime-provider identity DTOs shared across
+//!   process and API boundaries.
+//! - [`runtime_control_events`] — stable runtime-control event DTOs. These
+//!   are transport-neutral and intentionally do not model HTTP/SSE details.
 //!
 //! # Stability
 //!
@@ -47,5 +51,7 @@ pub mod ccp;
 pub mod config;
 pub mod error;
 pub mod handle;
+pub mod placement;
+pub mod runtime_control_events;
 
 pub use error::{Result, WireError};

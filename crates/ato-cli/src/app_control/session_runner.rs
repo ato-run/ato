@@ -1125,11 +1125,22 @@ impl SessionStartPhaseRunner {
         //    spawn) so observers see a clean workspace.
         if let Some(metadata) = prelaunch_receipt.as_ref() {
             info.attach_execution_receipt_metadata(metadata);
-            if let Err(err) =
+            // Stamp the readiness gate from the OBSERVED readiness outcome
+            // carried on the session record (set by start_*_session where
+            // wait_for_http_ready / the orchestrator readiness probes actually
+            // ran and passed; those paths bail on failure). A declared port is
+            // NOT proof: Terminal/Service strategies never probe it, and a
+            // declared-but-unbound port must never stamp readiness-passed.
+            let stamp_result = if info.readiness_confirmed() {
                 execution_receipts::mark_v2_receipt_readiness_passed(&metadata.execution_id)
-            {
+            } else {
+                execution_receipts::mark_v2_receipt_started_without_readiness(
+                    &metadata.execution_id,
+                )
+            };
+            if let Err(err) = stamp_result {
                 eprintln!(
-                    "ATO-WARN failed to mark session execution receipt readiness-passed: {}",
+                    "ATO-WARN failed to mark session execution receipt readiness gate: {}",
                     err
                 );
             }
