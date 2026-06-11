@@ -158,6 +158,7 @@ const TABLE: &[SystemCapsuleDescriptor] = &[
             Capability::WebviewCreate,
             Capability::LaunchSystemCapsule,
             Capability::AppQuit,
+            Capability::RuntimeControl,
         ],
     },
     SystemCapsuleDescriptor {
@@ -262,6 +263,24 @@ mod tests {
     #[test]
     fn unknown_slug_returns_none() {
         assert_eq!(lookup_by_slug("totally-unknown-capsule"), None);
+    }
+
+    #[test]
+    fn ato_start_grants_runtime_control() {
+        let d = lookup(SystemCapsuleId::AtoStart);
+        assert!(
+            d.allowed_capabilities.contains(&Capability::RuntimeControl),
+            "AtoStart must have RuntimeControl to launch/stop sessions"
+        );
+    }
+
+    #[test]
+    fn runtime_control_not_granted_to_store() {
+        let d = lookup(SystemCapsuleId::AtoStore);
+        assert!(
+            !d.allowed_capabilities.contains(&Capability::RuntimeControl),
+            "AtoStore must not have RuntimeControl"
+        );
     }
 
     #[test]

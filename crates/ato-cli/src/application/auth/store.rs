@@ -137,13 +137,13 @@ fn generate_pkce_challenge_s256(verifier: &str) -> String {
     to_base64_url(&hasher.finalize())
 }
 
-pub(super) fn store_api_base_url() -> String {
+pub(crate) fn store_api_base_url() -> String {
     trim_trailing_slash(
         &read_env_non_empty(ENV_STORE_API_URL).unwrap_or_else(|| DEFAULT_STORE_API_URL.to_string()),
     )
 }
 
-fn store_site_base_url() -> String {
+pub(crate) fn store_site_base_url() -> String {
     trim_trailing_slash(
         &read_env_non_empty(ENV_STORE_SITE_URL)
             .unwrap_or_else(|| DEFAULT_STORE_SITE_URL.to_string()),
@@ -288,6 +288,100 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
 
     let api_base = store_api_base_url();
     let site_base = store_site_base_url();
+    let bridge = bridge_authenticate_ephemeral(&api_base, &site_base, headless).await?;
+    let session_token = bridge.access_token;
+
+    let manager = AuthManager::new()?;
+    let storage = manager
+        .persist_session_token(session_token.clone(), headless)
+        .await?;
+    let mut creds = manager.load()?.unwrap_or_default();
+    creds.publisher_handle = bridge.handle.clone();
+    if headless {
+        let mut persisted = manager.load_canonical_credentials()?.unwrap_or_default();
+        persisted.session_token = Some(session_token.clone());
+        merge_metadata(&mut persisted, &creds);
+        manager.write_canonical_credentials(&persisted)?;
+    }
+
+    let session_token_for_setup = session_token.clone();
+    println!("🧪 Running publisher onboarding...");
+    let onboarding = run_publisher_onboarding_flow(
+        &session_token_for_setup,
+        creds.github_username.as_deref(),
+        false,
+    )
+    .await?;
+    creds.publisher_id = Some(onboarding.publisher_id);
+    creds.publisher_handle = Some(onboarding.publisher_handle);
+    creds.publisher_did = Some(onboarding.publisher_did);
+    if let Some(installation) = onboarding.installation {
+        creds.github_app_installation_id = Some(installation.installation_id);
+        creds.github_app_account_login = Some(installation.account_login);
+    }
+    if headless {
+        let mut persisted = manager.load_canonical_credentials()?.unwrap_or_default();
+        persisted.session_token = Some(session_token.clone());
+        merge_metadata(&mut persisted, &creds);
+        manager.write_canonical_credentials(&persisted)?;
+    }
+
+    println!("✅ Login completed successfully");
+    if let Some(handle) = creds.publisher_handle.as_deref() {
+        println!("   Publisher: {}", handle);
+    }
+    if let Some(id) = creds.github_app_installation_id {
+        println!("   GitHub App Installation: {}", id);
+    }
+    match storage {
+        TokenStorageLocation::AgeFile => {
+            println!(
+                "   Store session saved to: {} ({})",
+                storage.display(),
+                manager
+                    .age_home
+                    .join(".ato/credentials/auth/session.age")
+                    .display()
+            );
+        }
+        TokenStorageLocation::CanonicalFile => {
+            println!(
+                "   Store session saved to: {:?}",
+                manager.credentials_path()
+            );
+        }
+        TokenStorageLocation::Memory => {
+            println!("   Store session saved to: {}", storage.display());
+            println!(
+                "   ⚠️  Token will not survive this process. Re-run `ato login` in an interactive shell, or run `ato secrets init` to create an age identity."
+            );
+        }
+    }
+    if headless {
+        println!("   Metadata file: {:?}", manager.credentials_path());
+    }
+    Ok(())
+}
+
+/// In-memory result of a Store bridge authentication.
+pub(crate) struct BridgeSessionToken {
+    pub access_token: String,
+    pub handle: Option<String>,
+}
+
+/// Run the Store bridge (device-code style) authentication WITHOUT persisting
+/// anything: init → show user_code/URL → poll → exchange. Returns the session
+/// token in memory only.
+///
+/// Used by `ato login` (which then persists the token and runs publisher
+/// onboarding) and by `ato runner login` (which uses the token exactly once to
+/// register the runner device and then discards it — a runner host must never
+/// hold a long-lived user session).
+pub(crate) async fn bridge_authenticate_ephemeral(
+    api_base: &str,
+    site_base: &str,
+    headless: bool,
+) -> Result<BridgeSessionToken> {
     let client = reqwest::Client::new();
     let code_verifier = generate_pkce_verifier();
     let code_challenge = generate_pkce_challenge_s256(&code_verifier);
@@ -307,7 +401,7 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
         let status = start_response.status();
         let body = start_response.text().await.unwrap_or_default();
         let mut message = format!("Bridge auth init failed ({}): {}", status, body);
-        if status.is_server_error() && is_local_store_api_base_url(&api_base) {
+        if status.is_server_error() && is_local_store_api_base_url(api_base) {
             message.push_str(
                 "\nLocal ato-store may be missing DB migrations. Run `pnpm -C apps/ato-store db:migrate` and restart `pnpm -C apps/ato-store dev`.",
             );
@@ -373,7 +467,7 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
 
         if started_at.elapsed() >= Duration::from_secs(poll_timeout_secs) {
             anyhow::bail!(
-                "Authentication timed out after {} seconds. Run `ato login` again.",
+                "Authentication timed out after {} seconds. Run the login command again.",
                 poll_timeout_secs
             );
         }
@@ -402,11 +496,11 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
         }
 
         if poll_response.status() == StatusCode::CONFLICT {
-            anyhow::bail!("Authentication denied or cancelled. Run `ato login` again.");
+            anyhow::bail!("Authentication denied or cancelled. Run the login command again.");
         }
 
         if poll_response.status() == StatusCode::GONE {
-            anyhow::bail!("Authentication expired. Run `ato login` again.");
+            anyhow::bail!("Authentication expired. Run the login command again.");
         }
 
         if poll_response.status() == StatusCode::BAD_REQUEST {
@@ -456,78 +550,10 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
                     .await
                     .context("Invalid bridge auth exchange response")?;
 
-                let session_token = exchange.access_token;
-
-                let manager = AuthManager::new()?;
-                let storage = manager
-                    .persist_session_token(session_token.clone(), headless)
-                    .await?;
-                let mut creds = manager.load()?.unwrap_or_default();
-                creds.publisher_handle = exchange.handle.clone();
-                if headless {
-                    let mut persisted = manager.load_canonical_credentials()?.unwrap_or_default();
-                    persisted.session_token = Some(session_token.clone());
-                    merge_metadata(&mut persisted, &creds);
-                    manager.write_canonical_credentials(&persisted)?;
-                }
-
-                let session_token_for_setup = session_token.clone();
-                println!("🧪 Running publisher onboarding...");
-                let onboarding = run_publisher_onboarding_flow(
-                    &session_token_for_setup,
-                    creds.github_username.as_deref(),
-                    false,
-                )
-                .await?;
-                creds.publisher_id = Some(onboarding.publisher_id);
-                creds.publisher_handle = Some(onboarding.publisher_handle);
-                creds.publisher_did = Some(onboarding.publisher_did);
-                if let Some(installation) = onboarding.installation {
-                    creds.github_app_installation_id = Some(installation.installation_id);
-                    creds.github_app_account_login = Some(installation.account_login);
-                }
-                if headless {
-                    let mut persisted = manager.load_canonical_credentials()?.unwrap_or_default();
-                    persisted.session_token = Some(session_token.clone());
-                    merge_metadata(&mut persisted, &creds);
-                    manager.write_canonical_credentials(&persisted)?;
-                }
-
-                println!("✅ Login completed successfully");
-                if let Some(handle) = creds.publisher_handle.as_deref() {
-                    println!("   Publisher: {}", handle);
-                }
-                if let Some(id) = creds.github_app_installation_id {
-                    println!("   GitHub App Installation: {}", id);
-                }
-                match storage {
-                    TokenStorageLocation::AgeFile => {
-                        println!(
-                            "   Store session saved to: {} ({})",
-                            storage.display(),
-                            manager
-                                .age_home
-                                .join(".ato/credentials/auth/session.age")
-                                .display()
-                        );
-                    }
-                    TokenStorageLocation::CanonicalFile => {
-                        println!(
-                            "   Store session saved to: {:?}",
-                            manager.credentials_path()
-                        );
-                    }
-                    TokenStorageLocation::Memory => {
-                        println!("   Store session saved to: {}", storage.display());
-                        println!(
-                            "   ⚠️  Token will not survive this process. Re-run `ato login` in an interactive shell, or run `ato secrets init` to create an age identity."
-                        );
-                    }
-                }
-                if headless {
-                    println!("   Metadata file: {:?}", manager.credentials_path());
-                }
-                return Ok(());
+                return Ok(BridgeSessionToken {
+                    access_token: exchange.access_token,
+                    handle: exchange.handle,
+                });
             }
             other => {
                 anyhow::bail!("Unexpected authentication status: {}", other);
