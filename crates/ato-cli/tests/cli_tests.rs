@@ -1030,11 +1030,18 @@ fn test_help_hides_legacy_commands() {
     cmd.arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains(" open ").not())
-        .stdout(predicate::str::contains(" pack ").not())
-        .stdout(predicate::str::contains(" close ").not())
-        .stdout(predicate::str::contains(" auth ").not())
-        .stdout(predicate::str::contains(" setup ").not());
+        .stdout(predicate::str::is_match(r"(?m)^\s{2,}open\s").unwrap().not())
+        .stdout(predicate::str::is_match(r"(?m)^\s{2,}pack\s").unwrap().not())
+        .stdout(predicate::str::is_match(r"(?m)^\s{2,}close\s").unwrap().not())
+        .stdout(predicate::str::is_match(r"(?m)^\s{2,}auth\s").unwrap().not())
+        // Anchored to the command column: `workspace setup` is a legitimate
+        // subcommand and may appear in descriptions; only a top-level `setup`
+        // entry is legacy.
+        .stdout(
+            predicate::str::is_match(r"(?m)^\s{2,}setup\s")
+                .unwrap()
+                .not(),
+        );
 }
 
 #[test]
@@ -1366,9 +1373,11 @@ fn test_project_help_shows_launcher_projection_contract() {
         .stdout(predicate::str::contains("ato finalize"))
         .stdout(predicate::str::contains("--launcher-dir <LAUNCHER_DIR>"))
         .stdout(predicate::str::contains("Commands:"))
-        .stdout(predicate::str::contains(
-            "ls    List experimental projection state",
-        ));
+        // Padding-insensitive: clap right-pads the command column to the
+        // longest sibling, so fixed spacing breaks when commands are added.
+        .stdout(
+            predicate::str::is_match(r"(?m)^\s+ls\s+List experimental projection state").unwrap(),
+        );
 }
 
 #[test]
