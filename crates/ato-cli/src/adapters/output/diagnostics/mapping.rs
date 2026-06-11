@@ -689,8 +689,6 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
 
 #[cfg(test)]
 mod podman_disabled_tests {
-    use anyhow::Context as _;
-
     use super::{CliDiagnosticCode, CommandContext, from_anyhow};
 
     #[test]
