@@ -158,7 +158,7 @@ pub fn filter_sensitive_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>)
 ///
 /// Defines which paths are allowed for read-only or read-write access.
 /// All other paths are denied write access by default.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SandboxPolicy {
     /// Paths allowed for read-write access (app directories, /tmp, etc.)
     pub read_write_paths: Vec<PathBuf>,

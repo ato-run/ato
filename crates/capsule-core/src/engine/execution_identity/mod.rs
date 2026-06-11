@@ -1165,6 +1165,23 @@ impl GraphReceipt {
             observed_execution_id,
         }
     }
+
+    /// The workload launched but no readiness signal was available (no probe and
+    /// no declared port), so readiness was never confirmed. Honest middle state
+    /// between launch-passed and readiness-passed — it must NOT be reported as
+    /// readiness-passed.
+    pub fn started_without_readiness(
+        declared_execution_id: Option<String>,
+        resolved_execution_id: Option<String>,
+        observed_execution_id: Option<String>,
+    ) -> Self {
+        Self {
+            gate: "started-without-readiness".to_string(),
+            declared_execution_id,
+            resolved_execution_id,
+            observed_execution_id,
+        }
+    }
 }
 
 /// Per-node receipt entry: one node of the launch graph projected into the
