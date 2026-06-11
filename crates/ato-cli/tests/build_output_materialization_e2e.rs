@@ -689,6 +689,9 @@ fn corrupt_manifest(home: &Path, blob_hash: &str) -> Result<()> {
     Ok(())
 }
 
+// Unix-only like its sole caller (`remote_payload_symlink_is_rejected_at_projection`):
+// uses std::os::unix symlinks, so it must not compile on Windows.
+#[cfg(unix)]
 fn inject_symlink_into_remote_payload_and_rehash(remote_layer_root: &Path) -> Result<()> {
     let payload = remote_layer_root.join("blob/payload");
     // Place a dangling absolute symlink inside dist/ — the declared output dir.
