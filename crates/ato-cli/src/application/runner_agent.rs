@@ -830,10 +830,20 @@ async fn report_lease_status(
         LeaseReport::ConsentRequired(_) => {
             unreachable!("consent gates go through report_consent_required (/consent-required)")
         }
-        LeaseReport::Failed { code, message } => serde_json::json!({
-            "status": "failed",
-            "error": { "code": code, "message": scrub_secrets(message) },
-        }),
+        LeaseReport::Failed { code, message } => {
+            // On failure ONLY, attach the scrubbed tail of the child log so an
+            // operator can triage remotely (GET /v1/runs/:id error_log_tail)
+            // without shelling into the runner. Failure-only + bounded = no
+            // steady-state log flooding.
+            let mut error = serde_json::json!({
+                "code": code,
+                "message": scrub_secrets(message),
+            });
+            if let Some(tail) = read_run_log_tail(lease_id) {
+                error["log_tail"] = serde_json::Value::String(tail);
+            }
+            serde_json::json!({ "status": "failed", "error": error })
+        }
     };
     let response = client
         .post(&url)
@@ -1532,6 +1542,39 @@ async fn perform_stop_cleanup(
 }
 
 // ── Child execution ──
+
+/// Bytes of the child log tail attached to a failure report (well within the
+/// API's 16 KiB cap; the file itself is already bounded at MAX_RUN_LOG_BYTES).
+const RUN_LOG_TAIL_BYTES: usize = 12 * 1024;
+
+/// Read the tail of a lease's run log, scrubbed, for remote failure triage.
+/// Returns None when the log is absent/empty. A partial leading line (from
+/// cutting mid-file) is dropped so the excerpt starts on a line boundary.
+fn read_run_log_tail(lease_id: &str) -> Option<String> {
+    read_run_log_tail_at(&run_log_path(lease_id))
+}
+
+fn read_run_log_tail_at(path: &std::path::Path) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    let start = data.len().saturating_sub(RUN_LOG_TAIL_BYTES);
+    let text = String::from_utf8_lossy(&data[start..]);
+    let text = if start > 0 {
+        match text.find('\n') {
+            Some(i) => &text[i + 1..],
+            None => text.as_ref(),
+        }
+    } else {
+        text.as_ref()
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        // The log writer already scrubs each line; scrub again defensively in
+        // case a future caller logs a raw token.
+        Some(scrub_secrets(trimmed))
+    }
+}
 
 fn run_log_path(lease_id: &str) -> PathBuf {
     let base = credentials_path();
@@ -3080,6 +3123,44 @@ mod tests {
         let request = server.join().expect("server");
         assert!(request.contains("GET /v1/runners/01RUNNER/leases/open"));
         assert!(request.contains("authorization: Bearer ato_rnr_t") || request.contains("Authorization: Bearer ato_rnr_t"));
+    }
+
+    #[test]
+    fn log_tail_keeps_the_end_on_a_line_boundary_and_scrubs() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("ato-logtail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Far more than RUN_LOG_TAIL_BYTES so the head is dropped.
+        for i in 0..4000 {
+            writeln!(f, "line {i} ato_rnr_secrettokenvalue padding-padding-padding").unwrap();
+        }
+        writeln!(f, "FINAL ModuleNotFoundError: No module named 'uvicorn'").unwrap();
+        drop(f);
+
+        let tail = read_run_log_tail_at(&path).expect("tail");
+        assert!(tail.len() <= RUN_LOG_TAIL_BYTES);
+        // The most recent, diagnostic line survives.
+        assert!(tail.contains("ModuleNotFoundError"));
+        // Head was cut → the excerpt starts on a clean line boundary.
+        assert!(tail.starts_with("line "));
+        // Tokens are scrubbed, never echoed in the excerpt.
+        assert!(!tail.contains("secrettokenvalue"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn log_tail_is_none_for_absent_or_empty_log() {
+        let missing = std::env::temp_dir().join("ato-logtail-does-not-exist.log");
+        assert!(read_run_log_tail_at(&missing).is_none());
+        let dir = std::env::temp_dir().join(format!("ato-logtail-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty.log");
+        std::fs::write(&empty, b"   \n  \n").unwrap();
+        assert!(read_run_log_tail_at(&empty).is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
