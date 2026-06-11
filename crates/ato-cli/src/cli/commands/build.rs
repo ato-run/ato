@@ -1380,18 +1380,18 @@ fn run_build_lifecycle_shell_command(
     cmd.current_dir(capsule_core::common::paths::windows_child_compatible_path(
         &plan.execution_working_directory(),
     ))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .env("COREPACK_ENABLE_STRICT", "0")
-        // Disable pnpm 10's auto-manage-package-manager-versions to prevent it from
-        // attempting to download the pinned pnpm version in offline/CI environments.
-        .env("npm_config_manage_package_manager_versions", "false")
-        .env("npm_config_approve_builds", "on")
-        // Skip git-hooks managers: the capsule workspace has no .git dir so their
-        // prepare/postinstall scripts would fail with exit 128.
-        .env("HUSKY", "0")
-        .env("LEFTHOOK", "0");
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::inherit())
+    .stderr(std::process::Stdio::inherit())
+    .env("COREPACK_ENABLE_STRICT", "0")
+    // Disable pnpm 10's auto-manage-package-manager-versions to prevent it from
+    // attempting to download the pinned pnpm version in offline/CI environments.
+    .env("npm_config_manage_package_manager_versions", "false")
+    .env("npm_config_approve_builds", "on")
+    // Skip git-hooks managers: the capsule workspace has no .git dir so their
+    // prepare/postinstall scripts would fail with exit 128.
+    .env("HUSKY", "0")
+    .env("LEFTHOOK", "0");
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
