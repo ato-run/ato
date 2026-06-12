@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 
 use anyhow::Result;
+use capsule_core::common::readiness::http_status_indicates_ready;
 use capsule_core::types::ReadinessProbe;
 
 use super::spawn::ExternalCapsuleChild;
@@ -93,10 +94,15 @@ fn http_probe(path: &str, port: u16) -> bool {
     }
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
-    reader.read_line(&mut status_line).is_ok()
-        && (status_line.contains(" 200 ")
-            || status_line.contains(" 201 ")
-            || status_line.contains(" 204 "))
+    if reader.read_line(&mut status_line).is_err() {
+        return false;
+    }
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .map(http_status_indicates_ready)
+        .unwrap_or(false)
 }
 
 fn tcp_probe(host: &str, port: u16) -> bool {
