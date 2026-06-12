@@ -48,7 +48,11 @@ use super::runner_command::RunnerCommandPayload;
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LaunchPreparationBridgeResult {
     /// A launch can be prepared; `plan` carries the minimal identity surface.
-    Prepared { plan: LaunchPreparationBridgePlan },
+    // Boxed: LaunchPreparationBridgePlan dwarfs the NotPrepared variant
+    // (clippy::large_enum_variant). Box is transparent to serde.
+    Prepared {
+        plan: Box<LaunchPreparationBridgePlan>,
+    },
     /// A launch cannot be prepared; `blockers` lists stable codes.
     NotPrepared {
         blockers: Vec<LaunchPreparationBridgeBlocker>,
@@ -147,7 +151,7 @@ impl LaunchPreparationBridgeResult {
     pub fn from_decision(decision: &LaunchPreparationDecision) -> Self {
         match decision {
             LaunchPreparationDecision::Prepared(plan) => Self::Prepared {
-                plan: LaunchPreparationBridgePlan::from_plan(plan),
+                plan: Box::new(LaunchPreparationBridgePlan::from_plan(plan)),
             },
             LaunchPreparationDecision::NotPrepared { blockers } => Self::NotPrepared {
                 blockers: blockers

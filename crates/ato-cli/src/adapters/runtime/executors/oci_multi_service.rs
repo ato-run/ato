@@ -378,7 +378,9 @@ fn enforce_strict_oci_orchestration(
             enforcement: OciProviderEnforcement::podman(network_policy_required),
         })
         .collect();
-    enforce_strict_oci_services(&inputs, profile, None).map_err(anyhow::Error::new)
+    // Unbox before handing to anyhow: downstream recovery downcasts to
+    // `AtoExecutionError` (utils/error.rs), which a boxed wrap would hide.
+    enforce_strict_oci_services(&inputs, profile, None).map_err(|e| anyhow::Error::new(*e))
 }
 
 /// Receipt-safe provider evidence for each OCI service (#501). Not persisted to
@@ -1868,7 +1870,7 @@ mod tests {
     use crate::adapters::runtime::oci_provider::FakeOciProvider;
     use capsule_core::runtime::oci::{OciContainerInspect, engine_state_volume_name};
     use capsule_core::types::{
-        Mount, OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
+        OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
         ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
         ServiceConnectionInfo,
     };
@@ -2989,7 +2991,7 @@ volumes:
     #[tokio::test]
     async fn run_once_timeout_returns_typed_error() {
         let result = {
-            let _guard = run_once_test_env_lock().lock().unwrap();
+            let _guard = run_once_test_env_lock().lock().await;
             let prev = std::env::var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS").ok();
             // SAFETY: tests sharing this env var hold _guard for their duration.
             unsafe {
@@ -3227,10 +3229,11 @@ volumes:
         );
     }
 
-    /// Process-wide mutex for the timeout test (env-var-dependent).
-    fn run_once_test_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    /// Process-wide mutex for the timeout test (env-var-dependent). Async-aware
+    /// so the guard can be held across `.await` (clippy::await_holding_lock).
+    fn run_once_test_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        &LOCK
     }
 
     // ── OCI proxy env tests ───────────────────────────────────────────────────

@@ -753,7 +753,8 @@ mod tests {
         let reference = base.canonical_form(CanonicalGraphDomain::Declared);
 
         // A spread of independent reorderings — not just `reverse()`.
-        let permutations: Vec<Box<dyn Fn(&mut ExecutionGraph)>> = vec![
+        type Reordering = Box<dyn Fn(&mut ExecutionGraph)>;
+        let permutations: Vec<Reordering> = vec![
             Box::new(|g: &mut ExecutionGraph| g.nodes.reverse()),
             Box::new(|g: &mut ExecutionGraph| g.edges.reverse()),
             Box::new(|g: &mut ExecutionGraph| g.constraints.reverse()),

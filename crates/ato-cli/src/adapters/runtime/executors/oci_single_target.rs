@@ -446,7 +446,9 @@ fn enforce_strict_oci_launch(
     // The graph-derived resolved execution id is not threaded into the OCI launch
     // path yet (a remaining #501 slice), so pass `None` rather than substituting
     // the provider projection fingerprint — which is not an execution identity.
-    enforce_strict_oci(&facts, &enforcement, profile, None).map_err(anyhow::Error::new)
+    // Unbox before handing to anyhow: downstream recovery downcasts to
+    // `AtoExecutionError` (utils/error.rs), which a boxed wrap would hide.
+    enforce_strict_oci(&facts, &enforcement, profile, None).map_err(|e| anyhow::Error::new(*e))
 }
 
 /// Persist a durable launch receipt carrying OCI provider evidence (#501).
