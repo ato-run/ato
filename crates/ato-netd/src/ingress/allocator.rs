@@ -23,7 +23,7 @@
 //! error.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
 };
 
@@ -191,9 +191,15 @@ fn tmp_path_for(path: &Path) -> PathBuf {
 /// # Port reuse protection
 ///
 /// When an ephemeral port is released via [`EphemeralAllocator::release`],
-/// it is moved to `recently_freed` and will not be reassigned within the
-/// current daemon lifetime. This prevents the scenario where capsule A's
-/// port is immediately handed to capsule B.
+/// it is moved to a bounded `recently_freed` cooldown set and is not
+/// reassigned while it stays there. This prevents the scenario where
+/// capsule A's port is immediately handed to capsule B.
+///
+/// The cooldown set is bounded at [`RECENTLY_FREED_CAP`] entries (FIFO:
+/// the oldest freed port is evicted first), and `assign` falls back to
+/// reusing the oldest freed port when every otherwise-free port is in
+/// cooldown. Without the bound, a long-lived daemon servicing many
+/// transient sessions would exhaust the whole range (issue #647).
 ///
 /// # Collision avoidance
 ///
@@ -205,9 +211,22 @@ pub struct EphemeralAllocator {
     active_map: HashMap<String, u16>,
     /// Fast reverse lookup for collision detection.
     active_ports: HashSet<u16>,
-    /// Ports freed this daemon lifetime — blocked from immediate reuse.
+    /// Ports freed recently — blocked from immediate reuse. Membership set
+    /// for O(1) lookup; bounded by [`RECENTLY_FREED_CAP`].
     recently_freed: HashSet<u16>,
+    /// Insertion order of `recently_freed`, oldest at the front. Used to
+    /// evict (on overflow) or reuse (when the range is tight) the port
+    /// that has been in cooldown the longest.
+    recently_freed_order: VecDeque<u16>,
 }
+
+/// Maximum number of ports kept in the recently-freed cooldown set.
+///
+/// When the set is full, the oldest entry is evicted and becomes
+/// reassignable again. The bound keeps the immediate-reuse protection
+/// meaningful while guaranteeing the allocator can never block the whole
+/// 10,000-port range after many transient session start/stop cycles.
+const RECENTLY_FREED_CAP: usize = 1_024;
 
 impl EphemeralAllocator {
     pub fn new() -> Self {
@@ -217,6 +236,11 @@ impl EphemeralAllocator {
     /// Assign a port for `session_key`. Avoids `stable_occupied` ports,
     /// currently active ports, and recently-freed ports. Idempotent for
     /// the same key.
+    ///
+    /// When every otherwise-free port is in the recently-freed cooldown
+    /// set, the oldest freed port is reused instead of failing —
+    /// [`AllocError::RangeExhausted`] is returned only when stable and
+    /// active routes genuinely occupy the entire range.
     pub fn assign(
         &mut self,
         session_key: &str,
@@ -225,6 +249,7 @@ impl EphemeralAllocator {
         if let Some(&port) = self.active_map.get(session_key) {
             return Ok(port);
         }
+        // First pass: prefer ports outside the cooldown set.
         for port in PORT_RANGE_START..=PORT_RANGE_END {
             if !stable_occupied.contains(&port)
                 && !self.active_ports.contains(&port)
@@ -235,15 +260,39 @@ impl EphemeralAllocator {
                 return Ok(port);
             }
         }
+        // Fallback: every free port is in cooldown. Reuse the oldest freed
+        // port (longest cooldown) rather than exhausting the range.
+        if let Some(idx) = self
+            .recently_freed_order
+            .iter()
+            .position(|p| !stable_occupied.contains(p) && !self.active_ports.contains(p))
+        {
+            let port = self
+                .recently_freed_order
+                .remove(idx)
+                .expect("index returned by position() is in range");
+            self.recently_freed.remove(&port);
+            self.active_map.insert(session_key.to_string(), port);
+            self.active_ports.insert(port);
+            return Ok(port);
+        }
         Err(AllocError::RangeExhausted)
     }
 
-    /// Release the port for `session_key`. Moves it to `recently_freed`
-    /// to prevent immediate reuse within this daemon lifetime.
+    /// Release the port for `session_key`. Moves it to the bounded
+    /// `recently_freed` cooldown set to prevent immediate reuse; when the
+    /// set is full, the oldest entry is evicted and becomes reassignable.
     pub fn release(&mut self, session_key: &str) {
         if let Some(port) = self.active_map.remove(session_key) {
             self.active_ports.remove(&port);
-            self.recently_freed.insert(port);
+            if self.recently_freed.insert(port) {
+                self.recently_freed_order.push_back(port);
+                if self.recently_freed_order.len() > RECENTLY_FREED_CAP
+                    && let Some(oldest) = self.recently_freed_order.pop_front()
+                {
+                    self.recently_freed.remove(&oldest);
+                }
+            }
         }
     }
 
@@ -418,6 +467,82 @@ mod tests {
         assert_ne!(
             port, port2,
             "re-assigned port must differ from the released port within same daemon lifetime"
+        );
+    }
+
+    /// When every otherwise-free port is in the recently-freed cooldown
+    /// set, `assign` must fall back to reusing the oldest freed port and
+    /// only report `RangeExhausted` when stable + active routes genuinely
+    /// occupy the entire range.
+    #[test]
+    fn ephemeral_falls_back_to_oldest_freed_port_when_range_tight() {
+        let mut ea = EphemeralAllocator::new();
+        // Leave only two usable ports in the range.
+        let stable: HashSet<u16> = (PORT_RANGE_START + 2..=PORT_RANGE_END).collect();
+        let p1 = ea.assign("session:a", &stable).unwrap();
+        let p2 = ea.assign("session:b", &stable).unwrap();
+        ea.release("session:a");
+        ea.release("session:b");
+        // Both usable ports are now in cooldown; the allocator must reuse
+        // the oldest freed port first instead of reporting exhaustion.
+        let p3 = ea.assign("session:c", &stable).unwrap();
+        assert_eq!(p3, p1, "oldest freed port should be reused first");
+        let p4 = ea.assign("session:d", &stable).unwrap();
+        assert_eq!(p4, p2, "next-oldest freed port should be reused second");
+        // With both ports active again the range is genuinely exhausted.
+        let err = ea.assign("session:e", &stable);
+        assert!(
+            matches!(err, Err(AllocError::RangeExhausted)),
+            "expected RangeExhausted, got: {err:?}",
+        );
+    }
+
+    /// Regression test for issue #647: a long-lived daemon cycling many
+    /// transient sessions must never exhaust the ephemeral range just
+    /// because freed ports accumulate in the cooldown set.
+    #[test]
+    fn ephemeral_many_start_stop_cycles_do_not_exhaust_range() {
+        let mut ea = EphemeralAllocator::new();
+        let stable: HashSet<u16> = HashSet::new();
+        let range_len = usize::from(PORT_RANGE_END - PORT_RANGE_START) + 1;
+        // More start/stop cycles than there are ports in the range.
+        for i in 0..(range_len + 100) {
+            let key = format!("ephemeral:session-{i}");
+            ea.assign(&key, &stable)
+                .unwrap_or_else(|e| panic!("cycle {i} exhausted the range: {e}"));
+            ea.release(&key);
+        }
+        assert!(
+            ea.recently_freed.len() <= RECENTLY_FREED_CAP,
+            "recently_freed must stay bounded (len = {})",
+            ea.recently_freed.len(),
+        );
+        assert_eq!(
+            ea.recently_freed.len(),
+            ea.recently_freed_order.len(),
+            "membership set and order queue must stay in sync"
+        );
+    }
+
+    /// The cooldown set evicts its oldest entry once full, making that
+    /// port assignable again without any fallback.
+    #[test]
+    fn ephemeral_cooldown_evicts_oldest_entry_when_full() {
+        let mut ea = EphemeralAllocator::new();
+        let stable: HashSet<u16> = HashSet::new();
+        // Fill the cooldown set one past its capacity. Each cycle assigns
+        // the lowest non-blocked port, so cycle i frees PORT_RANGE_START + i.
+        for i in 0..=RECENTLY_FREED_CAP {
+            let key = format!("ephemeral:session-{i}");
+            ea.assign(&key, &stable).unwrap();
+            ea.release(&key);
+        }
+        // The oldest entry (PORT_RANGE_START) was evicted, so the next
+        // assignment picks it up via the normal first-pass scan.
+        let port = ea.assign("ephemeral:session-next", &stable).unwrap();
+        assert_eq!(
+            port, PORT_RANGE_START,
+            "evicted oldest port should be assignable again"
         );
     }
 }
