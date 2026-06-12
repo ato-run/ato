@@ -5676,6 +5676,7 @@ mod fast_path_tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: Some(GuestSessionDisplay {
                 adapter: "node".to_string(),
                 frontend_entry: "index.html".to_string(),
