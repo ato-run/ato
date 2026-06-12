@@ -695,6 +695,11 @@
     } else if (f.kind === 'enum') {
       el.textContent = f.value || (f.choices[0] || '—');
       el.classList.remove('empty');
+    } else if (f.kind === 'unknown') {
+      // #651 — field kind from a newer CLI this desktop doesn't support.
+      // Shown read-only; never editable, never submitted.
+      el.textContent = 'Unsupported (update ato)';
+      el.classList.add('empty');
     } else {
       if (f.value) { el.textContent = f.value; el.classList.remove('empty'); }
       else if (f.already_configured) { el.textContent = '(configured)'; el.classList.remove('empty'); }
@@ -824,6 +829,13 @@
         inp.dataset.fieldIdx = i;
         inp.placeholder = f.placeholder || (f.kind === 'secret' ? '••••••••' : '');
         inp.value = f.value || '';
+        if (f.kind === 'unknown') {
+          // #651 — kind from a newer CLI. Read-only on purpose: we can't
+          // tell whether the value is secret-like, so accepting input here
+          // could route a secret into plaintext config storage.
+          inp.disabled = true;
+          inp.placeholder = 'Unsupported field kind';
+        }
         inp.addEventListener('input', () => { _cfgFields[i].value = inp.value; refreshCfgVal(_cfgFields[i]); updateApproveBtn(); });
         wrap.appendChild(inp);
         if (f.kind === 'secret') {
@@ -839,6 +851,11 @@
         const hint = document.createElement('div');
         hint.className = 'fld-hint';
         hint.textContent = `Used only for ${f.label} requests.`;
+        grp.appendChild(hint);
+      } else if (f.kind === 'unknown') {
+        const hint = document.createElement('div');
+        hint.className = 'fld-hint';
+        hint.textContent = 'This field needs a newer version of ato to configure.';
         grp.appendChild(hint);
       }
       body.appendChild(grp);
@@ -961,14 +978,16 @@
     if (!_preview || _preview.loading) return;
     const secrets = {}, config = {};
     _cfgFields.forEach(f => {
-      if (!f.value) return;
+      // #651 — never submit unknown-kind fields: we can't tell secret
+      // from plaintext, so dropping the value is the fail-closed choice.
+      if (!f.value || f.kind === 'unknown') return;
       if (f.kind === 'secret') secrets[f.name] = f.value;
       else config[f.name] = f.value;
     });
     // Also collect from any open panel inputs
     document.querySelectorAll('[data-field-idx]').forEach(el => {
       const f = _cfgFields[+el.dataset.fieldIdx];
-      if (!f || !el.value) return;
+      if (!f || !el.value || f.kind === 'unknown') return;
       if (f.kind === 'secret') secrets[f.name] = el.value;
       else config[f.name] = el.value.trim();
     });

@@ -636,6 +636,10 @@ fn build_consent_preview(
                                     ConfigKind::String => "string",
                                     ConfigKind::Number => "number",
                                     ConfigKind::Enum { .. } => "enum",
+                                    // #651 — forward-compat fallback for a
+                                    // newer CLI's kind. consent.html renders
+                                    // this read-only and never submits it.
+                                    ConfigKind::Unknown => "unknown",
                                 }
                                 .to_string();
                                 let choices = match f.kind {

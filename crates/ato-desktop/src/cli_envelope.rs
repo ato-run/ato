@@ -274,6 +274,26 @@ mod tests {
     }
 
     #[test]
+    fn unknown_config_kind_degrades_field_without_dropping_schema() {
+        // #651 — a newer CLI may emit `kind` values this build doesn't
+        // know. One unknown element must not fail the whole
+        // `missing_schema` decode (which used to drop the entire config
+        // form); it degrades to `ConfigKind::Unknown` and the sibling
+        // fields stay intact.
+        let line = r#"{"level":"fatal","code":"E103","details":{"missing_schema":[{"name":"OPENAI_API_KEY","kind":"secret"},{"name":"PROMPT","kind":"multiline","rows":4}],"target":"main"}}"#;
+        let event = parse_cli_error_event(line).expect("must parse");
+        let details = event
+            .missing_env_details()
+            .expect("one unknown kind must not fail the whole details decode");
+        assert_eq!(details.missing_schema.len(), 2);
+        assert!(matches!(details.missing_schema[0].kind, ConfigKind::Secret));
+        assert!(matches!(
+            details.missing_schema[1].kind,
+            ConfigKind::Unknown
+        ));
+    }
+
+    #[test]
     fn ignores_unknown_top_level_fields() {
         // Forward-compat: if the CLI adds new top-level keys, the
         // desktop must keep parsing the ones it cares about.
