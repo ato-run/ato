@@ -714,7 +714,16 @@ fn provision_command_from_python_importer(
             // (e.g. gunicorn<21) that import pkg_resources still work.
             // Apps that explicitly pin setuptools>=72 in requirements.txt will
             // get a clear uv conflict error and can remove the implicit constraint.
-            "uv venv{python_pin} --seed --clear && uv pip install -r {requirements_arg} 'setuptools<72'"
+            //
+            // Quote the constraint with double quotes, not single quotes: cmd.exe
+            // does not treat `'` as a quote character, so `'setuptools<72'` leaves
+            // the `<` exposed and cmd parses it as input redirection (issue #629,
+            // Windows-only "Access is denied." / "The system cannot find the file
+            // specified."). Double quotes are honoured by both POSIX `sh` and
+            // cmd.exe, protecting the `<`. The Windows lifecycle runner passes the
+            // command through `cmd /D /S /C` with `raw_arg` so the inner quotes
+            // reach cmd verbatim instead of being escaped by Rust's argument quoting.
+            "uv venv{python_pin} --seed --clear && uv pip install -r {requirements_arg} \"setuptools<72\""
         )));
     }
 
@@ -779,10 +788,25 @@ fn run_lifecycle_shell_command(
 ) -> Result<()> {
     #[cfg(windows)]
     let mut cmd = {
+        use std::os::windows::process::CommandExt as _;
         let mut cmd = std::process::Command::new("cmd");
         // `/D` disables AutoRun so a broken/foreign \Command Processor\AutoRun script
         // cannot pollute output or leak a non-zero exit code into the lifecycle command.
-        cmd.args(["/D", "/C", command]);
+        //
+        // `/S` + a single outer-quoted payload, passed via `raw_arg`, is required for
+        // commands carrying their own double-quoted arguments (issue #629). The
+        // generated Python provision command quotes its version constraint as
+        // `"setuptools<72"` so the `<` is not parsed by cmd as input redirection.
+        // Passing the command through the normal `args(["/C", command])` path lets
+        // Rust's argument quoter wrap the whole string and escape the inner `"` as
+        // `\"`, which cmd then mis-tokenises — exposing the `<` and failing with
+        // "Access is denied." / "The system cannot find the file specified.".
+        // `raw_arg` hands cmd an exact command line: `/D /S /C "<command>"`. With
+        // `/S`, cmd strips only the first and last quote of the payload and leaves
+        // every inner quote intact for its own tokeniser, so `"setuptools<72"`
+        // reaches uv as a single, redirection-safe argument. Build the whole
+        // payload in one `raw_arg` so spacing/quoting is exactly what cmd sees.
+        cmd.raw_arg(windows_cmd_lifecycle_raw_args(command));
         cmd
     };
 
@@ -828,6 +852,25 @@ fn run_lifecycle_shell_command(
             command
         ))
     }
+}
+
+/// Build the raw command line tail handed to `cmd.exe` for a Windows lifecycle
+/// command (the `<args>` in `cmd <args>`).
+///
+/// Lifecycle commands may carry their own double-quoted arguments — e.g. the
+/// Python provision command quotes its version constraint as `"setuptools<72"`
+/// so cmd does not parse the `<` as input redirection (issue #629). The whole
+/// payload is wrapped in one outer pair of quotes and run with `/S`, which makes
+/// cmd strip only that first/last quote and leave every inner quote untouched
+/// for its own tokeniser. This string is passed verbatim via
+/// `CommandExt::raw_arg`, bypassing Rust's argument quoter (which would escape
+/// the inner `"` as `\"` and corrupt cmd's parse).
+///
+/// Defined cross-platform (pure string formatting) so the quoting contract can
+/// be unit-tested on every CI host, not only Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_cmd_lifecycle_raw_args(command: &str) -> String {
+    format!("/D /S /C \"{command}\"")
 }
 
 fn preflight_macos_compat(plan: &capsule_core::router::ManifestData) -> Result<()> {
@@ -1410,7 +1453,7 @@ mod tests {
     use super::{
         build_lifecycle_targets, build_root_install_plan, detect_required_glibc_from_lock,
         install_command_from_scope, plan_v03_provision_command, preflight_glibc_compat,
-        preflight_single_script_effective_cwd_compat,
+        preflight_single_script_effective_cwd_compat, windows_cmd_lifecycle_raw_args,
     };
     use crate::application::pipeline::phases::run::DerivedBridgeManifest;
     use crate::application::pipeline::phases::run::PreparedRunContext;
@@ -1624,7 +1667,7 @@ run_command = "serve.py"
 
         assert_eq!(
             command,
-            "uv venv --python 3.11.10 --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
+            "uv venv --python 3.11.10 --seed --clear && uv pip install -r requirements.txt \"setuptools<72\""
         );
     }
 
@@ -1656,8 +1699,71 @@ run_command = "main.py"
 
         assert_eq!(
             command,
-            "uv venv --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
+            "uv venv --seed --clear && uv pip install -r requirements.txt \"setuptools<72\""
         );
+    }
+
+    #[test]
+    fn python_provision_command_uses_cmd_safe_quoting_for_setuptools_constraint() {
+        // Regression for issue #629: the setuptools upper-bound must be quoted
+        // with double quotes, never POSIX single quotes. cmd.exe does not treat
+        // `'` as a quote, so `'setuptools<72'` leaves the `<` exposed and cmd
+        // parses it as input redirection ("The system cannot find the file
+        // specified." / "Access is denied." on windows/x86_64). Double quotes are
+        // honoured by both POSIX `sh` and cmd.exe.
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+run_command = "main.py"
+"#,
+        );
+
+        let command = plan_v03_provision_command(&plan)
+            .expect("provision command")
+            .expect("python requirements should provision");
+
+        assert!(
+            command.contains("\"setuptools<72\""),
+            "constraint must be double-quoted for cmd.exe safety, got: {command}"
+        );
+        assert!(
+            !command.contains("'setuptools<72'"),
+            "POSIX single quotes are not cmd.exe-safe and must not be emitted, got: {command}"
+        );
+    }
+
+    #[test]
+    fn windows_cmd_lifecycle_raw_args_preserves_inner_quotes_with_single_outer_pair() {
+        // Regression for issue #629: the windows lifecycle runner must hand cmd a
+        // `/D /S /C "<command>"` payload via `raw_arg`. `/S` makes cmd strip only
+        // the first/last quote and keep every inner quote for its own tokeniser,
+        // so a command carrying `"setuptools<72"` reaches uv with the `<`
+        // protected. Building this string ourselves bypasses Rust's argument
+        // quoter, which would escape the inner `"` as `\"` and corrupt the parse.
+        let command =
+            "uv venv --seed --clear && uv pip install -r requirements.txt \"setuptools<72\"";
+        let raw = windows_cmd_lifecycle_raw_args(command);
+
+        assert_eq!(
+            raw,
+            "/D /S /C \"uv venv --seed --clear && uv pip install -r requirements.txt \"setuptools<72\"\""
+        );
+        // Exactly one outer quote opens the payload right after `/C `.
+        assert!(raw.starts_with("/D /S /C \""));
+        assert!(raw.ends_with('"'));
+        // The inner constraint quotes survive verbatim (not backslash-escaped).
+        assert!(raw.contains("\"setuptools<72\""));
+        assert!(!raw.contains("\\\""));
     }
 
     #[test]
