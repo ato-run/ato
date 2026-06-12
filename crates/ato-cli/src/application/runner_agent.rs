@@ -176,12 +176,22 @@ struct HeartbeatRunnerView {
     online: bool,
 }
 
+/// Server-pushed self-update directive (present while this runner is below the
+/// operator-configured minimum). `minimum_version` is the floor — the runner
+/// self-updates to the LATEST release, which must satisfy it.
+#[derive(Debug, Deserialize)]
+struct UpdateDirective {
+    minimum_version: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct HeartbeatResponse {
     #[serde(default)]
     next_heartbeat_seconds: Option<u64>,
     #[serde(default)]
     runner: Option<HeartbeatRunnerView>,
+    #[serde(default)]
+    update: Option<UpdateDirective>,
 }
 
 /// The slice of an API error body the agent acts on. Only the machine `error`
@@ -191,6 +201,12 @@ struct HeartbeatResponse {
 struct ApiErrorBody {
     #[serde(default)]
     error: Option<String>,
+}
+
+/// This runner's `ato` agent version, reported to the control plane so the
+/// operator can see who is behind and target a self-update.
+pub fn agent_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
 /// Heartbeat request body. `public_base_url` is serialized ONLY when
@@ -205,6 +221,7 @@ pub fn build_heartbeat_body(
         "capabilities": capabilities,
         "os": os,
         "arch": arch,
+        "agent_version": agent_version(),
     });
     if let Some(url) = public_base_url {
         body["public_base_url"] = serde_json::Value::String(url.to_string());
@@ -229,8 +246,13 @@ pub fn format_heartbeat_log(online: bool, next_seconds: u64) -> String {
 
 #[derive(Debug)]
 pub enum HeartbeatOutcome {
-    /// Accepted; carries the server-directed next interval (seconds).
-    Ok { online: bool, next_seconds: u64 },
+    /// Accepted; carries the server-directed next interval (seconds) and an
+    /// optional self-update minimum the operator requested for this runner.
+    Ok {
+        online: bool,
+        next_seconds: u64,
+        update_min: Option<String>,
+    },
     /// 401 runner_revoked — terminal, fail closed.
     Revoked,
     /// 401 with any other code — token unknown/invalid. Terminal.
@@ -285,6 +307,7 @@ async fn send_heartbeat_once(
                 .next_heartbeat_seconds
                 .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS),
         ),
+        update_min: parsed.update.map(|u| u.minimum_version),
     }
 }
 
@@ -348,6 +371,7 @@ pub async fn run_login(
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "capabilities": capabilities,
+        "agent_version": agent_version(),
     });
     if let Some(url) = public_base_url.as_deref() {
         register_body["public_base_url"] = serde_json::Value::String(url.to_string());
@@ -390,6 +414,100 @@ pub async fn run_login(
     println!("   The runner token was saved and will not be shown.");
     println!("   Start heartbeats with: ato runner serve");
     Ok(())
+}
+
+/// Cooldown before retrying a self-update that failed transiently (network /
+/// release fetch). A no-receipt failure is terminal and never retried; an
+/// already-latest-but-below-minimum case waits a long cooldown (the operator's
+/// minimum is likely newer than any release yet).
+const SELF_UPDATE_TRANSIENT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const SELF_UPDATE_UNSATISFIABLE_COOLDOWN: Duration = Duration::from_secs(60 * 60);
+
+/// What to do after an idle self-update attempt for the current minimum.
+enum SelfUpdateNext {
+    /// The binary was replaced — re-exec into it.
+    ReExec,
+    /// Stop trying this minimum (no install receipt — can't self-update here).
+    GiveUp,
+    /// Retry after this cooldown (transient failure, or latest still < minimum).
+    RetryAfter(Duration),
+}
+
+/// Per-minimum self-update bookkeeping so a directive that cannot be satisfied
+/// is not retried on every heartbeat, while a transient failure still retries.
+struct UpdateAttempt {
+    min: String,
+    terminal: bool,
+    retry_after: Option<std::time::Instant>,
+}
+
+/// Run a self-update for the requested minimum (updates to LATEST). Returns the
+/// caller's next action. Best-effort: never panics; failures keep the runner on
+/// its current version.
+async fn maybe_self_update(min: &str) -> SelfUpdateNext {
+    use crate::cli::commands::update::SelfUpdateOutcome;
+    println!(
+        "⬆️  update requested (minimum {min}); current {} → updating to latest…",
+        agent_version()
+    );
+    match crate::cli::commands::update::run_self_update_async().await {
+        Ok(SelfUpdateOutcome::Updated(new_version)) => {
+            println!("✅ updated to v{new_version}; restarting runner…");
+            SelfUpdateNext::ReExec
+        }
+        Ok(SelfUpdateOutcome::AlreadyLatest) => {
+            eprintln!(
+                "ℹ️  already on the latest release but below the requested minimum {min}; will recheck later"
+            );
+            SelfUpdateNext::RetryAfter(SELF_UPDATE_UNSATISFIABLE_COOLDOWN)
+        }
+        Ok(SelfUpdateOutcome::NoReceipt) => {
+            eprintln!(
+                "⚠️  no install receipt; this runner cannot self-update — update it manually"
+            );
+            SelfUpdateNext::GiveUp
+        }
+        Err(err) => {
+            eprintln!(
+                "⚠️  self-update failed (will retry): {}",
+                scrub_secrets(&format!("{err:#}"))
+            );
+            SelfUpdateNext::RetryAfter(SELF_UPDATE_TRANSIENT_COOLDOWN)
+        }
+    }
+}
+
+/// Replace this process with a fresh `ato runner serve` (the just-updated
+/// binary), preserving the exact original argv. The runner credentials persist
+/// on disk, so the new process re-authenticates and resumes; startup reconcile
+/// settles any leases orphaned by the swap. Never returns on success.
+fn reexec_serve() -> ! {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("⚠️  cannot resolve current exe for re-exec: {err}");
+            std::process::exit(1);
+        }
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&exe).args(&args).exec();
+        // exec() only returns on failure.
+        eprintln!("⚠️  re-exec after self-update failed: {err}");
+        std::process::exit(1);
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(&exe).args(&args).spawn() {
+            Ok(_) => std::process::exit(0),
+            Err(err) => {
+                eprintln!("⚠️  re-exec after self-update failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 }
 
 /// `ato runner serve`: heartbeat loop. Runner-token auth only; fails closed
@@ -435,6 +553,10 @@ pub async fn run_serve(
 
     let mut interval = clamp_heartbeat_interval(creds.heartbeat_interval_seconds);
     let mut consecutive_failures: u32 = 0;
+    // Self-update bookkeeping for the current requested minimum: terminal (no
+    // receipt) is never retried; a transient failure or unsatisfiable minimum
+    // retries only after a cooldown. Reset when the requested minimum changes.
+    let mut update_attempt: Option<UpdateAttempt> = None;
     // One active run at a time (v0): while a dispatched child is alive the
     // runner does not claim further leases — GET leases/next CLAIMS, so a
     // busy runner must not even poll.
@@ -455,10 +577,41 @@ pub async fn run_serve(
             HeartbeatOutcome::Ok {
                 online,
                 next_seconds,
+                update_min,
             } => {
                 consecutive_failures = 0;
                 interval = next_seconds;
                 println!("{}", format_heartbeat_log(online, next_seconds));
+                // The operator requested a self-update. Act only while idle (no
+                // workload). A given minimum is retried only after a cooldown
+                // (transient failure / unsatisfiable) and never once terminal
+                // (no install receipt). On a successful update we re-exec into
+                // the new binary; startup reconcile settles orphaned leases.
+                if let Some(min) = update_min
+                    && !busy.load(Ordering::SeqCst)
+                {
+                    if update_attempt.as_ref().map(|a| a.min.as_str()) != Some(min.as_str()) {
+                        update_attempt = Some(UpdateAttempt {
+                            min: min.clone(),
+                            terminal: false,
+                            retry_after: None,
+                        });
+                    }
+                    let attempt = update_attempt.as_mut().expect("just set");
+                    let gated = attempt.terminal
+                        || attempt
+                            .retry_after
+                            .is_some_and(|t| std::time::Instant::now() < t);
+                    if !gated {
+                        match maybe_self_update(&min).await {
+                            SelfUpdateNext::ReExec => reexec_serve(),
+                            SelfUpdateNext::GiveUp => attempt.terminal = true,
+                            SelfUpdateNext::RetryAfter(cooldown) => {
+                                attempt.retry_after = Some(std::time::Instant::now() + cooldown);
+                            }
+                        }
+                    }
+                }
             }
             HeartbeatOutcome::Revoked => {
                 bail!(
@@ -2635,6 +2788,35 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_body_reports_agent_version() {
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64");
+        assert_eq!(body["agent_version"].as_str(), Some(agent_version()));
+        assert_eq!(agent_version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn heartbeat_response_parses_update_directive() {
+        let with: HeartbeatResponse = serde_json::from_value(serde_json::json!({
+            "next_heartbeat_seconds": 30,
+            "runner": { "online": true },
+            "update": { "minimum_version": "0.7.0" },
+        }))
+        .expect("parse update directive");
+        assert_eq!(
+            with.update.map(|u| u.minimum_version).as_deref(),
+            Some("0.7.0")
+        );
+
+        // Absent directive is the common case and must parse to None.
+        let without: HeartbeatResponse = serde_json::from_value(serde_json::json!({
+            "next_heartbeat_seconds": 30,
+            "runner": { "online": true },
+        }))
+        .expect("parse without directive");
+        assert!(without.update.is_none());
+    }
+
+    #[test]
     fn heartbeat_interval_is_clamped_on_ingest() {
         // Below the floor → busy-spin protection.
         assert_eq!(clamp_heartbeat_interval(0), MIN_HEARTBEAT_INTERVAL_SECS);
@@ -3323,6 +3505,7 @@ mod tests {
             HeartbeatOutcome::Ok {
                 online,
                 next_seconds,
+                ..
             } => {
                 assert!(online);
                 assert_eq!(next_seconds, 30);
