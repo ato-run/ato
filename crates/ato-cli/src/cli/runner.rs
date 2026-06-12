@@ -34,6 +34,16 @@ pub(crate) enum RunnerCommands {
         /// Print the sign-in URL instead of opening a browser
         #[arg(long, default_value_t = false)]
         headless: bool,
+
+        /// Headless hosted-runner enrollment: exchange this single-use
+        /// enrollment token (`ato_enr_…`, minted by the control plane and
+        /// injected via cloud-init) for a runner token, skipping the operator
+        /// device-flow sign-in. Used by Managed Cloud VMs. The token is never
+        /// printed or persisted — only the returned runner token is saved.
+        /// Falls back to the `ATO_RUNNER_ENROLLMENT_TOKEN` env var when this
+        /// flag is absent (explicit flag wins); see run_login.
+        #[arg(long, value_name = "TOKEN")]
+        enrollment_token: Option<String>,
     },
 
     /// Serve as a Connected Runner: send liveness heartbeats and poll for
