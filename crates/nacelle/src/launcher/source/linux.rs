@@ -360,11 +360,15 @@ fn add_sensitive_path_hiding(cmd: &mut Command, bind_mounted_parents: &[&str]) {
     let sensitive = sensitive_paths();
 
     for sp in &sensitive {
-        // Only hide if a parent of this sensitive path is actually bound
-        let dominated = bind_mounted_parents
+        // Hide if a parent of this sensitive path is bound (the sensitive
+        // dir is reachable through it), or if a bound path is the sensitive
+        // dir itself or sits inside it (e.g. an individually-bound
+        // ~/.aws/credentials) – the tmpfs is emitted after the binds, so it
+        // over-mounts and shadows them.
+        let exposed = bind_mounted_parents
             .iter()
-            .any(|parent| sp.starts_with(parent));
-        if dominated && sp.exists() {
+            .any(|parent| sp.starts_with(parent) || std::path::Path::new(parent).starts_with(sp));
+        if exposed && sp.exists() {
             let sp_str = sp.to_string_lossy();
             debug!("Hiding sensitive path in sandbox: {}", sp_str);
             cmd.args(["--tmpfs", &sp_str]);
@@ -1032,6 +1036,30 @@ mod tests {
         // No bound parents → nothing to hide
         add_sensitive_path_hiding(&mut cmd, &[]);
         // Just ensure it doesn't panic
+    }
+
+    #[test]
+    fn test_add_sensitive_path_hiding_bound_inside_sensitive_dir() {
+        // A bound path that sits inside a sensitive dir must be shadowed by
+        // a --tmpfs over the sensitive dir itself (issue #642).
+        let Some(sp) = sensitive_paths().into_iter().find(|p| p.is_dir()) else {
+            return; // no sensitive dirs on this machine — nothing to verify
+        };
+        let bound = sp.join("credentials");
+        let bound_str = bound.to_string_lossy().to_string();
+
+        let mut cmd = Command::new("echo");
+        add_sensitive_path_hiding(&mut cmd, &[&bound_str]);
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let sp_str = sp.to_string_lossy().to_string();
+        assert!(
+            args.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == sp_str),
+            "expected --tmpfs {sp_str} to shadow the bound path {bound_str}"
+        );
     }
 
     #[test]
