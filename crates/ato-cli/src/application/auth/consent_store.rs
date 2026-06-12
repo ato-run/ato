@@ -391,9 +391,23 @@ impl ConsentStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let record: ConsentRecord = serde_json::from_str(&line).map_err(|err| {
-                AtoExecutionError::internal(format!("failed to parse consent line: {err}"))
-            })?;
+            // #646: a torn/corrupt line (crash mid-write, unlocked
+            // concurrent append) must not brick every consent decision
+            // host-wide — it would also brick the recovery command,
+            // which calls is_consented before appending. Skip the bad
+            // line (with a warning) and keep scanning so the remaining
+            // records stay usable; re-approval appends a fresh record.
+            let record: ConsentRecord = match serde_json::from_str(&line) {
+                Ok(record) => record,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        error = %err,
+                        "skipping malformed consent ledger line"
+                    );
+                    continue;
+                }
+            };
             if record.scoped_id == key.scoped_id
                 && record.version == key.version
                 && record.target_label == key.target_label
@@ -990,6 +1004,76 @@ mod tests {
             parsed,
             WRITERS * APPENDS_PER_WRITER,
             "every append must land as exactly one parseable line"
+        );
+    }
+
+    /// #646 — a single malformed ledger line (crash mid-write,
+    /// unlocked concurrent append) must not brick all consent
+    /// decisions host-wide. `is_consented` skips the bad line and
+    /// keeps scanning: records before AND after it stay readable, and
+    /// the recovery command (`approve_execution_plan_consent`, which
+    /// calls `is_consented` before appending) keeps working over the
+    /// same file instead of failing with a parse error.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn malformed_consent_line_is_skipped_not_fatal() {
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        // Record A lands BEFORE the corruption.
+        let plan = non_trivial_plan();
+        approve_execution_plan_consent(
+            &plan.consent.key.scoped_id,
+            &plan.consent.key.version,
+            &plan.consent.key.target_label,
+            &plan.consent.policy_segment_hash,
+            &plan.consent.provisioning_policy_hash,
+        )
+        .expect("approve record A");
+
+        // Corrupt the ledger with a torn line (the shape a crash
+        // mid-write leaves behind).
+        let consent_file = home
+            .path()
+            .join(".ato")
+            .join("consent")
+            .join(CONSENT_FILE_NAME);
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&consent_file)
+                .expect("open consent file for corruption");
+            writeln!(file, "{{\"scoped_id\":\"torn").expect("append malformed line");
+        }
+
+        // Record A (before the bad line) must still be consented.
+        assert!(
+            has_consent(&plan).expect("has_consent must not fail on a malformed line"),
+            "record before the malformed line must stay consented"
+        );
+
+        // The recovery command must still work — before the fix it
+        // failed on the same parse error. Record B lands AFTER the
+        // corruption.
+        let mut plan_b = non_trivial_plan();
+        plan_b.consent.key.version = "2.0.0".to_string();
+        approve_execution_plan_consent(
+            &plan_b.consent.key.scoped_id,
+            &plan_b.consent.key.version,
+            &plan_b.consent.key.target_label,
+            &plan_b.consent.policy_segment_hash,
+            &plan_b.consent.provisioning_policy_hash,
+        )
+        .expect("approve must keep working with a malformed line present");
+
+        // Record B (after the bad line) must be found — the scan
+        // continues past the corruption instead of aborting.
+        assert!(
+            has_consent(&plan_b).expect("has_consent for record after the malformed line"),
+            "record after the malformed line must be readable"
         );
     }
 }

@@ -30,6 +30,26 @@ const RUNNER_CREDENTIALS_RELATIVE: &str = "runner/credentials.json";
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 /// Floor so a misbehaving server value cannot turn the loop into a busy-spin.
 const MIN_HEARTBEAT_INTERVAL_SECS: u64 = 5;
+/// Ceiling so a pathological server value cannot park the runner for hours or
+/// overflow the failure-backoff multiplication.
+const MAX_HEARTBEAT_INTERVAL_SECS: u64 = 3600;
+/// Cap on the failure backoff regardless of the negotiated interval.
+const MAX_HEARTBEAT_BACKOFF_SECS: u64 = 300;
+
+/// Clamp a server-controlled heartbeat interval to a sane range. Every ingest
+/// of an interval (registration, persisted credentials, heartbeat response)
+/// must pass through here.
+fn clamp_heartbeat_interval(seconds: u64) -> u64 {
+    seconds.clamp(MIN_HEARTBEAT_INTERVAL_SECS, MAX_HEARTBEAT_INTERVAL_SECS)
+}
+
+/// Backoff after `consecutive_failures` failed heartbeats. Saturating so an
+/// out-of-range interval can never overflow (wrap would defeat the backoff).
+fn heartbeat_backoff_secs(interval: u64, consecutive_failures: u32) -> u64 {
+    interval
+        .saturating_mul(u64::from(consecutive_failures.min(4)))
+        .min(MAX_HEARTBEAT_BACKOFF_SECS)
+}
 
 // ─────────────────────────────────────────────
 // Credentials
@@ -260,10 +280,11 @@ async fn send_heartbeat_once(
     };
     HeartbeatOutcome::Ok {
         online: parsed.runner.map(|r| r.online).unwrap_or(false),
-        next_seconds: parsed
-            .next_heartbeat_seconds
-            .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS)
-            .max(MIN_HEARTBEAT_INTERVAL_SECS),
+        next_seconds: clamp_heartbeat_interval(
+            parsed
+                .next_heartbeat_seconds
+                .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS),
+        ),
     }
 }
 
@@ -358,10 +379,7 @@ pub async fn run_login(
         runner_id: registered.runner.id.clone(),
         runner_token: registered.runner_token,
         display_name: registered.runner.display_name.clone(),
-        heartbeat_interval_seconds: registered
-            .heartbeat
-            .interval_seconds
-            .max(MIN_HEARTBEAT_INTERVAL_SECS),
+        heartbeat_interval_seconds: clamp_heartbeat_interval(registered.heartbeat.interval_seconds),
     };
     let path = credentials_path();
     save_credentials(&path, &creds)?;
@@ -415,9 +433,7 @@ pub async fn run_serve(
     // heartbeat/claim, so stop-requested zombies clear immediately on boot.
     reconcile_open_leases(&client, &api_base, &creds.runner_id, &creds.runner_token).await;
 
-    let mut interval = creds
-        .heartbeat_interval_seconds
-        .max(MIN_HEARTBEAT_INTERVAL_SECS);
+    let mut interval = clamp_heartbeat_interval(creds.heartbeat_interval_seconds);
     let mut consecutive_failures: u32 = 0;
     // One active run at a time (v0): while a dispatched child is alive the
     // runner does not claim further leases — GET leases/next CLAIMS, so a
@@ -456,7 +472,7 @@ pub async fn run_serve(
             }
             HeartbeatOutcome::Transient(reason) => {
                 consecutive_failures += 1;
-                let backoff = (interval * u64::from(consecutive_failures.min(4))).min(300);
+                let backoff = heartbeat_backoff_secs(interval, consecutive_failures);
                 eprintln!(
                     "⚠️  heartbeat failed ({reason}); retrying in {backoff}s (attempt {consecutive_failures})"
                 );
@@ -536,6 +552,12 @@ const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
 /// streams and the port line usually lands within a line or two. Without this,
 /// whichever wins decides whether the proxy + ready_url come up.
 const READY_PORT_GRACE: Duration = Duration::from_millis(2500);
+/// After a ready signal with NO receipt observed yet, hold this long for the
+/// `RECEIPT:` line — receipts go to stderr while lifecycle lines go to stdout,
+/// and the two independent stream readers merge in arrival order, so a ready
+/// can outrun its receipt. Only after this grace is the ready treated as
+/// unverifiable (fail closed).
+const READY_RECEIPT_GRACE: Duration = Duration::from_millis(2500);
 /** Cap per-run log files so a chatty child cannot fill the disk. */
 const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
 
@@ -1319,16 +1341,20 @@ fn parse_open_lease_ids(body: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Startup reconciliation: a freshly started serve process runs ZERO
-/// workloads. Dispatched children live in this process's process group
-/// (and under systemd, its cgroup), so they did not survive the previous
-/// process's exit — "nothing is running here" is honest runner evidence,
-/// not an API fabrication. For every lease the API still considers open on
-/// this runner, ack /stopped with reason `runner_restarted` so zombie
-/// stop-requested runs settle and the control plane matches reality.
-/// INVARIANT this leans on: spawn_run_child keeps workloads in our process
-/// group / unit cgroup. If a future runner detaches workloads, this ack is
-/// no longer honest and must be gated on actual process evidence.
+/// Startup reconciliation: settle leases the API still considers open on
+/// this runner with HONEST per-lease evidence. Dispatched children lead
+/// their OWN process group (see spawn_run_child), so a hard-killed runner
+/// (SIGKILL / OOM) can orphan a live workload subtree — "this is a fresh
+/// process" proves nothing about survivors. Every dispatch records its
+/// group id next to the run log; reconcile probes that record instead of
+/// assuming:
+/// - no record, or the group confirmed gone → full-cleanup ack (reason
+///   `runner_restarted`) so zombie stop-requested runs settle;
+/// - the group may still be alive → ack with NOTHING confirmed so the
+///   control plane records a failed stop and HOLDS the slot — never free a
+///   slot a surviving workload may still occupy (fail closed, matching
+///   perform_stop_cleanup).
+///
 /// Best-effort: a missing endpoint (older API) or a per-lease failure is
 /// logged and never blocks serving.
 async fn reconcile_open_leases(
@@ -1375,10 +1401,22 @@ async fn reconcile_open_leases(
         "🧹 reconciling {} stale lease(s) left from a previous runner process",
         lease_ids.len()
     );
-    // This process owns no workloads, so the slot is free and the previous
-    // children are gone: full-cleanup evidence.
-    let cleanup = StopCleanup::from_teardown(true, true);
     for lease_id in lease_ids {
+        let evidence = probe_workload_evidence(&run_pid_path(&lease_id));
+        match evidence {
+            WorkloadEvidence::ConfirmedGone => {
+                // The record (if any) is settled; drop it so a later restart
+                // can never probe a recycled pid.
+                clear_workload_group(&lease_id);
+            }
+            WorkloadEvidence::PossiblyAlive(pid) => {
+                let hint = pid.map_or("unknown pid".to_string(), |p| format!("pgid {p}"));
+                eprintln!(
+                    "   ⚠️ lease {lease_id}: a workload ({hint}) may have survived the previous runner; reporting unconfirmed cleanup so the slot stays held. Stop the survivor and restart the runner to settle."
+                );
+            }
+        }
+        let cleanup = reconcile_cleanup_for(evidence);
         match report_lease_stopped_with_reason(
             client,
             api_base,
@@ -1389,9 +1427,61 @@ async fn reconcile_open_leases(
         )
         .await
         {
-            Ok(()) => println!("   ✓ lease {lease_id}: acked stopped (runner_restarted)"),
+            Ok(()) => println!(
+                "   ✓ lease {lease_id}: acked stopped (runner_restarted, slot_released={})",
+                cleanup.slot_released
+            ),
             Err(err) => eprintln!("   ⚠️ lease {lease_id}: reconcile ack failed: {err}"),
         }
+    }
+}
+
+/// Liveness evidence for a previously dispatched workload group, derived
+/// from the record `record_workload_group` persisted next to the run log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkloadEvidence {
+    /// No group was ever recorded for the lease on this host, or the
+    /// recorded group is confirmed gone: "nothing survives here" is real
+    /// evidence, not an assumption.
+    ConfirmedGone,
+    /// The recorded group may still have a live process (or liveness cannot
+    /// be probed on this platform / the record is unreadable). The pid is a
+    /// hint for the operator when known.
+    PossiblyAlive(Option<u32>),
+}
+
+/// Probe whether the workload group recorded at `pid_path` survived the
+/// previous runner process. Anything short of confirmed absence maps to
+/// `PossiblyAlive` — the caller fails closed on it.
+fn probe_workload_evidence(pid_path: &Path) -> WorkloadEvidence {
+    let Ok(raw) = std::fs::read_to_string(pid_path) else {
+        // No record: this host never dispatched (or already confirmed the
+        // teardown of) a workload for the lease.
+        return WorkloadEvidence::ConfirmedGone;
+    };
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        // A record exists, so a dispatch happened and its teardown was never
+        // confirmed — an unreadable pid is not evidence of absence.
+        return WorkloadEvidence::PossiblyAlive(None);
+    };
+    #[cfg(unix)]
+    if process_group_confirmed_gone(pid) {
+        return WorkloadEvidence::ConfirmedGone;
+    }
+    // Unix: the group still has a member (or one we may not signal).
+    // Non-Unix: there is no group probe; a recorded dispatch without a
+    // confirmed teardown stays possibly-alive.
+    WorkloadEvidence::PossiblyAlive(Some(pid))
+}
+
+/// The honest /stopped cleanup record for one reconciled lease. Confirmed
+/// absence is the ONLY thing that frees the slot; a possible survivor claims
+/// nothing — not even `proxy_stopped`, since "a survivor exists" cannot rule
+/// out another live serve process still owning both workload and proxy.
+fn reconcile_cleanup_for(evidence: WorkloadEvidence) -> StopCleanup {
+    match evidence {
+        WorkloadEvidence::ConfirmedGone => StopCleanup::from_teardown(true, true),
+        WorkloadEvidence::PossiblyAlive(_) => StopCleanup::from_teardown(false, false),
     }
 }
 
@@ -1410,6 +1500,16 @@ fn kill_group(pid: u32, signal: libc::c_int) -> std::io::Result<()> {
     } else {
         Err(err)
     }
+}
+
+/// True only when signal-0 to `pid`'s process group fails with ESRCH: every
+/// member is confirmed gone. A delivered probe (rc == 0) is liveness, and so
+/// is EPERM — SOME process in the group exists, we just may not signal it —
+/// so both map to false (fail closed).
+#[cfg(unix)]
+fn process_group_confirmed_gone(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 /// True while any process in `pid`'s group still exists (signal 0 probes
@@ -1500,6 +1600,11 @@ async fn perform_stop_cleanup(
     println!("🛑 lease {lease_id}: owner requested stop; tearing down workload");
 
     let process_terminated = terminate_child_group(child_pid, monitor).await;
+    if process_terminated {
+        // Confirmed reap: the survivor record is settled. Drop it so a later
+        // restart can never probe a recycled pid.
+        clear_workload_group(lease_id);
+    }
 
     // Abort the proxy AND wait for the listener task to actually end before
     // claiming it stopped — the upstream is already dead, so in-flight
@@ -1541,6 +1646,35 @@ fn run_log_path(lease_id: &str) -> PathBuf {
         .map(|parent| parent.join("runs"))
         .unwrap_or_else(|| PathBuf::from("runs"));
     dir.join(format!("{lease_id}.log"))
+}
+
+/// Where the workload's process-group id for `lease_id` is recorded (next to
+/// its run log).
+fn run_pid_path(lease_id: &str) -> PathBuf {
+    run_log_path(lease_id).with_extension("pid")
+}
+
+/// Record the dispatched workload's process-group id (== child pid, see
+/// spawn_run_child) so a FUTURE serve process can probe — not assume —
+/// whether the subtree survived a hard-killed runner. The children lead
+/// their own group precisely so a stop can signal the whole subtree; the
+/// flip side is that they outlive a SIGKILLed/OOMed runner, and this record
+/// is the only evidence bridge across that restart. Best-effort: a failed
+/// write only costs the record, never the dispatch.
+fn record_workload_group(lease_id: &str, pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    let path = run_pid_path(lease_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, pid.to_string());
+}
+
+/// Drop the recorded group once its teardown is CONFIRMED (child reaped, or
+/// the group kill verified). Never call this on an unconfirmed teardown: the
+/// record is exactly what lets the next serve process detect a survivor.
+fn clear_workload_group(lease_id: &str) {
+    let _ = std::fs::remove_file(run_pid_path(lease_id));
 }
 
 fn ready_timeout() -> Duration {
@@ -1675,6 +1809,14 @@ async fn run_lease_child(
     let mut execution_id: Option<String> = None;
     let mut settled = false;
     let mut saw_exited_before = false;
+    // Set when a ready arrives before any receipt: receipts (stderr) and
+    // lifecycle lines (stdout) race across the two stream readers, so the
+    // ready is buffered (carrying its observed port) until the receipt lands
+    // or the grace below elapses.
+    let mut ready_awaiting_receipt: Option<Option<u16>> = None;
+    // If the receipt does not follow the buffered ready before this instant,
+    // the ready is unverifiable — fail closed.
+    let mut receipt_wait_deadline: Option<tokio::time::Instant> = None;
     // Set when a port-LESS ready arrives; if the canonical port-bearing line
     // does not follow before this instant, settle without a port.
     let mut portless_ready_deadline: Option<tokio::time::Instant> = None;
@@ -1700,6 +1842,16 @@ async fn run_lease_child(
                             });
                             return;
                         }
+                        // A ready was still buffered awaiting its receipt when
+                        // the streams closed — the receipt can no longer
+                        // arrive, so the ready is unverifiable; fail closed.
+                        if ready_awaiting_receipt.is_some() {
+                            let _ = reports.send(LeaseReport::Failed {
+                                code: "execution_id_unavailable".to_string(),
+                                message: "child reported ready but no execution receipt was observed".to_string(),
+                            });
+                            return;
+                        }
                         let code = status.and_then(|s| s.code());
                         let message = match (code, saw_exited_before) {
                             (Some(code), true) => format!(
@@ -1721,6 +1873,23 @@ async fn run_lease_child(
                         if execution_id.is_none() {
                             execution_id = execution_id_from_receipt(&path);
                         }
+                        // A ready that outran this receipt across the
+                        // stdout/stderr split was buffered — resolve it now
+                        // exactly as if it had arrived after the receipt.
+                        if !settled
+                            && let (Some(execution_id), Some(port)) =
+                                (execution_id.clone(), ready_awaiting_receipt)
+                        {
+                            ready_awaiting_receipt = None;
+                            receipt_wait_deadline = None;
+                            if port.is_some() {
+                                settled = true;
+                                let _ = reports.send(LeaseReport::Ready { execution_id, port });
+                            } else if portless_ready_deadline.is_none() {
+                                portless_ready_deadline =
+                                    Some(tokio::time::Instant::now() + READY_PORT_GRACE);
+                            }
+                        }
                     }
                     Some(ChildSignal::Ready { port }) if !settled => {
                         match (execution_id.clone(), port) {
@@ -1741,14 +1910,19 @@ async fn run_lease_child(
                                 }
                             }
                             (None, _) => {
-                                // A ready we cannot tie to an execution receipt is
-                                // unverifiable — fail closed rather than report it.
-                                settled = true;
-                                let _ = reports.send(LeaseReport::Failed {
-                                    code: "execution_id_unavailable".to_string(),
-                                    message: "child reported ready but no execution receipt was observed".to_string(),
-                                });
-                                let _ = child.start_kill();
+                                // No receipt observed YET — but the receipt
+                                // (stderr) and this line (stdout) ride separate
+                                // streams merged in arrival order, so this ready
+                                // may simply have outrun its receipt. Buffer it
+                                // for a bounded window instead of killing a
+                                // healthy workload; fail closed only if no
+                                // receipt follows (grace arm below).
+                                ready_awaiting_receipt =
+                                    Some(port.or(ready_awaiting_receipt.flatten()));
+                                if receipt_wait_deadline.is_none() {
+                                    receipt_wait_deadline =
+                                        Some(tokio::time::Instant::now() + READY_RECEIPT_GRACE);
+                                }
                             }
                         }
                     }
@@ -1770,6 +1944,22 @@ async fn run_lease_child(
                     }
                     _ => {}
                 }
+            }
+            // Receipt grace elapsed with a ready still buffered — a ready we
+            // cannot tie to an execution receipt is unverifiable; fail closed
+            // rather than report it. Pending forever when unset.
+            _ = async {
+                match receipt_wait_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if !settled => {
+                settled = true;
+                let _ = reports.send(LeaseReport::Failed {
+                    code: "execution_id_unavailable".to_string(),
+                    message: "child reported ready but no execution receipt was observed".to_string(),
+                });
+                let _ = child.start_kill();
             }
             // Port-less ready grace elapsed without a port line — settle without a
             // port (honest ready, no ready_url). Pending forever when unset.
@@ -1902,6 +2092,11 @@ async fn handle_claimed_lease(
             // PID == process-group id (see spawn_run_child); a stop signals the
             // whole workload group.
             let child_pid = child.id();
+            // Persist the group id BEFORE driving the child: if this process
+            // is hard-killed from here on, the next serve's reconcile must
+            // probe the possible survivor instead of fabricating teardown
+            // evidence (#645).
+            record_workload_group(&lease_id, child_pid);
             println!(
                 "🚀 lease {lease_id}: ato run {source_url} --sandbox (round {round}, log: {})",
                 log_path.display()
@@ -1933,6 +2128,7 @@ async fn handle_claimed_lease(
                 // Monitor closed without a decisive report (run_lease_child always
                 // reports before returning, so this is defensive). Idle out.
                 let _ = monitor.await;
+                clear_workload_group(&lease_id);
                 control.abort();
                 busy.store(false, Ordering::SeqCst);
                 return;
@@ -1946,6 +2142,7 @@ async fn handle_claimed_lease(
 
             // The child exited at the gate; reap its monitor before waiting.
             let _ = monitor.await;
+            clear_workload_group(&lease_id);
             if round > MAX_CONSENT_ROUNDS {
                 // Bounded: the gate kept re-emitting (a persistent recompute
                 // mismatch, or a local approval that never clears it). Fail
@@ -2205,6 +2402,7 @@ async fn handle_claimed_lease(
         } else {
             // Natural settle/exit: the child ran to completion on its own.
             let _ = monitor.await;
+            clear_workload_group(&lease_id);
             if let Some(handle) = proxy_handle {
                 handle.abort();
             }
@@ -2294,6 +2492,36 @@ mod tests {
         assert_eq!(
             with["public_base_url"].as_str(),
             Some("https://oci-a1.example.com")
+        );
+    }
+
+    #[test]
+    fn heartbeat_interval_is_clamped_on_ingest() {
+        // Below the floor → busy-spin protection.
+        assert_eq!(clamp_heartbeat_interval(0), MIN_HEARTBEAT_INTERVAL_SECS);
+        // In range → passes through.
+        assert_eq!(clamp_heartbeat_interval(30), 30);
+        // A pathological server value is ceiled, not trusted.
+        assert_eq!(
+            clamp_heartbeat_interval(u64::MAX),
+            MAX_HEARTBEAT_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn heartbeat_backoff_never_overflows_and_is_capped() {
+        // Normal growth: interval × failures, capped at 300s.
+        assert_eq!(heartbeat_backoff_secs(30, 1), 30);
+        assert_eq!(heartbeat_backoff_secs(30, 2), 60);
+        assert_eq!(heartbeat_backoff_secs(30, 4), 120);
+        // The multiplier stops growing after 4 failures.
+        assert_eq!(heartbeat_backoff_secs(30, 100), 120);
+        assert_eq!(heartbeat_backoff_secs(90, 4), MAX_HEARTBEAT_BACKOFF_SECS);
+        // Regression (#653): an out-of-range interval must saturate, not
+        // overflow — wrap in release builds defeated the backoff entirely.
+        assert_eq!(
+            heartbeat_backoff_secs(u64::MAX, 4),
+            MAX_HEARTBEAT_BACKOFF_SECS
         );
     }
 
@@ -2547,6 +2775,42 @@ mod tests {
             }
             other => panic!("unverifiable ready must fail closed, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ready_outrunning_receipt_across_streams_still_reports_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let receipt = dir.path().join("receipt.json");
+        std::fs::write(&receipt, r#"{"execution_id":"blake3:race-e2e"}"#).unwrap();
+        // ready (stdout) lands first; RECEIPT (stderr) follows later — the
+        // arrival order the two independent stream readers can always
+        // produce. The ready must be held for the receipt, not killed.
+        let script = format!(
+            "echo 'LIFECYCLE: ready port=8000'; sleep 1; echo 'RECEIPT: {}' >&2; exec sleep 30",
+            receipt.display()
+        );
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        let log_path = dir2.path().join("run.log");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let monitor = tokio::spawn(run_lease_child(
+            fake_child(&script),
+            log_path,
+            Duration::from_secs(20),
+            tx,
+        ));
+        let report = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("a report before the child exits");
+        assert_eq!(
+            report,
+            Some(LeaseReport::Ready {
+                execution_id: "blake3:race-e2e".to_string(),
+                port: Some(8000),
+            }),
+            "a ready that outruns its receipt across the stdout/stderr split must not kill a healthy workload"
+        );
+        monitor.abort();
     }
 
     #[cfg(unix)]
@@ -3089,6 +3353,132 @@ mod tests {
         assert!(
             request.contains("authorization: Bearer ato_rnr_t")
                 || request.contains("Authorization: Bearer ato_rnr_t")
+        );
+    }
+
+    // ── Startup reconcile: probe survivors, never fabricate teardown (#645) ──
+
+    #[test]
+    fn reconcile_cleanup_claims_full_teardown_only_on_confirmed_gone_evidence() {
+        let clean = reconcile_cleanup_for(WorkloadEvidence::ConfirmedGone);
+        assert!(clean.process_terminated && clean.proxy_stopped && clean.slot_released);
+        // A possibly-surviving workload confirms NOTHING, so nothing may be
+        // claimed — the slot must stay held (fail closed, matching
+        // perform_stop_cleanup).
+        for evidence in [
+            WorkloadEvidence::PossiblyAlive(Some(4242)),
+            WorkloadEvidence::PossiblyAlive(None),
+        ] {
+            let held = reconcile_cleanup_for(evidence);
+            assert!(!held.process_terminated);
+            assert!(!held.proxy_stopped);
+            assert!(
+                !held.slot_released,
+                "a possible survivor must never free the slot: {evidence:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_workload_evidence_without_a_record_confirms_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No record: this host never dispatched (or already confirmed the
+        // teardown of) a workload for the lease.
+        assert_eq!(
+            probe_workload_evidence(&dir.path().join("01LEASE.pid")),
+            WorkloadEvidence::ConfirmedGone
+        );
+    }
+
+    #[test]
+    fn probe_workload_evidence_fails_closed_on_an_unreadable_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("01LEASE.pid");
+        std::fs::write(&path, "not-a-pid").expect("write");
+        // A record exists, so a dispatch happened and its teardown was never
+        // confirmed — an unreadable pid is not evidence of absence.
+        assert_eq!(
+            probe_workload_evidence(&path),
+            WorkloadEvidence::PossiblyAlive(None)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_workload_evidence_tracks_a_real_group_lifecycle() {
+        // A live recorded group must read possibly-alive (the orphan of
+        // #645: children lead their OWN group, so they survive a hard-killed
+        // runner); once the group is gone it must read confirmed-gone so the
+        // slot can be freed honestly.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 300")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn group");
+        let pid = child.id().expect("child pid");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("01LEASE.pid");
+        std::fs::write(&path, pid.to_string()).expect("write record");
+
+        assert_eq!(
+            probe_workload_evidence(&path),
+            WorkloadEvidence::PossiblyAlive(Some(pid)),
+            "a live workload group must never be reconciled as torn down"
+        );
+
+        kill_group(pid, libc::SIGKILL).expect("kill group");
+        let _ = child.wait().await; // reap: a zombie still occupies the group
+        let mut gone = false;
+        for _ in 0..100 {
+            if probe_workload_evidence(&path) == WorkloadEvidence::ConfirmedGone {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "a reaped group is honest full-teardown evidence");
+    }
+
+    #[tokio::test]
+    async fn reconcile_acks_full_teardown_for_leases_with_no_recorded_workload() {
+        // Two-shot server: GET /leases/open lists one lease, then the
+        // /stopped ack is captured. No workload group was ever recorded for
+        // the lease on this host, so the full-cleanup claim is honest.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            for body in [
+                "{\"leases\":[{\"id\":\"01RECONCILE645NORECORD\"}]}",
+                "{\"ok\":true}",
+            ] {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                captured.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).expect("write");
+            }
+            captured
+        });
+        let client = reqwest::Client::new();
+        reconcile_open_leases(&client, &format!("http://{addr}"), "01RUNNER", "ato_rnr_t").await;
+        let captured = server.join().expect("server");
+        assert!(captured[0].contains("GET /v1/runners/01RUNNER/leases/open"));
+        assert!(captured[1].contains("POST /v1/runner-leases/01RECONCILE645NORECORD/stopped"));
+        assert!(captured[1].contains("\"reason\":\"runner_restarted\""));
+        assert!(
+            captured[1].contains("\"slot_released\":true"),
+            "no recorded workload → full teardown is honest evidence: {}",
+            captured[1]
         );
     }
 

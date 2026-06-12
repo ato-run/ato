@@ -561,10 +561,7 @@ impl SourceRuntime {
             builder.arg("-i");
             builder
         };
-        for (k, v) in filtered_env {
-            cmd.env(k, v);
-        }
-        cmd.env("TERM", "xterm-256color");
+        apply_terminal_env(&mut cmd, filtered_env);
 
         // Spawn shell on PTY slave, then drop slave handle
         let child = pair
@@ -712,6 +709,21 @@ fn canonical_supported_languages() -> Vec<String> {
         "node".to_string(),
         "python".to_string(),
     ]
+}
+
+/// Apply the filtered terminal environment to a PTY command builder.
+///
+/// `portable_pty::CommandBuilder` pre-seeds its env table with the full
+/// parent environment, and `.env()` only inserts/overrides — it never
+/// removes. Without `env_clear()` first, re-setting the filtered subset
+/// would be a no-op for removal and secrets/injection vectors stripped by
+/// `filter_terminal_env` would still reach the child shell.
+fn apply_terminal_env(cmd: &mut portable_pty::CommandBuilder, filtered_env: Vec<(String, String)>) {
+    cmd.env_clear();
+    for (k, v) in filtered_env {
+        cmd.env(k, v);
+    }
+    cmd.env("TERM", "xterm-256color");
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -941,6 +953,55 @@ mod tests {
                 ipc_sandbox: true,
             }
         );
+    }
+
+    // ── PTY terminal env application tests ──────────────────────────────────
+
+    #[test]
+    fn apply_terminal_env_starts_from_empty_env() {
+        use portable_pty::CommandBuilder;
+
+        // CommandBuilder pre-seeds the full parent environment; PATH is
+        // present in any realistic test environment.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        assert!(cmd.get_env("PATH").is_some());
+
+        apply_terminal_env(&mut cmd, Vec::new());
+
+        // Everything pre-seeded must be gone; only the explicit TERM remains.
+        assert!(cmd.get_env("PATH").is_none());
+        assert_eq!(
+            cmd.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+    }
+
+    #[test]
+    fn apply_terminal_env_removes_secret_filtered_from_parent() {
+        use crate::system::sandbox::filter_terminal_env;
+        use portable_pty::CommandBuilder;
+
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        // Simulate a secret seeded from the parent environment (the builder
+        // pre-populates its env table with `std::env::vars_os()`).
+        cmd.env("NACELLE_TEST_API_KEY", "leaked-secret");
+        cmd.env("LD_PRELOAD", "evil.so");
+
+        let parent_env = vec![
+            (
+                "NACELLE_TEST_API_KEY".to_string(),
+                "leaked-secret".to_string(),
+            ),
+            ("LD_PRELOAD".to_string(), "evil.so".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ];
+        apply_terminal_env(&mut cmd, filter_terminal_env(parent_env, "safe"));
+
+        // The filter dropped the secret and the injection vector; env_clear
+        // ensures they do not survive from the pre-seeded parent env either.
+        assert!(cmd.get_env("NACELLE_TEST_API_KEY").is_none());
+        assert!(cmd.get_env("LD_PRELOAD").is_none());
+        assert_eq!(cmd.get_env("PATH"), Some(std::ffi::OsStr::new("/usr/bin")));
     }
 
     #[test]

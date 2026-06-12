@@ -34,7 +34,7 @@ use ato_net::{
     resolver::{ResolveOptions, Resolver, ResolverError},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
     sync::mpsc,
 };
@@ -71,22 +71,20 @@ async fn handle_connect_inner(
 
     let mut buf_reader = BufReader::new(stream);
 
+    // Byte budget shared by the request line and all header lines.  The
+    // budget is enforced *while* reading (inside `read_header_line`), so a
+    // newline-less line cannot grow a buffer without bound.
+    let mut header_budget = MAX_HEADER_BYTES;
+
     // Request line: "CONNECT host:port HTTP/1.1\r\n"
-    let mut request_line = String::new();
-    buf_reader.read_line(&mut request_line).await?;
+    let request_line = read_header_line(&mut buf_reader, &mut header_budget).await?;
 
     let (host, port) = parse_connect_line(&request_line)?;
 
     // Discard remaining headers up to the blank separator line.
-    let mut header_bytes = request_line.len();
     loop {
-        let mut line = String::new();
-        let n = buf_reader.read_line(&mut line).await?;
-        header_bytes += n;
-        if header_bytes > MAX_HEADER_BYTES {
-            anyhow::bail!("CONNECT headers exceed {MAX_HEADER_BYTES} bytes");
-        }
-        if n == 0 {
+        let line = read_header_line(&mut buf_reader, &mut header_budget).await?;
+        if line.is_empty() {
             anyhow::bail!("premature EOF in CONNECT headers");
         }
         if line == "\r\n" || line == "\n" {
@@ -103,10 +101,12 @@ async fn handle_connect_inner(
 
     // ── 2. Hostname policy precheck ───────────────────────────────────────────
 
-    // Only check hostname policy for actual hostnames (not IP literals).
+    // IP literals skip DNS below, but they MUST still pass the hostname
+    // policy: a non-empty allowlist would otherwise be bypassed by dialing
+    // the resolved IP directly (fail closed — see issue #655).
     let is_ip_literal = host.parse::<IpAddr>().is_ok();
 
-    if !is_ip_literal && let PolicyDecision::DenyHost = policy.check_hostname(&host) {
+    if let PolicyDecision::DenyHost = policy.check_hostname(&host) {
         write_error_response(&mut client, 403, "hostname", &host, port).await?;
         let _ = receipt_tx.try_send(NetworkEgressDecision {
             target: host,
@@ -256,6 +256,43 @@ async fn handle_connect_inner(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Read one `\n`-terminated line, enforcing the remaining byte `budget`
+/// *during* the read.
+///
+/// Unlike [`AsyncBufReadExt::read_line`] — whose `BufReader` capacity bounds
+/// only the internal buffer, not the appended `String` — this caps total
+/// consumed bytes at `budget`, so a malicious client streaming a newline-less
+/// line cannot exhaust memory (issue #644).
+///
+/// Returns the line including its terminator; an empty string signals EOF.
+/// Fails when the line would exceed `budget` or is not valid UTF-8.
+async fn read_header_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    budget: &mut usize,
+) -> anyhow::Result<String> {
+    let mut line: Vec<u8> = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            break; // EOF
+        }
+        let (n, terminated) = match available.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len(), false),
+        };
+        if n > *budget {
+            anyhow::bail!("CONNECT headers exceed {MAX_HEADER_BYTES} bytes");
+        }
+        *budget -= n;
+        line.extend_from_slice(&available[..n]);
+        reader.consume(n);
+        if terminated {
+            break;
+        }
+    }
+    Ok(String::from_utf8(line)?)
+}
 
 /// Parse `CONNECT <authority> HTTP/1.1` and return `(host, port)`.
 ///
@@ -595,6 +632,71 @@ mod tests {
         assert_eq!(receipt.stage, "hostname");
     }
 
+    /// Test: IP-literal CONNECT target must not bypass the hostname
+    /// allowlist (#655) — 403 + DenyHost receipt, resolver never called.
+    #[tokio::test]
+    async fn ip_literal_does_not_bypass_allowlist() {
+        let (resolver, call_count) = FakeResolver::returning(vec![]);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
+
+        let policy = Arc::new(EgressPolicy::permissive().with_hostname_allow("allowed.test"));
+        let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connect(stream, policy, resolver_arc, receipt_tx).await;
+        });
+
+        let (status, _) = send_connect(proxy_addr, "127.0.0.1:80").await;
+        assert_eq!(status, 403, "IP literal must not bypass the allowlist");
+
+        // DNS must NOT have been called for an IP literal.
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
+
+        assert_eq!(receipt.decision, EgressDecision::DenyHost);
+        assert_eq!(receipt.stage, "hostname");
+    }
+
+    /// Test: an allowlisted IP literal still connects (no DNS involved).
+    #[tokio::test]
+    async fn allowlisted_ip_literal_connects() {
+        let echo_port = start_echo_server().await;
+
+        let (resolver, call_count) = FakeResolver::returning(vec![]);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
+
+        let policy = Arc::new(EgressPolicy::permissive().with_hostname_allow("127.0.0.1"));
+        let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connect(stream, policy, resolver_arc, receipt_tx).await;
+        });
+
+        let (status, _) = send_connect(proxy_addr, &format!("127.0.0.1:{echo_port}")).await;
+        assert_eq!(status, 200, "allowlisted IP literal must connect");
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
+
+        assert_eq!(receipt.decision, EgressDecision::Allow);
+        assert_eq!(receipt.stage, "connect");
+    }
+
     /// Test 3: DNS rebinding — CIDR deny after resolution → 403 + DenyCidr receipt.
     #[tokio::test]
     async fn dns_rebinding_cidr_deny() {
@@ -747,6 +849,76 @@ mod tests {
         .expect("echo timed out")
         .expect("read error");
         assert_eq!(&echo_buf, b"PIPELINED");
+    }
+
+    /// Regression (issue #644): a newline-less CONNECT line longer than
+    /// MAX_HEADER_BYTES must abort the connection during the read instead
+    /// of buffering it without bound.
+    #[tokio::test]
+    async fn oversized_connect_line_is_rejected() {
+        let (resolver, call_count) = FakeResolver::returning(vec![]);
+        let (receipt_tx, _receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
+
+        let policy = Arc::new(EgressPolicy::permissive());
+        let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+
+        let handler = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connect(stream, policy, resolver_arc, receipt_tx).await;
+        });
+
+        // Stream more than MAX_HEADER_BYTES with no `\n`.
+        let mut stream = TcpStream::connect(proxy_addr).await.unwrap();
+        let chunk = vec![b'A'; 4096];
+        let mut written = 0usize;
+        while written <= MAX_HEADER_BYTES {
+            if stream.write_all(&chunk).await.is_err() {
+                break; // handler already closed the connection
+            }
+            written += chunk.len();
+        }
+        let _ = stream.flush().await;
+
+        // The handler must bail out instead of waiting for a newline.
+        tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+            .await
+            .expect("handler must abort an oversized CONNECT line")
+            .unwrap();
+
+        // The resolver must never have been consulted.
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// Regression (issue #644): read_header_line enforces its byte budget
+    /// while reading, and returns intact lines within budget.
+    #[tokio::test]
+    async fn read_header_line_enforces_budget_during_read() {
+        // A newline-less line longer than the budget fails.
+        let data = vec![b'A'; MAX_HEADER_BYTES * 2];
+        let mut reader = BufReader::new(&data[..]);
+        let mut budget = MAX_HEADER_BYTES;
+        let err = read_header_line(&mut reader, &mut budget)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exceed"), "got: {err:#}");
+
+        // A line within budget is returned with terminator, budget debited.
+        let data: &[u8] = b"CONNECT example.com:443 HTTP/1.1\r\nHost: x\r\n";
+        let mut reader = BufReader::new(data);
+        let mut budget = MAX_HEADER_BYTES;
+        let line = read_header_line(&mut reader, &mut budget).await.unwrap();
+        assert_eq!(line, "CONNECT example.com:443 HTTP/1.1\r\n");
+        assert_eq!(budget, MAX_HEADER_BYTES - line.len());
+
+        // EOF yields an empty string.
+        let data: &[u8] = b"";
+        let mut reader = BufReader::new(data);
+        let mut budget = MAX_HEADER_BYTES;
+        let line = read_header_line(&mut reader, &mut budget).await.unwrap();
+        assert!(line.is_empty());
     }
 
     /// Test: parse_authority handles IPv6 literals correctly.
