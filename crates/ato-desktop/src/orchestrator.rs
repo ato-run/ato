@@ -4894,7 +4894,7 @@ pub fn spawn_ato_run_repl(
                                     if arg.is_empty() {
                                         let _ = send(
                                             &output_tx,
-                                            b"\x1b[33musage: .allow <host | *.host | ip>\x1b[0m\r\n",
+                                            b"\x1b[33musage: .allow <host | *.host | ip | host:port>\x1b[0m\r\n",
                                         );
                                     } else {
                                         match HostPattern::parse(arg) {
@@ -4930,7 +4930,7 @@ pub fn spawn_ato_run_repl(
                                     if arg.is_empty() {
                                         let _ = send(
                                             &output_tx,
-                                            b"\x1b[33musage: .deny <host | *.host | ip>\x1b[0m\r\n",
+                                            b"\x1b[33musage: .deny <host | *.host | ip | host:port>\x1b[0m\r\n",
                                         );
                                     } else {
                                         match HostPattern::parse(arg) {
@@ -4978,6 +4978,7 @@ pub fn spawn_ato_run_repl(
 \x1b[1mREPL meta-commands\x1b[0m\r\n\
   \x1b[36m.egress\x1b[0m              show current allowlist\r\n\
   \x1b[36m.allow\x1b[0m <pattern>     add a session-only allow (e.g. example.com, *.github.com, 1.2.3.4)\r\n\
+                       bare hosts cover ports 80/443 only; use host:port for others (e.g. example.com:8443)\r\n\
   \x1b[36m.deny\x1b[0m <pattern>      remove a session allow\r\n\
   \x1b[36m.reset-egress\x1b[0m        clear all session allows (defaults remain)\r\n\
   \x1b[36m.help\x1b[0m                this message\r\n\
@@ -5293,9 +5294,20 @@ pub fn spawn_ato_run_repl(
 
                             // Egress-deny hints (best-effort, non-fatal).
                             while let Ok(ev) = deny_rx.try_recv() {
+                                // Bare host grants only cover web ports
+                                // (80/443); anything else needs the
+                                // port-scoped `host:port` form.
+                                let pattern = if matches!(ev.port, 80 | 443) {
+                                    ev.host.clone()
+                                } else if ev.host.contains(':') {
+                                    // IPv6 literal — bracket for `.allow`.
+                                    format!("[{}]:{}", ev.host, ev.port)
+                                } else {
+                                    format!("{}:{}", ev.host, ev.port)
+                                };
                                 let msg = format!(
                                     "\r\n\x1b[33m⚠ egress blocked: {}:{}\x1b[0m  \x1b[90m(type `.allow {}` to permit this session)\x1b[0m\r\n",
-                                    ev.host, ev.port, ev.host
+                                    ev.host, ev.port, pattern
                                 );
                                 let _ = send(&output_tx, msg.as_bytes());
                             }
@@ -5676,6 +5688,7 @@ mod fast_path_tests {
             manifest_path: "/tmp/manifest.toml".to_string(),
             target_label: "main".to_string(),
             notes: vec![],
+            readiness_confirmed: false,
             guest: Some(GuestSessionDisplay {
                 adapter: "node".to_string(),
                 frontend_entry: "index.html".to_string(),
