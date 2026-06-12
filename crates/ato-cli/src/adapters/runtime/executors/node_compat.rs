@@ -277,7 +277,7 @@ fn build_orchestration_command(
     verify_execution_plan_hashes(execution_plan)?;
 
     let launch_spec = derive_launch_spec(plan)?;
-    let readiness_port = runtime_overrides::override_port(launch_spec.port);
+    let readiness_port = resolve_readiness_port(&launch_spec);
 
     let prepared = if is_package_manager_entrypoint(&launch_spec.command) {
         build_package_manager_command(
@@ -334,6 +334,24 @@ fn build_orchestration_command(
     };
 
     Ok((prepared, readiness_port))
+}
+
+/// Resolve the readiness port the lifecycle pump TCP-probes for a NodeCompat
+/// run from the capsule's launch spec.
+///
+/// This is the exact value `build_orchestration_command` hands to
+/// [`spawn_host_lifecycle_events`] for both [`spawn_background`] and
+/// [`spawn_foreground`]: the manifest's declared `port`, with a live
+/// `ATO_UI_OVERRIDE_PORT` session override taking precedence
+/// (`override_port`). It is NOT the raw `launch_spec.port` — when the desktop
+/// remaps an occupied declared port the override is the value the server binds
+/// and the pump must probe.
+///
+/// A capsule with neither a declared port nor an override resolves to `None`,
+/// which `spawn_host_lifecycle_events` maps to an honest `Started` (never a
+/// fake `Ready`), preserving `StartedWithoutReadiness` (#623).
+fn resolve_readiness_port(launch_spec: &capsule_core::launch_spec::LaunchSpec) -> Option<u16> {
+    runtime_overrides::override_port(launch_spec.port)
 }
 
 /// Spawn a NodeCompat process for background (daemon) execution.
@@ -1158,7 +1176,7 @@ mod tests {
     use super::{
         allow_net_hosts_for_resolved_port, is_provider_backed_node_workspace,
         map_deno_permission_error, map_node_compat_error, prepend_managed_node_to_path,
-        provider_resolution_metadata_path,
+        provider_resolution_metadata_path, resolve_readiness_port,
     };
 
     use capsule_core::launch_spec::{LaunchSpecSource, derive_launch_spec};
@@ -1327,13 +1345,45 @@ run = "node main.js"
         );
     }
 
-    // #623: foreground NodeCompat readiness wiring. The foreground path
-    // (`spawn_foreground`) now derives its readiness port from the manifest's
-    // declared `port`, exactly like the background path (`spawn_background`),
-    // instead of the old blocking `execute()` which probed nothing. A declared
-    // port must surface as the readiness port the lifecycle pump TCP-probes so
-    // dispatched node capsules emit `LIFECYCLE: ready` and reach `ready`
-    // instead of timing out at the runner's 600s ready deadline.
+    /// RAII guard mutating `ATO_UI_OVERRIDE_PORT` for one test and restoring it
+    /// on drop. `override_port` (which `resolve_readiness_port` calls) reads this
+    /// env var, so the session-override precedence path can only be exercised by
+    /// setting it. Restore-on-drop keeps the mutation from leaking into sibling
+    /// tests in the same process.
+    struct OverridePortGuard {
+        previous: Option<String>,
+    }
+
+    impl OverridePortGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var("ATO_UI_OVERRIDE_PORT").ok();
+            // SAFETY: mutated only through this guard within the test; restored
+            // on drop. Matches the env-mutation pattern already used by
+            // `prepend_managed_node_to_path_places_managed_bin_first`.
+            unsafe {
+                std::env::set_var("ATO_UI_OVERRIDE_PORT", value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for OverridePortGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("ATO_UI_OVERRIDE_PORT", value) },
+                None => unsafe { std::env::remove_var("ATO_UI_OVERRIDE_PORT") },
+            }
+        }
+    }
+
+    // #623: foreground NodeCompat readiness wiring. `build_orchestration_command`
+    // (shared by `spawn_foreground` and `spawn_background`) derives the readiness
+    // port the lifecycle pump TCP-probes via `resolve_readiness_port`, replacing
+    // the old blocking `execute()` which probed nothing. This drives that exact
+    // derivation (not the untouched `derive_launch_spec(&plan).port`): a declared
+    // manifest port must surface as the readiness port so dispatched node
+    // capsules emit `LIFECYCLE: ready` and reach `ready` instead of timing out at
+    // the runner's 600s ready deadline.
     #[test]
     fn declared_port_becomes_readiness_port_for_node_capsule() {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -1347,16 +1397,17 @@ port = 8000
         );
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
         assert_eq!(
-            spec.port,
+            resolve_readiness_port(&spec),
             Some(8000),
-            "declared manifest port must be the readiness port the foreground \
+            "declared manifest port must become the readiness port the foreground \
              lifecycle pump probes"
         );
     }
 
-    // #623: capsules with neither a declared port nor a readiness probe must
-    // keep the honest `StartedWithoutReadiness` behavior — `spawn_host_lifecycle_events`
-    // emits `Started` (never a fake `Ready`) when the readiness port is `None`.
+    // #623: capsules with neither a declared port nor a session override must
+    // keep the honest `StartedWithoutReadiness` behavior — `resolve_readiness_port`
+    // yields `None`, which `spawn_host_lifecycle_events` maps to `Started` (never
+    // a fake `Ready`).
     #[test]
     fn missing_port_yields_no_readiness_port_for_node_capsule() {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -1369,9 +1420,38 @@ run = "node main.js"
         );
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
         assert_eq!(
-            spec.port, None,
-            "a node capsule with no declared port must not synthesize a \
-             readiness port (no fake ready)"
+            resolve_readiness_port(&spec),
+            None,
+            "a node capsule with no declared port and no override must not \
+             synthesize a readiness port (no fake ready)"
+        );
+    }
+
+    // #623 / #565: when the desktop remaps an occupied declared port it installs
+    // `ATO_UI_OVERRIDE_PORT`; the server binds the override and the lifecycle pump
+    // must probe THAT port, not the raw declared one. `resolve_readiness_port`
+    // (via `override_port`) is the seam that picks the override — a property the
+    // raw `launch_spec.port` the old test asserted cannot express.
+    #[test]
+    fn session_override_takes_precedence_over_declared_readiness_port() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node main.js"
+port = 8000
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+        assert_eq!(spec.port, Some(8000), "manifest declares port 8000");
+
+        let _guard = OverridePortGuard::set("14126");
+        assert_eq!(
+            resolve_readiness_port(&spec),
+            Some(14126),
+            "a live ATO_UI_OVERRIDE_PORT must override the declared port as the \
+             readiness port the pump probes (#565 remap)"
         );
     }
 
