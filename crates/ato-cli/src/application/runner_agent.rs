@@ -176,12 +176,21 @@ struct HeartbeatRunnerView {
     online: bool,
 }
 
+/// Server-pushed self-update directive (present while this runner is behind the
+/// operator-requested target version).
+#[derive(Debug, Deserialize)]
+struct UpdateDirective {
+    target_version: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct HeartbeatResponse {
     #[serde(default)]
     next_heartbeat_seconds: Option<u64>,
     #[serde(default)]
     runner: Option<HeartbeatRunnerView>,
+    #[serde(default)]
+    update: Option<UpdateDirective>,
 }
 
 /// The slice of an API error body the agent acts on. Only the machine `error`
@@ -191,6 +200,12 @@ struct HeartbeatResponse {
 struct ApiErrorBody {
     #[serde(default)]
     error: Option<String>,
+}
+
+/// This runner's `ato` agent version, reported to the control plane so the
+/// operator can see who is behind and target a self-update.
+pub fn agent_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
 /// Heartbeat request body. `public_base_url` is serialized ONLY when
@@ -205,6 +220,7 @@ pub fn build_heartbeat_body(
         "capabilities": capabilities,
         "os": os,
         "arch": arch,
+        "agent_version": agent_version(),
     });
     if let Some(url) = public_base_url {
         body["public_base_url"] = serde_json::Value::String(url.to_string());
@@ -229,8 +245,13 @@ pub fn format_heartbeat_log(online: bool, next_seconds: u64) -> String {
 
 #[derive(Debug)]
 pub enum HeartbeatOutcome {
-    /// Accepted; carries the server-directed next interval (seconds).
-    Ok { online: bool, next_seconds: u64 },
+    /// Accepted; carries the server-directed next interval (seconds) and an
+    /// optional self-update target the operator requested for this runner.
+    Ok {
+        online: bool,
+        next_seconds: u64,
+        update_target: Option<String>,
+    },
     /// 401 runner_revoked — terminal, fail closed.
     Revoked,
     /// 401 with any other code — token unknown/invalid. Terminal.
@@ -285,6 +306,7 @@ async fn send_heartbeat_once(
                 .next_heartbeat_seconds
                 .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS),
         ),
+        update_target: parsed.update.map(|u| u.target_version),
     }
 }
 
@@ -348,6 +370,7 @@ pub async fn run_login(
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "capabilities": capabilities,
+        "agent_version": agent_version(),
     });
     if let Some(url) = public_base_url.as_deref() {
         register_body["public_base_url"] = serde_json::Value::String(url.to_string());
@@ -390,6 +413,68 @@ pub async fn run_login(
     println!("   The runner token was saved and will not be shown.");
     println!("   Start heartbeats with: ato runner serve");
     Ok(())
+}
+
+/// Run the self-update for a server-requested target. Returns true when the
+/// binary was actually replaced (so the caller should re-exec into it), false
+/// when already on the latest release or the update failed (best-effort: a
+/// failure keeps the runner on the current version and is retried only when the
+/// requested target changes).
+async fn maybe_self_update(target: &str) -> bool {
+    println!(
+        "⬆️  self-update requested → {target} (current {}); updating…",
+        agent_version()
+    );
+    match crate::cli::commands::update::run_self_update_async().await {
+        Ok(Some(new_version)) => {
+            println!("✅ updated to v{new_version}; restarting runner…");
+            true
+        }
+        Ok(None) => {
+            println!("✨ already on the latest release; nothing to update");
+            false
+        }
+        Err(err) => {
+            eprintln!(
+                "⚠️  self-update failed: {}",
+                scrub_secrets(&format!("{err:#}"))
+            );
+            false
+        }
+    }
+}
+
+/// Replace this process with a fresh `ato runner serve` (the just-updated
+/// binary), preserving the exact original argv. The runner credentials persist
+/// on disk, so the new process re-authenticates and resumes; startup reconcile
+/// settles any leases orphaned by the swap. Never returns on success.
+fn reexec_serve() -> ! {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("⚠️  cannot resolve current exe for re-exec: {err}");
+            std::process::exit(1);
+        }
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&exe).args(&args).exec();
+        // exec() only returns on failure.
+        eprintln!("⚠️  re-exec after self-update failed: {err}");
+        std::process::exit(1);
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(&exe).args(&args).spawn() {
+            Ok(_) => std::process::exit(0),
+            Err(err) => {
+                eprintln!("⚠️  re-exec after self-update failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 }
 
 /// `ato runner serve`: heartbeat loop. Runner-token auth only; fails closed
@@ -435,6 +520,9 @@ pub async fn run_serve(
 
     let mut interval = clamp_heartbeat_interval(creds.heartbeat_interval_seconds);
     let mut consecutive_failures: u32 = 0;
+    // The last self-update target we attempted, so a directive that cannot be
+    // satisfied (target newer than the latest release) is not retried forever.
+    let mut attempted_update: Option<String> = None;
     // One active run at a time (v0): while a dispatched child is alive the
     // runner does not claim further leases — GET leases/next CLAIMS, so a
     // busy runner must not even poll.
@@ -455,10 +543,26 @@ pub async fn run_serve(
             HeartbeatOutcome::Ok {
                 online,
                 next_seconds,
+                update_target,
             } => {
                 consecutive_failures = 0;
                 interval = next_seconds;
                 println!("{}", format_heartbeat_log(online, next_seconds));
+                // The operator requested a self-update for this runner. Only act
+                // while idle (no workload), and only attempt a given target once
+                // — if the self-update lands a version that still doesn't satisfy
+                // the target (e.g. target newer than the latest release) we must
+                // not re-exec every heartbeat. On a successful update we re-exec
+                // into the new binary; startup reconcile settles orphaned leases.
+                if let Some(target) = update_target
+                    && !busy.load(Ordering::SeqCst)
+                    && attempted_update.as_deref() != Some(target.as_str())
+                {
+                    attempted_update = Some(target.clone());
+                    if maybe_self_update(&target).await {
+                        reexec_serve();
+                    }
+                }
             }
             HeartbeatOutcome::Revoked => {
                 bail!(
@@ -2519,6 +2623,35 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_body_reports_agent_version() {
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64");
+        assert_eq!(body["agent_version"].as_str(), Some(agent_version()));
+        assert_eq!(agent_version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn heartbeat_response_parses_update_directive() {
+        let with: HeartbeatResponse = serde_json::from_value(serde_json::json!({
+            "next_heartbeat_seconds": 30,
+            "runner": { "online": true },
+            "update": { "target_version": "0.7.0" },
+        }))
+        .expect("parse update directive");
+        assert_eq!(
+            with.update.map(|u| u.target_version).as_deref(),
+            Some("0.7.0")
+        );
+
+        // Absent directive is the common case and must parse to None.
+        let without: HeartbeatResponse = serde_json::from_value(serde_json::json!({
+            "next_heartbeat_seconds": 30,
+            "runner": { "online": true },
+        }))
+        .expect("parse without directive");
+        assert!(without.update.is_none());
+    }
+
+    #[test]
     fn heartbeat_interval_is_clamped_on_ingest() {
         // Below the floor → busy-spin protection.
         assert_eq!(clamp_heartbeat_interval(0), MIN_HEARTBEAT_INTERVAL_SECS);
@@ -3113,6 +3246,7 @@ mod tests {
             HeartbeatOutcome::Ok {
                 online,
                 next_seconds,
+                ..
             } => {
                 assert!(online);
                 assert_eq!(next_seconds, 30);
