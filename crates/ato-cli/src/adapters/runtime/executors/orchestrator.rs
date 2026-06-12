@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use capsule_core::CapsuleReporter;
+use capsule_core::common::readiness::http_status_indicates_ready;
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lifecycle::LifecycleEvent;
 use capsule_core::router::ManifestData;
@@ -1619,9 +1620,7 @@ fn http_probe(path: &str, port: u16) -> bool {
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok());
-    status
-        .map(|code| (200..500).contains(&code))
-        .unwrap_or(false)
+    status.map(http_status_indicates_ready).unwrap_or(false)
 }
 
 fn tcp_probe(target: &str, port: u16) -> bool {
