@@ -103,10 +103,12 @@ async fn handle_connect_inner(
 
     // ── 2. Hostname policy precheck ───────────────────────────────────────────
 
-    // Only check hostname policy for actual hostnames (not IP literals).
+    // IP literals skip DNS below, but they MUST still pass the hostname
+    // policy: a non-empty allowlist would otherwise be bypassed by dialing
+    // the resolved IP directly (fail closed — see issue #655).
     let is_ip_literal = host.parse::<IpAddr>().is_ok();
 
-    if !is_ip_literal && let PolicyDecision::DenyHost = policy.check_hostname(&host) {
+    if let PolicyDecision::DenyHost = policy.check_hostname(&host) {
         write_error_response(&mut client, 403, "hostname", &host, port).await?;
         let _ = receipt_tx.try_send(NetworkEgressDecision {
             target: host,
@@ -593,6 +595,71 @@ mod tests {
 
         assert_eq!(receipt.decision, EgressDecision::DenyHost);
         assert_eq!(receipt.stage, "hostname");
+    }
+
+    /// Test: IP-literal CONNECT target must not bypass the hostname
+    /// allowlist (#655) — 403 + DenyHost receipt, resolver never called.
+    #[tokio::test]
+    async fn ip_literal_does_not_bypass_allowlist() {
+        let (resolver, call_count) = FakeResolver::returning(vec![]);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
+
+        let policy = Arc::new(EgressPolicy::permissive().with_hostname_allow("allowed.test"));
+        let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connect(stream, policy, resolver_arc, receipt_tx).await;
+        });
+
+        let (status, _) = send_connect(proxy_addr, "127.0.0.1:80").await;
+        assert_eq!(status, 403, "IP literal must not bypass the allowlist");
+
+        // DNS must NOT have been called for an IP literal.
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
+
+        assert_eq!(receipt.decision, EgressDecision::DenyHost);
+        assert_eq!(receipt.stage, "hostname");
+    }
+
+    /// Test: an allowlisted IP literal still connects (no DNS involved).
+    #[tokio::test]
+    async fn allowlisted_ip_literal_connects() {
+        let echo_port = start_echo_server().await;
+
+        let (resolver, call_count) = FakeResolver::returning(vec![]);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
+
+        let policy = Arc::new(EgressPolicy::permissive().with_hostname_allow("127.0.0.1"));
+        let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connect(stream, policy, resolver_arc, receipt_tx).await;
+        });
+
+        let (status, _) = send_connect(proxy_addr, &format!("127.0.0.1:{echo_port}")).await;
+        assert_eq!(status, 200, "allowlisted IP literal must connect");
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
+
+        assert_eq!(receipt.decision, EgressDecision::Allow);
+        assert_eq!(receipt.stage, "connect");
     }
 
     /// Test 3: DNS rebinding — CIDR deny after resolution → 403 + DenyCidr receipt.
