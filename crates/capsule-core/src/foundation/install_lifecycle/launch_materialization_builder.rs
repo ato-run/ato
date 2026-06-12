@@ -303,7 +303,7 @@ mod tests {
         FinalizerInput, FinalizerOutput, InstallBuildFacts, InstallRevisionFinalizer,
     };
     use crate::foundation::install_lifecycle::ids::{
-        ArtifactBuildId, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
+        ArtifactBuildId, InstalledAppId, ProfileId, derive_install_profile_key,
     };
     use crate::foundation::install_lifecycle::launch_inputs::ValidatedInstallReusableInputs;
     use crate::foundation::install_lifecycle::launch_template::{

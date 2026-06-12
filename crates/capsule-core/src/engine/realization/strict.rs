@@ -288,41 +288,41 @@ impl StrictRealizationGate {
         // 2. A declared or materialized identity that is not a well-formed
         //    content hash is rejected rather than trusted (#499 review). This is
         //    a *positively wrong* fact, so it blocks regardless of `required`.
-        if let Some(value) = declared {
-            if !is_content_hash(value) {
-                return Err(StrictRealizationGateError::block(
-                    id,
-                    kind,
-                    StrictGateReasonCode::InvalidIdentity,
-                    declared,
-                    materialized,
-                ));
-            }
+        if let Some(value) = declared
+            && !is_content_hash(value)
+        {
+            return Err(StrictRealizationGateError::block(
+                id,
+                kind,
+                StrictGateReasonCode::InvalidIdentity,
+                declared,
+                materialized,
+            ));
         }
-        if let Some(value) = materialized {
-            if !is_content_hash(value) {
-                return Err(StrictRealizationGateError::block(
-                    id,
-                    kind,
-                    StrictGateReasonCode::InvalidIdentity,
-                    declared,
-                    materialized,
-                ));
-            }
+        if let Some(value) = materialized
+            && !is_content_hash(value)
+        {
+            return Err(StrictRealizationGateError::block(
+                id,
+                kind,
+                StrictGateReasonCode::InvalidIdentity,
+                declared,
+                materialized,
+            ));
         }
 
         // 3. Declared vs materialized mismatch (both present, both valid). Also a
         //    positively wrong fact — block regardless of `required`.
-        if let (Some(d), Some(m)) = (declared, materialized) {
-            if d != m {
-                return Err(StrictRealizationGateError::block(
-                    id,
-                    kind,
-                    StrictGateReasonCode::IdentityMismatch,
-                    declared,
-                    materialized,
-                ));
-            }
+        if let (Some(d), Some(m)) = (declared, materialized)
+            && d != m
+        {
+            return Err(StrictRealizationGateError::block(
+                id,
+                kind,
+                StrictGateReasonCode::IdentityMismatch,
+                declared,
+                materialized,
+            ));
         }
 
         // 4. False-`Verified` guard (regression invariant): a node whose *#498
@@ -335,19 +335,20 @@ impl StrictRealizationGate {
         //    An authoritative #499 `Verified` verdict is *exempt*: the verifier
         //    has already proved the declared/materialized pair matches, so the
         //    contract is not required to carry a separate materialized identity.
-        if input.realization_status == RealizationStatus::Verified && !materialization_verified {
-            if declared.is_none() || materialized.is_none() {
-                return Err(StrictRealizationGateError::block(
-                    id,
-                    kind,
-                    StrictGateReasonCode::MaterializationMissing,
-                    declared,
-                    materialized,
-                ));
-            }
-            // declared == materialized (step 3) and both are content hashes
-            // (step 2): a genuine verified node.
+        if input.realization_status == RealizationStatus::Verified
+            && !materialization_verified
+            && (declared.is_none() || materialized.is_none())
+        {
+            return Err(StrictRealizationGateError::block(
+                id,
+                kind,
+                StrictGateReasonCode::MaterializationMissing,
+                declared,
+                materialized,
+            ));
         }
+        // declared == materialized (step 3) and both are content hashes
+        // (step 2): a genuine verified node.
 
         // 5. Absent / can't-verify / downgraded facts only block a *required*
         //    node. An optional node that is merely undecided does not stop launch.

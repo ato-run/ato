@@ -88,7 +88,9 @@ pub enum PersistedLaunchTemplateReuseDecision {
     /// A persisted template matched every stable input, validated internally, and
     /// passed volatile revalidation: it may be reused.
     Reusable {
-        launch_template: LaunchTemplate,
+        // Boxed: LaunchTemplate dwarfs the NotReusable variant
+        // (clippy::large_enum_variant).
+        launch_template: Box<LaunchTemplate>,
         key_hash: String,
         reuse_decision: LaunchReuseDecision,
     },
@@ -332,7 +334,7 @@ pub fn evaluate_persisted_launch_template_reuse(
     match decision {
         LaunchReuseDecision::Reuse { template_key_hash } => {
             PersistedLaunchTemplateReuseDecision::Reusable {
-                launch_template: loaded,
+                launch_template: Box::new(loaded),
                 key_hash: template_key_hash.clone(),
                 reuse_decision: LaunchReuseDecision::Reuse { template_key_hash },
             }
@@ -524,37 +526,6 @@ mod tests {
         }
     }
 
-    /// Finalize a standard install, force its validated inputs to `Ready`, build
-    /// the launch template, and persist it. Returns the revision id and the
-    /// persisted template (so tests can tamper a copy on disk).
-    fn finalize_and_persist_ready_template(
-        store: &InstallInstanceStore,
-        app: &InstalledAppId,
-        profile: &ProfileId,
-        out_base: &std::path::Path,
-        build_suffix: &str,
-    ) -> (InstallRevisionId, LaunchTemplate) {
-        let out = finalize_standard(store, app, profile, out_base, build_suffix);
-        let rev = out.install_revision_id.clone();
-        let mut v = ValidatedInstallReusableInputs::load(store, app, profile, &rev).unwrap();
-        make_ready(&mut v);
-        let built = build_launch_template(LaunchTemplateBuildInput {
-            template_id: "ltmpl_persisted".into(),
-            reusable_inputs: v,
-            profile_hash: "blake3:prof".into(),
-            network_policy_hash: "blake3:net".into(),
-            capability_policy_hash: "blake3:cap".into(),
-            runner_compatibility_class: RunnerCompatibilityClass::new(
-                "managed_runner/linux-x86_64",
-            ),
-        })
-        .expect("ready inputs build a template");
-        store
-            .write_launch_template(app, profile, &rev, &built.launch_template)
-            .unwrap();
-        (rev, built.launch_template)
-    }
-
     // NOTE: The reuse path forces the requirement graph + compatibility index to
     // `Ready` in-memory before building the *expected* key. So on the standard
     // install path (graph + index Partial on disk), `evaluate_persisted...` sees
@@ -716,7 +687,7 @@ mod tests {
                 key_hash,
                 reuse_decision,
             } => {
-                assert_eq!(launch_template, template);
+                assert_eq!(*launch_template, template);
                 assert_eq!(key_hash, template.key.key_hash().unwrap());
                 assert!(matches!(reuse_decision, LaunchReuseDecision::Reuse { .. }));
             }

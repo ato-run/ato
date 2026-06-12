@@ -72,7 +72,7 @@ pub(crate) fn enforce_strict_realization(
     bundle: &LaunchGraphBundle,
     env: &RealizationEnvironment,
     profile: LaunchProfile,
-) -> Result<(), AtoExecutionError> {
+) -> Result<(), Box<AtoExecutionError>> {
     if !profile.is_strict() {
         return Ok(());
     }
@@ -94,10 +94,13 @@ pub(crate) fn evaluate_contract(
     contract: &RealizationContract,
     materializations: &[MaterializationVerification],
     profile: LaunchProfile,
-) -> Result<(), AtoExecutionError> {
+) -> Result<(), Box<AtoExecutionError>> {
+    // Boxed Err: `AtoExecutionError` is ~528 bytes (clippy::result_large_err);
+    // callers that hand it to anyhow unbox it first so the
+    // `downcast_ref::<AtoExecutionError>()` contract (utils/error.rs) is kept.
     match evaluate_strict_gate_with_materialization(contract, materializations, profile) {
         Ok(()) => Ok(()),
-        Err(errors) => Err(to_execution_error(&errors)),
+        Err(errors) => Err(Box::new(to_execution_error(&errors))),
     }
 }
 

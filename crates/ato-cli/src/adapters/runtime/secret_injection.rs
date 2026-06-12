@@ -308,7 +308,6 @@ fn grant_matches_condition(
 mod tests {
     use super::*;
     use capsule_core::installed_state::{LaunchConditionSource, LaunchConditionStatus};
-    use std::cell::RefCell;
 
     const SECRET: &str = "sk-super-secret-value-1234567890";
 

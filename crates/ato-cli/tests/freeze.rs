@@ -230,6 +230,7 @@ fn derivation_lock_serializes_concurrent_acquisitions() {
 
 #[test]
 #[serial]
+#[cfg(unix)] // executable bits and symlinks are Unix filesystem semantics
 fn freeze_preserves_executable_bit_and_symlink() {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
