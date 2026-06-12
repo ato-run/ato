@@ -2202,15 +2202,21 @@ fn test_inspect_diagnostics_tauri_ambiguous_surfaces_contract_gap() {
         .as_array()
         .expect("diagnostics array");
 
+    // The ambiguous fixture is a monorepo root (apps/* sub-packages); the
+    // contract gap is surfaced as an explicit-selection requirement pointing
+    // the user at a sub-package directory.
     assert!(diagnostics.iter().any(|value| {
         value["lockPath"].as_str() == Some("contract")
-            && value["reasonClass"].as_str() == Some("insufficient_evidence")
+            && value["reasonClass"].as_str() == Some("explicit_selection_required")
+            && value["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("monorepo root"))
     }));
     assert!(diagnostics.iter().any(|value| {
         value["lockPath"].as_str() == Some("contract.process")
             && value["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("could not determine a runnable process"))
+                .is_some_and(|message| message.contains("run ato from a sub-package directory"))
     }));
 }
 
