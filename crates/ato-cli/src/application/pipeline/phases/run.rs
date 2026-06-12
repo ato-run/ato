@@ -1719,6 +1719,24 @@ fn sandbox_session_data_env(
     env
 }
 
+/// Pick the path the session-data env (`ATO_DATA_DIR` / `DATABASE_PATH`) must
+/// reference for a sandboxed source run.
+///
+/// On mount-namespace backends (Linux bwrap) the host dir is remapped to the
+/// guest path, so the env uses the guest path. The macOS seatbelt backend has
+/// no mount namespace — the child sees the host filesystem and the injected
+/// mount becomes a write-allow rule for the host path, not a remap — so the env
+/// must reference the host dir directly. Otherwise a stateful capsule tries to
+/// create the guest root (`/runs`) on the read-only host fs and exits before
+/// readiness (#628).
+fn sandbox_session_data_env_dir(guest_dir: &str, host_dir: &std::path::Path) -> String {
+    if cfg!(target_os = "macos") {
+        host_dir.to_string_lossy().to_string()
+    } else {
+        guest_dir.to_string()
+    }
+}
+
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -2167,6 +2185,12 @@ where
             let mut scope = attempt.cleanup_scope();
             scope.register_remove_dir(host_session_dir.clone());
         }
+        // The data-path env (ATO_DATA_DIR / DATABASE_PATH) must reference the
+        // path the workload actually sees at runtime — the guest path under a
+        // mount namespace (Linux bwrap), the host path under macOS seatbelt
+        // which has none. See `sandbox_session_data_env_dir` (#628).
+        let session_data_env_dir =
+            sandbox_session_data_env_dir(SESSION_DATA_GUEST, &host_session_dir);
         launch_ctx = launch_ctx.with_injected_mounts(vec![InjectedMount {
             source: host_session_dir,
             target: SESSION_DATA_GUEST.to_string(),
@@ -2177,7 +2201,7 @@ where
         // earlier injection already provides it — never override user/capsule.
         let plan_env = decision.plan.execution_env();
         let merged_env = launch_ctx.merged_env();
-        let session_env = sandbox_session_data_env(SESSION_DATA_GUEST, |key| {
+        let session_env = sandbox_session_data_env(&session_data_env_dir, |key| {
             plan_env.contains_key(key) || merged_env.contains_key(key)
         });
         if !session_env.is_empty() {
@@ -4774,7 +4798,8 @@ mod tests {
         normalize_existing_path, normalize_write_path, parent_package_id,
         parse_external_service_contracts, parse_reuse_if_present_service_preflights,
         reconcile_compat_manifest_targets, resolve_sandbox_grants, sandbox_session_data_env,
-        unavailable_service_message, validate_sandbox_grants_best_effort,
+        sandbox_session_data_env_dir, unavailable_service_message,
+        validate_sandbox_grants_best_effort,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -4811,6 +4836,31 @@ mod tests {
         // Both already set: inject nothing.
         let env = sandbox_session_data_env("/runs/ato/session", |_| true);
         assert!(env.is_empty());
+    }
+
+    #[test]
+    fn sandbox_session_data_env_dir_is_platform_correct() {
+        // #628: macOS seatbelt has no mount namespace, so the data-path env must
+        // reference the writable HOST session dir — not the guest `/runs/...`
+        // path (which would make a stateful capsule mkdir `/runs` on the
+        // read-only host root and exit before readiness). Linux/other backends
+        // remap the host dir to the guest path, so the env uses the guest path.
+        let host = std::path::Path::new("/Users/x/.ato/runs/session-data/123-456");
+        let chosen = sandbox_session_data_env_dir("/runs/ato/session", host);
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(chosen, host.to_string_lossy());
+            // The whole point: the env value is NOT the guest root path.
+            assert_ne!(chosen, "/runs/ato/session");
+            // And the derived DB path lives under the writable host dir.
+            let env = sandbox_session_data_env(&chosen, |_| false);
+            assert_eq!(
+                env.get("DATABASE_PATH").map(String::as_str),
+                Some(format!("{}/app.db", host.to_string_lossy()).as_str())
+            );
+        } else {
+            assert_eq!(chosen, "/runs/ato/session");
+        }
     }
 
     fn empty_host_env() -> crate::application::dependency_credentials::MapHostEnv {
