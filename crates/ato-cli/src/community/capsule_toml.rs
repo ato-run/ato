@@ -509,16 +509,19 @@ pub(crate) fn prompt_community_candidate_selection(
     }
 }
 
+// Serialises access to ATO_COMMUNITY_API_URL across ALL tests that touch
+// it — this module's (sync and async) and community/mod.rs's. A second
+// mutex for the same env var only serializes within its own island; the
+// islands still raced each other (and a panic poisoned the std one,
+// cascading into innocent tests). An async-aware mutex so async tests can
+// hold it across `.await` points; sync tests use `blocking_lock()`;
+// tokio mutexes do not poison.
+#[cfg(test)]
+pub(crate) static COMMUNITY_URL_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Serialises access to ATO_COMMUNITY_API_URL across all tests in this
-    // module (sync and async) so they don't race against each other. An
-    // async-aware mutex so async tests can hold it across `.await` points
-    // (clippy::await_holding_lock); sync tests use `blocking_lock()`.
-    pub(super) static COMMUNITY_URL_MUTEX: tokio::sync::Mutex<()> =
-        tokio::sync::Mutex::const_new(());
 
     #[test]
     fn trust_level_deserializes_community() {
