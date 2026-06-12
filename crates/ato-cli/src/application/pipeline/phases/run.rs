@@ -4201,13 +4201,43 @@ where
                 );
                 return Ok(());
             }
-            let exit = crate::executors::node_compat::execute(
+            // Foreground NodeCompat (Connected Runner dispatch / `ato run …
+            // --sandbox -y`) must emit honest readiness exactly like the host
+            // source executor: spawn with the lifecycle pump wired so the
+            // declared port is TCP-probed, the canonical `LIFECYCLE: ready
+            // port=N` line is printed, and the V2 receipt readiness gate is
+            // re-stamped from the observed event. The blocking `execute()` path
+            // did none of this, so dispatched node capsules never went ready
+            // and timed out at the 600s runner ready deadline (#623).
+            let process = crate::executors::node_compat::spawn_foreground(
                 &decision.plan,
                 prepared.authoritative_lock.as_ref(),
                 &execution_plan,
                 &launch_ctx,
                 request.dangerously_skip_permissions,
             )?;
+            register_capsule_process_cleanup(
+                &mut attempt,
+                &process,
+                decision.plan.selected_target_label(),
+            );
+            let exit = hooks
+                .complete_foreground_source_process(
+                    process,
+                    request.reporter.clone(),
+                    is_one_shot,
+                    false,
+                    launch_ctx
+                        .socket_paths()
+                        .map(|paths| !paths.is_empty())
+                        .unwrap_or(false),
+                    false,
+                    use_progressive_ui,
+                    // NodeCompat uses spawn_host_lifecycle_events; re-stamp its
+                    // receipt from the observed readiness outcome.
+                    Some(execution_id.clone()),
+                )
+                .await?;
             sidecar_cleanup.stop_now();
             if exit != 0 {
                 if let Some(external_capsules) = external_capsules.as_mut() {
