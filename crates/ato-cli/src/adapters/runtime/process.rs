@@ -76,6 +76,20 @@ pub struct DependencyContractSessionSnapshot {
     pub providers: Vec<DependencyContractProcessInfo>,
 }
 
+/// A durable host-pid handle on a sandboxed workload process, captured at
+/// keep-alive spawn time so `ato stop` can signal it directly later. On Linux
+/// the keep-alive server runs inside `bwrap --unshare-all --new-session`, where
+/// neither process-group signaling (the server leads its own setsid group) nor
+/// a stop-time ppid walk (the supervisor may be reparented, and namespaced
+/// pids can be hard to chain back) reliably reaches it. The recorded host pid,
+/// paired with its OS start time to defeat pid reuse, is the reliable handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportPreviewWorkloadPid {
+    pub pid: i32,
+    #[serde(default)]
+    pub start_time_unix_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPreviewSession {
     pub run_session_id: String,
@@ -86,6 +100,11 @@ pub struct ImportPreviewSession {
     pub ato_run_process_start_time_unix_ms: Option<u64>,
     #[serde(default)]
     pub process_group_ids: Vec<i32>,
+    /// Durable host pids of the sandboxed workload subtree (bwrap wrapper plus
+    /// its namespaced descendants), captured at spawn time. Signaled directly
+    /// by `ato stop` regardless of supervisor liveness or pgid layout.
+    #[serde(default)]
+    pub workload_pids: Vec<ImportPreviewWorkloadPid>,
     pub primary_port: Option<u16>,
     pub primary_url: Option<String>,
     pub shadow_dir: PathBuf,
@@ -1061,9 +1080,60 @@ fn stop_import_preview_session_record(
         Duration::from_secs(3)
     };
 
+    // Durable host pids of the sandboxed workload subtree, signaled directly
+    // by host pid (see below). Built from the recorded `workload_pids` plus a
+    // best-effort live ppid walk; reaped after the root is torn down.
+    #[cfg(unix)]
+    let mut sandboxed_subtree_pids: Vec<i32> = Vec::new();
+
     #[cfg(unix)]
     {
         let processes = unix_ps_processes();
+
+        // Why a DIRECT per-host-pid kill is required on Linux:
+        //
+        // A non-network `ato run` execs its workload through
+        // `bwrap --unshare-all --new-session`. Two facts defeat the older
+        // teardown strategies:
+        //   1. `--new-session` makes the sandboxed server `setsid()`, so on
+        //      the host it leads its OWN process group — distinct from the
+        //      recorded bwrap pgid. `kill(-pgid, …)` therefore never reaches
+        //      it, and `--die-with-parent` does not propagate to namespaced
+        //      grandchildren on a force kill.
+        //   2. The keep-alive supervisor (`ato_run_pid`) is the import's
+        //      detached child; once the import process returns "running" the
+        //      supervisor is reparented to init, and a stop-time ppid walk
+        //      from `ato_run_pid` can no longer enumerate the subtree.
+        //
+        // The reliable handle is the set of host pids captured at spawn time
+        // (`session.workload_pids`) — the bwrap wrapper plus its namespaced
+        // descendants — each guarded by its recorded OS start time so a
+        // recycled pid is never signaled. We supplement that with a live ppid
+        // walk from the supervisor when it is still alive and owned.
+        for workload in &session.workload_pids {
+            if workload.pid <= 0 {
+                continue;
+            }
+            if !is_process_alive(workload.pid) {
+                continue;
+            }
+            // Defeat pid reuse: only signal when the recorded start time still
+            // matches (or no start time was recorded — legacy sessions).
+            if !process_start_time_matches(workload.pid, workload.start_time_unix_ms) {
+                continue;
+            }
+            if !sandboxed_subtree_pids.contains(&workload.pid) {
+                sandboxed_subtree_pids.push(workload.pid);
+            }
+        }
+        if ato_run_owned {
+            for pid in import_preview_descendant_pids(session.ato_run_pid, &processes) {
+                if !sandboxed_subtree_pids.contains(&pid) {
+                    sandboxed_subtree_pids.push(pid);
+                }
+            }
+        }
+
         let verified_pgids =
             verified_import_preview_process_groups(session, ato_run_owned, &processes);
         for pgid in verified_pgids {
@@ -1071,7 +1141,32 @@ fn stop_import_preview_session_record(
                 stopped = true;
             }
         }
-        if stopped {
+
+        // Direct per-pid teardown of the sandboxed subtree. SIGTERM first
+        // (so a server that exits cleanly gets the chance), then escalate to
+        // SIGKILL for anything that survives the grace window.
+        for pid in &sandboxed_subtree_pids {
+            if unsafe { libc::kill(*pid, libc::SIGTERM) } == 0 {
+                stopped = true;
+            }
+        }
+        if !sandboxed_subtree_pids.is_empty() {
+            let deadline = std::time::Instant::now() + grace;
+            while std::time::Instant::now() < deadline
+                && sandboxed_subtree_pids
+                    .iter()
+                    .any(|pid| is_process_alive(*pid))
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            for pid in &sandboxed_subtree_pids {
+                if is_process_alive(*pid) && unsafe { libc::kill(*pid, libc::SIGKILL) } == 0 {
+                    stopped = true;
+                }
+            }
+        }
+
+        if stopped && ato_run_owned {
             let _ = wait_for_process_exit(session.ato_run_pid, 10);
         }
     }
@@ -1084,6 +1179,37 @@ fn stop_import_preview_session_record(
             }
             Ok(false) => {}
             Err(error) => errors.push(error.to_string()),
+        }
+    }
+
+    // Final bounded reap: any sandboxed subtree pid still alive after the root
+    // went down (the namespaced server can outlive its bwrap parent for a beat,
+    // and reparenting to pid 1 makes it unreachable by re-walking the now-dead
+    // root's ppid chain). SIGKILL the captured pids by host pid until the
+    // subtree is gone or the deadline elapses. This is what closes the
+    // keep-alive preview port.
+    #[cfg(unix)]
+    {
+        if !sandboxed_subtree_pids.is_empty() {
+            let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let alive: Vec<i32> = sandboxed_subtree_pids
+                    .iter()
+                    .copied()
+                    .filter(|pid| is_process_alive(*pid))
+                    .collect();
+                if alive.is_empty() {
+                    break;
+                }
+                for pid in &alive {
+                    let _ = unsafe { libc::kill(*pid, libc::SIGKILL) };
+                    stopped = true;
+                }
+                if std::time::Instant::now() >= reap_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 
@@ -1316,6 +1442,41 @@ fn terminate_process_group_id_with_escalation(pgid: i32, term_grace: Duration) -
     signaled
 }
 
+/// Every host pid that descends — via the ppid chain — from `root_pid`,
+/// excluding `root_pid` itself. On Linux this reaches the bwrap wrapper and,
+/// through it, the namespaced sandboxed server: host `ps` reports namespaced
+/// processes with their host-side pids and a host-visible ppid pointing at
+/// their bwrap parent, so a breadth-first ppid walk enumerates the whole
+/// sandboxed subtree. The root is excluded because it is torn down separately
+/// by `terminate_import_preview_root`. Bounded by the process count so a
+/// malformed/cyclic ppid graph cannot loop forever.
+#[cfg(unix)]
+fn import_preview_descendant_pids(root_pid: i32, processes: &[UnixPsProcess]) -> Vec<i32> {
+    if root_pid <= 0 {
+        return Vec::new();
+    }
+    let mut descendants: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    // Re-scan the full table each round: a child discovered in one pass can
+    // itself be the parent of a process scanned earlier in the same table.
+    for _ in 0..processes.len().saturating_add(1) {
+        let mut grew = false;
+        for process in processes {
+            if process.pid <= 0 || process.pid == root_pid {
+                continue;
+            }
+            let parent_is_in_subtree =
+                process.ppid == root_pid || descendants.contains(&process.ppid);
+            if parent_is_in_subtree && descendants.insert(process.pid) {
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    descendants.into_iter().collect()
+}
+
 #[cfg(unix)]
 fn verified_import_preview_process_groups(
     session: &ImportPreviewSession,
@@ -1339,11 +1500,64 @@ fn verified_import_preview_process_groups(
     {
         if Some(pgid) == ato_run_pgid
             || process_group_matches_import_preview_session(pgid, session, processes)
+            || (ato_run_owned
+                && process_group_descends_from_pid(pgid, session.ato_run_pid, processes))
         {
             verified.insert(pgid);
         }
     }
     verified
+}
+
+/// True when any member of `pgid`'s process group descends — via the
+/// parent chain — from `ancestor_pid`. On Linux a non-network `ato run`
+/// launches its workload through `bwrap --unshare-all`, which leads its
+/// OWN process group (nacelle puts the bwrap wrapper in `process_group(0)`)
+/// and hides the sandboxed command line and cwd behind a PID namespace, so
+/// neither the `ATO_IMPORT_SESSION_ID` marker nor a `shadow_dir` reference
+/// is visible to the host `ps`. The ppid chain back to the Ato-owned
+/// `ato run` pid is the proof that the group still belongs to this session.
+/// Callers gate this on `ato_run_owned` (the root pid + start time matched),
+/// so it can only ever verify groups rooted under a confirmed Ato process —
+/// never a recycled or unrelated pid.
+#[cfg(unix)]
+fn process_group_descends_from_pid(
+    pgid: i32,
+    ancestor_pid: i32,
+    processes: &[UnixPsProcess],
+) -> bool {
+    if pgid <= 0 || ancestor_pid <= 0 {
+        return false;
+    }
+    processes
+        .iter()
+        .filter(|process| process.pgid == pgid)
+        .any(|process| process_descends_from_pid(process.pid, ancestor_pid, processes))
+}
+
+/// Walk the parent chain from `pid` looking for `ancestor_pid`. Bounded by
+/// the process count so a malformed/cyclic ppid graph can never loop
+/// forever; reaching pid 0/1 (no recorded parent) ends the walk.
+#[cfg(unix)]
+fn process_descends_from_pid(pid: i32, ancestor_pid: i32, processes: &[UnixPsProcess]) -> bool {
+    let mut current = pid;
+    for _ in 0..processes.len().saturating_add(1) {
+        if current == ancestor_pid {
+            return true;
+        }
+        let Some(parent) = processes
+            .iter()
+            .find(|process| process.pid == current)
+            .map(|process| process.ppid)
+        else {
+            return false;
+        };
+        if parent <= 0 || parent == current {
+            return false;
+        }
+        current = parent;
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -1582,6 +1796,7 @@ fn command_is_known_non_target(command: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnixPsProcess {
     pid: i32,
+    ppid: i32,
     pgid: i32,
     command: String,
 }
@@ -1589,11 +1804,11 @@ struct UnixPsProcess {
 #[cfg(unix)]
 fn unix_ps_processes() -> Vec<UnixPsProcess> {
     let output = Command::new("ps")
-        .args(["eww", "-axo", "pid=,pgid=,command="])
+        .args(["eww", "-axo", "pid=,ppid=,pgid=,command="])
         .output()
         .or_else(|_| {
             Command::new("ps")
-                .args(["-axo", "pid=,pgid=,command="])
+                .args(["-axo", "pid=,ppid=,pgid=,command="])
                 .output()
         });
     let Ok(output) = output else {
@@ -1613,9 +1828,15 @@ fn parse_unix_ps_process_line(line: &str) -> Option<UnixPsProcess> {
     let trimmed = line.trim();
     let mut parts = trimmed.split_whitespace();
     let pid = parts.next()?.parse().ok()?;
+    let ppid = parts.next()?.parse().ok()?;
     let pgid = parts.next()?.parse().ok()?;
     let command = parts.collect::<Vec<_>>().join(" ");
-    Some(UnixPsProcess { pid, pgid, command })
+    Some(UnixPsProcess {
+        pid,
+        ppid,
+        pgid,
+        command,
+    })
 }
 #[cfg(not(unix))]
 fn terminate_pgroup_with_escalation(pid: i32, _term_grace: Duration) {
@@ -1885,6 +2106,7 @@ mod tests {
         session.process_group_ids = vec![777];
         let processes = vec![UnixPsProcess {
             pid: 4242,
+            ppid: 1,
             pgid: 777,
             command: "python3 unrelated_server.py".to_string(),
         }];
@@ -1904,6 +2126,7 @@ mod tests {
         session.process_group_ids = vec![888];
         let processes = vec![UnixPsProcess {
             pid: 5151,
+            ppid: 1,
             pgid: 888,
             command: format!(
                 "ATO_IMPORT_SESSION_ID={} python3 {}",
@@ -1914,6 +2137,159 @@ mod tests {
 
         let verified = verified_import_preview_process_groups(&session, false, &processes);
         assert_eq!(verified.into_iter().collect::<Vec<_>>(), vec![888]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verified_import_preview_process_groups_accept_sandboxed_descendant_group() {
+        // Linux repro: the bwrap-sandboxed server leads its OWN process group
+        // (pgid 888) and hides its command line / cwd behind a PID namespace.
+        // The genuinely unverifiable member is the namespaced grandchild
+        // (pid 5151): its host-visible argv uses guest paths and its
+        // /proc/<pid>/cwd resolves inside the namespace mount, so it carries
+        // neither the ATO_IMPORT_SESSION_ID marker (stripped by bwrap
+        // --clearenv) nor a shadow_dir reference. (The real bwrap monitor argv
+        // does carry the host shadow_dir via `--ro-bind <shadow_dir> /app`, so
+        // it may already match on shadow_dir; this fixture models bwrap without
+        // it to isolate the descendant proof. Either way the only proof the
+        // namespaced workload belongs to the session is the ppid chain back to
+        // the Ato-owned `ato run` (pid 4000, pgid 4000).)
+        let mut session = test_import_preview_session("preview-sandboxed", i32::MAX, 4000, true);
+        session.process_group_ids = vec![4000, 888];
+        let processes = vec![
+            // The Ato-owned outer `ato run` leads pgid 4000.
+            UnixPsProcess {
+                pid: 4000,
+                ppid: 1,
+                pgid: 4000,
+                command: format!(
+                    "ato run {} --yes ATO_IMPORT_SESSION_ID={}",
+                    session.shadow_dir.display(),
+                    session.run_session_id
+                ),
+            },
+            // bwrap wrapper: child of the outer run but in its OWN group (888).
+            UnixPsProcess {
+                pid: 5000,
+                ppid: 4000,
+                pgid: 888,
+                command: "bwrap --unshare-all --die-with-parent".to_string(),
+            },
+            // Sandboxed server: namespaced, no session marker, no shadow_dir.
+            UnixPsProcess {
+                pid: 5151,
+                ppid: 5000,
+                pgid: 888,
+                command: "python3 keep_alive_server.py 1111".to_string(),
+            },
+        ];
+
+        let verified = verified_import_preview_process_groups(&session, true, &processes);
+        assert_eq!(
+            verified.into_iter().collect::<Vec<_>>(),
+            vec![888, 4000],
+            "the sandboxed descendant group must verify as Ato-owned"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verified_import_preview_process_groups_reject_descendant_when_root_unowned() {
+        // Same topology, but the root pid is NOT confirmed Ato-owned
+        // (ato_run_owned = false). The descendant proof must be ignored —
+        // fail closed rather than kill a group rooted under an unverified pid.
+        let mut session = test_import_preview_session("preview-unowned-root", i32::MAX, 4000, true);
+        session.process_group_ids = vec![888];
+        let processes = vec![
+            UnixPsProcess {
+                pid: 4000,
+                ppid: 1,
+                pgid: 4000,
+                command: "ato run --yes".to_string(),
+            },
+            UnixPsProcess {
+                pid: 5151,
+                ppid: 4000,
+                pgid: 888,
+                command: "python3 keep_alive_server.py 1111".to_string(),
+            },
+        ];
+
+        let verified = verified_import_preview_process_groups(&session, false, &processes);
+        assert!(verified.is_empty());
+        assert_eq!(
+            live_unverified_import_preview_process_groups(&session, &verified, &processes),
+            vec![888]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn import_preview_descendant_pids_walks_full_sandboxed_subtree() {
+        // Linux topology: ato run (4000) → bwrap (5000, own pgroup) →
+        // namespaced server (5151, its own setsid pgroup). The direct-pid
+        // teardown must enumerate BOTH the bwrap wrapper and the namespaced
+        // server, regardless of their process groups, and must exclude the
+        // root itself (it is torn down separately).
+        let processes = vec![
+            UnixPsProcess {
+                pid: 1,
+                ppid: 0,
+                pgid: 1,
+                command: "init".to_string(),
+            },
+            UnixPsProcess {
+                pid: 4000,
+                ppid: 1,
+                pgid: 4000,
+                command: "ato run /shadow --yes".to_string(),
+            },
+            UnixPsProcess {
+                pid: 5000,
+                ppid: 4000,
+                pgid: 888,
+                command: "bwrap --unshare-all --new-session --die-with-parent".to_string(),
+            },
+            UnixPsProcess {
+                pid: 5151,
+                ppid: 5000,
+                pgid: 5151,
+                command: "python3 keep_alive_server.py 1111".to_string(),
+            },
+            // Unrelated process: must not be swept.
+            UnixPsProcess {
+                pid: 9999,
+                ppid: 1,
+                pgid: 9999,
+                command: "python3 someone_elses_server.py".to_string(),
+            },
+        ];
+
+        let descendants = import_preview_descendant_pids(4000, &processes);
+        assert_eq!(descendants, vec![5000, 5151]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn import_preview_descendant_pids_rejects_nonpositive_root_and_unrelated_tree() {
+        let processes = vec![
+            UnixPsProcess {
+                pid: 5151,
+                ppid: 7777,
+                pgid: 5151,
+                command: "python3 keep_alive_server.py 1111".to_string(),
+            },
+            UnixPsProcess {
+                pid: 7777,
+                ppid: 1,
+                pgid: 7777,
+                command: "unrelated parent".to_string(),
+            },
+        ];
+        // No process links back to root 4000, so the subtree is empty.
+        assert!(import_preview_descendant_pids(4000, &processes).is_empty());
+        // A non-positive root pid is always rejected.
+        assert!(import_preview_descendant_pids(0, &processes).is_empty());
     }
 
     #[test]
@@ -1934,6 +2310,7 @@ mod tests {
     fn import_preview_env_sweep_candidates_ignore_run_session_only_marker() {
         let processes = vec![UnixPsProcess {
             pid: 4242,
+            ppid: 1,
             pgid: 777,
             command: "ATO_RUN_SESSION_ID=run-123 python3 server.py".to_string(),
         }];
@@ -1955,6 +2332,7 @@ mod tests {
         session.process_group_ids = vec![888];
         let processes = vec![UnixPsProcess {
             pid: 5151,
+            ppid: 1,
             pgid: 888,
             command: format!(
                 "ATO_IMPORT_SESSION_ID={} python3 {}",
@@ -1973,6 +2351,7 @@ mod tests {
     fn import_preview_env_sweep_candidates_select_missing_import_session_marker() {
         let processes = vec![UnixPsProcess {
             pid: 6262,
+            ppid: 1,
             pgid: 999,
             command: "ATO_IMPORT_SESSION_ID=preview-missing python3 stale_server.py".to_string(),
         }];
@@ -2011,6 +2390,7 @@ mod tests {
                 .ok()
                 .and_then(ato_session_core::process::process_start_time_unix_ms),
             process_group_ids: Vec::new(),
+            workload_pids: Vec::new(),
             primary_port: None,
             primary_url: None,
             shadow_dir,
@@ -2168,6 +2548,69 @@ mod tests {
         assert!(stopped);
         let _ = workload.wait().expect("wait workload");
         assert!(!pm.pid_file_path("capsule-workload").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_preview_stop_kills_recorded_workload_pid_when_supervisor_dead() {
+        // Models the Linux keep-alive bug: the `ato run` supervisor has exited
+        // (or been reparented and is no longer reachable by a ppid walk), yet a
+        // sandboxed server child is still alive. The durable recorded
+        // workload pid must be SIGKILLed directly so the port closes.
+        let mut workload = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn workload");
+        let workload_pid = workload.id() as i32;
+
+        // ato_run_pid points at a pid that is NOT alive (use the workload's own
+        // future-reaped value is unsafe; instead pick a very unlikely-live pid).
+        // i32::MAX is never a live pid, so ato_run_owned stays false and the
+        // stop path must fall back to the recorded workload pid.
+        let mut session = test_import_preview_session("preview-workload-kill", 1, i32::MAX, true);
+        session.workload_pids = vec![ImportPreviewWorkloadPid {
+            pid: workload_pid,
+            start_time_unix_ms: u32::try_from(workload_pid)
+                .ok()
+                .and_then(ato_session_core::process::process_start_time_unix_ms),
+        }];
+
+        let result = stop_import_preview_session_record(&session, true);
+        assert_eq!(result.status, ImportPreviewStopStatus::Stopped);
+
+        let _ = workload.wait();
+        assert!(
+            !is_process_alive(workload_pid),
+            "recorded workload pid must be terminated by stop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_preview_stop_skips_recorded_workload_pid_on_start_time_mismatch() {
+        // Defeat pid reuse: a recorded workload pid whose start time no longer
+        // matches must NOT be signaled (it has been recycled to an unrelated
+        // process). The bystander `sleep` survives the stop call.
+        let mut bystander = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn bystander");
+        let bystander_pid = bystander.id() as i32;
+
+        let mut session = test_import_preview_session("preview-workload-reuse", 1, i32::MAX, true);
+        session.workload_pids = vec![ImportPreviewWorkloadPid {
+            pid: bystander_pid,
+            // Deliberately wrong start time → pid-reuse guard rejects the kill.
+            start_time_unix_ms: Some(1),
+        }];
+
+        let _ = stop_import_preview_session_record(&session, true);
+        assert!(
+            is_process_alive(bystander_pid),
+            "a recycled pid (start-time mismatch) must not be killed"
+        );
+        let _ = bystander.kill();
+        let _ = bystander.wait();
     }
 
     #[test]
