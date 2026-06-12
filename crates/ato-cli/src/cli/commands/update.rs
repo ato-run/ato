@@ -47,20 +47,34 @@ pub fn update() -> Result<()> {
     Ok(())
 }
 
+/// Classified result of a runner self-update attempt, so the caller can decide
+/// between re-exec, a cooldown retry, or stopping (a terminal misconfig).
+pub enum SelfUpdateOutcome {
+    /// Updated to a new version (the runner should re-exec into it).
+    Updated(String),
+    /// Already on the latest release (nothing to do).
+    AlreadyLatest,
+    /// No cargo-dist install receipt — self-update is impossible here (dev build
+    /// or a non-installer install). Terminal: do not retry.
+    NoReceipt,
+}
+
 /// Self-update used by the Connected Runner agent when the control plane signals
-/// a target version. Async-safe (no nested tokio runtime, unlike [`update`]).
-/// Requires the cargo-dist install receipt (installed via ato.run/install.sh or
-/// a release build); a receiptless dev build returns an error rather than
-/// silently doing nothing. Returns Some(new_version) when it updated, None when
-/// already on the latest release.
-pub async fn run_self_update_async() -> Result<Option<String>> {
+/// it should update. Always targets the LATEST release (axoupdater) — the
+/// server-side "minimum" is a floor the operator sets, not an exact version.
+/// Async-safe (no nested tokio runtime, unlike [`update`]). A transient
+/// failure (network / release fetch) returns Err for the caller to retry; a
+/// missing install receipt is the terminal `NoReceipt`.
+pub async fn run_self_update_async() -> Result<SelfUpdateOutcome> {
     let mut updater = AxoUpdater::new_for("ato");
-    updater
-        .load_receipt()
-        .context("no ato install receipt; self-update needs an install via ato.run/install.sh")?;
+    if updater.load_receipt().is_err() {
+        return Ok(SelfUpdateOutcome::NoReceipt);
+    }
     updater.disable_installer_output();
-    let result = updater.run().await.context("ato self-update failed")?;
-    Ok(result.map(|r| r.new_version.to_string()))
+    match updater.run().await.context("ato self-update failed")? {
+        Some(result) => Ok(SelfUpdateOutcome::Updated(result.new_version.to_string())),
+        None => Ok(SelfUpdateOutcome::AlreadyLatest),
+    }
 }
 
 fn resolve_installer_url() -> String {
