@@ -99,9 +99,9 @@ pub(crate) fn clear_install_lifecycle_context() {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// let _guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx);
-/// execute_run_command(...)?;
+/// execute_run_command(/* ... */)?;
 /// // Context is cleared here automatically.
 /// ```
 pub(crate) struct ScopedInstallLifecycleGuard;
