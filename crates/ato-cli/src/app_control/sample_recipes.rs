@@ -375,6 +375,9 @@ mod tests {
 
     #[test]
     fn materialized_content_matches_embedded() {
+        // Materializes under an ATO_HOME-derived path and reads it back;
+        // serialize against env-mutating tests or the path moves mid-test.
+        let _env = crate::tests::env_lock().lock().unwrap();
         let result = resolve_sample_recipe_for_input("memos")
             .expect("no error")
             .expect("memos alias");
@@ -385,6 +388,7 @@ mod tests {
 
     #[test]
     fn materialize_all_writes_all_recipes() {
+        let _env = crate::tests::env_lock().lock().unwrap();
         materialize_all_sample_recipes().expect("materialize all");
         for binding in SAMPLE_RECIPE_CATALOG {
             let root = capsule_core::common::paths::ato_path_or_workspace_tmp("sample-recipes");

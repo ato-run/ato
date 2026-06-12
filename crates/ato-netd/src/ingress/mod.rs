@@ -283,8 +283,10 @@ impl IngressManager {
 
     /// Deregister an ephemeral ingress route. No-op if key is unknown.
     ///
-    /// The released port is moved to a recently-freed set and will not be
-    /// reassigned to another ephemeral route within this daemon lifetime.
+    /// The released port is moved to a bounded recently-freed cooldown set
+    /// and is not reassigned to another ephemeral route while it stays
+    /// there (oldest entries are evicted or reused first when the set is
+    /// full or the range is tight).
     pub async fn deregister_ephemeral(&mut self, session_key: &str) {
         if let Some(handle) = self.ephemeral_routes.remove(session_key) {
             let _ = handle.cancel_tx.send(true);

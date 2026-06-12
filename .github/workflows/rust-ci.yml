@@ -7,9 +7,10 @@ name: Rust CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -57,31 +58,98 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # The Windows leg is informational for now: the ato-cli test suite had
+    # never compiled (let alone run) on Windows before this leg existed, and
+    # carries ~112 pre-existing failures (path separators, snapshots, unix
+    # assumptions). It must not block dev integration while that parity debt
+    # is paid down; see the Windows test-parity tracking issue.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    env:
+      # The full workspace debug build with default debuginfo overflows the
+      # ubuntu runner's disk ("No space left on device" at link time).
+      # Line tables keep file:line in backtraces at a fraction of the size.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Full history so we can diff this PR against its merge base.
+          fetch-depth: 0
+      - name: Free runner disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # `ato-desktop` requires GPUI's heavy native deps (X11/Wayland on Linux,
-      # Cocoa on macOS) which are not yet wired into CI. Limit the matrix to
-      # `ato-cli` + shared core crates until M3 lands the desktop CI bringup.
-      #
-      # Build ato + nacelle binaries first so share_interactive_e2e tests can
-      # resolve them from PATH (they spawn child processes during tests).
+      # Run only the tests relevant to the change: a crate is selected if it
+      # was edited, or transitively depends on an edited crate. An unrelated PR
+      # (e.g. a desktop- or netd-only fix) therefore skips the heavy ato-cli
+      # suite instead of running — and flaking on — it. `ato-desktop` is outside
+      # the cargo workspace (own Cargo.lock, GUI-only git deps) and is never
+      # built here, so desktop-only changes select nothing. Selection is
+      # fail-safe: an unknown diff or a build-wide file falls back to the full
+      # set. See .github/scripts/affected_crates.py.
+      - name: Select affected crates
+        id: affected
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=python3; command -v "$PY" >/dev/null 2>&1 || PY=python
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags --quiet origin "$GITHUB_BASE_REF" || true
+            base="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD 2>/dev/null || true)"
+          else
+            base="$(git rev-parse --verify --quiet HEAD~1 || true)"
+          fi
+          if [ -n "$base" ]; then
+            git diff --name-only "$base" HEAD > changed.txt || echo "<FULL>" > changed.txt
+          else
+            echo "<FULL>" > changed.txt
+          fi
+          echo "----- changed files -----"; cat changed.txt
+          "$PY" .github/scripts/affected_crates.py < changed.txt > pkgs.txt
+          echo "----- affected crates -----"; cat pkgs.txt
+          count="$(grep -c . pkgs.txt || true)"; count="${count:-0}"
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          if grep -qx ato-cli pkgs.txt; then
+            echo "ato_cli=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ato_cli=0" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.affected.outputs.count != '0'
         run: |
           sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+      # ato-cli's e2e tests spawn `ato`/`nacelle`, so they must resolve from
+      # PATH. Only build them when ato-cli is actually in the affected set.
       - name: Build test binaries
+        if: steps.affected.outputs.ato_cli == '1'
+        shell: bash
         run: |
           cargo build -p ato-cli --bin ato
           cargo build -p nacelle --bin nacelle
           echo "$(pwd)/target/debug" >> $GITHUB_PATH
-      - name: Run tests
+      # Test each selected crate in its own `cargo test -p` process, matching
+      # the previous job's per-crate isolation (a single combined invocation
+      # raises cross-crate test parallelism and destabilises ato-cli's
+      # process-spawning e2e tests). Run them all, then fail if any failed.
+      - name: Run affected tests
+        if: steps.affected.outputs.count != '0'
+        shell: bash
         run: |
-          cargo test -p ato-cli --no-fail-fast
-          cargo test -p capsule-core --no-fail-fast
-          cargo test -p lock-draft-engine --no-fail-fast
+          set -uo pipefail
+          rc=0
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            echo "::group::cargo test -p $p"
+            cargo test -p "$p" --no-fail-fast || rc=1
+            echo "::endgroup::"
+          done < pkgs.txt
+          exit $rc
+      - name: No affected crates
+        if: steps.affected.outputs.count == '0'
+        run: echo "No testable workspace crate is affected by this change — skipping the test run."

@@ -44,8 +44,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::runtime::oci_provider::{
-    OciImageResolutionMode, OciImageResolutionRequest, OciProvider, OciProviderError,
-    OciProviderProbe, OciProviderSelector, OciResolvedImage,
+    OciProvider, OciProviderError, OciProviderProbe, OciProviderSelector,
 };
 use capsule_core::execution_plan::derive::compile_execution_plan;
 use capsule_core::execution_plan::error::AtoExecutionError;
@@ -202,48 +201,6 @@ fn oci_provider_name(kind: OciProviderKind) -> &'static str {
         OciProviderKind::DockerCompatible => "docker-compatible",
         OciProviderKind::AtoNative => "ato-native",
     }
-}
-
-/// Resolved images and per-target failures from an image resolution pass.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OciImageResolutionReport {
-    pub resolved: Vec<OciResolvedImage>,
-    /// `(target_label, error)` pairs for targets that failed to resolve.
-    pub failures: Vec<(String, OciProviderError)>,
-}
-
-/// Resolve OCI images for every request using the provider from `selector`.
-///
-/// - `Required`: returns `Err` on the first resolution failure.
-/// - `BestEffort`: continues collecting failures and returns `Ok` with a
-///   report that may contain both resolved images and failures.
-#[allow(dead_code)]
-pub(crate) async fn preflight_oci_image_resolution<S>(
-    selector: &S,
-    requests: &[OciImageResolutionRequest],
-    mode: OciImageResolutionMode,
-) -> Result<OciImageResolutionReport, OciProviderError>
-where
-    S: OciProviderSelector,
-{
-    let provider = selector.select_provider();
-    let mut resolved = Vec::new();
-    let mut failures: Vec<(String, OciProviderError)> = Vec::new();
-
-    for request in requests {
-        match provider.resolve_image(request).await {
-            Ok(image) => resolved.push(image),
-            Err(error) => match mode {
-                OciImageResolutionMode::Required => return Err(error),
-                OciImageResolutionMode::BestEffort => {
-                    failures.push((request.target_label.clone(), error));
-                }
-            },
-        }
-    }
-
-    Ok(OciImageResolutionReport { resolved, failures })
 }
 
 /// Errors specific to the preflight collector. Anything that prevents
@@ -882,7 +839,7 @@ fn config_field_for_env(name: &str, description: &str) -> ConfigField {
 mod tests {
     use super::*;
     use crate::runtime::oci_provider::{
-        CommandOutput, OciCommandRunner, OciPlatformPolicy, PodmanProbePlatform, PodmanProvider,
+        CommandOutput, OciCommandRunner, PodmanProbePlatform, PodmanProvider,
     };
     use std::collections::HashMap;
     use std::fs;
@@ -1187,138 +1144,6 @@ egress_allow = ["smtp.gmail.com"]
         assert_eq!(error.code(), "oci_provider_capability_unsupported");
     }
 
-    // ── OCI image resolution preflight tests ─────────────────────────────────
-
-    fn resolution_selector(runner: FakeRunner) -> TestOciProviderSelector {
-        selector(runner, PodmanProbePlatform::Linux)
-    }
-
-    fn multi_arch_manifest_json() -> &'static str {
-        r#"{
-          "schemaVersion": 2,
-          "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
-          "manifests": [
-            {
-              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-              "platform": { "os": "linux", "architecture": "amd64" }
-            },
-            {
-              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-              "platform": { "os": "linux", "architecture": "arm64", "variant": "v8" }
-            }
-          ]
-        }"#
-    }
-
-    #[tokio::test]
-    async fn preflight_image_resolution_required_mode_fails_on_first_error() {
-        use crate::runtime::oci_provider::{OciImageResolutionMode, OciImageResolutionRequest};
-        use capsule_core::types::OciPlatform;
-
-        let selector = resolution_selector(
-            FakeRunner::default()
-                // First request: bad ref, will fail before hitting the runner
-                // (malformed ref)
-                .with_output(
-                    &["podman", "manifest", "inspect", "postgres:14"],
-                    output(0, multi_arch_manifest_json(), ""),
-                ),
-        );
-
-        let requests = vec![
-            OciImageResolutionRequest {
-                target_label: "db".to_string(),
-                declared_ref: "has space".to_string(), // malformed
-                requested_platform: None,
-                resolution_mode: OciImageResolutionMode::Required,
-                importer_input_hash: None,
-                platform_policy: OciPlatformPolicy::NativeOnly,
-            },
-            OciImageResolutionRequest {
-                target_label: "app".to_string(),
-                declared_ref: "postgres:14".to_string(),
-                requested_platform: Some(OciPlatform {
-                    os: "linux".to_string(),
-                    architecture: "amd64".to_string(),
-                    variant: None,
-                }),
-                resolution_mode: OciImageResolutionMode::Required,
-                importer_input_hash: None,
-                platform_policy: OciPlatformPolicy::NativeOnly,
-            },
-        ];
-
-        let err =
-            preflight_oci_image_resolution(&selector, &requests, OciImageResolutionMode::Required)
-                .await
-                .expect_err("required mode must fail on first error");
-        assert_eq!(err.code(), "oci_image_ref_malformed");
-    }
-
-    #[tokio::test]
-    async fn preflight_image_resolution_best_effort_collects_all_failures() {
-        use crate::runtime::oci_provider::{OciImageResolutionMode, OciImageResolutionRequest};
-        use capsule_core::types::OciPlatform;
-
-        let selector = resolution_selector(FakeRunner::default().with_output(
-            &["podman", "manifest", "inspect", "postgres:14"],
-            output(0, multi_arch_manifest_json(), ""),
-        ));
-
-        let requests = vec![
-            OciImageResolutionRequest {
-                target_label: "db".to_string(),
-                declared_ref: "has space".to_string(), // malformed
-                requested_platform: None,
-                resolution_mode: OciImageResolutionMode::BestEffort,
-                importer_input_hash: None,
-                platform_policy: OciPlatformPolicy::NativeOnly,
-            },
-            OciImageResolutionRequest {
-                target_label: "app".to_string(),
-                declared_ref: "postgres:14".to_string(),
-                requested_platform: Some(OciPlatform {
-                    os: "linux".to_string(),
-                    architecture: "amd64".to_string(),
-                    variant: None,
-                }),
-                resolution_mode: OciImageResolutionMode::BestEffort,
-                importer_input_hash: None,
-                platform_policy: OciPlatformPolicy::NativeOnly,
-            },
-        ];
-
-        let report = preflight_oci_image_resolution(
-            &selector,
-            &requests,
-            OciImageResolutionMode::BestEffort,
-        )
-        .await
-        .expect("best effort must not fail");
-
-        assert_eq!(report.failures.len(), 1, "one failure expected");
-        assert_eq!(report.failures[0].0, "db", "failure is for 'db'");
-        assert_eq!(report.failures[0].1.code(), "oci_image_ref_malformed");
-        assert_eq!(report.resolved.len(), 1, "one resolved image");
-        assert_eq!(report.resolved[0].declared_ref, "postgres:14");
-    }
-
-    #[tokio::test]
-    async fn preflight_image_resolution_empty_requests_returns_empty_report() {
-        use crate::runtime::oci_provider::OciImageResolutionMode;
-
-        let selector = resolution_selector(FakeRunner::default());
-
-        let report =
-            preflight_oci_image_resolution(&selector, &[], OciImageResolutionMode::Required)
-                .await
-                .expect("empty requests must succeed");
-
-        assert!(report.resolved.is_empty());
-        assert!(report.failures.is_empty());
-    }
     /// aggregate envelope rather than emitting them serially via
     /// E103/E302 errors.
     ///

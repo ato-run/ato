@@ -2,7 +2,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -94,23 +93,6 @@ pub enum ShellEvent {
     TitleChanged {
         pane_id: usize,
         title: String,
-    },
-    GuestConsoleLog {
-        pane_id: usize,
-        level: String,
-        message: String,
-    },
-    GuestNetworkStart {
-        pane_id: usize,
-        request_id: String,
-        method: String,
-        url: String,
-    },
-    GuestNetworkEnd {
-        pane_id: usize,
-        request_id: String,
-        status: u16,
-        duration_ms: u64,
     },
     ProcessLog {
         pane_id: usize,
@@ -217,6 +199,25 @@ impl BridgeProxy {
                 capability,
                 payload,
             } => {
+                // Bind the command to the capability that authorizes it: the
+                // guest-supplied capability must be one the command actually
+                // requires AND must be present in the allowlist. Checking the
+                // allowlist alone would let any single grant unlock every
+                // host command.
+                if !invoke_capability_authorizes(&command, &capability) {
+                    self.log(
+                        ActivityTone::Warning,
+                        format!(
+                            "Fail-closed guest invoke denied: {capability} does not authorize {command}"
+                        ),
+                    );
+                    return GuestBridgeResponse::Denied {
+                        request_id: Some(request_id),
+                        message: format!(
+                            "capability {capability} does not authorize command {command}"
+                        ),
+                    };
+                }
                 if !capability_allowed(allowlist, &capability) {
                     self.log(
                         ActivityTone::Warning,
@@ -371,6 +372,8 @@ impl BridgeProxy {
         payload: Value,
         session: Option<&GuestSessionContext>,
     ) -> Result<Value> {
+        // Every command handled here must be bound to its required
+        // capability in `invoke_capability_authorizes` above.
         match command {
             "shell.workspaceInfo" => Ok(payload),
             "plugin:window|setTitle" => {
@@ -398,6 +401,28 @@ impl BridgeProxy {
 
 fn capability_allowed(allowlist: &[String], capability: &str) -> bool {
     allowlist.iter().any(|grant| grant == capability)
+}
+
+/// Command → capability binding for the invoke path.
+///
+/// Two capability naming schemes coexist: kebab-case `CapabilityGrant` names
+/// used by shell-managed routes (e.g. "read-file") and the command-shaped
+/// names declared in capsule manifests under
+/// `metadata.ato_desktop_guest.capabilities` (e.g. "plugin:fs|readFile").
+/// Each host command accepts only the capability names listed here; every
+/// other command is proxied to the guest's own backend, which is gated
+/// behind the manifest-declared "app.invoke" grant. Commands added to
+/// `dispatch_invoke` must declare their capability here or they fail closed.
+fn invoke_capability_authorizes(command: &str, capability: &str) -> bool {
+    let accepted: &[&str] = match command {
+        "shell.workspaceInfo" => &["workspace-info"],
+        "plugin:window|setTitle" => &["plugin:window|setTitle"],
+        "plugin:fs|readFile" => &["read-file", "plugin:fs|readFile"],
+        "plugin:dialog|open" => &["plugin:dialog|open"],
+        "shell.open" => &["open-external", "shell.open"],
+        _ => &["app.invoke"],
+    };
+    accepted.contains(&capability)
 }
 
 fn read_session_file(session: Option<&GuestSessionContext>, payload: &Value) -> Result<Value> {
@@ -430,14 +455,22 @@ fn open_external(payload: &Value) -> Result<Value> {
         .get("url")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("shell.open requires string payload.url"))?;
-    let status = Command::new("open")
-        .arg(url)
-        .status()
+    validate_external_url(url)?;
+    crate::proc_util::open_external_url(url)
         .with_context(|| format!("failed to invoke open for {url}"))?;
-    if !status.success() {
-        anyhow::bail!("open returned non-zero status for {url}");
-    }
     Ok(serde_json::json!({ "opened": url }))
+}
+
+/// Guests may only open web links in the user's browser. Reject `file://`
+/// URLs, bare paths, and custom schemes so a guest cannot launch arbitrary
+/// local files, app bundles, or scheme handlers through the OS open command
+/// (matches the dock/app external-open paths).
+fn validate_external_url(url: &str) -> Result<()> {
+    let parsed = Url::parse(url).with_context(|| format!("invalid shell.open URL {url}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("shell.open can open only http(s) URLs: {url}");
+    }
+    Ok(())
 }
 
 fn proxy_to_guest_backend(
@@ -523,6 +556,108 @@ mod tests {
     }
 
     #[test]
+    fn bridge_denies_command_invoked_under_unrelated_granted_capability() {
+        // Regression: holding any single grant must not unlock every host
+        // command. A guest granted only read-file claims that capability
+        // while invoking shell.open.
+        let bridge = BridgeProxy::new();
+        let request = serde_json::json!({
+            "kind": "invoke",
+            "request_id": 2,
+            "command": "shell.open",
+            "capability": "read-file",
+            "payload": {"url": "/System/Applications/Calculator.app"}
+        });
+        let response =
+            bridge.handle_message(&request.to_string(), &["read-file".to_string()], None);
+        assert!(matches!(response, GuestBridgeResponse::Denied { .. }));
+    }
+
+    #[test]
+    fn bridge_denies_backend_proxy_under_non_app_invoke_capability() {
+        // Unknown commands proxy to the guest backend and require the
+        // "app.invoke" grant; another granted capability must not stand in.
+        let bridge = BridgeProxy::new();
+        let request = serde_json::json!({
+            "kind": "invoke",
+            "request_id": 3,
+            "command": "ping",
+            "capability": "read-file",
+            "payload": {"message": "hi"}
+        });
+        let response =
+            bridge.handle_message(&request.to_string(), &["read-file".to_string()], None);
+        assert!(matches!(response, GuestBridgeResponse::Denied { .. }));
+    }
+
+    #[test]
+    fn bridge_denies_devtools_telemetry_invoke() {
+        // Regression for #652: the removed DevTools guest-telemetry path
+        // POSTed invokes under a synthetic "__devtools__" capability. That
+        // capability is not part of the grant vocabulary and no host command
+        // declares it, so the channel must fail closed — even if a guest were
+        // somehow granted "__devtools__", no devtools.* command authorizes it.
+        let bridge = BridgeProxy::new();
+        for command in [
+            "devtools.console",
+            "devtools.network.start",
+            "devtools.network.end",
+        ] {
+            let request = serde_json::json!({
+                "kind": "invoke",
+                "request_id": 6,
+                "command": command,
+                "capability": "__devtools__",
+                "payload": {"message": "telemetry"}
+            });
+            // Granting "__devtools__" outright still fails closed because no
+            // command accepts it as an authorizing capability.
+            let response =
+                bridge.handle_message(&request.to_string(), &["__devtools__".to_string()], None);
+            assert!(
+                matches!(response, GuestBridgeResponse::Denied { .. }),
+                "{command} under __devtools__ should be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_allows_command_under_its_required_capability() {
+        let bridge = BridgeProxy::new();
+        let request = serde_json::json!({
+            "kind": "invoke",
+            "request_id": 4,
+            "command": "plugin:window|setTitle",
+            "capability": "plugin:window|setTitle",
+            "payload": {"title": "Hello"}
+        });
+        let response = bridge.handle_message(
+            &request.to_string(),
+            &["plugin:window|setTitle".to_string()],
+            None,
+        );
+        assert!(matches!(response, GuestBridgeResponse::Ok { .. }));
+    }
+
+    #[test]
+    fn bridge_authorizes_backend_proxy_under_app_invoke_grant() {
+        // With "app.invoke" granted, an unknown command passes authorization
+        // and reaches the backend proxy, which errors (not denies) without a
+        // guest session context.
+        let bridge = BridgeProxy::new();
+        let request = serde_json::json!({
+            "kind": "invoke",
+            "request_id": 5,
+            "command": "ping",
+            "capability": "app.invoke",
+            "payload": {"message": "hi"}
+        });
+        let response =
+            bridge.handle_message(&request.to_string(), &["app.invoke".to_string()], None);
+        assert!(matches!(response, GuestBridgeResponse::Error { .. }));
+    }
+
+    #[test]
     fn bridge_serializes_json_response() {
         let bridge = BridgeProxy::new();
         let response = GuestBridgeResponse::Ok {
@@ -536,5 +671,27 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["request_id"], 7);
+    }
+
+    #[test]
+    fn validate_external_url_accepts_http_and_https() {
+        assert!(validate_external_url("http://example.com/path").is_ok());
+        assert!(validate_external_url("https://example.com").is_ok());
+    }
+
+    #[test]
+    fn validate_external_url_rejects_non_web_schemes() {
+        assert!(validate_external_url("file:///Users/me/.ssh/config").is_err());
+        assert!(validate_external_url("file:///Applications/Planted.app").is_err());
+        assert!(validate_external_url("ssh://example.com").is_err());
+        assert!(validate_external_url("x-custom-handler://payload").is_err());
+        assert!(validate_external_url("/etc/passwd").is_err());
+        assert!(validate_external_url("not a url").is_err());
+    }
+
+    #[test]
+    fn open_external_rejects_file_url_payload() {
+        let payload = serde_json::json!({ "url": "file:///etc/passwd" });
+        assert!(open_external(&payload).is_err());
     }
 }
