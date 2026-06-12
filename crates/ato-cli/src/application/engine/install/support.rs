@@ -909,6 +909,11 @@ pub(crate) async fn resolve_run_target_or_install(
             }
 
             let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+            // Set only when a community capsule.toml is chosen SILENTLY (the
+            // non-interactive `-y` single-candidate auto-pick). Such a snapshot
+            // must defer to a repo that ships its own manifest — see
+            // `should_apply_effective_toml`.
+            let mut community_auto_selected = false;
             let selected_community_toml: Option<String> = if use_existing_toml.is_some() {
                 None
             } else {
@@ -926,10 +931,9 @@ pub(crate) async fn resolve_run_target_or_install(
                                 Err(_) => None,
                             }
                         } else if candidates.len() == 1 && yes {
-                            futures::executor::block_on(reporter.notify(format!(
-                                "Using community capsule.toml: {}",
-                                candidates[0].title
-                            )))?;
+                            // Silent auto-pick: applied only if the repo ships
+                            // no manifest of its own (see overwrite site below).
+                            community_auto_selected = true;
                             Some(0)
                         } else {
                             return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
@@ -1133,7 +1137,25 @@ pub(crate) async fn resolve_run_target_or_install(
             let checkout_root = checkout.checkout_dir.clone();
             maybe_copy_env_example(&checkout_root, json_mode);
 
-            if let Some(toml_content) = effective_toml {
+            let repo_ships_manifest = checkout_root.join("capsule.toml").exists();
+            // A silently auto-selected community snapshot must not override the
+            // repo's own manifest: the executed manifest (and the consent
+            // policy derived from it) must be the materialized source, not a
+            // stale catalog snapshot. Explicit -T / interactive picks still win.
+            let apply_effective_toml = effective_toml.is_some()
+                && should_apply_effective_toml(community_auto_selected, repo_ships_manifest);
+            if community_auto_selected && repo_ships_manifest {
+                futures::executor::block_on(reporter.notify(format!(
+                    "Using the repository's own capsule.toml for {repository} (a community snapshot exists; pass -T to use it instead)."
+                )))?;
+            }
+
+            if let Some(toml_content) = effective_toml.filter(|_| apply_effective_toml) {
+                if !community_auto_selected {
+                    futures::executor::block_on(
+                        reporter.notify("Using the selected capsule.toml override.".to_string()),
+                    )?;
+                }
                 let toml_path = checkout_root.join("capsule.toml");
                 std::fs::write(&toml_path, toml_content).with_context(|| {
                     format!("Failed to write capsule.toml to {}", toml_path.display())
@@ -1466,6 +1488,26 @@ pub(crate) async fn resolve_run_target_or_install(
         transient_workspace_root: None,
         community_submit_context: None,
     })
+}
+
+/// Whether an `effective_toml` should overwrite the materialized repo's own
+/// `capsule.toml`.
+///
+/// Invariant (P3-B.5 — consent/policy determinism): a community/catalog
+/// snapshot that was selected **silently** (the non-interactive `-y`
+/// single-candidate auto-pick) MUST NOT override a repo that ships its own
+/// manifest. The materialized source is the source of truth; overriding it
+/// would make the executed manifest — and therefore the consent policy the
+/// gate computes and the user is asked to approve — a stale catalog snapshot
+/// (e.g. hello-capsule@0.2.0 / api.openai.com) instead of what the repo
+/// actually declares (0.3.0 / loopback). Explicit selections (`-T`, or an
+/// interactive choice) are honoured even when the repo ships a manifest,
+/// because the user chose them on purpose.
+fn should_apply_effective_toml(community_auto_selected: bool, repo_ships_manifest: bool) -> bool {
+    if community_auto_selected && repo_ships_manifest {
+        return false;
+    }
+    true
 }
 
 fn is_import_preview_run_target(path: &Path, ato_home: &Path) -> bool {
@@ -3198,6 +3240,33 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::sync::Arc;
+
+    // ── P3-B.5: a silent community snapshot must not override a repo's
+    //    own materialized manifest (consent/policy determinism). ──
+
+    #[test]
+    fn silent_community_snapshot_does_not_override_repo_manifest() {
+        // The exact regression: hello-capsule ships its own capsule.toml
+        // (0.3.0/loopback), a single community snapshot (0.2.0/openai) was
+        // auto-picked by `-y`. The repo manifest must win, so consent is
+        // computed from what actually runs.
+        assert!(!should_apply_effective_toml(true, true));
+    }
+
+    #[test]
+    fn silent_community_snapshot_is_used_only_when_repo_has_no_manifest() {
+        // Genuine fallback: the repo ships no capsule.toml, so the
+        // auto-picked community snapshot is the only manifest available.
+        assert!(should_apply_effective_toml(true, false));
+    }
+
+    #[test]
+    fn explicit_toml_override_is_honoured_even_when_repo_ships_manifest() {
+        // -T / interactive selection is community_auto_selected == false:
+        // the user chose it on purpose, so it overrides the repo manifest.
+        assert!(should_apply_effective_toml(false, true));
+        assert!(should_apply_effective_toml(false, false));
+    }
 
     struct EnvVarGuard {
         key: &'static str,

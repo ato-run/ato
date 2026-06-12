@@ -24,11 +24,6 @@ pub(crate) fn receipt_path(root: &Path, execution_id: &str) -> Result<PathBuf> {
     Ok(receipt_dir(root, execution_id)?.join(RECEIPT_FILE_NAME))
 }
 
-#[allow(dead_code)] // retained for v1 callers and tests during the v2 migration.
-pub(crate) fn write_receipt_atomic(receipt: &ExecutionReceipt) -> Result<PathBuf> {
-    write_receipt_atomic_at(&default_receipt_root(), receipt)
-}
-
 #[allow(dead_code)] // retained for v1 tests during the v2 migration.
 pub(crate) fn write_receipt_atomic_at(root: &Path, receipt: &ExecutionReceipt) -> Result<PathBuf> {
     write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V1(receipt.clone()))
@@ -93,11 +88,7 @@ fn write_receipt_payload_atomic_at<T: serde::Serialize>(
     Ok(final_path)
 }
 
-#[allow(dead_code)]
-pub(crate) fn read_receipt(execution_id: &str) -> Result<ExecutionReceipt> {
-    read_receipt_at(&default_receipt_root(), execution_id)
-}
-
+#[allow(dead_code)] // retained for v1 tests during the v2 migration.
 pub(crate) fn read_receipt_at(root: &Path, execution_id: &str) -> Result<ExecutionReceipt> {
     match read_receipt_document_at(root, execution_id)? {
         ExecutionReceiptDocument::V1(receipt) => Ok(receipt),
@@ -166,6 +157,23 @@ pub(crate) fn mark_v2_receipt_observed_at(
     *receipt = stamped;
     write_receipt_document_atomic_at(root, &document)?;
     Ok(observed_id)
+}
+
+/// Stamp the receipt's readiness gate as `started-without-readiness`: the
+/// workload launched but no readiness signal was available, so readiness was
+/// never confirmed. Honest alternative to falsely claiming readiness-passed.
+pub(crate) fn mark_v2_receipt_started_without_readiness(execution_id: &str) -> Result<()> {
+    let mut document = read_receipt_document(execution_id)?;
+    let ExecutionReceiptDocument::V2(receipt) = &mut document else {
+        return Ok(());
+    };
+    receipt.graph_receipt = Some(GraphReceipt::started_without_readiness(
+        receipt.declared_execution_id.clone(),
+        receipt.resolved_execution_id.clone(),
+        receipt.observed_execution_id.clone(),
+    ));
+    write_receipt_document_atomic(&document)?;
+    Ok(())
 }
 
 pub(crate) fn read_receipt_document_at(

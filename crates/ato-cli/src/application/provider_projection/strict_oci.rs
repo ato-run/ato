@@ -214,7 +214,7 @@ pub(crate) fn enforce_strict_oci(
     enforcement: &OciProviderEnforcement,
     profile: LaunchProfile,
     graph_resolved_execution_id: Option<&str>,
-) -> Result<(), AtoExecutionError> {
+) -> Result<(), Box<AtoExecutionError>> {
     if !profile.is_strict() {
         return Ok(());
     }
@@ -245,7 +245,7 @@ pub(crate) fn enforce_strict_oci_services(
     services: &[OciServiceStrict],
     profile: LaunchProfile,
     graph_resolved_execution_id: Option<&str>,
-) -> Result<(), AtoExecutionError> {
+) -> Result<(), Box<AtoExecutionError>> {
     if !profile.is_strict() {
         return Ok(());
     }
