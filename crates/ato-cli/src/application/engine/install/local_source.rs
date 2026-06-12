@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use capsule_core::AtoError;
+use capsule_core::common::fs::{SymlinkPolicy, copy_dir_recursive};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::installed_state::InstalledStateDb;
@@ -343,7 +344,10 @@ impl LocalPackStaging {
         let unique = format!("stage-{}-{}", std::process::id(), rand::random::<u32>());
         let root = staging_root.join(unique);
         let dir = root.join("source");
-        copy_dir_recursive(source_dir, &dir).with_context(|| {
+        // Symlinks are dropped (fail closed): a source containing e.g.
+        // `cfg -> ~/.ssh/config` must not embed the foreign target contents
+        // into the staged capsule.
+        copy_dir_recursive(source_dir, &dir, SymlinkPolicy::Skip).with_context(|| {
             format!(
                 "failed to stage local capsule source {} -> {}",
                 source_dir.display(),
@@ -370,23 +374,6 @@ impl Drop for LocalPackStaging {
             );
         }
     }
-}
-
-/// Recursively copy a directory tree. Symlinks are copied as their target
-/// contents (fixtures are plain files); special files are skipped.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &dst_path)?;
-        } else if file_type.is_file() || file_type.is_symlink() {
-            std::fs::copy(entry.path(), &dst_path)?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -464,5 +451,69 @@ run = "node server.js"
             raw_manifest_publisher("publisher = \"koh0920\"\n").as_deref(),
             Some("koh0920")
         );
+    }
+
+    /// Regression: staging a local source must not embed the *target
+    /// contents* of symlinks (`cfg -> ~/.ssh/config` style links used to
+    /// be copied as plain files into the staged capsule).
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn local_pack_staging_drops_symlinks() {
+        let _lock = crate::tests::env_lock().lock().expect("env lock");
+        let ato_home = tempfile::tempdir().expect("ato home");
+        let _ato_home_guard =
+            EnvVarGuard::set("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let outside = tempfile::tempdir().expect("outside dir");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"do not embed").expect("write secret");
+
+        let source = tempfile::tempdir().expect("source dir");
+        std::fs::write(source.path().join("capsule.toml"), b"# fixture").expect("write manifest");
+        std::os::unix::fs::symlink(&secret, source.path().join("cfg")).expect("create symlink");
+
+        let staging = LocalPackStaging::new(source.path()).expect("staging");
+        assert!(staging.dir().join("capsule.toml").is_file());
+        assert!(
+            staging.dir().join("cfg").symlink_metadata().is_err(),
+            "symlink must not be staged (neither as link nor as target contents)"
+        );
+    }
+
+    #[cfg(unix)]
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    #[cfg(unix)]
+    impl EnvVarGuard {
+        fn set(key: &str, value: Option<&str>) -> Self {
+            let previous = std::env::var(key).ok();
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                unsafe {
+                    std::env::set_var(&self.key, value);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(&self.key);
+                }
+            }
+        }
     }
 }

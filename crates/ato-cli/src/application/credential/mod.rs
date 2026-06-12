@@ -30,10 +30,11 @@ use std::path::Path;
 /// including those in sibling modules (`auth`, `secrets`). Centralizing the
 /// mutex here keeps a single lock across the whole credential surface.
 #[cfg(test)]
-pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+pub(crate) fn test_env_lock() -> &'static crate::tests::EnvLock {
+    // Delegate to the crate-wide env lock: `HOME`/`ATO_HOME` are mutated by
+    // tests well outside the credential/auth surface, and a second mutex for
+    // the same process-global resource only serializes within its own island.
+    crate::tests::env_lock()
 }
 
 use anyhow::{Context, Result};

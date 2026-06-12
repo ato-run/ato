@@ -1,12 +1,17 @@
+// The env guard is deliberately held across `.await` points: these tests run
+// on tokio's current-thread flavor, and the lock must span the whole test so
+// `HOME`/`ATO_HOME` stay stable while the server is driven.
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
 use axum::body::to_bytes;
 use std::io::{Cursor, ErrorKind, Write};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Mutex as StdMutex, OnceLock};
-
-fn env_lock() -> &'static StdMutex<()> {
-    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| StdMutex::new(()))
+// Serialises HOME/ATO_HOME-mutating tests against the WHOLE crate, not just
+// this file — a private mutex here raced the rest of the suite over the same
+// process-global environment.
+fn env_lock() -> &'static crate::tests::EnvLock {
+    crate::tests::env_lock()
 }
 
 #[test]
@@ -54,6 +59,68 @@ impl Drop for HomeGuard {
                 std::env::remove_var("HOME");
             }
         }
+    }
+}
+
+struct AtoHomeGuard {
+    previous: Option<std::ffi::OsString>,
+    root: std::path::PathBuf,
+}
+
+impl AtoHomeGuard {
+    fn set(name: &str) -> Self {
+        let previous = std::env::var_os("ATO_HOME");
+        let root = std::env::current_dir()
+            .expect("cwd")
+            .join(".tmp")
+            .join("registry-serve-tests")
+            .join(format!(
+                "{}-{}-{}",
+                name,
+                std::process::id(),
+                chrono::Utc::now()
+                    .timestamp_nanos_opt()
+                    .expect("timestamp nanos")
+            ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create ATO_HOME test root");
+        unsafe {
+            std::env::set_var("ATO_HOME", &root);
+        }
+        Self { previous, root }
+    }
+}
+
+impl Drop for AtoHomeGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            unsafe {
+                std::env::set_var("ATO_HOME", previous);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("ATO_HOME");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn bearer_headers(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let value = format!("Bearer {token}")
+        .parse::<HeaderValue>()
+        .expect("auth header");
+    headers.insert(header::AUTHORIZATION, value);
+    headers
+}
+
+fn registry_test_state(auth_token: Option<&str>) -> AppState {
+    AppState {
+        listen_url: "http://127.0.0.1:8787".to_string(),
+        data_dir: std::env::current_dir().expect("cwd").join(".tmp"),
+        auth_token: auth_token.map(str::to_string),
+        lock: Arc::new(Mutex::new(())),
     }
 }
 
@@ -769,6 +836,257 @@ fn read_process_log_lines_applies_tail_limit() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_providers_returns_desktop_provider() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_providers(State(state), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json[0]["id"], "desktop:local");
+    assert_eq!(json[0]["kind"], "desktop");
+    assert_eq!(json[0]["capabilities"]["supports_logs"], true);
+    assert_eq!(json[0]["capabilities"]["supports_launch"], true);
+    assert_eq!(json[0]["capabilities"]["supports_stop"], true);
+    assert_eq!(json[0]["capabilities"]["supports_start_serve"], false);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sensitive_runtime_read_apis_require_auth_when_token_configured() {
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("runtime-read-auth");
+    let state = registry_test_state(Some("secret"));
+
+    let response = handle_runtime_sessions(State(state.clone()), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = handle_runtime_install_profiles(State(state.clone()), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = handle_runtime_session_logs(
+        State(state.clone()),
+        HeaderMap::new(),
+        AxumPath("runtime-session-1".to_string()),
+        Query(ProcessLogsQuery { tail: Some(10) }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let headers = bearer_headers("secret");
+    let response = handle_runtime_sessions(State(state.clone()), headers.clone())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = handle_runtime_install_profiles(State(state.clone()), headers.clone())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = handle_runtime_session_logs(
+        State(state),
+        headers,
+        AxumPath("runtime-session-1".to_string()),
+        Query(ProcessLogsQuery { tail: Some(10) }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn install_profiles_read_ato_home_instances_root() {
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("install-profiles");
+
+    let root = install_profile_store_root();
+    let store = capsule_core::foundation::install_lifecycle::InstallInstanceStore::new(&root)
+        .expect("install store");
+    let app_id = capsule_core::foundation::install_lifecycle::InstalledAppId::new(
+        "app_runtime_profile_test",
+    );
+    let profile_id = capsule_core::foundation::install_lifecycle::ProfileId::new("default");
+    let revision_id =
+        capsule_core::foundation::install_lifecycle::InstallRevisionId::new("rev_runtime_test");
+    store
+        .write_app_record(&capsule_core::foundation::install_lifecycle::AppRecord {
+            installed_app_id: app_id.clone(),
+            publisher: "koh0920".to_string(),
+            slug: "runtime-demo".to_string(),
+            capsule_handle: "koh0920/runtime-demo".to_string(),
+            version: "0.1.0".to_string(),
+            installed_at: "2026-05-31T00:00:00Z".to_string(),
+            updated_at: "2026-05-31T00:00:00Z".to_string(),
+        })
+        .expect("write app");
+    store
+        .write_profile(
+            &app_id,
+            &capsule_core::foundation::install_lifecycle::LaunchProfile {
+                profile_id: profile_id.clone(),
+                port_policy: "fixed:8123".to_string(),
+                isolation: "strict".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("write profile");
+    store
+        .scaffold_revision(&revision_id)
+        .expect("scaffold revision");
+    store
+        .set_current_revision(&app_id, &profile_id, &revision_id)
+        .expect("set current revision");
+
+    let response = handle_runtime_install_profiles(
+        State(registry_test_state(Some("secret"))),
+        bearer_headers("secret"),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json[0]["installed_app_id"], "app_runtime_profile_test");
+    assert_eq!(json[0]["publisher"], "koh0920");
+    assert_eq!(json[0]["slug"], "runtime-demo");
+    assert_eq!(json[0]["capsule_handle"], "koh0920/runtime-demo");
+    assert_eq!(json[0]["profile_id"], "default");
+    assert_eq!(json[0]["current_revision_id"], "rev_runtime_test");
+    assert_eq!(json[0]["port_policy"], "fixed:8123");
+    assert_eq!(json[0]["isolation"], "strict");
+}
+
+#[test]
+fn runtime_session_summary_keeps_legacy_process_origin_unknown() {
+    let summary = runtime_session_summary(runtime_process_fixture(), None);
+
+    assert_eq!(summary.session.session_id, "runtime-session-1");
+    assert_eq!(summary.session.status, "ready");
+    assert_eq!(summary.session.user_visible_url, None);
+    assert_eq!(
+        summary.local_runtime_url.as_deref(),
+        Some("http://127.0.0.1:8123")
+    );
+    assert_eq!(
+        summary.session.requested_by_client.as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(
+        summary.session.runtime_owner.as_deref(),
+        Some("local_runtime")
+    );
+    assert_eq!(
+        summary.session.placement.placement_provider,
+        capsule_wire::placement::PlacementProviderKind::Desktop
+    );
+}
+
+#[test]
+fn runtime_session_summary_uses_stored_session_origin_and_user_url() {
+    let stored = stored_runtime_session_record();
+    let summary = runtime_session_summary(runtime_process_fixture(), Some(&stored));
+
+    assert_eq!(summary.session.session_id, "runtime-session-1");
+    assert_eq!(
+        summary.session.user_visible_url.as_deref(),
+        Some("https://desktop.example/session/runtime-session-1")
+    );
+    assert_eq!(
+        summary.local_runtime_url.as_deref(),
+        Some("http://127.0.0.1:8123")
+    );
+    assert_eq!(
+        summary.session.requested_by_client.as_deref(),
+        Some("desktop_fe")
+    );
+    assert_eq!(summary.session.runtime_owner.as_deref(), Some("desktop_be"));
+    assert_eq!(
+        summary.session.placement.placement_provider_id.as_str(),
+        "desktop:stored"
+    );
+}
+
+fn runtime_process_fixture() -> ProcessInfo {
+    ProcessInfo {
+        id: "runtime-session-1".to_string(),
+        name: "demo".to_string(),
+        pid: std::process::id() as i32,
+        workload_pid: None,
+        status: ProcessStatus::Ready,
+        runtime: "source".to_string(),
+        start_time: std::time::SystemTime::now(),
+        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            std::process::id(),
+        ),
+        workload_os_start_time_unix_ms: None,
+        manifest_path: None,
+        scoped_id: None,
+        target_label: Some("main".to_string()),
+        requested_port: Some(8123),
+        log_path: None,
+        ready_at: Some(std::time::SystemTime::now()),
+        last_event: None,
+        last_error: None,
+        exit_code: None,
+    }
+}
+
+fn stored_runtime_session_record() -> ato_session_core::StoredSessionInfo {
+    serde_json::from_value(serde_json::json!({
+        "session_id": "runtime-session-1",
+        "handle": "publisher/slug",
+        "normalized_handle": "publisher/slug",
+        "canonical_handle": null,
+        "trust_state": "trusted",
+        "source": "registry",
+        "restricted": false,
+        "snapshot": null,
+        "runtime": {
+            "target_label": "main",
+            "runtime": "node",
+            "driver": null,
+            "language": null,
+            "port": null
+        },
+        "display_strategy": "web_url",
+        "pid": 1234,
+        "log_path": ".tmp/runtime-session-1.log",
+        "manifest_path": "capsule.toml",
+        "target_label": "main",
+        "notes": [],
+        "guest": null,
+        "web": null,
+        "terminal": null,
+        "service": null,
+        "placement_provider": "desktop",
+        "placement_provider_id": "desktop:stored",
+        "placement_id": "plc_stored_desktop",
+        "placement_fingerprint": "sha256:abc",
+        "placement_facets": {
+            "provider_kind": "desktop",
+            "isolation_class": "local",
+            "storage_class": "local",
+            "network_class": "loopback",
+            "runner_version": "0.7.0-dev"
+        },
+        "user_visible_url": "https://desktop.example/session/runtime-session-1",
+        "requested_by_client": "desktop_fe",
+        "runtime_owner": "desktop_be"
+    }))
+    .expect("stored session record")
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn manifest_yank_requires_auth() {
     let tmp = tempfile::tempdir().expect("tempdir");
     initialize_storage(tmp.path()).expect("init");
@@ -992,9 +1310,297 @@ async fn version_resolve_returns_gone_for_yanked_release() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_requires_write_auth() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_launch_session(
+        State(state),
+        HeaderMap::new(),
+        Json(LaunchSessionRequest {
+            install_profile_key: "k".to_string(),
+            target_label: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_requires_write_auth() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_stop_session(
+        State(state),
+        HeaderMap::new(),
+        AxumPath("sess-1".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_rejects_wrong_token() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_launch_session(
+        State(state),
+        bearer_headers("wrong"),
+        Json(LaunchSessionRequest {
+            install_profile_key: "k".to_string(),
+            target_label: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_post_requires_write_auth() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_stop_session_post(
+        State(state),
+        HeaderMap::new(),
+        AxumPath("sess-1".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_post_rejects_wrong_token() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_stop_session_post(
+        State(state),
+        bearer_headers("wrong"),
+        AxumPath("sess-1".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_post_unknown_session_returns_404() {
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("stop-post-unknown");
+    let state = registry_test_state(None);
+    let response = handle_runtime_stop_session_post(
+        State(state),
+        HeaderMap::new(),
+        AxumPath("nonexistent-session-id".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_empty_key_returns_400() {
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("launch-empty-key");
+    let state = registry_test_state(None);
+    let response = handle_runtime_launch_session(
+        State(state),
+        HeaderMap::new(),
+        Json(LaunchSessionRequest {
+            install_profile_key: "".to_string(),
+            target_label: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_unknown_key_returns_404() {
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("launch-unknown-key");
+    let state = registry_test_state(None);
+    let response = handle_runtime_launch_session(
+        State(state),
+        HeaderMap::new(),
+        Json(LaunchSessionRequest {
+            install_profile_key: "nonexistent::default".to_string(),
+            target_label: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// Verify that try_register_ephemeral_ingress_with_url never leaks a loopback
+/// address into user_visible_url. The launch handler always sets user_visible_url
+/// to None; local_runtime_url carries the loopback address instead.
+#[test]
+fn launch_response_user_visible_url_is_never_loopback() {
+    // Construct a LaunchSessionResponse as the handler would build it after a
+    // successful session start with a local runtime URL.
+    use capsule_wire::placement::{
+        PlacementFacets, PlacementIdentity, PlacementProviderId, PlacementProviderKind,
+    };
+    let resp = super::LaunchSessionResponse {
+        status: "starting".to_string(),
+        install_profile_key: "ipk_abc::default".to_string(),
+        launch_profile_id: None,
+        placement: PlacementIdentity {
+            placement_provider: PlacementProviderKind::Desktop,
+            placement_provider_id: PlacementProviderId::new("desktop:local"),
+            placement_id: "plc_local_desktop".to_string(),
+            placement_fingerprint: None,
+            placement_facets: Some(PlacementFacets {
+                provider_kind: PlacementProviderKind::Desktop,
+                isolation_class: "local".to_string(),
+                storage_class: "local".to_string(),
+                network_class: "loopback".to_string(),
+                runner_version: None,
+            }),
+        },
+        requested_by_client: "web_console".to_string(),
+        runtime_owner: "local_runtime".to_string(),
+        session_id: "sess-abc".to_string(),
+        user_visible_url: None,
+        local_runtime_url: Some("http://127.0.0.1:8080".to_string()),
+    };
+
+    assert!(
+        resp.user_visible_url.is_none(),
+        "user_visible_url must be None — loopback URLs must not appear here"
+    );
+    assert!(
+        resp.local_runtime_url
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("http://127.0.0.1"),
+        "local_runtime_url should carry the loopback URL"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_non_default_profile_returns_501() {
+    use capsule_core::foundation::install_lifecycle::{
+        AppRecord, InstallInstanceStore, InstalledAppId, LaunchProfile, ProfileId,
+    };
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("launch-non-default-profile");
+
+    // Register an app with a non-default profile.
+    let root = install_profile_store_root();
+    let store = InstallInstanceStore::new(&root).expect("install store");
+    let app_id = InstalledAppId::new("app_non_default_test");
+    let profile_id = ProfileId::new("gpu");
+    store
+        .write_app_record(&AppRecord {
+            installed_app_id: app_id.clone(),
+            publisher: "koh0920".to_string(),
+            slug: "demo".to_string(),
+            capsule_handle: "koh0920/demo".to_string(),
+            version: "0.1.0".to_string(),
+            installed_at: "2026-06-04T00:00:00Z".to_string(),
+            updated_at: "2026-06-04T00:00:00Z".to_string(),
+        })
+        .expect("write app");
+    store
+        .write_profile(
+            &app_id,
+            &LaunchProfile {
+                profile_id: profile_id.clone(),
+                ..Default::default()
+            },
+        )
+        .expect("write profile");
+
+    use capsule_core::foundation::install_lifecycle::derive_install_profile_key;
+    let ipk = derive_install_profile_key(&app_id, &profile_id)
+        .as_str()
+        .to_string();
+
+    let state = registry_test_state(None);
+    let response = handle_runtime_launch_session(
+        State(state),
+        HeaderMap::new(),
+        Json(LaunchSessionRequest {
+            install_profile_key: ipk,
+            target_label: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_provider_capabilities_start_serve_is_false() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_providers(State(state), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        json[0]["capabilities"]["supports_start_serve"], false,
+        "supports_start_serve must be false until StartServe integration lands"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_session_logs_sse_streams_beyond_channel_capacity() {
+    // Verify that SSE back-pressure (send().await) delivers all existing lines
+    // even when the log exceeds the channel capacity (512). Previously try_send
+    // would have silently aborted the stream at 512 lines.
+    use axum::http::header::ACCEPT;
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("sse-backlog");
+
+    // Write 600 lines — more than the channel capacity of 512.
+    let session_id = "sse-backlog-session";
+    let log_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("logs");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+    let log_path = log_dir.join(format!("{session_id}.log"));
+    let log_content: String = (0..600).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(&log_path, log_content).expect("write log");
+
+    let state = registry_test_state(None);
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, "text/event-stream".parse().unwrap());
+    let response = handle_runtime_session_logs(
+        State(state),
+        headers,
+        AxumPath(session_id.to_string()),
+        Query(ProcessLogsQuery { tail: None }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Consume the SSE body. Because there is no running process the background
+    // task terminates after the first poll, so the stream ends promptly.
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("SSE body must arrive within 5s")
+    .expect("body");
+
+    // All 600 lines must appear as `data:` events.
+    let text = String::from_utf8_lossy(&body);
+    let data_count = text.lines().filter(|l| l.starts_with("data:")).count();
+    assert!(
+        data_count >= 600,
+        "expected >= 600 data events, got {data_count}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn persistent_state_local_api_registers_and_lists_records() {
     let (_home, _home_guard, manifest_path, bind_dir, state) = {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap();
         let home = tempfile::tempdir().expect("home");
         let home_guard = HomeGuard::set(home.path());
 
@@ -1095,4 +1701,682 @@ target = "/var/lib/app"
     let fetched: crate::registry::store::PersistentStateRecord =
         serde_json::from_slice(&get_body).expect("parse get json");
     assert_eq!(fetched, registered);
+}
+
+// ─── write_private_file permission tests ─────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn write_private_file_corrects_existing_loose_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join(".console-token");
+
+    // Create file with 0644 (simulating old std::fs::write behaviour).
+    std::fs::write(&path, b"old-token").expect("initial write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("set 0644");
+
+    // write_private_file must tighten the permission even on an existing file.
+    write_private_file(&path, b"new-token").expect("write_private_file");
+
+    let mode = std::fs::metadata(&path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "existing file must be tightened to 0600");
+
+    let contents = std::fs::read_to_string(&path).expect("read back");
+    assert_eq!(contents, "new-token");
+}
+
+// ─── validate_add_capsule_source unit tests ───────────────────────────────────
+
+#[test]
+fn validate_add_capsule_source_accepts_publisher_slug() {
+    assert!(validate_add_capsule_source("koh0920/adminer").is_ok());
+    assert!(validate_add_capsule_source("my-publisher/my-slug").is_ok());
+    assert!(validate_add_capsule_source("publisher123/slug456").is_ok());
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_version_suffix() {
+    // @version is rejected for MVP: idempotency check strips @version when
+    // looking up app_id, causing false already_installed on version mismatch.
+    assert!(validate_add_capsule_source("koh0920/adminer@v2").is_err());
+    assert!(validate_add_capsule_source("koh0920/adminer@1.0.0").is_err());
+}
+
+#[test]
+fn validate_add_capsule_source_accepts_share_url() {
+    assert!(validate_add_capsule_source("https://ato.run/s/abc123").is_ok());
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_empty() {
+    assert!(validate_add_capsule_source("").is_err());
+    assert!(validate_add_capsule_source("   ").is_err());
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_unsafe_schemes() {
+    for scheme in &[
+        "javascript:alert(1)",
+        "data:text/html,<h1>x</h1>",
+        "file:///etc/passwd",
+        "vbscript:msgbox(1)",
+        "blob:http://example.com/abc",
+        "about:blank",
+    ] {
+        assert!(
+            validate_add_capsule_source(scheme).is_err(),
+            "expected rejection for: {scheme}"
+        );
+    }
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_missing_slug() {
+    assert!(validate_add_capsule_source("publisher").is_err());
+    assert!(validate_add_capsule_source("publisher/").is_err());
+    assert!(validate_add_capsule_source("/slug").is_err());
+}
+
+#[test]
+fn validate_add_capsule_source_rejects_too_long() {
+    let long = "a".repeat(2049);
+    assert!(validate_add_capsule_source(&long).is_err());
+}
+
+// ─── add-capsule handler tests ────────────────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_requires_auth() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_add_capsule(
+        State(state),
+        HeaderMap::new(),
+        Json(AddCapsuleRequest {
+            source: "koh0920/adminer".to_string(),
+            profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_rejects_wrong_token() {
+    let state = registry_test_state(Some("secret"));
+    let response = handle_runtime_add_capsule(
+        State(state),
+        bearer_headers("wrong"),
+        Json(AddCapsuleRequest {
+            source: "koh0920/adminer".to_string(),
+            profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_empty_source_returns_400() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_add_capsule(
+        State(state),
+        HeaderMap::new(),
+        Json(AddCapsuleRequest {
+            source: "".to_string(),
+            profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"], "invalid_source");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_rejects_unsafe_scheme() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_add_capsule(
+        State(state),
+        HeaderMap::new(),
+        Json(AddCapsuleRequest {
+            source: "javascript:alert(1)".to_string(),
+            profile_id: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"], "invalid_source");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_add_capsule_non_default_profile_returns_501() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_add_capsule(
+        State(state),
+        HeaderMap::new(),
+        Json(AddCapsuleRequest {
+            source: "koh0920/adminer".to_string(),
+            profile_id: Some("gpu".to_string()),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"], "non_default_profile_not_supported");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_reports_supports_add_capsule_true() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_providers(State(state), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        json[0]["capabilities"]["supports_add_capsule"], true,
+        "supports_add_capsule must be true"
+    );
+}
+
+// ─── CORS / PNA middleware integration tests ─────────────────────────────────
+
+mod cors_pna_tests {
+    use super::*;
+    use crate::adapters::registry::serve::cors_pna::{cors_pna_layer, parse_allowed_origins};
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+
+    fn make_router(token: Option<&str>) -> axum::Router {
+        let state = registry_test_state(token);
+        let allowed = parse_allowed_origins();
+        build_app_router(false)
+            .with_state(state)
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: axum::middleware::Next| {
+                    cors_pna_layer(Arc::clone(&allowed), req, next)
+                },
+            ))
+    }
+
+    fn preflight(origin: &str, pna: bool) -> Request<Body> {
+        let mut b = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/v1/runtime/providers")
+            .header("origin", origin)
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "authorization");
+        if pna {
+            b = b.header("access-control-request-private-network", "true");
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    fn get_req(origin: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v1/runtime/providers")
+            .header("origin", origin)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn get_req_no_auth(origin: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v1/runtime/sessions")
+            .header("origin", origin)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn allowed_origin_preflight_receives_acao() {
+        let app = make_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(preflight(origin, false))
+            .await
+            .expect("call router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let acao = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .expect("ACAO header missing");
+        assert_eq!(acao, origin);
+    }
+
+    #[tokio::test]
+    async fn disallowed_origin_preflight_receives_no_acao() {
+        let app = make_router(None);
+        let resp = app
+            .oneshot(preflight("https://evil.example.com", false))
+            .await
+            .expect("call router");
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not get ACAO header"
+        );
+    }
+
+    #[tokio::test]
+    async fn localhost_5173_preflight_succeeds() {
+        let app = make_router(None);
+        let origin = "http://localhost:5173";
+        let resp = app
+            .oneshot(preflight(origin, false))
+            .await
+            .expect("call router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO"),
+            origin
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_5173_preflight_succeeds() {
+        let app = make_router(None);
+        let origin = "http://127.0.0.1:5173";
+        let resp = app
+            .oneshot(preflight(origin, false))
+            .await
+            .expect("call router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO"),
+            origin
+        );
+    }
+
+    #[tokio::test]
+    async fn pna_preflight_receives_acapn_for_allowed_origin() {
+        let app = make_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(preflight(origin, true))
+            .await
+            .expect("call router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let acapn = resp
+            .headers()
+            .get("access-control-allow-private-network")
+            .expect("ACAPN header missing");
+        assert_eq!(acapn, "true");
+    }
+
+    #[tokio::test]
+    async fn pna_preflight_no_acapn_for_disallowed_origin() {
+        let app = make_router(None);
+        let resp = app
+            .oneshot(preflight("https://evil.example.com", true))
+            .await
+            .expect("call router");
+        assert!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .is_none(),
+            "disallowed origin must not get ACAPN"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_protected_endpoint_rejects_missing_bearer() {
+        let app = make_router(Some("secret-token"));
+        let resp = app
+            .oneshot(get_req_no_auth("https://app.ato.run"))
+            .await
+            .expect("call router");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "missing token must return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_bearer_token_with_allowed_origin_succeeds() {
+        let _env = env_lock().lock().unwrap();
+        let _guard = AtoHomeGuard::set("cors_pna_valid_token");
+        let app = make_router(Some("correct-token"));
+        let resp = app
+            .oneshot(get_req("https://app.ato.run", "correct-token"))
+            .await
+            .expect("call router");
+        // /v1/runtime/providers returns 200 even if no sessions/installs exist
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_some(),
+            "ACAO must be set for allowed origin"
+        );
+    }
+
+    // ── Full-stack regression: desktop CorsLayer + cors_pna_layer combined ────
+    //
+    // Mirrors the real layer order in `serve()` so regressions are caught when
+    // both middleware stacks are active simultaneously.
+
+    fn make_full_stack_router(token: Option<&str>) -> axum::Router {
+        use tower_http::cors::CorsLayer;
+        let state = registry_test_state(token);
+        let allowed = parse_allowed_origins();
+        let desktop_origin = "capsule://desktop.ato.run"
+            .parse::<axum::http::HeaderValue>()
+            .expect("valid header value");
+        build_app_router(false)
+            .with_state(state)
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(desktop_origin)
+                    .allow_methods([Method::GET]),
+            )
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: axum::middleware::Next| {
+                    cors_pna_layer(Arc::clone(&allowed), req, next)
+                },
+            ))
+    }
+
+    #[tokio::test]
+    async fn full_stack_disallowed_pna_preflight_omits_all_cors_allow_headers() {
+        let app = make_full_stack_router(None);
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/v1/runtime/sessions")
+            .header("origin", "https://evil.example.com")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "authorization")
+            .header("access-control-request-private-network", "true")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("call full-stack router");
+        // Preflight must be intercepted with a clean response.
+        assert!(
+            resp.status() == StatusCode::NO_CONTENT || resp.status().is_success(),
+            "expected non-error preflight status, got {}",
+            resp.status()
+        );
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not receive ACAO"
+        );
+        assert!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .is_none(),
+            "disallowed origin must not receive ACAPN"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-methods").is_none(),
+            "disallowed origin must not receive ACAM"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-headers").is_none(),
+            "disallowed origin must not receive ACAH"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_stack_disallowed_actual_get_omits_acao() {
+        let _env = env_lock().lock().unwrap();
+        let _guard = AtoHomeGuard::set("full_stack_disallowed_get");
+        let app = make_full_stack_router(Some("tok"));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/runtime/providers")
+            .header("origin", "https://evil.example.com")
+            .header("authorization", "Bearer tok")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("call full-stack router");
+        // Endpoint should still behave normally.
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not receive ACAO on actual request"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_stack_pwa_preflight_returns_acao_and_acapn() {
+        let app = make_full_stack_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(preflight(origin, true))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing"),
+            origin
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .expect("ACAPN missing"),
+            "true"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_stack_pwa_get_with_valid_token_returns_acao() {
+        let _env = env_lock().lock().unwrap();
+        let _guard = AtoHomeGuard::set("full_stack_valid_token");
+        let app = make_full_stack_router(Some("tok"));
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(get_req(origin, "tok"))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing on actual GET"),
+            origin
+        );
+    }
+
+    fn post_preflight(uri: &str, origin: &str, pna: bool) -> Request<Body> {
+        let mut b = Request::builder()
+            .method(Method::OPTIONS)
+            .uri(uri)
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                "authorization, content-type",
+            );
+        if pna {
+            b = b.header("access-control-request-private-network", "true");
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pwa_post_preflight_for_launch_returns_acao_and_acapn() {
+        let app = make_full_stack_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(post_preflight("/v1/runtime/sessions", origin, true))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing"),
+            origin
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .expect("ACAPN missing"),
+            "true"
+        );
+        let acam = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .expect("ACAM missing")
+            .to_str()
+            .unwrap();
+        assert!(
+            acam.contains("POST"),
+            "POST must be in allowed methods: {acam}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pwa_post_preflight_for_stop_returns_acao_and_acapn() {
+        let app = make_full_stack_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(post_preflight(
+                "/v1/runtime/sessions/sess-123/stop",
+                origin,
+                true,
+            ))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing"),
+            origin
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .expect("ACAPN missing"),
+            "true"
+        );
+    }
+
+    #[tokio::test]
+    async fn pwa_post_preflight_for_add_capsule_returns_acao_and_acapn() {
+        let app = make_full_stack_router(None);
+        let origin = "https://app.ato.run";
+        let resp = app
+            .oneshot(post_preflight("/v1/runtime/install-profiles", origin, true))
+            .await
+            .expect("call full-stack router");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .expect("ACAO missing"),
+            origin
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .expect("ACAPN missing"),
+            "true"
+        );
+        let acam = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .expect("ACAM missing")
+            .to_str()
+            .unwrap();
+        assert!(
+            acam.contains("POST"),
+            "POST must be in allowed methods for add-capsule: {acam}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disallowed_add_capsule_preflight_omits_all_cors_headers() {
+        let app = make_full_stack_router(None);
+        let resp = app
+            .oneshot(post_preflight(
+                "/v1/runtime/install-profiles",
+                "https://evil.example.com",
+                true,
+            ))
+            .await
+            .expect("call full-stack router");
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not get ACAO"
+        );
+        assert!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .is_none(),
+            "disallowed origin must not get ACAPN"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-methods").is_none(),
+            "disallowed origin must not get ACAM"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-headers").is_none(),
+            "disallowed origin must not get ACAH"
+        );
+    }
+
+    #[tokio::test]
+    async fn disallowed_post_preflight_omits_all_cors_allow_headers() {
+        let app = make_full_stack_router(None);
+        let resp = app
+            .oneshot(post_preflight(
+                "/v1/runtime/sessions",
+                "https://evil.example.com",
+                true,
+            ))
+            .await
+            .expect("call full-stack router");
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not get ACAO"
+        );
+        assert!(
+            resp.headers()
+                .get("access-control-allow-private-network")
+                .is_none(),
+            "disallowed origin must not get ACAPN"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-methods").is_none(),
+            "disallowed origin must not get ACAM"
+        );
+        assert!(
+            resp.headers().get("access-control-allow-headers").is_none(),
+            "disallowed origin must not get ACAH"
+        );
+    }
 }

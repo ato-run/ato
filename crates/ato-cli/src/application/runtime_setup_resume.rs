@@ -63,11 +63,6 @@ pub(crate) fn is_marker_stale(marker: &RuntimeSetupResumeMarker, now_unix_ms: u6
 
 // ── default-path convenience wrappers ─────────────────────────────────────────
 
-/// Write the resume marker to the default path.
-pub(crate) fn write_resume_marker(marker: &RuntimeSetupResumeMarker) -> Result<()> {
-    write_resume_marker_at(&resume_marker_path(), marker)
-}
-
 /// Read the resume marker from the default path (`None` if absent/corrupt).
 pub(crate) fn read_resume_marker() -> Option<RuntimeSetupResumeMarker> {
     read_resume_marker_at(&resume_marker_path())

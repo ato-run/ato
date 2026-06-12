@@ -15,6 +15,12 @@
 //!
 //! Listens on `127.0.0.1:<ephemeral>` only; inbound from non-loopback
 //! is dropped defensively.
+//!
+//! Every allowed dial is additionally vetted *after* DNS resolution: an
+//! allowlisted hostname that resolves to a loopback / private /
+//! link-local address is refused, and the dial is pinned to the vetted
+//! addresses (DNS-rebinding SSRF guard, CWE-918). See
+//! [`EgressPolicy::decide_resolved`].
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -266,9 +272,19 @@ fn handle_connect(
         return Ok(());
     }
 
-    let upstream = match TcpStream::connect_timeout_any(&format!("{host}:{port}"), DIAL_TIMEOUT) {
+    let upstream = match resolve_vet_dial(&host, port, policy, DIAL_TIMEOUT) {
         Ok(s) => s,
-        Err(e) => {
+        // No DenyEvent here: the REPL hint suggests `.allow <host>`, but
+        // the host is already allowed — it is the resolved address that
+        // is forbidden, and no user grant can permit it (DenyFinal).
+        Err(DialError::DeniedIp(ip)) => {
+            tracing::warn!(host=%host, port=port, ip=%ip, "egress-proxy: DENY resolved ip (connect)");
+            let _ = client.write_all(
+                b"HTTP/1.1 403 Forbidden\r\nX-Ato-Egress: denied-ip\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            );
+            return Ok(());
+        }
+        Err(DialError::Io(e)) => {
             tracing::debug!(host=%host, port=port, error=%e, "egress-proxy: dial failed");
             let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
             return Ok(());
@@ -339,10 +355,17 @@ fn handle_absolute(
         return Ok(());
     }
 
-    let mut upstream = match TcpStream::connect_timeout_any(&format!("{host}:{port}"), DIAL_TIMEOUT)
-    {
+    let mut upstream = match resolve_vet_dial(&host, port, policy, DIAL_TIMEOUT) {
         Ok(s) => s,
-        Err(e) => {
+        // See handle_connect for why no DenyEvent is published here.
+        Err(DialError::DeniedIp(ip)) => {
+            tracing::warn!(host=%host, port=port, ip=%ip, "egress-proxy: DENY resolved ip (http)");
+            let _ = client.write_all(
+                b"HTTP/1.1 403 Forbidden\r\nX-Ato-Egress: denied-ip\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            );
+            return Ok(());
+        }
+        Err(DialError::Io(e)) => {
             tracing::debug!(host=%host, port=port, error=%e, "egress-proxy: dial failed");
             let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
             return Ok(());
@@ -423,29 +446,74 @@ fn copy_direction(mut src: TcpStream, mut dst: TcpStream) {
     let _ = src.shutdown(Shutdown::Read);
 }
 
-trait ConnectAny {
-    fn connect_timeout_any(addr: &str, timeout: Duration) -> std::io::Result<TcpStream>;
+/// Why a vetted dial failed.
+#[derive(Debug)]
+enum DialError {
+    /// A resolved address failed the post-resolution IP guard
+    /// (DNS-rebinding defence) — surfaced as 403, not 502.
+    DeniedIp(IpAddr),
+    Io(std::io::Error),
 }
-impl ConnectAny for TcpStream {
-    fn connect_timeout_any(addr: &str, timeout: Duration) -> std::io::Result<TcpStream> {
-        use std::net::ToSocketAddrs;
-        let addrs: Vec<SocketAddr> = addr.to_socket_addrs()?.collect();
-        if addrs.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AddrNotAvailable,
-                "no addresses resolved",
-            ));
-        }
-        let per = timeout / (addrs.len() as u32).max(1);
-        let mut last_err = None;
-        for a in addrs {
-            match TcpStream::connect_timeout(&a, per) {
-                Ok(s) => return Ok(s),
-                Err(e) => last_err = Some(e),
+
+/// Vet every resolved address against the policy's post-resolution
+/// guard. Deny-any semantics (matching `ato-netd`'s CIDR stage): if ANY
+/// resolved address is denied the whole dial is refused, so a rebinding
+/// resolver cannot smuggle a private target into the address list and
+/// rely on connect fail-over to reach it.
+fn vet_resolved(
+    host: &str,
+    addrs: &[SocketAddr],
+    policy: &Arc<Mutex<EgressPolicy>>,
+) -> Result<(), IpAddr> {
+    match policy.lock() {
+        Ok(p) => {
+            for a in addrs {
+                if !matches!(p.decide_resolved(host, a.ip()), Decision::Allow) {
+                    return Err(a.ip());
+                }
             }
+            Ok(())
         }
-        Err(last_err.unwrap_or_else(|| std::io::Error::other("connect failed")))
+        // Poisoned policy lock: fail closed.
+        Err(_) => Err(addrs
+            .first()
+            .map(|a| a.ip())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))),
     }
+}
+
+/// Resolve `host:port`, vet the resolved addresses, then dial. The dial
+/// is pinned to the vetted `SocketAddr`s — the hostname is never
+/// re-resolved after the check.
+fn resolve_vet_dial(
+    host: &str,
+    port: u16,
+    policy: &Arc<Mutex<EgressPolicy>>,
+    timeout: Duration,
+) -> Result<TcpStream, DialError> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(DialError::Io)?
+        .collect();
+    if addrs.is_empty() {
+        return Err(DialError::Io(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no addresses resolved",
+        )));
+    }
+    vet_resolved(host, &addrs, policy).map_err(DialError::DeniedIp)?;
+    let per = timeout / (addrs.len() as u32).max(1);
+    let mut last_err = None;
+    for a in addrs {
+        match TcpStream::connect_timeout(&a, per) {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(DialError::Io(
+        last_err.unwrap_or_else(|| std::io::Error::other("connect failed")),
+    ))
 }
 
 #[cfg(test)]
@@ -520,6 +588,20 @@ mod tests {
     }
 
     #[test]
+    fn denies_connect_to_non_web_port_on_allowed_host() {
+        // Regression for issue #648: a bare host grant covers only the
+        // web ports — CONNECT to e.g. SSH/SMTP on it must be refused.
+        // (Deny happens before any dial, so no real network is touched.)
+        let policy = make_policy(&["example.com"]);
+        let handle = EgressProxy::spawn(policy, None).unwrap();
+        for target in ["example.com:22", "example.com:25", "example.com:5432"] {
+            let (_s, hdr) = send_connect(handle.addr(), target);
+            assert!(hdr.contains("403"), "expected 403 for {target}, got: {hdr}");
+            assert!(hdr.contains("X-Ato-Egress: denied"));
+        }
+    }
+
+    #[test]
     fn deny_event_is_published() {
         use std::sync::mpsc::channel;
         let policy = make_policy(&[]);
@@ -559,6 +641,41 @@ mod tests {
         let n = s.read(&mut buf).unwrap();
         let hdr = String::from_utf8_lossy(&buf[..n]).to_string();
         assert!(hdr.contains("403"), "expected 403, got: {hdr}");
+    }
+
+    #[test]
+    fn vet_blocks_rebound_non_public_addrs() {
+        // DNS-rebinding shape: the hostname stage allowed
+        // `evil.example.com`, but the (attacker-controlled) resolver
+        // answered with the cloud-metadata endpoint.
+        let policy = make_policy(&["*.example.com"]);
+        let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
+        assert_eq!(
+            vet_resolved("evil.example.com", &[metadata], &policy),
+            Err(metadata.ip())
+        );
+        // Deny-any: a public address in the same answer does not rescue it.
+        let mixed: [SocketAddr; 2] = [
+            "93.184.216.34:80".parse().unwrap(),
+            "10.0.0.1:80".parse().unwrap(),
+        ];
+        assert!(vet_resolved("evil.example.com", &mixed, &policy).is_err());
+        // All-public answers pass.
+        let public: [SocketAddr; 1] = ["93.184.216.34:80".parse().unwrap()];
+        assert!(vet_resolved("evil.example.com", &public, &policy).is_ok());
+    }
+
+    #[test]
+    fn vet_keeps_localhost_loopback_dialable() {
+        let policy = make_policy(&[]);
+        let loopback: [SocketAddr; 2] = [
+            "127.0.0.1:8080".parse().unwrap(),
+            "[::1]:8080".parse().unwrap(),
+        ];
+        assert!(vet_resolved("localhost", &loopback, &policy).is_ok());
+        // ... but `localhost` rebinding away from loopback is refused.
+        let rebound: [SocketAddr; 1] = ["192.168.1.1:8080".parse().unwrap()];
+        assert!(vet_resolved("localhost", &rebound, &policy).is_err());
     }
 
     #[test]

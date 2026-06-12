@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::cli::ImportArgs;
-use crate::runtime::process::{ImportPreviewSession, ProcessManager};
+use crate::runtime::process::{ImportPreviewSession, ImportPreviewWorkloadPid, ProcessManager};
 use capsule_core::foundation::types::command_spec::contains_shell_operators;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
@@ -1060,6 +1060,11 @@ fn run_shadow_workspace_keep_alive(
     let mut observed_pgids = std::collections::BTreeSet::new();
     observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
     observed_pgids.insert(pid);
+    let mut workload_pids: Vec<ImportPreviewWorkloadPid> = Vec::new();
+    merge_workload_pids(
+        &mut workload_pids,
+        probe_workload_pids(pid, &materialized.shadow_dir),
+    );
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -1069,6 +1074,10 @@ fn run_shadow_workspace_keep_alive(
     let mut readiness_state = "pending".to_string();
     while std::time::Instant::now() < deadline {
         observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+        merge_workload_pids(
+            &mut workload_pids,
+            probe_workload_pids(pid, &materialized.shadow_dir),
+        );
         if let Ok(resp) = client.get(&primary_url).send()
             && resp.status().is_success()
         {
@@ -1140,6 +1149,10 @@ fn run_shadow_workspace_keep_alive(
     }
 
     observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+    merge_workload_pids(
+        &mut workload_pids,
+        probe_workload_pids(pid, &materialized.shadow_dir),
+    );
     let now = now_unix_ms()?;
     let (owner_kind, owner_pid) = import_preview_owner();
     let session = ImportPreviewSession {
@@ -1155,6 +1168,7 @@ fn run_shadow_workspace_keep_alive(
             child.id(),
         ),
         process_group_ids: observed_pgids.into_iter().collect(),
+        workload_pids,
         primary_port: Some(actual_port),
         primary_url: Some(primary_url),
         shadow_dir: materialized.shadow_dir.clone(),
@@ -1512,6 +1526,64 @@ fn probe_pgids(root_pid: i32, shadow_dir: &Path) -> std::collections::BTreeSet<i
 #[cfg(not(unix))]
 fn probe_pgids(_root_pid: i32, _shadow_dir: &Path) -> std::collections::BTreeSet<i32> {
     std::collections::BTreeSet::new()
+}
+
+/// Durable host pids of the workload subtree spawned under `root_pid`
+/// (the keep-alive `ato run` supervisor): on Linux this is the `bwrap`
+/// wrapper plus its namespaced descendants (the sandboxed server). Each
+/// pid is paired with its OS start time so `ato stop` can SIGTERM/SIGKILL
+/// it directly later without being fooled by pid reuse. The supervisor
+/// itself is excluded — it is recorded separately as `ato_run_pid`. Rows
+/// whose command references `shadow_dir` are also included to catch a
+/// workload that has been reparented away from the supervisor between the
+/// spawn and this probe.
+#[cfg(unix)]
+fn probe_workload_pids(root_pid: i32, shadow_dir: &Path) -> Vec<ImportPreviewWorkloadPid> {
+    let rows = process_rows();
+    let mut pending = vec![root_pid];
+    let mut descendants = std::collections::BTreeSet::new();
+    while let Some(parent) = pending.pop() {
+        for row in rows.iter().filter(|row| row.ppid == parent) {
+            if row.pid != root_pid && descendants.insert(row.pid) {
+                pending.push(row.pid);
+            }
+        }
+    }
+
+    let shadow_dir = shadow_dir.display().to_string();
+    rows.into_iter()
+        .filter(|row| {
+            row.pid > 0
+                && row.pid != root_pid
+                && (descendants.contains(&row.pid)
+                    || (!shadow_dir.is_empty() && row.command.contains(&shadow_dir)))
+        })
+        .map(|row| ImportPreviewWorkloadPid {
+            pid: row.pid,
+            start_time_unix_ms: u32::try_from(row.pid)
+                .ok()
+                .and_then(ato_session_core::process::process_start_time_unix_ms),
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn probe_workload_pids(_root_pid: i32, _shadow_dir: &Path) -> Vec<ImportPreviewWorkloadPid> {
+    Vec::new()
+}
+
+/// Merge newly observed workload pids into the running set, keyed by pid so
+/// repeated probes accumulate the full subtree (a child that appears only
+/// after readiness, e.g. a forked worker, is still captured).
+fn merge_workload_pids(
+    into: &mut Vec<ImportPreviewWorkloadPid>,
+    observed: Vec<ImportPreviewWorkloadPid>,
+) {
+    for candidate in observed {
+        if !into.iter().any(|existing| existing.pid == candidate.pid) {
+            into.push(candidate);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2216,5 +2288,55 @@ mod tests {
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("ghp_abcdefghijklmnopqrstuvwxyz"));
         assert!(!redacted.contains("sk-abcdefghi"));
+    }
+
+    #[test]
+    fn merge_workload_pids_dedups_by_pid_and_preserves_order() {
+        let mut acc = Vec::new();
+        merge_workload_pids(
+            &mut acc,
+            vec![
+                ImportPreviewWorkloadPid {
+                    pid: 100,
+                    start_time_unix_ms: Some(11),
+                },
+                ImportPreviewWorkloadPid {
+                    pid: 200,
+                    start_time_unix_ms: Some(22),
+                },
+            ],
+        );
+        // Second probe: 100 already present (a re-observed start time must NOT
+        // overwrite the first capture), 300 is new.
+        merge_workload_pids(
+            &mut acc,
+            vec![
+                ImportPreviewWorkloadPid {
+                    pid: 100,
+                    start_time_unix_ms: Some(99),
+                },
+                ImportPreviewWorkloadPid {
+                    pid: 300,
+                    start_time_unix_ms: Some(33),
+                },
+            ],
+        );
+        assert_eq!(
+            acc,
+            vec![
+                ImportPreviewWorkloadPid {
+                    pid: 100,
+                    start_time_unix_ms: Some(11),
+                },
+                ImportPreviewWorkloadPid {
+                    pid: 200,
+                    start_time_unix_ms: Some(22),
+                },
+                ImportPreviewWorkloadPid {
+                    pid: 300,
+                    start_time_unix_ms: Some(33),
+                },
+            ]
+        );
     }
 }
