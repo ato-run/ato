@@ -1982,10 +1982,17 @@ mod tests {
     #[cfg(unix)]
     fn verified_import_preview_process_groups_accept_sandboxed_descendant_group() {
         // Linux repro: the bwrap-sandboxed server leads its OWN process group
-        // (pgid 888) and hides its command line / cwd behind a PID namespace,
-        // so it carries neither the ATO_IMPORT_SESSION_ID marker nor a
-        // shadow_dir reference. The only proof it belongs to the session is the
-        // ppid chain back to the Ato-owned `ato run` (pid 4000, pgid 4000).
+        // (pgid 888) and hides its command line / cwd behind a PID namespace.
+        // The genuinely unverifiable member is the namespaced grandchild
+        // (pid 5151): its host-visible argv uses guest paths and its
+        // /proc/<pid>/cwd resolves inside the namespace mount, so it carries
+        // neither the ATO_IMPORT_SESSION_ID marker (stripped by bwrap
+        // --clearenv) nor a shadow_dir reference. (The real bwrap monitor argv
+        // does carry the host shadow_dir via `--ro-bind <shadow_dir> /app`, so
+        // it may already match on shadow_dir; this fixture models bwrap without
+        // it to isolate the descendant proof. Either way the only proof the
+        // namespaced workload belongs to the session is the ppid chain back to
+        // the Ato-owned `ato run` (pid 4000, pgid 4000).)
         let mut session = test_import_preview_session("preview-sandboxed", i32::MAX, 4000, true);
         session.process_group_ids = vec![4000, 888];
         let processes = vec![
