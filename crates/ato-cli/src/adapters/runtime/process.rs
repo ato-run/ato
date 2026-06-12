@@ -1061,9 +1061,38 @@ fn stop_import_preview_session_record(
         Duration::from_secs(3)
     };
 
+    // Host pids that descend from the recorded `ato run` (captured BEFORE the
+    // root is killed — see below). Reaped directly by host pid after the root
+    // goes down, since killing the root reparents these to pid 1 and severs
+    // the ppid chain that identifies them.
+    #[cfg(unix)]
+    let mut sandboxed_descendant_pids: Vec<i32> = Vec::new();
+
     #[cfg(unix)]
     {
         let processes = unix_ps_processes();
+
+        // On Linux a non-network `ato run` execs its workload through
+        // `bwrap --unshare-all --new-session`. `--new-session` makes the
+        // sandboxed server call `setsid()`, so on the host it leads a
+        // process group whose pgid is NOT the recorded bwrap pgid — and
+        // killing the bwrap process group (`kill(-pgid, …)`) therefore does
+        // not reach the server. `--die-with-parent` is the only other
+        // teardown and it is unreliable for a force-kill (it watches bwrap's
+        // parent and does not propagate to namespaced grandchildren). The
+        // robust teardown is to enumerate every host process that descends
+        // from the recorded `ato run` pid via the ppid chain and SIGKILL
+        // each one DIRECTLY BY HOST PID — host `ps` sees namespaced PIDs, so
+        // a direct per-pid kill always reaches the sandboxed server
+        // regardless of its process group. This snapshot is taken BEFORE the
+        // root is killed: once `ato run` dies the kernel reparents its
+        // descendants to pid 1 and the ppid chain that identifies them is
+        // gone.
+        if ato_run_owned {
+            sandboxed_descendant_pids =
+                import_preview_descendant_pids(session.ato_run_pid, &processes);
+        }
+
         let verified_pgids =
             verified_import_preview_process_groups(session, ato_run_owned, &processes);
         for pgid in verified_pgids {
@@ -1071,6 +1100,31 @@ fn stop_import_preview_session_record(
                 stopped = true;
             }
         }
+
+        // Direct per-pid teardown of the sandboxed subtree. SIGTERM first
+        // (so a server that exits cleanly gets the chance), then escalate to
+        // SIGKILL for anything that survives the grace window.
+        for pid in &sandboxed_descendant_pids {
+            if unsafe { libc::kill(*pid, libc::SIGTERM) } == 0 {
+                stopped = true;
+            }
+        }
+        if !sandboxed_descendant_pids.is_empty() {
+            let deadline = std::time::Instant::now() + grace;
+            while std::time::Instant::now() < deadline
+                && sandboxed_descendant_pids
+                    .iter()
+                    .any(|pid| is_process_alive(*pid))
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            for pid in &sandboxed_descendant_pids {
+                if is_process_alive(*pid) && unsafe { libc::kill(*pid, libc::SIGKILL) } == 0 {
+                    stopped = true;
+                }
+            }
+        }
+
         if stopped {
             let _ = wait_for_process_exit(session.ato_run_pid, 10);
         }
@@ -1084,6 +1138,37 @@ fn stop_import_preview_session_record(
             }
             Ok(false) => {}
             Err(error) => errors.push(error.to_string()),
+        }
+    }
+
+    // Final bounded reap: any sandboxed descendant captured above that is
+    // still alive after the root went down (the namespaced server can outlive
+    // its bwrap parent for a beat, and reparenting to pid 1 makes it
+    // unreachable by re-walking the now-dead root's ppid chain). SIGKILL the
+    // captured pids by host pid until the subtree is gone or the deadline
+    // elapses. This is what closes the keep-alive preview port.
+    #[cfg(unix)]
+    {
+        if !sandboxed_descendant_pids.is_empty() {
+            let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let alive: Vec<i32> = sandboxed_descendant_pids
+                    .iter()
+                    .copied()
+                    .filter(|pid| is_process_alive(*pid))
+                    .collect();
+                if alive.is_empty() {
+                    break;
+                }
+                for pid in &alive {
+                    let _ = unsafe { libc::kill(*pid, libc::SIGKILL) };
+                    stopped = true;
+                }
+                if std::time::Instant::now() >= reap_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 
@@ -1314,6 +1399,41 @@ fn terminate_process_group_id_with_escalation(pgid: i32, term_grace: Duration) -
     }
     signaled |= signal_group(libc::SIGKILL);
     signaled
+}
+
+/// Every host pid that descends — via the ppid chain — from `root_pid`,
+/// excluding `root_pid` itself. On Linux this reaches the bwrap wrapper and,
+/// through it, the namespaced sandboxed server: host `ps` reports namespaced
+/// processes with their host-side pids and a host-visible ppid pointing at
+/// their bwrap parent, so a breadth-first ppid walk enumerates the whole
+/// sandboxed subtree. The root is excluded because it is torn down separately
+/// by `terminate_import_preview_root`. Bounded by the process count so a
+/// malformed/cyclic ppid graph cannot loop forever.
+#[cfg(unix)]
+fn import_preview_descendant_pids(root_pid: i32, processes: &[UnixPsProcess]) -> Vec<i32> {
+    if root_pid <= 0 {
+        return Vec::new();
+    }
+    let mut descendants: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    // Re-scan the full table each round: a child discovered in one pass can
+    // itself be the parent of a process scanned earlier in the same table.
+    for _ in 0..processes.len().saturating_add(1) {
+        let mut grew = false;
+        for process in processes {
+            if process.pid <= 0 || process.pid == root_pid {
+                continue;
+            }
+            let parent_is_in_subtree =
+                process.ppid == root_pid || descendants.contains(&process.ppid);
+            if parent_is_in_subtree && descendants.insert(process.pid) {
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    descendants.into_iter().collect()
 }
 
 #[cfg(unix)]
@@ -2060,6 +2180,75 @@ mod tests {
             live_unverified_import_preview_process_groups(&session, &verified, &processes),
             vec![888]
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn import_preview_descendant_pids_walks_full_sandboxed_subtree() {
+        // Linux topology: ato run (4000) → bwrap (5000, own pgroup) →
+        // namespaced server (5151, its own setsid pgroup). The direct-pid
+        // teardown must enumerate BOTH the bwrap wrapper and the namespaced
+        // server, regardless of their process groups, and must exclude the
+        // root itself (it is torn down separately).
+        let processes = vec![
+            UnixPsProcess {
+                pid: 1,
+                ppid: 0,
+                pgid: 1,
+                command: "init".to_string(),
+            },
+            UnixPsProcess {
+                pid: 4000,
+                ppid: 1,
+                pgid: 4000,
+                command: "ato run /shadow --yes".to_string(),
+            },
+            UnixPsProcess {
+                pid: 5000,
+                ppid: 4000,
+                pgid: 888,
+                command: "bwrap --unshare-all --new-session --die-with-parent".to_string(),
+            },
+            UnixPsProcess {
+                pid: 5151,
+                ppid: 5000,
+                pgid: 5151,
+                command: "python3 keep_alive_server.py 1111".to_string(),
+            },
+            // Unrelated process: must not be swept.
+            UnixPsProcess {
+                pid: 9999,
+                ppid: 1,
+                pgid: 9999,
+                command: "python3 someone_elses_server.py".to_string(),
+            },
+        ];
+
+        let descendants = import_preview_descendant_pids(4000, &processes);
+        assert_eq!(descendants, vec![5000, 5151]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn import_preview_descendant_pids_rejects_nonpositive_root_and_unrelated_tree() {
+        let processes = vec![
+            UnixPsProcess {
+                pid: 5151,
+                ppid: 7777,
+                pgid: 5151,
+                command: "python3 keep_alive_server.py 1111".to_string(),
+            },
+            UnixPsProcess {
+                pid: 7777,
+                ppid: 1,
+                pgid: 7777,
+                command: "unrelated parent".to_string(),
+            },
+        ];
+        // No process links back to root 4000, so the subtree is empty.
+        assert!(import_preview_descendant_pids(4000, &processes).is_empty());
+        // A non-positive root pid is always rejected.
+        assert!(import_preview_descendant_pids(0, &processes).is_empty());
     }
 
     #[test]
