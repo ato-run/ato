@@ -83,7 +83,7 @@ fn assert_json_object_has_keys(value: &serde_json::Value, keys: &[&str]) {
 
 // Delegate to the crate-wide env lock so all ATO_HOME-mutating test groups
 // (lib_tests, install/tests, executors/source) are serialised by one mutex.
-fn test_env_lock() -> &'static std::sync::Mutex<()> {
+fn test_env_lock() -> &'static crate::tests::EnvLock {
     crate::tests::env_lock()
 }
 
