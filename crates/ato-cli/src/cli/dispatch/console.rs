@@ -169,7 +169,7 @@ fn try_open_browser(url: &str) -> Result<()> {
             .arg(url)
             .spawn()
             .context("Failed to launch browser with `xdg-open`")?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
