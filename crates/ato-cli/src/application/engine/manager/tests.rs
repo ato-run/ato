@@ -43,11 +43,32 @@ fn test_parse_engine_filename_too_short() {
 
 #[test]
 fn test_engine_path() {
-    // Reads the HOME/ATO_HOME-derived engines root; serialize against
-    // env-mutating tests or the path is computed from another test's temp env.
+    // Hermetic: the `.ato/engines` assertion assumes the default HOME layout,
+    // so pin HOME and clear ATO_HOME under the env lock — holding the lock
+    // alone does not protect against a var leaked by an earlier test.
     let _env = crate::tests::env_lock().lock().unwrap();
-    let em = EngineManager::new().unwrap();
-    let path = em.engine_path("nacelle", "v1.2.3");
+    let home = tempfile::tempdir().unwrap();
+    let prev_home = std::env::var_os("HOME");
+    let prev_ato_home = std::env::var_os("ATO_HOME");
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::remove_var("ATO_HOME");
+    }
+    let result = std::panic::catch_unwind(|| {
+        let em = EngineManager::new().unwrap();
+        em.engine_path("nacelle", "v1.2.3")
+    });
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_ato_home {
+            Some(v) => std::env::set_var("ATO_HOME", v),
+            None => std::env::remove_var("ATO_HOME"),
+        }
+    }
+    let path = result.expect("engine_path must not panic");
     let path_str = path.to_string_lossy();
     assert!(path_str.contains("nacelle-v1.2.3"));
     assert!(path_str.contains(".ato/engines"));
