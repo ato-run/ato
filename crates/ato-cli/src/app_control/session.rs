@@ -4670,7 +4670,21 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn community_toml_launch_skips_auto_bindings_without_persistent_state() {
+        // Hermetic ATO_HOME: `resolve_sample_recipe_for_input` materializes the
+        // recipe under `$ATO_HOME/sample-recipes/<slug>/`. Without pinning
+        // ATO_HOME this test would materialize into — and read from — whatever
+        // ATO_HOME a parallel `#[serial]` test happens to have set, racing that
+        // test's tempdir teardown (the file vanishes between write and read on
+        // slower / symlinked-tmp platforms). Take the env lock and pin ATO_HOME
+        // to a private tempdir so the materialize/read pair is isolated.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
         let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("pgweb")
             .expect("resolve sample recipe")
             .expect("pgweb recipe");
@@ -4704,7 +4718,18 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn session_start_allows_no_persistent_state_without_attach_state() {
+        // Hermetic ATO_HOME (see sibling test above): pgweb has NO persistent
+        // state, so `resolve_local_plan_for_session_start` must succeed with an
+        // empty override map and read its materialized manifest from a private
+        // ATO_HOME — never from an ATO_HOME a parallel test is tearing down.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
         let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("pgweb")
             .expect("resolve sample recipe")
             .expect("pgweb recipe");
