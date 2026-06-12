@@ -4327,4 +4327,180 @@ mod tests {
             other => panic!("expected a portless Ready, got {other:?}"),
         }
     }
+
+    // ── Connected Runner ⇄ real NodeCompat foreground readiness (regression
+    //    lock for #693 / #703) ──
+    //
+    // The runner's `run_lease_child` settles a lease as Ready only when the
+    // dispatched `ato run <source> --sandbox -y` child emits the machine
+    // `RECEIPT:` line plus the canonical `LIFECYCLE: ready port=N` line. Before
+    // #693, foreground NodeCompat runs took the blocking `execute()` path, which
+    // wired no lifecycle pump: a dispatched node capsule emitted neither line,
+    // so `run_lease_child` ran out the 600s ready deadline and the lease was
+    // reported failed(readiness_timeout). #693 added
+    // `node_compat::spawn_foreground` so the foreground node path TCP-probes the
+    // declared port and prints `LIFECYCLE: ready port=N` exactly like the host
+    // source executor.
+    //
+    // The other readiness tests in this module drive `run_lease_child` against a
+    // *synthetic* shell script that echoes those lines — they pin the runner's
+    // parsing, not that a real foreground node run actually emits them. This
+    // test closes that gap end to end: it spawns the *real* `ato` binary the way
+    // the runner does (`spawn_run_child`'s exact `run <path> --sandbox -y`
+    // shape) against the real `installed-relaunch-node` NodeCompat fixture
+    // (declared `port = 18880`), feeds its real stdout/stderr through the real
+    // `run_lease_child`, and asserts it reaches `LeaseReport::Ready` with the
+    // observed port — the assertion that timed out before #693.
+
+    /// Resolve the `ato` binary that sits beside this test's `current_exe`.
+    /// Cargo links integration/unit test binaries into `…/target/<profile>/deps`
+    /// while the `ato` bin lands in `…/target/<profile>/ato`, so walk up from the
+    /// test binary and look for a sibling `ato` in an ancestor directory.
+    #[cfg(unix)]
+    fn resolve_ato_binary() -> Option<PathBuf> {
+        if let Ok(path) = std::env::var("ATO_RUNNER_CHILD_BIN")
+            && !path.trim().is_empty()
+        {
+            let candidate = PathBuf::from(path);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        let exe = std::env::current_exe().ok()?;
+        for ancestor in exe.ancestors() {
+            let candidate = ancestor.join("ato");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Resolve the `nacelle` engine the source/node toolchain run needs.
+    /// Mirrors the convention in `tests/provider_npm_run_e2e.rs`: honor an
+    /// explicit `NACELLE_PATH`, else fall back to the sibling crate's debug
+    /// build.
+    #[cfg(unix)]
+    fn resolve_test_nacelle() -> Option<PathBuf> {
+        if let Ok(path) = std::env::var("NACELLE_PATH") {
+            let candidate = PathBuf::from(path);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        let candidate =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../nacelle/target/debug/nacelle");
+        candidate.exists().then_some(candidate)
+    }
+
+    /// The real NodeCompat capsule fixture: a tiny `node server.js` that binds
+    /// the declared port (18880) and stays up — the minimal shape a dispatched
+    /// run must drive to ready.
+    #[cfg(unix)]
+    fn node_compat_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("installed-relaunch-node")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "spawns the real ato binary + a real source/node runtime via the managed toolchain (needs node + nacelle); run with --ignored"]
+    async fn node_compat_capsule_dispatched_through_runner_reaches_ready() {
+        let Some(ato_bin) = resolve_ato_binary() else {
+            panic!("could not resolve the built `ato` binary beside the test executable");
+        };
+        let Some(nacelle) = resolve_test_nacelle() else {
+            panic!(
+                "could not resolve `nacelle`; set NACELLE_PATH or build crates/nacelle (cargo build -p nacelle)"
+            );
+        };
+        let fixture = node_compat_fixture_dir();
+        assert!(
+            fixture.join("capsule.toml").is_file(),
+            "missing NodeCompat fixture at {}",
+            fixture.display()
+        );
+
+        // Hermetic state: a throwaway ATO_HOME/HOME and unroutable Store/GitHub
+        // bases so the dispatched run never touches the developer's real ~/.ato
+        // or the network. Mirrors tests/installed_relaunch_port_remap_e2e.rs.
+        let scratch = tempfile::tempdir().expect("temp scratch");
+        let ato_home = scratch.path().join("ato-home");
+        let home = scratch.path().join("home");
+        std::fs::create_dir_all(&ato_home).expect("create ato_home");
+        std::fs::create_dir_all(&home).expect("create home");
+
+        // Spawn the dispatched child with the EXACT shape `spawn_run_child`
+        // builds — `ato run <path> --sandbox -y` in its own process group, with
+        // piped stdout/stderr — plus the operator-host `--nacelle` extra the
+        // runner would inject via ATO_RUNNER_RUN_ARGS.
+        let mut cmd = tokio::process::Command::new(&ato_bin);
+        cmd.arg("run")
+            .arg(&fixture)
+            .arg("--sandbox")
+            .arg("-y")
+            .arg("--nacelle")
+            .arg(&nacelle);
+        cmd.env("ATO_HOME", &ato_home)
+            .env("HOME", &home)
+            .env("ATO_STORE_API_URL", "http://127.0.0.1:1")
+            .env("ATO_GITHUB_API_BASE_URL", "http://127.0.0.1:1")
+            .env("ATO_TELEMETRY", "0")
+            .env("NACELLE_PATH", &nacelle);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // Lead a new process group (pgid == child pid) so a hard test teardown
+        // can reap the whole `ato run` → nacelle → bwrap → node subtree, exactly
+        // as the runner's `spawn_run_child` does.
+        cmd.process_group(0);
+        let child = cmd
+            .spawn()
+            .expect("spawn real `ato run --sandbox -y` child");
+
+        let log_dir = tempfile::tempdir().expect("log tempdir");
+        let log_path = log_dir.path().join("run.log");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LeaseReport>();
+        // 90s ceiling: long enough for a cold toolchain provision on a real host,
+        // far below the 600s production ready deadline this regression is about.
+        let monitor = tokio::spawn(run_lease_child(
+            child,
+            log_path.clone(),
+            Duration::from_secs(90),
+            tx,
+        ));
+
+        let report = tokio::time::timeout(Duration::from_secs(120), rx.recv())
+            .await
+            .expect("the runner must settle the lease before the 120s test ceiling")
+            .expect("run_lease_child always emits a decisive report before returning");
+        monitor.abort();
+
+        match report {
+            LeaseReport::Ready { execution_id, port } => {
+                // The exact outcome that hung before #693: the dispatched
+                // foreground NodeCompat run emitted `LIFECYCLE: ready port=N`
+                // (consumed here) instead of timing out at the ready deadline.
+                assert_eq!(
+                    port,
+                    Some(18880),
+                    "the dispatched NodeCompat run must report ready on its declared port 18880"
+                );
+                assert!(
+                    !execution_id.is_empty(),
+                    "a ready lease must carry the receipt-derived execution_id"
+                );
+            }
+            LeaseReport::Failed { code, message } => {
+                let tail = std::fs::read_to_string(&log_path).unwrap_or_default();
+                panic!(
+                    "NodeCompat dispatch must reach ready, not fail ({code}: {message})\nrun log:\n{tail}"
+                );
+            }
+            other => panic!("expected LeaseReport::Ready on the declared port, got {other:?}"),
+        }
+    }
 }
