@@ -1521,11 +1521,26 @@ fn process_group_alive(pid: u32) -> bool {
     unsafe { libc::kill(-(pid as libc::pid_t), 0) == 0 }
 }
 
+/// True while `pid` is still in the process table (`tasklist` PID filter).
+/// The production teardown gates on the monitor reaping the child, not on
+/// this — it is a precise check for tests.
+#[cfg(all(windows, test))]
+fn windows_pid_alive(pid: u32) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
+        .unwrap_or(false)
+}
+
 /// Terminate the workload's process group and wait for it to be reaped.
 /// SIGTERM first (let the app shut down cleanly), escalate to SIGKILL after a
 /// bounded grace, and confirm via the monitor task draining the child's output
 /// and reaping it. Returns true only when termination is confirmed; an
 /// unconfirmable outcome returns false so the caller can fail closed.
+/// Non-Unix hosts have no POSIX process groups; there `taskkill /T /F`
+/// force-kills the whole subtree under the same confirm-or-fail-closed
+/// contract.
 async fn terminate_child_group(
     child_pid: Option<u32>,
     mut monitor: tokio::task::JoinHandle<()>,
@@ -1551,12 +1566,40 @@ async fn terminate_child_group(
     }
     #[cfg(not(unix))]
     {
-        let _ = child_pid;
-        // No process groups: abort the monitor; kill_on_drop reaps the direct
-        // child when its handle drops. Best effort on non-Unix hosts.
-        monitor.abort();
-        let _ = monitor.await;
-        true
+        let Some(pid) = child_pid else {
+            // No live PID means the child was already reaped — nothing to kill.
+            let _ = monitor.await;
+            return true;
+        };
+        // No POSIX process groups here: `taskkill /T /F` terminates the ENTIRE
+        // workload subtree — kill_on_drop alone TerminateProcess'es only the
+        // direct `ato run` child and would orphan the nacelle/app
+        // grandchildren. Exit code 128 means no such process: the tree already
+        // exited, which is the teardown we wanted (the ESRCH analogue).
+        let tree_killed = match tokio::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+        {
+            Ok(status) => status.success() || status.code() == Some(128),
+            Err(_) => false,
+        };
+        if !tree_killed {
+            // The kill was refused or could not be issued, so the subtree may
+            // still be alive. Reap the direct child (kill_on_drop) as a best
+            // effort, but report the teardown UNCONFIRMED — fail closed so the
+            // caller holds the slot.
+            monitor.abort();
+            let _ = monitor.await;
+            return false;
+        }
+        // TerminateProcess cannot be refused; the monitor should reap the
+        // direct child promptly. If it still does not return, we cannot
+        // confirm termination — fail closed.
+        (tokio::time::timeout(STOP_KILL_GRACE, &mut monitor).await).is_ok()
     }
 }
 
@@ -3562,6 +3605,64 @@ mod tests {
         assert!(
             !process_group_alive(pid),
             "no process in the workload group may survive the stop"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminate_child_group_kills_whole_tree_and_confirms() {
+        // PowerShell starts ping as a grandchild and prints its PID, so a
+        // successful teardown proves we kill the TREE (taskkill /T), not just
+        // the direct child — the requirement to reap the whole workload
+        // subtree on a host without POSIX process groups.
+        let mut cmd = tokio::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "$p = Start-Process -FilePath ping -ArgumentList '-n','300','127.0.0.1' \
+             -PassThru -WindowStyle Hidden; Write-Output $p.Id; Wait-Process -Id $p.Id",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn workload tree");
+        let pid = child.id().expect("child pid");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut lines = BufReader::new(stdout).lines();
+        let grandchild: u32 = tokio::time::timeout(Duration::from_secs(60), lines.next_line())
+            .await
+            .expect("grandchild pid printed within timeout")
+            .expect("read grandchild pid line")
+            .expect("grandchild pid line present")
+            .trim()
+            .parse()
+            .expect("grandchild pid parses");
+        assert!(
+            windows_pid_alive(grandchild),
+            "the workload grandchild must be running before the stop"
+        );
+
+        let monitor = tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        let terminated = terminate_child_group(Some(pid), monitor).await;
+        assert!(
+            terminated,
+            "terminating the tree must be confirmed (monitor reaps the leader)"
+        );
+
+        // taskkill /T terminated the grandchild directly; confirm nothing from
+        // the workload tree survives to occupy the slot.
+        for _ in 0..100 {
+            if !windows_pid_alive(grandchild) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !windows_pid_alive(grandchild),
+            "no process in the workload tree may survive the stop"
         );
     }
 
