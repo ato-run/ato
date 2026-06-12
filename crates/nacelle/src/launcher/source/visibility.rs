@@ -87,6 +87,9 @@ impl WorkloadVisibilityPlan {
     /// Host path of the project virtualenv interpreter, when one applies. Used by
     /// backends that exec the workload against the host filesystem (seatbelt,
     /// Windows). `None` falls back to the base toolchain interpreter.
+    // Host-exec backends (seatbelt/Windows) only; the Linux bwrap backend reads
+    // `self.venv` directly, so on Linux this accessor would be dead code.
+    #[cfg(not(target_os = "linux"))]
     pub(super) fn venv_host_python(&self) -> Option<PathBuf> {
         self.venv.as_ref().map(|v| v.host_python.clone())
     }
