@@ -588,6 +588,20 @@ mod tests {
     }
 
     #[test]
+    fn denies_connect_to_non_web_port_on_allowed_host() {
+        // Regression for issue #648: a bare host grant covers only the
+        // web ports — CONNECT to e.g. SSH/SMTP on it must be refused.
+        // (Deny happens before any dial, so no real network is touched.)
+        let policy = make_policy(&["example.com"]);
+        let handle = EgressProxy::spawn(policy, None).unwrap();
+        for target in ["example.com:22", "example.com:25", "example.com:5432"] {
+            let (_s, hdr) = send_connect(handle.addr(), target);
+            assert!(hdr.contains("403"), "expected 403 for {target}, got: {hdr}");
+            assert!(hdr.contains("X-Ato-Egress: denied"));
+        }
+    }
+
+    #[test]
     fn deny_event_is_published() {
         use std::sync::mpsc::channel;
         let policy = make_policy(&[]);
