@@ -448,7 +448,7 @@ pub(super) fn is_build_toolchain_git_missing(err: &AnyhowError) -> bool {
 /// textual marker so any path that emits it still avoids the E999 fallback.
 fn exited_before_ready_diagnostic(err: &AnyhowError, causes: &[String]) -> Option<CliDiagnostic> {
     use crate::adapters::runtime::executors::oci_multi_service::{
-        OciExitedBeforeReadyError, OCI_EXITED_BEFORE_READY_CODE,
+        OCI_EXITED_BEFORE_READY_CODE, OciExitedBeforeReadyError,
     };
 
     const HINT: &str = "コンテナは起動しましたが readiness 前に終了しました。上のログを確認してください。\
@@ -689,9 +689,7 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
 
 #[cfg(test)]
 mod podman_disabled_tests {
-    use anyhow::Context as _;
-
-    use super::{from_anyhow, CliDiagnosticCode, CommandContext};
+    use super::{CliDiagnosticCode, CommandContext, from_anyhow};
 
     #[test]
     fn smoke_shell_failure_maps_to_e213() {
@@ -867,7 +865,7 @@ mod podman_disabled_tests {
 
 #[cfg(test)]
 mod exited_before_ready_tests {
-    use super::{from_anyhow, CliDiagnosticCode, CommandContext};
+    use super::{CliDiagnosticCode, CommandContext, from_anyhow};
     use crate::adapters::runtime::executors::oci_multi_service::OciExitedBeforeReadyError;
 
     fn db_exited_error() -> OciExitedBeforeReadyError {

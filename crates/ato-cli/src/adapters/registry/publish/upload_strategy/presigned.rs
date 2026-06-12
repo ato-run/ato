@@ -648,6 +648,9 @@ mod tests {
     #[test]
     #[serial]
     fn presigned_strategy_round_trip_uses_unsigned_put_and_finalize() {
+        // `#[serial]` only serializes against other serial_test users; the
+        // crate-wide env lock is what protects HOME/ATO_HOME here.
+        let _env = crate::tests::env_lock().lock().unwrap();
         let home = tempdir().expect("tempdir");
         let ato_home = home.path().join(".ato");
         let previous_home = std::env::var("HOME").ok();
@@ -758,6 +761,7 @@ mod tests {
     #[test]
     #[serial]
     fn presigned_strategy_preserves_allow_existing_and_already_existed() {
+        let _env = crate::tests::env_lock().lock().unwrap();
         let home = tempdir().expect("tempdir");
         let ato_home = home.path().join(".ato");
         let previous_home = std::env::var("HOME").ok();

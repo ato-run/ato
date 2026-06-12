@@ -30,6 +30,7 @@ path = "src/main.rs"
 
 [dependencies]
 capsule-core = { path = "../capsule-core", version = "0.11.0" }
+capsule-wire = { path = "../capsule-wire", version = "0.1.0" }
 ato-session-core = { path = "../ato-session-core", version = "0.1.0" }
 ato-net = { path = "../ato-net" }
 lock-draft-engine = { path = "lock-draft-engine", version = "0.1.0" }

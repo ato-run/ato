@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
 
 use super::SourceRuntime;
+use super::visibility::WorkloadVisibilityPlan;
 
 fn requested_host_cwd(target: &SourceTarget) -> PathBuf {
     target
@@ -42,6 +43,24 @@ fn allowed_mount_host_path(mount: &crate::launcher::InjectedMount) -> PathBuf {
         .unwrap_or_else(|| mount.source.clone())
 }
 
+/// Env keys the runtime re-applies inside the production sandbox after
+/// `env_clear`. This is a STRICT allowlist — only keys the runtime itself
+/// synthesizes for the sandbox contract (the writable session data dir), never
+/// general user/host env. `env_clear` deliberately drops everything else.
+/// Mirrors `SANDBOX_RUNTIME_ENV_ALLOWLIST` in `linux.rs`; keep the two in sync.
+const SANDBOX_RUNTIME_ENV_ALLOWLIST: &[&str] = &["ATO_DATA_DIR", "DATABASE_PATH"];
+
+/// Select the entries of the workload env that the runtime is allowed to
+/// re-inject past `env_clear`. Order is preserved; `Command::env` applies
+/// last-write-wins for duplicate keys.
+fn sandbox_runtime_setenv_pairs(env: Option<&[(String, String)]>) -> Vec<(String, String)> {
+    env.into_iter()
+        .flatten()
+        .filter(|(key, _)| SANDBOX_RUNTIME_ENV_ALLOWLIST.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Resolve the executable and arguments based on target.cmd or language detection
 ///
 /// This function handles various scenarios:
@@ -58,8 +77,24 @@ async fn resolve_executable_and_args(
     if let Some(ref explicit_cmd) = target.cmd
         && let Some((binary, args)) = explicit_cmd.split_first()
     {
-        // Check if the binary needs JIT provisioning (python, node, etc.)
-        let executable = resolve_binary(runtime, target, binary).await?;
+        // Prefer the project virtualenv interpreter for a bare `python`/`python3`,
+        // mirroring the Linux backend: a bare python maps to the base toolchain,
+        // which lacks the capsule's installed dependencies (`ModuleNotFoundError`).
+        let executable = if target.language == "python" && is_python_interpreter(binary) {
+            let toolchain = runtime.ensure_toolchain(target).await.map_err(|e| {
+                RuntimeError::ToolchainError {
+                    message: "Failed to ensure python toolchain".to_string(),
+                    technical_reason: Some(e.to_string()),
+                    cloud_upsell: None,
+                }
+            })?;
+            WorkloadVisibilityPlan::compute(target, &toolchain)
+                .venv_host_python()
+                .unwrap_or(toolchain)
+        } else {
+            // Check if the binary needs JIT provisioning (python, node, etc.)
+            resolve_binary(runtime, target, binary).await?
+        };
 
         // Prepare arguments
         let mut final_args: Vec<String> = Vec::new();
@@ -112,7 +147,15 @@ async fn resolve_executable_and_args(
         _ => vec![source_entrypoint_host_path(target).display().to_string()],
     };
 
-    Ok((toolchain_path, args))
+    // Prefer the project virtualenv interpreter for python (see Case 1).
+    let executable = match target.language.to_lowercase().as_str() {
+        "python" | "python3" => WorkloadVisibilityPlan::compute(target, &toolchain_path)
+            .venv_host_python()
+            .unwrap_or(toolchain_path),
+        _ => toolchain_path,
+    };
+
+    Ok((executable, args))
 }
 
 /// Check if the binary name is a Python interpreter (not a tool like uv/pip)
@@ -252,6 +295,14 @@ async fn launch_with_sandbox_exec(
         target.language, target.entrypoint, toolchain_path
     );
 
+    // Platform-neutral plan: which interpreter to run (venv vs base toolchain)
+    // and which host paths the workload must read. Lowered below to the venv
+    // interpreter path and seatbelt `allow file-read*` rules.
+    let visibility = WorkloadVisibilityPlan::compute(target, &toolchain_path);
+    let python_interp = visibility
+        .venv_host_python()
+        .unwrap_or_else(|| toolchain_path.clone());
+
     // Ensure log directory exists
     std::fs::create_dir_all(&runtime.config.log_dir).map_err(|e| RuntimeError::Io {
         path: runtime.config.log_dir.clone(),
@@ -259,7 +310,7 @@ async fn launch_with_sandbox_exec(
     })?;
 
     // Generate dynamic Seatbelt profile
-    let profile = generate_seatbelt_profile(target, &toolchain_path);
+    let profile = generate_seatbelt_profile(target, &toolchain_path, &visibility.read_paths);
 
     // Write profile to temp file
     let profile_path = runtime
@@ -284,8 +335,12 @@ async fn launch_with_sandbox_exec(
         // Use explicit command directly
         // The first element is the binary, rest are arguments
         if let Some((binary, args)) = explicit_cmd.split_first() {
-            // Find the actual binary path using toolchain manager or PATH
-            let binary_path = if binary == &target.language
+            // Find the actual binary path using toolchain manager or PATH. A bare
+            // python prefers the project virtualenv interpreter (see
+            // `WorkloadVisibilityPlan`); other known runtimes use the toolchain.
+            let binary_path = if target.language == "python" && is_python_interpreter(binary) {
+                python_interp.clone()
+            } else if binary == &target.language
                 || binary == "python"
                 || binary == "python3"
                 || binary == "node"
@@ -307,18 +362,19 @@ async fn launch_with_sandbox_exec(
             cmd.args(args);
         }
     } else {
-        // Legacy path: use toolchain + language-specific arguments
-        cmd.arg(&toolchain_path);
-
-        // Add language-specific arguments
+        // Legacy path: toolchain + language-specific arguments. Python prefers
+        // the project virtualenv interpreter (see `WorkloadVisibilityPlan`).
         match target.language.to_lowercase().as_str() {
             "python" | "python3" => {
+                cmd.arg(&python_interp);
                 cmd.args(["-B", &target.entrypoint]);
             }
             "deno" => {
+                cmd.arg(&toolchain_path);
                 cmd.args(["run", "--allow-read=.", &target.entrypoint]);
             }
             _ => {
+                cmd.arg(&toolchain_path);
                 cmd.arg(&target.entrypoint);
             }
         }
@@ -334,11 +390,23 @@ async fn launch_with_sandbox_exec(
         .unwrap_or_else(|_| requested_host_cwd(target));
     cmd.current_dir(&canonical_cwd);
 
-    // Apply user-provided environment variables
-    if let Some(ref envs) = request.env {
-        for (key, value) in envs {
-            cmd.env(key, value);
-        }
+    // SECURITY: start the sandboxed child from a cleared environment so host
+    // secrets (AWS_SECRET_ACCESS_KEY, API tokens, ...) never leak into the
+    // capsule. sandbox-exec itself performs no env scrubbing, so the launcher
+    // must do it here — mirrors the Linux production path's `--clearenv`
+    // discipline (linux.rs).
+    cmd.env_clear();
+    // Re-add essential env vars (same baseline as the Linux path).
+    cmd.env("PATH", "/usr/bin:/bin");
+    cmd.env("HOME", "/tmp");
+    cmd.env("LANG", "C.UTF-8");
+
+    // Re-apply runtime-owned env that must survive env_clear. Strict
+    // allowlist (SANDBOX_RUNTIME_ENV_ALLOWLIST) — e.g. ATO_DATA_DIR /
+    // DATABASE_PATH for the writable session data dir. General user/host env
+    // stays dropped.
+    for (key, value) in sandbox_runtime_setenv_pairs(request.env.as_deref()) {
+        cmd.env(key, value);
     }
 
     // Apply sidecar (SOCKS5 proxy) environment variables
@@ -524,7 +592,11 @@ async fn launch_direct(
 /// - (version 1) - Required version declaration
 /// - For dev mode: allow default for simplicity
 /// - For production mode: deny default with explicit allowlist based on IsolationPolicy
-fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &std::path::Path) -> String {
+fn generate_seatbelt_profile(
+    target: &SourceTarget,
+    toolchain_path: &std::path::Path,
+    visibility_paths: &[PathBuf],
+) -> String {
     // Get isolation policy from target, or use default
     let isolation = target.isolation.as_ref();
 
@@ -540,7 +612,7 @@ fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &std::path::
         .to_string()
     } else {
         // Production mode: build profile from IsolationPolicy
-        generate_production_seatbelt_profile(target, toolchain_path, isolation)
+        generate_production_seatbelt_profile(target, toolchain_path, isolation, visibility_paths)
     }
 }
 
@@ -553,6 +625,7 @@ fn generate_production_seatbelt_profile(
     target: &SourceTarget,
     _toolchain_path: &std::path::Path,
     isolation: Option<&crate::launcher::IsolationPolicy>,
+    visibility_paths: &[PathBuf],
 ) -> String {
     let source_dir = target.source_dir.to_string_lossy();
 
@@ -585,6 +658,23 @@ fn generate_production_seatbelt_profile(
         "(allow file-read* file-write* (subpath \"{}\"))\n\n",
         source_dir
     ));
+
+    // =========================================================================
+    // Workload visibility plan (platform-neutral): venv base CPython install +
+    // managed toolchain install root. The default policy is `(allow default)`,
+    // so these are read anyway today; emitting them explicitly documents the
+    // dependency and keeps the venv/toolchain interpreter loadable if the
+    // default is ever tightened to (deny default).
+    // =========================================================================
+    if !visibility_paths.is_empty() {
+        profile.push_str("; Workload runtime visibility (venv base install + toolchain root)\n");
+        for path in visibility_paths {
+            if let Some(escaped) = escape_path_for_sbpl(path) {
+                profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", escaped));
+            }
+        }
+        profile.push('\n');
+    }
 
     // =========================================================================
     // Apply IsolationPolicy from capsule.toml
@@ -777,7 +867,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
 
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(allow default)"));
@@ -802,7 +892,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
 
         assert!(profile.contains("(version 1)"));
         // New approach: allow default, deny specific paths
@@ -814,6 +904,37 @@ mod tests {
         assert!(profile.contains("(trace deny)"));
         // Check sensitive paths are denied
         assert!(profile.contains("/.ssh"));
+    }
+
+    #[test]
+    fn test_seatbelt_profile_emits_visibility_read_rules() {
+        // The platform-neutral visibility plan (venv base install + toolchain
+        // install root) must be lowered to explicit seatbelt read allowances.
+        let target = SourceTarget {
+            language: "python".to_string(),
+            entrypoint: "main.py".to_string(),
+            source_dir: PathBuf::from("/Users/test/project"),
+            dev_mode: false,
+            ..Default::default()
+        };
+        let toolchain = PathBuf::from("/usr/bin/python3");
+        let visibility = vec![
+            PathBuf::from("/Users/test/.cache/uv/cpython-3.11"),
+            PathBuf::from("/Users/test/.ato/toolchains/python-3.11/python"),
+        ];
+
+        let profile = generate_seatbelt_profile(&target, &toolchain, &visibility);
+
+        assert!(
+            profile.contains("(allow file-read* (subpath \"/Users/test/.cache/uv/cpython-3.11\"))"),
+            "profile must allow reading the venv base install: {profile}"
+        );
+        assert!(
+            profile.contains(
+                "(allow file-read* (subpath \"/Users/test/.ato/toolchains/python-3.11/python\"))"
+            ),
+            "profile must allow reading the toolchain install root: {profile}"
+        );
     }
 
     #[test]
@@ -848,7 +969,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/local/bin/node");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
 
         // New approach: allow default, network not denied when enabled
         assert!(profile.contains("(allow default)"));
@@ -899,7 +1020,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
 
         // No deny network, no egress comment
         assert!(!profile.contains("(deny network*)"));
@@ -928,13 +1049,37 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
         let parent = socket_path.parent().unwrap().to_string_lossy().to_string();
 
         assert!(
             profile.contains(&parent),
             "profile should allow IPC parent directory: {profile}"
         );
+    }
+
+    #[test]
+    fn sandbox_runtime_env_allowlist_filters_to_runtime_keys() {
+        // Only runtime-owned keys survive env_clear; general user/host env is
+        // dropped (no FOO/secret leak into the sandbox). Parity with the
+        // Linux --clearenv regression test in linux.rs.
+        let env = vec![
+            ("ATO_DATA_DIR".to_string(), "/runs/ato/session".to_string()),
+            (
+                "DATABASE_PATH".to_string(),
+                "/runs/ato/session/app.db".to_string(),
+            ),
+            ("FOO".to_string(), "bar".to_string()),
+            ("SECRET_TOKEN".to_string(), "shhh".to_string()),
+        ];
+        let pairs = sandbox_runtime_setenv_pairs(Some(&env));
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["ATO_DATA_DIR", "DATABASE_PATH"]);
+        assert!(
+            !keys.contains(&"FOO") && !keys.contains(&"SECRET_TOKEN"),
+            "general user/host env must not survive env_clear"
+        );
+        assert!(sandbox_runtime_setenv_pairs(None).is_empty());
     }
 
     #[test]
@@ -1023,5 +1168,111 @@ mod tests {
         let status = child.wait().unwrap();
         assert!(status.success(), "sandboxed process failed: {status:?}");
         assert_eq!(std::fs::read_to_string(output_path).unwrap(), "ok");
+    }
+
+    /// Regression test for ato-run/ato#640: the sandbox-exec child must start
+    /// from a cleared environment. Host env (e.g. cargo's CARGO_MANIFEST_DIR
+    /// in this test process) and non-allowlisted request env (a fake AWS
+    /// secret) must not be visible inside the capsule; allowlisted
+    /// runtime-owned env (ATO_DATA_DIR) must survive.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_sandbox_exec_clears_host_env() {
+        if !is_seatbelt_available() || which::which("python3").is_err() {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let log_dir = temp_dir.path().join("logs");
+        let state_dir = temp_dir.path().join("state");
+        std::fs::create_dir_all(&source_dir).unwrap();
+
+        let output_path = source_dir.join("env-dump.txt");
+        let script_path = source_dir.join("main.py");
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import os
+from pathlib import Path
+keys = ["AWS_SECRET_ACCESS_KEY", "CARGO_MANIFEST_DIR", "ATO_DATA_DIR", "HOME"]
+lines = ["{{}}={{}}".format(k, os.environ.get(k, "<unset>")) for k in keys]
+Path({output_path:?}).write_text("\n".join(lines), encoding="utf-8")
+"#
+            ),
+        )
+        .unwrap();
+
+        let runtime = SourceRuntime::new(crate::launcher::source::SourceRuntimeConfig {
+            dev_mode: false,
+            log_dir,
+            state_dir,
+            sidecar_config: None,
+        });
+
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: None,
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: source_dir.clone(),
+            requested_cwd: None,
+            cmd: None,
+            dev_mode: false,
+            isolation: Some(IsolationPolicy {
+                sandbox_enabled: true,
+                read_only_paths: vec![],
+                read_write_paths: vec![],
+                network_enabled: false,
+                egress_allow: vec![],
+                egress_id_allow: vec![],
+            }),
+            ipc_socket_paths: vec![],
+            injected_mounts: vec![],
+            ..Default::default()
+        };
+
+        let request = LaunchRequest {
+            workload_id: "macos-seatbelt-env-clear",
+            bundle_root: source_dir.clone(),
+            env: Some(vec![
+                // Simulates a host secret smuggled into the workload env —
+                // must NOT survive the allowlist.
+                ("AWS_SECRET_ACCESS_KEY".to_string(), "leaked".to_string()),
+                // Runtime-owned contract key — must survive.
+                ("ATO_DATA_DIR".to_string(), "/runs/ato/session".to_string()),
+            ]),
+            args: None,
+            source_target: Some(target.clone()),
+            socket_manager: None,
+        };
+
+        let result = launch_native_macos(&runtime, &request, &target)
+            .await
+            .unwrap();
+        assert!(result.pid.is_some());
+
+        let mut child = runtime.take_child("macos-seatbelt-env-clear").unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "sandboxed process failed: {status:?}");
+
+        let dump = std::fs::read_to_string(output_path).unwrap();
+        assert!(
+            dump.contains("AWS_SECRET_ACCESS_KEY=<unset>"),
+            "non-allowlisted request env leaked into the sandbox: {dump}"
+        );
+        assert!(
+            dump.contains("CARGO_MANIFEST_DIR=<unset>"),
+            "host env inherited into the sandbox (env_clear missing): {dump}"
+        );
+        assert!(
+            dump.contains("ATO_DATA_DIR=/runs/ato/session"),
+            "allowlisted runtime env must survive env_clear: {dump}"
+        );
+        assert!(
+            dump.contains("HOME=/tmp"),
+            "HOME must be pinned to the sandbox baseline: {dump}"
+        );
     }
 }
