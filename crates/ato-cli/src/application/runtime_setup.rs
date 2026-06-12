@@ -1308,6 +1308,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn detect_podman_not_found_suggests_install() {
+        let _env = crate::tests::env_lock().lock().unwrap();
         // Temporarily clear ATO_PODMAN_BIN and set a PATH with no podman.
         let prev_bin = std::env::var_os("ATO_PODMAN_BIN");
         let prev_path = std::env::var_os("PATH");
@@ -1316,6 +1317,11 @@ mod tests {
         // non-existent location for known paths.
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("PATH", tmp.path()) };
+        // Resolution probes fixed install locations (e.g. /opt/homebrew/bin)
+        // independently of PATH; on hosts with a real podman the NotFound
+        // branch under test is unreachable, and `status` describes machine
+        // state instead. Detect that while the scrubbed PATH is active.
+        let host_podman_resolvable = capsule_core::podman::resolve_podman().is_ok();
         let status = detect_podman();
         unsafe {
             match prev_bin {
@@ -1330,6 +1336,9 @@ mod tests {
         // Only assert when we're confident podman is not on the system (the
         // test may still find a real podman in known locations on developer
         // machines, which is fine — skip in that case).
+        if host_podman_resolvable {
+            return;
+        }
         if !status.ready {
             assert!(
                 status.message.contains("not installed")
