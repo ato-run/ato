@@ -597,9 +597,13 @@ mod tests {
         assert!(!json.contains("retryable"), "false must be omitted: {json}");
 
         // A transient failure carries `retryable: true` for the UI's Retry action.
-        let retry = InstallProgress::new(ToolKind::Podman, InstallPhase::Failed, "504").retryable(true);
+        let retry =
+            InstallProgress::new(ToolKind::Podman, InstallPhase::Failed, "504").retryable(true);
         let json = serde_json::to_string(&retry).unwrap();
-        assert!(json.contains("\"retryable\":true"), "true must be present: {json}");
+        assert!(
+            json.contains("\"retryable\":true"),
+            "true must be present: {json}"
+        );
 
         // Round-trips, and a missing field deserializes to false.
         let back: InstallProgress =

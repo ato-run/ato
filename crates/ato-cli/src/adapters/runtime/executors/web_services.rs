@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
+use capsule_core::common::readiness::http_status_indicates_ready;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::installed_state::{InstalledStateDb, os_port_is_free};
 use capsule_core::router::ManifestData;
@@ -841,9 +842,7 @@ fn http_probe(path: &str, port: u16) -> bool {
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok());
-    status
-        .map(|code| (200..500).contains(&code))
-        .unwrap_or(false)
+    status.map(http_status_indicates_ready).unwrap_or(false)
 }
 
 fn tcp_probe(target: &str, port: u16) -> bool {

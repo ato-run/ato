@@ -1,0 +1,19 @@
+{
+  "status": "prepared",
+  "plan": {
+    "install_revision_id": "rev_b84b849427b1fc4e38d7ffdecf972a52",
+    "capsule_instance_key": "cik_5bdac5603f5283c6e9a9ae48d82723fb",
+    "execution_id": "exec_4c0dac2466cd02294c35aa7b9e1e92440364d11f0c4ea9b46b0a6d9ee7a94654",
+    "requirement_graph_hash": "blake3:385cf098769a07701aa4ac04fef67d86fc47fad020f5b33c9af16a96d5da2abf",
+    "requirement_graph_snapshot_hash": "blake3:a63515f9a5538bc10a194171abcf773f195b274407c457b1a2cc53741e1eda93",
+    "launch_template_key_hash": "blake3:2dabc786a1fa2a90dcf9de54d8e5bb7a1069b53f0809c12eaece549849962514",
+    "selected_runner_class": "managed_runner",
+    "selected_runner_ref": "/runners/run_managed_1",
+    "command_request_id": "cmdreq_1",
+    "prepare_command": {
+      "command": "prepare_session",
+      "session": "ses_prep",
+      "materialization_plan": "/sessions/cik_5bdac5603f5283c6e9a9ae48d82723fb/materialization"
+    }
+  }
+}

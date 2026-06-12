@@ -756,55 +756,6 @@ pub struct CapsuleLogEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConsoleLevel {
-    Log,
-    Info,
-    Warn,
-    Error,
-    Debug,
-}
-
-impl ConsoleLevel {
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "info" => Self::Info,
-            "warn" => Self::Warn,
-            "error" => Self::Error,
-            "debug" => Self::Debug,
-            _ => Self::Log,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Log => "log",
-            Self::Info => "info",
-            Self::Warn => "warn",
-            Self::Error => "error",
-            Self::Debug => "debug",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConsoleLogEntry {
-    pub pane_id: PaneId,
-    pub level: ConsoleLevel,
-    pub message: String,
-    pub source_label: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetworkLogEntry {
-    pub request_id: String,
-    pub pane_id: PaneId,
-    pub method: String,
-    pub url: String,
-    pub status: Option<u16>,
-    pub duration_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserCommandKind {
     Back,
     Forward,
@@ -1199,8 +1150,6 @@ pub struct AppState {
     pub pending_post_login_target: Option<PendingPostLoginTarget>,
     pub auth_sessions: Vec<AuthSession>,
     pub auth_policy_registry: AuthPolicyRegistry,
-    pub console_logs: Vec<ConsoleLogEntry>,
-    pub network_logs: Vec<NetworkLogEntry>,
     pub config: crate::config::DesktopConfig,
     pub secret_store: crate::config::SecretStore,
     /// Handle → granted secret keys cache, built from bridge list().allow
@@ -1348,8 +1297,6 @@ impl AppState {
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
-            console_logs: Vec::new(),
-            network_logs: Vec::new(),
             config: crate::config::load_config(),
             secret_store: {
                 let _ = crate::config::migrate_legacy_secrets_if_present();
@@ -1549,8 +1496,6 @@ impl AppState {
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
-            console_logs: Vec::new(),
-            network_logs: Vec::new(),
             config: crate::config::load_config(),
             secret_store: {
                 let _ = crate::config::migrate_legacy_secrets_if_present();
@@ -2830,56 +2775,6 @@ impl AppState {
                     self.update_pane(pane_id, |pane| {
                         pane.title = title.clone();
                     });
-                }
-                ShellEvent::GuestConsoleLog {
-                    pane_id,
-                    level,
-                    message,
-                } => {
-                    let source_label = self.pane_source_label(pane_id);
-                    self.console_logs.push(ConsoleLogEntry {
-                        pane_id,
-                        level: ConsoleLevel::from_str(&level),
-                        message,
-                        source_label,
-                    });
-                    if self.console_logs.len() > 5000 {
-                        self.console_logs.drain(0..500);
-                    }
-                }
-                ShellEvent::GuestNetworkStart {
-                    pane_id,
-                    request_id,
-                    method,
-                    url,
-                } => {
-                    self.network_logs.push(NetworkLogEntry {
-                        request_id,
-                        pane_id,
-                        method,
-                        url,
-                        status: None,
-                        duration_ms: None,
-                    });
-                    if self.network_logs.len() > 2000 {
-                        self.network_logs.drain(0..200);
-                    }
-                }
-                ShellEvent::GuestNetworkEnd {
-                    pane_id: _,
-                    request_id,
-                    status,
-                    duration_ms,
-                } => {
-                    if let Some(entry) = self
-                        .network_logs
-                        .iter_mut()
-                        .rev()
-                        .find(|e| e.request_id == request_id)
-                    {
-                        entry.status = Some(status);
-                        entry.duration_ms = Some(duration_ms);
-                    }
                 }
                 ShellEvent::ProcessLog { pane_id, message } => {
                     self.push_capsule_log(

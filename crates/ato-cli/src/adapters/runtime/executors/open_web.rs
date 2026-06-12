@@ -184,4 +184,21 @@ mod tests {
         assert!(rendered.contains("--host 127.0.0.1"));
         assert!(rendered.contains("61357"));
     }
+
+    #[test]
+    fn static_server_script_confines_paths_with_a_boundary_check() {
+        // Regression guard for issue #657: a raw `candidate.startsWith(root)`
+        // prefix check lets a sibling directory sharing root's prefix
+        // (e.g. /x/app-secret for root /x/app) escape confinement. The embedded
+        // script must compare against the exact root or a separator boundary.
+        assert!(
+            STATIC_SERVER_SCRIPT
+                .contains("if (candidate !== root && !candidate.startsWith(root + SEP))"),
+            "static_file_server.ts must use a path-boundary confinement check"
+        );
+        assert!(
+            !STATIC_SERVER_SCRIPT.contains("candidate.startsWith(root))"),
+            "static_file_server.ts must not confine paths with a raw string prefix check"
+        );
+    }
 }

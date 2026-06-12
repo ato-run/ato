@@ -46,9 +46,15 @@ use crate::utils::error::{
 /// Carries no value — only identity.
 #[derive(Debug, Clone)]
 pub(crate) struct SecretPromptRequest {
+    // The CLI provider prompts by `input_key` alone; the full identity tuple is
+    // part of the provider contract for richer prompt surfaces (e.g. a desktop
+    // dialog naming the app), which do not exist yet.
+    #[allow(dead_code)]
     pub install_profile_key: String,
+    #[allow(dead_code)]
     pub install_revision_id: Option<String>,
     /// The matching ledger claim's condition key (bare or namespaced).
+    #[allow(dead_code)]
     pub condition_key: String,
     /// The secret name (e.g. `OPENAI_API_KEY`).
     pub input_key: String,
@@ -81,9 +87,15 @@ impl std::fmt::Debug for SecretPromptValue {
 /// Carries no value — only identity.
 #[derive(Debug, Clone)]
 pub(crate) struct StatePromptRequest {
+    // The CLI provider prompts by `input_key` alone; the full identity tuple is
+    // part of the provider contract for richer prompt surfaces (e.g. a desktop
+    // dialog naming the app), which do not exist yet.
+    #[allow(dead_code)]
     pub install_profile_key: String,
+    #[allow(dead_code)]
     pub install_revision_id: Option<String>,
     /// The matching ledger claim's condition key (bare or namespaced).
+    #[allow(dead_code)]
     pub condition_key: String,
     /// The state key (e.g. `data`).
     pub input_key: String,
@@ -331,6 +343,16 @@ fn derive_state_binding_id(install_profile_key: &str, condition_key: &str) -> St
     format!("binding_{hex}")
 }
 
+/// The three injection seams `=prompt` resolution writes through, grouped so
+/// they travel together — they are always supplied as a set (see
+/// [`resolve_prompt_launch_inputs`]).
+#[derive(Clone, Copy)]
+pub(crate) struct LaunchConditionSeams<'a> {
+    pub provider: &'a dyn LaunchConditionPromptProvider,
+    pub grant_store: &'a dyn SecretGrantStore,
+    pub target_store: &'a dyn StateBindingTargetStore,
+}
+
 /// Resolve `=prompt` launch inputs into concrete `grant:<id>` / `binding:<id>`
 /// inputs by creating real grants/bindings, to be called after the installed
 /// identity is resolved and before `run_relaunch_preflight`.
@@ -354,10 +376,13 @@ pub(crate) fn resolve_prompt_launch_inputs(
     install_revision_id: Option<&str>,
     capsule_location: Option<&str>,
     inputs: Vec<LaunchConditionInput>,
-    provider: &dyn LaunchConditionPromptProvider,
-    grant_store: &dyn SecretGrantStore,
-    target_store: &dyn StateBindingTargetStore,
+    seams: &LaunchConditionSeams<'_>,
 ) -> Result<Vec<LaunchConditionInput>> {
+    let LaunchConditionSeams {
+        provider,
+        grant_store,
+        target_store,
+    } = *seams;
     // No `=prompt` input → nothing to do (no ledger read, no prompt).
     if !inputs
         .iter()
@@ -684,9 +709,11 @@ mod tests {
                 LaunchConditionInputKind::Secret,
                 "OPENAI_API_KEY",
             )],
-            &provider,
-            &store,
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &provider,
+                grant_store: &store,
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap();
 
@@ -722,9 +749,11 @@ mod tests {
                 LaunchConditionInputKind::Secret,
                 "OPENAI_API_KEY",
             )],
-            &FakeProvider::returning(SECRET),
-            &FakeStore::ok(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning(SECRET),
+                grant_store: &FakeStore::ok(),
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap();
         let grant_id = match &out[0].value {
@@ -747,9 +776,11 @@ mod tests {
                 LaunchConditionInputKind::Secret,
                 "OPENAI_API_KEY",
             )],
-            &FakeProvider::returning(SECRET),
-            &FakeStore::failing(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning(SECRET),
+                grant_store: &FakeStore::failing(),
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap_err();
         // No grant proof was recorded because the secure write failed.
@@ -774,9 +805,11 @@ mod tests {
                 LaunchConditionInputKind::Secret,
                 "OPENAI_API_KEY",
             )],
-            &FakeProvider::returning(SECRET),
-            &FakeStore::failing(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning(SECRET),
+                grant_store: &FakeStore::failing(),
+                target_store: &FakeTargetStore::ok(),
+            },
         );
         let grant_id = derive_secret_grant_id("ipk_app", "secret.OPENAI_API_KEY");
         assert!(
@@ -798,9 +831,11 @@ mod tests {
                 LaunchConditionInputKind::Secret,
                 "OPENAI_API_KEY",
             )],
-            &FakeProvider::returning(SECRET),
-            &FakeStore::ok(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning(SECRET),
+                grant_store: &FakeStore::ok(),
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap();
         // Rewritten input carries only the grant id, never the value.
@@ -827,9 +862,11 @@ mod tests {
                 LaunchConditionInputKind::Secret,
                 "OPENAI_API_KEY",
             )],
-            &FakeProvider::cancelling(),
-            &FakeStore::ok(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::cancelling(),
+                grant_store: &FakeStore::ok(),
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("cancel"));
@@ -867,9 +904,11 @@ mod tests {
                 LaunchConditionInputKind::Secret,
                 "OPENAI_API_KEY",
             )],
-            &FakeProvider::returning(SECRET),
-            &FakeStore::ok(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning(SECRET),
+                grant_store: &FakeStore::ok(),
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("unknown condition"));
@@ -889,9 +928,12 @@ mod tests {
             Some("rev1"),
             Some("ato.run/acme/app"),
             vec![prompt_input(LaunchConditionInputKind::State, "data")],
-            &provider,
-            &FakeStore::failing(), // never touched: no secret prompt
-            &DbStateBindingTargetStore { db: &db },
+            &LaunchConditionSeams {
+                provider: &provider,
+                // grant store is never touched: no secret prompt in this test
+                grant_store: &FakeStore::failing(),
+                target_store: &DbStateBindingTargetStore { db: &db },
+            },
         )
         .unwrap();
 
@@ -928,9 +970,11 @@ mod tests {
             Some("rev1"),
             None,
             vec![prompt_input(LaunchConditionInputKind::State, "data")],
-            &FakeProvider::returning_state(STATE_PATH),
-            &FakeStore::ok(),
-            &DbStateBindingTargetStore { db: &db },
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning_state(STATE_PATH),
+                grant_store: &FakeStore::ok(),
+                target_store: &DbStateBindingTargetStore { db: &db },
+            },
         )
         .unwrap();
         let binding_id = match &out[0].value {
@@ -950,9 +994,11 @@ mod tests {
             Some("rev1"),
             None,
             vec![prompt_input(LaunchConditionInputKind::State, "data")],
-            &FakeProvider::returning_state(STATE_PATH),
-            &FakeStore::ok(),
-            &FakeTargetStore::failing(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning_state(STATE_PATH),
+                grant_store: &FakeStore::ok(),
+                target_store: &FakeTargetStore::failing(),
+            },
         )
         .unwrap_err();
         // No binding proof recorded because the target write failed (fail-closed).
@@ -973,9 +1019,11 @@ mod tests {
             Some("rev1"),
             None,
             vec![prompt_input(LaunchConditionInputKind::State, "data")],
-            &FakeProvider::returning_state(STATE_PATH),
-            &FakeStore::ok(),
-            &DbStateBindingTargetStore { db: &db },
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning_state(STATE_PATH),
+                grant_store: &FakeStore::ok(),
+                target_store: &DbStateBindingTargetStore { db: &db },
+            },
         )
         .unwrap();
         // The rewritten input carries only the binding id, never the path.
@@ -1033,9 +1081,11 @@ mod tests {
             Some("rev1"),
             None,
             vec![prompt_input(LaunchConditionInputKind::State, "data")],
-            &FakeProvider::cancelling(),
-            &FakeStore::ok(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::cancelling(),
+                grant_store: &FakeStore::ok(),
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("cancel"));
@@ -1053,9 +1103,11 @@ mod tests {
             Some("rev1"),
             None,
             vec![prompt_input(LaunchConditionInputKind::State, "data")],
-            &FakeProvider::returning_state(STATE_PATH),
-            &FakeStore::ok(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::returning_state(STATE_PATH),
+                grant_store: &FakeStore::ok(),
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("unknown condition"));
@@ -1086,9 +1138,11 @@ mod tests {
             Some("rev1"),
             None,
             vec![prompt_input(LaunchConditionInputKind::State, "data")],
-            &provider,
-            &FakeStore::ok(),
-            &FakeTargetStore::ok(),
+            &LaunchConditionSeams {
+                provider: &provider,
+                grant_store: &FakeStore::ok(),
+                target_store: &FakeTargetStore::ok(),
+            },
         )
         .unwrap();
         assert!(out.is_empty(), "satisfied prompt is dropped, not created");
@@ -1133,9 +1187,11 @@ mod tests {
             Some("rev1"),
             None,
             inputs.clone(),
-            &FakeProvider::cancelling(),
-            &FakeStore::failing(),
-            &FakeTargetStore::failing(),
+            &LaunchConditionSeams {
+                provider: &FakeProvider::cancelling(),
+                grant_store: &FakeStore::failing(),
+                target_store: &FakeTargetStore::failing(),
+            },
         )
         .unwrap();
         assert_eq!(out, inputs);

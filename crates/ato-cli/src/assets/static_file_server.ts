@@ -5,6 +5,7 @@ if (!rootArg || !portArg) {
 }
 
 const root = await Deno.realPath(rootArg);
+const SEP = Deno.build.os === "windows" ? "\\" : "/";
 const port = Number.parseInt(portArg, 10);
 if (!Number.isFinite(port) || port <= 0 || port > 65535) {
   console.error(`invalid port: ${portArg}`);
@@ -41,7 +42,9 @@ const safeJoin = async (pathname: string): Promise<string | null> => {
   const rel = normalized.replace(/^\/+/, "");
   const candidate = await Deno.realPath(`${root}/${rel}`).catch(() => null);
   if (!candidate) return null;
-  if (!candidate.startsWith(root)) return null;
+  // Path-boundary check: a raw prefix match would let a sibling directory
+  // sharing root's prefix (e.g. /x/app-secret for root /x/app) pass.
+  if (candidate !== root && !candidate.startsWith(root + SEP)) return null;
   return candidate;
 };
 

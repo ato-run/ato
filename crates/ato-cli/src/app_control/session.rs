@@ -26,6 +26,7 @@ use capsule_core::handle::{
 };
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule_wire::placement::{PlacementFacets, PlacementProviderKind};
 use serde::Serialize;
 
 use crate::ProviderToolchain;
@@ -98,9 +99,9 @@ pub(crate) fn clear_install_lifecycle_context() {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// let _guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx);
-/// execute_run_command(...)?;
+/// execute_run_command(/* ... */)?;
 /// // Context is cleared here automatically.
 /// ```
 pub(crate) struct ScopedInstallLifecycleGuard;
@@ -173,6 +174,28 @@ const SESSION_ACTION_STOP: &str = "session_stop";
 const SESSION_RUNTIME: &str = "ato-desktop-session";
 const DESKTOP_PARENT_PID_ENV: &str = "ATO_DESKTOP_PARENT_PID";
 const DESKTOP_PARENT_START_TIME_ENV: &str = "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS";
+const DESKTOP_PLACEMENT_PROVIDER: &str = "desktop";
+const DESKTOP_PLACEMENT_PROVIDER_ID: &str = "desktop:local";
+const DESKTOP_PLACEMENT_ID: &str = "plc_local_desktop";
+const DESKTOP_RUNTIME_OWNER: &str = "desktop_be";
+
+fn desktop_placement_facets() -> PlacementFacets {
+    PlacementFacets {
+        provider_kind: PlacementProviderKind::Desktop,
+        isolation_class: "local".to_string(),
+        storage_class: "local".to_string(),
+        network_class: "loopback".to_string(),
+        runner_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    }
+}
+
+fn session_requested_by_client() -> String {
+    if std::env::var_os(DESKTOP_PARENT_PID_ENV).is_some() {
+        "desktop_fe".to_string()
+    } else {
+        "cli".to_string()
+    }
+}
 
 /// Build a reporter for orchestration-session helpers. In envelope
 /// mode (set by `start_session(json=true)` on the orchestrator's
@@ -263,6 +286,10 @@ pub struct SessionInfo {
     manifest_path: String,
     target_label: String,
     notes: Vec<String>,
+    /// Whether session start observed a real readiness confirmation
+    /// (HTTP ready-wait / orchestrator probes). Drives the honest
+    /// `status` ("ready" vs "started") and the receipt readiness gate.
+    readiness_confirmed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     adapter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,6 +338,10 @@ pub struct SessionInfo {
 impl SessionInfo {
     /// PID of the spawned process. Used by the App Session Materialization
     /// layer to enrich the freshly-written record with its process_start_time.
+    pub(crate) fn readiness_confirmed(&self) -> bool {
+        self.readiness_confirmed
+    }
+
     pub(crate) fn pid(&self) -> i32 {
         self.pid
     }
@@ -468,6 +499,10 @@ fn auto_attach_state_args_for_community_toml_manifest(
 // types out so `ato-desktop` can read records without depending on
 // `ato-cli`.
 
+// The argument list maps 1:1 onto the `ato app session start` CLI flags
+// (dispatch/app.rs annotates each call site); a bag-of-options struct would
+// only relocate the width without making any call site clearer.
+#[allow(clippy::too_many_arguments)]
 pub fn start_session(
     handle: &str,
     target_label: Option<&str>,
@@ -806,6 +841,7 @@ pub(super) fn start_guest_session(
         snapshot: resolution.snapshot.clone(),
         runtime: runtime.clone(),
         display_strategy: CapsuleDisplayStrategy::GuestWebview,
+        readiness_confirmed: true,
         pid: child.id() as i32,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
@@ -846,6 +882,14 @@ pub(super) fn start_guest_session(
         install_profile_key: None,
         install_revision_id: None,
         capsule_instance_key: None,
+        placement_provider: Some(DESKTOP_PLACEMENT_PROVIDER.to_string()),
+        placement_provider_id: Some(DESKTOP_PLACEMENT_PROVIDER_ID.to_string()),
+        placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: None,
+        placement_facets: Some(desktop_placement_facets()),
+        user_visible_url: None,
+        requested_by_client: Some(session_requested_by_client()),
+        runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
@@ -1046,6 +1090,10 @@ pub(super) fn start_runtime_session(
     } else {
         None
     };
+    // OBSERVED readiness: only the WebUrl strategy waits on the bound port
+    // (wait_for_http_ready above, which bails on failure). Terminal/Service
+    // strategies launch with no readiness signal — never claim ready for them.
+    let readiness_confirmed = local_url.is_some();
 
     if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
         notes.push(format!(
@@ -1064,7 +1112,12 @@ pub(super) fn start_runtime_session(
         name: session_name(plan, "capsule-session"),
         pid: runtime_process.child.id() as i32,
         workload_pid: runtime_process.workload_pid.map(|value| value as i32),
-        status: ProcessStatus::Ready,
+        status: if readiness_confirmed {
+            ProcessStatus::Ready
+        } else {
+            // Launched with no readiness signal: Running, never a fake Ready.
+            ProcessStatus::Running
+        },
         runtime: runtime
             .runtime
             .clone()
@@ -1081,8 +1134,15 @@ pub(super) fn start_runtime_session(
         target_label: Some(plan.selected_target_label().to_string()),
         requested_port: session_web_port.as_ref().map(|web_port| web_port.port),
         log_path: Some(log_path.clone()),
-        ready_at: Some(SystemTime::now()),
-        last_event: Some("ready".to_string()),
+        ready_at: readiness_confirmed.then(SystemTime::now),
+        last_event: Some(
+            if readiness_confirmed {
+                "ready"
+            } else {
+                "started"
+            }
+            .to_string(),
+        ),
         last_error: None,
         exit_code: None,
     };
@@ -1124,6 +1184,7 @@ pub(super) fn start_runtime_session(
         snapshot: resolution.snapshot.clone(),
         runtime: runtime.clone(),
         display_strategy: display_strategy.clone(),
+        readiness_confirmed,
         pid: runtime_process.child.id() as i32,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
@@ -1166,6 +1227,14 @@ pub(super) fn start_runtime_session(
         install_profile_key: None,
         install_revision_id: None,
         capsule_instance_key: None,
+        placement_provider: Some(DESKTOP_PLACEMENT_PROVIDER.to_string()),
+        placement_provider_id: Some(DESKTOP_PLACEMENT_PROVIDER_ID.to_string()),
+        placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: None,
+        placement_facets: Some(desktop_placement_facets()),
+        user_visible_url: None,
+        requested_by_client: Some(session_requested_by_client()),
+        runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
@@ -1511,6 +1580,7 @@ pub(super) fn start_orchestration_session_in_process(
         snapshot: resolution.snapshot.clone(),
         runtime: runtime_descriptor,
         display_strategy: CapsuleDisplayStrategy::WebUrl,
+        readiness_confirmed: true,
         pid: leaf_local_pid,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
@@ -1519,7 +1589,7 @@ pub(super) fn start_orchestration_session_in_process(
         guest: None,
         web: Some(WebSessionDisplay {
             local_url: local_url.clone(),
-            healthcheck_url: local_url,
+            healthcheck_url: local_url.clone(),
             served_by: leaf_driver,
         }),
         terminal: None,
@@ -1547,6 +1617,14 @@ pub(super) fn start_orchestration_session_in_process(
         install_profile_key: None,
         install_revision_id: None,
         capsule_instance_key: None,
+        placement_provider: Some(DESKTOP_PLACEMENT_PROVIDER.to_string()),
+        placement_provider_id: Some(DESKTOP_PLACEMENT_PROVIDER_ID.to_string()),
+        placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: None,
+        placement_facets: Some(desktop_placement_facets()),
+        user_visible_url: None,
+        requested_by_client: Some(session_requested_by_client()),
+        runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
     write_session_record(&session_root_path, &session)?;
 
@@ -1733,6 +1811,7 @@ pub(super) fn start_orchestration_session_supervisor(
         snapshot: resolution.snapshot.clone(),
         runtime,
         display_strategy: CapsuleDisplayStrategy::WebUrl,
+        readiness_confirmed: true,
         pid: child.id() as i32,
         log_path: log_path.display().to_string(),
         manifest_path: manifest_path.display().to_string(),
@@ -1741,7 +1820,7 @@ pub(super) fn start_orchestration_session_supervisor(
         guest: None,
         web: Some(WebSessionDisplay {
             local_url: local_url.clone(),
-            healthcheck_url: local_url,
+            healthcheck_url: local_url.clone(),
             served_by: leaf_driver,
         }),
         terminal: None,
@@ -1767,6 +1846,14 @@ pub(super) fn start_orchestration_session_supervisor(
         install_profile_key: None,
         install_revision_id: None,
         capsule_instance_key: None,
+        placement_provider: Some(DESKTOP_PLACEMENT_PROVIDER.to_string()),
+        placement_provider_id: Some(DESKTOP_PLACEMENT_PROVIDER_ID.to_string()),
+        placement_id: Some(DESKTOP_PLACEMENT_ID.to_string()),
+        placement_fingerprint: None,
+        placement_facets: Some(desktop_placement_facets()),
+        user_visible_url: None,
+        requested_by_client: Some(session_requested_by_client()),
+        runtime_owner: Some(DESKTOP_RUNTIME_OWNER.to_string()),
     };
     write_session_record(&session_root, &session)?;
 
@@ -2001,7 +2088,14 @@ pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInf
         handle: session.handle,
         normalized_handle: session.normalized_handle,
         canonical_handle: session.canonical_handle,
-        status: "ready".to_string(),
+        status: if session.readiness_confirmed {
+            "ready".to_string()
+        } else {
+            // Honest "launched, not confirmed ready" — the start path had no
+            // readiness signal (or the record predates the field).
+            "started".to_string()
+        },
+        readiness_confirmed: session.readiness_confirmed,
         trust_state: session.trust_state,
         source: session.source,
         restricted: session.restricted,
@@ -3707,6 +3801,52 @@ mod tests {
     }
 
     #[test]
+    fn session_info_from_stored_status_is_honest_about_readiness() {
+        let base = serde_json::json!({
+            "session_id": "runtime-session-1",
+            "handle": "publisher/slug",
+            "normalized_handle": "publisher/slug",
+            "canonical_handle": null,
+            "trust_state": "trusted",
+            "source": "registry",
+            "restricted": false,
+            "snapshot": null,
+            "runtime": {
+                "target_label": "main",
+                "runtime": "node",
+                "driver": null,
+                "language": null,
+                "port": null
+            },
+            "display_strategy": "web_url",
+            "pid": 1234,
+            "log_path": ".tmp/runtime-session-1.log",
+            "manifest_path": "capsule.toml",
+            "target_label": "main",
+            "notes": [],
+            "guest": null,
+            "web": null,
+            "terminal": null,
+            "service": null
+        });
+
+        // Confirmed readiness (HTTP wait / orchestrator probes passed) → "ready".
+        let mut confirmed = base.clone();
+        confirmed["readiness_confirmed"] = serde_json::Value::Bool(true);
+        let stored: StoredSessionInfo = serde_json::from_value(confirmed).expect("stored record");
+        let info = session_info_from_stored(stored);
+        assert_eq!(info.status, "ready");
+        assert!(info.readiness_confirmed());
+
+        // No readiness signal — and equally a legacy record missing the field
+        // entirely — must surface as "started", never a fake "ready".
+        let stored: StoredSessionInfo = serde_json::from_value(base).expect("legacy stored record");
+        let info = session_info_from_stored(stored);
+        assert_eq!(info.status, "started");
+        assert!(!info.readiness_confirmed());
+    }
+
+    #[test]
     fn reserve_port_returns_requested_port_when_available() {
         let port = reserve_port(Some(43291)).expect("reserve port");
         assert_eq!(port, 43291);
@@ -3759,6 +3899,7 @@ mod tests {
                 normalized_handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
                 canonical_handle: Some("capsule://ato.run/koh0920/ato-onboarding".to_string()),
                 status: "ready".to_string(),
+                readiness_confirmed: true,
                 trust_state: TrustState::Untrusted,
                 source: Some("registry".to_string()),
                 restricted: true,
@@ -3907,6 +4048,7 @@ mod tests {
             manifest_path: "/tmp/capsule.toml".to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -3929,6 +4071,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         // Provider-set parity: graph providers ≡ dependency_contracts providers.
@@ -3992,6 +4142,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4074,6 +4225,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -4115,6 +4274,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4148,6 +4308,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -4194,6 +4362,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4245,6 +4414,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -4288,6 +4465,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4321,6 +4499,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -4484,7 +4670,21 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn community_toml_launch_skips_auto_bindings_without_persistent_state() {
+        // Hermetic ATO_HOME: `resolve_sample_recipe_for_input` materializes the
+        // recipe under `$ATO_HOME/sample-recipes/<slug>/`. Without pinning
+        // ATO_HOME this test would materialize into — and read from — whatever
+        // ATO_HOME a parallel `#[serial]` test happens to have set, racing that
+        // test's tempdir teardown (the file vanishes between write and read on
+        // slower / symlinked-tmp platforms). Take the env lock and pin ATO_HOME
+        // to a private tempdir so the materialize/read pair is isolated.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
         let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("pgweb")
             .expect("resolve sample recipe")
             .expect("pgweb recipe");
@@ -4518,7 +4718,18 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn session_start_allows_no_persistent_state_without_attach_state() {
+        // Hermetic ATO_HOME (see sibling test above): pgweb has NO persistent
+        // state, so `resolve_local_plan_for_session_start` must succeed with an
+        // empty override map and read its materialized manifest from a private
+        // ATO_HOME — never from an ATO_HOME a parallel test is tearing down.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
         let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("pgweb")
             .expect("resolve sample recipe")
             .expect("pgweb recipe");
@@ -4591,6 +4802,7 @@ mod tests {
                 manifest_path: temp.path().join("capsule.toml").display().to_string(),
                 target_label: "web".to_string(),
                 notes: vec![],
+                readiness_confirmed: true,
                 guest: None,
                 web: Some(WebSessionDisplay {
                     local_url: "http://127.0.0.1:9999/".to_string(),
@@ -4628,6 +4840,14 @@ mod tests {
                 install_profile_key: None,
                 install_revision_id: None,
                 capsule_instance_key: None,
+                placement_provider: None,
+                placement_provider_id: None,
+                placement_id: None,
+                placement_fingerprint: None,
+                placement_facets: None,
+                user_visible_url: None,
+                requested_by_client: None,
+                runtime_owner: None,
             },
         )
         .expect("write session record");
@@ -4698,6 +4918,7 @@ mod tests {
                 manifest_path: temp.path().join("capsule.toml").display().to_string(),
                 target_label: "web".to_string(),
                 notes: vec![],
+                readiness_confirmed: true,
                 guest: None,
                 web: Some(WebSessionDisplay {
                     local_url: "http://127.0.0.1:9999/".to_string(),
@@ -4735,6 +4956,14 @@ mod tests {
                 install_profile_key: None,
                 install_revision_id: None,
                 capsule_instance_key: None,
+                placement_provider: None,
+                placement_provider_id: None,
+                placement_id: None,
+                placement_fingerprint: None,
+                placement_facets: None,
+                user_visible_url: None,
+                requested_by_client: None,
+                runtime_owner: None,
             },
         )
         .expect("write session record");
@@ -4811,6 +5040,7 @@ mod tests {
             manifest_path: temp.path().join("capsule.toml").display().to_string(),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -4865,6 +5095,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4975,6 +5213,7 @@ mod tests {
                 manifest_path: temp.path().join("capsule.toml").display().to_string(),
                 target_label: "web".to_string(),
                 notes: vec![],
+                readiness_confirmed: true,
                 guest: None,
                 web: Some(WebSessionDisplay {
                     local_url: "http://127.0.0.1:5173/".to_string(),
@@ -5029,6 +5268,14 @@ mod tests {
                 install_profile_key: None,
                 install_revision_id: None,
                 capsule_instance_key: None,
+                placement_provider: None,
+                placement_provider_id: None,
+                placement_id: None,
+                placement_fingerprint: None,
+                placement_facets: None,
+                user_visible_url: None,
+                requested_by_client: None,
+                runtime_owner: None,
             },
         )
         .expect("write session record");
@@ -5124,10 +5371,10 @@ mod tests {
         // setup failure.
         let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(pids) = listener_pids_on_port(port) {
-                if pids.contains(&workload_pid) {
-                    break;
-                }
+            if let Ok(pids) = listener_pids_on_port(port)
+                && pids.contains(&workload_pid)
+            {
+                break;
             }
             if std::time::Instant::now() >= bound_deadline {
                 let _ = unsafe { libc::kill(workload_pid as libc::pid_t, libc::SIGKILL) };
@@ -5165,6 +5412,7 @@ mod tests {
             manifest_path: format!("/tmp/capsule-fallback-{port}.toml"),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -5199,6 +5447,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -5258,10 +5514,10 @@ mod tests {
 
         let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(pids) = listener_pids_on_port(port) {
-                if pids.contains(&workload_pid) {
-                    break;
-                }
+            if let Ok(pids) = listener_pids_on_port(port)
+                && pids.contains(&workload_pid)
+            {
+                break;
             }
             if std::time::Instant::now() >= bound_deadline {
                 let _ = unsafe { libc::kill(workload_pid as libc::pid_t, libc::SIGKILL) };
@@ -5383,10 +5639,10 @@ mod tests {
         // 10s budget as the sibling fallback test.
         let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(pids) = listener_pids_on_port(port) {
-                if !pids.is_empty() {
-                    break;
-                }
+            if let Ok(pids) = listener_pids_on_port(port)
+                && !pids.is_empty()
+            {
+                break;
             }
             if std::time::Instant::now() >= bound_deadline {
                 let pgid = unsafe { libc::getpgid(wrapper_pid as libc::pid_t) };
@@ -5435,6 +5691,7 @@ mod tests {
             manifest_path: format!("/tmp/capsule-pgroup-{port}.toml"),
             target_label: "web".to_string(),
             notes: vec![],
+            readiness_confirmed: true,
             guest: None,
             web: None,
             terminal: None,
@@ -5469,6 +5726,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -5662,7 +5927,7 @@ mod tests {
         // assertion checks "unchanged", not "absent" — robust regardless of
         // the ambient environment.
         let before: Vec<Option<std::ffi::OsString>> =
-            ENV_KEYS.iter().map(|key| std::env::var_os(key)).collect();
+            ENV_KEYS.iter().map(std::env::var_os).collect();
 
         let ctx = crate::cli::commands::run::InstallLifecycleContext {
             installed_app_id: "app_env".to_string(),

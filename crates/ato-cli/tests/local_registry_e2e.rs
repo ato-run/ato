@@ -77,10 +77,10 @@ fn start_local_registry_or_skip(
 fn wait_for_well_known(base_url: &str) -> Result<()> {
     let url = format!("{}/.well-known/capsule.json", base_url);
     for _ in 0..60 {
-        if let Ok(resp) = reqwest::blocking::get(&url) {
-            if resp.status().is_success() {
-                return Ok(());
-            }
+        if let Ok(resp) = reqwest::blocking::get(&url)
+            && resp.status().is_success()
+        {
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -510,6 +510,33 @@ fn materialize_desktop_sample(sample_name: &str, project_dir: &Path) -> Result<(
         );
     }
     copy_dir_recursive(&sample_root, project_dir)
+}
+
+/// #179: unbuilt Electron source apps are unsupported — ato does not run
+/// their packaging step, so publish must fail closed with the typed
+/// must-be-built diagnostic instead of deriving a bundle from an
+/// unbuildable source tree.
+fn assert_unbuilt_electron_publish_fails_closed(
+    ato: &Path,
+    base_url: &str,
+    workspace_root: &Path,
+    home_dir: &Path,
+    extra_publish_args: &[&str],
+) -> Result<()> {
+    let mut publish_args = vec!["publish", "--registry", base_url, "--json"];
+    publish_args.extend_from_slice(extra_publish_args);
+    let publish = run_ato_with_home(ato, &publish_args, workspace_root, home_dir)?;
+    let stderr = String::from_utf8_lossy(&publish.stderr);
+    assert!(
+        !publish.status.success(),
+        "unbuilt electron publish must fail closed (#179): stdout={}",
+        String::from_utf8_lossy(&publish.stdout)
+    );
+    assert!(
+        stderr.contains("Electron desktop apps must be built before"),
+        "expected the typed electron must-be-built diagnostic, got: {stderr}"
+    );
+    Ok(())
 }
 
 fn assert_source_desktop_private_publish(
@@ -986,15 +1013,9 @@ fn e2e_local_registry_private_publish_source_electron() -> Result<()> {
         return Ok(());
     };
 
-    assert_source_desktop_private_publish(
-        &ato,
-        &base_url,
-        &project_dir,
-        &home_dir,
-        "electron",
-        &[],
-        "source_derived_unsigned_bundle",
-    )
+    // Since #179 (d6905baa) unbuilt Electron source apps are rejected at
+    // inference; this flow now guards the fail-closed behavior.
+    assert_unbuilt_electron_publish_fails_closed(&ato, &base_url, &project_dir, &home_dir, &[])
 }
 
 #[test]
@@ -1110,14 +1131,15 @@ fn e2e_local_registry_private_publish_source_electron_finalize_local() -> Result
         return Ok(());
     };
 
-    assert_source_desktop_private_publish(
+    // Since #179 (d6905baa) unbuilt Electron source apps are rejected at
+    // inference, before finalize flags can matter; guard that the failure
+    // stays closed under the finalize-local path too.
+    assert_unbuilt_electron_publish_fails_closed(
         &ato,
         &base_url,
         &project_dir,
         &home_dir,
-        "electron",
         &["--finalize-local", "--allow-external-finalize"],
-        "locally_finalized_signed_bundle",
     )
 }
 

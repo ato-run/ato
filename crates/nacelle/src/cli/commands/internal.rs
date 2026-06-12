@@ -186,6 +186,14 @@ pub struct ExecEnvelope {
     /// Requested working directory for the process.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Explicit source directory to bind-mount at the guest root (Linux V1).
+    /// When set, nacelle uses this as `source_dir` instead of the manifest's
+    /// parent — letting ato-cli keep the synthesized manifest in a pool dir
+    /// (outside the source tree, for stable identity) while still mounting the
+    /// real materialized source (with `app/` + `.venv`). Optional and
+    /// backward-compatible (older nacelle ignores it; spec_version unchanged).
+    #[serde(default)]
+    pub source_dir: Option<String>,
     /// Additional host mounts injected by ato-cli.
     #[serde(default)]
     pub mounts: Vec<ExecMount>,
@@ -593,13 +601,83 @@ fn emit_service_exited(service: &str, status: &std::process::ExitStatus) {
     .emit();
 }
 
-fn emit_service_ready(service: &str) {
-    NacelleEvent::IpcReady {
-        service: service.to_string(),
-        endpoint: "command://ready".to_string(),
-        port: None,
+/// Maximum number of trailing bytes of a crashed child's log we echo to
+/// nacelle's stderr. A FastAPI/uvicorn traceback fits comfortably; the cap
+/// stops a runaway log from flooding the supervisor's output.
+const CHILD_LOG_TAIL_MAX_BYTES: u64 = 16 * 1024;
+
+/// Surface the sandboxed child's own stdout/stderr to nacelle's stderr when it
+/// exits non-zero (#628).
+///
+/// Production backends (macOS seatbelt, Linux bwrap) redirect the sandboxed
+/// child's stdout/stderr to a per-workload log file rather than piping them
+/// back through nacelle, so `start_log_forwarding` (which only drains live
+/// pipes) forwards nothing for them. On a crash that left the actual failure —
+/// e.g. a Python traceback explaining `exit code 1` — unobservable: it lived
+/// only in a temp log file that nacelle then discarded on cleanup, and never
+/// reached the runner log tail. Here we read the tail of that log file and echo
+/// it to nacelle's stderr (the stream ato-cli forwards into the runner log)
+/// before the workspace is cleaned up.
+///
+/// No-ops on success, when the backend kept no log file (dev-mode pipes), or
+/// when the file is missing/empty/unreadable — surfacing diagnostics must never
+/// itself become a failure path.
+fn surface_child_log_tail(
+    log_path: Option<&std::path::Path>,
+    service: &str,
+    status: &std::process::ExitStatus,
+) {
+    if status.success() {
+        return;
     }
-    .emit();
+    let Some(log_path) = log_path else {
+        return;
+    };
+
+    let tail = match read_log_tail(log_path, CHILD_LOG_TAIL_MAX_BYTES) {
+        Some(tail) if !tail.trim().is_empty() => tail,
+        _ => return,
+    };
+
+    eprintln!(
+        "[nacelle] --- captured output of '{}' (exit code {}) from {} ---",
+        service,
+        status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string()),
+        log_path.display()
+    );
+    for line in tail.lines() {
+        eprintln!("[child] {line}");
+    }
+    eprintln!("[nacelle] --- end captured output of '{}' ---", service);
+}
+
+/// Read up to `max_bytes` from the end of `path`, returning a lossy UTF-8
+/// string. Returns `None` if the file cannot be opened/read. On a partial read
+/// from the middle of the file the first (possibly truncated) line is dropped so
+/// the surfaced tail starts on a clean line boundary.
+fn read_log_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let truncated = len > max_bytes;
+    if truncated {
+        file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        // Drop the leading partial line so output starts on a boundary.
+        if let Some(idx) = text.find('\n') {
+            return Some(text[idx + 1..].to_string());
+        }
+    }
+    Some(text)
 }
 
 fn readiness_endpoint(
@@ -708,7 +786,11 @@ async fn readiness_http_ok(http_get: &str, port: u16) -> bool {
     let client = reqwest::Client::new();
     let fut = async {
         let resp = client.get(url).send().await.ok()?;
-        Some(resp.status().is_success())
+        // Keep in sync with capsule_core::common::readiness::
+        // http_status_indicates_ready (nacelle does not depend on
+        // capsule-core): ready iff 200 <= status < 400, Kubernetes
+        // `httpGet` probe semantics.
+        Some((200..400).contains(&resp.status().as_u16()))
     };
 
     timeout(Duration::from_secs(2), fut)
@@ -880,13 +962,29 @@ fn detect_language_from_extension(path: &str) -> Option<String> {
 }
 
 /// Find the most likely entrypoint file from command tokens
+/// Source-file extensions the launcher may need to rewrite to the in-sandbox
+/// path. A token is only treated as an entrypoint file if it is an explicit
+/// relative path (`./…`) or carries one of these extensions. We deliberately do
+/// NOT treat every dotted token as a file: an ASGI/WSGI app spec like
+/// `app.main:app` (extension parsed as `main:app`) or a dotted version such as
+/// `127.0.0.1` is an argument, not an entrypoint, and rewriting it to `/app/…`
+/// breaks the command (e.g. `uvicorn app.main:app`).
+const ENTRYPOINT_SOURCE_EXTS: &[&str] = &[
+    "py", "pyw", "js", "mjs", "cjs", "ts", "tsx", "jsx", "rb", "sh", "bash", "php", "pl", "lua",
+];
+
 fn find_entrypoint_file(tokens: &[String]) -> String {
-    // Look for file-like arguments (has extension or starts with ./)
+    // Look for file-like arguments (explicit relative path, or a known
+    // source-file extension).
     for token in tokens.iter().skip(1) {
         if token.starts_with("./") || token.starts_with("../") {
             return token.clone();
         }
-        if std::path::Path::new(token).extension().is_some() {
+        if let Some(ext) = std::path::Path::new(token)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            && ENTRYPOINT_SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str())
+        {
             return token.clone();
         }
     }
@@ -1010,6 +1108,7 @@ fn prepare_v1_launch(envelope: ExecEnvelope) -> Result<EnvironmentWorkspace> {
             readonly: mount.readonly,
         })
         .collect();
+    let source_dir_override = envelope.source_dir.map(PathBuf::from);
 
     EnvironmentWorkspace::for_manifest(
         format!("exec-{}", std::process::id()),
@@ -1019,7 +1118,8 @@ fn prepare_v1_launch(envelope: ExecEnvelope) -> Result<EnvironmentWorkspace> {
         merged_env,
         ipc_socket_paths,
         injected_mounts,
-    )
+    )?
+    .with_source_dir_override(source_dir_override)
 }
 
 fn prepare_v2_launch(envelope: ExecEnvelopeV2) -> Result<EnvironmentWorkspace> {
@@ -1290,6 +1390,12 @@ async fn execute_prepared_launch(
         .await
         .map_err(|err| anyhow::anyhow!("Launch failed: {:?}", err))?;
 
+    // Path of the sandboxed child's own stdout/stderr log file, when the
+    // backend redirected them there (production seatbelt/bwrap paths). Dev-mode
+    // launches pipe the child instead and carry no log file (`None`). Captured
+    // before any early return so it can be surfaced on a crash (#628).
+    let child_log_path = result.log_path.clone();
+
     write_ok(
         prepared.spec_version.clone(),
         ExecResult {
@@ -1353,6 +1459,7 @@ async fn execute_prepared_launch(
                     if let Some(log_forwarders) = log_forwarders.take() {
                         log_forwarders.wait().await;
                     }
+                    surface_child_log_tail(child_log_path.as_deref(), &manifest.name, &status);
                     emit_service_exited(&manifest.name, &status);
                     prepared.sync_derived_outputs()?;
                     emit_execution_completed(&manifest.name, &prepared, status.code())?;
@@ -1361,13 +1468,23 @@ async fn execute_prepared_launch(
                 }
             }
         } else {
-            emit_service_ready(&manifest.name);
+            // No readiness signal (no probe declared, and ato-cli synthesizes a
+            // conservative probe only when a port is declared). Report
+            // *Started*, NOT Ready — faking readiness from process spawn alone
+            // hides crashes-after-launch and produces a dishonest receipt.
+            NacelleEvent::ServiceStarted {
+                service: manifest.name.clone(),
+                endpoint: None,
+                port: None,
+            }
+            .emit();
         }
 
         let status = wait_for_child_exit(&mut child).await?;
         if let Some(log_forwarders) = log_forwarders.take() {
             log_forwarders.wait().await;
         }
+        surface_child_log_tail(child_log_path.as_deref(), &manifest.name, &status);
         emit_service_exited(&manifest.name, &status);
         prepared.sync_derived_outputs()?;
         emit_execution_completed(&manifest.name, &prepared, status.code())?;
@@ -1390,6 +1507,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn find_entrypoint_file_ignores_module_specs_and_versions() {
+        // `uvicorn app.main:app` — the app spec must NOT be treated as the
+        // entrypoint file (it would otherwise be rewritten to /app/app.main:app
+        // and break the command).
+        let tokens: Vec<String> = [
+            "python3",
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "python3");
+
+        // A real script entrypoint IS picked up.
+        let tokens: Vec<String> = ["python3", "app/main.py"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "app/main.py");
+
+        // Explicit relative path is picked up.
+        let tokens: Vec<String> = ["node", "./server.js"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(find_entrypoint_file(&tokens), "./server.js");
+    }
+
+    #[test]
     fn test_exec_envelope_without_ipc_fields() {
         let json = r#"{
             "spec_version": "0.1.0",
@@ -1402,6 +1552,19 @@ mod tests {
         assert!(envelope.ipc_env.is_none());
         assert!(envelope.ipc_socket_paths.is_none());
         assert_eq!(envelope.env.as_ref().unwrap().len(), 1);
+        // Backward-compatible: absent source_dir deserializes to None.
+        assert!(envelope.source_dir.is_none());
+    }
+
+    #[test]
+    fn test_exec_envelope_parses_source_dir_override() {
+        let json = r#"{
+            "spec_version": "0.1.0",
+            "workload": { "type": "source", "manifest": "/pool/x.toml" },
+            "source_dir": "/materialized/app"
+        }"#;
+        let envelope: ExecEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.source_dir.as_deref(), Some("/materialized/app"));
     }
 
     #[test]
@@ -1665,6 +1828,54 @@ http_get = "/health"
         assert!(envelope.workload.cmd.is_some());
         assert!(!envelope.interactive);
         assert!(envelope.workload.manifest.is_none());
+    }
+
+    #[test]
+    fn read_log_tail_returns_full_short_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workload.log");
+        std::fs::write(&path, "line one\nline two\n").unwrap();
+
+        let tail = read_log_tail(&path, CHILD_LOG_TAIL_MAX_BYTES).unwrap();
+        assert_eq!(tail, "line one\nline two\n");
+    }
+
+    #[test]
+    fn read_log_tail_caps_and_starts_on_line_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workload.log");
+        // 5 lines of 100 'a's each (~505 bytes); cap at 250 keeps only the tail
+        // and must drop the leading partial line.
+        let body = (0..5)
+            .map(|i| format!("{}{}", i, "a".repeat(99)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{body}\n")).unwrap();
+
+        let tail = read_log_tail(&path, 250).unwrap();
+        assert!(
+            tail.len() as u64 <= 250,
+            "tail must respect the byte cap: {} bytes",
+            tail.len()
+        );
+        // The kept tail starts on a clean line boundary (no mid-line fragment):
+        // every retained line is one of the original full lines.
+        for line in tail.lines() {
+            assert_eq!(
+                line.len(),
+                100,
+                "line must be a complete original line: {line:?}"
+            );
+        }
+        // The very last line is preserved.
+        assert!(tail.contains(&format!("4{}", "a".repeat(99))));
+    }
+
+    #[test]
+    fn read_log_tail_missing_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.log");
+        assert!(read_log_tail(&path, CHILD_LOG_TAIL_MAX_BYTES).is_none());
     }
 
     #[test]

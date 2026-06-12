@@ -934,6 +934,7 @@ mod tests {
                 target_label: "main".into(),
                 launch_key: None,
                 notes: vec![],
+                readiness_confirmed: false,
                 guest: None,
                 web: None,
                 terminal: None,
@@ -975,6 +976,14 @@ mod tests {
                 install_profile_key: None,
                 install_revision_id: None,
                 capsule_instance_key: None,
+                placement_provider: None,
+                placement_provider_id: None,
+                placement_id: None,
+                placement_fingerprint: None,
+                placement_facets: None,
+                user_visible_url: None,
+                requested_by_client: None,
+                runtime_owner: None,
             }
         };
 
@@ -1049,6 +1058,7 @@ mod tests {
             target_label: "main".into(),
             launch_key: None,
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: None,
             terminal: None,
@@ -1078,6 +1088,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         // No ordering edges between db and cache → must reject.
@@ -1157,6 +1175,7 @@ mod tests {
             target_label: "main".into(),
             launch_key: None,
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: None,
             terminal: None,
@@ -1208,6 +1227,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         // Only uses-edges (service→provider); no service→service ordering.
@@ -1308,6 +1335,7 @@ mod tests {
             target_label: "main".into(),
             launch_key: None,
             notes: vec![],
+            readiness_confirmed: false,
             guest: None,
             web: None,
             terminal: None,
@@ -1349,6 +1377,14 @@ mod tests {
             install_profile_key: None,
             install_revision_id: None,
             capsule_instance_key: None,
+            placement_provider: None,
+            placement_provider_id: None,
+            placement_id: None,
+            placement_fingerprint: None,
+            placement_facets: None,
+            user_visible_url: None,
+            requested_by_client: None,
+            runtime_owner: None,
         };
 
         assert!(

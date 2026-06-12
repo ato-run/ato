@@ -630,9 +630,17 @@ fn default_store_site_url() -> String {
     "https://ato.run".to_string()
 }
 
-fn default_local_registry_port() -> u16 {
+pub(crate) fn default_local_registry_port() -> u16 {
     8080
 }
+
+/// GPUI global carrying the configured local-registry port so any system-capsule
+/// IPC handler can use the same port as the read path without requiring config
+/// I/O or a separate parameter.
+///
+/// Set by `start_window::open_start_window` at window construction time.
+pub(crate) struct LocalRegistryPort(pub(crate) u16);
+impl gpui::Global for LocalRegistryPort {}
 
 fn default_projection_directory() -> String {
     "/Applications".to_string()

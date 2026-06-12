@@ -265,7 +265,7 @@ fn typed_error_includes_node_id_kind_and_reason() {
     assert_eq!(json["node_kind"], "dependency-output");
     assert_eq!(json["reason_code"], "materialization_missing");
     assert_eq!(json["profile"], "strict");
-    assert!(json["explanation"].as_str().unwrap().len() > 0);
+    assert!(!json["explanation"].as_str().unwrap().is_empty());
 }
 
 #[test]

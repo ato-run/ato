@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ato.run/specs/launch-preparation-plan.schema.json",
+  "title": "LaunchPreparationBridgeResult",
+  "description": "Control-plane-facing projection of a capsule-core launch-preparation decision (#581 ↔ #593). Produced by engine::launch_preparation_bridge. Carries only flat identity refs, content hashes, a stable blocker vocabulary, and the reference-only PrepareSession command — never raw secrets or observed/runtime diagnostics.",
+  "oneOf": [
+    { "$ref": "#/$defs/Prepared" },
+    { "$ref": "#/$defs/NotPrepared" }
+  ],
+  "$defs": {
+    "Prepared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "plan"],
+      "properties": {
+        "status": { "const": "prepared" },
+        "plan": { "$ref": "#/$defs/Plan" }
+      }
+    },
+    "NotPrepared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "blockers"],
+      "properties": {
+        "status": { "const": "not_prepared" },
+        "blockers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Blocker" }
+        }
+      }
+    },
+    "Plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "install_revision_id",
+        "capsule_instance_key",
+        "execution_id",
+        "requirement_graph_hash",
+        "requirement_graph_snapshot_hash",
+        "launch_template_key_hash",
+        "selected_runner_class",
+        "selected_runner_ref",
+        "command_request_id",
+        "prepare_command"
+      ],
+      "properties": {
+        "install_revision_id": {
+          "type": "string",
+          "pattern": "^rev_[0-9a-f]{32}$",
+          "description": "Immutable revision root id (content-addressed)."
+        },
+        "capsule_instance_key": {
+          "type": "string",
+          "pattern": "^cik_[0-9a-f]{32}$",
+          "description": "Per-launch instance key derived from (profile key + revision + execution id)."
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_[0-9a-f]{32,}$",
+          "description": "Launch-time execution identity. Deterministic from stable inputs; never an observed pid/container id."
+        },
+        "requirement_graph_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$",
+          "description": "Requirement-graph CONTENT hash. Must differ from requirement_graph_snapshot_hash (#588/#596)."
+        },
+        "requirement_graph_snapshot_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$",
+          "description": "Requirement-graph SNAPSHOT identity (graph + profile defaults + completeness). Kept distinct from the content hash."
+        },
+        "launch_template_key_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$",
+          "description": "Key hash of the reused launch template."
+        },
+        "selected_runner_class": {
+          "type": "string",
+          "enum": [
+            "managed_runner",
+            "desktop_runner",
+            "external_runner",
+            "browser_runner",
+            "browser_preview_runner"
+          ]
+        },
+        "selected_runner_ref": {
+          "type": "string",
+          "description": "Control-plane reference to the selected runner. Never a pid/container/live route."
+        },
+        "command_request_id": {
+          "type": "string",
+          "description": "Idempotency / correlation key for the later dispatch layer."
+        },
+        "prepare_command": { "$ref": "#/$defs/PrepareSessionCommand" }
+      }
+    },
+    "PrepareSessionCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The reference-only PrepareSession command. A prepared plan carries ONLY this command kind — never start_session or stop_session.",
+      "required": ["command", "session", "materialization_plan"],
+      "properties": {
+        "command": { "const": "prepare_session" },
+        "session": { "type": "string" },
+        "materialization_plan": {
+          "type": "string",
+          "description": "Reference to the persisted per-session materialization plan."
+        }
+      }
+    },
+    "Blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Stable blocker vocabulary. launch_preparation_unavailable is reserved for callers that cannot reach capsule-core at all.",
+          "enum": [
+            "reusable_inputs_invalid",
+            "launch_template_not_reusable",
+            "launch_materialization_failed",
+            "prepare_session_command_failed",
+            "launch_preparation_unavailable"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "description": "Non-authoritative human diagnostic. May be omitted. Never carries secrets or observed runtime facts."
+        }
+      }
+    }
+  }
+}

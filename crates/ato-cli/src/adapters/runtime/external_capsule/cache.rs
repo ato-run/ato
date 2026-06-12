@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use capsule_core::common::fs::{SymlinkPolicy, copy_dir_recursive};
 use capsule_core::lockfile::LockedCapsuleDependency;
 use sha2::{Digest, Sha256};
 
@@ -135,12 +136,16 @@ async fn ensure_github_runtime_tree_for_dependency(
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create cache parent {}", parent.display()))?;
         }
-        copy_dir_recursive(&checkout.checkout_dir, &cache_dir).with_context(|| {
-            format!(
-                "failed to copy github checkout into cache {}",
-                cache_dir.display()
-            )
-        })?;
+        // Symlinks are skipped: they may point outside the checkout. The
+        // executable bit (bootstrap.sh etc.) survives via `fs::copy`.
+        copy_dir_recursive(&checkout.checkout_dir, &cache_dir, SymlinkPolicy::Skip).with_context(
+            || {
+                format!(
+                    "failed to copy github checkout into cache {}",
+                    cache_dir.display()
+                )
+            },
+        )?;
         // Record the fingerprint so subsequent cache hits can detect
         // local corruption. We hash the canonicalized capsule.toml
         // bytes — the manifest is the single file ato actually reads
@@ -204,31 +209,6 @@ fn github_capsule_cache_dir(
         .join(&parsed.owner)
         .join(&parsed.repo)
         .join(&parsed.commit))
-}
-
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &dst_path)?;
-        } else if file_type.is_symlink() {
-            // Skip symlinks; they may point outside the checkout.
-            continue;
-        } else {
-            fs::copy(entry.path(), &dst_path)?;
-            // Preserve executable bit (bootstrap.sh etc.) on Unix.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = fs::metadata(entry.path())?.permissions();
-                fs::set_permissions(&dst_path, fs::Permissions::from_mode(perms.mode()))?;
-            }
-        }
-    }
-    Ok(())
 }
 
 fn external_capsule_cache_path(locked: &LockedCapsuleDependency) -> Result<PathBuf> {
