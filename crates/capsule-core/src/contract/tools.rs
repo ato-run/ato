@@ -387,6 +387,8 @@ fn acquire_tool_cache_lock(
     let lock_path = tools_root.join(".install.lock");
     let lock = fs::OpenOptions::new()
         .create(true)
+        // Never truncate: this file exists only to carry the advisory lock.
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -617,7 +619,10 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<()> {
 }
 
 /// Lock-acquiring wrapper around [`install_runtime_tool_archive_locked`] for
-/// callers that do not already hold the per-entry install lock.
+/// callers that do not already hold the per-entry install lock. (Production
+/// code locks in `ensure_runtime_tool`; only tests install archives
+/// directly.)
+#[cfg(test)]
 fn install_runtime_tool_archive(
     spec: &RuntimeToolSpec,
     version: &str,
