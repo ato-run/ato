@@ -278,6 +278,87 @@ pub fn compile_execution_plan_from_lock(
     })
 }
 
+/// Compile an OCI `ExecutionPlan` directly from an already-resolved image digest,
+/// without consulting the lock runtime model.
+///
+/// Pure-OCI service capsules (`[targets.app] runtime="oci"`) have no source
+/// `contract.process`, so `resolve_lock_runtime_model` (gated by
+/// `ensure_execution_ready`) rejects them. They do not need a source runtime
+/// model: the resolved image digest, target label, and optional port are
+/// everything an OCI launch requires, and they are already available at run
+/// time (digest from `resolution.oci_images`, metadata from the manifest).
+///
+/// This keeps the source-native path (`compile_execution_plan_from_lock`)
+/// untouched while still producing a real launch receipt + execution_id, so
+/// honest-readiness (ato#608/#609) can report `ready` for OCI targets.
+///
+/// NOTE: `egress_allow` is currently passed empty by the only caller because
+/// PodmanProvider cannot enforce egress allowlists anyway (the strict gate
+/// would only have refused to launch, never enforced). Sourcing manifest
+/// `network.egress_allow` into this plan can be a follow-up.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_oci_execution_plan_from_resolution(
+    scoped_id: String,
+    version: String,
+    target_label: String,
+    declared_image_ref: &str,
+    port: Option<u16>,
+    egress_allow: Vec<String>,
+    resolved_image: Option<OciImageResolution>,
+    platform: &PlatformSnapshot,
+) -> Result<ExecutionPlan, AtoExecutionError> {
+    let runtime = ExecutionRuntime::Oci;
+    let driver = resolve_driver(runtime, None, None, &[])?;
+    let tier = derive_tier(runtime, driver)?;
+
+    let runtime_section = build_runtime_section(
+        runtime,
+        driver,
+        egress_allow.clone(),
+        String::new(),
+        Vec::new(),
+        port,
+        &LockCompilerOverlay::default(),
+    )?;
+    let provisioning = build_provisioning(runtime, driver, &runtime_section.policy, tier);
+    let policy_segment_hash =
+        compute_policy_segment_hash(&runtime_section, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION)?;
+    let provisioning_policy_hash = compute_provisioning_policy_hash(&provisioning)?;
+
+    let oci_policy = build_oci_policy_envelope(declared_image_ref, port, egress_allow, resolved_image);
+
+    Ok(ExecutionPlan {
+        schema_version: EXECUTION_PLAN_SCHEMA_VERSION.to_string(),
+        capsule: CapsuleRef {
+            scoped_id: scoped_id.clone(),
+            version: version.clone(),
+        },
+        target: TargetRef {
+            label: target_label.clone(),
+            runtime,
+            driver,
+            language: None,
+        },
+        provisioning,
+        runtime: runtime_section,
+        consent: Consent {
+            key: ConsentKey {
+                scoped_id,
+                version,
+                target_label,
+            },
+            policy_segment_hash,
+            provisioning_policy_hash,
+            mount_set_algo_id: MOUNT_SET_ALGO_ID.to_string(),
+            mount_set_algo_version: MOUNT_SET_ALGO_VERSION,
+        },
+        reproducibility: Reproducibility {
+            platform: platform_from_snapshot(platform),
+        },
+        oci: Some(oci_policy),
+    })
+}
+
 fn build_runtime_section(
     runtime: ExecutionRuntime,
     driver: ExecutionDriver,
@@ -769,6 +850,51 @@ image = "docker.io/library/redis:7"
     fn derive_tier_oci_is_tier3() {
         let tier = derive_tier(ExecutionRuntime::Oci, ExecutionDriver::Oci).expect("tier");
         assert!(matches!(tier, ExecutionTier::Tier3));
+    }
+
+    #[test]
+    fn compile_oci_from_resolution_yields_receipt_inputs() {
+        use crate::foundation::types::oci::{OciImageResolution, OciPlatform};
+
+        let resolved_image = OciImageResolution {
+            declared_ref: "ghcr.io/go-gitea/gitea:latest".to_string(),
+            resolved_digest: "sha256:7bae791181c2".to_string(),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "arm64".to_string(),
+                variant: None,
+            },
+            importer_input_hash: None,
+        };
+
+        let plan = compile_oci_execution_plan_from_resolution(
+            "gitea".to_string(),
+            "1.0.0".to_string(),
+            "app".to_string(),
+            "ghcr.io/go-gitea/gitea:latest",
+            Some(3000),
+            Vec::new(),
+            Some(resolved_image),
+            &PlatformSnapshot {
+                os: "macos".to_string(),
+                arch: "aarch64".to_string(),
+                libc: "unknown".to_string(),
+            },
+        )
+        .expect("oci plan");
+
+        let oci = plan.oci.as_ref().expect("oci envelope present");
+        let resolved = oci.resolved_image.as_ref().expect("resolved image present");
+        assert_eq!(resolved.resolved_digest, "sha256:7bae791181c2");
+        assert_eq!(oci.port_exposure, Some(3000));
+        assert_eq!(plan.target.label, "app");
+        assert!(matches!(plan.target.runtime, ExecutionRuntime::Oci));
+        assert!(matches!(plan.target.driver, ExecutionDriver::Oci));
+        assert_eq!(plan.capsule.scoped_id, "gitea");
+        assert_eq!(plan.consent.key.scoped_id, "gitea");
+        assert_eq!(plan.consent.key.version, "1.0.0");
+        assert_eq!(plan.consent.key.target_label, "app");
+        assert!(!plan.consent.policy_segment_hash.is_empty());
     }
 
     #[test]
