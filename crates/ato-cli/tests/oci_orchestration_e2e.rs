@@ -1,3 +1,9 @@
+// Unix-only: drives container fixtures through POSIX entrypoint scripts,
+// Unix permission bits, and libc::kill. Without this gate the test target
+// does not even compile on Windows, breaking
+// `cargo check --workspace --all-targets` there.
+#![cfg(unix)]
+
 mod fail_closed_support;
 
 use std::fs;
