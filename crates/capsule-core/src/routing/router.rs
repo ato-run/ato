@@ -3,8 +3,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-use shell_words;
-
 use crate::ato_lock::AtoLock;
 use crate::lock_runtime::{self, ResolvedLockRuntimeModel};
 use crate::manifest;
@@ -904,68 +902,6 @@ impl ExecutionDescriptor {
             .or_else(|| self.compat_str(&["targets", &self.selected_target, "prestart_command"]))
             .or_else(|| self.compat_str(&["prestart"]))
             .or_else(|| self.compat_str(&["prestart_command"]))
-    }
-
-    /// Resolve a command value from a target-level field, handling both
-    /// string and object (table) forms.
-    #[allow(dead_code)]
-    fn resolve_target_field(&self, field: &str) -> Option<String> {
-        let target = self.manifest.get("targets")?.get(&self.selected_target)?;
-        let value = target.get(field)?;
-        match value {
-            toml::Value::String(s) => Some(s.clone()),
-            toml::Value::Table(t) => {
-                if let Some(toml::Value::String(shell)) = t.get("shell") {
-                    return Some(shell.clone());
-                }
-                if let Some(toml::Value::String(cmd)) = t.get("cmd") {
-                    let mut parts = vec![cmd.clone()];
-                    if let Some(toml::Value::Array(args)) = t.get("args") {
-                        for arg in args {
-                            if let Some(s) = arg.as_str() {
-                                parts.push(s.to_string());
-                            }
-                        }
-                    }
-                    return Some(shell_words::join(parts.iter().map(String::as_str)));
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    /// Resolve a command value from the manifest TOML, handling both
-    /// string and object (table) forms.
-    #[allow(dead_code)]
-    fn resolve_command_string(&self, path: &[&str]) -> Option<String> {
-        let mut current = &self.manifest;
-        for key in path {
-            current = current.get(key)?;
-        }
-        match current {
-            toml::Value::String(s) => Some(s.clone()),
-            toml::Value::Table(t) => {
-                // Shell form: { shell = "...", shell_kind = "..." }
-                if let Some(toml::Value::String(shell)) = t.get("shell") {
-                    return Some(shell.clone());
-                }
-                // Argv form: { cmd = "...", args = [...], ... }
-                if let Some(toml::Value::String(cmd)) = t.get("cmd") {
-                    let mut parts = vec![cmd.clone()];
-                    if let Some(toml::Value::Array(args)) = t.get("args") {
-                        for arg in args {
-                            if let Some(s) = arg.as_str() {
-                                parts.push(s.to_string());
-                            }
-                        }
-                    }
-                    return Some(shell_words::join(parts.iter().map(String::as_str)));
-                }
-                None
-            }
-            _ => None,
-        }
     }
 
     pub fn build_cache_outputs(&self) -> Vec<String> {

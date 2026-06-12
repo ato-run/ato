@@ -94,20 +94,6 @@ pub async fn run_publish_install_phase_async(
     })
 }
 
-#[allow(dead_code)]
-pub fn run_publish_install_phase(
-    artifact_path: &Path,
-    preview: &crate::application::pipeline::phases::publish::PrivatePublishSummary,
-    verification: Option<&crate::publish_artifact::VerifiedArtifactInfo>,
-) -> Result<PublishInstallResult> {
-    futures::executor::block_on(run_publish_install_phase_async(
-        artifact_path,
-        preview,
-        verification,
-        None,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
