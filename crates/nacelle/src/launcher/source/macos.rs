@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
 
 use super::SourceRuntime;
+use super::visibility::WorkloadVisibilityPlan;
 
 fn requested_host_cwd(target: &SourceTarget) -> PathBuf {
     target
@@ -76,8 +77,24 @@ async fn resolve_executable_and_args(
     if let Some(ref explicit_cmd) = target.cmd
         && let Some((binary, args)) = explicit_cmd.split_first()
     {
-        // Check if the binary needs JIT provisioning (python, node, etc.)
-        let executable = resolve_binary(runtime, target, binary).await?;
+        // Prefer the project virtualenv interpreter for a bare `python`/`python3`,
+        // mirroring the Linux backend: a bare python maps to the base toolchain,
+        // which lacks the capsule's installed dependencies (`ModuleNotFoundError`).
+        let executable = if target.language == "python" && is_python_interpreter(binary) {
+            let toolchain = runtime.ensure_toolchain(target).await.map_err(|e| {
+                RuntimeError::ToolchainError {
+                    message: "Failed to ensure python toolchain".to_string(),
+                    technical_reason: Some(e.to_string()),
+                    cloud_upsell: None,
+                }
+            })?;
+            WorkloadVisibilityPlan::compute(target, &toolchain)
+                .venv_host_python()
+                .unwrap_or(toolchain)
+        } else {
+            // Check if the binary needs JIT provisioning (python, node, etc.)
+            resolve_binary(runtime, target, binary).await?
+        };
 
         // Prepare arguments
         let mut final_args: Vec<String> = Vec::new();
@@ -130,7 +147,15 @@ async fn resolve_executable_and_args(
         _ => vec![source_entrypoint_host_path(target).display().to_string()],
     };
 
-    Ok((toolchain_path, args))
+    // Prefer the project virtualenv interpreter for python (see Case 1).
+    let executable = match target.language.to_lowercase().as_str() {
+        "python" | "python3" => WorkloadVisibilityPlan::compute(target, &toolchain_path)
+            .venv_host_python()
+            .unwrap_or(toolchain_path),
+        _ => toolchain_path,
+    };
+
+    Ok((executable, args))
 }
 
 /// Check if the binary name is a Python interpreter (not a tool like uv/pip)
@@ -270,6 +295,14 @@ async fn launch_with_sandbox_exec(
         target.language, target.entrypoint, toolchain_path
     );
 
+    // Platform-neutral plan: which interpreter to run (venv vs base toolchain)
+    // and which host paths the workload must read. Lowered below to the venv
+    // interpreter path and seatbelt `allow file-read*` rules.
+    let visibility = WorkloadVisibilityPlan::compute(target, &toolchain_path);
+    let python_interp = visibility
+        .venv_host_python()
+        .unwrap_or_else(|| toolchain_path.clone());
+
     // Ensure log directory exists
     std::fs::create_dir_all(&runtime.config.log_dir).map_err(|e| RuntimeError::Io {
         path: runtime.config.log_dir.clone(),
@@ -277,7 +310,7 @@ async fn launch_with_sandbox_exec(
     })?;
 
     // Generate dynamic Seatbelt profile
-    let profile = generate_seatbelt_profile(target, &toolchain_path);
+    let profile = generate_seatbelt_profile(target, &toolchain_path, &visibility.read_paths);
 
     // Write profile to temp file
     let profile_path = runtime
@@ -302,8 +335,12 @@ async fn launch_with_sandbox_exec(
         // Use explicit command directly
         // The first element is the binary, rest are arguments
         if let Some((binary, args)) = explicit_cmd.split_first() {
-            // Find the actual binary path using toolchain manager or PATH
-            let binary_path = if binary == &target.language
+            // Find the actual binary path using toolchain manager or PATH. A bare
+            // python prefers the project virtualenv interpreter (see
+            // `WorkloadVisibilityPlan`); other known runtimes use the toolchain.
+            let binary_path = if target.language == "python" && is_python_interpreter(binary) {
+                python_interp.clone()
+            } else if binary == &target.language
                 || binary == "python"
                 || binary == "python3"
                 || binary == "node"
@@ -325,18 +362,19 @@ async fn launch_with_sandbox_exec(
             cmd.args(args);
         }
     } else {
-        // Legacy path: use toolchain + language-specific arguments
-        cmd.arg(&toolchain_path);
-
-        // Add language-specific arguments
+        // Legacy path: toolchain + language-specific arguments. Python prefers
+        // the project virtualenv interpreter (see `WorkloadVisibilityPlan`).
         match target.language.to_lowercase().as_str() {
             "python" | "python3" => {
+                cmd.arg(&python_interp);
                 cmd.args(["-B", &target.entrypoint]);
             }
             "deno" => {
+                cmd.arg(&toolchain_path);
                 cmd.args(["run", "--allow-read=.", &target.entrypoint]);
             }
             _ => {
+                cmd.arg(&toolchain_path);
                 cmd.arg(&target.entrypoint);
             }
         }
@@ -554,7 +592,11 @@ async fn launch_direct(
 /// - (version 1) - Required version declaration
 /// - For dev mode: allow default for simplicity
 /// - For production mode: deny default with explicit allowlist based on IsolationPolicy
-fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &std::path::Path) -> String {
+fn generate_seatbelt_profile(
+    target: &SourceTarget,
+    toolchain_path: &std::path::Path,
+    visibility_paths: &[PathBuf],
+) -> String {
     // Get isolation policy from target, or use default
     let isolation = target.isolation.as_ref();
 
@@ -570,7 +612,7 @@ fn generate_seatbelt_profile(target: &SourceTarget, toolchain_path: &std::path::
         .to_string()
     } else {
         // Production mode: build profile from IsolationPolicy
-        generate_production_seatbelt_profile(target, toolchain_path, isolation)
+        generate_production_seatbelt_profile(target, toolchain_path, isolation, visibility_paths)
     }
 }
 
@@ -583,6 +625,7 @@ fn generate_production_seatbelt_profile(
     target: &SourceTarget,
     _toolchain_path: &std::path::Path,
     isolation: Option<&crate::launcher::IsolationPolicy>,
+    visibility_paths: &[PathBuf],
 ) -> String {
     let source_dir = target.source_dir.to_string_lossy();
 
@@ -615,6 +658,23 @@ fn generate_production_seatbelt_profile(
         "(allow file-read* file-write* (subpath \"{}\"))\n\n",
         source_dir
     ));
+
+    // =========================================================================
+    // Workload visibility plan (platform-neutral): venv base CPython install +
+    // managed toolchain install root. The default policy is `(allow default)`,
+    // so these are read anyway today; emitting them explicitly documents the
+    // dependency and keeps the venv/toolchain interpreter loadable if the
+    // default is ever tightened to (deny default).
+    // =========================================================================
+    if !visibility_paths.is_empty() {
+        profile.push_str("; Workload runtime visibility (venv base install + toolchain root)\n");
+        for path in visibility_paths {
+            if let Some(escaped) = escape_path_for_sbpl(path) {
+                profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", escaped));
+            }
+        }
+        profile.push('\n');
+    }
 
     // =========================================================================
     // Apply IsolationPolicy from capsule.toml
@@ -807,7 +867,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
 
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(allow default)"));
@@ -832,7 +892,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
 
         assert!(profile.contains("(version 1)"));
         // New approach: allow default, deny specific paths
@@ -844,6 +904,37 @@ mod tests {
         assert!(profile.contains("(trace deny)"));
         // Check sensitive paths are denied
         assert!(profile.contains("/.ssh"));
+    }
+
+    #[test]
+    fn test_seatbelt_profile_emits_visibility_read_rules() {
+        // The platform-neutral visibility plan (venv base install + toolchain
+        // install root) must be lowered to explicit seatbelt read allowances.
+        let target = SourceTarget {
+            language: "python".to_string(),
+            entrypoint: "main.py".to_string(),
+            source_dir: PathBuf::from("/Users/test/project"),
+            dev_mode: false,
+            ..Default::default()
+        };
+        let toolchain = PathBuf::from("/usr/bin/python3");
+        let visibility = vec![
+            PathBuf::from("/Users/test/.cache/uv/cpython-3.11"),
+            PathBuf::from("/Users/test/.ato/toolchains/python-3.11/python"),
+        ];
+
+        let profile = generate_seatbelt_profile(&target, &toolchain, &visibility);
+
+        assert!(
+            profile.contains("(allow file-read* (subpath \"/Users/test/.cache/uv/cpython-3.11\"))"),
+            "profile must allow reading the venv base install: {profile}"
+        );
+        assert!(
+            profile.contains(
+                "(allow file-read* (subpath \"/Users/test/.ato/toolchains/python-3.11/python\"))"
+            ),
+            "profile must allow reading the toolchain install root: {profile}"
+        );
     }
 
     #[test]
@@ -878,7 +969,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/local/bin/node");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
 
         // New approach: allow default, network not denied when enabled
         assert!(profile.contains("(allow default)"));
@@ -929,7 +1020,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
 
         // No deny network, no egress comment
         assert!(!profile.contains("(deny network*)"));
@@ -958,7 +1049,7 @@ mod tests {
         };
         let toolchain = PathBuf::from("/usr/bin/python3");
 
-        let profile = generate_seatbelt_profile(&target, &toolchain);
+        let profile = generate_seatbelt_profile(&target, &toolchain, &[]);
         let parent = socket_path.parent().unwrap().to_string_lossy().to_string();
 
         assert!(
