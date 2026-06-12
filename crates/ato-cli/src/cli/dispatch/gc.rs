@@ -155,10 +155,14 @@ pub(crate) fn execute_gc_command(args: GcArgs) -> Result<()> {
 /// - Returns `Ok(())` if the session root path cannot be computed (no
 ///   `ATO_HOME` / no `HOME`) or if the root simply does not exist — these
 ///   are environmental "no sessions known" cases, not corruption.
-/// - Returns `Err` for any IO error walking an *existing* session root or
-///   any malformed JSON record under it. We cannot prove a record we
-///   cannot read does not reference a revision GC is about to delete, so
-///   the destructive operation must stop.
+/// - Skips a record that vanishes between the `read_dir` snapshot and the
+///   per-record read (`NotFound`): a concurrent `session stop` removes the
+///   record when the session ends, so a deleted record cannot reference a
+///   live session.
+/// - Returns `Err` for any other IO error walking an *existing* session
+///   root or any malformed JSON record under it. We cannot prove a record
+///   we cannot read does not reference a revision GC is about to delete,
+///   so the destructive operation must stop.
 ///
 /// We deliberately do **not** delegate to
 /// `ato_session_core::store::read_session_records`: that function is
@@ -189,8 +193,17 @@ fn collect_active_session_revisions(
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read session record {}", path.display()))?;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            // The record was deleted between the read_dir snapshot and
+            // this read (a concurrent `session stop` removes the record
+            // when the session ends). A deleted record cannot reference
+            // a live session, so skip it instead of aborting GC.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("read session record {}", path.display()));
+            }
+        };
         let record: ato_session_core::record::StoredSessionInfo = serde_json::from_str(&raw)
             .with_context(|| format!("parse session record {}", path.display()))?;
         let rev_id = match &record.install_revision_id {
@@ -619,6 +632,62 @@ mod tests {
             all_revs.len(),
             4,
             "no revisions should be deleted when GC aborts; survivors = {:?}",
+            all_revs.iter().map(|r| r.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A session record that disappears between the `read_dir` snapshot
+    /// and the per-record read (a concurrent `session stop` deleted it) is
+    /// a benign skip, not an abort. We simulate the race deterministically
+    /// with a dangling symlink: `read_dir` lists it, `read_to_string`
+    /// fails with `NotFound`.
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn gc_skips_session_record_deleted_concurrently() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _app_id, _profile_id, _revs) = make_store_with_revs(&dir, 4);
+
+        let session_root = dir.path().join("desktop_sessions");
+        std::fs::create_dir_all(&session_root).unwrap();
+        // Dangling symlink — the target never exists.
+        std::os::unix::fs::symlink(
+            session_root.join("removed-by-session-stop.json.gone"),
+            session_root.join("vanished.json"),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("ATO_HOME", dir.path());
+        }
+        unsafe {
+            std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        }
+        let result = execute_gc_command(GcArgs {
+            dry_run: false,
+            keep_last: 2,
+            retention_days: 0,
+            json: false,
+        });
+        unsafe {
+            std::env::remove_var("ATO_HOME");
+        }
+        unsafe {
+            std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
+        }
+        assert!(
+            result.is_ok(),
+            "gc should skip a session record deleted concurrently: {:?}",
+            result
+        );
+
+        // GC proceeded normally: the 2 revisions beyond keep_last were
+        // collected instead of the whole command aborting.
+        let all_revs = store.list_all_revisions().unwrap();
+        assert_eq!(
+            all_revs.len(),
+            2,
+            "expected gc to proceed and collect; survivors = {:?}",
             all_revs.iter().map(|r| r.as_str()).collect::<Vec<_>>()
         );
     }
