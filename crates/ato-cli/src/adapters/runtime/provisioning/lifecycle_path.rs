@@ -41,6 +41,11 @@ pub(crate) struct LifecyclePathPlan {
     pub ato_toolchain_bins: Vec<PathBuf>,
     pub dependency_output_bins: Vec<PathBuf>,
     pub minimal_system_bins: Vec<PathBuf>,
+    /// Directories appended last for lifecycle tools ato does not manage
+    /// (e.g. `cargo` from rustup) — see
+    /// [`host_fallback_for_unmanaged_command`]. Always paired with a
+    /// `host_fallback` provenance entry and a degraded marker.
+    pub host_fallback_bins: Vec<PathBuf>,
     pub provenance: LifecyclePathProvenance,
 }
 
@@ -58,6 +63,9 @@ impl LifecyclePathPlan {
             }
         }
         for path in &self.minimal_system_bins {
+            push_unique_path(&mut entries, &mut seen, path.clone());
+        }
+        for path in &self.host_fallback_bins {
             push_unique_path(&mut entries, &mut seen, path.clone());
         }
 
@@ -180,17 +188,24 @@ pub(crate) async fn build_lifecycle_path_plan(
         })
         .collect();
 
-    let plan = LifecyclePathPlan {
+    let mut plan = LifecyclePathPlan {
         phase,
         ato_toolchain_bins: materialized_toolchains.bins,
         dependency_output_bins,
         minimal_system_bins,
+        host_fallback_bins: Vec::new(),
         provenance: LifecyclePathProvenance {
             ato_toolchains: materialized_toolchains.provenance,
             dependency_bins,
             minimal_system_bins: minimal_system_provenance,
         },
     };
+    if let Some((bin_dir, fallback_provenance)) =
+        host_fallback_for_unmanaged_command(&plan, command)
+    {
+        plan.host_fallback_bins.push(bin_dir);
+        plan.provenance.ato_toolchains.push(fallback_provenance);
+    }
     plan.emit_degraded_markers(reporter).await;
     emit_command_tool_resolution_marker(&plan, command, reporter).await?;
     tracing::debug!(
@@ -633,6 +648,43 @@ fn runtime_tool_name_for_command(command_name: &str) -> Option<&'static str> {
     }
 }
 
+/// Host fallback for lifecycle tools ato does not manage (e.g. `cargo`).
+///
+/// The sanitized lifecycle PATH carries managed toolchains, dependency
+/// outputs, and the minimal system dirs only — a manifest command like
+/// `cargo fetch --locked` could never resolve on rustup hosts
+/// (`~/.cargo/bin` is not a system dir) and died with a bare exit 127.
+/// When the command's leading tool is neither a managed runtime tool nor
+/// resolvable from the planned PATH, resolve it from the parent process's
+/// PATH and expose only its directory, appended after every managed entry
+/// and paired with a degraded `host_fallback` marker — the same contract the
+/// managed-tool host fallback already uses.
+fn host_fallback_for_unmanaged_command(
+    plan: &LifecyclePathPlan,
+    command: &str,
+) -> Option<(PathBuf, ToolchainProvenance)> {
+    let command_name = leading_command_name(command)?;
+    if runtime_tool_name_for_command(command_name).is_some() {
+        // The managed-tool flow owns this command; never widen its PATH here.
+        return None;
+    }
+    let path_env = plan.path_env().ok()?;
+    let cwd = std::env::current_dir().ok()?;
+    if which::which_in(command_name, Some(&path_env), &cwd).is_ok() {
+        return None;
+    }
+    let host_path = which::which(command_name).ok()?;
+    let bin_dir = host_path.parent()?.to_path_buf();
+    let provenance = ToolchainProvenance {
+        tool: command_name.to_string(),
+        requested_version: None,
+        resolved_version: detect_host_tool_version(command_name),
+        logical_id: logical_toolchain_id(command_name, None, ToolchainSource::HostFallback),
+        source: ToolchainSource::HostFallback,
+    };
+    Some((bin_dir, provenance))
+}
+
 fn minimal_system_bins() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
@@ -791,6 +843,7 @@ mod tests {
             ato_toolchain_bins: vec![PathBuf::from("/managed/node/bin")],
             dependency_output_bins: vec![PathBuf::from("/repo/node_modules/.bin")],
             minimal_system_bins: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+            host_fallback_bins: Vec::new(),
             provenance: LifecyclePathProvenance::default(),
         };
 
@@ -817,6 +870,7 @@ mod tests {
                 PathBuf::from("/repo/server/node_modules/.bin"),
             ],
             minimal_system_bins: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+            host_fallback_bins: Vec::new(),
             provenance: LifecyclePathProvenance::default(),
         };
 
