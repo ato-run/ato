@@ -76,6 +76,20 @@ pub struct DependencyContractSessionSnapshot {
     pub providers: Vec<DependencyContractProcessInfo>,
 }
 
+/// A durable host-pid handle on a sandboxed workload process, captured at
+/// keep-alive spawn time so `ato stop` can signal it directly later. On Linux
+/// the keep-alive server runs inside `bwrap --unshare-all --new-session`, where
+/// neither process-group signaling (the server leads its own setsid group) nor
+/// a stop-time ppid walk (the supervisor may be reparented, and namespaced
+/// pids can be hard to chain back) reliably reaches it. The recorded host pid,
+/// paired with its OS start time to defeat pid reuse, is the reliable handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportPreviewWorkloadPid {
+    pub pid: i32,
+    #[serde(default)]
+    pub start_time_unix_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPreviewSession {
     pub run_session_id: String,
@@ -86,6 +100,11 @@ pub struct ImportPreviewSession {
     pub ato_run_process_start_time_unix_ms: Option<u64>,
     #[serde(default)]
     pub process_group_ids: Vec<i32>,
+    /// Durable host pids of the sandboxed workload subtree (bwrap wrapper plus
+    /// its namespaced descendants), captured at spawn time. Signaled directly
+    /// by `ato stop` regardless of supervisor liveness or pgid layout.
+    #[serde(default)]
+    pub workload_pids: Vec<ImportPreviewWorkloadPid>,
     pub primary_port: Option<u16>,
     pub primary_url: Option<String>,
     pub shadow_dir: PathBuf,
@@ -1061,36 +1080,58 @@ fn stop_import_preview_session_record(
         Duration::from_secs(3)
     };
 
-    // Host pids that descend from the recorded `ato run` (captured BEFORE the
-    // root is killed — see below). Reaped directly by host pid after the root
-    // goes down, since killing the root reparents these to pid 1 and severs
-    // the ppid chain that identifies them.
+    // Durable host pids of the sandboxed workload subtree, signaled directly
+    // by host pid (see below). Built from the recorded `workload_pids` plus a
+    // best-effort live ppid walk; reaped after the root is torn down.
     #[cfg(unix)]
-    let mut sandboxed_descendant_pids: Vec<i32> = Vec::new();
+    let mut sandboxed_subtree_pids: Vec<i32> = Vec::new();
 
     #[cfg(unix)]
     {
         let processes = unix_ps_processes();
 
-        // On Linux a non-network `ato run` execs its workload through
-        // `bwrap --unshare-all --new-session`. `--new-session` makes the
-        // sandboxed server call `setsid()`, so on the host it leads a
-        // process group whose pgid is NOT the recorded bwrap pgid — and
-        // killing the bwrap process group (`kill(-pgid, …)`) therefore does
-        // not reach the server. `--die-with-parent` is the only other
-        // teardown and it is unreliable for a force-kill (it watches bwrap's
-        // parent and does not propagate to namespaced grandchildren). The
-        // robust teardown is to enumerate every host process that descends
-        // from the recorded `ato run` pid via the ppid chain and SIGKILL
-        // each one DIRECTLY BY HOST PID — host `ps` sees namespaced PIDs, so
-        // a direct per-pid kill always reaches the sandboxed server
-        // regardless of its process group. This snapshot is taken BEFORE the
-        // root is killed: once `ato run` dies the kernel reparents its
-        // descendants to pid 1 and the ppid chain that identifies them is
-        // gone.
+        // Why a DIRECT per-host-pid kill is required on Linux:
+        //
+        // A non-network `ato run` execs its workload through
+        // `bwrap --unshare-all --new-session`. Two facts defeat the older
+        // teardown strategies:
+        //   1. `--new-session` makes the sandboxed server `setsid()`, so on
+        //      the host it leads its OWN process group — distinct from the
+        //      recorded bwrap pgid. `kill(-pgid, …)` therefore never reaches
+        //      it, and `--die-with-parent` does not propagate to namespaced
+        //      grandchildren on a force kill.
+        //   2. The keep-alive supervisor (`ato_run_pid`) is the import's
+        //      detached child; once the import process returns "running" the
+        //      supervisor is reparented to init, and a stop-time ppid walk
+        //      from `ato_run_pid` can no longer enumerate the subtree.
+        //
+        // The reliable handle is the set of host pids captured at spawn time
+        // (`session.workload_pids`) — the bwrap wrapper plus its namespaced
+        // descendants — each guarded by its recorded OS start time so a
+        // recycled pid is never signaled. We supplement that with a live ppid
+        // walk from the supervisor when it is still alive and owned.
+        for workload in &session.workload_pids {
+            if workload.pid <= 0 {
+                continue;
+            }
+            if !is_process_alive(workload.pid) {
+                continue;
+            }
+            // Defeat pid reuse: only signal when the recorded start time still
+            // matches (or no start time was recorded — legacy sessions).
+            if !process_start_time_matches(workload.pid, workload.start_time_unix_ms) {
+                continue;
+            }
+            if !sandboxed_subtree_pids.contains(&workload.pid) {
+                sandboxed_subtree_pids.push(workload.pid);
+            }
+        }
         if ato_run_owned {
-            sandboxed_descendant_pids =
-                import_preview_descendant_pids(session.ato_run_pid, &processes);
+            for pid in import_preview_descendant_pids(session.ato_run_pid, &processes) {
+                if !sandboxed_subtree_pids.contains(&pid) {
+                    sandboxed_subtree_pids.push(pid);
+                }
+            }
         }
 
         let verified_pgids =
@@ -1104,28 +1145,28 @@ fn stop_import_preview_session_record(
         // Direct per-pid teardown of the sandboxed subtree. SIGTERM first
         // (so a server that exits cleanly gets the chance), then escalate to
         // SIGKILL for anything that survives the grace window.
-        for pid in &sandboxed_descendant_pids {
+        for pid in &sandboxed_subtree_pids {
             if unsafe { libc::kill(*pid, libc::SIGTERM) } == 0 {
                 stopped = true;
             }
         }
-        if !sandboxed_descendant_pids.is_empty() {
+        if !sandboxed_subtree_pids.is_empty() {
             let deadline = std::time::Instant::now() + grace;
             while std::time::Instant::now() < deadline
-                && sandboxed_descendant_pids
+                && sandboxed_subtree_pids
                     .iter()
                     .any(|pid| is_process_alive(*pid))
             {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            for pid in &sandboxed_descendant_pids {
+            for pid in &sandboxed_subtree_pids {
                 if is_process_alive(*pid) && unsafe { libc::kill(*pid, libc::SIGKILL) } == 0 {
                     stopped = true;
                 }
             }
         }
 
-        if stopped {
+        if stopped && ato_run_owned {
             let _ = wait_for_process_exit(session.ato_run_pid, 10);
         }
     }
@@ -1141,18 +1182,18 @@ fn stop_import_preview_session_record(
         }
     }
 
-    // Final bounded reap: any sandboxed descendant captured above that is
-    // still alive after the root went down (the namespaced server can outlive
-    // its bwrap parent for a beat, and reparenting to pid 1 makes it
-    // unreachable by re-walking the now-dead root's ppid chain). SIGKILL the
-    // captured pids by host pid until the subtree is gone or the deadline
-    // elapses. This is what closes the keep-alive preview port.
+    // Final bounded reap: any sandboxed subtree pid still alive after the root
+    // went down (the namespaced server can outlive its bwrap parent for a beat,
+    // and reparenting to pid 1 makes it unreachable by re-walking the now-dead
+    // root's ppid chain). SIGKILL the captured pids by host pid until the
+    // subtree is gone or the deadline elapses. This is what closes the
+    // keep-alive preview port.
     #[cfg(unix)]
     {
-        if !sandboxed_descendant_pids.is_empty() {
+        if !sandboxed_subtree_pids.is_empty() {
             let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
-                let alive: Vec<i32> = sandboxed_descendant_pids
+                let alive: Vec<i32> = sandboxed_subtree_pids
                     .iter()
                     .copied()
                     .filter(|pid| is_process_alive(*pid))
@@ -2349,6 +2390,7 @@ mod tests {
                 .ok()
                 .and_then(ato_session_core::process::process_start_time_unix_ms),
             process_group_ids: Vec::new(),
+            workload_pids: Vec::new(),
             primary_port: None,
             primary_url: None,
             shadow_dir,
@@ -2506,6 +2548,69 @@ mod tests {
         assert!(stopped);
         let _ = workload.wait().expect("wait workload");
         assert!(!pm.pid_file_path("capsule-workload").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_preview_stop_kills_recorded_workload_pid_when_supervisor_dead() {
+        // Models the Linux keep-alive bug: the `ato run` supervisor has exited
+        // (or been reparented and is no longer reachable by a ppid walk), yet a
+        // sandboxed server child is still alive. The durable recorded
+        // workload pid must be SIGKILLed directly so the port closes.
+        let mut workload = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn workload");
+        let workload_pid = workload.id() as i32;
+
+        // ato_run_pid points at a pid that is NOT alive (use the workload's own
+        // future-reaped value is unsafe; instead pick a very unlikely-live pid).
+        // i32::MAX is never a live pid, so ato_run_owned stays false and the
+        // stop path must fall back to the recorded workload pid.
+        let mut session = test_import_preview_session("preview-workload-kill", 1, i32::MAX, true);
+        session.workload_pids = vec![ImportPreviewWorkloadPid {
+            pid: workload_pid,
+            start_time_unix_ms: u32::try_from(workload_pid)
+                .ok()
+                .and_then(ato_session_core::process::process_start_time_unix_ms),
+        }];
+
+        let result = stop_import_preview_session_record(&session, true);
+        assert_eq!(result.status, ImportPreviewStopStatus::Stopped);
+
+        let _ = workload.wait();
+        assert!(
+            !is_process_alive(workload_pid),
+            "recorded workload pid must be terminated by stop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_preview_stop_skips_recorded_workload_pid_on_start_time_mismatch() {
+        // Defeat pid reuse: a recorded workload pid whose start time no longer
+        // matches must NOT be signaled (it has been recycled to an unrelated
+        // process). The bystander `sleep` survives the stop call.
+        let mut bystander = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn bystander");
+        let bystander_pid = bystander.id() as i32;
+
+        let mut session = test_import_preview_session("preview-workload-reuse", 1, i32::MAX, true);
+        session.workload_pids = vec![ImportPreviewWorkloadPid {
+            pid: bystander_pid,
+            // Deliberately wrong start time → pid-reuse guard rejects the kill.
+            start_time_unix_ms: Some(1),
+        }];
+
+        let _ = stop_import_preview_session_record(&session, true);
+        assert!(
+            is_process_alive(bystander_pid),
+            "a recycled pid (start-time mismatch) must not be killed"
+        );
+        let _ = bystander.kill();
+        let _ = bystander.wait();
     }
 
     #[test]
