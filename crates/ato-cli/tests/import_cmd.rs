@@ -522,7 +522,7 @@ port = {port}
         .as_str()
         .context("missing run_session_id")?;
     run_stop(&root, run_session_id)?;
-    assert_port_closed(port)?;
+    assert_port_closes_after_stop(port)?;
     Ok(())
 }
 
@@ -567,7 +567,7 @@ port = {port}
     let output = run_import_with_args(&root, &source, Some(&recipe), &["--keep-alive"])?;
     assert_eq!(output["run"]["status"].as_str(), Some("running"));
     run_stop_all(&root)?;
-    assert_port_closed(port)?;
+    assert_port_closes_after_stop(port)?;
     Ok(())
 }
 
@@ -652,6 +652,28 @@ fn free_port() -> Result<u16> {
 
 fn python3_available() -> bool {
     Command::new("python3").arg("--version").output().is_ok()
+}
+
+/// Post-stop teardown is observed asynchronously: `ato stop` returns once the
+/// session record is cleaned, but a SIGTERM-ed child can hold its listener a
+/// beat longer under CI load (seen on Linux runners). Poll briefly; a server
+/// that survives the deadline is a real leak.
+fn assert_port_closes_after_stop(port: u16) -> Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let open = TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}").parse()?,
+            Duration::from_millis(200),
+        )
+        .is_ok();
+        if !open {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("server on port {port} is still accepting connections after stop");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn assert_port_closed(port: u16) -> Result<()> {
