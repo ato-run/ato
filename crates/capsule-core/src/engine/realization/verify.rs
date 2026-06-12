@@ -355,26 +355,24 @@ pub fn verify_materialization_with_provider<P: MaterializedHashProvider>(
         .nodes
         .into_iter()
         .map(|mut node| {
-            if node.actual_hash.is_none() {
-                if let Some(path) = node.materialized_path.as_deref() {
-                    match provider.hash_file(Path::new(path)) {
-                        Ok(hash) => node.actual_hash = Some(hash),
-                        Err(_) => {
-                            // Compute failed — typed Unavailable, path redacted.
-                            return MaterializationVerification {
-                                node_id: node.node_id.clone(),
-                                node_kind: node.node_kind,
-                                result: MaterializationVerificationResult::Unavailable {
-                                    reason:
-                                        MaterializationUnavailableReason::HashComputationUnavailable,
-                                },
-                                evidence: vec![
-                                    MaterializationVerificationEvidence::RedactedPath {
-                                        label: node.source.role_label().to_string(),
-                                    },
-                                ],
-                            };
-                        }
+            if node.actual_hash.is_none()
+                && let Some(path) = node.materialized_path.as_deref()
+            {
+                match provider.hash_file(Path::new(path)) {
+                    Ok(hash) => node.actual_hash = Some(hash),
+                    Err(_) => {
+                        // Compute failed — typed Unavailable, path redacted.
+                        return MaterializationVerification {
+                            node_id: node.node_id.clone(),
+                            node_kind: node.node_kind,
+                            result: MaterializationVerificationResult::Unavailable {
+                                reason:
+                                    MaterializationUnavailableReason::HashComputationUnavailable,
+                            },
+                            evidence: vec![MaterializationVerificationEvidence::RedactedPath {
+                                label: node.source.role_label().to_string(),
+                            }],
+                        };
                     }
                 }
             }

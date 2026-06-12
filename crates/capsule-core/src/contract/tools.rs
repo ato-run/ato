@@ -1184,12 +1184,8 @@ mod tests {
             let tar = builder.into_inner().expect("finish uv tar");
             let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             gz.write_all(&tar).expect("write uv tgz");
-            return gz.finish().expect("finish uv tgz");
+            gz.finish().expect("finish uv tgz")
         }
-    }
-
-    fn build_uv_tgz() -> Vec<u8> {
-        build_uv_tgz_at(&resolved_layout_path(&UV).expect("uv layout"), 0o755)
     }
 
     /// Builds a nested-layout archive where the uv binary is inside a
@@ -1570,7 +1566,8 @@ mod tests {
     // for the cache hit branch.
 
     struct FakeCacheDir {
-        root: tempfile::TempDir,
+        // Held for RAII only: dropping it removes the temp dir.
+        _root: tempfile::TempDir,
         extracted_dir: PathBuf,
         shim_dir: PathBuf,
         sha_path: PathBuf,
@@ -1588,7 +1585,7 @@ mod tests {
             let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
             let shim_path = shim_dir.join(shim_name);
             FakeCacheDir {
-                root,
+                _root: root,
                 extracted_dir,
                 shim_dir,
                 sha_path,

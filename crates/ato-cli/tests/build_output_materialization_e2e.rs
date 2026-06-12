@@ -689,6 +689,7 @@ fn corrupt_manifest(home: &Path, blob_hash: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn inject_symlink_into_remote_payload_and_rehash(remote_layer_root: &Path) -> Result<()> {
     let payload = remote_layer_root.join("blob/payload");
     // Place a dangling absolute symlink inside dist/ — the declared output dir.

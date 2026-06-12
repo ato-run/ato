@@ -44,6 +44,31 @@ pub(super) fn background_ready_message(
     format!("🚀 Capsule started in background and is ready (ID: {id})")
 }
 
+/// Message for a background run that launched but emitted no readiness signal
+/// (no declared port / no probe). Honest "started, not confirmed ready" — never
+/// claims readiness and is NOT the "still starting"/timeout warning (the process
+/// launched fine; we simply have nothing to probe).
+pub(super) fn background_started_message(
+    id: &str,
+    compatibility_host_mode: CompatibilityHostMode,
+    is_one_shot: bool,
+) -> String {
+    if is_one_shot {
+        if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+            return format!("✔ Background command started (Host Fallback, ID: {id})");
+        }
+        return format!("🚀 Background command started (ID: {id})");
+    }
+    if matches!(compatibility_host_mode, CompatibilityHostMode::Enabled) {
+        return format!(
+            "🚀 Capsule launched in background — no readiness signal, not confirmed ready (Host Fallback, ID: {id}). Use `ato ps --all` to inspect status."
+        );
+    }
+    format!(
+        "🚀 Capsule launched in background — no readiness signal, not confirmed ready (ID: {id}). Use `ato ps --all` to inspect status."
+    )
+}
+
 pub(super) fn background_timeout_message(
     id: &str,
     compatibility_host_mode: CompatibilityHostMode,
@@ -109,6 +134,11 @@ pub(super) struct BackgroundCompletionOptions {
     pub ready_without_events: bool,
     pub desktop_open_only: bool,
     pub compatibility_host_mode: CompatibilityHostMode,
+    /// Execution-receipt id to re-stamp from the OBSERVED readiness outcome
+    /// (Some only for host-lifecycle paths). `None` leaves the pre-spawn
+    /// `launch-passed` gate untouched (e.g. the nacelle-sandbox path, which is
+    /// out of scope for host readiness honesty).
+    pub execution_id: Option<String>,
 }
 
 fn background_process_name(plan: &capsule_core::router::ManifestData) -> String {
@@ -192,6 +222,33 @@ pub(super) async fn complete_background_source_process(
 
     cleanup_process_artifacts(&process.cleanup_paths);
 
+    // Re-stamp the receipt's readiness gate from the OBSERVED outcome (never
+    // from spawn): a run that reached readiness is readiness-passed; one that
+    // launched without a readiness signal is started-without-readiness. Other
+    // outcomes (timeout / failure / one-shot completion) leave the pre-spawn
+    // launch-passed gate untouched — honest, since readiness was not observed.
+    // Best-effort and V2-only (a no-op on V1 receipts).
+    if let Some(execution_id) = options.execution_id.as_deref() {
+        let stamp = match startup_outcome {
+            BackgroundStartupOutcome::Ready => Some(
+                crate::application::execution_receipts::mark_v2_receipt_readiness_passed(
+                    execution_id,
+                ),
+            ),
+            BackgroundStartupOutcome::StartedWithoutReadiness => Some(
+                crate::application::execution_receipts::mark_v2_receipt_started_without_readiness(
+                    execution_id,
+                ),
+            ),
+            BackgroundStartupOutcome::CompletedSuccessfully
+            | BackgroundStartupOutcome::TimedOut
+            | BackgroundStartupOutcome::FailedBeforeReady => None,
+        };
+        if let Some(Err(err)) = stamp {
+            eprintln!("ATO-WARN failed to mark host execution receipt readiness gate: {err}");
+        }
+    }
+
     match startup_outcome {
         BackgroundStartupOutcome::Ready => {
             let _ = process.child;
@@ -202,6 +259,19 @@ pub(super) async fn complete_background_source_process(
                     &process_id,
                     options.compatibility_host_mode,
                     options.desktop_open_only,
+                    options.is_one_shot,
+                ))
+                .await?;
+            Ok(())
+        }
+        BackgroundStartupOutcome::StartedWithoutReadiness => {
+            let _ = process.child;
+            let _ = event_rx;
+            let _ = process_manager.read_pid(&process_id)?;
+            reporter
+                .notify(background_started_message(
+                    &process_id,
+                    options.compatibility_host_mode,
                     options.is_one_shot,
                 ))
                 .await?;
@@ -254,6 +324,9 @@ pub(super) async fn complete_background_source_process(
     }
 }
 
+// Mirrors `ConsumerRunExecuteHooks::complete_foreground_source_process`, whose
+// trait carries the same (allowed) argument list; keep the two in lockstep.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn complete_foreground_source_process(
     mut process: crate::executors::source::CapsuleProcess,
     reporter: Arc<CliReporter>,
@@ -262,6 +335,7 @@ pub(super) async fn complete_foreground_source_process(
     ipc_socket_mapped: bool,
     desktop_open_only: bool,
     use_progressive_ui: bool,
+    execution_id: Option<String>,
 ) -> Result<i32> {
     let (run_label, stop_label) = foreground_run_spinner_labels(desktop_open_only);
     let run_spinner = if use_progressive_ui {
@@ -276,6 +350,7 @@ pub(super) async fn complete_foreground_source_process(
         ipc_socket_mapped,
         run_spinner.clone(),
         is_one_shot,
+        execution_id,
     )?;
     let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
     if let Some(handle) = readiness_notifier {
@@ -305,6 +380,7 @@ pub(super) fn spawn_foreground_native_event_reporter(
     ipc_socket_mapped: bool,
     progress: Option<ProgressBar>,
     is_one_shot: bool,
+    execution_id: Option<String>,
 ) -> Result<Option<JoinHandle<()>>> {
     let Some(event_rx) = event_rx else {
         return Ok(None);
@@ -320,7 +396,52 @@ pub(super) fn spawn_foreground_native_event_reporter(
 
     Ok(Some(std::thread::spawn(move || {
         let mut ready_reported = false;
+        let mut lifecycle_ready_printed = false;
+        let mut readiness_stamped = false;
         for event in event_rx {
+            // Re-stamp the receipt's readiness gate from the OBSERVED event
+            // (never from spawn): the first Ready is readiness-passed, the first
+            // Started (no readiness signal) is started-without-readiness. A run
+            // that exits before either leaves the pre-spawn launch-passed gate
+            // (never readiness-passed). Best-effort + V2-only (no-op on V1).
+            if !readiness_stamped && let Some(execution_id) = execution_id.as_deref() {
+                let stamp = match &event {
+                    LifecycleEvent::Ready { .. } => {
+                        readiness_stamped = true;
+                        Some(crate::application::execution_receipts::mark_v2_receipt_readiness_passed(
+                            execution_id,
+                        ))
+                    }
+                    LifecycleEvent::Started { .. } => {
+                        readiness_stamped = true;
+                        Some(
+                            crate::application::execution_receipts::mark_v2_receipt_started_without_readiness(
+                                execution_id,
+                            ),
+                        )
+                    }
+                    LifecycleEvent::Exited { .. } => None,
+                };
+                if let Some(Err(err)) = stamp {
+                    eprintln!(
+                        "ATO-WARN failed to mark host execution receipt readiness gate: {err}"
+                    );
+                }
+            }
+
+            // Stable machine-readable lifecycle line (companion to "RECEIPT:"):
+            // lets non-TTY supervisors (the Connected Runner agent, CI) key on
+            // the honest ready signal — and its observed port — without
+            // parsing human strings. Printed once, and BEFORE the human
+            // message: supervisors settle on the first ready signal they see,
+            // so the structured line must win over the string fallback.
+            if let LifecycleEvent::Ready { port, .. } = &event
+                && !lifecycle_ready_printed
+            {
+                lifecycle_ready_printed = true;
+                println!("{}", lifecycle_ready_line(*port));
+            }
+
             for message in foreground_native_event_messages(&event, ready_reported, is_one_shot) {
                 match message {
                     ForegroundEventMessage::Notify(message) => {
@@ -424,6 +545,11 @@ pub(super) fn wait_for_background_native_startup(
                 BackgroundStartupOutcome::Ready => {
                     return Ok((BackgroundStartupOutcome::Ready, event_rx));
                 }
+                BackgroundStartupOutcome::StartedWithoutReadiness => {
+                    // Launched with no readiness signal — terminal for startup
+                    // purposes. Return now instead of looping to the deadline.
+                    return Ok((BackgroundStartupOutcome::StartedWithoutReadiness, event_rx));
+                }
                 BackgroundStartupOutcome::CompletedSuccessfully => {
                     return Ok((BackgroundStartupOutcome::CompletedSuccessfully, event_rx));
                 }
@@ -476,6 +602,20 @@ fn persist_background_native_event(
             info.last_event = Some("ready".to_string());
             info.last_error = None;
         }
+        LifecycleEvent::Started { .. } => {
+            // Launched without a readiness signal: the process is Running but
+            // NOT confirmed ready. Do not set Ready/ready_at — that would be a
+            // false-ready. (Background readiness then resolves via the normal
+            // wait/timeout path; a follow-up may add a dedicated outcome.)
+            if matches!(
+                info.status,
+                crate::runtime::process::ProcessStatus::Starting
+            ) {
+                info.status = crate::runtime::process::ProcessStatus::Running;
+            }
+            info.last_event = Some("started".to_string());
+            info.last_error = None;
+        }
         LifecycleEvent::Exited { service, exit_code } => {
             info.exit_code = *exit_code;
             info.last_event = Some("exited".to_string());
@@ -499,6 +639,15 @@ fn persist_background_native_event(
             }
         }
     })?;
+
+    // A Started event is the honest "launched, no readiness signal" terminal
+    // signal: surface it directly as StartedWithoutReadiness so the startup
+    // wait returns promptly instead of stalling to the ready-wait deadline.
+    // Gate on the event variant (not the resulting status) — `Running` is too
+    // generic to key on, and only the Started event should short-circuit here.
+    if matches!(event, LifecycleEvent::Started { .. }) {
+        return Ok(BackgroundStartupOutcome::StartedWithoutReadiness);
+    }
 
     Ok(match updated.status {
         crate::runtime::process::ProcessStatus::Ready => BackgroundStartupOutcome::Ready,
@@ -553,6 +702,14 @@ pub(super) fn initial_foreground_native_messages(
     messages
 }
 
+/// Machine-readable ready line: `LIFECYCLE: ready` or `LIFECYCLE: ready port=N`.
+pub(super) fn lifecycle_ready_line(port: Option<u16>) -> String {
+    match port {
+        Some(port) => format!("LIFECYCLE: ready port={port}"),
+        None => "LIFECYCLE: ready".to_string(),
+    }
+}
+
 pub(super) fn foreground_native_event_messages(
     event: &LifecycleEvent,
     ready_reported: bool,
@@ -600,6 +757,25 @@ pub(super) fn foreground_native_event_messages(
             };
             vec![ForegroundEventMessage::Warn(message)]
         }
+        LifecycleEvent::Started { service, .. } if !ready_reported => {
+            // Launched, but NO readiness signal (no probe / no declared port).
+            // Honest "started, not ready" — never printed as ready. A later
+            // Exited still surfaces "exited before readiness" (ready_reported
+            // stays false).
+            let message = if is_one_shot {
+                format!("[•] Command '{service}' started (no readiness signal)")
+            } else if service == "main" {
+                "[•] Service launched — no readiness signal, not confirmed ready".to_string()
+            } else {
+                format!(
+                    "[•] Service '{service}' launched — no readiness signal, not confirmed ready"
+                )
+            };
+            vec![
+                ForegroundEventMessage::Notify(message),
+                ForegroundEventMessage::Notify("    Streaming logs...".to_string()),
+            ]
+        }
         _ => Vec::new(),
     }
 }
@@ -623,4 +799,105 @@ pub(super) async fn notify_web_endpoint(
         ))
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process_manager_with_starting_record(
+        id: &str,
+    ) -> (crate::runtime::process::ProcessManager, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = crate::runtime::process::ProcessManager::with_run_dir_for_test(
+            dir.path().to_path_buf(),
+        );
+        let info = crate::runtime::process::ProcessInfo {
+            id: id.to_string(),
+            name: "test".to_string(),
+            pid: std::process::id() as i32,
+            workload_pid: None,
+            status: crate::runtime::process::ProcessStatus::Starting,
+            runtime: "host".to_string(),
+            start_time: SystemTime::now(),
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
+            manifest_path: None,
+            scoped_id: None,
+            target_label: None,
+            requested_port: None,
+            log_path: None,
+            ready_at: None,
+            last_event: None,
+            last_error: None,
+            exit_code: None,
+        };
+        manager.write_pid(&info).expect("write pid record");
+        (manager, dir)
+    }
+
+    #[test]
+    fn lifecycle_ready_line_is_stable_and_machine_readable() {
+        assert_eq!(
+            lifecycle_ready_line(Some(8000)),
+            "LIFECYCLE: ready port=8000"
+        );
+        assert_eq!(lifecycle_ready_line(None), "LIFECYCLE: ready");
+    }
+
+    #[test]
+    fn started_event_maps_to_started_without_readiness_not_timeout() {
+        // Regression guard for the host-path timeout defect: a Started event (no
+        // readiness signal) must resolve PROMPTLY to StartedWithoutReadiness,
+        // never Ready and never the TimedOut catch-all (which would stall a
+        // healthy no-port background run to the ready-wait deadline).
+        let id = "capsule-started-test";
+        let (manager, _dir) = process_manager_with_starting_record(id);
+
+        let outcome = persist_background_native_event(
+            &manager,
+            id,
+            &LifecycleEvent::Started {
+                service: "main".to_string(),
+                endpoint: None,
+                port: None,
+            },
+            false,
+        )
+        .expect("persist started event");
+
+        assert_eq!(outcome, BackgroundStartupOutcome::StartedWithoutReadiness);
+
+        // The persisted record is Running (launched) — never Ready, no ready_at.
+        let persisted = manager.read_pid(id).expect("read pid record");
+        assert_eq!(
+            persisted.status,
+            crate::runtime::process::ProcessStatus::Running
+        );
+        assert_eq!(persisted.last_event.as_deref(), Some("started"));
+        assert!(
+            persisted.ready_at.is_none(),
+            "a Started event must never set ready_at"
+        );
+    }
+
+    #[test]
+    fn ready_event_still_maps_to_ready() {
+        // Sanity: a genuine Ready event still resolves to Ready (the port-branch
+        // honest path is unchanged by this fix).
+        let id = "capsule-ready-test";
+        let (manager, _dir) = process_manager_with_starting_record(id);
+        let outcome = persist_background_native_event(
+            &manager,
+            id,
+            &LifecycleEvent::Ready {
+                service: "main".to_string(),
+                endpoint: None,
+                port: Some(8080),
+            },
+            false,
+        )
+        .expect("persist ready event");
+        assert_eq!(outcome, BackgroundStartupOutcome::Ready);
+    }
 }

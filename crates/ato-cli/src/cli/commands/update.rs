@@ -47,6 +47,36 @@ pub fn update() -> Result<()> {
     Ok(())
 }
 
+/// Classified result of a runner self-update attempt, so the caller can decide
+/// between re-exec, a cooldown retry, or stopping (a terminal misconfig).
+pub enum SelfUpdateOutcome {
+    /// Updated to a new version (the runner should re-exec into it).
+    Updated(String),
+    /// Already on the latest release (nothing to do).
+    AlreadyLatest,
+    /// No cargo-dist install receipt — self-update is impossible here (dev build
+    /// or a non-installer install). Terminal: do not retry.
+    NoReceipt,
+}
+
+/// Self-update used by the Connected Runner agent when the control plane signals
+/// it should update. Always targets the LATEST release (axoupdater) — the
+/// server-side "minimum" is a floor the operator sets, not an exact version.
+/// Async-safe (no nested tokio runtime, unlike [`update`]). A transient
+/// failure (network / release fetch) returns Err for the caller to retry; a
+/// missing install receipt is the terminal `NoReceipt`.
+pub async fn run_self_update_async() -> Result<SelfUpdateOutcome> {
+    let mut updater = AxoUpdater::new_for("ato");
+    if updater.load_receipt().is_err() {
+        return Ok(SelfUpdateOutcome::NoReceipt);
+    }
+    updater.disable_installer_output();
+    match updater.run().await.context("ato self-update failed")? {
+        Some(result) => Ok(SelfUpdateOutcome::Updated(result.new_version.to_string())),
+        None => Ok(SelfUpdateOutcome::AlreadyLatest),
+    }
+}
+
 fn resolve_installer_url() -> String {
     std::env::var(INSTALLER_URL_ENV)
         .ok()

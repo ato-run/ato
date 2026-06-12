@@ -36,6 +36,18 @@ pub enum NacelleEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         port: Option<u16>,
     },
+    /// The workload was launched but there is no readiness signal (no probe
+    /// declared, and no port to synthesize a conservative probe from). This is
+    /// the honest "started, not ready" state — it must NEVER be treated as
+    /// ready. Distinct from `IpcReady`, which is emitted only on real probe
+    /// success.
+    ServiceStarted {
+        service: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+    },
     ServiceExited {
         service: String,
         exit_code: Option<i32>,

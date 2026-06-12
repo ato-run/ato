@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::PathBuf;
 
 use chrono::Utc;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use capsule_core::AtoError;
@@ -94,6 +95,35 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
              Or open the launching app and click Approve in the modal.",
         );
 
+        let summary = consent_summary(plan);
+
+        // Emit a stable machine-readable line so the Connected Runner can parse
+        // it (ChildSignal::ConsentRequired), surface the policy to the owner,
+        // and — only after the owner approves this exact consent_ref — call the
+        // existing `approve-execution-plan` primitive and retry. This is purely
+        // additive: the typed E302 below is still returned and the run still
+        // fails closed until the exact policy is approved.
+        // Emit the machine line ONLY when consent_ref computes and the payload
+        // serializes — never a malformed/empty-ref signal. On any failure we
+        // skip the line and still return the unchanged E302 below (fail closed).
+        if let Ok(consent_ref) = capsule_core::execution_plan::canonical::consent_ref(&plan.consent)
+            && let Ok(machine_line) =
+                serde_json::to_string(&capsule_wire::consent::ConsentRequiredLine {
+                    schema: capsule_wire::consent::CONSENT_REQUIRED_SCHEMA.to_string(),
+                    consent_ref,
+                    identity: capsule_wire::consent::ConsentIdentity {
+                        scoped_id: scoped_id.clone(),
+                        version: version.clone(),
+                        target_label: target_label.clone(),
+                        policy_segment_hash: policy_segment_hash.clone(),
+                        provisioning_policy_hash: provisioning_policy_hash.clone(),
+                        summary: summary.clone(),
+                    },
+                })
+        {
+            println!("CONSENT-REQUIRED: {machine_line}");
+        }
+
         return Err(AtoExecutionError::from_ato_error(
             AtoError::ExecutionPlanConsentRequired {
                 message,
@@ -103,7 +133,7 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
                 target_label,
                 policy_segment_hash,
                 provisioning_policy_hash,
-                summary: consent_summary(plan),
+                summary,
             },
         ));
     }
@@ -348,9 +378,23 @@ impl ConsentStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let record: ConsentRecord = serde_json::from_str(&line).map_err(|err| {
-                AtoExecutionError::internal(format!("failed to parse consent line: {err}"))
-            })?;
+            // #646: a torn/corrupt line (crash mid-write, unlocked
+            // concurrent append) must not brick every consent decision
+            // host-wide — it would also brick the recovery command,
+            // which calls is_consented before appending. Skip the bad
+            // line (with a warning) and keep scanning so the remaining
+            // records stay usable; re-approval appends a fresh record.
+            let record: ConsentRecord = match serde_json::from_str(&line) {
+                Ok(record) => record,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        error = %err,
+                        "skipping malformed consent ledger line"
+                    );
+                    continue;
+                }
+            };
             if record.scoped_id == key.scoped_id
                 && record.version == key.version
                 && record.target_label == key.target_label
@@ -367,6 +411,27 @@ impl ConsentStore {
     fn append_consent(&self, mut record: ConsentRecord) -> Result<(), AtoExecutionError> {
         record.approved_at = Utc::now().to_rfc3339();
 
+        // Multiple OS processes append to this ledger concurrently: the
+        // runner agent, the desktop-spawned `ato internal consent
+        // approve-execution-plan`, direct `ato run`, and `ato serve`.
+        // Serialize appends with an advisory exclusive lock on a sidecar
+        // file (locking the ledger itself would make concurrent
+        // `is_consented` reads fail on Windows, where file locks are
+        // mandatory). The lock releases when `lock_file` drops.
+        let lock_path = self.path.with_extension("jsonl.lock");
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|err| {
+                AtoExecutionError::internal(format!("failed to open consent lock file: {err}"))
+            })?;
+        lock_file.lock_exclusive().map_err(|err| {
+            AtoExecutionError::internal(format!("failed to lock consent file: {err}"))
+        })?;
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -378,7 +443,11 @@ impl ConsentStore {
         let line = serde_json::to_string(&record).map_err(|err| {
             AtoExecutionError::internal(format!("failed to serialize consent: {err}"))
         })?;
-        writeln!(file, "{}", line).map_err(|err| {
+        // Record + newline in a single write(2): even an unlocked legacy
+        // appender racing this one cannot split the line in half.
+        let mut payload = line.into_bytes();
+        payload.push(b'\n');
+        file.write_all(&payload).map_err(|err| {
             AtoExecutionError::internal(format!("failed to write consent record: {err}"))
         })?;
 
@@ -856,6 +925,142 @@ mod tests {
         assert!(
             has_consent(&plan).expect("has_consent under ATO_HOME"),
             "approve write + has_consent read must agree under ATO_HOME isolation"
+        );
+    }
+
+    /// Regression for #649: concurrent appenders (runner agent,
+    /// desktop-spawned `ato internal consent approve-execution-plan`,
+    /// direct `ato run`, `ato serve`) all write to the same
+    /// `executionplan_v1.jsonl`. The unlocked `writeln!` emitted the
+    /// record and its newline as two separate write(2) calls, so racing
+    /// writers could interleave a `{A}{B}` line that the strict parser
+    /// in `is_consented` rejects — bricking every subsequent consent
+    /// read. Appends now serialize on an exclusive sidecar lock and
+    /// land record + newline in one `write_all`; this test hammers the
+    /// append path from many writers and asserts every line still
+    /// parses as exactly one record.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn concurrent_appends_never_interleave_records() {
+        let _serial = env_lock().lock().unwrap();
+        let ato_home = TempDir::new().expect("create temporary ATO_HOME");
+        let _ato_home_guard =
+            EnvVarGuard::set("ATO_HOME", Some(&ato_home.path().to_string_lossy()));
+
+        const WRITERS: usize = 8;
+        const APPENDS_PER_WRITER: usize = 25;
+
+        let mut handles = Vec::new();
+        for writer in 0..WRITERS {
+            handles.push(std::thread::spawn(move || {
+                // Each writer opens its own ConsentStore (and thus its
+                // own file handles per append), mirroring independent
+                // OS processes contending on the same ledger.
+                let store = ConsentStore::new().expect("open consent store");
+                for n in 0..APPENDS_PER_WRITER {
+                    let record = ConsentRecord {
+                        scoped_id: format!("publisher/app-{writer}-{n}"),
+                        version: "1.0.0".to_string(),
+                        target_label: "cli".to_string(),
+                        policy_segment_hash: "blake3:aaa".to_string(),
+                        provisioning_policy_hash: "blake3:bbb".to_string(),
+                        approved_at: String::new(),
+                    };
+                    store.append_consent(record).expect("append consent");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("writer thread panicked");
+        }
+
+        let consent_file = ato_home.path().join("consent").join(CONSENT_FILE_NAME);
+        let contents = std::fs::read_to_string(&consent_file).expect("read consent file");
+        let mut parsed = 0usize;
+        for line in contents.lines() {
+            let record: ConsentRecord = serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("corrupt consent line {line:?}: {err}"));
+            assert!(
+                !record.approved_at.is_empty(),
+                "appended record must carry approved_at; got line: {line:?}"
+            );
+            parsed += 1;
+        }
+        assert_eq!(
+            parsed,
+            WRITERS * APPENDS_PER_WRITER,
+            "every append must land as exactly one parseable line"
+        );
+    }
+
+    /// #646 — a single malformed ledger line (crash mid-write,
+    /// unlocked concurrent append) must not brick all consent
+    /// decisions host-wide. `is_consented` skips the bad line and
+    /// keeps scanning: records before AND after it stay readable, and
+    /// the recovery command (`approve_execution_plan_consent`, which
+    /// calls `is_consented` before appending) keeps working over the
+    /// same file instead of failing with a parse error.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn malformed_consent_line_is_skipped_not_fatal() {
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        // Record A lands BEFORE the corruption.
+        let plan = non_trivial_plan();
+        approve_execution_plan_consent(
+            &plan.consent.key.scoped_id,
+            &plan.consent.key.version,
+            &plan.consent.key.target_label,
+            &plan.consent.policy_segment_hash,
+            &plan.consent.provisioning_policy_hash,
+        )
+        .expect("approve record A");
+
+        // Corrupt the ledger with a torn line (the shape a crash
+        // mid-write leaves behind).
+        let consent_file = home
+            .path()
+            .join(".ato")
+            .join("consent")
+            .join(CONSENT_FILE_NAME);
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&consent_file)
+                .expect("open consent file for corruption");
+            writeln!(file, "{{\"scoped_id\":\"torn").expect("append malformed line");
+        }
+
+        // Record A (before the bad line) must still be consented.
+        assert!(
+            has_consent(&plan).expect("has_consent must not fail on a malformed line"),
+            "record before the malformed line must stay consented"
+        );
+
+        // The recovery command must still work — before the fix it
+        // failed on the same parse error. Record B lands AFTER the
+        // corruption.
+        let mut plan_b = non_trivial_plan();
+        plan_b.consent.key.version = "2.0.0".to_string();
+        approve_execution_plan_consent(
+            &plan_b.consent.key.scoped_id,
+            &plan_b.consent.key.version,
+            &plan_b.consent.key.target_label,
+            &plan_b.consent.policy_segment_hash,
+            &plan_b.consent.provisioning_policy_hash,
+        )
+        .expect("approve must keep working with a malformed line present");
+
+        // Record B (after the bad line) must be found — the scan
+        // continues past the corruption instead of aborting.
+        assert!(
+            has_consent(&plan_b).expect("has_consent for record after the malformed line"),
+            "record after the malformed line must be readable"
         );
     }
 }

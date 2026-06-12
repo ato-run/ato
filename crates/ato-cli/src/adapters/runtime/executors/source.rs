@@ -27,6 +27,7 @@ use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 use crate::runtime::provider_workspace;
+use crate::runtime::provisioning::dependency_root;
 
 use capsule_core::engine;
 use capsule_core::isolation::HostIsolationContext;
@@ -967,6 +968,13 @@ impl NacelleExecAdapter {
                     .collect::<Vec<_>>(),
                 "ipc_env": ipc_env,
                 "ipc_socket_paths": ipc_socket_paths,
+                // Bind the real materialized source root (with app/ + .venv) at
+                // the guest root, decoupled from the synthesized manifest's
+                // location. The manifest stays in a pool dir (outside the source
+                // tree) so it cannot perturb the source-tree hash / execution
+                // identity; this tells nacelle which directory to actually mount.
+                // Honored on the Linux V1 source path; ignored elsewhere.
+                "source_dir": dependency_root(plan).display().to_string(),
             }),
             cleanup_paths: vec![normalized_manifest_path],
         })
@@ -975,13 +983,11 @@ impl NacelleExecAdapter {
 
 fn runtime_cwd_payload(launch_ctx: &RuntimeLaunchContext, working_dir: &Path) -> Option<String> {
     if cfg!(target_os = "linux") {
-        // The Linux sandbox bind-mounts the materialized workspace at
-        // /workspace, so the cwd inside the sandbox is always /workspace
-        // regardless of the host effective_cwd. Subdirectories like
-        // working_dir.relative_to(workspace) are not yet routed here —
-        // the orchestrator's existing /workspace contract preserves the
-        // historical behaviour.
-        return Some("/workspace".to_string());
+        // The Linux sandbox bind-mounts the capsule's dependency_root (its
+        // working dir, which holds app code + the build-phase `.venv`) at /app,
+        // so the cwd inside the sandbox is /app. The venv is then at /app/.venv
+        // and bare-module entrypoints resolve from /app.
+        return Some("/app".to_string());
     }
     // macOS sandbox runs in the host filesystem namespace, so apply the
     // same caller-vs-workspace resolution the host execution path uses
@@ -1035,7 +1041,16 @@ fn write_normalized_manifest(
     let is_provider_workspace = provider_workspace::is_provider_workspace(&plan.manifest_dir);
 
     let (normalized_entrypoint, command) = if is_python {
-        if is_provider_workspace {
+        // Run `python3` directly when the dependencies are already materialized:
+        //   - provider workspaces expose deps via site-packages/PYTHONPATH;
+        //   - a build-phase `.venv` is run via nacelle's bare-`python3`->venv
+        //     mapping (the launcher mounts `dependency_root` at /app, so the venv
+        //     is reachable at /app/.venv and its base CPython install is bound).
+        // `uv run` is only a fallback for when neither is present: it cannot work
+        // inside the sandbox (no `uv` binary is bind-mounted, the requirements
+        // path is a host path absent inside, and there is no writable venv), so
+        // it must not be the default for venv-backed capsules.
+        if is_provider_workspace || venv_python_binary(&dependency_root(plan)).is_some() {
             let mut tokens = vec![sandbox_entrypoint.clone()];
             tokens.extend(cmd_args.iter().cloned());
             (
@@ -1153,6 +1168,34 @@ fn write_normalized_manifest(
             language.insert("version".to_string(), toml::Value::String(version));
         }
         manifest.insert("language".to_string(), toml::Value::Table(language));
+    }
+
+    // Readiness probe: honor an author-declared probe if present, else
+    // synthesize a conservative TCP probe from a declared server port. This is
+    // what lets the runtime report Ready only after the port actually accepts,
+    // instead of faking readiness from process spawn. Capsules with NEITHER a
+    // probe NOR a port honestly report StartedWithoutReadiness (the launcher no
+    // longer fakes ready). Generic — applied to every source capsule, never
+    // special-cased per capsule.
+    if let Some(probe) = plan
+        .manifest
+        .get("readiness_probe")
+        .and_then(|value| value.as_table())
+    {
+        manifest.insert(
+            "readiness_probe".to_string(),
+            toml::Value::Table(probe.clone()),
+        );
+    } else if let Some(port) = plan.execution_port() {
+        // MANIFEST-DECLARED port only — never the auto-port override. The
+        // auto-allocated port is not communicated to the sandboxed workload
+        // (no --port injection inside the nacelle manifest run command), so a
+        // probe on it is doomed to time out and would fail an otherwise
+        // healthy no-port capsule. No declared port -> no probe -> honest
+        // StartedWithoutReadiness.
+        let mut probe = toml::map::Map::new();
+        probe.insert("port".to_string(), toml::Value::String(port.to_string()));
+        manifest.insert("readiness_probe".to_string(), toml::Value::Table(probe));
     }
 
     // Phase A0 source non-pollution: write the synthetic nacelle manifest into
@@ -1314,10 +1357,17 @@ fn python_runtime_selector_env(
 }
 
 fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
-    let relative = sandbox_source_entrypoint_relative(plan, entrypoint);
     if cfg!(target_os = "linux") {
-        Path::new("/workspace").join(relative).display().to_string()
+        // Linux V1: dependency_root (the capsule's working dir) is bind-mounted
+        // at /app, and a declared entrypoint is relative to that working dir, so
+        // it maps directly under /app. (The `source/<working_dir>` prefixing used
+        // off-Linux is an artifact of mounting the manifest_dir-rooted workspace;
+        // here we mount dependency_root itself, which already absorbs it.)
+        let trimmed = entrypoint.trim();
+        let rel = trimmed.strip_prefix("./").unwrap_or(trimmed);
+        Path::new("/app").join(rel).display().to_string()
     } else {
+        let relative = sandbox_source_entrypoint_relative(plan, entrypoint);
         Path::new(".").join(relative).display().to_string()
     }
 }
@@ -1553,7 +1603,12 @@ pub(crate) fn spawn_host_lifecycle_events(
                 thread::sleep(Duration::from_millis(100));
             }
         } else {
-            let _ = ready_tx.send(LifecycleEvent::Ready {
+            // No declared readiness port: the process launched but there is no
+            // signal we can probe, so we must NOT claim readiness. Emit Started
+            // (honest "launched, not confirmed ready"), never Ready — mirroring
+            // the sandbox-path fix in #608. Consumers map Started -> Running /
+            // not-ready and never surface it as ready.
+            let _ = ready_tx.send(LifecycleEvent::Started {
                 service: "main".to_string(),
                 endpoint: None,
                 port: None,
@@ -1622,6 +1677,78 @@ mod tests {
                 unsafe {
                     std::env::remove_var(self.key);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_host_lifecycle_events_no_port_emits_started_not_ready() {
+        // Core honest-readiness guard for the HOST path: with no declared port
+        // there is no signal to probe, so the supervisor must emit Started
+        // ("launched, not confirmed ready"), NEVER Ready (the old false-ready).
+        // Our own PID is alive, so the thread reaches the no-port branch.
+        let rx = spawn_host_lifecycle_events(std::process::id(), None);
+        let event = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("expected a lifecycle event from the host supervisor");
+        assert!(
+            matches!(event, LifecycleEvent::Started { .. }),
+            "no-port host run must emit Started, got {event:?}"
+        );
+        assert!(
+            !matches!(event, LifecycleEvent::Ready { .. }),
+            "no-port host run must never emit Ready"
+        );
+    }
+
+    #[test]
+    fn spawn_host_lifecycle_events_listening_port_emits_ready() {
+        // Port branch is honest: Ready is emitted only after the declared port
+        // actually accepts a connection. A live listener makes the probe succeed
+        // deterministically.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let rx = spawn_host_lifecycle_events(std::process::id(), Some(port));
+        let event = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("expected a readiness event once the port accepts");
+        match event {
+            LifecycleEvent::Ready { port: observed, .. } => {
+                assert_eq!(observed, Some(port), "Ready must carry the probed port");
+            }
+            other => panic!("listening port must emit Ready, got {other:?}"),
+        }
+        drop(listener);
+    }
+
+    #[test]
+    fn spawn_host_lifecycle_events_exited_process_with_port_never_emits_ready() {
+        // Crash-before-ready: when the workload has already exited and the
+        // declared port never accepts, the supervisor must end WITHOUT emitting
+        // Ready. We reap a short-lived child first so its PID is dead, making the
+        // process-liveness check break the poll loop promptly (deterministic, no
+        // timeout/env mutation). A bound-then-dropped port is guaranteed closed.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived child");
+        let pid = child.id();
+        let _ = child.wait();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let closed_port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+
+        let rx = spawn_host_lifecycle_events(pid, Some(closed_port));
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            // Sender dropped without emitting anything: honest — a workload that
+            // never became reachable is never reported ready.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+            Ok(event) => panic!(
+                "exited process with a closed port must never emit a readiness event, got {event:?}"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("supervisor thread should have ended after the process exited")
             }
         }
     }
@@ -1743,7 +1870,8 @@ mod tests {
         let entrypoint = sandbox_source_entrypoint(&plan, "run.sh");
 
         if cfg!(target_os = "linux") {
-            assert_eq!(entrypoint, "/workspace/run.sh");
+            // dependency_root is mounted at /app; the entrypoint is relative to it.
+            assert_eq!(entrypoint, "/app/run.sh");
         } else {
             assert!(entrypoint.starts_with("./"));
             assert!(entrypoint.ends_with("run.sh"));
@@ -2245,6 +2373,183 @@ mod tests {
         assert!(
             !normalized.contains("source/-m") && !normalized.contains("source\\\\-m"),
             "normalized={normalized}"
+        );
+    }
+
+    /// When the build phase produced a `.venv`, the sandbox manifest must run the
+    /// venv interpreter directly (`python3` → nacelle maps it to /app/.venv) and
+    /// NOT `uv run` (which cannot work inside the sandbox). Regression for the
+    /// mount-contract fix.
+    #[serial_test::serial]
+    #[test]
+    fn write_normalized_manifest_uses_python3_directly_when_venv_present() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempdir().unwrap();
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = tempdir().unwrap();
+        // Simulate the build-phase venv in the dependency root.
+        let venv_bin = dir.path().join(".venv").join("bin");
+        fs::create_dir_all(&venv_bin).unwrap();
+        fs::write(venv_bin.join("python"), "#!/bin/sh\n").unwrap();
+
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            run_command = "python -m uvicorn app.main:app --host 127.0.0.1"
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).unwrap();
+        let normalized = fs::read_to_string(&normalized_path).unwrap();
+
+        assert!(
+            normalized.contains("entrypoint = \"python3\""),
+            "venv present must run python3 directly: {normalized}"
+        );
+        assert!(
+            !normalized.contains("entrypoint = \"uv\""),
+            "must not fall back to `uv run` when a venv exists: {normalized}"
+        );
+        assert!(
+            normalized.contains("-m uvicorn app.main:app --host 127.0.0.1"),
+            "{normalized}"
+        );
+        assert!(
+            !normalized.contains("--with-requirements"),
+            "no host requirements path in the manifest: {normalized}"
+        );
+    }
+
+    /// A declared server port synthesizes a conservative TCP [readiness_probe]
+    /// so the runtime reports Ready only after the port accepts; no port means
+    /// no probe (the capsule honestly reports StartedWithoutReadiness).
+    #[serial_test::serial]
+    #[test]
+    fn write_normalized_manifest_synthesizes_readiness_probe_from_declared_port() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempdir().unwrap();
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+
+        // With a declared port -> [readiness_probe] port = "8000".
+        let dir = tempdir().unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            port = 8000
+            run_command = "python -m uvicorn app.main:app --host 127.0.0.1"
+            "#,
+            "dev",
+        );
+        let normalized =
+            fs::read_to_string(write_normalized_manifest(&plan, &[], &[]).unwrap()).unwrap();
+        assert!(
+            normalized.contains("[readiness_probe]") && normalized.contains("port = \"8000\""),
+            "declared port must synthesize a TCP readiness probe: {normalized}"
+        );
+
+        // No declared port -> no readiness_probe (honest StartedWithoutReadiness).
+        let dir2 = tempdir().unwrap();
+        let plan2 = plan_from_manifest(
+            &dir2,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            run_command = "python -m uvicorn app.main:app --host 127.0.0.1"
+            "#,
+            "dev",
+        );
+        let normalized2 =
+            fs::read_to_string(write_normalized_manifest(&plan2, &[], &[]).unwrap()).unwrap();
+
+        // Even when the run-phase auto-port guard has installed a port
+        // override (ATO_UI_OVERRIDE_PORT), a plan with NO declared port must
+        // not get a probe: the sandboxed workload never learns that port, so
+        // the probe could only time out (live E2E regression, runner lease
+        // 01KTR0XPCC…: "Readiness probe timed out" on a healthy capsule).
+        {
+            let _auto_port = runtime_overrides::scoped_override_port(43219);
+            let normalized_auto =
+                fs::read_to_string(write_normalized_manifest(&plan2, &[], &[]).unwrap()).unwrap();
+            assert!(
+                !normalized_auto.contains("[readiness_probe]"),
+                "auto-port override must not synthesize a sandbox probe: {normalized_auto}"
+            );
+        }
+        assert!(
+            !normalized2.contains("[readiness_probe]"),
+            "no declared port must NOT synthesize a probe: {normalized2}"
+        );
+    }
+
+    #[test]
+    fn runtime_cwd_payload_is_app_on_linux() {
+        let cwd = runtime_cwd_payload(&RuntimeLaunchContext::empty(), Path::new("/unused"));
+        if cfg!(target_os = "linux") {
+            assert_eq!(cwd.as_deref(), Some("/app"));
+        }
+        // macOS resolves a host path (covered by resolve_host_execution_cwd tests).
+    }
+
+    /// The envelope must send `source_dir` = the real materialized dependency
+    /// root, while the synthesized manifest stays in the pool dir (so it cannot
+    /// perturb the source-tree hash / execution identity). Covers the
+    /// mount-contract + identity invariants.
+    #[serial_test::serial]
+    #[test]
+    fn adapter_sends_source_dir_and_keeps_manifest_in_pool() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempdir().unwrap();
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("main.py"), "print('ok')\n").unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            entrypoint = "main.py"
+            "#,
+            "dev",
+        );
+
+        let adapter = NacelleExecAdapter::for_plan(
+            &plan,
+            ExecuteMode::Foreground,
+            &RuntimeLaunchContext::empty(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            adapter.payload["source_dir"].as_str(),
+            Some(dependency_root(&plan).display().to_string().as_str()),
+            "source_dir must be the real materialized dependency root"
+        );
+        let manifest_path = adapter.payload["workload"]["manifest"]
+            .as_str()
+            .expect("manifest path");
+        assert!(
+            manifest_path.contains("nacelle-manifests"),
+            "manifest must stay in the pool dir (identity-safe): {manifest_path}"
+        );
+        assert!(
+            !manifest_path.starts_with(dir.path().to_string_lossy().as_ref()),
+            "manifest must NOT be written inside the source tree: {manifest_path}"
         );
     }
 

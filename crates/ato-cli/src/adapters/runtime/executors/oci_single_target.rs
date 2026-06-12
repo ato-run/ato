@@ -446,7 +446,9 @@ fn enforce_strict_oci_launch(
     // The graph-derived resolved execution id is not threaded into the OCI launch
     // path yet (a remaining #501 slice), so pass `None` rather than substituting
     // the provider projection fingerprint — which is not an execution identity.
-    enforce_strict_oci(&facts, &enforcement, profile, None).map_err(anyhow::Error::new)
+    // Unbox before handing to anyhow: downstream recovery downcasts to
+    // `AtoExecutionError` (utils/error.rs), which a boxed wrap would hide.
+    enforce_strict_oci(&facts, &enforcement, profile, None).map_err(|e| anyhow::Error::new(*e))
 }
 
 /// Persist a durable launch receipt carrying OCI provider evidence (#501).
@@ -670,7 +672,10 @@ mod tests {
     fn oci_secret_env_debug_redacted() {
         let entry = secret("OPENAI_API_KEY", "sk-live-secret");
         let rendered = format!("{entry:?}");
-        assert!(!rendered.contains("sk-live-secret"), "value must be redacted");
+        assert!(
+            !rendered.contains("sk-live-secret"),
+            "value must be redacted"
+        );
         assert!(
             rendered.contains("OPENAI_API_KEY"),
             "the env name is not sensitive and may appear"
@@ -716,7 +721,10 @@ mod tests {
         let ctx = RuntimeLaunchContext::default();
         assert!(ctx.secret_env().is_empty());
         let env = build_oci_container_env(base.clone(), &ctx);
-        assert_eq!(env, base, "no secret_env means env is unchanged by injection");
+        assert_eq!(
+            env, base,
+            "no secret_env means env is unchanged by injection"
+        );
     }
 
     // ── Policy gate tests ─────────────────────────────────────────────────────

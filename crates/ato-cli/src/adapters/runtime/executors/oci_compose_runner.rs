@@ -8,8 +8,9 @@
 //!    check provider readiness, resolve image digests, execute.
 //! 2. [`execute_compose_run_with_provider`] — testable core, accepts any
 //!    `OciProvider` and pre-built `OciImageResolution` map.
-//! 3. [`resolve_images_for_compose`] — resolve every service's image digest via
-//!    the provider; exposed `pub(crate)` for testing.
+//! 3. [`resolve_images_with_lock_replay`] — resolve every service's image digest
+//!    via the provider (reusing fresh lock entries when present); exposed
+//!    `pub(crate)` for testing.
 //!
 //! # Invariants
 //! * Every service must have a resolved image digest before execution starts.
@@ -372,57 +373,6 @@ pub(crate) async fn resolve_images_with_lock_replay<P: OciProvider>(
     Ok((images, new_lock))
 }
 
-/// Resolve image digests for every service in the import output (no lock replay).
-///
-/// Returns `service_name → OciImageResolution`. On `Unsupported` (provider
-/// cannot resolve), returns a typed error asking the caller to run `ato lock`
-/// first. On any other provider error, propagates with context.
-/// Kept for use by existing tests that don't need lock replay.
-#[allow(dead_code)]
-pub(crate) async fn resolve_images_for_compose<P: OciProvider>(
-    import_output: &ComposeImportOutput,
-    provider: &P,
-    reporter: &Arc<CliReporter>,
-) -> Result<HashMap<String, OciImageResolution>> {
-    let mut images = HashMap::new();
-    for svc in &import_output.services {
-        reporter
-            .notify(format!(
-                "🔍 [{}] Resolving image digest: {}",
-                svc.name, svc.image_ref
-            ))
-            .await?;
-        let request = OciImageResolutionRequest {
-            target_label: svc.name.clone(),
-            declared_ref: svc.image_ref.clone(),
-            requested_platform: None,
-            resolution_mode: OciImageResolutionMode::Required,
-            importer_input_hash: None,
-            platform_policy: OciPlatformPolicy::NativeOnly,
-        };
-        match provider.resolve_image(&request).await {
-            Ok(resolved) => {
-                images.insert(svc.name.clone(), resolved.into_lock_resolution());
-            }
-            Err(OciProviderError::Unsupported(_)) => {
-                anyhow::bail!(
-                    "oci_image_resolution_required: provider does not support image digest \
-                     resolution; run `ato lock` first to resolve '{}' for service '{}'",
-                    svc.image_ref,
-                    svc.name
-                );
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("{}: {}", e.code(), e).context(format!(
-                    "failed to resolve image '{}' for service '{}'",
-                    svc.image_ref, svc.name
-                )));
-            }
-        }
-    }
-    Ok(images)
-}
-
 /// Execute the imported service graph with a caller-provided `OciProvider` and
 /// pre-built image resolution map.
 ///
@@ -673,10 +623,15 @@ services:
         let provider = FakeOciProvider::ready();
         let reporter = fake_reporter();
 
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let images = rt
-            .block_on(resolve_images_for_compose(
+        let (images, _lock) = rt
+            .block_on(resolve_images_with_lock_replay(
                 &import_output,
+                "docker-compose.yml",
+                &source_hash,
+                None, // no existing lock
                 &provider,
                 &reporter,
             ))
@@ -878,9 +833,14 @@ services:
         );
         let reporter = fake_reporter();
 
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(resolve_images_for_compose(
+        let result = rt.block_on(resolve_images_with_lock_replay(
             &import_output,
+            "docker-compose.yml",
+            &source_hash,
+            None, // no existing lock
             &provider,
             &reporter,
         ));
@@ -912,9 +872,14 @@ services:
         );
         let reporter = fake_reporter();
 
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(resolve_images_for_compose(
+        let result = rt.block_on(resolve_images_with_lock_replay(
             &import_output,
+            "docker-compose.yml",
+            &source_hash,
+            None, // no existing lock
             &provider,
             &reporter,
         ));

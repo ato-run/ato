@@ -434,6 +434,7 @@ mod tests {
                 ato_run_pid: 2,
                 ato_run_process_start_time_unix_ms: None,
                 process_group_ids: vec![],
+                workload_pids: vec![],
                 primary_port: None,
                 primary_url: None,
                 shadow_dir: std::path::PathBuf::from(".tmp/shadow"),

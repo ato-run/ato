@@ -160,10 +160,10 @@ fn wait_for_well_known(
                 stderr
             );
         }
-        if let Ok(resp) = client.get(&url).send() {
-            if resp.status().is_success() {
-                return Ok(());
-            }
+        if let Ok(resp) = client.get(&url).send()
+            && resp.status().is_success()
+        {
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(200));
     }

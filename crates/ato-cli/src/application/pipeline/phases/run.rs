@@ -857,6 +857,27 @@ fn register_dependency_contract_cleanup(
     }
 }
 
+/// Register the per-run ephemeral state directories auto-provisioned for a
+/// headless run (#700) with the run-attempt cleanup scope so they are removed
+/// when the run ends. Ephemeral state must not survive the run; the auto
+/// provisioner places it under `~/.ato/runs/<token>` and returns the per-run
+/// roots here for removal.
+fn register_headless_ephemeral_state_cleanup(
+    attempt: Option<&mut PipelineAttemptContext>,
+    ephemeral_dirs: &[PathBuf],
+) {
+    if ephemeral_dirs.is_empty() {
+        return;
+    }
+    let Some(attempt) = attempt else {
+        return;
+    };
+    let mut scope = attempt.cleanup_scope();
+    for dir in ephemeral_dirs {
+        scope.register_remove_dir(dir.clone());
+    }
+}
+
 fn register_capsule_process_cleanup(
     attempt: &mut Option<&mut PipelineAttemptContext>,
     process: &crate::executors::source::CapsuleProcess,
@@ -1698,6 +1719,45 @@ fn collect_port_preferences(
     prefs
 }
 
+/// Build the runtime-owned data-directory env for a sandboxed source run.
+///
+/// Sets `ATO_DATA_DIR` to the writable session guest dir and `DATABASE_PATH` to
+/// `<guest_dir>/app.db`, but ONLY for keys that `already_set` reports as absent
+/// — the runtime never overrides a value the capsule manifest or the user
+/// provided. These keys are re-applied past the sandbox `--clearenv` by the
+/// nacelle launcher's runtime allowlist.
+fn sandbox_session_data_env(
+    guest_dir: &str,
+    already_set: impl Fn(&str) -> bool,
+) -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+    if !already_set("ATO_DATA_DIR") {
+        env.insert("ATO_DATA_DIR".to_string(), guest_dir.to_string());
+    }
+    if !already_set("DATABASE_PATH") {
+        env.insert("DATABASE_PATH".to_string(), format!("{guest_dir}/app.db"));
+    }
+    env
+}
+
+/// Pick the path the session-data env (`ATO_DATA_DIR` / `DATABASE_PATH`) must
+/// reference for a sandboxed source run.
+///
+/// On mount-namespace backends (Linux bwrap) the host dir is remapped to the
+/// guest path, so the env uses the guest path. The macOS seatbelt backend has
+/// no mount namespace — the child sees the host filesystem and the injected
+/// mount becomes a write-allow rule for the host path, not a remap — so the env
+/// must reference the host dir directly. Otherwise a stateful capsule tries to
+/// create the guest root (`/runs`) on the read-only host fs and exits before
+/// readiness (#628).
+fn sandbox_session_data_env_dir(guest_dir: &str, host_dir: &std::path::Path) -> String {
+    if cfg!(target_os = "macos") {
+        host_dir.to_string_lossy().to_string()
+    } else {
+        guest_dir.to_string()
+    }
+}
+
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -1778,7 +1838,7 @@ where
         }),
         &request.capsule_launch_inputs,
     )?;
-    let state_source_overrides =
+    let mut state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
             authoritative_input
                 .effective_state
@@ -1787,6 +1847,44 @@ where
         } else {
             HashMap::new()
         };
+    // Headless / Connected Runner state auto-provisioning (#687). `ato run
+    // <source> --sandbox` (what the runner spawns) carries no `--state`
+    // binding, so a recipe declaring a `[state.*]` block would otherwise
+    // hard-error on the unbound persistent state. Mirror the desktop path by
+    // auto-provisioning a per-source `~/.ato/state/run/...` directory for any
+    // declared state that is still unbound. Only the authoritative-input path
+    // is provisioned here; the non-authoritative branch provisions against its
+    // freshly loaded manifest below.
+    if request.sandbox_mode
+        && request.authoritative_input.is_some()
+        && manifest_path.exists()
+        && let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
+            &manifest_path,
+            validation_mode,
+        )
+    {
+        let normalized_source_ref =
+            headless_normalized_source_ref(request, preview_session.as_ref());
+        let profile_id = request
+            .install_lifecycle_context
+            .as_ref()
+            .map(|ctx| ctx.install_profile_id.as_str());
+        let runner_namespace = runtime_overrides::scoped_id_override();
+        let key_inputs = HeadlessStateKeyInputs {
+            normalized_source_ref: &normalized_source_ref,
+            selected_target_label: effective_target_label.unwrap_or("default"),
+            profile_id,
+            runner_namespace: runner_namespace.as_deref(),
+            workspace_root_for_fallback: &workspace_root,
+        };
+        let outcome = auto_provision_headless_state_overrides(
+            &loaded.model,
+            &state_source_overrides,
+            &key_inputs,
+        )?;
+        state_source_overrides = outcome.overrides;
+        register_headless_ephemeral_state_cleanup(attempt.as_deref_mut(), &outcome.ephemeral_dirs);
+    }
     let mut decision = if let Some(authoritative_input) = request.authoritative_input.as_ref() {
         let mut decision = capsule_core::router::route_lock_with_state_overrides(
             &authoritative_input.lock_path,
@@ -1852,8 +1950,39 @@ where
                 "schema_version=0.3 type=library package cannot be started with `ato run`"
             );
         }
-        let state_source_overrides =
-            resolve_state_source_overrides(&manifest, &request.state_bindings)?;
+        let mut state_source_overrides =
+            resolve_explicit_or_auto_state_source_overrides(&manifest, request)?;
+        // Headless / Connected Runner state auto-provisioning (#687): fill in
+        // a `~/.ato/state/run/...` directory for any declared state still
+        // unbound after the explicit `--state` bindings were applied. Keyed on a
+        // stable source-derived id (#700), with ephemeral state routed to a
+        // per-run cleanup-scoped dir.
+        if request.sandbox_mode {
+            let normalized_source_ref =
+                headless_normalized_source_ref(request, preview_session.as_ref());
+            let profile_id = request
+                .install_lifecycle_context
+                .as_ref()
+                .map(|ctx| ctx.install_profile_id.as_str());
+            let runner_namespace = runtime_overrides::scoped_id_override();
+            let key_inputs = HeadlessStateKeyInputs {
+                normalized_source_ref: &normalized_source_ref,
+                selected_target_label: effective_target_label.unwrap_or("default"),
+                profile_id,
+                runner_namespace: runner_namespace.as_deref(),
+                workspace_root_for_fallback: &workspace_root,
+            };
+            let outcome = auto_provision_headless_state_overrides(
+                &manifest,
+                &state_source_overrides,
+                &key_inputs,
+            )?;
+            state_source_overrides = outcome.overrides;
+            register_headless_ephemeral_state_cleanup(
+                attempt.as_deref_mut(),
+                &outcome.ephemeral_dirs,
+            );
+        }
         capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
             &manifest_path,
             router::ExecutionProfile::Dev,
@@ -2089,6 +2218,59 @@ where
                 })
                 .collect(),
         );
+
+        // Writable per-run session data directory. Sandboxed source runs mount
+        // the capsule at /app read-only, so a stateful capsule (e.g. one that
+        // writes SQLite) has nowhere to persist. Mount a fresh per-run host dir
+        // at the guest path /runs/ato/session — chosen so it classifies as
+        // SessionLocal (ephemeral) rather than PersistentState, keeping the
+        // receipt honest — and point the common data-path env vars at it ONLY
+        // when the capsule/user has not already set them. The dir is ephemeral
+        // (registered for run cleanup); it lives OUTSIDE the materialized source
+        // tree so it does not perturb the source-tree hash.
+        const SESSION_DATA_GUEST: &str = "/runs/ato/session";
+        let host_session_dir = capsule_core::common::paths::ato_runs_dir()
+            .join("session-data")
+            .join(format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos())
+                    .unwrap_or(0)
+            ));
+        std::fs::create_dir_all(&host_session_dir).with_context(|| {
+            format!(
+                "Failed to create sandbox session data dir: {}",
+                host_session_dir.display()
+            )
+        })?;
+        if let Some(attempt) = attempt.as_mut() {
+            let mut scope = attempt.cleanup_scope();
+            scope.register_remove_dir(host_session_dir.clone());
+        }
+        // The data-path env (ATO_DATA_DIR / DATABASE_PATH) must reference the
+        // path the workload actually sees at runtime — the guest path under a
+        // mount namespace (Linux bwrap), the host path under macOS seatbelt
+        // which has none. See `sandbox_session_data_env_dir` (#628).
+        let session_data_env_dir =
+            sandbox_session_data_env_dir(SESSION_DATA_GUEST, &host_session_dir);
+        launch_ctx = launch_ctx.with_injected_mounts(vec![InjectedMount {
+            source: host_session_dir,
+            target: SESSION_DATA_GUEST.to_string(),
+            readonly: false,
+        }]);
+
+        // Inject data-path env only when neither the capsule manifest env nor an
+        // earlier injection already provides it — never override user/capsule.
+        let plan_env = decision.plan.execution_env();
+        let merged_env = launch_ctx.merged_env();
+        let session_env = sandbox_session_data_env(&session_data_env_dir, |key| {
+            plan_env.contains_key(key) || merged_env.contains_key(key)
+        });
+        if !session_env.is_empty() {
+            launch_ctx = launch_ctx.with_injected_env(session_env);
+        }
     }
     let mut agent_attempted = false;
 
@@ -3077,6 +3259,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         ready_without_events: bool,
         desktop_open_only: bool,
         compatibility_host_mode: CompatibilityHostMode,
+        execution_id: Option<String>,
         reporter: &Arc<CliReporter>,
     ) -> Result<()>;
 
@@ -3089,6 +3272,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
         ipc_socket_mapped: bool,
         desktop_open_only: bool,
         use_progressive_ui: bool,
+        execution_id: Option<String>,
     ) -> Result<i32>;
 
     async fn cleanup_existing_scoped_processes_before_run(
@@ -3436,11 +3620,14 @@ where
             );
         };
         let env = crate::application::strict_realization::launch_environment();
+        // Unbox before handing to anyhow: downstream recovery downcasts to
+        // `AtoExecutionError` (utils/error.rs), which a boxed wrap would hide.
         crate::application::strict_realization::enforce_strict_realization(
             launch_graph,
             &env,
             crate::application::strict_realization::launch_profile(true),
-        )?;
+        )
+        .map_err(|e| anyhow::Error::new(*e))?;
     }
 
     let run_command_uses_specialized_executor = decision
@@ -3804,6 +3991,10 @@ where
                         ready_without_events,
                         desktop_native_open_only,
                         compatibility_host_mode,
+                        // Host execution uses spawn_host_lifecycle_events; re-stamp
+                        // its receipt from the observed outcome. The nacelle-sandbox
+                        // path (!host_execution) keeps its launch-passed gate.
+                        host_execution.then(|| execution_id.clone()),
                         &request.reporter,
                     )
                     .await?;
@@ -3837,6 +4028,7 @@ where
                         .unwrap_or(false),
                     desktop_native_open_only,
                     use_progressive_ui,
+                    host_execution.then(|| execution_id.clone()),
                 )
                 .await?;
             sidecar_cleanup.stop_now();
@@ -3882,6 +4074,9 @@ where
                         ready_without_events,
                         false,
                         compatibility_host_mode,
+                        // NodeCompat uses spawn_host_lifecycle_events; re-stamp
+                        // its receipt from the observed readiness outcome.
+                        Some(execution_id.clone()),
                         &request.reporter,
                     )
                     .await?;
@@ -3911,6 +4106,7 @@ where
                         .unwrap_or(false),
                     false,
                     use_progressive_ui,
+                    Some(execution_id.clone()),
                 )
                 .await?;
             sidecar_cleanup.stop_now();
@@ -4050,6 +4246,9 @@ where
                         ready_without_events,
                         false,
                         compatibility_host_mode,
+                        // NodeCompat uses spawn_host_lifecycle_events; re-stamp
+                        // its receipt from the observed readiness outcome.
+                        Some(execution_id.clone()),
                         &request.reporter,
                     )
                     .await?;
@@ -4066,13 +4265,43 @@ where
                 );
                 return Ok(());
             }
-            let exit = crate::executors::node_compat::execute(
+            // Foreground NodeCompat (Connected Runner dispatch / `ato run …
+            // --sandbox -y`) must emit honest readiness exactly like the host
+            // source executor: spawn with the lifecycle pump wired so the
+            // declared port is TCP-probed, the canonical `LIFECYCLE: ready
+            // port=N` line is printed, and the V2 receipt readiness gate is
+            // re-stamped from the observed event. The blocking `execute()` path
+            // did none of this, so dispatched node capsules never went ready
+            // and timed out at the 600s runner ready deadline (#623).
+            let process = crate::executors::node_compat::spawn_foreground(
                 &decision.plan,
                 prepared.authoritative_lock.as_ref(),
                 &execution_plan,
                 &launch_ctx,
                 request.dangerously_skip_permissions,
             )?;
+            register_capsule_process_cleanup(
+                &mut attempt,
+                &process,
+                decision.plan.selected_target_label(),
+            );
+            let exit = hooks
+                .complete_foreground_source_process(
+                    process,
+                    request.reporter.clone(),
+                    is_one_shot,
+                    false,
+                    launch_ctx
+                        .socket_paths()
+                        .map(|paths| !paths.is_empty())
+                        .unwrap_or(false),
+                    false,
+                    use_progressive_ui,
+                    // NodeCompat uses spawn_host_lifecycle_events; re-stamp its
+                    // receipt from the observed readiness outcome.
+                    Some(execution_id.clone()),
+                )
+                .await?;
             sidecar_cleanup.stop_now();
             if exit != 0 {
                 if let Some(external_capsules) = external_capsules.as_mut() {
@@ -4277,11 +4506,34 @@ pub(crate) fn resolve_state_source_overrides(
     resolve_state_source_overrides_with_store(manifest, raw_bindings, None)
 }
 
+/// Resolve `--state` bindings for a run, deferring to headless auto-provisioning
+/// for any remaining unbound persistent state when the run is sandboxed (#687).
+///
+/// In `--sandbox` mode the missing-binding hard error is suppressed because the
+/// caller auto-provisions the remaining declared state immediately afterward.
+/// Without `--sandbox` the original fail-closed behavior is preserved: a
+/// persistent state with no `--state` binding is still an error.
+fn resolve_explicit_or_auto_state_source_overrides(
+    manifest: &CapsuleManifest,
+    request: &ConsumerRunRequest,
+) -> Result<HashMap<String, String>> {
+    if !request.sandbox_mode {
+        return resolve_state_source_overrides(manifest, &request.state_bindings);
+    }
+    let requested = parse_explicit_state_bindings(&request.state_bindings)?;
+    resolve_requested_state_source_overrides_lenient(manifest, &requested, None)
+}
+
 pub(crate) fn resolve_state_source_overrides_with_store(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
     store: Option<&RegistryStore>,
 ) -> Result<HashMap<String, String>> {
+    let requested = parse_explicit_state_bindings(raw_bindings)?;
+    resolve_state_source_overrides_from_requested(manifest, &requested, store)
+}
+
+fn parse_explicit_state_bindings(raw_bindings: &[String]) -> Result<HashMap<String, String>> {
     let mut requested = HashMap::new();
     for raw in raw_bindings {
         let (state_name, locator) = raw.split_once('=').ok_or_else(|| {
@@ -4308,8 +4560,56 @@ pub(crate) fn resolve_state_source_overrides_with_store(
             );
         }
     }
+    Ok(requested)
+}
 
-    resolve_state_source_overrides_from_requested(manifest, &requested, store)
+/// Resolve explicitly-requested `--state` bindings without erroring on declared
+/// persistent state that has no binding. Used by the headless auto-provisioning
+/// path (#687), which fills any remaining declared state immediately after.
+/// Validation of the requested bindings themselves (undeclared / non-persistent)
+/// is still enforced.
+fn resolve_requested_state_source_overrides_lenient(
+    manifest: &CapsuleManifest,
+    requested: &HashMap<String, String>,
+    store: Option<&RegistryStore>,
+) -> Result<HashMap<String, String>> {
+    for state_name in requested.keys() {
+        let requirement = manifest.state.get(state_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--state references undeclared manifest state '{}'",
+                state_name
+            )
+        })?;
+        if requirement.durability != StateDurability::Persistent {
+            anyhow::bail!(
+                "--state only supports persistent manifest state; '{}' is {:?}",
+                state_name,
+                requirement.durability
+            );
+        }
+    }
+
+    let mut resolved = HashMap::new();
+    for (state_name, locator) in requested {
+        let record = if parse_state_reference(locator).is_some() {
+            match store {
+                Some(store) => resolve_registered_state_reference_in_store(
+                    manifest, state_name, locator, store,
+                )?,
+                None => resolve_registered_state_reference(manifest, state_name, locator)?,
+            }
+        } else {
+            match store {
+                Some(store) => {
+                    ensure_registered_state_binding_in_store(manifest, state_name, locator, store)?
+                }
+                None => ensure_registered_state_binding(manifest, state_name, locator)?,
+            }
+        };
+        resolved.insert(state_name.clone(), record.backend_locator);
+    }
+
+    Ok(resolved)
 }
 
 fn resolve_state_source_overrides_from_requested(
@@ -4378,6 +4678,335 @@ fn resolve_state_source_overrides_from_requested(
     }
 
     Ok(resolved)
+}
+
+/// Stable identity inputs for headless state auto-provisioning (#700).
+///
+/// These are the inputs to the `headless_state_instance_id` derivation. Every
+/// field is deliberately *stable across runs and revisions* of the same source:
+/// the persistent state directory must be reused by re-runs of the same source
+/// and shared across revisions, but it must NOT collide with a *different* source
+/// that happens to declare the same `manifest.name`.
+///
+/// Inputs that change per execution — `execution_id`, allocated ports, session
+/// id, process / container id, dynamic env — are intentionally NOT part of this
+/// struct. (That is exactly why `capsule_instance_key` — derived from
+/// `install_profile_key + install_revision_id + execution_id` — is the wrong key
+/// here: it changes per revision/execution, whereas instance-scoped persistent
+/// state is shared across revisions.)
+#[derive(Debug, Clone)]
+pub(crate) struct HeadlessStateKeyInputs<'a> {
+    /// Canonical, stable reference to the source being run (e.g.
+    /// `github.com/owner/repo`, or a stable local source path). When the source
+    /// reference is unstable (a per-run materialization dir under one of the
+    /// ato-managed ephemeral roots, or an anonymous local checkout), the caller
+    /// passes the workspace root in `workspace_root_for_fallback` so the
+    /// derivation can substitute the materialized-source tree hash instead.
+    pub(crate) normalized_source_ref: &'a str,
+    /// Selected target label (`default` when none was chosen). Different targets
+    /// of the same source get distinct state instances.
+    pub(crate) selected_target_label: &'a str,
+    /// Profile id, or `None` to fall back to the `"default"` profile namespace.
+    pub(crate) profile_id: Option<&'a str>,
+    /// Runner / account namespace when one is available (e.g. `ATO_SCOPED_ID`).
+    /// `None` for a normal `ato run` and for the runner-spawned child today —
+    /// `ato runner serve` does NOT export an account/runner namespace into the
+    /// `ato run <source> --sandbox -y` child env (the runner token is kept out of
+    /// the child entirely), so this is normally absent; it is threaded through so
+    /// a future multi-tenant runner can isolate per account without changing the
+    /// path scheme.
+    pub(crate) runner_namespace: Option<&'a str>,
+    /// Workspace root used ONLY to compute the `source_tree_hash` fallback when
+    /// `normalized_source_ref` is unstable.
+    pub(crate) workspace_root_for_fallback: &'a Path,
+}
+
+/// Serializable view of the stable key inputs, fed through the repo's existing
+/// versioned content-hash helper (`canonical_hash` → JCS + `blake3:<hex>`). Using
+/// the shared helper inherits its documented "never hash session ids / ports /
+/// pids / timestamps" contract rather than inventing a new ad-hoc hash.
+#[derive(serde::Serialize)]
+struct HeadlessStateKeyMaterial<'a> {
+    /// Version tag so the derivation can evolve without silently re-keying old
+    /// state: bump this and existing instances rebind to a fresh directory.
+    v: u8,
+    source_ref: &'a str,
+    name: &'a str,
+    target: &'a str,
+    profile: &'a str,
+    namespace: &'a str,
+}
+
+/// Outcome of headless state auto-provisioning: the resolved override map plus
+/// the set of ephemeral directories the provisioner created. The caller registers
+/// the ephemeral dirs with the run-attempt cleanup scope so they are removed when
+/// the run ends (ephemeral state must not persist across runs — #700).
+#[derive(Debug, Default)]
+pub(crate) struct HeadlessStateProvisionOutcome {
+    pub(crate) overrides: HashMap<String, String>,
+    pub(crate) ephemeral_dirs: Vec<PathBuf>,
+}
+
+/// True when `source_ref` is not a stable cross-run source identity: an empty
+/// ref, or a path that lives under one of the ato-managed ephemeral roots
+/// (`~/.ato/runs`, `~/.ato/cache`, `~/.ato/projections`). A github ref, a
+/// registry ref, or a stable user-owned local path are all considered stable.
+fn headless_source_ref_is_unstable(source_ref: &str) -> bool {
+    let trimmed = source_ref.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    use capsule_core::common::paths;
+    let unstable_roots = [
+        paths::ato_runs_dir(),
+        paths::ato_cache_dir(),
+        paths::ato_projections_dir(),
+    ];
+    let candidate = Path::new(trimmed);
+    unstable_roots
+        .iter()
+        .any(|root| candidate.starts_with(root))
+}
+
+/// Headless / Connected Runner state auto-provisioning.
+///
+/// `ato run <source> --sandbox` (what `ato runner serve` spawns for every lease)
+/// never receives a `--state` binding, so any recipe that declares a `[state.*]`
+/// block would hard-error in `state_source_path` (`requires an explicit
+/// persistent binding`) or fail container creation on the un-creatable
+/// `/var/lib/ato/state` ephemeral base. The desktop / session path already
+/// auto-provisions a per-source directory; this provides the equivalent for the
+/// headless path so stateful capsules can run on a runner (#687).
+///
+/// State is keyed on a stable, source-derived `headless_state_instance_id`
+/// (#700) — NOT on `manifest.name` alone, which would make two different sources
+/// that share a `name` collide on the same state directory. The id is a
+/// `canonical_hash` (JCS + `blake3`) over the stable inputs in
+/// [`HeadlessStateKeyInputs`]; per-execution facts (execution id, ports, session
+/// / process / container ids, dynamic env) are deliberately excluded so the same
+/// source reuses its state across runs and revisions.
+///
+/// Durability splits the path scheme (#700):
+/// - `persistent` → `~/.ato/state/run/<headless_state_instance_id>/<state-name>`
+///   (stable, reused across runs).
+/// - `ephemeral`  → `~/.ato/runs/<run-session-token>/state/<state-name>` (under
+///   the per-run cleanup scope; the directory is returned in
+///   [`HeadlessStateProvisionOutcome::ephemeral_dirs`] so the caller registers it
+///   for removal when the run ends — ephemeral state must not survive the run).
+///
+/// An explicit `--state` binding (or workspace / lock seed) always wins: any
+/// state already present in `existing_overrides` is left untouched.
+///
+/// Fails closed on any state `kind` other than `filesystem`: an auto-provisioned
+/// host directory is only a meaningful backend for a filesystem state, and a
+/// future non-filesystem kind must opt in explicitly rather than be silently
+/// mis-provisioned as a directory.
+fn auto_provision_headless_state_overrides(
+    manifest: &CapsuleManifest,
+    existing_overrides: &HashMap<String, String>,
+    key_inputs: &HeadlessStateKeyInputs<'_>,
+) -> Result<HeadlessStateProvisionOutcome> {
+    use capsule_core::types::{StateDurability, StateKind, StateRequirement};
+
+    let mut overrides = existing_overrides.clone();
+    let mut ephemeral_dirs = Vec::new();
+
+    // Short-circuit BEFORE any disk read or key derivation (#700 follow-up):
+    // collect the states this run will actually auto-provision (declared,
+    // not already bound). Fail closed here on any non-filesystem kind. If
+    // nothing remains, return a pure no-op — we must NOT read `capsule.toml`,
+    // compute `headless_state_instance_id` (which may `hash_tree` the source
+    // tree), or touch `ato_state_dir()` for a capsule that has no unbound
+    // filesystem state (e.g. pgweb). This keeps the no-state path free of the
+    // source-read / canonicalize work that was platform-path-fragile.
+    let mut unbound_filesystem_states: Vec<(&String, &StateRequirement)> = Vec::new();
+    for (state_name, requirement) in &manifest.state {
+        if overrides.contains_key(state_name) {
+            continue;
+        }
+        // Fail closed: only filesystem state can be auto-provisioned as a host
+        // directory. Any other kind must be bound explicitly.
+        if requirement.kind != StateKind::Filesystem {
+            anyhow::bail!(
+                "state '{}' has kind {:?}, which cannot be auto-provisioned for a headless run; bind it explicitly with --state {}=...",
+                state_name,
+                requirement.kind,
+                state_name
+            );
+        }
+        unbound_filesystem_states.push((state_name, requirement));
+    }
+    if unbound_filesystem_states.is_empty() {
+        return Ok(HeadlessStateProvisionOutcome {
+            overrides,
+            ephemeral_dirs,
+        });
+    }
+
+    // Stable per-source persistent root, computed only when at least one unbound
+    // persistent filesystem state actually needs it — `headless_state_instance_id`
+    // can read the source tree (`hash_tree`) in the unstable-ref fallback, so it
+    // must not run on the no-state / ephemeral-only paths. The instance id is the
+    // same across re-runs of the same source (so persistent state is reused) and
+    // differs between sources that share a `manifest.name` (so they never collide).
+    let needs_persistent = unbound_filesystem_states
+        .iter()
+        .any(|(_, requirement)| requirement.durability == StateDurability::Persistent);
+    let persistent_root = if needs_persistent {
+        let instance_id = headless_state_instance_id(manifest, key_inputs)?;
+        Some(
+            capsule_core::common::paths::ato_state_dir()
+                .join("run")
+                .join(instance_id),
+        )
+    } else {
+        None
+    };
+
+    // Per-run ephemeral root. The token provides filesystem uniqueness only and
+    // lives under `~/.ato/runs`, which is the run cleanup root. Computed lazily so
+    // a source with only persistent state never creates a runs/ subtree.
+    let mut ephemeral_root: Option<PathBuf> = None;
+
+    for (state_name, requirement) in unbound_filesystem_states {
+        let path = match requirement.durability {
+            StateDurability::Persistent => persistent_root
+                .as_ref()
+                .expect("persistent_root is computed when a persistent state exists")
+                .join(state_name),
+            StateDurability::Ephemeral => {
+                let root = match ephemeral_root.as_ref() {
+                    Some(root) => root.clone(),
+                    None => {
+                        // `ato_run_layout` mints a fresh `~/.ato/runs/state-…`
+                        // root; we use its `root` as the per-run cleanup-scoped
+                        // base and place state under `<root>/state/<name>`.
+                        let root = capsule_core::common::paths::ato_run_layout("headless-state")
+                            .root
+                            .join("state");
+                        ephemeral_root = Some(root.clone());
+                        root
+                    }
+                };
+                let dir = root.join(state_name);
+                // Register the ephemeral *root* (the `~/.ato/runs/<token>` dir,
+                // i.e. the parent of `state/`) so cleanup removes the whole
+                // per-run subtree, matching the run cleanup scope.
+                if let Some(run_root) = dir.ancestors().nth(2) {
+                    let run_root = run_root.to_path_buf();
+                    if !ephemeral_dirs.contains(&run_root) {
+                        ephemeral_dirs.push(run_root);
+                    }
+                }
+                dir
+            }
+        };
+
+        fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "failed to auto-provision headless state directory {}",
+                path.display()
+            )
+        })?;
+        let locator = path
+            .canonicalize()
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        overrides.insert(state_name.clone(), locator);
+    }
+
+    Ok(HeadlessStateProvisionOutcome {
+        overrides,
+        ephemeral_dirs,
+    })
+}
+
+/// Compute the stable `headless_state_instance_id` for a source's persistent
+/// state root (#700). See [`HeadlessStateKeyInputs`] for the input contract.
+fn headless_state_instance_id(
+    manifest: &CapsuleManifest,
+    inputs: &HeadlessStateKeyInputs<'_>,
+) -> Result<String> {
+    let fallback_tree_hash;
+    let effective_source_ref = if headless_source_ref_is_unstable(inputs.normalized_source_ref) {
+        // The source reference is not a stable identity (local path / anonymous
+        // materialized source). Fall back to the content hash of the materialized
+        // source tree so two different sources never collide, while re-runs of the
+        // same tree resolve to the same instance. (Git commit SHA is deliberately
+        // not used: it is provenance, not materialized-source identity.)
+        fallback_tree_hash = capsule_core::blob::hash_tree(inputs.workspace_root_for_fallback)
+            .map(|tree| tree.blob_hash)
+            .with_context(|| {
+                format!(
+                    "failed to hash source tree for headless state identity at {}",
+                    inputs.workspace_root_for_fallback.display()
+                )
+            })?;
+        fallback_tree_hash.as_str()
+    } else {
+        inputs.normalized_source_ref.trim()
+    };
+
+    // The owner scope is the manifest's explicit `state_owner_scope` when set,
+    // otherwise the manifest name (matching the documented default-owner-scope
+    // semantics on `CapsuleManifest::state_owner_scope`).
+    let owner_scope = manifest
+        .state_owner_scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .unwrap_or_else(|| manifest.name.trim());
+
+    let material = HeadlessStateKeyMaterial {
+        v: 1,
+        source_ref: effective_source_ref,
+        name: owner_scope,
+        target: inputs.selected_target_label.trim(),
+        profile: inputs.profile_id.unwrap_or("default"),
+        namespace: inputs.runner_namespace.unwrap_or("default"),
+    };
+
+    // `canonical_hash` returns `blake3:<hex>`; strip the algorithm prefix so the
+    // value is a single path-safe segment.
+    let hashed = capsule_core::foundation::install_lifecycle::canonical_hash(&material)
+        .context("failed to derive headless state instance id")?;
+    let id = hashed.split(':').next_back().unwrap_or(&hashed).to_string();
+    Ok(id)
+}
+
+/// Resolve the stable `normalized_source_ref` for headless state identity from
+/// the run request (#700).
+///
+/// Preference order:
+/// 1. The preview session's `target_reference` (the canonical source ref the user
+///    / runner asked for, e.g. `github.com/owner/repo`), when present.
+/// 2. `use_existing_toml` when it names a source ref rather than a bare flag.
+/// 3. The `request.target` as the user supplied it.
+///
+/// The returned string may be an unstable per-run materialization path; the
+/// caller passes it through [`HeadlessStateKeyInputs`] together with the
+/// workspace root, and [`headless_state_instance_id`] substitutes the source tree
+/// hash when it detects an unstable ref.
+fn headless_normalized_source_ref(
+    request: &ConsumerRunRequest,
+    preview_session: Option<&preview::PreviewSession>,
+) -> String {
+    if let Some(reference) = preview_session
+        .map(|session| session.target_reference.trim())
+        .filter(|reference| !reference.is_empty())
+    {
+        return reference.to_string();
+    }
+    if let Some(reference) = request
+        .use_existing_toml
+        .as_deref()
+        .map(str::trim)
+        .filter(|reference| !reference.is_empty())
+    {
+        return reference.to_string();
+    }
+    request.target.to_string_lossy().to_string()
 }
 
 pub(crate) fn resolve_compatibility_host_mode(
@@ -4520,21 +5149,74 @@ mod tests {
     use super::{
         ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
         ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
-        PreparedRunContext, RunPipelineState, ServiceRequiredAsset, collect_port_preferences,
-        normalize_existing_path, normalize_write_path, parent_package_id,
-        parse_external_service_contracts, parse_reuse_if_present_service_preflights,
-        reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
-        validate_sandbox_grants_best_effort,
+        HeadlessStateKeyInputs, PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
+        collect_port_preferences, headless_state_instance_id, normalize_existing_path,
+        normalize_write_path, parent_package_id, parse_external_service_contracts,
+        parse_reuse_if_present_service_preflights, reconcile_compat_manifest_targets,
+        resolve_sandbox_grants, sandbox_session_data_env, sandbox_session_data_env_dir,
+        unavailable_service_message, validate_sandbox_grants_best_effort,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
 
     use crate::reporters::CliReporter;
+
+    #[test]
+    fn sandbox_session_data_env_sets_absent_keys_only() {
+        // Nothing set: both runtime keys injected, pointing at the guest dir.
+        let env = sandbox_session_data_env("/runs/ato/session", |_| false);
+        assert_eq!(
+            env.get("ATO_DATA_DIR").map(String::as_str),
+            Some("/runs/ato/session")
+        );
+        assert_eq!(
+            env.get("DATABASE_PATH").map(String::as_str),
+            Some("/runs/ato/session/app.db")
+        );
+
+        // Capsule/user already set DATABASE_PATH: do NOT override it; still set
+        // ATO_DATA_DIR.
+        let env = sandbox_session_data_env("/runs/ato/session", |k| k == "DATABASE_PATH");
+        assert!(
+            !env.contains_key("DATABASE_PATH"),
+            "must not override DATABASE_PATH"
+        );
+        assert!(env.contains_key("ATO_DATA_DIR"));
+
+        // Both already set: inject nothing.
+        let env = sandbox_session_data_env("/runs/ato/session", |_| true);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn sandbox_session_data_env_dir_is_platform_correct() {
+        // #628: macOS seatbelt has no mount namespace, so the data-path env must
+        // reference the writable HOST session dir — not the guest `/runs/...`
+        // path (which would make a stateful capsule mkdir `/runs` on the
+        // read-only host root and exit before readiness). Linux/other backends
+        // remap the host dir to the guest path, so the env uses the guest path.
+        let host = std::path::Path::new("/Users/x/.ato/runs/session-data/123-456");
+        let chosen = sandbox_session_data_env_dir("/runs/ato/session", host);
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(chosen, host.to_string_lossy());
+            // The whole point: the env value is NOT the guest root path.
+            assert_ne!(chosen, "/runs/ato/session");
+            // And the derived DB path lives under the writable host dir.
+            let env = sandbox_session_data_env(&chosen, |_| false);
+            assert_eq!(
+                env.get("DATABASE_PATH").map(String::as_str),
+                Some(format!("{}/app.db", host.to_string_lossy()).as_str())
+            );
+        } else {
+            assert_eq!(chosen, "/runs/ato/session");
+        }
+    }
 
     fn empty_host_env() -> crate::application::dependency_credentials::MapHostEnv {
         crate::application::dependency_credentials::MapHostEnv::new(&[])
@@ -4746,6 +5428,448 @@ run = "/usr/bin/true"
         .expect("manifest");
 
         assert_eq!(parent_package_id(&manifest), "demo@1.2.3");
+    }
+
+    /// Scoped `ATO_HOME` guard so the auto-provisioning tests resolve
+    /// `ato_state_dir()` under a tempdir and restore the prior value on drop.
+    struct AtoHomeGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl AtoHomeGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("ATO_HOME");
+            // SAFETY: tests touching ATO_HOME run under `#[serial]`.
+            unsafe { std::env::set_var("ATO_HOME", path) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for AtoHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests touching ATO_HOME run under `#[serial]`.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
+            }
+        }
+    }
+
+    fn persistent_state_manifest() -> CapsuleManifest {
+        CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "gitea"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/go-gitea/gitea:latest"
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "primary-data"
+attach = "explicit"
+schema_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
+"#,
+        )
+        .expect("manifest")
+    }
+
+    /// Same manifest shape as `persistent_state_manifest`, but the state is
+    /// declared `durability = "ephemeral"` (#700 ephemeral path test).
+    fn ephemeral_state_manifest() -> CapsuleManifest {
+        CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "scratch"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/scratch:latest"
+
+[state.data]
+kind = "filesystem"
+durability = "ephemeral"
+purpose = "scratch"
+attach = "explicit"
+schema_id = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
+"#,
+        )
+        .expect("manifest")
+    }
+
+    /// Build `HeadlessStateKeyInputs` for a stable source ref. The fallback
+    /// workspace root is irrelevant for a stable ref but must point somewhere.
+    fn stable_key_inputs<'a>(
+        source_ref: &'a str,
+        workspace_root: &'a Path,
+    ) -> HeadlessStateKeyInputs<'a> {
+        HeadlessStateKeyInputs {
+            normalized_source_ref: source_ref,
+            selected_target_label: "default",
+            profile_id: None,
+            runner_namespace: None,
+            workspace_root_for_fallback: workspace_root,
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_auto_provision_creates_dir_for_unbound_persistent_state() {
+        // #687: `ato run <source> --sandbox` has no `--state`, so a recipe with a
+        // `[state.*]` block would hard-error. Auto-provisioning binds a writable
+        // per-source directory under `~/.ato/state/run/<instance-id>/` instead.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let manifest = persistent_state_manifest();
+        let workspace = home.path().to_path_buf();
+        let inputs = stable_key_inputs("github.com/owner/gitea", &workspace);
+        let outcome =
+            super::auto_provision_headless_state_overrides(&manifest, &HashMap::new(), &inputs)
+                .expect("auto-provision");
+
+        let instance_id =
+            headless_state_instance_id(&manifest, &inputs).expect("derive instance id");
+        let bound = outcome.overrides.get("data").expect("data is auto-bound");
+        let expected = home
+            .path()
+            .join("state")
+            .join("run")
+            .join(&instance_id)
+            .join("data");
+        assert_eq!(
+            fs::canonicalize(bound).expect("bound dir exists"),
+            fs::canonicalize(&expected).expect("expected dir exists"),
+        );
+        assert!(expected.is_dir(), "auto-provisioned dir must be created");
+        assert!(
+            outcome.ephemeral_dirs.is_empty(),
+            "persistent state must not register ephemeral cleanup dirs"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_auto_provision_preserves_existing_binding() {
+        // #700: an explicit `--state data=/path` (or workspace/lock binding) wins;
+        // auto-provisioning must NEVER override an explicit binding, regardless of
+        // durability.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let manifest = persistent_state_manifest();
+        let mut existing = HashMap::new();
+        existing.insert("data".to_string(), "/explicit/path".to_string());
+        let workspace = home.path().to_path_buf();
+        let inputs = stable_key_inputs("github.com/owner/gitea", &workspace);
+
+        let outcome = super::auto_provision_headless_state_overrides(&manifest, &existing, &inputs)
+            .expect("auto-provision");
+
+        assert_eq!(
+            outcome.overrides.get("data").map(String::as_str),
+            Some("/explicit/path"),
+            "explicit binding must take precedence over auto-provisioning"
+        );
+        let instance_id =
+            headless_state_instance_id(&manifest, &inputs).expect("derive instance id");
+        assert!(
+            !home
+                .path()
+                .join("state")
+                .join("run")
+                .join(&instance_id)
+                .exists(),
+            "must not create a dir when the state is already bound"
+        );
+        assert!(outcome.ephemeral_dirs.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_auto_provision_is_noop_without_state_block() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+        let manifest = CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "stateless"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+"#,
+        )
+        .expect("manifest");
+
+        let workspace = home.path().to_path_buf();
+        let inputs = stable_key_inputs("github.com/owner/stateless", &workspace);
+        let outcome =
+            super::auto_provision_headless_state_overrides(&manifest, &HashMap::new(), &inputs)
+                .expect("auto-provision");
+        assert!(outcome.overrides.is_empty());
+        assert!(outcome.ephemeral_dirs.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_auto_provision_no_state_path_reads_nothing() {
+        // #700 follow-up (CI regression on macos/windows): the no-provision path
+        // must short-circuit BEFORE any source read or key derivation. We prove it
+        // here by handing the function an UNSTABLE source ref together with a
+        // workspace root that DOES NOT EXIST: if the function reached
+        // `headless_state_instance_id` it would `hash_tree` that path and return
+        // Err. A clean Ok with empty overrides proves no source read happened.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let missing_workspace = home.path().join("does-not-exist");
+        assert!(!missing_workspace.exists());
+        // Unstable ref (empty string) so the fallback WOULD trigger a hash_tree if
+        // the function ever derived the key.
+        let inputs = HeadlessStateKeyInputs {
+            normalized_source_ref: "",
+            selected_target_label: "default",
+            profile_id: None,
+            runner_namespace: None,
+            workspace_root_for_fallback: &missing_workspace,
+        };
+
+        // Case A: no `[state.*]` block at all.
+        let stateless = CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "stateless"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+"#,
+        )
+        .expect("manifest");
+        let outcome =
+            super::auto_provision_headless_state_overrides(&stateless, &HashMap::new(), &inputs)
+                .expect("no-state path must be a pure no-op (no source read)");
+        assert!(outcome.overrides.is_empty());
+        assert!(outcome.ephemeral_dirs.is_empty());
+
+        // Case B: a persistent state that is ALREADY bound — also nothing to
+        // provision, so still no source read despite the unstable ref + missing
+        // workspace.
+        let manifest = persistent_state_manifest();
+        let mut existing = HashMap::new();
+        existing.insert("data".to_string(), "/explicit/path".to_string());
+        let outcome = super::auto_provision_headless_state_overrides(&manifest, &existing, &inputs)
+            .expect("fully-bound path must be a pure no-op (no source read)");
+        assert_eq!(
+            outcome.overrides.get("data").map(String::as_str),
+            Some("/explicit/path")
+        );
+        assert!(outcome.ephemeral_dirs.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_ephemeral_only_path_does_not_derive_persistent_key() {
+        // An ephemeral-only capsule must NOT compute the persistent instance id
+        // (which can read the source tree). Prove it the same way: unstable ref +
+        // missing workspace would error if `headless_state_instance_id` ran, but
+        // the ephemeral branch never calls it.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let missing_workspace = home.path().join("does-not-exist");
+        let inputs = HeadlessStateKeyInputs {
+            normalized_source_ref: "",
+            selected_target_label: "default",
+            profile_id: None,
+            runner_namespace: None,
+            workspace_root_for_fallback: &missing_workspace,
+        };
+
+        let manifest = ephemeral_state_manifest();
+        let outcome =
+            super::auto_provision_headless_state_overrides(&manifest, &HashMap::new(), &inputs)
+                .expect("ephemeral-only path must not derive the persistent key (no source read)");
+        // Ephemeral state is still provisioned (under ~/.ato/runs), it just does
+        // not need the persistent key derivation.
+        assert!(outcome.overrides.contains_key("data"));
+        assert!(!outcome.ephemeral_dirs.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_state_instance_id_differs_for_same_name_different_source() {
+        // #700 defect 1: keying state on `manifest.name` alone makes two DIFFERENT
+        // sources that happen to share a `name` collide on the SAME state directory
+        // (an isolation hazard). The source-derived instance id must distinguish
+        // them so they resolve to DIFFERENT state dirs.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        // Same manifest (same `name = "gitea"`), two distinct stable source refs.
+        let manifest = persistent_state_manifest();
+        let workspace = home.path().to_path_buf();
+
+        let inputs_a = stable_key_inputs("github.com/alice/gitea", &workspace);
+        let inputs_b = stable_key_inputs("github.com/bob/gitea", &workspace);
+
+        let outcome_a =
+            super::auto_provision_headless_state_overrides(&manifest, &HashMap::new(), &inputs_a)
+                .expect("auto-provision A");
+        let outcome_b =
+            super::auto_provision_headless_state_overrides(&manifest, &HashMap::new(), &inputs_b)
+                .expect("auto-provision B");
+
+        let dir_a = outcome_a.overrides.get("data").expect("A bound");
+        let dir_b = outcome_b.overrides.get("data").expect("B bound");
+        assert_ne!(
+            dir_a, dir_b,
+            "two different sources sharing manifest.name must NOT share a state dir"
+        );
+
+        // And re-running the SAME source must reuse the SAME dir (stability).
+        let outcome_a2 =
+            super::auto_provision_headless_state_overrides(&manifest, &HashMap::new(), &inputs_a)
+                .expect("auto-provision A re-run");
+        assert_eq!(
+            dir_a,
+            outcome_a2.overrides.get("data").expect("A re-run bound"),
+            "re-running the same source must reuse its persistent state dir"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_ephemeral_state_does_not_land_in_persistent_root() {
+        // #700 defect 2: `durability = "ephemeral"` state must NOT be bound to the
+        // stable persistent root (`~/.ato/state/run/...`); it must land under a
+        // per-run/session-scoped path (`~/.ato/runs/...`) that is registered for
+        // cleanup so it does not persist across runs.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let manifest = ephemeral_state_manifest();
+        let workspace = home.path().to_path_buf();
+        let inputs = stable_key_inputs("github.com/owner/scratch", &workspace);
+
+        let outcome =
+            super::auto_provision_headless_state_overrides(&manifest, &HashMap::new(), &inputs)
+                .expect("auto-provision");
+
+        let bound = outcome.overrides.get("data").expect("data is auto-bound");
+        let bound_path = fs::canonicalize(bound).expect("bound dir exists");
+
+        let persistent_root = fs::canonicalize(home.path().join("state").join("run"))
+            .unwrap_or_else(|_| home.path().join("state").join("run"));
+        assert!(
+            !bound_path.starts_with(&persistent_root),
+            "ephemeral state must NOT live under the persistent state root: {}",
+            bound_path.display()
+        );
+
+        let runs_root = fs::canonicalize(home.path().join("runs"))
+            .expect("runs root exists once an ephemeral dir is provisioned");
+        assert!(
+            bound_path.starts_with(&runs_root),
+            "ephemeral state must live under the per-run runs root: {}",
+            bound_path.display()
+        );
+
+        // The per-run root must be registered for cleanup so it is removed when the
+        // run ends (ephemeral state must not survive the run), and that root must
+        // be an ancestor of the bound dir.
+        assert!(
+            !outcome.ephemeral_dirs.is_empty(),
+            "ephemeral state must register a cleanup dir"
+        );
+        assert!(
+            outcome
+                .ephemeral_dirs
+                .iter()
+                .any(|dir| bound_path
+                    .starts_with(fs::canonicalize(dir).unwrap_or_else(|_| dir.clone()))),
+            "a registered cleanup dir must be an ancestor of the ephemeral state dir"
+        );
+    }
+
+    #[test]
+    fn resolve_state_overrides_sandbox_tolerates_unbound_persistent_state() {
+        // #687 fix wiring: the non-authoritative `ato run <source> --sandbox`
+        // branch routes through `resolve_explicit_or_auto_state_source_overrides`
+        // with `sandbox_mode = true` and no `--state`. It must NOT hard-error on
+        // the declared-but-unbound persistent state (the bug); it defers that
+        // state to the auto-provisioner, which fills it immediately after.
+        //
+        // This pins the actual fix: if the sandbox guard in
+        // `resolve_explicit_or_auto_state_source_overrides` were removed, this
+        // run would route through the strict resolver and reintroduce the
+        // "requires an explicit --state" error this test asserts is gone.
+        let manifest = persistent_state_manifest();
+        let mut request = sandbox_request(
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        request.sandbox_mode = true;
+        request.state_bindings = Vec::new();
+
+        let overrides = super::resolve_explicit_or_auto_state_source_overrides(&manifest, &request)
+            .expect("sandbox run must not error on unbound persistent state");
+        // The unbound persistent state is intentionally left for the
+        // auto-provisioner, so the lenient resolver returns nothing for it.
+        assert!(
+            !overrides.contains_key("data"),
+            "lenient resolver leaves unbound state to the auto-provisioner"
+        );
+    }
+
+    #[test]
+    fn resolve_state_overrides_non_sandbox_still_fails_closed() {
+        // Fail-closed contract preserved for non-sandbox runs: a declared
+        // persistent state with no `--state` binding is still an error. This
+        // guards against the #687 fix accidentally loosening the normal path.
+        let manifest = persistent_state_manifest();
+        let mut request = sandbox_request(
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        request.sandbox_mode = false;
+        request.state_bindings = Vec::new();
+
+        let err = super::resolve_explicit_or_auto_state_source_overrides(&manifest, &request)
+            .expect_err("non-sandbox run with unbound persistent state must fail closed");
+        assert!(
+            err.to_string().contains("requires an explicit --state"),
+            "expected fail-closed binding error, got: {err}"
+        );
     }
 
     #[test]

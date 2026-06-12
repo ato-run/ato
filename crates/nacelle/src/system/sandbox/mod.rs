@@ -126,6 +126,9 @@ pub fn is_sensitive_path(candidate: &std::path::Path) -> bool {
 
 /// Filter a list of paths, removing any that overlap with sensitive paths.
 ///
+/// A candidate overlaps when it **is**, **contains**, or **is contained by**
+/// a sensitive path (same bidirectional check as [`is_sensitive_path`]).
+///
 /// Returns `(clean, removed)`:
 /// - `clean`: paths that are safe to include in an allow-list.
 /// - `removed`: paths that were dropped because they overlap with sensitive dirs.
@@ -135,12 +138,16 @@ pub fn filter_sensitive_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>)
     let mut removed = Vec::new();
 
     for p in paths {
-        let dominated = sensitive.iter().any(|sp| {
-            // The candidate is an ancestor of a sensitive dir – allowing it
-            // would implicitly grant access to secrets.
-            sp.starts_with(p) && sp != p
+        let overlapping = sensitive.iter().any(|sp| {
+            // The candidate is a sensitive path itself or sits inside one
+            // (e.g. ~/.aws/credentials) – allowing it would expose secrets
+            // directly.
+            p.starts_with(sp)
+                // The candidate is an ancestor of a sensitive dir – allowing
+                // it would implicitly grant access to secrets.
+                || sp.starts_with(p)
         });
-        if dominated {
+        if overlapping {
             removed.push(p.clone());
         } else {
             clean.push(p.clone());
@@ -158,7 +165,7 @@ pub fn filter_sensitive_paths(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>)
 ///
 /// Defines which paths are allowed for read-only or read-write access.
 /// All other paths are denied write access by default.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SandboxPolicy {
     /// Paths allowed for read-write access (app directories, /tmp, etc.)
     pub read_write_paths: Vec<PathBuf>,
@@ -825,6 +832,36 @@ mod tests {
             );
             assert!(clean.contains(&PathBuf::from("/tmp")));
             assert!(clean.contains(&PathBuf::from("/usr")));
+        }
+    }
+
+    #[test]
+    fn test_filter_sensitive_paths_removes_exact_match() {
+        if let Some(home) = dirs::home_dir() {
+            // A path that IS a sensitive dir must be dropped (issue #642).
+            let ssh = home.join(".ssh");
+            let input = vec![ssh.clone(), PathBuf::from("/tmp")];
+            let (clean, removed) = filter_sensitive_paths(&input);
+            assert!(
+                removed.contains(&ssh),
+                "~/.ssh itself should be removed from the allow-list"
+            );
+            assert!(clean.contains(&PathBuf::from("/tmp")));
+        }
+    }
+
+    #[test]
+    fn test_filter_sensitive_paths_removes_child_of_sensitive_dir() {
+        if let Some(home) = dirs::home_dir() {
+            // A file inside a sensitive dir must be dropped (issue #642).
+            let creds = home.join(".aws/credentials");
+            let input = vec![creds.clone(), PathBuf::from("/var/data")];
+            let (clean, removed) = filter_sensitive_paths(&input);
+            assert!(
+                removed.contains(&creds),
+                "~/.aws/credentials should be removed from the allow-list"
+            );
+            assert!(clean.contains(&PathBuf::from("/var/data")));
         }
     }
 
