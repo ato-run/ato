@@ -676,10 +676,126 @@ pub fn parse_lease_command(
 
 // ── Secret scrubbing ──
 
-/// Redact runner tokens from any text that leaves this process (error
-/// reports, log excerpts). The token never goes into child env, but scrub
-/// defensively anyway.
+/// The single redaction placeholder used for every scrubbed secret value.
+const SCRUB_PLACEHOLDER: &str = "[REDACTED]";
+
+/// One redaction pass: a compiled pattern plus the replacement template
+/// applied to each match. `$1`/`$2`/… in the template refer to capture groups,
+/// so a pass can keep the structural prefix (`KEY=`, `Bearer `) and redact only
+/// the secret value.
+struct ScrubPass {
+    re: regex::Regex,
+    replacement: &'static str,
+}
+
+/// Compiled, ordered redaction passes applied to any text that leaves this
+/// process. Each pass keeps the surrounding structure (the line/traceback
+/// shape) and replaces only the secret VALUE, so persisted failure reports
+/// remain useful for debugging while never carrying a live credential.
+///
+/// Compiled once: [`scrub_secrets`] runs per child-log line, so per-call
+/// compilation would be wasteful. None of these patterns can fail to compile;
+/// the static asserts that at construction time.
+///
+/// Runner tokens are redacted FIRST (in [`scrub_runner_tokens`]) into the
+/// `ato_rnr_[REDACTED]` form; these passes deliberately do not re-touch that
+/// marker (the value classes exclude `[`), so the runner-token shape survives.
+static SCRUB_PASSES: std::sync::LazyLock<Vec<ScrubPass>> = std::sync::LazyLock::new(|| {
+    let patterns: &[(&str, &str)] = &[
+        // URL credentials: `scheme://user:pass@host` → keep the shape, drop
+        // the userinfo. Must run before the generic key=value pass.
+        (r"://[^:@/\s]+:[^@\s]+@", "://[REDACTED]@"),
+        // Known high-confidence token prefixes (case-insensitive on the
+        // prefix label, value kept verbatim-length-agnostic). Covers GitHub
+        // (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_), OpenAI/Anthropic
+        // (sk-, sk-ant-), and npm. `sk-ant-` is matched by the `sk-` arm
+        // (the trailing run is consumed greedily).
+        (
+            r"(?i)\b(github_pat_|ghp_|gho_|ghu_|ghs_|ghr_|sk-|npm_)[A-Za-z0-9_-]+",
+            SCRUB_PLACEHOLDER,
+        ),
+        // AWS access-key ids.
+        (r"\bAKIA[A-Z0-9]{16}\b", SCRUB_PLACEHOLDER),
+        // Bearer / Authorization headers. The value class excludes `[` so the
+        // already-redacted runner-token marker (`ato_rnr_[REDACTED]`) is not
+        // re-matched as a whole; the leftover `ato_rnr_` prefix is skipped in
+        // [`scrub_secrets`] (see the per-match guard), preserving its shape.
+        (
+            r"(?i)(bearer\s+|authorization:\s*(?:bearer\s+)?)[A-Za-z0-9._~+/=-]{8,}",
+            "$1[REDACTED]",
+        ),
+        // `.env`-style / generic secret assignments. Matches either
+        // `KEY=value` or `KEY: value` when the KEY looks secret-bearing
+        // (api key/apikey/token/secret/password/passwd/pwd/credential).
+        (
+            r#"(?i)((?:[A-Za-z0-9_.-]*(?:api[_-]?key|token|secret|password|passwd|pwd|credential)[A-Za-z0-9_.-]*)\s*[:=]\s*)("?)[^\s"']+("?)"#,
+            "$1$2[REDACTED]$3",
+        ),
+        // Any UPPER_SNAKE assignment with a non-trivial value (catches
+        // `OPENAI_API_KEY=…`, `DATABASE_URL=…`, `MY_SECRET=…`). The value
+        // class excludes `[`, leaving an already-redacted `KEY=[REDACTED]`
+        // untouched.
+        (
+            r#"(?m)\b([A-Z][A-Z0-9_]{2,})=("?)[^\s"'\[]{4,}("?)"#,
+            "$1=$2[REDACTED]$3",
+        ),
+    ];
+    patterns
+        .iter()
+        .map(|(re, replacement)| ScrubPass {
+            re: regex::Regex::new(re).expect("scrub pattern must compile"),
+            replacement,
+        })
+        .collect()
+});
+
+/// Redact secrets from any text that leaves this process — error reports, lease
+/// failure messages, and the persisted run-log tail (a sandboxed child's raw
+/// stdout/stderr echoed as `[child] …`). This is the single common boundary
+/// every runner sink routes through before persistence (ato#702):
+/// [`BoundedLog::line`] (saved `log_tail`), the [`LeaseReport::Failed`] message
+/// (lease error / failure report), and the `scrub_secrets(&format!("{err:#}"))`
+/// run-error reports throughout the lease loop.
+///
+/// Redacts: ato runner tokens (`ato_rnr_…`), GitHub tokens
+/// (`ghp_`/`gho_`/`github_pat_`/…), OpenAI & Anthropic keys (`sk-…`,
+/// `sk-ant-…`), npm tokens, AWS access-key ids (`AKIA…`), Bearer /
+/// Authorization headers, URL userinfo credentials, and `.env`-style
+/// `KEY=value` / `KEY: value` secret assignments. The surrounding traceback
+/// shape is preserved — only the secret value is replaced with `[REDACTED]`.
 pub fn scrub_secrets(text: &str) -> String {
+    let mut out = scrub_runner_tokens(text);
+    for pass in SCRUB_PASSES.iter() {
+        // Cow::Owned only when a match was rewritten; the common
+        // (no-secret) line stays a borrow and avoids an allocation. The
+        // closure keeps the structural capture groups and, where a value
+        // group exists, substitutes the placeholder — but leaves the leftover
+        // `ato_rnr_` prefix of an already-redacted runner token untouched so
+        // [`scrub_runner_tokens`]'s dedicated `ato_rnr_[REDACTED]` shape
+        // survives.
+        out = pass
+            .re
+            .replace_all(&out, |caps: &regex::Captures| {
+                // Skip a match that already carries (or overlaps) a redaction
+                // artifact — most importantly the runner token's
+                // `ato_rnr_[REDACTED]` form, which the Bearer pass would
+                // otherwise partially re-match into `[REDACTED][REDACTED]`.
+                if caps[0].contains("ato_rnr_") || caps[0].contains(SCRUB_PLACEHOLDER) {
+                    return caps[0].to_string();
+                }
+                let mut rendered = String::new();
+                caps.expand(pass.replacement, &mut rendered);
+                rendered
+            })
+            .into_owned();
+    }
+    out
+}
+
+/// Redact ato runner bearer tokens (`ato_rnr_…`). Split out from the regex
+/// passes because it predates them and has dedicated test coverage; the token
+/// never goes into child env, but scrub defensively anyway.
+fn scrub_runner_tokens(text: &str) -> String {
     const PREFIX: &str = "ato_rnr_";
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -2767,6 +2883,100 @@ mod tests {
         assert!(!scrubbed.contains("AbC-123_xyz"));
         assert!(scrubbed.contains("ato_rnr_[REDACTED]"));
         assert_eq!(scrub_secrets("no secrets here"), "no secrets here");
+    }
+
+    /// ato#702: a sandboxed child's `[child] …` log tail can carry traceback
+    /// secrets that reach the persisted runner failure report. `scrub_secrets`
+    /// is the single common boundary all four runner sinks (saved log_tail,
+    /// failure report, lease error, run error) route through before
+    /// persistence; assert it redacts every secret class from the acceptance
+    /// criteria while preserving the surrounding traceback shape.
+    #[test]
+    fn scrub_redacts_child_log_tail_secrets() {
+        // A realistic "[child] …" tail as it would be persisted into the
+        // failure report / run log: an env dump, a GitHub token, an
+        // OpenAI-style key, and an Anthropic key inside a traceback line.
+        let raw = concat!(
+            "[child] Traceback (most recent call last):\n",
+            "[child]   File \"app.py\", line 42, in connect\n",
+            "[child] OPENAI_API_KEY=sk-proj-abc123DEF456ghi789jkl012MNO\n",
+            "[child] export GITHUB_TOKEN=ghp_AbCdEf0123456789AbCdEf0123456789AbCd\n",
+            "[child] api_key: \"sk-ant-api03-SECRETvalue-XYZ_123\"\n",
+            "[child] DATABASE_URL=postgres://user:s3cr3tP4ss@db.example.com:5432/app\n",
+            "[child] aws id AKIAIOSFODNN7EXAMPLE rejected\n",
+            "[child] sent Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payloadpart.signature\n",
+        );
+        let scrubbed = scrub_secrets(raw);
+
+        // Acceptance criteria: none of these secret values may remain.
+        assert!(
+            !scrubbed.contains("sk-proj-abc123DEF456ghi789jkl012MNO"),
+            "OpenAI key leaked: {scrubbed}"
+        );
+        assert!(
+            !scrubbed.contains("ghp_AbCdEf0123456789AbCdEf0123456789AbCd"),
+            "GitHub token leaked: {scrubbed}"
+        );
+        assert!(
+            !scrubbed.contains("sk-ant-api03-SECRETvalue-XYZ_123"),
+            "Anthropic key leaked: {scrubbed}"
+        );
+        assert!(
+            !scrubbed.contains("s3cr3tP4ss"),
+            "URL credential leaked: {scrubbed}"
+        );
+        assert!(
+            !scrubbed.contains("AKIAIOSFODNN7EXAMPLE"),
+            "AWS access key id leaked: {scrubbed}"
+        );
+        assert!(
+            !scrubbed.contains("eyJhbGciOiJIUzI1NiJ9.payloadpart.signature"),
+            "bearer token leaked: {scrubbed}"
+        );
+
+        // The traceback shape is preserved (only values are redacted).
+        assert!(scrubbed.contains("Traceback (most recent call last):"));
+        assert!(scrubbed.contains("File \"app.py\", line 42, in connect"));
+        assert!(scrubbed.contains("[REDACTED]"));
+    }
+
+    /// `.env`-style `KEY=value` / `KEY: value` secret assignments are redacted
+    /// by key name AND by UPPER_SNAKE convention, while non-secret structure
+    /// (e.g. short numeric assignments) is left intact.
+    #[test]
+    fn scrub_redacts_env_style_secrets() {
+        let scrubbed = scrub_secrets("API_KEY=supersecretvalue123 password: hunter2hunter");
+        assert!(!scrubbed.contains("supersecretvalue123"), "{scrubbed}");
+        assert!(!scrubbed.contains("hunter2hunter"), "{scrubbed}");
+        assert!(scrubbed.contains("API_KEY=[REDACTED]"), "{scrubbed}");
+
+        // A short, non-secret-looking value is not a credential — left alone so
+        // tracebacks stay readable.
+        assert_eq!(scrub_secrets("exit code 137"), "exit code 137");
+        assert_eq!(scrub_secrets("retry=3"), "retry=3");
+    }
+
+    /// The persisted log tail (`BoundedLog::line`) and the lease failure
+    /// message both route through `scrub_secrets`, so a secret in a child line
+    /// must not survive into the written run log.
+    #[test]
+    fn bounded_log_scrubs_child_secrets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("run.log");
+        let mut log = BoundedLog::create(&log_path);
+        log.line("[child] OPENAI_API_KEY=sk-proj-LEAKsecretVALUE0123456789abcd");
+        log.line("[child] using ghp_LEAKgithubTOKEN0123456789abcdefABCDEF12");
+        drop(log);
+        let written = std::fs::read_to_string(&log_path).expect("read log");
+        assert!(
+            !written.contains("sk-proj-LEAKsecretVALUE0123456789abcd"),
+            "persisted log leaked OpenAI key: {written}"
+        );
+        assert!(
+            !written.contains("ghp_LEAKgithubTOKEN0123456789abcdefABCDEF12"),
+            "persisted log leaked GitHub token: {written}"
+        );
+        assert!(written.contains("[REDACTED]"), "{written}");
     }
 
     // ── Fake-child execution flows (no API, no network) ──
