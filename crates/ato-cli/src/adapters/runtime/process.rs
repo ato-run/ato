@@ -1339,11 +1339,64 @@ fn verified_import_preview_process_groups(
     {
         if Some(pgid) == ato_run_pgid
             || process_group_matches_import_preview_session(pgid, session, processes)
+            || (ato_run_owned
+                && process_group_descends_from_pid(pgid, session.ato_run_pid, processes))
         {
             verified.insert(pgid);
         }
     }
     verified
+}
+
+/// True when any member of `pgid`'s process group descends — via the
+/// parent chain — from `ancestor_pid`. On Linux a non-network `ato run`
+/// launches its workload through `bwrap --unshare-all`, which leads its
+/// OWN process group (nacelle puts the bwrap wrapper in `process_group(0)`)
+/// and hides the sandboxed command line and cwd behind a PID namespace, so
+/// neither the `ATO_IMPORT_SESSION_ID` marker nor a `shadow_dir` reference
+/// is visible to the host `ps`. The ppid chain back to the Ato-owned
+/// `ato run` pid is the proof that the group still belongs to this session.
+/// Callers gate this on `ato_run_owned` (the root pid + start time matched),
+/// so it can only ever verify groups rooted under a confirmed Ato process —
+/// never a recycled or unrelated pid.
+#[cfg(unix)]
+fn process_group_descends_from_pid(
+    pgid: i32,
+    ancestor_pid: i32,
+    processes: &[UnixPsProcess],
+) -> bool {
+    if pgid <= 0 || ancestor_pid <= 0 {
+        return false;
+    }
+    processes
+        .iter()
+        .filter(|process| process.pgid == pgid)
+        .any(|process| process_descends_from_pid(process.pid, ancestor_pid, processes))
+}
+
+/// Walk the parent chain from `pid` looking for `ancestor_pid`. Bounded by
+/// the process count so a malformed/cyclic ppid graph can never loop
+/// forever; reaching pid 0/1 (no recorded parent) ends the walk.
+#[cfg(unix)]
+fn process_descends_from_pid(pid: i32, ancestor_pid: i32, processes: &[UnixPsProcess]) -> bool {
+    let mut current = pid;
+    for _ in 0..processes.len().saturating_add(1) {
+        if current == ancestor_pid {
+            return true;
+        }
+        let Some(parent) = processes
+            .iter()
+            .find(|process| process.pid == current)
+            .map(|process| process.ppid)
+        else {
+            return false;
+        };
+        if parent <= 0 || parent == current {
+            return false;
+        }
+        current = parent;
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -1582,6 +1635,7 @@ fn command_is_known_non_target(command: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnixPsProcess {
     pid: i32,
+    ppid: i32,
     pgid: i32,
     command: String,
 }
@@ -1589,11 +1643,11 @@ struct UnixPsProcess {
 #[cfg(unix)]
 fn unix_ps_processes() -> Vec<UnixPsProcess> {
     let output = Command::new("ps")
-        .args(["eww", "-axo", "pid=,pgid=,command="])
+        .args(["eww", "-axo", "pid=,ppid=,pgid=,command="])
         .output()
         .or_else(|_| {
             Command::new("ps")
-                .args(["-axo", "pid=,pgid=,command="])
+                .args(["-axo", "pid=,ppid=,pgid=,command="])
                 .output()
         });
     let Ok(output) = output else {
@@ -1613,9 +1667,15 @@ fn parse_unix_ps_process_line(line: &str) -> Option<UnixPsProcess> {
     let trimmed = line.trim();
     let mut parts = trimmed.split_whitespace();
     let pid = parts.next()?.parse().ok()?;
+    let ppid = parts.next()?.parse().ok()?;
     let pgid = parts.next()?.parse().ok()?;
     let command = parts.collect::<Vec<_>>().join(" ");
-    Some(UnixPsProcess { pid, pgid, command })
+    Some(UnixPsProcess {
+        pid,
+        ppid,
+        pgid,
+        command,
+    })
 }
 #[cfg(not(unix))]
 fn terminate_pgroup_with_escalation(pid: i32, _term_grace: Duration) {
@@ -1885,6 +1945,7 @@ mod tests {
         session.process_group_ids = vec![777];
         let processes = vec![UnixPsProcess {
             pid: 4242,
+            ppid: 1,
             pgid: 777,
             command: "python3 unrelated_server.py".to_string(),
         }];
@@ -1904,6 +1965,7 @@ mod tests {
         session.process_group_ids = vec![888];
         let processes = vec![UnixPsProcess {
             pid: 5151,
+            ppid: 1,
             pgid: 888,
             command: format!(
                 "ATO_IMPORT_SESSION_ID={} python3 {}",
@@ -1914,6 +1976,83 @@ mod tests {
 
         let verified = verified_import_preview_process_groups(&session, false, &processes);
         assert_eq!(verified.into_iter().collect::<Vec<_>>(), vec![888]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verified_import_preview_process_groups_accept_sandboxed_descendant_group() {
+        // Linux repro: the bwrap-sandboxed server leads its OWN process group
+        // (pgid 888) and hides its command line / cwd behind a PID namespace,
+        // so it carries neither the ATO_IMPORT_SESSION_ID marker nor a
+        // shadow_dir reference. The only proof it belongs to the session is the
+        // ppid chain back to the Ato-owned `ato run` (pid 4000, pgid 4000).
+        let mut session = test_import_preview_session("preview-sandboxed", i32::MAX, 4000, true);
+        session.process_group_ids = vec![4000, 888];
+        let processes = vec![
+            // The Ato-owned outer `ato run` leads pgid 4000.
+            UnixPsProcess {
+                pid: 4000,
+                ppid: 1,
+                pgid: 4000,
+                command: format!(
+                    "ato run {} --yes ATO_IMPORT_SESSION_ID={}",
+                    session.shadow_dir.display(),
+                    session.run_session_id
+                ),
+            },
+            // bwrap wrapper: child of the outer run but in its OWN group (888).
+            UnixPsProcess {
+                pid: 5000,
+                ppid: 4000,
+                pgid: 888,
+                command: "bwrap --unshare-all --die-with-parent".to_string(),
+            },
+            // Sandboxed server: namespaced, no session marker, no shadow_dir.
+            UnixPsProcess {
+                pid: 5151,
+                ppid: 5000,
+                pgid: 888,
+                command: "python3 keep_alive_server.py 1111".to_string(),
+            },
+        ];
+
+        let verified = verified_import_preview_process_groups(&session, true, &processes);
+        assert_eq!(
+            verified.into_iter().collect::<Vec<_>>(),
+            vec![888, 4000],
+            "the sandboxed descendant group must verify as Ato-owned"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verified_import_preview_process_groups_reject_descendant_when_root_unowned() {
+        // Same topology, but the root pid is NOT confirmed Ato-owned
+        // (ato_run_owned = false). The descendant proof must be ignored —
+        // fail closed rather than kill a group rooted under an unverified pid.
+        let mut session = test_import_preview_session("preview-unowned-root", i32::MAX, 4000, true);
+        session.process_group_ids = vec![888];
+        let processes = vec![
+            UnixPsProcess {
+                pid: 4000,
+                ppid: 1,
+                pgid: 4000,
+                command: "ato run --yes".to_string(),
+            },
+            UnixPsProcess {
+                pid: 5151,
+                ppid: 4000,
+                pgid: 888,
+                command: "python3 keep_alive_server.py 1111".to_string(),
+            },
+        ];
+
+        let verified = verified_import_preview_process_groups(&session, false, &processes);
+        assert!(verified.is_empty());
+        assert_eq!(
+            live_unverified_import_preview_process_groups(&session, &verified, &processes),
+            vec![888]
+        );
     }
 
     #[test]
@@ -1934,6 +2073,7 @@ mod tests {
     fn import_preview_env_sweep_candidates_ignore_run_session_only_marker() {
         let processes = vec![UnixPsProcess {
             pid: 4242,
+            ppid: 1,
             pgid: 777,
             command: "ATO_RUN_SESSION_ID=run-123 python3 server.py".to_string(),
         }];
@@ -1955,6 +2095,7 @@ mod tests {
         session.process_group_ids = vec![888];
         let processes = vec![UnixPsProcess {
             pid: 5151,
+            ppid: 1,
             pgid: 888,
             command: format!(
                 "ATO_IMPORT_SESSION_ID={} python3 {}",
@@ -1973,6 +2114,7 @@ mod tests {
     fn import_preview_env_sweep_candidates_select_missing_import_session_marker() {
         let processes = vec![UnixPsProcess {
             pid: 6262,
+            ppid: 1,
             pgid: 999,
             command: "ATO_IMPORT_SESSION_ID=preview-missing python3 stale_server.py".to_string(),
         }];
