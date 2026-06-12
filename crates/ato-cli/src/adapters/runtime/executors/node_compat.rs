@@ -260,26 +260,27 @@ pub fn spawn(
         .context("Failed to spawn node compat runtime for orchestration")
 }
 
-/// Spawn a NodeCompat process for background (daemon) execution.
-/// Returns a `CapsuleProcess` with port-based readiness detection.
-pub fn spawn_background(
+/// Assemble the fully-prepared NodeCompat orchestration command together with
+/// the readiness port to probe. Shared by [`spawn_background`] and
+/// [`spawn_foreground`] so both daemon and foreground (Connected Runner
+/// dispatch) executions wire identical port-based readiness detection — only
+/// the stdio wiring differs between callers. Returns the `PreparedCommand`
+/// (whose `_secret_fd_guard`, on unix, must stay alive until `spawn`) so the
+/// caller controls stdio and spawn timing.
+fn build_orchestration_command(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
-) -> Result<super::source::CapsuleProcess> {
+) -> Result<(PreparedCommand, Option<u16>)> {
     verify_execution_plan_hashes(execution_plan)?;
 
     let launch_spec = derive_launch_spec(plan)?;
     let readiness_port = runtime_overrides::override_port(launch_spec.port);
 
-    let mut cmd = if is_package_manager_entrypoint(&launch_spec.command) {
-        let PreparedCommand {
-            cmd,
-            #[cfg(unix)]
-            _secret_fd_guard,
-        } = build_package_manager_command(
+    let prepared = if is_package_manager_entrypoint(&launch_spec.command) {
+        build_package_manager_command(
             plan,
             authoritative_lock,
             execution_plan,
@@ -287,8 +288,7 @@ pub fn spawn_background(
             &launch_spec.command,
             &launch_spec.args,
             launch_ctx,
-        )?;
-        cmd
+        )?
     } else {
         let Some(_) = launch_spec.required_lockfile.as_ref() else {
             return Err(AtoExecutionError::lock_incomplete(
@@ -298,11 +298,7 @@ pub fn spawn_background(
             .into());
         };
 
-        if let Some(PreparedCommand {
-            cmd,
-            #[cfg(unix)]
-            _secret_fd_guard,
-        }) = maybe_build_direct_node_command(
+        if let Some(prepared) = maybe_build_direct_node_command(
             plan,
             authoritative_lock,
             execution_plan,
@@ -311,7 +307,7 @@ pub fn spawn_background(
             &launch_spec.args,
             launch_ctx,
         )? {
-            cmd
+            prepared
         } else {
             let deno_bin =
                 runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
@@ -322,11 +318,7 @@ pub fn spawn_background(
                 &launch_spec.command,
                 launch_ctx,
             )?;
-            let PreparedCommand {
-                cmd,
-                #[cfg(unix)]
-                _secret_fd_guard,
-            } = build_runtime_command(
+            build_runtime_command(
                 &deno_bin,
                 plan,
                 authoritative_lock,
@@ -337,10 +329,36 @@ pub fn spawn_background(
                 launch_ctx,
                 use_compat_flag,
                 dangerously_skip_permissions,
-            )?;
-            cmd
+            )?
         }
     };
+
+    Ok((prepared, readiness_port))
+}
+
+/// Spawn a NodeCompat process for background (daemon) execution.
+/// Returns a `CapsuleProcess` with port-based readiness detection.
+pub fn spawn_background(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+) -> Result<super::source::CapsuleProcess> {
+    let (
+        PreparedCommand {
+            mut cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        },
+        readiness_port,
+    ) = build_orchestration_command(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        launch_ctx,
+        dangerously_skip_permissions,
+    )?;
 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -348,6 +366,57 @@ pub fn spawn_background(
     let child = cmd
         .spawn()
         .context("Failed to spawn node compat process in background")?;
+    let event_rx = super::source::spawn_host_lifecycle_events(child.id(), readiness_port);
+
+    Ok(super::source::CapsuleProcess {
+        child,
+        cleanup_paths: Vec::new(),
+        event_rx: Some(event_rx),
+        workload_pid: None,
+        log_path: None,
+        execution_cwd: None,
+    })
+}
+
+/// Spawn a NodeCompat process for foreground execution (the path the Connected
+/// Runner dispatch and `ato run … --sandbox -y` take). Mirrors
+/// [`spawn_background`]'s readiness wiring — a `CapsuleProcess` whose `event_rx`
+/// is fed by [`spawn_host_lifecycle_events`] so the foreground event pump can
+/// TCP-probe the declared port, print the canonical `LIFECYCLE: ready port=N`
+/// line, and re-stamp the V2 receipt — but inherits stdio (like the blocking
+/// [`execute`] path) so the guest's output still reaches the user's terminal.
+///
+/// Capsules with neither a declared port nor a readiness probe resolve
+/// `readiness_port` to `None` and keep the honest `StartedWithoutReadiness`
+/// behavior (no fake ready), matching the host source executor (#623).
+pub fn spawn_foreground(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+) -> Result<super::source::CapsuleProcess> {
+    let (
+        PreparedCommand {
+            mut cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        },
+        readiness_port,
+    ) = build_orchestration_command(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        launch_ctx,
+        dangerously_skip_permissions,
+    )?;
+
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let child = cmd
+        .spawn()
+        .context("Failed to spawn node compat process in foreground")?;
     let event_rx = super::source::spawn_host_lifecycle_events(child.id(), readiness_port);
 
     Ok(super::source::CapsuleProcess {
@@ -1255,6 +1324,54 @@ run = "node main.js"
         assert_eq!(
             spec.required_lockfile,
             Some(tmp.path().join("source").join("yarn.lock"))
+        );
+    }
+
+    // #623: foreground NodeCompat readiness wiring. The foreground path
+    // (`spawn_foreground`) now derives its readiness port from the manifest's
+    // declared `port`, exactly like the background path (`spawn_background`),
+    // instead of the old blocking `execute()` which probed nothing. A declared
+    // port must surface as the readiness port the lifecycle pump TCP-probes so
+    // dispatched node capsules emit `LIFECYCLE: ready` and reach `ready`
+    // instead of timing out at the runner's 600s ready deadline.
+    #[test]
+    fn declared_port_becomes_readiness_port_for_node_capsule() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node main.js"
+port = 8000
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+        assert_eq!(
+            spec.port,
+            Some(8000),
+            "declared manifest port must be the readiness port the foreground \
+             lifecycle pump probes"
+        );
+    }
+
+    // #623: capsules with neither a declared port nor a readiness probe must
+    // keep the honest `StartedWithoutReadiness` behavior — `spawn_host_lifecycle_events`
+    // emits `Started` (never a fake `Ready`) when the readiness port is `None`.
+    #[test]
+    fn missing_port_yields_no_readiness_port_for_node_capsule() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node main.js"
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+        assert_eq!(
+            spec.port, None,
+            "a node capsule with no declared port must not synthesize a \
+             readiness port (no fake ready)"
         );
     }
 
