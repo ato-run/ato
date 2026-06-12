@@ -369,6 +369,43 @@ pub(crate) fn compile_oci_execution_plan(
     use capsule_core::contract::lock_runtime;
     use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
 
+    // Pure-OCI service capsules (`[targets.app] runtime="oci"`) have no source
+    // `contract.process`, so the lock runtime model resolver — gated by
+    // `ensure_execution_ready`, which hard-requires `contract.process` — rejects
+    // them with `ambiguous_entrypoint`. Those launches need no source runtime
+    // model: the resolved image digest, target label, and optional port are
+    // already present. Compile the plan directly from the resolved image so a
+    // real launch receipt + execution_id is minted and honest-readiness
+    // (ato#608/#609) can report `ready`. (Issue ato#712)
+    if !plan.lock.contract.entries.contains_key("process") {
+        let label = plan.selected_target_label().to_string();
+        let scoped_id = plan
+            .manifest_name()
+            .ok_or_else(|| anyhow::anyhow!("OCI execution requires capsule metadata.name"))?;
+        let version = plan
+            .manifest_version()
+            .ok_or_else(|| anyhow::anyhow!("OCI execution requires capsule metadata.version"))?;
+        let resolved_image = lock_runtime::resolve_oci_image_for_target(&plan.lock, &label)
+            .context("failed to read resolved OCI image from lock")?;
+        let declared = plan.targets_oci_image().unwrap_or_default();
+
+        // egress_allow is passed empty: PodmanProvider cannot enforce egress
+        // allowlists, so the strict gate would only refuse to launch, never
+        // enforce. Sourcing manifest network.egress_allow can be a follow-up.
+        return derive::compile_oci_execution_plan_from_resolution(
+            scoped_id,
+            version,
+            label,
+            &declared,
+            plan.execution_port(),
+            Vec::new(),
+            resolved_image,
+            &PlatformSnapshot::current(),
+        )
+        .map_err(anyhow::Error::from)
+        .context("failed to compile OCI execution plan from resolved image");
+    }
+
     let resolved =
         lock_runtime::resolve_lock_runtime_model(&plan.lock, Some(plan.selected_target_label()))
             .context("failed to resolve lock runtime model for OCI target")?;
