@@ -536,6 +536,12 @@ const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
 /// streams and the port line usually lands within a line or two. Without this,
 /// whichever wins decides whether the proxy + ready_url come up.
 const READY_PORT_GRACE: Duration = Duration::from_millis(2500);
+/// After a ready signal with NO receipt observed yet, hold this long for the
+/// `RECEIPT:` line — receipts go to stderr while lifecycle lines go to stdout,
+/// and the two independent stream readers merge in arrival order, so a ready
+/// can outrun its receipt. Only after this grace is the ready treated as
+/// unverifiable (fail closed).
+const READY_RECEIPT_GRACE: Duration = Duration::from_millis(2500);
 /** Cap per-run log files so a chatty child cannot fill the disk. */
 const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
 
@@ -1675,6 +1681,14 @@ async fn run_lease_child(
     let mut execution_id: Option<String> = None;
     let mut settled = false;
     let mut saw_exited_before = false;
+    // Set when a ready arrives before any receipt: receipts (stderr) and
+    // lifecycle lines (stdout) race across the two stream readers, so the
+    // ready is buffered (carrying its observed port) until the receipt lands
+    // or the grace below elapses.
+    let mut ready_awaiting_receipt: Option<Option<u16>> = None;
+    // If the receipt does not follow the buffered ready before this instant,
+    // the ready is unverifiable — fail closed.
+    let mut receipt_wait_deadline: Option<tokio::time::Instant> = None;
     // Set when a port-LESS ready arrives; if the canonical port-bearing line
     // does not follow before this instant, settle without a port.
     let mut portless_ready_deadline: Option<tokio::time::Instant> = None;
@@ -1700,6 +1714,16 @@ async fn run_lease_child(
                             });
                             return;
                         }
+                        // A ready was still buffered awaiting its receipt when
+                        // the streams closed — the receipt can no longer
+                        // arrive, so the ready is unverifiable; fail closed.
+                        if ready_awaiting_receipt.is_some() {
+                            let _ = reports.send(LeaseReport::Failed {
+                                code: "execution_id_unavailable".to_string(),
+                                message: "child reported ready but no execution receipt was observed".to_string(),
+                            });
+                            return;
+                        }
                         let code = status.and_then(|s| s.code());
                         let message = match (code, saw_exited_before) {
                             (Some(code), true) => format!(
@@ -1721,6 +1745,23 @@ async fn run_lease_child(
                         if execution_id.is_none() {
                             execution_id = execution_id_from_receipt(&path);
                         }
+                        // A ready that outran this receipt across the
+                        // stdout/stderr split was buffered — resolve it now
+                        // exactly as if it had arrived after the receipt.
+                        if !settled
+                            && let (Some(execution_id), Some(port)) =
+                                (execution_id.clone(), ready_awaiting_receipt)
+                        {
+                            ready_awaiting_receipt = None;
+                            receipt_wait_deadline = None;
+                            if port.is_some() {
+                                settled = true;
+                                let _ = reports.send(LeaseReport::Ready { execution_id, port });
+                            } else if portless_ready_deadline.is_none() {
+                                portless_ready_deadline =
+                                    Some(tokio::time::Instant::now() + READY_PORT_GRACE);
+                            }
+                        }
                     }
                     Some(ChildSignal::Ready { port }) if !settled => {
                         match (execution_id.clone(), port) {
@@ -1741,14 +1782,19 @@ async fn run_lease_child(
                                 }
                             }
                             (None, _) => {
-                                // A ready we cannot tie to an execution receipt is
-                                // unverifiable — fail closed rather than report it.
-                                settled = true;
-                                let _ = reports.send(LeaseReport::Failed {
-                                    code: "execution_id_unavailable".to_string(),
-                                    message: "child reported ready but no execution receipt was observed".to_string(),
-                                });
-                                let _ = child.start_kill();
+                                // No receipt observed YET — but the receipt
+                                // (stderr) and this line (stdout) ride separate
+                                // streams merged in arrival order, so this ready
+                                // may simply have outrun its receipt. Buffer it
+                                // for a bounded window instead of killing a
+                                // healthy workload; fail closed only if no
+                                // receipt follows (grace arm below).
+                                ready_awaiting_receipt =
+                                    Some(port.or(ready_awaiting_receipt.flatten()));
+                                if receipt_wait_deadline.is_none() {
+                                    receipt_wait_deadline =
+                                        Some(tokio::time::Instant::now() + READY_RECEIPT_GRACE);
+                                }
                             }
                         }
                     }
@@ -1770,6 +1816,22 @@ async fn run_lease_child(
                     }
                     _ => {}
                 }
+            }
+            // Receipt grace elapsed with a ready still buffered — a ready we
+            // cannot tie to an execution receipt is unverifiable; fail closed
+            // rather than report it. Pending forever when unset.
+            _ = async {
+                match receipt_wait_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if !settled => {
+                settled = true;
+                let _ = reports.send(LeaseReport::Failed {
+                    code: "execution_id_unavailable".to_string(),
+                    message: "child reported ready but no execution receipt was observed".to_string(),
+                });
+                let _ = child.start_kill();
             }
             // Port-less ready grace elapsed without a port line — settle without a
             // port (honest ready, no ready_url). Pending forever when unset.
@@ -2547,6 +2609,42 @@ mod tests {
             }
             other => panic!("unverifiable ready must fail closed, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ready_outrunning_receipt_across_streams_still_reports_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let receipt = dir.path().join("receipt.json");
+        std::fs::write(&receipt, r#"{"execution_id":"blake3:race-e2e"}"#).unwrap();
+        // ready (stdout) lands first; RECEIPT (stderr) follows later — the
+        // arrival order the two independent stream readers can always
+        // produce. The ready must be held for the receipt, not killed.
+        let script = format!(
+            "echo 'LIFECYCLE: ready port=8000'; sleep 1; echo 'RECEIPT: {}' >&2; exec sleep 30",
+            receipt.display()
+        );
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        let log_path = dir2.path().join("run.log");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let monitor = tokio::spawn(run_lease_child(
+            fake_child(&script),
+            log_path,
+            Duration::from_secs(20),
+            tx,
+        ));
+        let report = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("a report before the child exits");
+        assert_eq!(
+            report,
+            Some(LeaseReport::Ready {
+                execution_id: "blake3:race-e2e".to_string(),
+                port: Some(8000),
+            }),
+            "a ready that outruns its receipt across the stdout/stderr split must not kill a healthy workload"
+        );
+        monitor.abort();
     }
 
     #[cfg(unix)]
