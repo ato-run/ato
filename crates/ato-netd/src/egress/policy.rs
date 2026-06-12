@@ -73,6 +73,10 @@ impl EgressPolicy {
     /// rule, or if a non-empty allow list does not include the hostname.
     /// Returns [`PolicyDecision::Allow`] otherwise.
     ///
+    /// IP-literal targets are checked too: with a non-empty allow list an
+    /// IP literal is denied unless it is itself listed, so the allowlist
+    /// cannot be bypassed by dialing the resolved IP directly.
+    ///
     /// The resolver must **not** be called when this returns `DenyHost`.
     pub fn check_hostname(&self, host: &str) -> PolicyDecision {
         let h = normalize_hostname(host);
@@ -104,8 +108,16 @@ impl EgressPolicy {
 }
 
 /// Normalise a hostname for policy comparisons: lowercase + strip trailing dot.
+///
+/// IP literals are canonicalised via parse-then-format so textual variants
+/// of the same address (e.g. `0:0:0:0:0:0:0:1` and `::1`) match the same
+/// policy entry.
 pub(crate) fn normalize_hostname(host: &str) -> String {
-    host.trim_end_matches('.').to_lowercase()
+    let h = host.trim_end_matches('.').to_lowercase();
+    match h.parse::<IpAddr>() {
+        Ok(ip) => ip.to_string(),
+        Err(_) => h,
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -142,6 +154,28 @@ mod tests {
         let p = EgressPolicy::permissive().with_hostname_allow("allowed.test");
         assert_eq!(p.check_hostname("allowed.test"), PolicyDecision::Allow);
         assert_eq!(p.check_hostname("other.test"), PolicyDecision::DenyHost);
+    }
+
+    #[test]
+    fn allowlist_blocks_unlisted_ip_literals() {
+        // Regression (#655): a non-empty allowlist must not be bypassed by
+        // dialing an IP literal directly.
+        let p = EgressPolicy::permissive().with_hostname_allow("allowed.test");
+        assert_eq!(p.check_hostname("93.184.216.34"), PolicyDecision::DenyHost);
+        assert_eq!(p.check_hostname("::1"), PolicyDecision::DenyHost);
+    }
+
+    #[test]
+    fn allowlisted_ip_literal_is_allowed() {
+        let p = EgressPolicy::permissive().with_hostname_allow("93.184.216.34");
+        assert_eq!(p.check_hostname("93.184.216.34"), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn ip_literal_normalization_matches_textual_variants() {
+        // Parse-then-format canonicalisation: `0:0:0:0:0:0:0:1` ≡ `::1`.
+        let p = EgressPolicy::permissive().with_hostname_deny("0:0:0:0:0:0:0:1");
+        assert_eq!(p.check_hostname("::1"), PolicyDecision::DenyHost);
     }
 
     #[test]
