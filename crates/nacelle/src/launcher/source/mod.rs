@@ -11,6 +11,12 @@
 
 pub mod toolchain;
 mod validator;
+// The platform-neutral visibility plan is consumed by the Linux (bwrap) and
+// macOS (seatbelt) backends. Windows uses a VM-mapped sandbox that does not
+// lower per-path visibility, so the module is gated to avoid dead-code warnings
+// there. `test` keeps it compiled for `cargo test` on any host.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+mod visibility;
 
 #[cfg(target_os = "linux")]
 mod linux;
