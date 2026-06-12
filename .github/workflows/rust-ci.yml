@@ -133,15 +133,23 @@ jobs:
           cargo build -p ato-cli --bin ato
           cargo build -p nacelle --bin nacelle
           echo "$(pwd)/target/debug" >> $GITHUB_PATH
+      # Test each selected crate in its own `cargo test -p` process, matching
+      # the previous job's per-crate isolation (a single combined invocation
+      # raises cross-crate test parallelism and destabilises ato-cli's
+      # process-spawning e2e tests). Run them all, then fail if any failed.
       - name: Run affected tests
         if: steps.affected.outputs.count != '0'
         shell: bash
         run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r p; do [ -n "$p" ] && args+=( -p "$p" ); done < pkgs.txt
-          echo "Running: cargo test ${args[*]} --no-fail-fast"
-          cargo test "${args[@]}" --no-fail-fast
+          set -uo pipefail
+          rc=0
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            echo "::group::cargo test -p $p"
+            cargo test -p "$p" --no-fail-fast || rc=1
+            echo "::endgroup::"
+          done < pkgs.txt
+          exit $rc
       - name: No affected crates
         if: steps.affected.outputs.count == '0'
         run: echo "No testable workspace crate is affected by this change — skipping the test run."

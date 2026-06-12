@@ -22,8 +22,19 @@ import subprocess
 import sys
 
 # Crates that are cargo-workspace members but must never be tested in CI.
-# (ato-desktop is already outside the workspace; listed for defence in depth.)
-EXCLUDE = {"ato-desktop", "ato-desktop-xtask"}
+#   - ato-desktop / xtask: outside the cargo workspace (GUI git deps).
+#   - nacelle / ato-net / ato-netd: their integration tests (e.g. nacelle's
+#     terminal_e2e PTY tests) are not stable on headless CI runners and were
+#     deliberately never in the CI test list; keep that policy. A change to one
+#     of these still tests any *dependent* in the proven set (e.g. an ato-net
+#     change runs ato-cli's tests because ato-cli depends on ato-net).
+EXCLUDE = {
+    "ato-desktop",
+    "ato-desktop-xtask",
+    "nacelle",
+    "ato-net",
+    "ato-netd",
+}
 
 # A change touching any of these forces the full testable set, because it can
 # affect every crate's build or the selection logic itself.
