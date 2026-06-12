@@ -42,31 +42,12 @@ use serde_json::{Value, json};
 use walkdir::WalkDir;
 
 const GLOBAL_RUN_SOURCE_INFERENCE_DIR: &str = "source-inference";
-/// Dead code since `USE_HOME_RUN_STATE = true`; retained until the
-/// `use_global_run_state` field is removed in v0.5.x (PR 4).
-#[allow(dead_code)]
-const WORKSPACE_RUN_SOURCE_INFERENCE_DIR: &str = ".ato/tmp/source-inference";
 const SINGLE_SCRIPT_CACHE_SUBDIR: &str = "source-inference/single-script-cache";
 
-/// Run-attempt state is always stored under `~/.ato/runs/` rather than the
-/// caller's working directory.  Keeping ephemeral artifacts out of the project
-/// tree satisfies the "cwd untouched" invariant and makes GC straightforward.
-///
-/// Historical note: prior to this constant, `use_global_run_state` was `false`
-/// for directory-based projects (commit f44b1b8 only migrated single-scripts).
-/// No functional reason to keep directory-project attempts in cwd was found.
-///
-/// TODO(v0.5.x): Remove the `use_global_run_state` field from
-/// `MaterializationAdapter` and this constant — the field only exists to make
-/// the dead `else` branch in `materialize_run_result` compile until PR 4.
-const USE_HOME_RUN_STATE: bool = true;
-// Compile-time assertion: USE_HOME_RUN_STATE must remain true until the field
-// is removed.  If you are tempted to set it false, delete the field instead.
-#[allow(clippy::assertions_on_constants)]
-const _: () = assert!(
-    USE_HOME_RUN_STATE,
-    "USE_HOME_RUN_STATE must be true; remove the field instead"
-);
+// Run-attempt state is always stored under `~/.ato/runs/` (see
+// `materialize_run_result`) rather than the caller's working directory. Keeping
+// ephemeral artifacts out of the project tree satisfies the "cwd untouched"
+// invariant and makes GC straightforward.
 #[derive(Debug, Clone)]
 pub(crate) enum SourceInferenceInput {
     SourceEvidence(SourceEvidenceInput),
@@ -138,8 +119,6 @@ struct MaterializationAdapter {
     workspace_root: PathBuf,
     project_root: PathBuf,
     original_manifest: Option<toml::Value>,
-    // TODO(v0.5.x): Remove this field; it is always USE_HOME_RUN_STATE (true).
-    use_global_run_state: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -351,7 +330,6 @@ pub(crate) fn materialize_run_from_explicit_native_artifact(
         workspace_root: project_root.clone(),
         project_root: project_root.clone(),
         original_manifest: None,
-        use_global_run_state: USE_HOME_RUN_STATE,
     };
     let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
         project_root,
@@ -404,7 +382,6 @@ fn prepare_run_materialization_adapter(
         workspace_root: source.project_root.clone(),
         project_root,
         original_manifest: None,
-        use_global_run_state: USE_HOME_RUN_STATE,
     })
 }
 
@@ -416,7 +393,6 @@ fn prepare_workspace_materialization_adapter(
         workspace_root: source.project_root.clone(),
         project_root,
         original_manifest: None,
-        use_global_run_state: false,
     })
 }
 
@@ -904,7 +880,6 @@ pub(crate) fn materialize_run_from_canonical_lock(
         workspace_root: canonical.project_root.clone(),
         project_root: canonical.project_root.clone(),
         original_manifest,
-        use_global_run_state: USE_HOME_RUN_STATE,
     };
     let input = SourceInferenceInput::CanonicalLock(CanonicalLockInput {
         project_root: canonical.project_root.clone(),
@@ -929,7 +904,6 @@ pub(crate) fn materialize_run_from_compatibility(
         workspace_root: project.project_root.clone(),
         project_root: project.project_root.clone(),
         original_manifest: Some(original_manifest),
-        use_global_run_state: USE_HOME_RUN_STATE,
     };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
@@ -990,7 +964,6 @@ pub(crate) fn execute_init_from_compatibility(
         workspace_root: project.project_root.clone(),
         project_root: project.project_root.clone(),
         original_manifest: None,
-        use_global_run_state: false,
     };
     let mut result = execute_shared_engine(
         SourceInferenceInput::DraftLock(draft_input),
@@ -3027,16 +3000,13 @@ fn enforce_mode_preconditions(
 fn materialize_run_result(
     workspace_root: &Path,
     project_root: &Path,
-    use_global_run_state: bool,
     result: SourceInferenceResult,
     mut scope: Option<&mut CleanupScope>,
     original_manifest: Option<&toml::Value>,
 ) -> Result<RunMaterialization> {
-    let run_state_root = if use_global_run_state {
-        ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR)
-    } else {
-        workspace_root.join(WORKSPACE_RUN_SOURCE_INFERENCE_DIR)
-    };
+    // Run-attempt state always lives under `~/.ato/runs/` so the caller's cwd
+    // stays untouched and GC can sweep the global root.
+    let run_state_root = ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR);
     let run_state_dir = run_state_root.join(unique_attempt_token());
     fs::create_dir_all(&run_state_dir)
         .with_context(|| format!("Failed to create {}", run_state_dir.display()))?;
@@ -3074,7 +3044,6 @@ fn materialize_run_model(
     materialize_run_result(
         &adapter.workspace_root,
         &adapter.project_root,
-        adapter.use_global_run_state,
         result,
         scope,
         adapter.original_manifest.as_ref(),
@@ -6923,6 +6892,61 @@ target = "worker"
         assert!(
             msg.contains("Go") || msg.contains("go run"),
             "Go project error should contain Go hint, got: {msg}"
+        );
+    }
+
+    fn empty_run_result() -> SourceInferenceResult {
+        SourceInferenceResult {
+            input_kind: SourceInferenceInputKind::SourceEvidence,
+            lock: AtoLock::default(),
+            provenance: Vec::new(),
+            diagnostics: Vec::new(),
+            infer: InferResult {
+                candidate_sets: Vec::new(),
+                unresolved: Vec::new(),
+            },
+            resolve: ResolveResult {
+                resolved_process: false,
+                resolved_runtime: false,
+                resolved_target_compatibility: false,
+                resolved_dependency_closure: false,
+                unresolved: Vec::new(),
+            },
+            selection_gate: None,
+            approval_gate: None,
+        }
+    }
+
+    /// Regression guard for the dead-code cleanup (issue #659): run-attempt
+    /// state must always materialize under `~/.ato/runs/source-inference/`,
+    /// never under the caller's workspace. The removed `use_global_run_state`
+    /// field once carried a cwd-based `else` branch; this asserts that branch
+    /// stays gone and the global root is unconditional, independent of the
+    /// `workspace_root` argument.
+    #[serial_test::serial]
+    #[test]
+    fn run_state_always_materializes_under_home_runs_dir() {
+        let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home) = isolate_ato_home(&dir);
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace dir");
+
+        let materialized =
+            materialize_run_result(&workspace, &workspace, empty_run_result(), None, None)
+                .expect("materialize run result");
+
+        let runs_root = ato_runs_dir().join(GLOBAL_RUN_SOURCE_INFERENCE_DIR);
+        assert!(
+            materialized.lock_path.starts_with(&runs_root),
+            "lock must live under {} but was {}",
+            runs_root.display(),
+            materialized.lock_path.display(),
+        );
+        assert!(
+            !materialized.lock_path.starts_with(&workspace),
+            "run state must never land inside the workspace ({}); got {}",
+            workspace.display(),
+            materialized.lock_path.display(),
         );
     }
 }
