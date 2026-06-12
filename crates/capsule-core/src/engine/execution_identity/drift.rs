@@ -616,22 +616,21 @@ fn diff_subjects(old: &DriftSubject, new: &DriftSubject) -> ReceiptDriftReport {
     // Defensive fallback: if the canonical execution_id changed but no facet or
     // graph difference was localized (e.g. a facet outside the compared set
     // moved), still surface that drift exists rather than silently report none.
-    if changes.is_empty() {
-        if let (Some(old_id), Some(new_id)) = (&old.execution_id, &new.execution_id) {
-            if old_id != new_id {
-                changes.push(ReceiptDriftChange {
-                    class: DriftClass::DeclaredDrift,
-                    component_kind: COMPONENT_RECEIPT_FIELD.to_string(),
-                    component_id: "execution_id".to_string(),
-                    field: "execution_id".to_string(),
-                    old: Some(Value::String(old_id.clone())),
-                    new: Some(Value::String(new_id.clone())),
-                    reason: "execution_id changed but no component-level difference could be \
+    if changes.is_empty()
+        && let (Some(old_id), Some(new_id)) = (&old.execution_id, &new.execution_id)
+        && old_id != new_id
+    {
+        changes.push(ReceiptDriftChange {
+            class: DriftClass::DeclaredDrift,
+            component_kind: COMPONENT_RECEIPT_FIELD.to_string(),
+            component_id: "execution_id".to_string(),
+            field: "execution_id".to_string(),
+            old: Some(Value::String(old_id.clone())),
+            new: Some(Value::String(new_id.clone())),
+            reason: "execution_id changed but no component-level difference could be \
                              localized from the comparable evidence"
-                        .to_string(),
-                });
-            }
-        }
+                .to_string(),
+        });
     }
 
     ReceiptDriftReport {
@@ -946,10 +945,10 @@ fn to_value<T: Serialize>(value: &T) -> Value {
 /// inner string when `Known`, otherwise a `{status, reason}` object so a
 /// status transition (e.g. `Known -> Unknown`) is still detected as drift.
 fn tracked_value(tracked: &Tracked<String>) -> Value {
-    if tracked.status == TrackingStatus::Known {
-        if let Some(value) = &tracked.value {
-            return Value::String(value.clone());
-        }
+    if tracked.status == TrackingStatus::Known
+        && let Some(value) = &tracked.value
+    {
+        return Value::String(value.clone());
     }
     let mut map = serde_json::Map::new();
     map.insert("status".to_string(), to_value(&tracked.status));

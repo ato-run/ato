@@ -164,12 +164,13 @@ struct HeartbeatResponse {
     runner: Option<HeartbeatRunnerView>,
 }
 
+/// The slice of an API error body the agent acts on. Only the machine `error`
+/// code drives behavior (revoked vs invalid token); serde ignores any other
+/// fields (e.g. the human-facing `message`).
 #[derive(Debug, Deserialize, Default)]
 struct ApiErrorBody {
     #[serde(default)]
     error: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
 }
 
 /// Heartbeat request body. `public_base_url` is serialized ONLY when
@@ -1237,6 +1238,7 @@ impl StopCleanup {
     }
 }
 
+#[cfg(test)]
 fn stopped_request_body(cleanup: &StopCleanup) -> serde_json::Value {
     stopped_request_body_with_reason(cleanup, "user_requested")
 }

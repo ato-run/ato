@@ -249,7 +249,8 @@ mod tests {
 
         // Changing ANY of the identity 5-tuple fields MUST change the ref
         // (exact binding is what the downstream owner-approval relies on).
-        let mutate: [(&str, fn(&mut Consent)); 5] = [
+        type FieldMutation = (&'static str, fn(&mut Consent));
+        let mutate: [FieldMutation; 5] = [
             ("scoped_id", |c| c.key.scoped_id = "community/other".into()),
             ("version", |c| c.key.version = "9.9.9".into()),
             ("target_label", |c| c.key.target_label = "web".into()),

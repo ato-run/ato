@@ -3506,11 +3506,14 @@ where
             );
         };
         let env = crate::application::strict_realization::launch_environment();
+        // Unbox before handing to anyhow: downstream recovery downcasts to
+        // `AtoExecutionError` (utils/error.rs), which a boxed wrap would hide.
         crate::application::strict_realization::enforce_strict_realization(
             launch_graph,
             &env,
             crate::application::strict_realization::launch_profile(true),
-        )?;
+        )
+        .map_err(|e| anyhow::Error::new(*e))?;
     }
 
     let run_command_uses_specialized_executor = decision

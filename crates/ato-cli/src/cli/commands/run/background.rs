@@ -324,6 +324,9 @@ pub(super) async fn complete_background_source_process(
     }
 }
 
+// Mirrors `ConsumerRunExecuteHooks::complete_foreground_source_process`, whose
+// trait carries the same (allowed) argument list; keep the two in lockstep.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn complete_foreground_source_process(
     mut process: crate::executors::source::CapsuleProcess,
     reporter: Arc<CliReporter>,
