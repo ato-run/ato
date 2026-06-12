@@ -22,9 +22,30 @@ use crate::install::support::{
 /// All env-touching tests across the crate must hold this lock for
 /// the duration of their execution to prevent races under `cargo test`'s
 /// default parallel scheduler. Use: `let _lock = crate::tests::env_lock().lock().unwrap();`
-pub(crate) fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+pub(crate) fn env_lock() -> &'static EnvLock {
+    static LOCK: OnceLock<EnvLock> = OnceLock::new();
+    LOCK.get_or_init(|| EnvLock(Mutex::new(())))
+}
+
+/// A poison-tolerant wrapper around the env mutex.
+///
+/// A test that panics while holding the lock must not cascade into every
+/// later env-locked test (one real failure used to poison ~20 innocent
+/// tests). Poisoning carries no signal here: the protected resource is the
+/// process environment, which each test sets up for itself. `lock()` mirrors
+/// `Mutex::lock`'s `Result` shape so existing `.lock().unwrap()` /
+/// `.lock().expect(..)` call sites keep working unchanged.
+pub(crate) struct EnvLock(Mutex<()>);
+
+impl EnvLock {
+    pub(crate) fn lock(
+        &'static self,
+    ) -> Result<std::sync::MutexGuard<'static, ()>, std::convert::Infallible> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
 }
 
 /// Parse CLI args on a dedicated wide-stack thread.
