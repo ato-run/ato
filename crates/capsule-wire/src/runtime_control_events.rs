@@ -11,7 +11,9 @@ pub enum RuntimeControlEvent {
         online: bool,
     },
     SessionStarted {
-        session: PlacedSessionSummary,
+        // Boxed: PlacedSessionSummary is ~376 bytes, an order of magnitude
+        // larger than every other variant (clippy::large_enum_variant).
+        session: Box<PlacedSessionSummary>,
     },
     SessionStopped {
         session_id: String,

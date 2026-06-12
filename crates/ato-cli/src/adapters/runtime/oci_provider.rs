@@ -2162,7 +2162,7 @@ impl DockerCompatibleOciProvider<BollardOciRuntimeClient> {
 async fn connect_ready_docker_compatible_provider()
 -> Result<DockerCompatibleOciProvider<BollardOciRuntimeClient>, OciProviderError> {
     let provider = DockerCompatibleOciProvider::connect_default(docker_compatible_semantics())
-        .map_err(|err| classify_docker_connect_error(err))?;
+        .map_err(classify_docker_connect_error)?;
     let version = provider
         .client
         .docker()

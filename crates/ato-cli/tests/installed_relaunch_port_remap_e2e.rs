@@ -94,14 +94,13 @@ fn hermetic_env(cmd: &mut Command, ato_home: &Path, home: &Path) {
 fn parse_install_ipk(stdout: &[u8]) -> String {
     let text = String::from_utf8_lossy(stdout);
     for (index, _) in text.match_indices('{').rev() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text[index..]) {
-            if let Some(ipk) = value
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text[index..])
+            && let Some(ipk) = value
                 .get("install_lifecycle")
                 .and_then(|l| l.get("install_profile_key"))
                 .and_then(|v| v.as_str())
-            {
-                return ipk.to_string();
-            }
+        {
+            return ipk.to_string();
         }
     }
     panic!("install_profile_key not found in install stdout:\n{text}");

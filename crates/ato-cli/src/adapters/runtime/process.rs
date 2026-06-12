@@ -1163,20 +1163,20 @@ fn read_process_commandline(pid: i32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         let proc_path = format!("/proc/{pid}/cmdline");
-        if let Ok(raw) = fs::read(proc_path) {
-            if !raw.is_empty() {
-                let mut out = String::new();
-                for byte in raw {
-                    if byte == 0 {
-                        out.push(' ');
-                    } else {
-                        out.push(byte as char);
-                    }
+        if let Ok(raw) = fs::read(proc_path)
+            && !raw.is_empty()
+        {
+            let mut out = String::new();
+            for byte in raw {
+                if byte == 0 {
+                    out.push(' ');
+                } else {
+                    out.push(byte as char);
                 }
-                let trimmed = out.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+            }
+            let trimmed = out.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
     }
@@ -1392,7 +1392,7 @@ fn process_current_working_dir(pid: i32) -> Option<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        return fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
     #[cfg(not(target_os = "linux"))]

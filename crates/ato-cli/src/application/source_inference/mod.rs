@@ -1964,7 +1964,14 @@ fn detect_promotable_native_build_plan(project_root: &Path) -> Result<Option<Nat
     let Some(plan) = infer_source_native_delivery_plan(project_root, &detected)? else {
         return Ok(None);
     };
-    if plan.closure_complete && plan.plan.source_app_path.exists() {
+    // Electron source projects must already be built (#179) — ato does not run
+    // their packaging step, so an unbuilt app must not be promoted. Tauri and
+    // Wails are built by ato via the plan's build_command (required by
+    // closure_complete), so a source-only project promotes before any artifact
+    // exists.
+    let requires_existing_artifact = plan.plan.framework == "electron";
+    if plan.closure_complete && (!requires_existing_artifact || plan.plan.source_app_path.exists())
+    {
         return Ok(Some(plan.plan));
     }
     Ok(None)
