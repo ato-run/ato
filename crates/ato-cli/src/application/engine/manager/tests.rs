@@ -43,6 +43,9 @@ fn test_parse_engine_filename_too_short() {
 
 #[test]
 fn test_engine_path() {
+    // Reads the HOME/ATO_HOME-derived engines root; serialize against
+    // env-mutating tests or the path is computed from another test's temp env.
+    let _env = crate::tests::env_lock().lock().unwrap();
     let em = EngineManager::new().unwrap();
     let path = em.engine_path("nacelle", "v1.2.3");
     let path_str = path.to_string_lossy();
