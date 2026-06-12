@@ -4806,30 +4806,20 @@ fn auto_provision_headless_state_overrides(
     existing_overrides: &HashMap<String, String>,
     key_inputs: &HeadlessStateKeyInputs<'_>,
 ) -> Result<HeadlessStateProvisionOutcome> {
-    use capsule_core::types::{StateDurability, StateKind};
+    use capsule_core::types::{StateDurability, StateKind, StateRequirement};
 
     let mut overrides = existing_overrides.clone();
     let mut ephemeral_dirs = Vec::new();
-    if manifest.state.is_empty() {
-        return Ok(HeadlessStateProvisionOutcome {
-            overrides,
-            ephemeral_dirs,
-        });
-    }
 
-    // Stable per-source persistent root. The instance id is the same across
-    // re-runs of the same source (so persistent state is reused) and differs
-    // between sources that share a `manifest.name` (so they never collide).
-    let instance_id = headless_state_instance_id(manifest, key_inputs)?;
-    let persistent_root = capsule_core::common::paths::ato_state_dir()
-        .join("run")
-        .join(&instance_id);
-
-    // Per-run ephemeral root. The token provides filesystem uniqueness only and
-    // lives under `~/.ato/runs`, which is the run cleanup root. Computed lazily so
-    // a source with only persistent state never creates a runs/ subtree.
-    let mut ephemeral_root: Option<PathBuf> = None;
-
+    // Short-circuit BEFORE any disk read or key derivation (#700 follow-up):
+    // collect the states this run will actually auto-provision (declared,
+    // not already bound). Fail closed here on any non-filesystem kind. If
+    // nothing remains, return a pure no-op — we must NOT read `capsule.toml`,
+    // compute `headless_state_instance_id` (which may `hash_tree` the source
+    // tree), or touch `ato_state_dir()` for a capsule that has no unbound
+    // filesystem state (e.g. pgweb). This keeps the no-state path free of the
+    // source-read / canonicalize work that was platform-path-fragile.
+    let mut unbound_filesystem_states: Vec<(&String, &StateRequirement)> = Vec::new();
     for (state_name, requirement) in &manifest.state {
         if overrides.contains_key(state_name) {
             continue;
@@ -4844,9 +4834,46 @@ fn auto_provision_headless_state_overrides(
                 state_name
             );
         }
+        unbound_filesystem_states.push((state_name, requirement));
+    }
+    if unbound_filesystem_states.is_empty() {
+        return Ok(HeadlessStateProvisionOutcome {
+            overrides,
+            ephemeral_dirs,
+        });
+    }
 
+    // Stable per-source persistent root, computed only when at least one unbound
+    // persistent filesystem state actually needs it — `headless_state_instance_id`
+    // can read the source tree (`hash_tree`) in the unstable-ref fallback, so it
+    // must not run on the no-state / ephemeral-only paths. The instance id is the
+    // same across re-runs of the same source (so persistent state is reused) and
+    // differs between sources that share a `manifest.name` (so they never collide).
+    let needs_persistent = unbound_filesystem_states
+        .iter()
+        .any(|(_, requirement)| requirement.durability == StateDurability::Persistent);
+    let persistent_root = if needs_persistent {
+        let instance_id = headless_state_instance_id(manifest, key_inputs)?;
+        Some(
+            capsule_core::common::paths::ato_state_dir()
+                .join("run")
+                .join(instance_id),
+        )
+    } else {
+        None
+    };
+
+    // Per-run ephemeral root. The token provides filesystem uniqueness only and
+    // lives under `~/.ato/runs`, which is the run cleanup root. Computed lazily so
+    // a source with only persistent state never creates a runs/ subtree.
+    let mut ephemeral_root: Option<PathBuf> = None;
+
+    for (state_name, requirement) in unbound_filesystem_states {
         let path = match requirement.durability {
-            StateDurability::Persistent => persistent_root.join(state_name),
+            StateDurability::Persistent => persistent_root
+                .as_ref()
+                .expect("persistent_root is computed when a persistent state exists")
+                .join(state_name),
             StateDurability::Ephemeral => {
                 let root = match ephemeral_root.as_ref() {
                     Some(root) => root.clone(),
@@ -5603,6 +5630,93 @@ image = "ghcr.io/example/app:latest"
                 .expect("auto-provision");
         assert!(outcome.overrides.is_empty());
         assert!(outcome.ephemeral_dirs.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_auto_provision_no_state_path_reads_nothing() {
+        // #700 follow-up (CI regression on macos/windows): the no-provision path
+        // must short-circuit BEFORE any source read or key derivation. We prove it
+        // here by handing the function an UNSTABLE source ref together with a
+        // workspace root that DOES NOT EXIST: if the function reached
+        // `headless_state_instance_id` it would `hash_tree` that path and return
+        // Err. A clean Ok with empty overrides proves no source read happened.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let missing_workspace = home.path().join("does-not-exist");
+        assert!(!missing_workspace.exists());
+        // Unstable ref (empty string) so the fallback WOULD trigger a hash_tree if
+        // the function ever derived the key.
+        let inputs = HeadlessStateKeyInputs {
+            normalized_source_ref: "",
+            selected_target_label: "default",
+            profile_id: None,
+            runner_namespace: None,
+            workspace_root_for_fallback: &missing_workspace,
+        };
+
+        // Case A: no `[state.*]` block at all.
+        let stateless = CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "stateless"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+"#,
+        )
+        .expect("manifest");
+        let outcome =
+            super::auto_provision_headless_state_overrides(&stateless, &HashMap::new(), &inputs)
+                .expect("no-state path must be a pure no-op (no source read)");
+        assert!(outcome.overrides.is_empty());
+        assert!(outcome.ephemeral_dirs.is_empty());
+
+        // Case B: a persistent state that is ALREADY bound — also nothing to
+        // provision, so still no source read despite the unstable ref + missing
+        // workspace.
+        let manifest = persistent_state_manifest();
+        let mut existing = HashMap::new();
+        existing.insert("data".to_string(), "/explicit/path".to_string());
+        let outcome = super::auto_provision_headless_state_overrides(&manifest, &existing, &inputs)
+            .expect("fully-bound path must be a pure no-op (no source read)");
+        assert_eq!(
+            outcome.overrides.get("data").map(String::as_str),
+            Some("/explicit/path")
+        );
+        assert!(outcome.ephemeral_dirs.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_ephemeral_only_path_does_not_derive_persistent_key() {
+        // An ephemeral-only capsule must NOT compute the persistent instance id
+        // (which can read the source tree). Prove it the same way: unstable ref +
+        // missing workspace would error if `headless_state_instance_id` ran, but
+        // the ephemeral branch never calls it.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let missing_workspace = home.path().join("does-not-exist");
+        let inputs = HeadlessStateKeyInputs {
+            normalized_source_ref: "",
+            selected_target_label: "default",
+            profile_id: None,
+            runner_namespace: None,
+            workspace_root_for_fallback: &missing_workspace,
+        };
+
+        let manifest = ephemeral_state_manifest();
+        let outcome =
+            super::auto_provision_headless_state_overrides(&manifest, &HashMap::new(), &inputs)
+                .expect("ephemeral-only path must not derive the persistent key (no source read)");
+        // Ephemeral state is still provisioned (under ~/.ato/runs), it just does
+        // not need the persistent key derivation.
+        assert!(outcome.overrides.contains_key("data"));
+        assert!(!outcome.ephemeral_dirs.is_empty());
     }
 
     #[test]
