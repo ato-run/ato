@@ -300,10 +300,23 @@ pub async fn run_login(
     display_name: Option<String>,
     public_base_url: Option<String>,
     headless: bool,
+    enrollment_token: Option<String>,
 ) -> Result<()> {
     let api_base = api_base
         .map(|value| value.trim_end_matches('/').to_string())
         .unwrap_or_else(crate::application::auth::store_api_base_url);
+
+    // Headless hosted-runner enrollment (#699): a Managed Cloud VM exchanges a
+    // single-use enrollment token for a runner token — no operator device flow.
+    // Precedence is explicit: an `--enrollment-token` flag wins; otherwise fall
+    // back to ATO_RUNNER_ENROLLMENT_TOKEN (convenient for cloud-init). The token
+    // VALUE is never logged. With neither set, the normal device flow runs.
+    let enrollment_token = enrollment_token.or_else(enrollment_token_from_env);
+    if let Some(token) = enrollment_token {
+        return run_login_with_enrollment_token(api_base, display_name, public_base_url, token)
+            .await;
+    }
+
     let site_base = site_base
         .map(|value| value.trim_end_matches('/').to_string())
         .unwrap_or_else(crate::application::auth::store_site_base_url);
@@ -366,6 +379,139 @@ pub async fn run_login(
     save_credentials(&path, &creds)?;
 
     println!("✅ Runner registered");
+    println!("   Runner ID: {}", creds.runner_id);
+    println!("   Credentials: {} (0600)", path.display());
+    println!("   The runner token was saved and will not be shown.");
+    println!("   Start heartbeats with: ato runner serve");
+    Ok(())
+}
+
+/// Build the `POST /v1/runners/enroll` body. Pure (unit-tested). The enrollment
+/// token is the body's only credential — there is NO bearer auth — and it is
+/// never logged. os/arch/capabilities are the honest host probe.
+fn build_enroll_body(
+    enrollment_token: &str,
+    display_name: &str,
+    capabilities: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "enrollment_token": enrollment_token,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "capabilities": capabilities,
+        "display_name": display_name,
+    })
+}
+
+/// Human-readable failure for a non-2xx enroll response. NEVER echoes the raw
+/// response body — only the server's typed `{ error, message }` — so a single-
+/// use enrollment token can never leak into logs through an error path.
+fn enroll_failure_message(status_code: u16, body: &str) -> String {
+    let parsed: ApiErrorBody = serde_json::from_str(body).unwrap_or_default();
+    let detail = parsed
+        .message
+        .or(parsed.error)
+        .unwrap_or_else(|| format!("HTTP {status_code}"));
+    format!("runner enrollment failed (HTTP {status_code}): {detail}")
+}
+
+/// Resolve an enrollment token from `ATO_RUNNER_ENROLLMENT_TOKEN` when the
+/// `--enrollment-token` flag was not passed (cloud-init convenience). Logs that
+/// the env var is being used — NEVER its value. Empty/whitespace is treated as
+/// absent.
+fn enrollment_token_from_env() -> Option<String> {
+    match std::env::var("ATO_RUNNER_ENROLLMENT_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => {
+            eprintln!(
+                "Using enrollment token from ATO_RUNNER_ENROLLMENT_TOKEN environment variable (value hidden)."
+            );
+            Some(token)
+        }
+        _ => None,
+    }
+}
+
+/// Exchange a single-use enrollment token for the runner credential via
+/// `POST /v1/runners/enroll`. The returned `RunnerCredentials` are the SAME
+/// shape, store fields, and identifiers device-flow `run_login` produces — only
+/// the acquisition path differs, so `serve`/`logout`/`status` all read it
+/// unchanged. Does NOT persist (the caller saves), which keeps it unit-testable
+/// against a mock server without touching the on-disk credential store. The
+/// enrollment token is never logged; HTTP failures surface only the server's
+/// typed `{ error, message }`, never the raw body.
+async fn enroll_for_credentials(
+    api_base: &str,
+    display_name: &str,
+    enrollment_token: String,
+) -> Result<RunnerCredentials> {
+    let capabilities = collect_capabilities();
+    let body = build_enroll_body(&enrollment_token, display_name, &capabilities);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/runners/enroll", api_base))
+        .json(&body)
+        .send()
+        .await
+        .context("failed to call POST /v1/runners/enroll")?;
+    // The single-use token is spent server-side now; drop it promptly.
+    drop(enrollment_token);
+
+    let status = response.status();
+    if !status.is_success() {
+        let raw = response.text().await.unwrap_or_default();
+        bail!("{}", enroll_failure_message(status.as_u16(), &raw));
+    }
+    let registered: RegisterResponse = response
+        .json()
+        .await
+        .context("invalid /v1/runners/enroll response")?;
+
+    Ok(RunnerCredentials {
+        api_base: api_base.to_string(),
+        runner_id: registered.runner.id.clone(),
+        runner_token: registered.runner_token,
+        display_name: registered.runner.display_name.clone(),
+        heartbeat_interval_seconds: registered
+            .heartbeat
+            .interval_seconds
+            .max(MIN_HEARTBEAT_INTERVAL_SECS),
+    })
+}
+
+/// `ato runner login --enrollment-token <TOKEN>`: headless hosted-runner
+/// enrollment. Exchanges a single-use `ato_enr_…` token for a runner token via
+/// `POST /v1/runners/enroll`, then persists credentials EXACTLY like device-flow
+/// login. No browser, no operator session — used by a Managed Cloud VM whose
+/// cloud-init injected the token. The runner knows nothing about the provider
+/// (Fly/Hetzner/…): it sends the token, stores the returned `ato_rnr_` token,
+/// and `ato runner serve` proceeds on the existing heartbeat/poll/claim loop
+/// unchanged. The enrollment token is never printed and never written to disk.
+async fn run_login_with_enrollment_token(
+    api_base: String,
+    display_name: Option<String>,
+    public_base_url: Option<String>,
+    enrollment_token: String,
+) -> Result<()> {
+    let display_name = display_name.unwrap_or_else(default_display_name);
+    if public_base_url.is_some() {
+        // A hosted runner's public origin is assigned by the control plane at
+        // enrollment, not chosen by the runner. Say so rather than silently
+        // dropping the flag.
+        eprintln!(
+            "⚠️  --public-base-url is ignored with --enrollment-token: a hosted runner's public URL is assigned by the control plane."
+        );
+    }
+
+    println!("🛰  Enrolling this host as a hosted runner");
+    println!("   API:  {}", api_base);
+    println!("   Name: {}", display_name);
+
+    let creds = enroll_for_credentials(&api_base, &display_name, enrollment_token).await?;
+    let path = credentials_path();
+    save_credentials(&path, &creds)?;
+
+    println!("✅ Hosted runner enrolled");
     println!("   Runner ID: {}", creds.runner_id);
     println!("   Credentials: {} (0600)", path.display());
     println!("   The runner token was saved and will not be shown.");
@@ -2261,6 +2407,85 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn build_enroll_body_carries_token_and_honest_host_facts() {
+        let caps = vec!["linux".to_string(), "sandbox=linux-bwrap".to_string()];
+        let body = build_enroll_body("ato_enr_secret", "my-runner", &caps);
+        assert_eq!(body["enrollment_token"], "ato_enr_secret");
+        assert_eq!(body["display_name"], "my-runner");
+        assert_eq!(body["os"], std::env::consts::OS);
+        assert_eq!(body["arch"], std::env::consts::ARCH);
+        assert_eq!(body["capabilities"][1], "sandbox=linux-bwrap");
+    }
+
+    #[test]
+    fn enroll_failure_message_is_typed_and_never_leaks_the_token() {
+        // Typed API error → actionable message surfaced verbatim.
+        let m = enroll_failure_message(
+            410,
+            r#"{"error":"expired","message":"Enrollment token has expired."}"#,
+        );
+        assert!(m.contains("410"));
+        assert!(m.contains("Enrollment token has expired."));
+        // A body that somehow reflected the raw token must never surface it:
+        // only the server's typed fields are used, never the raw body.
+        let leaky = "ato_enr_should_never_appear_in_logs";
+        let m2 = enroll_failure_message(401, leaky);
+        assert!(!m2.contains("ato_enr_should_never_appear_in_logs"));
+    }
+
+    #[tokio::test]
+    async fn headless_enrollment_persists_runner_token_through_the_existing_store() {
+        // Mock control plane: POST /v1/runners/enroll → 201 with the enrolled
+        // runner + its runner token (the exact shape POST /v1/runners returns,
+        // plus an extra lease_id the CLI ignores).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock api");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"runner":{"id":"01HOSTED","display_name":"Managed microvm-burst"},"runner_token":"ato_rnr_returned-secret","lease_id":"01LEASE","heartbeat":{"interval_seconds":30}}"#;
+                let response = format!(
+                    "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let api_base = format!("http://127.0.0.1:{port}");
+        let creds = enroll_for_credentials(
+            &api_base,
+            "Managed microvm-burst",
+            "ato_enr_single-use-secret".to_string(),
+        )
+        .await
+        .expect("headless enrollment succeeds");
+        server.join().ok();
+
+        // Same credential shape device-flow login produces — readable by serve.
+        assert_eq!(creds.runner_id, "01HOSTED");
+        assert_eq!(creds.runner_token, "ato_rnr_returned-secret");
+        assert_eq!(creds.api_base, api_base);
+        assert_eq!(creds.heartbeat_interval_seconds, 30);
+
+        // Persist through the EXISTING store + reader the serve loop uses.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("runner").join("credentials.json");
+        save_credentials(&path, &creds).expect("save");
+        let loaded = load_credentials(&path).expect("load");
+        assert_eq!(loaded.runner_token, "ato_rnr_returned-secret");
+
+        // The single-use enrollment token must NEVER be written to disk.
+        let on_disk = std::fs::read_to_string(&path).expect("read creds");
+        assert!(
+            !on_disk.contains("ato_enr_single-use-secret"),
+            "enrollment token must not be persisted"
+        );
+    }
 
     #[test]
     fn credentials_roundtrip_sets_0600_and_holds_no_session_fields() {
