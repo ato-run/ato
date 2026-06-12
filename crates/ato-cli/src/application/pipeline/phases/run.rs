@@ -5154,6 +5154,63 @@ image = "ghcr.io/example/app:latest"
     }
 
     #[test]
+    fn resolve_state_overrides_sandbox_tolerates_unbound_persistent_state() {
+        // #687 fix wiring: the non-authoritative `ato run <source> --sandbox`
+        // branch routes through `resolve_explicit_or_auto_state_source_overrides`
+        // with `sandbox_mode = true` and no `--state`. It must NOT hard-error on
+        // the declared-but-unbound persistent state (the bug); it defers that
+        // state to the auto-provisioner, which fills it immediately after.
+        //
+        // This pins the actual fix: if the sandbox guard in
+        // `resolve_explicit_or_auto_state_source_overrides` were removed, this
+        // run would route through the strict resolver and reintroduce the
+        // "requires an explicit --state" error this test asserts is gone.
+        let manifest = persistent_state_manifest();
+        let mut request = sandbox_request(
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        request.sandbox_mode = true;
+        request.state_bindings = Vec::new();
+
+        let overrides = super::resolve_explicit_or_auto_state_source_overrides(&manifest, &request)
+            .expect("sandbox run must not error on unbound persistent state");
+        // The unbound persistent state is intentionally left for the
+        // auto-provisioner, so the lenient resolver returns nothing for it.
+        assert!(
+            !overrides.contains_key("data"),
+            "lenient resolver leaves unbound state to the auto-provisioner"
+        );
+    }
+
+    #[test]
+    fn resolve_state_overrides_non_sandbox_still_fails_closed() {
+        // Fail-closed contract preserved for non-sandbox runs: a declared
+        // persistent state with no `--state` binding is still an error. This
+        // guards against the #687 fix accidentally loosening the normal path.
+        let manifest = persistent_state_manifest();
+        let mut request = sandbox_request(
+            std::env::temp_dir(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        request.sandbox_mode = false;
+        request.state_bindings = Vec::new();
+
+        let err = super::resolve_explicit_or_auto_state_source_overrides(&manifest, &request)
+            .expect_err("non-sandbox run with unbound persistent state must fail closed");
+        assert!(
+            err.to_string().contains("requires an explicit --state"),
+            "expected fail-closed binding error, got: {err}"
+        );
+    }
+
+    #[test]
     fn locked_dependency_resolved_ref_prefers_content_digest() {
         let locked = capsule_core::lockfile::LockedCapsuleDependency {
             name: "db".to_string(),
