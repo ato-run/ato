@@ -27,6 +27,27 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Parse CLI args on a dedicated wide-stack thread.
+///
+/// `Cli::try_parse_from` materializes the full clap command tree; its
+/// unoptimized recursion overflows libtest's default 2 MiB test-thread stack
+/// now that the CLI surface spans the app/session/runner/runtime trees
+/// (`fatal runtime error: stack overflow` aborting the whole lib-test binary
+/// on CI). Parsing on an explicit 16 MiB thread keeps these tests independent
+/// of `RUST_MIN_STACK`.
+fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T> + Send + 'static,
+    T: Into<std::ffi::OsString> + Clone + Send,
+{
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || Cli::try_parse_from(args))
+        .expect("spawn cli parse thread")
+        .join()
+        .expect("cli parse thread panicked")
+}
+
 #[test]
 fn semver_prefers_highest_stable_release() {
     let stable = ParsedSemver::parse("1.2.0").unwrap();
@@ -224,7 +245,7 @@ fn search_tui_gate_requires_tty_and_flags_allowing_tui() {
 
 #[test]
 fn run_command_parses_explicit_state_bindings() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "run",
         ".",
@@ -249,7 +270,7 @@ fn run_command_parses_explicit_state_bindings() {
 
 #[test]
 fn run_command_parses_agent_mode() {
-    let cli = Cli::try_parse_from(["ato", "run", ".", "--agent", "force"]).expect("parse");
+    let cli = parse_cli(["ato", "run", ".", "--agent", "force"]).expect("parse");
 
     match cli.command {
         Commands::Run { agent, .. } => assert_eq!(agent, RunAgentMode::Force),
@@ -258,26 +279,14 @@ fn run_command_parses_agent_mode() {
 }
 
 /// Parse argv and return the `Launch` command's `detached_session` flag.
-///
-/// `Cli::try_parse_from` recurses deeply enough to overflow the default ~2 MiB
-/// test-thread stack for this crate's large command enum — a pre-existing
-/// clap-derive limitation (the same overflow hits the existing `run_command_*`
-/// parse tests on a single-test run). Run the parse on a roomier stack so this
-/// regression guard does not abort the suite.
+/// (`parse_cli` already runs the stack-heavy parse on a wide-stack thread.)
 fn launch_detached_flag(argv: &'static [&'static str]) -> bool {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(
-            move || match Cli::try_parse_from(argv).expect("parse").command {
-                Commands::Launch {
-                    detached_session, ..
-                } => detached_session,
-                other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-            },
-        )
-        .expect("spawn parse thread")
-        .join()
-        .expect("join parse thread")
+    match parse_cli(argv).expect("parse").command {
+        Commands::Launch {
+            detached_session, ..
+        } => detached_session,
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
 }
 
 #[test]
@@ -304,7 +313,7 @@ fn launch_detached_session_is_explicit_internal_opt_in() {
 
 #[test]
 fn run_command_parses_entry_and_env_flags() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "run",
         "https://ato.run/s/demo",
@@ -335,7 +344,7 @@ fn run_command_parses_entry_and_env_flags() {
 
 #[test]
 fn encap_command_parses_default_flags() {
-    let cli = Cli::try_parse_from(["ato", "encap", "."]).expect("parse");
+    let cli = parse_cli(["ato", "encap", "."]).expect("parse");
     match cli.command {
         Commands::Encap {
             path,
@@ -357,7 +366,7 @@ fn encap_command_parses_default_flags() {
 
 #[test]
 fn encap_command_parses_internal_flag() {
-    let cli = Cli::try_parse_from(["ato", "encap", "--internal"]).expect("parse");
+    let cli = parse_cli(["ato", "encap", "--internal"]).expect("parse");
     match cli.command {
         Commands::Encap {
             internal,
@@ -375,7 +384,7 @@ fn encap_command_parses_internal_flag() {
 
 #[test]
 fn encap_command_parses_private_flag() {
-    let cli = Cli::try_parse_from(["ato", "encap", "--private"]).expect("parse");
+    let cli = parse_cli(["ato", "encap", "--private"]).expect("parse");
     match cli.command {
         Commands::Encap {
             internal,
@@ -393,7 +402,7 @@ fn encap_command_parses_private_flag() {
 
 #[test]
 fn encap_command_parses_local_flag() {
-    let cli = Cli::try_parse_from(["ato", "encap", "--local"]).expect("parse");
+    let cli = parse_cli(["ato", "encap", "--local"]).expect("parse");
     match cli.command {
         Commands::Encap {
             internal,
@@ -411,14 +420,14 @@ fn encap_command_parses_local_flag() {
 
 #[test]
 fn encap_command_mutual_exclusion_fails() {
-    assert!(Cli::try_parse_from(["ato", "encap", "--internal", "--private"]).is_err());
-    assert!(Cli::try_parse_from(["ato", "encap", "--internal", "--local"]).is_err());
-    assert!(Cli::try_parse_from(["ato", "encap", "--private", "--local"]).is_err());
+    assert!(parse_cli(["ato", "encap", "--internal", "--private"]).is_err());
+    assert!(parse_cli(["ato", "encap", "--internal", "--local"]).is_err());
+    assert!(parse_cli(["ato", "encap", "--private", "--local"]).is_err());
 }
 
 #[test]
 fn encap_command_default_path_is_cwd() {
-    let cli = Cli::try_parse_from(["ato", "encap"]).expect("parse");
+    let cli = parse_cli(["ato", "encap"]).expect("parse");
     match cli.command {
         Commands::Encap { path, .. } => assert_eq!(path, PathBuf::from(".")),
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
@@ -427,7 +436,7 @@ fn encap_command_default_path_is_cwd() {
 
 #[test]
 fn decap_command_requires_into_and_parses_plan() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "decap",
         "https://ato.run/s/demo",
@@ -447,7 +456,7 @@ fn decap_command_requires_into_and_parses_plan() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let error = Cli::try_parse_from(["ato", "decap", "https://ato.run/s/demo"]);
+    let error = parse_cli(["ato", "decap", "https://ato.run/s/demo"]);
     assert!(error.is_err(), "missing --into must fail");
     let rendered = error.err().expect("parse error").to_string();
     assert!(rendered.contains("--into"));
@@ -455,7 +464,7 @@ fn decap_command_requires_into_and_parses_plan() {
 
 #[test]
 fn workspace_share_command_parses_default_flags() {
-    let cli = Cli::try_parse_from(["ato", "workspace", "share", "."]).expect("parse");
+    let cli = parse_cli(["ato", "workspace", "share", "."]).expect("parse");
     match cli.command {
         Commands::Workspace { command } => match command {
             WorkspaceCommands::Share {
@@ -482,7 +491,7 @@ fn workspace_share_command_parses_default_flags() {
 
 #[test]
 fn workspace_share_command_parses_dev_flag() {
-    let cli = Cli::try_parse_from(["ato", "workspace", "share", ".", "--dev"]).expect("parse");
+    let cli = parse_cli(["ato", "workspace", "share", ".", "--dev"]).expect("parse");
     match cli.command {
         Commands::Workspace { command } => match command {
             WorkspaceCommands::Share { dev, .. } => {
@@ -496,8 +505,8 @@ fn workspace_share_command_parses_dev_flag() {
 
 #[test]
 fn workspace_share_command_parses_dev_and_print_plan() {
-    let cli = Cli::try_parse_from(["ato", "workspace", "share", ".", "--dev", "--print-plan"])
-        .expect("parse");
+    let cli =
+        parse_cli(["ato", "workspace", "share", ".", "--dev", "--print-plan"]).expect("parse");
     match cli.command {
         Commands::Workspace { command } => match command {
             WorkspaceCommands::Share {
@@ -514,7 +523,7 @@ fn workspace_share_command_parses_dev_and_print_plan() {
 
 #[test]
 fn workspace_share_command_parses_visibility_flags() {
-    let cli = Cli::try_parse_from(["ato", "workspace", "share", "--internal"]).expect("parse");
+    let cli = parse_cli(["ato", "workspace", "share", "--internal"]).expect("parse");
     match cli.command {
         Commands::Workspace { command } => match command {
             WorkspaceCommands::Share { internal, .. } => {
@@ -528,14 +537,14 @@ fn workspace_share_command_parses_visibility_flags() {
 
 #[test]
 fn workspace_share_command_mutual_exclusion_fails() {
-    assert!(Cli::try_parse_from(["ato", "workspace", "share", "--internal", "--private"]).is_err());
-    assert!(Cli::try_parse_from(["ato", "workspace", "share", "--internal", "--local"]).is_err());
-    assert!(Cli::try_parse_from(["ato", "workspace", "share", "--private", "--local"]).is_err());
+    assert!(parse_cli(["ato", "workspace", "share", "--internal", "--private"]).is_err());
+    assert!(parse_cli(["ato", "workspace", "share", "--internal", "--local"]).is_err());
+    assert!(parse_cli(["ato", "workspace", "share", "--private", "--local"]).is_err());
 }
 
 #[test]
 fn workspace_setup_command_parses_into_and_plan() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "workspace",
         "setup",
@@ -564,7 +573,7 @@ fn workspace_setup_command_parses_into_and_plan() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let error = Cli::try_parse_from(["ato", "workspace", "setup", "https://ato.run/s/demo"]);
+    let error = parse_cli(["ato", "workspace", "setup", "https://ato.run/s/demo"]);
     assert!(error.is_err(), "missing --into must fail");
     let rendered = error.err().expect("parse error").to_string();
     assert!(rendered.contains("--into"));
@@ -572,7 +581,7 @@ fn workspace_setup_command_parses_into_and_plan() {
 
 #[test]
 fn workspace_setup_command_parses_dev_flag() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "workspace",
         "setup",
@@ -595,7 +604,7 @@ fn workspace_setup_command_parses_dev_flag() {
 
 #[test]
 fn workspace_setup_command_parses_dev_and_plan() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "workspace",
         "setup",
@@ -620,8 +629,7 @@ fn workspace_setup_command_parses_dev_and_plan() {
 
 #[test]
 fn run_command_parses_provider_toolchain_via_flag() {
-    let cli = Cli::try_parse_from(["ato", "run", "npm:tsx", "--via", "pnpm", "--", "--help"])
-        .expect("parse");
+    let cli = parse_cli(["ato", "run", "npm:tsx", "--via", "pnpm", "--", "--help"]).expect("parse");
 
     match cli.command {
         Commands::Run { via, args, .. } => {
@@ -634,8 +642,8 @@ fn run_command_parses_provider_toolchain_via_flag() {
 
 #[test]
 fn run_command_parses_verbose_flag() {
-    let cli = Cli::try_parse_from(["ato", "run", "--verbose", "npm:prettier", "--", "--version"])
-        .expect("parse");
+    let cli =
+        parse_cli(["ato", "run", "--verbose", "npm:prettier", "--", "--version"]).expect("parse");
 
     match cli.command {
         Commands::Run {
@@ -654,8 +662,7 @@ fn run_command_parses_verbose_flag() {
 
 #[test]
 fn run_command_parses_trailing_args_after_separator() {
-    let cli =
-        Cli::try_parse_from(["ato", "run", "@demo/tool", "--", "--help", "-v"]).expect("parse");
+    let cli = parse_cli(["ato", "run", "@demo/tool", "--", "--help", "-v"]).expect("parse");
 
     match cli.command {
         Commands::Run { path, args, .. } => {
@@ -668,7 +675,7 @@ fn run_command_parses_trailing_args_after_separator() {
 
 #[test]
 fn run_command_parses_trailing_args_with_target_flag() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "run",
         "--target",
@@ -693,7 +700,7 @@ fn run_command_parses_trailing_args_with_target_flag() {
 
 #[test]
 fn run_command_parses_sandbox_io_grants() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "run",
         "--sandbox",
@@ -728,7 +735,7 @@ fn run_command_parses_sandbox_io_grants() {
 
 #[test]
 fn run_command_parses_cwd_override() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "run",
         "--cwd",
@@ -750,8 +757,7 @@ fn run_command_parses_cwd_override() {
 
 #[test]
 fn run_command_parses_hidden_provider_toolchain_hint() {
-    let cli =
-        Cli::try_parse_from(["ato", "run", "pypi:markitdown[pdf]", "--via", "uv"]).expect("parse");
+    let cli = parse_cli(["ato", "run", "pypi:markitdown[pdf]", "--via", "uv"]).expect("parse");
 
     match cli.command {
         Commands::Run { path, via, .. } => {
@@ -764,7 +770,7 @@ fn run_command_parses_hidden_provider_toolchain_hint() {
 
 #[test]
 fn init_command_defaults_to_durable_workspace_materialization() {
-    let cli = Cli::try_parse_from(["ato", "init"]).expect("parse");
+    let cli = parse_cli(["ato", "init"]).expect("parse");
 
     match cli.command {
         Commands::Init { path, yes } => {
@@ -777,7 +783,7 @@ fn init_command_defaults_to_durable_workspace_materialization() {
 
 #[test]
 fn setup_command_defaults_to_project_dependency_fetch() {
-    let cli = Cli::try_parse_from(["ato", "setup"]).expect("parse");
+    let cli = parse_cli(["ato", "setup"]).expect("parse");
 
     match cli.command {
         Commands::Setup {
@@ -799,7 +805,7 @@ fn setup_command_defaults_to_project_dependency_fetch() {
 
 #[test]
 fn state_command_parses_register_and_inspect_forms() {
-    let register = Cli::try_parse_from([
+    let register = parse_cli([
         "ato",
         "state",
         "register",
@@ -830,8 +836,7 @@ fn state_command_parses_register_and_inspect_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let inspect =
-        Cli::try_parse_from(["ato", "state", "inspect", "state-demo"]).expect("parse inspect");
+    let inspect = parse_cli(["ato", "state", "inspect", "state-demo"]).expect("parse inspect");
     match inspect.command {
         Commands::State {
             command: StateCommands::Inspect { state_ref, json },
@@ -845,7 +850,7 @@ fn state_command_parses_register_and_inspect_forms() {
 
 #[test]
 fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
-    let resolve = Cli::try_parse_from([
+    let resolve = parse_cli([
         "ato",
         "app",
         "resolve",
@@ -873,7 +878,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let session_start = Cli::try_parse_from([
+    let session_start = parse_cli([
         "ato",
         "app",
         "session",
@@ -911,7 +916,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let session_start_with_state = Cli::try_parse_from([
+    let session_start_with_state = parse_cli([
         "ato",
         "app",
         "session",
@@ -956,7 +961,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
 
     for value in ["data", ":path", "data:"] {
         assert!(
-            Cli::try_parse_from([
+            parse_cli([
                 "ato",
                 "app",
                 "session",
@@ -970,7 +975,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         );
     }
 
-    let session_stop = Cli::try_parse_from([
+    let session_stop = parse_cli([
         "ato",
         "app",
         "session",
@@ -992,7 +997,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let session_watch_parent = Cli::try_parse_from([
+    let session_watch_parent = parse_cli([
         "ato",
         "app",
         "session",
@@ -1027,8 +1032,8 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let status = Cli::try_parse_from(["ato", "app", "status", "ato/ato-desktop", "--json"])
-        .expect("parse app status");
+    let status =
+        parse_cli(["ato", "app", "status", "ato/ato-desktop", "--json"]).expect("parse app status");
     match status.command {
         Commands::App {
             command: AppCommands::Status { package_id, json },
@@ -1039,7 +1044,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let bootstrap = Cli::try_parse_from([
+    let bootstrap = parse_cli([
         "ato",
         "app",
         "bootstrap",
@@ -1085,7 +1090,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let repair = Cli::try_parse_from([
+    let repair = parse_cli([
         "ato",
         "app",
         "repair",
@@ -1113,8 +1118,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
 
 #[test]
 fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
-    let lock =
-        Cli::try_parse_from(["ato", "inspect", "lock", "./demo"]).expect("parse inspect lock");
+    let lock = parse_cli(["ato", "inspect", "lock", "./demo"]).expect("parse inspect lock");
     match lock.command {
         Commands::Inspect {
             command: InspectCommands::Lock { path, json },
@@ -1125,8 +1129,8 @@ fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let preview = Cli::try_parse_from(["ato", "inspect", "preview", "--json"])
-        .expect("parse inspect preview");
+    let preview =
+        parse_cli(["ato", "inspect", "preview", "--json"]).expect("parse inspect preview");
     match preview.command {
         Commands::Inspect {
             command: InspectCommands::Preview { path, json },
@@ -1138,7 +1142,7 @@ fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
     }
 
     let diagnostics =
-        Cli::try_parse_from(["ato", "inspect", "diagnostics"]).expect("parse inspect diagnostics");
+        parse_cli(["ato", "inspect", "diagnostics"]).expect("parse inspect diagnostics");
     match diagnostics.command {
         Commands::Inspect {
             command: InspectCommands::Diagnostics { path, json },
@@ -1149,7 +1153,7 @@ fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let remediation = Cli::try_parse_from(["ato", "inspect", "remediation", "./capsule.toml"])
+    let remediation = parse_cli(["ato", "inspect", "remediation", "./capsule.toml"])
         .expect("parse inspect remediation");
     match remediation.command {
         Commands::Inspect {
@@ -1161,7 +1165,7 @@ fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let execution = Cli::try_parse_from([
+    let execution = parse_cli([
         "ato",
         "inspect",
         "execution",
@@ -1185,8 +1189,8 @@ fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
 
 #[test]
 fn replay_command_parses_explicit_modes() {
-    let strict = Cli::try_parse_from(["ato", "replay", "blake3:abc", "--strict"])
-        .expect("parse strict replay");
+    let strict =
+        parse_cli(["ato", "replay", "blake3:abc", "--strict"]).expect("parse strict replay");
     match strict.command {
         Commands::Replay {
             id,
@@ -1202,9 +1206,8 @@ fn replay_command_parses_explicit_modes() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let best_effort =
-        Cli::try_parse_from(["ato", "replay", "blake3:def", "--best-effort", "--json"])
-            .expect("parse best-effort replay");
+    let best_effort = parse_cli(["ato", "replay", "blake3:def", "--best-effort", "--json"])
+        .expect("parse best-effort replay");
     match best_effort.command {
         Commands::Replay {
             id,
@@ -1223,7 +1226,7 @@ fn replay_command_parses_explicit_modes() {
 
 #[test]
 fn uninstall_command_parses_purge_flags() {
-    let cli = Cli::try_parse_from([
+    let cli = parse_cli([
         "ato",
         "uninstall",
         "--purge",
@@ -1254,8 +1257,8 @@ fn uninstall_command_parses_purge_flags() {
 
 #[test]
 fn uninstall_command_requires_purge_for_sensitive_flags() {
-    assert!(Cli::try_parse_from(["ato", "uninstall", "--include-config"]).is_err());
-    assert!(Cli::try_parse_from(["ato", "uninstall", "--include-keys"]).is_err());
+    assert!(parse_cli(["ato", "uninstall", "--include-config"]).is_err());
+    assert!(parse_cli(["ato", "uninstall", "--include-keys"]).is_err());
 }
 
 #[test]
