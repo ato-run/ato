@@ -47,6 +47,22 @@ pub fn update() -> Result<()> {
     Ok(())
 }
 
+/// Self-update used by the Connected Runner agent when the control plane signals
+/// a target version. Async-safe (no nested tokio runtime, unlike [`update`]).
+/// Requires the cargo-dist install receipt (installed via ato.run/install.sh or
+/// a release build); a receiptless dev build returns an error rather than
+/// silently doing nothing. Returns Some(new_version) when it updated, None when
+/// already on the latest release.
+pub async fn run_self_update_async() -> Result<Option<String>> {
+    let mut updater = AxoUpdater::new_for("ato");
+    updater
+        .load_receipt()
+        .context("no ato install receipt; self-update needs an install via ato.run/install.sh")?;
+    updater.disable_installer_output();
+    let result = updater.run().await.context("ato self-update failed")?;
+    Ok(result.map(|r| r.new_version.to_string()))
+}
+
 fn resolve_installer_url() -> String {
     std::env::var(INSTALLER_URL_ENV)
         .ok()
