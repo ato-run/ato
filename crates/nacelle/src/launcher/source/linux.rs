@@ -24,6 +24,7 @@ use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
 use crate::system::sandbox::{filter_sensitive_paths, sensitive_paths};
 
 use super::SourceRuntime;
+use super::visibility::WorkloadVisibilityPlan;
 
 fn requested_guest_cwd(target: &SourceTarget) -> PathBuf {
     target
@@ -69,87 +70,6 @@ fn system_ro_binds() -> [[&'static str; 3]; 6] {
         ["--ro-bind-try", "/etc/hosts", "/etc/hosts"],
         ["--ro-bind-try", "/etc/ssl", "/etc/ssl"],
     ]
-}
-
-/// In-sandbox interpreter selection for a project virtualenv.
-struct SandboxVenv {
-    /// Guest path of the venv interpreter (the source dir is mounted at `/app`).
-    guest_python: String,
-    /// Host path of the base CPython install the venv references, which must be
-    /// bind-mounted so the venv interpreter can exec and load its standard
-    /// library.
-    base_install: PathBuf,
-}
-
-/// Detect a project virtualenv created by the build phase
-/// (`<source_dir>/.venv`) and resolve the base CPython install it references.
-///
-/// A venv interpreter is a thin shim: it adds the venv's `site-packages` to
-/// `sys.path` but loads the standard library (and, for symlinked venvs, execs)
-/// from the base install named in `.venv/pyvenv.cfg` (`home = …/bin`). For the
-/// sandboxed interpreter to work, that base install must be visible inside the
-/// sandbox, so we surface its root for an additional bind-mount. Returns `None`
-/// when no venv interpreter exists (capsules with no third-party dependencies
-/// fall back to the base toolchain interpreter) or when the base install cannot
-/// be resolved.
-fn sandbox_venv_python(target: &SourceTarget) -> Option<SandboxVenv> {
-    let venv_dir = target.source_dir.join(".venv");
-    if !venv_dir.join("bin").join("python").exists() {
-        return None;
-    }
-    Some(SandboxVenv {
-        guest_python: "/app/.venv/bin/python".to_string(),
-        base_install: venv_base_install(&venv_dir)?,
-    })
-}
-
-/// Resolve the base CPython install root for a venv. Prefers the `home` key in
-/// `pyvenv.cfg` (which points at the base interpreter's `bin/`, whose parent is
-/// the install root); falls back to canonicalizing the venv `python` symlink.
-fn venv_base_install(venv_dir: &std::path::Path) -> Option<PathBuf> {
-    if let Ok(cfg) = std::fs::read_to_string(venv_dir.join("pyvenv.cfg")) {
-        for line in cfg.lines() {
-            if let Some((key, value)) = line.split_once('=')
-                && key.trim() == "home"
-            {
-                let home = PathBuf::from(value.trim());
-                // `home` is the base interpreter's bin/ — bind its parent
-                // (the install root) so stdlib under lib/ is also present.
-                return Some(home.parent().map(|p| p.to_path_buf()).unwrap_or(home));
-            }
-        }
-    }
-    // Fallback: follow the venv python symlink to the real base binary.
-    std::fs::canonicalize(venv_dir.join("bin").join("python"))
-        .ok()
-        .and_then(|real| real.parent().map(|bin| bin.to_path_buf())) // …/bin
-        .and_then(|bin| bin.parent().map(|root| root.to_path_buf())) // install root
-}
-
-/// Resolve the install root for a managed toolchain interpreter so the launcher
-/// can bind the whole install (`bin/` + `lib/`), not just the binary file.
-///
-/// nacelle's managed interpreters live at `<root>/bin/<exe>` — e.g.
-/// `~/.capsule/toolchains/python-3.11/python/bin/python3` or
-/// `~/.ato/toolchains/node-20/<dist>/bin/node`. The runtime loader needs
-/// siblings under `<root>/lib/` (libpython*.so, node's `lib/`, …); binding only
-/// the binary leaves those absent and the interpreter cannot start
-/// (`error while loading shared libraries: libpython3.x.so.1.0`).
-///
-/// Returns `None` (caller keeps the binary-only bind) when the path is not in a
-/// `<root>/bin/<exe>` layout, or when the resolved root would be `/` or `/usr`
-/// — those are already provided by `system_ro_binds`, and binding them here
-/// would be redundant or over-broad.
-fn toolchain_install_root(toolchain_path: &std::path::Path) -> Option<PathBuf> {
-    let bin = toolchain_path.parent()?;
-    if bin.file_name().and_then(|n| n.to_str()) != Some("bin") {
-        return None;
-    }
-    let root = bin.parent()?;
-    if root == std::path::Path::new("/") || root == std::path::Path::new("/usr") {
-        return None;
-    }
-    Some(root.to_path_buf())
 }
 
 /// Env keys the runtime re-applies inside the production sandbox after
@@ -400,6 +320,11 @@ pub async fn launch_with_bubblewrap(
         target.language, target.entrypoint, toolchain_path, target.dev_mode
     );
 
+    // Platform-neutral plan for which interpreter to run and which host paths
+    // the workload must see (venv base install + toolchain install root). Lowered
+    // below to bwrap `--ro-bind-try` binds and the in-sandbox interpreter path.
+    let visibility = WorkloadVisibilityPlan::compute(target, &toolchain_path);
+
     // =====================================================================
     // Egress enforcement checks
     // =====================================================================
@@ -465,14 +390,17 @@ pub async fn launch_with_bubblewrap(
     let toolchain_path_str = toolchain_path.to_string_lossy();
     cmd.args(["--ro-bind", &toolchain_path_str, &toolchain_path_str]);
 
-    // Also bind the toolchain's install ROOT (bin/ + lib/), not just the binary,
-    // so the interpreter can load its runtime — e.g. libpython*.so for a managed
-    // CPython, or node's lib/. Binding only the binary leaves those absent and
-    // the interpreter exits with "error while loading shared libraries".
-    // `--ro-bind-try` keeps it non-fatal; /usr and / are skipped (already bound).
-    if let Some(toolchain_root) = toolchain_install_root(&toolchain_path) {
-        let toolchain_root_str = toolchain_root.to_string_lossy();
-        cmd.args(["--ro-bind-try", &toolchain_root_str, &toolchain_root_str]);
+    // Lower the platform-neutral visibility plan to bwrap binds. `read_paths`
+    // carries the venv base install and the toolchain install ROOT (bin/ + lib/,
+    // not just the binary) so the interpreter can load its runtime — e.g.
+    // libpython*.so for a managed CPython, or node's lib/, and the base CPython a
+    // venv shim execs into. Binding only the binary leaves those absent and the
+    // interpreter exits with "error while loading shared libraries".
+    // `--ro-bind-try` keeps each non-fatal; /usr and / are already excluded by
+    // the plan (and bound above).
+    for path in &visibility.read_paths {
+        let path_str = path.to_string_lossy();
+        cmd.args(["--ro-bind-try", &path_str, &path_str]);
     }
 
     // Bind mount the source directory read-only
@@ -630,19 +558,15 @@ pub async fn launch_with_bubblewrap(
         runtime.apply_sidecar_env(&mut cmd);
     }
 
-    // Resolve the interpreter, preferring a project virtualenv when the build
-    // phase produced one. A bare `python`/`python3` otherwise maps to the
-    // managed *base* toolchain interpreter, which carries only the standard
-    // library — the capsule's installed dependencies live in `.venv`, so the
-    // app would fail at import time (`ModuleNotFoundError`). When a venv exists
-    // we run its interpreter (`/app/.venv/bin/python`) and bind-mount the base
-    // CPython install it references (a venv python is a thin shim that loads
-    // stdlib and execs from that base install).
-    let venv_python = sandbox_venv_python(target);
-    if let Some(ref venv) = venv_python {
-        let base = venv.base_install.to_string_lossy();
-        cmd.args(["--ro-bind-try", &base, &base]);
-    }
+    // Interpreter selection comes from the visibility plan, which prefers a
+    // project virtualenv when the build phase produced one. A bare
+    // `python`/`python3` otherwise maps to the managed *base* toolchain
+    // interpreter, which carries only the standard library — the capsule's
+    // installed dependencies live in `.venv`, so the app would fail at import
+    // time (`ModuleNotFoundError`). The venv interpreter runs at its guest path
+    // (`/app/.venv/bin/python`); its base CPython install is already bound above
+    // via `visibility.read_paths`.
+    let venv_python = visibility.venv.as_ref();
 
     // Landlock is applied to the *workload*, not the bwrap wrapper, via an
     // in-sandbox shim (`nacelle sandbox-exec`). bwrap sets up the user
@@ -674,7 +598,7 @@ pub async fn launch_with_bubblewrap(
     if let Some(explicit_cmd) = target.cmd.as_ref() {
         if let Some((binary, args)) = explicit_cmd.split_first() {
             let binary_path = match binary.as_str() {
-                "python" | "python3" => match &venv_python {
+                "python" | "python3" => match venv_python {
                     Some(venv) => PathBuf::from(&venv.guest_python),
                     None => toolchain_path.clone(),
                 },
@@ -696,7 +620,7 @@ pub async fn launch_with_bubblewrap(
     } else {
         // No explicit command: synthesize `<interpreter> <entrypoint>` from the
         // declared language, preferring the venv interpreter for python.
-        let python_interp = match &venv_python {
+        let python_interp = match venv_python {
             Some(venv) => PathBuf::from(&venv.guest_python),
             None => toolchain_path.clone(),
         };
@@ -1149,85 +1073,6 @@ mod tests {
             injected_mounts: vec![],
             ..Default::default()
         }
-    }
-
-    fn make_venv(root: &std::path::Path, home: &std::path::Path) {
-        let bin = root.join(".venv").join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("python"), b"#!/bin/sh\n").unwrap();
-        std::fs::write(
-            root.join(".venv").join("pyvenv.cfg"),
-            format!("home = {}\nversion = 3.11.15\n", home.display()),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn sandbox_venv_python_absent_when_no_venv() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = python_target(tmp.path().to_path_buf());
-        // No `.venv` → fall back to the managed base toolchain interpreter.
-        assert!(sandbox_venv_python(&target).is_none());
-    }
-
-    #[test]
-    fn sandbox_venv_python_uses_guest_path_and_base_install() {
-        let tmp = tempfile::tempdir().unwrap();
-        // pyvenv.cfg `home` points at the base interpreter's bin/; the install
-        // root (its parent) is what must be bind-mounted into the sandbox.
-        let base_bin = tmp.path().join("uv-python").join("bin");
-        std::fs::create_dir_all(&base_bin).unwrap();
-        make_venv(tmp.path(), &base_bin);
-
-        let target = python_target(tmp.path().to_path_buf());
-        let venv = sandbox_venv_python(&target).expect("venv must be detected");
-        assert_eq!(venv.guest_python, "/app/.venv/bin/python");
-        assert_eq!(venv.base_install, tmp.path().join("uv-python"));
-    }
-
-    #[test]
-    fn venv_base_install_prefers_pyvenv_cfg_home() {
-        let tmp = tempfile::tempdir().unwrap();
-        let base_bin = tmp.path().join("install-root").join("bin");
-        std::fs::create_dir_all(&base_bin).unwrap();
-        make_venv(tmp.path(), &base_bin);
-        let resolved = venv_base_install(&tmp.path().join(".venv")).unwrap();
-        assert_eq!(resolved, tmp.path().join("install-root"));
-    }
-
-    #[test]
-    fn toolchain_install_root_resolves_bin_parent() {
-        // Managed CPython layout: <root>/bin/<exe> -> <root> (so lib/ comes too).
-        assert_eq!(
-            toolchain_install_root(&PathBuf::from(
-                "/home/u/.capsule/toolchains/python-3.11/python/bin/python3"
-            )),
-            Some(PathBuf::from(
-                "/home/u/.capsule/toolchains/python-3.11/python"
-            ))
-        );
-        // Managed Node layout.
-        assert_eq!(
-            toolchain_install_root(&PathBuf::from(
-                "/home/u/.ato/toolchains/node-20/node-v20.20.2-linux-arm64/bin/node"
-            )),
-            Some(PathBuf::from(
-                "/home/u/.ato/toolchains/node-20/node-v20.20.2-linux-arm64"
-            ))
-        );
-    }
-
-    #[test]
-    fn toolchain_install_root_skips_system_and_nonbin_layouts() {
-        // System interpreter: root would be /usr, already covered by system binds.
-        assert_eq!(
-            toolchain_install_root(&PathBuf::from("/usr/bin/python3")),
-            None
-        );
-        // bin directly under / : root would be /, must not be bound here.
-        assert_eq!(toolchain_install_root(&PathBuf::from("/bin/python3")), None);
-        // Not a `<root>/bin/<exe>` layout: keep the binary-only bind.
-        assert_eq!(toolchain_install_root(&PathBuf::from("/opt/python3")), None);
     }
 
     #[test]
