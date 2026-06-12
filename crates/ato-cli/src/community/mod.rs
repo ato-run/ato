@@ -135,9 +135,6 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Mutex;
-
-    static COMMUNITY_API_URL_MUTEX: Mutex<()> = Mutex::new(());
 
     fn mock_http_sequence(responses: Vec<(u16, &'static str)>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock community API");
@@ -271,7 +268,7 @@ repository = "github.com/owner/repo"
 
     #[test]
     fn fetch_and_validate_rejects_ctoml_id_from_another_source() {
-        let _guard = COMMUNITY_API_URL_MUTEX.lock().expect("community api mutex");
+        let _guard = super::capsule_toml::COMMUNITY_URL_MUTEX.blocking_lock();
         let base = mock_http_sequence(vec![(
             200,
             r#"{"candidates":[
@@ -291,7 +288,7 @@ repository = "github.com/owner/repo"
 
     #[test]
     fn fetch_and_validate_rejects_toml_source_mismatch() {
-        let _guard = COMMUNITY_API_URL_MUTEX.lock().expect("community api mutex");
+        let _guard = super::capsule_toml::COMMUNITY_URL_MUTEX.blocking_lock();
         let base = mock_http_sequence(vec![
             (
                 200,
@@ -314,7 +311,7 @@ repository = "github.com/owner/repo"
 
     #[test]
     fn fetch_and_validate_allows_missing_toml_source_when_registry_matches() {
-        let _guard = COMMUNITY_API_URL_MUTEX.lock().expect("community api mutex");
+        let _guard = super::capsule_toml::COMMUNITY_URL_MUTEX.blocking_lock();
         let base = mock_http_sequence(vec![
             (
                 200,
