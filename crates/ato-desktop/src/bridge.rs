@@ -217,6 +217,25 @@ impl BridgeProxy {
                 capability,
                 payload,
             } => {
+                // Bind the command to the capability that authorizes it: the
+                // guest-supplied capability must be one the command actually
+                // requires AND must be present in the allowlist. Checking the
+                // allowlist alone would let any single grant unlock every
+                // host command.
+                if !invoke_capability_authorizes(&command, &capability) {
+                    self.log(
+                        ActivityTone::Warning,
+                        format!(
+                            "Fail-closed guest invoke denied: {capability} does not authorize {command}"
+                        ),
+                    );
+                    return GuestBridgeResponse::Denied {
+                        request_id: Some(request_id),
+                        message: format!(
+                            "capability {capability} does not authorize command {command}"
+                        ),
+                    };
+                }
                 if !capability_allowed(allowlist, &capability) {
                     self.log(
                         ActivityTone::Warning,
@@ -371,6 +390,8 @@ impl BridgeProxy {
         payload: Value,
         session: Option<&GuestSessionContext>,
     ) -> Result<Value> {
+        // Every command handled here must be bound to its required
+        // capability in `invoke_capability_authorizes` above.
         match command {
             "shell.workspaceInfo" => Ok(payload),
             "plugin:window|setTitle" => {
@@ -398,6 +419,28 @@ impl BridgeProxy {
 
 fn capability_allowed(allowlist: &[String], capability: &str) -> bool {
     allowlist.iter().any(|grant| grant == capability)
+}
+
+/// Command → capability binding for the invoke path.
+///
+/// Two capability naming schemes coexist: kebab-case `CapabilityGrant` names
+/// used by shell-managed routes (e.g. "read-file") and the command-shaped
+/// names declared in capsule manifests under
+/// `metadata.ato_desktop_guest.capabilities` (e.g. "plugin:fs|readFile").
+/// Each host command accepts only the capability names listed here; every
+/// other command is proxied to the guest's own backend, which is gated
+/// behind the manifest-declared "app.invoke" grant. Commands added to
+/// `dispatch_invoke` must declare their capability here or they fail closed.
+fn invoke_capability_authorizes(command: &str, capability: &str) -> bool {
+    let accepted: &[&str] = match command {
+        "shell.workspaceInfo" => &["workspace-info"],
+        "plugin:window|setTitle" => &["plugin:window|setTitle"],
+        "plugin:fs|readFile" => &["read-file", "plugin:fs|readFile"],
+        "plugin:dialog|open" => &["plugin:dialog|open"],
+        "shell.open" => &["open-external", "shell.open"],
+        _ => &["app.invoke"],
+    };
+    accepted.contains(&capability)
 }
 
 fn read_session_file(session: Option<&GuestSessionContext>, payload: &Value) -> Result<Value> {
@@ -520,6 +563,77 @@ mod tests {
         let response =
             bridge.handle_message(&request.to_string(), &["read-file".to_string()], None);
         assert!(matches!(response, GuestBridgeResponse::Denied { .. }));
+    }
+
+    #[test]
+    fn bridge_denies_command_invoked_under_unrelated_granted_capability() {
+        // Regression: holding any single grant must not unlock every host
+        // command. A guest granted only read-file claims that capability
+        // while invoking shell.open.
+        let bridge = BridgeProxy::new();
+        let request = serde_json::json!({
+            "kind": "invoke",
+            "request_id": 2,
+            "command": "shell.open",
+            "capability": "read-file",
+            "payload": {"url": "/System/Applications/Calculator.app"}
+        });
+        let response =
+            bridge.handle_message(&request.to_string(), &["read-file".to_string()], None);
+        assert!(matches!(response, GuestBridgeResponse::Denied { .. }));
+    }
+
+    #[test]
+    fn bridge_denies_backend_proxy_under_non_app_invoke_capability() {
+        // Unknown commands proxy to the guest backend and require the
+        // "app.invoke" grant; another granted capability must not stand in.
+        let bridge = BridgeProxy::new();
+        let request = serde_json::json!({
+            "kind": "invoke",
+            "request_id": 3,
+            "command": "ping",
+            "capability": "read-file",
+            "payload": {"message": "hi"}
+        });
+        let response =
+            bridge.handle_message(&request.to_string(), &["read-file".to_string()], None);
+        assert!(matches!(response, GuestBridgeResponse::Denied { .. }));
+    }
+
+    #[test]
+    fn bridge_allows_command_under_its_required_capability() {
+        let bridge = BridgeProxy::new();
+        let request = serde_json::json!({
+            "kind": "invoke",
+            "request_id": 4,
+            "command": "plugin:window|setTitle",
+            "capability": "plugin:window|setTitle",
+            "payload": {"title": "Hello"}
+        });
+        let response = bridge.handle_message(
+            &request.to_string(),
+            &["plugin:window|setTitle".to_string()],
+            None,
+        );
+        assert!(matches!(response, GuestBridgeResponse::Ok { .. }));
+    }
+
+    #[test]
+    fn bridge_authorizes_backend_proxy_under_app_invoke_grant() {
+        // With "app.invoke" granted, an unknown command passes authorization
+        // and reaches the backend proxy, which errors (not denies) without a
+        // guest session context.
+        let bridge = BridgeProxy::new();
+        let request = serde_json::json!({
+            "kind": "invoke",
+            "request_id": 5,
+            "command": "ping",
+            "capability": "app.invoke",
+            "payload": {"message": "hi"}
+        });
+        let response =
+            bridge.handle_message(&request.to_string(), &["app.invoke".to_string()], None);
+        assert!(matches!(response, GuestBridgeResponse::Error { .. }));
     }
 
     #[test]
