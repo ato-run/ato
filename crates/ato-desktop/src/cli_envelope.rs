@@ -38,6 +38,7 @@
 //! exercises the same shape against the same types.
 
 use capsule_wire::config::ConfigField;
+use capsule_wire::consent::{ConsentIdentity, ConsentRequiredDetails};
 use serde::Deserialize;
 
 /// `details` payload for E103 (`missing_required_env`). The desktop
@@ -54,45 +55,11 @@ pub struct MissingEnvDetailsDto {
     pub target: Option<String>,
 }
 
-/// Sentinel value the desktop matches on to route an E302
-/// (`ATO_ERR_EXECUTION_CONTRACT_INVALID`) envelope to the consent
-/// modal flow specifically. Any other E302 still falls through to
-/// the existing fatal-toast path so unrelated execution-contract
-/// errors keep their behaviour.
-pub const CONSENT_REQUIRED_REASON: &str = "execution_plan_consent_required";
-
-/// `details` payload for the E302 sub-shape emitted by
-/// `ato-cli::application::auth::consent_store::require_consent` when
-/// stdin is non-TTY. Carries the full identity tuple needed to round-
-/// trip back through `ato internal consent approve-execution-plan`,
-/// plus a pre-rendered human-readable summary so the desktop can
-/// populate the modal without a second CLI call.
-///
-/// All fields are required on the wire (the CLI emits them
-/// unconditionally), but they are `#[serde(default)]` so a future CLI
-/// that drops one keeps parsing — `consent_required_details` returns
-/// `None` only on shape errors.
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
-pub struct ConsentRequiredDetailsDto {
-    /// Discriminator: must equal `CONSENT_REQUIRED_REASON`. Older
-    /// E302 envelopes (without this field) are rejected by
-    /// `consent_required_details` so the caller falls through to the
-    /// generic fatal-toast path.
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub scoped_id: String,
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub target_label: String,
-    #[serde(default)]
-    pub policy_segment_hash: String,
-    #[serde(default)]
-    pub provisioning_policy_hash: String,
-    #[serde(default)]
-    pub summary: String,
-}
+// The consent-required wire shape (`ConsentRequiredDetails`) and its routing
+// discriminator (`capsule_wire::consent::CONSENT_REQUIRED_REASON`) now live
+// in `capsule-wire`, single-sourced with the CLI producer and the runner's
+// stdout consumer. The desktop deserializes into that shared type directly
+// (see `consent_required_details` below) instead of mirroring the tuple.
 
 /// Desktop projection of `apps/ato-cli/src/utils/error.rs::AtoErrorEvent`,
 /// the on-the-wire shape for any `AtoExecutionError` under `--json`. The
@@ -125,33 +92,20 @@ impl AtoCliErrorEventDto {
         serde_json::from_value(value).ok()
     }
 
-    /// Decode `details` as the consent-required shape. Returns `None`
-    /// unless `details.reason == "execution_plan_consent_required"`
-    /// AND every consent-key field is non-empty — both gates protect
-    /// the caller from routing an unrelated E302 to the consent modal.
-    /// Old E302 envelopes (no `reason` field, generic
-    /// `ExecutionContractInvalid`) intentionally yield `None` here so
-    /// they fall through to the existing fatal-toast path.
-    pub fn consent_required_details(&self) -> Option<ConsentRequiredDetailsDto> {
+    /// Decode `details` as the consent-required shape, returning the
+    /// validated [`ConsentIdentity`]. Returns `None` unless
+    /// `details.reason == "execution_plan_consent_required"` AND every
+    /// consent-key field is well-formed — both gates (applied by the
+    /// shared `capsule-wire` validation) protect the caller from routing
+    /// an unrelated or unsatisfiable E302 to the consent modal. Old E302
+    /// envelopes (no `reason` field, or a generic `ExecutionContractInvalid`
+    /// whose `details` lacks the identity tuple) yield `None` here — the
+    /// strict wire shape fails to deserialize, or `consent_required`
+    /// rejects it — so they fall through to the existing fatal-toast path.
+    pub fn consent_required_details(&self) -> Option<ConsentIdentity> {
         let value = self.details.clone()?;
-        let dto: ConsentRequiredDetailsDto = serde_json::from_value(value).ok()?;
-        if dto.reason.as_deref() != Some(CONSENT_REQUIRED_REASON) {
-            return None;
-        }
-        if dto.scoped_id.is_empty()
-            || dto.version.is_empty()
-            || dto.target_label.is_empty()
-            || dto.policy_segment_hash.is_empty()
-            || dto.provisioning_policy_hash.is_empty()
-        {
-            // A consent envelope with empty identity fields is
-            // structurally broken — we can't round-trip it through the
-            // `internal consent approve-execution-plan` plumbing
-            // either way. Treat as "fall back to fatal toast" rather
-            // than render a modal that can't actually be approved.
-            return None;
-        }
-        Some(dto)
+        let details: ConsentRequiredDetails = serde_json::from_value(value).ok()?;
+        details.consent_required().cloned()
     }
 }
 
@@ -313,7 +267,6 @@ mod tests {
         let details = event
             .consent_required_details()
             .expect("consent details present");
-        assert_eq!(details.reason.as_deref(), Some(CONSENT_REQUIRED_REASON));
         assert_eq!(details.scoped_id, "wasedap2p-backend");
         assert_eq!(details.version, "0.1.0");
         assert_eq!(details.target_label, "app");
