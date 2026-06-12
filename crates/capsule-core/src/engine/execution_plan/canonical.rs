@@ -12,7 +12,12 @@ use crate::security::path::validate_path;
 
 /// Schema tag baked into the `consent_ref` hash input so a future change to the
 /// consent key structure cannot collide with or be misread as an older ref.
-pub const CONSENT_REF_SCHEMA: &str = "execution_plan_consent_v1";
+///
+/// Single-sourced from [`capsule_wire::consent::CONSENT_REQUIRED_SCHEMA`] so
+/// the hash input here, the runner's `CONSENT-REQUIRED:` validation, and the
+/// CLI's emitted line all agree on one literal — a divergence here would
+/// recompute a different `consent_ref` and silently break approval binding.
+pub const CONSENT_REF_SCHEMA: &str = capsule_wire::consent::CONSENT_REQUIRED_SCHEMA;
 
 #[derive(Serialize)]
 struct ConsentRefInput<'a> {

@@ -52,22 +52,6 @@ fn consent_record_for_plan(plan: &ExecutionPlan) -> ConsentRecord {
     )
 }
 
-/// Machine-readable `CONSENT-REQUIRED:` line payload (borrow-only). Emitted to
-/// stdout in non-interactive mode so the Connected Runner can parse it as
-/// `ChildSignal::ConsentRequired` (see runner_agent.rs). Carries the full
-/// identity 5-tuple plus the derived `consent_ref` and the human summary.
-#[derive(Serialize)]
-struct ConsentRequiredLine<'a> {
-    schema: &'a str,
-    consent_ref: &'a str,
-    scoped_id: &'a str,
-    version: &'a str,
-    target_label: &'a str,
-    policy_segment_hash: &'a str,
-    provisioning_policy_hash: &'a str,
-    summary: &'a str,
-}
-
 pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), AtoExecutionError> {
     if has_consent(plan)? {
         return Ok(());
@@ -123,16 +107,19 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
         // serializes — never a malformed/empty-ref signal. On any failure we
         // skip the line and still return the unchanged E302 below (fail closed).
         if let Ok(consent_ref) = capsule_core::execution_plan::canonical::consent_ref(&plan.consent)
-            && let Ok(machine_line) = serde_json::to_string(&ConsentRequiredLine {
-                schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA,
-                consent_ref: &consent_ref,
-                scoped_id: &scoped_id,
-                version: &version,
-                target_label: &target_label,
-                policy_segment_hash: &policy_segment_hash,
-                provisioning_policy_hash: &provisioning_policy_hash,
-                summary: &summary,
-            })
+            && let Ok(machine_line) =
+                serde_json::to_string(&capsule_wire::consent::ConsentRequiredLine {
+                    schema: capsule_wire::consent::CONSENT_REQUIRED_SCHEMA.to_string(),
+                    consent_ref,
+                    identity: capsule_wire::consent::ConsentIdentity {
+                        scoped_id: scoped_id.clone(),
+                        version: version.clone(),
+                        target_label: target_label.clone(),
+                        policy_segment_hash: policy_segment_hash.clone(),
+                        provisioning_policy_hash: provisioning_policy_hash.clone(),
+                        summary: summary.clone(),
+                    },
+                })
         {
             println!("CONSENT-REQUIRED: {machine_line}");
         }
