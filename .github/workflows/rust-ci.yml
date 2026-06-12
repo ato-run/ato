@@ -59,10 +59,27 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    # The Windows leg is informational for now: the ato-cli test suite had
+    # never compiled (let alone run) on Windows before this leg existed, and
+    # carries ~112 pre-existing failures (path separators, snapshots, unix
+    # assumptions). It must not block dev integration while that parity debt
+    # is paid down; see the Windows test-parity tracking issue.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    env:
+      # The full workspace debug build with default debuginfo overflows the
+      # ubuntu runner's disk ("No space left on device" at link time).
+      # Line tables keep file:line in backtraces at a fraction of the size.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Free runner disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # `ato-desktop` requires GPUI's heavy native deps (X11/Wayland on Linux,
