@@ -5716,7 +5716,6 @@ mod fast_path_tests {
             user_visible_url: None,
             requested_by_client: None,
             runtime_owner: None,
-            readiness_confirmed: false,
         }
     }
 
