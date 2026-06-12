@@ -94,23 +94,6 @@ pub enum ShellEvent {
         pane_id: usize,
         title: String,
     },
-    GuestConsoleLog {
-        pane_id: usize,
-        level: String,
-        message: String,
-    },
-    GuestNetworkStart {
-        pane_id: usize,
-        request_id: String,
-        method: String,
-        url: String,
-    },
-    GuestNetworkEnd {
-        pane_id: usize,
-        request_id: String,
-        status: u16,
-        duration_ms: u64,
-    },
     ProcessLog {
         pane_id: usize,
         message: String,
@@ -605,6 +588,37 @@ mod tests {
         let response =
             bridge.handle_message(&request.to_string(), &["read-file".to_string()], None);
         assert!(matches!(response, GuestBridgeResponse::Denied { .. }));
+    }
+
+    #[test]
+    fn bridge_denies_devtools_telemetry_invoke() {
+        // Regression for #652: the removed DevTools guest-telemetry path
+        // POSTed invokes under a synthetic "__devtools__" capability. That
+        // capability is not part of the grant vocabulary and no host command
+        // declares it, so the channel must fail closed — even if a guest were
+        // somehow granted "__devtools__", no devtools.* command authorizes it.
+        let bridge = BridgeProxy::new();
+        for command in [
+            "devtools.console",
+            "devtools.network.start",
+            "devtools.network.end",
+        ] {
+            let request = serde_json::json!({
+                "kind": "invoke",
+                "request_id": 6,
+                "command": command,
+                "capability": "__devtools__",
+                "payload": {"message": "telemetry"}
+            });
+            // Granting "__devtools__" outright still fails closed because no
+            // command accepts it as an authorizing capability.
+            let response =
+                bridge.handle_message(&request.to_string(), &["__devtools__".to_string()], None);
+            assert!(
+                matches!(response, GuestBridgeResponse::Denied { .. }),
+                "{command} under __devtools__ should be denied"
+            );
+        }
     }
 
     #[test]
