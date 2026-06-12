@@ -2,7 +2,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -430,14 +429,22 @@ fn open_external(payload: &Value) -> Result<Value> {
         .get("url")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("shell.open requires string payload.url"))?;
-    let status = Command::new("open")
-        .arg(url)
-        .status()
+    validate_external_url(url)?;
+    crate::proc_util::open_external_url(url)
         .with_context(|| format!("failed to invoke open for {url}"))?;
-    if !status.success() {
-        anyhow::bail!("open returned non-zero status for {url}");
-    }
     Ok(serde_json::json!({ "opened": url }))
+}
+
+/// Guests may only open web links in the user's browser. Reject `file://`
+/// URLs, bare paths, and custom schemes so a guest cannot launch arbitrary
+/// local files, app bundles, or scheme handlers through the OS open command
+/// (matches the dock/app external-open paths).
+fn validate_external_url(url: &str) -> Result<()> {
+    let parsed = Url::parse(url).with_context(|| format!("invalid shell.open URL {url}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("shell.open can open only http(s) URLs: {url}");
+    }
+    Ok(())
 }
 
 fn proxy_to_guest_backend(
@@ -536,5 +543,27 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
         assert_eq!(value["status"], "ok");
         assert_eq!(value["request_id"], 7);
+    }
+
+    #[test]
+    fn validate_external_url_accepts_http_and_https() {
+        assert!(validate_external_url("http://example.com/path").is_ok());
+        assert!(validate_external_url("https://example.com").is_ok());
+    }
+
+    #[test]
+    fn validate_external_url_rejects_non_web_schemes() {
+        assert!(validate_external_url("file:///Users/me/.ssh/config").is_err());
+        assert!(validate_external_url("file:///Applications/Planted.app").is_err());
+        assert!(validate_external_url("ssh://example.com").is_err());
+        assert!(validate_external_url("x-custom-handler://payload").is_err());
+        assert!(validate_external_url("/etc/passwd").is_err());
+        assert!(validate_external_url("not a url").is_err());
+    }
+
+    #[test]
+    fn open_external_rejects_file_url_payload() {
+        let payload = serde_json::json!({ "url": "file:///etc/passwd" });
+        assert!(open_external(&payload).is_err());
     }
 }
