@@ -99,9 +99,9 @@ pub(crate) fn clear_install_lifecycle_context() {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// let _guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx);
-/// execute_run_command(...)?;
+/// execute_run_command(/* ... */)?;
 /// // Context is cleared here automatically.
 /// ```
 pub(crate) struct ScopedInstallLifecycleGuard;
@@ -499,6 +499,10 @@ fn auto_attach_state_args_for_community_toml_manifest(
 // types out so `ato-desktop` can read records without depending on
 // `ato-cli`.
 
+// The argument list maps 1:1 onto the `ato app session start` CLI flags
+// (dispatch/app.rs annotates each call site); a bag-of-options struct would
+// only relocate the width without making any call site clearer.
+#[allow(clippy::too_many_arguments)]
 pub fn start_session(
     handle: &str,
     target_label: Option<&str>,
@@ -5342,10 +5346,10 @@ mod tests {
         // setup failure.
         let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(pids) = listener_pids_on_port(port) {
-                if pids.contains(&workload_pid) {
-                    break;
-                }
+            if let Ok(pids) = listener_pids_on_port(port)
+                && pids.contains(&workload_pid)
+            {
+                break;
             }
             if std::time::Instant::now() >= bound_deadline {
                 let _ = unsafe { libc::kill(workload_pid as libc::pid_t, libc::SIGKILL) };
@@ -5485,10 +5489,10 @@ mod tests {
 
         let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(pids) = listener_pids_on_port(port) {
-                if pids.contains(&workload_pid) {
-                    break;
-                }
+            if let Ok(pids) = listener_pids_on_port(port)
+                && pids.contains(&workload_pid)
+            {
+                break;
             }
             if std::time::Instant::now() >= bound_deadline {
                 let _ = unsafe { libc::kill(workload_pid as libc::pid_t, libc::SIGKILL) };
@@ -5610,10 +5614,10 @@ mod tests {
         // 10s budget as the sibling fallback test.
         let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(pids) = listener_pids_on_port(port) {
-                if !pids.is_empty() {
-                    break;
-                }
+            if let Ok(pids) = listener_pids_on_port(port)
+                && !pids.is_empty()
+            {
+                break;
             }
             if std::time::Instant::now() >= bound_deadline {
                 let pgid = unsafe { libc::getpgid(wrapper_pid as libc::pid_t) };
@@ -5898,7 +5902,7 @@ mod tests {
         // assertion checks "unchanged", not "absent" — robust regardless of
         // the ambient environment.
         let before: Vec<Option<std::ffi::OsString>> =
-            ENV_KEYS.iter().map(|key| std::env::var_os(key)).collect();
+            ENV_KEYS.iter().map(std::env::var_os).collect();
 
         let ctx = crate::cli::commands::run::InstallLifecycleContext {
             installed_app_id: "app_env".to_string(),

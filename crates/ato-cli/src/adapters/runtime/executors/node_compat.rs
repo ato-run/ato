@@ -574,10 +574,9 @@ fn build_runtime_command(
     if matches!(
         execution_plan.target.runtime,
         ExecutionRuntime::Web | ExecutionRuntime::Source
-    ) {
-        if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
-            cmd.env("PORT", port.to_string());
-        }
+    ) && let Some(port) = runtime_overrides::override_port(plan.execution_port())
+    {
+        cmd.env("PORT", port.to_string());
     }
     if execution_plan.target.runtime == ExecutionRuntime::Web {
         if !dangerously_skip_permissions {

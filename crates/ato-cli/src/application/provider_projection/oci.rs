@@ -571,11 +571,11 @@ impl OciProjectionPlan {
         let mut args: Vec<String> = vec!["create".into(), "--name".into(), self.name.clone()];
 
         // --platform only when creating an emulated (non-native) container.
-        if let Some(platform) = &self.platform {
-            if platform.architecture != host.architecture {
-                args.push("--platform".into());
-                args.push(format!("linux/{}", platform.architecture));
-            }
+        if let Some(platform) = &self.platform
+            && platform.architecture != host.architecture
+        {
+            args.push("--platform".into());
+            args.push(format!("linux/{}", platform.architecture));
         }
         // Render both label sets (launch + provider bookkeeping) merged into a
         // single sorted sequence, so the emitted `--label` flags are equivalent

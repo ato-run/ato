@@ -679,10 +679,10 @@ pub(super) fn delete_capsule_from_index(
             });
         }
 
-        if capsule.latest_version == removed.version {
-            if let Some(last) = capsule.releases.last() {
-                capsule.latest_version = last.version.clone();
-            }
+        if capsule.latest_version == removed.version
+            && let Some(last) = capsule.releases.last()
+        {
+            capsule.latest_version = last.version.clone();
         }
         capsule.updated_at = now.to_string();
         return DeleteCapsuleOutcome::Deleted(DeleteCapsuleResult {

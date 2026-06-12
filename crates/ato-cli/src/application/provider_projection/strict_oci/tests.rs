@@ -21,7 +21,7 @@ fn clean_facts() -> OciStrictFacts {
 fn strict(
     facts: &OciStrictFacts,
     enforcement: &OciProviderEnforcement,
-) -> Result<(), AtoExecutionError> {
+) -> Result<(), Box<AtoExecutionError>> {
     enforce_strict_oci(facts, enforcement, LaunchProfile::Strict, RID)
 }
 
@@ -201,7 +201,7 @@ fn service(label: &str, facts: OciStrictFacts) -> OciServiceStrict {
     }
 }
 
-fn strict_services(services: &[OciServiceStrict]) -> Result<(), AtoExecutionError> {
+fn strict_services(services: &[OciServiceStrict]) -> Result<(), Box<AtoExecutionError>> {
     enforce_strict_oci_services(services, LaunchProfile::Strict, None)
 }
 

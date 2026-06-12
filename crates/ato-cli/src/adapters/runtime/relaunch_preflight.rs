@@ -173,15 +173,15 @@ fn preflight_with_persist(
     // Best-effort write-through of *durable* resolutions only (transient host-env
     // presence is excluded). The in-memory resolved claims remain authoritative
     // for this launch, so a persistence failure warns and continues.
-    if let Some(persist_claims) = resolution.durable_persist_claims() {
-        if let Err(err) = persist(&persist_claims) {
-            tracing::warn!(
-                error = %err,
-                install_profile_key,
-                "failed to persist resolved launch conditions; \
-                 using in-memory resolution for this launch"
-            );
-        }
+    if let Some(persist_claims) = resolution.durable_persist_claims()
+        && let Err(err) = persist(&persist_claims)
+    {
+        tracing::warn!(
+            error = %err,
+            install_profile_key,
+            "failed to persist resolved launch conditions; \
+             using in-memory resolution for this launch"
+        );
     }
     for update in &resolution.updates {
         tracing::debug!(
