@@ -15,7 +15,6 @@
 //! those paths with `--tmpfs` so they appear as empty directories inside
 //! the sandbox.
 
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -110,13 +109,13 @@ fn sandbox_venv_python(target: &SourceTarget) -> Option<SandboxVenv> {
 fn venv_base_install(venv_dir: &std::path::Path) -> Option<PathBuf> {
     if let Ok(cfg) = std::fs::read_to_string(venv_dir.join("pyvenv.cfg")) {
         for line in cfg.lines() {
-            if let Some((key, value)) = line.split_once('=') {
-                if key.trim() == "home" {
-                    let home = PathBuf::from(value.trim());
-                    // `home` is the base interpreter's bin/ — bind its parent
-                    // (the install root) so stdlib under lib/ is also present.
-                    return Some(home.parent().map(|p| p.to_path_buf()).unwrap_or(home));
-                }
+            if let Some((key, value)) = line.split_once('=')
+                && key.trim() == "home"
+            {
+                let home = PathBuf::from(value.trim());
+                // `home` is the base interpreter's bin/ — bind its parent
+                // (the install root) so stdlib under lib/ is also present.
+                return Some(home.parent().map(|p| p.to_path_buf()).unwrap_or(home));
             }
         }
     }
@@ -282,16 +281,18 @@ pub fn generate_landlock_policy(target: &SourceTarget) -> crate::system::sandbox
 fn guest_landlock_policy(target: &SourceTarget) -> crate::system::sandbox::SandboxPolicy {
     use crate::system::sandbox::SandboxPolicy;
 
-    let mut policy = SandboxPolicy::default();
-    policy.read_only_paths = vec![PathBuf::from("/")];
-    policy.read_write_paths = vec![
-        PathBuf::from("/tmp"),
-        PathBuf::from("/var/tmp"),
-        // Source is mounted read-only at /app; mirror the prior policy's intent
-        // of treating the capsule's own dir as writable. bwrap's read-only bind
-        // still wins, so this grants nothing extra.
-        PathBuf::from("/app"),
-    ];
+    let mut policy = SandboxPolicy {
+        read_only_paths: vec![PathBuf::from("/")],
+        read_write_paths: vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/var/tmp"),
+            // Source is mounted read-only at /app; mirror the prior policy's
+            // intent of treating the capsule's own dir as writable. bwrap's
+            // read-only bind still wins, so this grants nothing extra.
+            PathBuf::from("/app"),
+        ],
+        ..SandboxPolicy::default()
+    };
     for mount in &target.injected_mounts {
         if !mount.readonly {
             policy.read_write_paths.push(mount.target.clone());
