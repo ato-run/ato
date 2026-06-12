@@ -454,18 +454,6 @@ fn import_run_keep_alive_returns_session_and_leaves_server_running() -> Result<(
     if !python3_available() {
         return Ok(());
     }
-    // KNOWN LINUX BUG: `ato stop` returns success but the bwrap-sandboxed app
-    // server keeps accepting connections (>5s after stop) — the recorded
-    // process groups don't reach the namespaced child. Reproduces on every
-    // ubuntu CI run incl. main 2026-06-08; passes on macOS. Un-skip as the
-    // regression guard when the Linux stop teardown is fixed.
-    if cfg!(target_os = "linux") {
-        eprintln!(
-            "skipping import_run_keep_alive_returns_session_and_leaves_server_running: \
-             linux stop does not yet tear down the sandboxed keep-alive server"
-        );
-        return Ok(());
-    }
 
     let root = test_root("keep-alive-session")?;
     let _cleanup = Cleanup(root.clone());
@@ -542,14 +530,6 @@ port = {port}
 #[cfg(unix)]
 fn import_run_keep_alive_stop_all_stops_session() -> Result<()> {
     if !python3_available() {
-        return Ok(());
-    }
-    // KNOWN LINUX BUG: see import_run_keep_alive_returns_session_and_leaves_server_running.
-    if cfg!(target_os = "linux") {
-        eprintln!(
-            "skipping import_run_keep_alive_stop_all_stops_session: \
-             linux stop does not yet tear down the sandboxed keep-alive server"
-        );
         return Ok(());
     }
 
