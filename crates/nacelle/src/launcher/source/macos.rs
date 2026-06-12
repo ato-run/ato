@@ -42,6 +42,24 @@ fn allowed_mount_host_path(mount: &crate::launcher::InjectedMount) -> PathBuf {
         .unwrap_or_else(|| mount.source.clone())
 }
 
+/// Env keys the runtime re-applies inside the production sandbox after
+/// `env_clear`. This is a STRICT allowlist — only keys the runtime itself
+/// synthesizes for the sandbox contract (the writable session data dir), never
+/// general user/host env. `env_clear` deliberately drops everything else.
+/// Mirrors `SANDBOX_RUNTIME_ENV_ALLOWLIST` in `linux.rs`; keep the two in sync.
+const SANDBOX_RUNTIME_ENV_ALLOWLIST: &[&str] = &["ATO_DATA_DIR", "DATABASE_PATH"];
+
+/// Select the entries of the workload env that the runtime is allowed to
+/// re-inject past `env_clear`. Order is preserved; `Command::env` applies
+/// last-write-wins for duplicate keys.
+fn sandbox_runtime_setenv_pairs(env: Option<&[(String, String)]>) -> Vec<(String, String)> {
+    env.into_iter()
+        .flatten()
+        .filter(|(key, _)| SANDBOX_RUNTIME_ENV_ALLOWLIST.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Resolve the executable and arguments based on target.cmd or language detection
 ///
 /// This function handles various scenarios:
@@ -334,11 +352,23 @@ async fn launch_with_sandbox_exec(
         .unwrap_or_else(|_| requested_host_cwd(target));
     cmd.current_dir(&canonical_cwd);
 
-    // Apply user-provided environment variables
-    if let Some(ref envs) = request.env {
-        for (key, value) in envs {
-            cmd.env(key, value);
-        }
+    // SECURITY: start the sandboxed child from a cleared environment so host
+    // secrets (AWS_SECRET_ACCESS_KEY, API tokens, ...) never leak into the
+    // capsule. sandbox-exec itself performs no env scrubbing, so the launcher
+    // must do it here — mirrors the Linux production path's `--clearenv`
+    // discipline (linux.rs).
+    cmd.env_clear();
+    // Re-add essential env vars (same baseline as the Linux path).
+    cmd.env("PATH", "/usr/bin:/bin");
+    cmd.env("HOME", "/tmp");
+    cmd.env("LANG", "C.UTF-8");
+
+    // Re-apply runtime-owned env that must survive env_clear. Strict
+    // allowlist (SANDBOX_RUNTIME_ENV_ALLOWLIST) — e.g. ATO_DATA_DIR /
+    // DATABASE_PATH for the writable session data dir. General user/host env
+    // stays dropped.
+    for (key, value) in sandbox_runtime_setenv_pairs(request.env.as_deref()) {
+        cmd.env(key, value);
     }
 
     // Apply sidecar (SOCKS5 proxy) environment variables
@@ -938,6 +968,30 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_runtime_env_allowlist_filters_to_runtime_keys() {
+        // Only runtime-owned keys survive env_clear; general user/host env is
+        // dropped (no FOO/secret leak into the sandbox). Parity with the
+        // Linux --clearenv regression test in linux.rs.
+        let env = vec![
+            ("ATO_DATA_DIR".to_string(), "/runs/ato/session".to_string()),
+            (
+                "DATABASE_PATH".to_string(),
+                "/runs/ato/session/app.db".to_string(),
+            ),
+            ("FOO".to_string(), "bar".to_string()),
+            ("SECRET_TOKEN".to_string(), "shhh".to_string()),
+        ];
+        let pairs = sandbox_runtime_setenv_pairs(Some(&env));
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["ATO_DATA_DIR", "DATABASE_PATH"]);
+        assert!(
+            !keys.contains(&"FOO") && !keys.contains(&"SECRET_TOKEN"),
+            "general user/host env must not survive env_clear"
+        );
+        assert!(sandbox_runtime_setenv_pairs(None).is_empty());
+    }
+
+    #[test]
     fn test_escape_path_for_sbpl() {
         // Test basic path
         let path = PathBuf::from("/tmp/test");
@@ -1023,5 +1077,111 @@ mod tests {
         let status = child.wait().unwrap();
         assert!(status.success(), "sandboxed process failed: {status:?}");
         assert_eq!(std::fs::read_to_string(output_path).unwrap(), "ok");
+    }
+
+    /// Regression test for ato-run/ato#640: the sandbox-exec child must start
+    /// from a cleared environment. Host env (e.g. cargo's CARGO_MANIFEST_DIR
+    /// in this test process) and non-allowlisted request env (a fake AWS
+    /// secret) must not be visible inside the capsule; allowlisted
+    /// runtime-owned env (ATO_DATA_DIR) must survive.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_sandbox_exec_clears_host_env() {
+        if !is_seatbelt_available() || which::which("python3").is_err() {
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let log_dir = temp_dir.path().join("logs");
+        let state_dir = temp_dir.path().join("state");
+        std::fs::create_dir_all(&source_dir).unwrap();
+
+        let output_path = source_dir.join("env-dump.txt");
+        let script_path = source_dir.join("main.py");
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import os
+from pathlib import Path
+keys = ["AWS_SECRET_ACCESS_KEY", "CARGO_MANIFEST_DIR", "ATO_DATA_DIR", "HOME"]
+lines = ["{{}}={{}}".format(k, os.environ.get(k, "<unset>")) for k in keys]
+Path({output_path:?}).write_text("\n".join(lines), encoding="utf-8")
+"#
+            ),
+        )
+        .unwrap();
+
+        let runtime = SourceRuntime::new(crate::launcher::source::SourceRuntimeConfig {
+            dev_mode: false,
+            log_dir,
+            state_dir,
+            sidecar_config: None,
+        });
+
+        let target = SourceTarget {
+            language: "python".to_string(),
+            version: None,
+            entrypoint: "main.py".to_string(),
+            dependencies: None,
+            args: vec![],
+            source_dir: source_dir.clone(),
+            requested_cwd: None,
+            cmd: None,
+            dev_mode: false,
+            isolation: Some(IsolationPolicy {
+                sandbox_enabled: true,
+                read_only_paths: vec![],
+                read_write_paths: vec![],
+                network_enabled: false,
+                egress_allow: vec![],
+                egress_id_allow: vec![],
+            }),
+            ipc_socket_paths: vec![],
+            injected_mounts: vec![],
+            ..Default::default()
+        };
+
+        let request = LaunchRequest {
+            workload_id: "macos-seatbelt-env-clear",
+            bundle_root: source_dir.clone(),
+            env: Some(vec![
+                // Simulates a host secret smuggled into the workload env —
+                // must NOT survive the allowlist.
+                ("AWS_SECRET_ACCESS_KEY".to_string(), "leaked".to_string()),
+                // Runtime-owned contract key — must survive.
+                ("ATO_DATA_DIR".to_string(), "/runs/ato/session".to_string()),
+            ]),
+            args: None,
+            source_target: Some(target.clone()),
+            socket_manager: None,
+        };
+
+        let result = launch_native_macos(&runtime, &request, &target)
+            .await
+            .unwrap();
+        assert!(result.pid.is_some());
+
+        let mut child = runtime.take_child("macos-seatbelt-env-clear").unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "sandboxed process failed: {status:?}");
+
+        let dump = std::fs::read_to_string(output_path).unwrap();
+        assert!(
+            dump.contains("AWS_SECRET_ACCESS_KEY=<unset>"),
+            "non-allowlisted request env leaked into the sandbox: {dump}"
+        );
+        assert!(
+            dump.contains("CARGO_MANIFEST_DIR=<unset>"),
+            "host env inherited into the sandbox (env_clear missing): {dump}"
+        );
+        assert!(
+            dump.contains("ATO_DATA_DIR=/runs/ato/session"),
+            "allowlisted runtime env must survive env_clear: {dump}"
+        );
+        assert!(
+            dump.contains("HOME=/tmp"),
+            "HOME must be pinned to the sandbox baseline: {dump}"
+        );
     }
 }
