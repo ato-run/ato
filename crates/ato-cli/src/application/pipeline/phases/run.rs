@@ -1799,7 +1799,7 @@ where
         }),
         &request.capsule_launch_inputs,
     )?;
-    let state_source_overrides =
+    let mut state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
             authoritative_input
                 .effective_state
@@ -1808,6 +1808,25 @@ where
         } else {
             HashMap::new()
         };
+    // Headless / Connected Runner state auto-provisioning (#687). `ato run
+    // <source> --sandbox` (what the runner spawns) carries no `--state`
+    // binding, so a recipe declaring a `[state.*]` block would otherwise
+    // hard-error on the unbound persistent state. Mirror the desktop path by
+    // auto-provisioning a per-source `~/.ato/state/run/...` directory for any
+    // declared state that is still unbound. Only the authoritative-input path
+    // is provisioned here; the non-authoritative branch provisions against its
+    // freshly loaded manifest below.
+    if request.sandbox_mode
+        && request.authoritative_input.is_some()
+        && manifest_path.exists()
+        && let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
+            &manifest_path,
+            validation_mode,
+        )
+    {
+        state_source_overrides =
+            auto_provision_headless_state_overrides(&loaded.model, &state_source_overrides)?;
+    }
     let mut decision = if let Some(authoritative_input) = request.authoritative_input.as_ref() {
         let mut decision = capsule_core::router::route_lock_with_state_overrides(
             &authoritative_input.lock_path,
@@ -1873,8 +1892,15 @@ where
                 "schema_version=0.3 type=library package cannot be started with `ato run`"
             );
         }
-        let state_source_overrides =
-            resolve_state_source_overrides(&manifest, &request.state_bindings)?;
+        let mut state_source_overrides =
+            resolve_explicit_or_auto_state_source_overrides(&manifest, request)?;
+        // Headless / Connected Runner state auto-provisioning (#687): fill in
+        // a `~/.ato/state/run/...` directory for any declared state still
+        // unbound after the explicit `--state` bindings were applied.
+        if request.sandbox_mode {
+            state_source_overrides =
+                auto_provision_headless_state_overrides(&manifest, &state_source_overrides)?;
+        }
         capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
             &manifest_path,
             router::ExecutionProfile::Dev,
@@ -4362,11 +4388,34 @@ pub(crate) fn resolve_state_source_overrides(
     resolve_state_source_overrides_with_store(manifest, raw_bindings, None)
 }
 
+/// Resolve `--state` bindings for a run, deferring to headless auto-provisioning
+/// for any remaining unbound persistent state when the run is sandboxed (#687).
+///
+/// In `--sandbox` mode the missing-binding hard error is suppressed because the
+/// caller auto-provisions the remaining declared state immediately afterward.
+/// Without `--sandbox` the original fail-closed behavior is preserved: a
+/// persistent state with no `--state` binding is still an error.
+fn resolve_explicit_or_auto_state_source_overrides(
+    manifest: &CapsuleManifest,
+    request: &ConsumerRunRequest,
+) -> Result<HashMap<String, String>> {
+    if !request.sandbox_mode {
+        return resolve_state_source_overrides(manifest, &request.state_bindings);
+    }
+    let requested = parse_explicit_state_bindings(&request.state_bindings)?;
+    resolve_requested_state_source_overrides_lenient(manifest, &requested, None)
+}
+
 pub(crate) fn resolve_state_source_overrides_with_store(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
     store: Option<&RegistryStore>,
 ) -> Result<HashMap<String, String>> {
+    let requested = parse_explicit_state_bindings(raw_bindings)?;
+    resolve_state_source_overrides_from_requested(manifest, &requested, store)
+}
+
+fn parse_explicit_state_bindings(raw_bindings: &[String]) -> Result<HashMap<String, String>> {
     let mut requested = HashMap::new();
     for raw in raw_bindings {
         let (state_name, locator) = raw.split_once('=').ok_or_else(|| {
@@ -4393,8 +4442,56 @@ pub(crate) fn resolve_state_source_overrides_with_store(
             );
         }
     }
+    Ok(requested)
+}
 
-    resolve_state_source_overrides_from_requested(manifest, &requested, store)
+/// Resolve explicitly-requested `--state` bindings without erroring on declared
+/// persistent state that has no binding. Used by the headless auto-provisioning
+/// path (#687), which fills any remaining declared state immediately after.
+/// Validation of the requested bindings themselves (undeclared / non-persistent)
+/// is still enforced.
+fn resolve_requested_state_source_overrides_lenient(
+    manifest: &CapsuleManifest,
+    requested: &HashMap<String, String>,
+    store: Option<&RegistryStore>,
+) -> Result<HashMap<String, String>> {
+    for state_name in requested.keys() {
+        let requirement = manifest.state.get(state_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--state references undeclared manifest state '{}'",
+                state_name
+            )
+        })?;
+        if requirement.durability != StateDurability::Persistent {
+            anyhow::bail!(
+                "--state only supports persistent manifest state; '{}' is {:?}",
+                state_name,
+                requirement.durability
+            );
+        }
+    }
+
+    let mut resolved = HashMap::new();
+    for (state_name, locator) in requested {
+        let record = if parse_state_reference(locator).is_some() {
+            match store {
+                Some(store) => resolve_registered_state_reference_in_store(
+                    manifest, state_name, locator, store,
+                )?,
+                None => resolve_registered_state_reference(manifest, state_name, locator)?,
+            }
+        } else {
+            match store {
+                Some(store) => {
+                    ensure_registered_state_binding_in_store(manifest, state_name, locator, store)?
+                }
+                None => ensure_registered_state_binding(manifest, state_name, locator)?,
+            }
+        };
+        resolved.insert(state_name.clone(), record.backend_locator);
+    }
+
+    Ok(resolved)
 }
 
 fn resolve_state_source_overrides_from_requested(
@@ -4463,6 +4560,74 @@ fn resolve_state_source_overrides_from_requested(
     }
 
     Ok(resolved)
+}
+
+/// Headless / Connected Runner state auto-provisioning.
+///
+/// `ato run <source> --sandbox` (what `ato runner serve` spawns for every lease)
+/// never receives a `--state` binding, so any recipe that declares a `[state.*]`
+/// block would hard-error in `state_source_path` (`requires an explicit
+/// persistent binding`) or fail container creation on the un-creatable
+/// `/var/lib/ato/state` ephemeral base. The desktop / session path already
+/// auto-provisions a per-source directory; this provides the equivalent for the
+/// headless path so stateful capsules can run on a runner (#687).
+///
+/// For every declared state that is not already bound (by `--state`, the
+/// workspace binding seed, or the embedded lock binding), a stable
+/// `~/.ato/state/run/<capsule-name>/<state-name>` directory is created and used
+/// as the override source. Both the capsule name and the state name are
+/// kebab-case-validated by manifest validation, so they are path-safe.
+///
+/// Fails closed on any state `kind` other than `filesystem`: an auto-provisioned
+/// host directory is only a meaningful backend for a filesystem state, and a
+/// future non-filesystem kind must opt in explicitly rather than be silently
+/// mis-provisioned as a directory.
+fn auto_provision_headless_state_overrides(
+    manifest: &CapsuleManifest,
+    existing_overrides: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    use capsule_core::types::StateKind;
+
+    let mut overrides = existing_overrides.clone();
+    if manifest.state.is_empty() {
+        return Ok(overrides);
+    }
+
+    let state_root = capsule_core::common::paths::ato_state_dir()
+        .join("run")
+        .join(manifest.name.trim());
+
+    for (state_name, requirement) in &manifest.state {
+        if overrides.contains_key(state_name) {
+            continue;
+        }
+        // Fail closed: only filesystem state can be auto-provisioned as a host
+        // directory. Any other kind must be bound explicitly.
+        if requirement.kind != StateKind::Filesystem {
+            anyhow::bail!(
+                "state '{}' has kind {:?}, which cannot be auto-provisioned for a headless run; bind it explicitly with --state {}=...",
+                state_name,
+                requirement.kind,
+                state_name
+            );
+        }
+
+        let path = state_root.join(state_name);
+        fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "failed to auto-provision headless state directory {}",
+                path.display()
+            )
+        })?;
+        let locator = path
+            .canonicalize()
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        overrides.insert(state_name.clone(), locator);
+    }
+
+    Ok(overrides)
 }
 
 pub(crate) fn resolve_compatibility_host_mode(
@@ -4613,7 +4778,7 @@ mod tests {
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
@@ -4858,6 +5023,134 @@ run = "/usr/bin/true"
         .expect("manifest");
 
         assert_eq!(parent_package_id(&manifest), "demo@1.2.3");
+    }
+
+    /// Scoped `ATO_HOME` guard so the auto-provisioning tests resolve
+    /// `ato_state_dir()` under a tempdir and restore the prior value on drop.
+    struct AtoHomeGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl AtoHomeGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("ATO_HOME");
+            // SAFETY: tests touching ATO_HOME run under `#[serial]`.
+            unsafe { std::env::set_var("ATO_HOME", path) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for AtoHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests touching ATO_HOME run under `#[serial]`.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
+            }
+        }
+    }
+
+    fn persistent_state_manifest() -> CapsuleManifest {
+        CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "gitea"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/go-gitea/gitea:latest"
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "primary-data"
+attach = "explicit"
+schema_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
+"#,
+        )
+        .expect("manifest")
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_auto_provision_creates_dir_for_unbound_persistent_state() {
+        // #687: `ato run <source> --sandbox` has no `--state`, so a recipe with a
+        // `[state.*]` block would hard-error. Auto-provisioning binds a writable
+        // per-source directory under `~/.ato/state/run/...` instead.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let manifest = persistent_state_manifest();
+        let overrides = super::auto_provision_headless_state_overrides(&manifest, &HashMap::new())
+            .expect("auto-provision");
+
+        let bound = overrides.get("data").expect("data is auto-bound");
+        let expected = home
+            .path()
+            .join("state")
+            .join("run")
+            .join("gitea")
+            .join("data");
+        assert_eq!(
+            fs::canonicalize(bound).expect("bound dir exists"),
+            fs::canonicalize(&expected).expect("expected dir exists"),
+        );
+        assert!(expected.is_dir(), "auto-provisioned dir must be created");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn headless_auto_provision_preserves_existing_binding() {
+        // An explicit `--state data=/path` (or workspace/lock binding) wins; the
+        // auto-provisioner must not overwrite it.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = AtoHomeGuard::set(home.path());
+
+        let manifest = persistent_state_manifest();
+        let mut existing = HashMap::new();
+        existing.insert("data".to_string(), "/explicit/path".to_string());
+
+        let overrides = super::auto_provision_headless_state_overrides(&manifest, &existing)
+            .expect("auto-provision");
+
+        assert_eq!(
+            overrides.get("data").map(String::as_str),
+            Some("/explicit/path")
+        );
+        assert!(
+            !home.path().join("state").join("run").join("gitea").exists(),
+            "must not create a dir when the state is already bound"
+        );
+    }
+
+    #[test]
+    fn headless_auto_provision_is_noop_without_state_block() {
+        let manifest = CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "stateless"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+"#,
+        )
+        .expect("manifest");
+
+        let overrides = super::auto_provision_headless_state_overrides(&manifest, &HashMap::new())
+            .expect("auto-provision");
+        assert!(overrides.is_empty());
     }
 
     #[test]
