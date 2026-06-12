@@ -22,8 +22,8 @@ pub enum Decision {
     DenyAskUser,
     /// Hard deny; no amount of user grant can permit this.
     ///
-    /// Reserved for future deny rules. Not emitted by the current parser.
-    #[allow(dead_code)]
+    /// Emitted by [`EgressPolicy::decide_resolved`] when an allowed
+    /// hostname resolves to a non-public address (DNS-rebinding guard).
     DenyFinal,
 }
 
@@ -160,6 +160,60 @@ impl EgressPolicy {
         Decision::DenyAskUser
     }
 
+    /// Post-resolution guard against DNS-rebinding SSRF (CWE-918).
+    ///
+    /// [`decide`](Self::decide) evaluates the hostname *string* before DNS
+    /// resolution, so an allowed name (e.g. `evil.example.com` under
+    /// `*.example.com`) can still resolve to a loopback / private /
+    /// link-local address — the cloud-metadata endpoint being the classic
+    /// target. Callers must vet **every** resolved address with this
+    /// method and only dial addresses that return [`Decision::Allow`].
+    ///
+    /// Rules, in order:
+    ///   1. IP-literal targets were already evaluated as that exact
+    ///      address by `decide`; resolution cannot diverge from it.
+    ///   2. The localhost name family may only land on loopback.
+    ///   3. An address covered by an explicit `Ip` allow pattern is a
+    ///      deliberate user grant (e.g. a LAN device).
+    ///   4. Loopback / link-local / RFC 1918 / ULA / unspecified /
+    ///      broadcast / multicast addresses are [`Decision::DenyFinal`]
+    ///      — no grant on the *hostname* can permit them.
+    pub fn decide_resolved(&self, host: &str, resolved: IpAddr) -> Decision {
+        // Normalise IPv4-mapped IPv6 (`::ffff:a.b.c.d`) so the v4 range
+        // checks below cannot be bypassed in v6 clothing.
+        let ip = resolved.to_canonical();
+
+        if let Ok(lit) = IpAddr::from_str(host) {
+            return if lit.to_canonical() == ip {
+                Decision::Allow
+            } else {
+                Decision::DenyFinal
+            };
+        }
+
+        if HostPattern::Localhost.matches(host) {
+            return if ip.is_loopback() {
+                Decision::Allow
+            } else {
+                Decision::DenyFinal
+            };
+        }
+
+        if self
+            .default_allow
+            .iter()
+            .chain(self.session_allow.iter())
+            .any(|p| matches!(p, HostPattern::Ip(_)) && p.matches(&ip.to_string()))
+        {
+            return Decision::Allow;
+        }
+
+        if is_non_public(ip) {
+            return Decision::DenyFinal;
+        }
+        Decision::Allow
+    }
+
     /// Add a session-only allow rule. Returns `true` if it was a new rule.
     ///
     /// Localhost is rejected because it is already built-in; returning
@@ -194,6 +248,34 @@ impl EgressPolicy {
         EgressSnapshot {
             defaults: self.default_allow.iter().map(HostPattern::render).collect(),
             session: self.session_allow.iter().map(HostPattern::render).collect(),
+        }
+    }
+}
+
+/// Is `ip` outside the publicly routable unicast space?
+///
+/// Plays the role of `ato-netd`'s post-resolution `check_addr` CIDR stage
+/// with a fixed deny set: loopback, RFC 1918 private, link-local (incl.
+/// the 169.254.169.254 cloud-metadata endpoint), IPv6 ULA, plus
+/// unspecified / broadcast / multicast. Deliberately excludes CGNAT
+/// 100.64.0.0/10 — Tailscale-style overlay networks legitimately resolve
+/// hostnames into that range.
+fn is_non_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
         }
     }
 }
@@ -399,6 +481,95 @@ mod tests {
         pol.reset_session();
         assert!(pol.snapshot().session.is_empty());
         assert_eq!(pol.decide("builtin.com", 443), Decision::Allow);
+    }
+
+    #[test]
+    fn decide_resolved_blocks_rebinding_to_non_public() {
+        // DNS rebinding: the hostname is allowed, but the attacker's
+        // resolver answers with a non-public address. Hard deny.
+        let mut pol = EgressPolicy::localhost_only();
+        pol.allow(HostPattern::parse("*.example.com").unwrap());
+        for ip in [
+            "127.0.0.1",          // loopback
+            "10.1.2.3",           // RFC 1918
+            "172.16.0.1",         // RFC 1918
+            "192.168.1.1",        // RFC 1918
+            "169.254.169.254",    // link-local / cloud metadata
+            "0.0.0.0",            // unspecified
+            "255.255.255.255",    // broadcast
+            "224.0.0.1",          // multicast
+            "::1",                // v6 loopback
+            "::",                 // v6 unspecified
+            "fe80::1",            // v6 link-local
+            "fd00::1",            // v6 ULA
+            "::ffff:127.0.0.1",   // v4-mapped loopback
+            "::ffff:192.168.1.1", // v4-mapped private
+        ] {
+            assert_eq!(
+                pol.decide_resolved("evil.example.com", ip.parse().unwrap()),
+                Decision::DenyFinal,
+                "{ip} must be a hard deny"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_resolved_allows_public_addrs() {
+        let mut pol = EgressPolicy::localhost_only();
+        pol.allow(HostPattern::parse("*.example.com").unwrap());
+        for ip in ["93.184.216.34", "2606:2800:220:1::1"] {
+            assert_eq!(
+                pol.decide_resolved("ok.example.com", ip.parse().unwrap()),
+                Decision::Allow,
+                "{ip} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_resolved_localhost_names_pin_to_loopback() {
+        let pol = EgressPolicy::localhost_only();
+        assert_eq!(
+            pol.decide_resolved("localhost", "127.0.0.1".parse().unwrap()),
+            Decision::Allow
+        );
+        assert_eq!(
+            pol.decide_resolved("localhost", "::1".parse().unwrap()),
+            Decision::Allow
+        );
+        // `localhost` rebinding away from loopback is a hard deny.
+        assert_eq!(
+            pol.decide_resolved("localhost", "10.0.0.1".parse().unwrap()),
+            Decision::DenyFinal
+        );
+    }
+
+    #[test]
+    fn decide_resolved_allows_ip_literal_targets() {
+        // An IP-literal target only reaches the dial when `decide`
+        // matched an explicit Ip grant; resolution cannot diverge.
+        let pol = EgressPolicy::new(vec![HostPattern::parse("192.168.1.50").unwrap()]);
+        assert_eq!(
+            pol.decide_resolved("192.168.1.50", "192.168.1.50".parse().unwrap()),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn decide_resolved_honours_explicit_ip_grant_for_hostname() {
+        // The user deliberately allowed the LAN address: a hostname
+        // resolving to it is a grant, not a rebinding.
+        let mut pol = EgressPolicy::localhost_only();
+        pol.allow(HostPattern::parse("*.lan.example").unwrap());
+        pol.allow(HostPattern::parse("192.168.1.50").unwrap());
+        assert_eq!(
+            pol.decide_resolved("nas.lan.example", "192.168.1.50".parse().unwrap()),
+            Decision::Allow
+        );
+        assert_eq!(
+            pol.decide_resolved("nas.lan.example", "192.168.1.51".parse().unwrap()),
+            Decision::DenyFinal
+        );
     }
 
     #[test]
