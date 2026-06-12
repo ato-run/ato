@@ -939,6 +939,31 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
         return Err(e.into());
     }
 
+    // Emit the canonical machine-readable readiness line so a Connected Runner
+    // recognizes OCI readiness. The runner monitor (runner_agent) parses
+    // "LIFECYCLE: ready[ port=N]" / "(ready event received)" to settle a run as
+    // ready; the human "🌐 OCI service available" line above is NOT machine-
+    // parsed, so without this an OCI run stays `provisioning` forever even
+    // though the container is serving (ato#712, runner-readiness half). Mirrors
+    // the source path's lifecycle_ready_line(port). The port is the published
+    // host port of the user-facing service (what the runner's root proxy maps).
+    let ready_port = started
+        .iter()
+        .find(|r| {
+            orch_plan
+                .services
+                .iter()
+                .find(|s| s.name == r.service_name)
+                .map(|s| s.network.publish)
+                .unwrap_or(false)
+        })
+        .and_then(|r| r.host_port);
+    let ready_line = match ready_port {
+        Some(port) => format!("LIFECYCLE: ready port={port}"),
+        None => "LIFECYCLE: ready".to_string(),
+    };
+    let _ = reporter.notify(ready_line).await;
+
     // Write OCI session record so `ato ps` and `ato stop --all` can track it.
     let session_store = OciSessionStore::new();
     let oci_session_record = session_store.as_ref().ok().map(|store| {
