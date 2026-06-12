@@ -1341,16 +1341,20 @@ fn parse_open_lease_ids(body: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Startup reconciliation: a freshly started serve process runs ZERO
-/// workloads. Dispatched children live in this process's process group
-/// (and under systemd, its cgroup), so they did not survive the previous
-/// process's exit — "nothing is running here" is honest runner evidence,
-/// not an API fabrication. For every lease the API still considers open on
-/// this runner, ack /stopped with reason `runner_restarted` so zombie
-/// stop-requested runs settle and the control plane matches reality.
-/// INVARIANT this leans on: spawn_run_child keeps workloads in our process
-/// group / unit cgroup. If a future runner detaches workloads, this ack is
-/// no longer honest and must be gated on actual process evidence.
+/// Startup reconciliation: settle leases the API still considers open on
+/// this runner with HONEST per-lease evidence. Dispatched children lead
+/// their OWN process group (see spawn_run_child), so a hard-killed runner
+/// (SIGKILL / OOM) can orphan a live workload subtree — "this is a fresh
+/// process" proves nothing about survivors. Every dispatch records its
+/// group id next to the run log; reconcile probes that record instead of
+/// assuming:
+/// - no record, or the group confirmed gone → full-cleanup ack (reason
+///   `runner_restarted`) so zombie stop-requested runs settle;
+/// - the group may still be alive → ack with NOTHING confirmed so the
+///   control plane records a failed stop and HOLDS the slot — never free a
+///   slot a surviving workload may still occupy (fail closed, matching
+///   perform_stop_cleanup).
+///
 /// Best-effort: a missing endpoint (older API) or a per-lease failure is
 /// logged and never blocks serving.
 async fn reconcile_open_leases(
@@ -1397,10 +1401,22 @@ async fn reconcile_open_leases(
         "🧹 reconciling {} stale lease(s) left from a previous runner process",
         lease_ids.len()
     );
-    // This process owns no workloads, so the slot is free and the previous
-    // children are gone: full-cleanup evidence.
-    let cleanup = StopCleanup::from_teardown(true, true);
     for lease_id in lease_ids {
+        let evidence = probe_workload_evidence(&run_pid_path(&lease_id));
+        match evidence {
+            WorkloadEvidence::ConfirmedGone => {
+                // The record (if any) is settled; drop it so a later restart
+                // can never probe a recycled pid.
+                clear_workload_group(&lease_id);
+            }
+            WorkloadEvidence::PossiblyAlive(pid) => {
+                let hint = pid.map_or("unknown pid".to_string(), |p| format!("pgid {p}"));
+                eprintln!(
+                    "   ⚠️ lease {lease_id}: a workload ({hint}) may have survived the previous runner; reporting unconfirmed cleanup so the slot stays held. Stop the survivor and restart the runner to settle."
+                );
+            }
+        }
+        let cleanup = reconcile_cleanup_for(evidence);
         match report_lease_stopped_with_reason(
             client,
             api_base,
@@ -1411,9 +1427,61 @@ async fn reconcile_open_leases(
         )
         .await
         {
-            Ok(()) => println!("   ✓ lease {lease_id}: acked stopped (runner_restarted)"),
+            Ok(()) => println!(
+                "   ✓ lease {lease_id}: acked stopped (runner_restarted, slot_released={})",
+                cleanup.slot_released
+            ),
             Err(err) => eprintln!("   ⚠️ lease {lease_id}: reconcile ack failed: {err}"),
         }
+    }
+}
+
+/// Liveness evidence for a previously dispatched workload group, derived
+/// from the record `record_workload_group` persisted next to the run log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkloadEvidence {
+    /// No group was ever recorded for the lease on this host, or the
+    /// recorded group is confirmed gone: "nothing survives here" is real
+    /// evidence, not an assumption.
+    ConfirmedGone,
+    /// The recorded group may still have a live process (or liveness cannot
+    /// be probed on this platform / the record is unreadable). The pid is a
+    /// hint for the operator when known.
+    PossiblyAlive(Option<u32>),
+}
+
+/// Probe whether the workload group recorded at `pid_path` survived the
+/// previous runner process. Anything short of confirmed absence maps to
+/// `PossiblyAlive` — the caller fails closed on it.
+fn probe_workload_evidence(pid_path: &Path) -> WorkloadEvidence {
+    let Ok(raw) = std::fs::read_to_string(pid_path) else {
+        // No record: this host never dispatched (or already confirmed the
+        // teardown of) a workload for the lease.
+        return WorkloadEvidence::ConfirmedGone;
+    };
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        // A record exists, so a dispatch happened and its teardown was never
+        // confirmed — an unreadable pid is not evidence of absence.
+        return WorkloadEvidence::PossiblyAlive(None);
+    };
+    #[cfg(unix)]
+    if process_group_confirmed_gone(pid) {
+        return WorkloadEvidence::ConfirmedGone;
+    }
+    // Unix: the group still has a member (or one we may not signal).
+    // Non-Unix: there is no group probe; a recorded dispatch without a
+    // confirmed teardown stays possibly-alive.
+    WorkloadEvidence::PossiblyAlive(Some(pid))
+}
+
+/// The honest /stopped cleanup record for one reconciled lease. Confirmed
+/// absence is the ONLY thing that frees the slot; a possible survivor claims
+/// nothing — not even `proxy_stopped`, since "a survivor exists" cannot rule
+/// out another live serve process still owning both workload and proxy.
+fn reconcile_cleanup_for(evidence: WorkloadEvidence) -> StopCleanup {
+    match evidence {
+        WorkloadEvidence::ConfirmedGone => StopCleanup::from_teardown(true, true),
+        WorkloadEvidence::PossiblyAlive(_) => StopCleanup::from_teardown(false, false),
     }
 }
 
@@ -1432,6 +1500,16 @@ fn kill_group(pid: u32, signal: libc::c_int) -> std::io::Result<()> {
     } else {
         Err(err)
     }
+}
+
+/// True only when signal-0 to `pid`'s process group fails with ESRCH: every
+/// member is confirmed gone. A delivered probe (rc == 0) is liveness, and so
+/// is EPERM — SOME process in the group exists, we just may not signal it —
+/// so both map to false (fail closed).
+#[cfg(unix)]
+fn process_group_confirmed_gone(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 /// True while any process in `pid`'s group still exists (signal 0 probes
@@ -1522,6 +1600,11 @@ async fn perform_stop_cleanup(
     println!("🛑 lease {lease_id}: owner requested stop; tearing down workload");
 
     let process_terminated = terminate_child_group(child_pid, monitor).await;
+    if process_terminated {
+        // Confirmed reap: the survivor record is settled. Drop it so a later
+        // restart can never probe a recycled pid.
+        clear_workload_group(lease_id);
+    }
 
     // Abort the proxy AND wait for the listener task to actually end before
     // claiming it stopped — the upstream is already dead, so in-flight
@@ -1563,6 +1646,35 @@ fn run_log_path(lease_id: &str) -> PathBuf {
         .map(|parent| parent.join("runs"))
         .unwrap_or_else(|| PathBuf::from("runs"));
     dir.join(format!("{lease_id}.log"))
+}
+
+/// Where the workload's process-group id for `lease_id` is recorded (next to
+/// its run log).
+fn run_pid_path(lease_id: &str) -> PathBuf {
+    run_log_path(lease_id).with_extension("pid")
+}
+
+/// Record the dispatched workload's process-group id (== child pid, see
+/// spawn_run_child) so a FUTURE serve process can probe — not assume —
+/// whether the subtree survived a hard-killed runner. The children lead
+/// their own group precisely so a stop can signal the whole subtree; the
+/// flip side is that they outlive a SIGKILLed/OOMed runner, and this record
+/// is the only evidence bridge across that restart. Best-effort: a failed
+/// write only costs the record, never the dispatch.
+fn record_workload_group(lease_id: &str, pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    let path = run_pid_path(lease_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, pid.to_string());
+}
+
+/// Drop the recorded group once its teardown is CONFIRMED (child reaped, or
+/// the group kill verified). Never call this on an unconfirmed teardown: the
+/// record is exactly what lets the next serve process detect a survivor.
+fn clear_workload_group(lease_id: &str) {
+    let _ = std::fs::remove_file(run_pid_path(lease_id));
 }
 
 fn ready_timeout() -> Duration {
@@ -1980,6 +2092,11 @@ async fn handle_claimed_lease(
             // PID == process-group id (see spawn_run_child); a stop signals the
             // whole workload group.
             let child_pid = child.id();
+            // Persist the group id BEFORE driving the child: if this process
+            // is hard-killed from here on, the next serve's reconcile must
+            // probe the possible survivor instead of fabricating teardown
+            // evidence (#645).
+            record_workload_group(&lease_id, child_pid);
             println!(
                 "🚀 lease {lease_id}: ato run {source_url} --sandbox (round {round}, log: {})",
                 log_path.display()
@@ -2011,6 +2128,7 @@ async fn handle_claimed_lease(
                 // Monitor closed without a decisive report (run_lease_child always
                 // reports before returning, so this is defensive). Idle out.
                 let _ = monitor.await;
+                clear_workload_group(&lease_id);
                 control.abort();
                 busy.store(false, Ordering::SeqCst);
                 return;
@@ -2024,6 +2142,7 @@ async fn handle_claimed_lease(
 
             // The child exited at the gate; reap its monitor before waiting.
             let _ = monitor.await;
+            clear_workload_group(&lease_id);
             if round > MAX_CONSENT_ROUNDS {
                 // Bounded: the gate kept re-emitting (a persistent recompute
                 // mismatch, or a local approval that never clears it). Fail
@@ -2283,6 +2402,7 @@ async fn handle_claimed_lease(
         } else {
             // Natural settle/exit: the child ran to completion on its own.
             let _ = monitor.await;
+            clear_workload_group(&lease_id);
             if let Some(handle) = proxy_handle {
                 handle.abort();
             }
@@ -3233,6 +3353,132 @@ mod tests {
         assert!(
             request.contains("authorization: Bearer ato_rnr_t")
                 || request.contains("Authorization: Bearer ato_rnr_t")
+        );
+    }
+
+    // ── Startup reconcile: probe survivors, never fabricate teardown (#645) ──
+
+    #[test]
+    fn reconcile_cleanup_claims_full_teardown_only_on_confirmed_gone_evidence() {
+        let clean = reconcile_cleanup_for(WorkloadEvidence::ConfirmedGone);
+        assert!(clean.process_terminated && clean.proxy_stopped && clean.slot_released);
+        // A possibly-surviving workload confirms NOTHING, so nothing may be
+        // claimed — the slot must stay held (fail closed, matching
+        // perform_stop_cleanup).
+        for evidence in [
+            WorkloadEvidence::PossiblyAlive(Some(4242)),
+            WorkloadEvidence::PossiblyAlive(None),
+        ] {
+            let held = reconcile_cleanup_for(evidence);
+            assert!(!held.process_terminated);
+            assert!(!held.proxy_stopped);
+            assert!(
+                !held.slot_released,
+                "a possible survivor must never free the slot: {evidence:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_workload_evidence_without_a_record_confirms_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No record: this host never dispatched (or already confirmed the
+        // teardown of) a workload for the lease.
+        assert_eq!(
+            probe_workload_evidence(&dir.path().join("01LEASE.pid")),
+            WorkloadEvidence::ConfirmedGone
+        );
+    }
+
+    #[test]
+    fn probe_workload_evidence_fails_closed_on_an_unreadable_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("01LEASE.pid");
+        std::fs::write(&path, "not-a-pid").expect("write");
+        // A record exists, so a dispatch happened and its teardown was never
+        // confirmed — an unreadable pid is not evidence of absence.
+        assert_eq!(
+            probe_workload_evidence(&path),
+            WorkloadEvidence::PossiblyAlive(None)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_workload_evidence_tracks_a_real_group_lifecycle() {
+        // A live recorded group must read possibly-alive (the orphan of
+        // #645: children lead their OWN group, so they survive a hard-killed
+        // runner); once the group is gone it must read confirmed-gone so the
+        // slot can be freed honestly.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 300")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn group");
+        let pid = child.id().expect("child pid");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("01LEASE.pid");
+        std::fs::write(&path, pid.to_string()).expect("write record");
+
+        assert_eq!(
+            probe_workload_evidence(&path),
+            WorkloadEvidence::PossiblyAlive(Some(pid)),
+            "a live workload group must never be reconciled as torn down"
+        );
+
+        kill_group(pid, libc::SIGKILL).expect("kill group");
+        let _ = child.wait().await; // reap: a zombie still occupies the group
+        let mut gone = false;
+        for _ in 0..100 {
+            if probe_workload_evidence(&path) == WorkloadEvidence::ConfirmedGone {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "a reaped group is honest full-teardown evidence");
+    }
+
+    #[tokio::test]
+    async fn reconcile_acks_full_teardown_for_leases_with_no_recorded_workload() {
+        // Two-shot server: GET /leases/open lists one lease, then the
+        // /stopped ack is captured. No workload group was ever recorded for
+        // the lease on this host, so the full-cleanup claim is honest.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            for body in [
+                "{\"leases\":[{\"id\":\"01RECONCILE645NORECORD\"}]}",
+                "{\"ok\":true}",
+            ] {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                captured.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).expect("write");
+            }
+            captured
+        });
+        let client = reqwest::Client::new();
+        reconcile_open_leases(&client, &format!("http://{addr}"), "01RUNNER", "ato_rnr_t").await;
+        let captured = server.join().expect("server");
+        assert!(captured[0].contains("GET /v1/runners/01RUNNER/leases/open"));
+        assert!(captured[1].contains("POST /v1/runner-leases/01RECONCILE645NORECORD/stopped"));
+        assert!(captured[1].contains("\"reason\":\"runner_restarted\""));
+        assert!(
+            captured[1].contains("\"slot_released\":true"),
+            "no recorded workload → full teardown is honest evidence: {}",
+            captured[1]
         );
     }
 
