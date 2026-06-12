@@ -1804,8 +1804,10 @@ const LOG_TAIL_MAX_BYTES: usize = 16 * 1024;
 /// Read the tail (last `max_bytes`) of a lease's run log for a failure report.
 /// The on-disk log is already secret-scrubbed line-by-line (BoundedLog), but we
 /// scrub once more as defense in depth before it leaves the process. Returns
-/// None when there is no log or it is empty. A truncated tail drops its partial
-/// leading line and is marked, so the reader knows it is only the end.
+/// None when there is no log or it is empty. A truncated tail is prefixed with a
+/// marker; when it begins mid-line (a newline exists within it) the partial
+/// leading line is dropped. A single line longer than `max_bytes` (no interior
+/// newline) is kept verbatim under the marker rather than blanked.
 fn read_log_tail(lease_id: &str, max_bytes: usize) -> Option<String> {
     read_log_tail_from(&run_log_path(lease_id), max_bytes)
 }
@@ -1819,6 +1821,8 @@ fn read_log_tail_from(path: &Path, max_bytes: usize) -> Option<String> {
     let start = bytes.len().saturating_sub(max_bytes);
     let mut text = String::from_utf8_lossy(&bytes[start..]).into_owned();
     if start > 0 {
+        // Drop the (partial) leading line only when there IS an interior
+        // newline; a single over-long line with none is kept verbatim.
         if let Some(nl) = text.find('\n') {
             text = text[nl + 1..].to_string();
         }
@@ -3043,6 +3047,18 @@ mod tests {
         assert!(tail.starts_with("...[earlier log truncated]"));
         assert!(tail.contains("eeee")); // the end is kept
         assert!(!tail.contains("aaaa")); // the start is dropped
+    }
+
+    #[test]
+    fn log_tail_keeps_a_single_overlong_line_verbatim_under_the_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("lease.log");
+        // One line longer than the cap, with NO interior newline.
+        std::fs::write(&path, "x".repeat(100)).unwrap();
+        let tail = read_log_tail_from(&path, 10).expect("tail");
+        assert!(tail.starts_with("...[earlier log truncated]"));
+        // Nothing is blanked: the kept bytes survive under the marker.
+        assert!(tail.trim_start_matches("...[earlier log truncated]").contains("x"));
     }
 
     #[test]
