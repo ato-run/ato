@@ -1030,10 +1030,26 @@ fn test_help_hides_legacy_commands() {
     cmd.arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"(?m)^\s{2,}open\s").unwrap().not())
-        .stdout(predicate::str::is_match(r"(?m)^\s{2,}pack\s").unwrap().not())
-        .stdout(predicate::str::is_match(r"(?m)^\s{2,}close\s").unwrap().not())
-        .stdout(predicate::str::is_match(r"(?m)^\s{2,}auth\s").unwrap().not())
+        .stdout(
+            predicate::str::is_match(r"(?m)^\s{2,}open\s")
+                .unwrap()
+                .not(),
+        )
+        .stdout(
+            predicate::str::is_match(r"(?m)^\s{2,}pack\s")
+                .unwrap()
+                .not(),
+        )
+        .stdout(
+            predicate::str::is_match(r"(?m)^\s{2,}close\s")
+                .unwrap()
+                .not(),
+        )
+        .stdout(
+            predicate::str::is_match(r"(?m)^\s{2,}auth\s")
+                .unwrap()
+                .not(),
+        )
         // Anchored to the command column: `workspace setup` is a legitimate
         // subcommand and may appear in descriptions; only a top-level `setup`
         // entry is legacy.
