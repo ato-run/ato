@@ -1580,7 +1580,18 @@ fn merge_workload_pids(
     observed: Vec<ImportPreviewWorkloadPid>,
 ) {
     for candidate in observed {
-        if !into.iter().any(|existing| existing.pid == candidate.pid) {
+        if let Some(existing) = into
+            .iter_mut()
+            .find(|existing| existing.pid == candidate.pid)
+        {
+            // Keep the first capture's identity, but backfill a missing start
+            // time from a later probe so the pid-reuse guard (which matches on
+            // start time) stays strong. An already-recorded `Some` is never
+            // overwritten.
+            if existing.start_time_unix_ms.is_none() {
+                existing.start_time_unix_ms = candidate.start_time_unix_ms;
+            }
+        } else {
             into.push(candidate);
         }
     }
@@ -2335,6 +2346,50 @@ mod tests {
                 ImportPreviewWorkloadPid {
                     pid: 300,
                     start_time_unix_ms: Some(33),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_workload_pids_backfills_missing_start_time_but_keeps_existing() {
+        let mut acc = vec![
+            // First probe captured the pid before its start time was readable.
+            ImportPreviewWorkloadPid {
+                pid: 100,
+                start_time_unix_ms: None,
+            },
+            // This one already has a start time; a later probe must not change it.
+            ImportPreviewWorkloadPid {
+                pid: 200,
+                start_time_unix_ms: Some(22),
+            },
+        ];
+        merge_workload_pids(
+            &mut acc,
+            vec![
+                // Later probe now sees pid 100's start time -> backfill None -> Some.
+                ImportPreviewWorkloadPid {
+                    pid: 100,
+                    start_time_unix_ms: Some(55),
+                },
+                // Re-observed start time for pid 200 must NOT overwrite Some(22).
+                ImportPreviewWorkloadPid {
+                    pid: 200,
+                    start_time_unix_ms: Some(99),
+                },
+            ],
+        );
+        assert_eq!(
+            acc,
+            vec![
+                ImportPreviewWorkloadPid {
+                    pid: 100,
+                    start_time_unix_ms: Some(55),
+                },
+                ImportPreviewWorkloadPid {
+                    pid: 200,
+                    start_time_unix_ms: Some(22),
                 },
             ]
         );
