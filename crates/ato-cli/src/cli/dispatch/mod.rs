@@ -741,12 +741,14 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     display_name,
                     public_base_url,
                     headless,
+                    enrollment_token,
                 } => rt.block_on(crate::application::runner_agent::run_login(
                     api_base,
                     site_base,
                     display_name,
                     public_base_url,
                     headless,
+                    enrollment_token,
                 )),
                 crate::cli::RunnerCommands::Serve {
                     api_base,
