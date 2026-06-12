@@ -701,41 +701,21 @@ pub fn scrub_secrets(text: &str) -> String {
 // ── Child output signals ──
 
 /// Parsed payload of a `CONSENT-REQUIRED: <json>` line from `ato run` (P4-A).
-/// The full identity 5-tuple is the decision contract; `consent_ref` is its
-/// hash (blake3(JCS(schema + 5-tuple))). The runner reports this as
-/// needs_consent and, only after the owner approves this exact `consent_ref`,
-/// calls the local `approve-execution-plan` primitive and retries.
-// All fields are required (no serde defaults): a CONSENT-REQUIRED line missing
-// any field fails to deserialize and is NOT treated as a consent signal — an
-// incomplete signal must never be reported to the control plane.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ConsentRequest {
-    pub schema: String,
-    pub consent_ref: String,
-    pub scoped_id: String,
-    pub version: String,
-    pub target_label: String,
-    pub policy_segment_hash: String,
-    pub provisioning_policy_hash: String,
-    /// Human policy summary. Must be PRESENT (may be empty); a missing summary
-    /// fails to deserialize.
-    pub summary: String,
-}
-
-impl ConsentRequest {
-    /// A consent signal is honored only if it is complete AND well-formed: the
-    /// exact schema, a blake3 consent_ref, a non-empty identity, and blake3
-    /// policy hashes. Anything less is not a valid consent gate.
-    fn is_valid(&self) -> bool {
-        self.schema == capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA
-            && self.consent_ref.starts_with("blake3:")
-            && !self.scoped_id.is_empty()
-            && !self.version.is_empty()
-            && !self.target_label.is_empty()
-            && self.policy_segment_hash.starts_with("blake3:")
-            && self.provisioning_policy_hash.starts_with("blake3:")
-    }
-}
+///
+/// This is the shared wire type [`capsule_wire::consent::ConsentRequiredLine`]:
+/// the full identity 5-tuple (under [`identity`](capsule_wire::consent::ConsentRequiredLine::identity))
+/// is the decision contract; `consent_ref` is its hash
+/// (blake3(JCS(schema + 5-tuple))). The runner reports this as needs_consent
+/// and, only after the owner approves this exact `consent_ref`, calls the
+/// local `approve-execution-plan` primitive and retries.
+///
+/// All fields are required (no serde defaults) and the line is honored only
+/// when [`is_valid`](capsule_wire::consent::ConsentRequiredLine::is_valid)
+/// holds — an incomplete or ill-formed signal must never reach the control
+/// plane. Validation lives in `capsule-wire` so the producer
+/// (`consent_store`), this consumer, and the desktop stderr consumer can
+/// never drift.
+pub use capsule_wire::consent::ConsentRequiredLine as ConsentRequest;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChildSignal {
@@ -1114,12 +1094,12 @@ async fn report_consent_required(
     let body = serde_json::json!({
         "schema": request.schema,
         "consent_ref": request.consent_ref,
-        "scoped_id": request.scoped_id,
-        "version": request.version,
-        "target_label": request.target_label,
-        "policy_segment_hash": request.policy_segment_hash,
-        "provisioning_policy_hash": request.provisioning_policy_hash,
-        "summary": request.summary,
+        "scoped_id": request.identity.scoped_id,
+        "version": request.identity.version,
+        "target_label": request.identity.target_label,
+        "policy_segment_hash": request.identity.policy_segment_hash,
+        "provisioning_policy_hash": request.identity.provisioning_policy_hash,
+        "summary": request.identity.summary,
     });
     let response = client
         .post(&url)
@@ -2267,11 +2247,11 @@ async fn handle_claimed_lease(
             // owner's approved ref ALL agree. A recompute error is unrecoverable
             // (cannot verify) → fail closed.
             let recomputed = match capsule_core::execution_plan::canonical::consent_ref_from_parts(
-                &request.scoped_id,
-                &request.version,
-                &request.target_label,
-                &request.policy_segment_hash,
-                &request.provisioning_policy_hash,
+                &request.identity.scoped_id,
+                &request.identity.version,
+                &request.identity.target_label,
+                &request.identity.policy_segment_hash,
+                &request.identity.provisioning_policy_hash,
             ) {
                 Ok(value) => value,
                 Err(err) => {
@@ -2308,11 +2288,11 @@ async fn handle_claimed_lease(
             // API refuses; the retried child's `running` report is the valid move.
             if let Err(err) =
                 crate::application::auth::consent_store::approve_execution_plan_consent(
-                    &request.scoped_id,
-                    &request.version,
-                    &request.target_label,
-                    &request.policy_segment_hash,
-                    &request.provisioning_policy_hash,
+                    &request.identity.scoped_id,
+                    &request.identity.version,
+                    &request.identity.target_label,
+                    &request.identity.policy_segment_hash,
+                    &request.identity.provisioning_policy_hash,
                 )
             {
                 eprintln!("⚠️  lease {lease_id}: local consent record failed: {err}");
@@ -2688,12 +2668,12 @@ mod tests {
         match parse_child_line(&format!("CONSENT-REQUIRED: {valid}")) {
             Some(ChildSignal::ConsentRequired(req)) => {
                 assert_eq!(req.consent_ref, "blake3:ref");
-                assert_eq!(req.scoped_id, "community/hello-capsule");
-                assert_eq!(req.version, "0.3.0");
-                assert_eq!(req.target_label, "main");
-                assert_eq!(req.policy_segment_hash, "blake3:p");
-                assert_eq!(req.provisioning_policy_hash, "blake3:q");
-                assert!(req.summary.contains("api.example.com"));
+                assert_eq!(req.identity.scoped_id, "community/hello-capsule");
+                assert_eq!(req.identity.version, "0.3.0");
+                assert_eq!(req.identity.target_label, "main");
+                assert_eq!(req.identity.policy_segment_hash, "blake3:p");
+                assert_eq!(req.identity.provisioning_policy_hash, "blake3:q");
+                assert!(req.identity.summary.contains("api.example.com"));
             }
             other => panic!("expected ConsentRequired, got {other:?}"),
         }
@@ -2726,6 +2706,39 @@ mod tests {
         ];
         for line in rejects {
             assert_eq!(parse_child_line(line), None, "must reject: {line}");
+        }
+    }
+
+    /// Regression (#661): the `CONSENT-REQUIRED:` line is the SHARED
+    /// `capsule-wire` type, so a payload serialized from
+    /// `capsule_wire::consent::ConsentRequiredLine` — exactly what the CLI
+    /// producer emits — round-trips through the runner's `parse_child_line`.
+    /// This binds producer and consumer to one type + one validation: a
+    /// schema bump or field rename can no longer compile on both sides while
+    /// silently failing `is_valid()` (the original triplication hazard). The
+    /// schema field is sourced from the same `CONSENT_REF_SCHEMA` constant the
+    /// validator checks, so the two cannot disagree.
+    #[test]
+    fn consent_required_line_uses_shared_wire_type_end_to_end() {
+        let payload = capsule_wire::consent::ConsentRequiredLine {
+            schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
+            consent_ref: "blake3:bind".to_string(),
+            identity: capsule_wire::consent::ConsentIdentity {
+                scoped_id: "community/hello-capsule".to_string(),
+                version: "0.3.0".to_string(),
+                target_label: "main".to_string(),
+                policy_segment_hash: "blake3:seg".to_string(),
+                provisioning_policy_hash: "blake3:prov".to_string(),
+                summary: "network: api.example.com".to_string(),
+            },
+        };
+        let line = format!(
+            "CONSENT-REQUIRED: {}",
+            serde_json::to_string(&payload).expect("serialize wire payload")
+        );
+        match parse_child_line(&line) {
+            Some(ChildSignal::ConsentRequired(parsed)) => assert_eq!(parsed, payload),
+            other => panic!("producer's wire line must parse as ConsentRequired, got {other:?}"),
         }
     }
 
@@ -3229,12 +3242,14 @@ mod tests {
         ConsentRequest {
             schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:ref".to_string(),
-            scoped_id: "community/hello-capsule".to_string(),
-            version: "0.3.0".to_string(),
-            target_label: "main".to_string(),
-            policy_segment_hash: "blake3:seg".to_string(),
-            provisioning_policy_hash: "blake3:prov".to_string(),
-            summary: "network: api.example.com\nfs-rw: /data".to_string(),
+            identity: capsule_wire::consent::ConsentIdentity {
+                scoped_id: "community/hello-capsule".to_string(),
+                version: "0.3.0".to_string(),
+                target_label: "main".to_string(),
+                policy_segment_hash: "blake3:seg".to_string(),
+                provisioning_policy_hash: "blake3:prov".to_string(),
+                summary: "network: api.example.com\nfs-rw: /data".to_string(),
+            },
         }
     }
 
