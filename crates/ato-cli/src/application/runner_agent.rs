@@ -949,10 +949,19 @@ async fn report_lease_status(
         LeaseReport::ConsentRequired(_) => {
             unreachable!("consent gates go through report_consent_required (/consent-required)")
         }
-        LeaseReport::Failed { code, message } => serde_json::json!({
-            "status": "failed",
-            "error": { "code": code, "message": scrub_secrets(message) },
-        }),
+        LeaseReport::Failed { code, message } => {
+            let mut error = serde_json::json!({
+                "code": code,
+                "message": scrub_secrets(message),
+            });
+            // Attach the scrubbed child-log tail so the failure can be triaged
+            // remotely (ato-api derives a diagnostic report from it). Best-
+            // effort: a missing/empty log just omits the field.
+            if let Some(tail) = read_log_tail(lease_id, LOG_TAIL_MAX_BYTES) {
+                error["log_tail"] = serde_json::Value::String(tail);
+            }
+            serde_json::json!({ "status": "failed", "error": error })
+        }
     };
     let response = client
         .post(&url)
@@ -1785,6 +1794,40 @@ fn run_log_path(lease_id: &str) -> PathBuf {
         .map(|parent| parent.join("runs"))
         .unwrap_or_else(|| PathBuf::from("runs"));
     dir.join(format!("{lease_id}.log"))
+}
+
+/// Upper bound on the log tail attached to a failure report. Matches the API's
+/// `error.log_tail` cap (POST /v1/runner-leases/:id/status) so the server never
+/// has to truncate ours.
+const LOG_TAIL_MAX_BYTES: usize = 16 * 1024;
+
+/// Read the tail (last `max_bytes`) of a lease's run log for a failure report.
+/// The on-disk log is already secret-scrubbed line-by-line (BoundedLog), but we
+/// scrub once more as defense in depth before it leaves the process. Returns
+/// None when there is no log or it is empty. A truncated tail drops its partial
+/// leading line and is marked, so the reader knows it is only the end.
+fn read_log_tail(lease_id: &str, max_bytes: usize) -> Option<String> {
+    read_log_tail_from(&run_log_path(lease_id), max_bytes)
+}
+
+/// Path-taking core of [`read_log_tail`] (testable without ATO_HOME).
+fn read_log_tail_from(path: &Path, max_bytes: usize) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let start = bytes.len().saturating_sub(max_bytes);
+    let mut text = String::from_utf8_lossy(&bytes[start..]).into_owned();
+    if start > 0 {
+        if let Some(nl) = text.find('\n') {
+            text = text[nl + 1..].to_string();
+        }
+        text = format!("...[earlier log truncated]\n{text}");
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(scrub_secrets(&text))
 }
 
 /// Where the workload's process-group id for `lease_id` is recorded (next to
@@ -2977,6 +3020,43 @@ mod tests {
             "persisted log leaked GitHub token: {written}"
         );
         assert!(written.contains("[REDACTED]"), "{written}");
+    }
+
+    #[test]
+    fn log_tail_returns_whole_small_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("lease.log");
+        std::fs::write(&path, "line one\nline two\nline three\n").unwrap();
+        let tail = read_log_tail_from(&path, 16 * 1024).expect("tail");
+        assert!(tail.contains("line one"));
+        assert!(tail.contains("line three"));
+        assert!(!tail.contains("earlier log truncated"));
+    }
+
+    #[test]
+    fn log_tail_truncates_to_last_bytes_and_drops_partial_first_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("lease.log");
+        // 5 lines; cap small enough to keep only the last couple.
+        std::fs::write(&path, "aaaa\nbbbb\ncccc\ndddd\neeee\n").unwrap();
+        let tail = read_log_tail_from(&path, 12).expect("tail");
+        assert!(tail.starts_with("...[earlier log truncated]"));
+        assert!(tail.contains("eeee")); // the end is kept
+        assert!(!tail.contains("aaaa")); // the start is dropped
+    }
+
+    #[test]
+    fn log_tail_scrubs_secrets_and_handles_missing_or_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("lease.log");
+        std::fs::write(&path, "token leak ato_rnr_SECRET_value here\n").unwrap();
+        let tail = read_log_tail_from(&path, 16 * 1024).expect("tail");
+        assert!(!tail.contains("SECRET_value"));
+        assert!(tail.contains("ato_rnr_[REDACTED]"));
+
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(read_log_tail_from(&path, 16 * 1024), None); // empty → None
+        assert_eq!(read_log_tail_from(&dir.path().join("nope.log"), 16 * 1024), None); // missing → None
     }
 
     // ── Fake-child execution flows (no API, no network) ──
