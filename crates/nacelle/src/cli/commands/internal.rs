@@ -601,6 +601,85 @@ fn emit_service_exited(service: &str, status: &std::process::ExitStatus) {
     .emit();
 }
 
+/// Maximum number of trailing bytes of a crashed child's log we echo to
+/// nacelle's stderr. A FastAPI/uvicorn traceback fits comfortably; the cap
+/// stops a runaway log from flooding the supervisor's output.
+const CHILD_LOG_TAIL_MAX_BYTES: u64 = 16 * 1024;
+
+/// Surface the sandboxed child's own stdout/stderr to nacelle's stderr when it
+/// exits non-zero (#628).
+///
+/// Production backends (macOS seatbelt, Linux bwrap) redirect the sandboxed
+/// child's stdout/stderr to a per-workload log file rather than piping them
+/// back through nacelle, so `start_log_forwarding` (which only drains live
+/// pipes) forwards nothing for them. On a crash that left the actual failure —
+/// e.g. a Python traceback explaining `exit code 1` — unobservable: it lived
+/// only in a temp log file that nacelle then discarded on cleanup, and never
+/// reached the runner log tail. Here we read the tail of that log file and echo
+/// it to nacelle's stderr (the stream ato-cli forwards into the runner log)
+/// before the workspace is cleaned up.
+///
+/// No-ops on success, when the backend kept no log file (dev-mode pipes), or
+/// when the file is missing/empty/unreadable — surfacing diagnostics must never
+/// itself become a failure path.
+fn surface_child_log_tail(
+    log_path: Option<&std::path::Path>,
+    service: &str,
+    status: &std::process::ExitStatus,
+) {
+    if status.success() {
+        return;
+    }
+    let Some(log_path) = log_path else {
+        return;
+    };
+
+    let tail = match read_log_tail(log_path, CHILD_LOG_TAIL_MAX_BYTES) {
+        Some(tail) if !tail.trim().is_empty() => tail,
+        _ => return,
+    };
+
+    eprintln!(
+        "[nacelle] --- captured output of '{}' (exit code {}) from {} ---",
+        service,
+        status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string()),
+        log_path.display()
+    );
+    for line in tail.lines() {
+        eprintln!("[child] {line}");
+    }
+    eprintln!("[nacelle] --- end captured output of '{}' ---", service);
+}
+
+/// Read up to `max_bytes` from the end of `path`, returning a lossy UTF-8
+/// string. Returns `None` if the file cannot be opened/read. On a partial read
+/// from the middle of the file the first (possibly truncated) line is dropped so
+/// the surfaced tail starts on a clean line boundary.
+fn read_log_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let truncated = len > max_bytes;
+    if truncated {
+        file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        // Drop the leading partial line so output starts on a boundary.
+        if let Some(idx) = text.find('\n') {
+            return Some(text[idx + 1..].to_string());
+        }
+    }
+    Some(text)
+}
+
 fn readiness_endpoint(
     probe: &ReadinessProbeConfig,
     ipc_socket_paths: &[PathBuf],
@@ -1311,6 +1390,12 @@ async fn execute_prepared_launch(
         .await
         .map_err(|err| anyhow::anyhow!("Launch failed: {:?}", err))?;
 
+    // Path of the sandboxed child's own stdout/stderr log file, when the
+    // backend redirected them there (production seatbelt/bwrap paths). Dev-mode
+    // launches pipe the child instead and carry no log file (`None`). Captured
+    // before any early return so it can be surfaced on a crash (#628).
+    let child_log_path = result.log_path.clone();
+
     write_ok(
         prepared.spec_version.clone(),
         ExecResult {
@@ -1374,6 +1459,7 @@ async fn execute_prepared_launch(
                     if let Some(log_forwarders) = log_forwarders.take() {
                         log_forwarders.wait().await;
                     }
+                    surface_child_log_tail(child_log_path.as_deref(), &manifest.name, &status);
                     emit_service_exited(&manifest.name, &status);
                     prepared.sync_derived_outputs()?;
                     emit_execution_completed(&manifest.name, &prepared, status.code())?;
@@ -1398,6 +1484,7 @@ async fn execute_prepared_launch(
         if let Some(log_forwarders) = log_forwarders.take() {
             log_forwarders.wait().await;
         }
+        surface_child_log_tail(child_log_path.as_deref(), &manifest.name, &status);
         emit_service_exited(&manifest.name, &status);
         prepared.sync_derived_outputs()?;
         emit_execution_completed(&manifest.name, &prepared, status.code())?;
@@ -1741,6 +1828,54 @@ http_get = "/health"
         assert!(envelope.workload.cmd.is_some());
         assert!(!envelope.interactive);
         assert!(envelope.workload.manifest.is_none());
+    }
+
+    #[test]
+    fn read_log_tail_returns_full_short_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workload.log");
+        std::fs::write(&path, "line one\nline two\n").unwrap();
+
+        let tail = read_log_tail(&path, CHILD_LOG_TAIL_MAX_BYTES).unwrap();
+        assert_eq!(tail, "line one\nline two\n");
+    }
+
+    #[test]
+    fn read_log_tail_caps_and_starts_on_line_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workload.log");
+        // 5 lines of 100 'a's each (~505 bytes); cap at 250 keeps only the tail
+        // and must drop the leading partial line.
+        let body = (0..5)
+            .map(|i| format!("{}{}", i, "a".repeat(99)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{body}\n")).unwrap();
+
+        let tail = read_log_tail(&path, 250).unwrap();
+        assert!(
+            tail.len() as u64 <= 250,
+            "tail must respect the byte cap: {} bytes",
+            tail.len()
+        );
+        // The kept tail starts on a clean line boundary (no mid-line fragment):
+        // every retained line is one of the original full lines.
+        for line in tail.lines() {
+            assert_eq!(
+                line.len(),
+                100,
+                "line must be a complete original line: {line:?}"
+            );
+        }
+        // The very last line is preserved.
+        assert!(tail.contains(&format!("4{}", "a".repeat(99))));
+    }
+
+    #[test]
+    fn read_log_tail_missing_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.log");
+        assert!(read_log_tail(&path, CHILD_LOG_TAIL_MAX_BYTES).is_none());
     }
 
     #[test]
