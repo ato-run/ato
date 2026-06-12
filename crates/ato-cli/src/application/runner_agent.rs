@@ -30,6 +30,26 @@ const RUNNER_CREDENTIALS_RELATIVE: &str = "runner/credentials.json";
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 /// Floor so a misbehaving server value cannot turn the loop into a busy-spin.
 const MIN_HEARTBEAT_INTERVAL_SECS: u64 = 5;
+/// Ceiling so a pathological server value cannot park the runner for hours or
+/// overflow the failure-backoff multiplication.
+const MAX_HEARTBEAT_INTERVAL_SECS: u64 = 3600;
+/// Cap on the failure backoff regardless of the negotiated interval.
+const MAX_HEARTBEAT_BACKOFF_SECS: u64 = 300;
+
+/// Clamp a server-controlled heartbeat interval to a sane range. Every ingest
+/// of an interval (registration, persisted credentials, heartbeat response)
+/// must pass through here.
+fn clamp_heartbeat_interval(seconds: u64) -> u64 {
+    seconds.clamp(MIN_HEARTBEAT_INTERVAL_SECS, MAX_HEARTBEAT_INTERVAL_SECS)
+}
+
+/// Backoff after `consecutive_failures` failed heartbeats. Saturating so an
+/// out-of-range interval can never overflow (wrap would defeat the backoff).
+fn heartbeat_backoff_secs(interval: u64, consecutive_failures: u32) -> u64 {
+    interval
+        .saturating_mul(u64::from(consecutive_failures.min(4)))
+        .min(MAX_HEARTBEAT_BACKOFF_SECS)
+}
 
 // ─────────────────────────────────────────────
 // Credentials
@@ -260,10 +280,11 @@ async fn send_heartbeat_once(
     };
     HeartbeatOutcome::Ok {
         online: parsed.runner.map(|r| r.online).unwrap_or(false),
-        next_seconds: parsed
-            .next_heartbeat_seconds
-            .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS)
-            .max(MIN_HEARTBEAT_INTERVAL_SECS),
+        next_seconds: clamp_heartbeat_interval(
+            parsed
+                .next_heartbeat_seconds
+                .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS),
+        ),
     }
 }
 
@@ -358,10 +379,7 @@ pub async fn run_login(
         runner_id: registered.runner.id.clone(),
         runner_token: registered.runner_token,
         display_name: registered.runner.display_name.clone(),
-        heartbeat_interval_seconds: registered
-            .heartbeat
-            .interval_seconds
-            .max(MIN_HEARTBEAT_INTERVAL_SECS),
+        heartbeat_interval_seconds: clamp_heartbeat_interval(registered.heartbeat.interval_seconds),
     };
     let path = credentials_path();
     save_credentials(&path, &creds)?;
@@ -415,9 +433,7 @@ pub async fn run_serve(
     // heartbeat/claim, so stop-requested zombies clear immediately on boot.
     reconcile_open_leases(&client, &api_base, &creds.runner_id, &creds.runner_token).await;
 
-    let mut interval = creds
-        .heartbeat_interval_seconds
-        .max(MIN_HEARTBEAT_INTERVAL_SECS);
+    let mut interval = clamp_heartbeat_interval(creds.heartbeat_interval_seconds);
     let mut consecutive_failures: u32 = 0;
     // One active run at a time (v0): while a dispatched child is alive the
     // runner does not claim further leases — GET leases/next CLAIMS, so a
@@ -456,7 +472,7 @@ pub async fn run_serve(
             }
             HeartbeatOutcome::Transient(reason) => {
                 consecutive_failures += 1;
-                let backoff = (interval * u64::from(consecutive_failures.min(4))).min(300);
+                let backoff = heartbeat_backoff_secs(interval, consecutive_failures);
                 eprintln!(
                     "⚠️  heartbeat failed ({reason}); retrying in {backoff}s (attempt {consecutive_failures})"
                 );
@@ -2356,6 +2372,36 @@ mod tests {
         assert_eq!(
             with["public_base_url"].as_str(),
             Some("https://oci-a1.example.com")
+        );
+    }
+
+    #[test]
+    fn heartbeat_interval_is_clamped_on_ingest() {
+        // Below the floor → busy-spin protection.
+        assert_eq!(clamp_heartbeat_interval(0), MIN_HEARTBEAT_INTERVAL_SECS);
+        // In range → passes through.
+        assert_eq!(clamp_heartbeat_interval(30), 30);
+        // A pathological server value is ceiled, not trusted.
+        assert_eq!(
+            clamp_heartbeat_interval(u64::MAX),
+            MAX_HEARTBEAT_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn heartbeat_backoff_never_overflows_and_is_capped() {
+        // Normal growth: interval × failures, capped at 300s.
+        assert_eq!(heartbeat_backoff_secs(30, 1), 30);
+        assert_eq!(heartbeat_backoff_secs(30, 2), 60);
+        assert_eq!(heartbeat_backoff_secs(30, 4), 120);
+        // The multiplier stops growing after 4 failures.
+        assert_eq!(heartbeat_backoff_secs(30, 100), 120);
+        assert_eq!(heartbeat_backoff_secs(90, 4), MAX_HEARTBEAT_BACKOFF_SECS);
+        // Regression (#653): an out-of-range interval must saturate, not
+        // overflow — wrap in release builds defeated the backoff entirely.
+        assert_eq!(
+            heartbeat_backoff_secs(u64::MAX, 4),
+            MAX_HEARTBEAT_BACKOFF_SECS
         );
     }
 
