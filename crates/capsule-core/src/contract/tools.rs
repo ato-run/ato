@@ -1344,10 +1344,6 @@ mod tests {
         }
     }
 
-    fn build_uv_tgz() -> Vec<u8> {
-        build_uv_tgz_at(&resolved_layout_path(&UV).expect("uv layout"), 0o755)
-    }
-
     /// Builds a nested-layout archive where the uv binary is inside a
     /// `uv-{triple}/` subdirectory (the layout astral-sh/uv uses on some
     /// releases).  On Windows the archive is a .zip containing `uv.exe`;
@@ -1730,7 +1726,8 @@ mod tests {
     // for the cache hit branch.
 
     struct FakeCacheDir {
-        root: tempfile::TempDir,
+        // Held for RAII only: dropping it removes the temp dir.
+        _root: tempfile::TempDir,
         extracted_dir: PathBuf,
         shim_dir: PathBuf,
         sha_path: PathBuf,
@@ -1748,7 +1745,7 @@ mod tests {
             let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
             let shim_path = shim_dir.join(shim_name);
             FakeCacheDir {
-                root,
+                _root: root,
                 extracted_dir,
                 shim_dir,
                 sha_path,
