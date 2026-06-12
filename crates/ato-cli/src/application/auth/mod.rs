@@ -104,7 +104,7 @@ pub(super) fn read_env_non_empty(key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(super) fn shared_env_lock() -> &'static std::sync::Mutex<()> {
+pub(super) fn shared_env_lock() -> &'static crate::tests::EnvLock {
     crate::application::credential::test_env_lock()
 }
 
