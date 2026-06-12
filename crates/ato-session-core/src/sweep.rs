@@ -23,6 +23,17 @@ const DEFAULT_RUN_DIR_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// enough to be a leak rather than an in-flight write.
 const RUN_DIR_LEGACY_TTL_MULTIPLIER: u32 = 2;
 const SWEEP_LOCK_FILE: &str = ".startup-sweep.lock";
+const SWEEP_STAMP_FILE: &str = ".startup-sweep.stamp";
+/// How long a completed sweep suppresses the next one. The sweep only
+/// reclaims artifacts whose owning process is already gone, so re-running it
+/// on every single `ato` invocation within a few seconds of the last sweep is
+/// pure waste — the artifact set cannot have meaningfully changed. Each run
+/// can spawn a blocking `podman inspect` (or `tasklist` on Windows) per OCI
+/// orchestration record, so a desktop shelling out to `ato` repeatedly pays
+/// that cost on every call. Throttling collapses bursts of invocations to a
+/// single sweep while keeping the work itself byte-for-byte identical when it
+/// does run.
+const DEFAULT_SWEEP_THROTTLE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct StartupSweepOptions {
@@ -63,9 +74,75 @@ pub fn sweep_startup_runtime_artifacts_best_effort() {
             return;
         }
     };
-    if let Err(error) = sweep_startup_runtime_artifacts(&options) {
-        debug!(error = %error, "startup runtime artifact sweep failed");
+    // Throttle: if a sweep completed within the throttle window, skip this
+    // invocation entirely. This keeps the per-`ato`-call cost (including the
+    // blocking OCI liveness probes) off the common path when invocations come
+    // in bursts. The marker lives next to the sweep lock in `run_dir`.
+    if sweep_recently_completed(&options.run_dir, options.now, DEFAULT_SWEEP_THROTTLE) {
+        debug!(
+            run_dir = %options.run_dir.display(),
+            "startup runtime artifact sweep throttled: a recent sweep is still fresh"
+        );
+        return;
     }
+    match sweep_startup_runtime_artifacts(&options) {
+        Ok(_) => mark_sweep_completed(&options.run_dir, options.now),
+        Err(error) => {
+            debug!(error = %error, "startup runtime artifact sweep failed");
+        }
+    }
+}
+
+/// Returns `true` when a sweep stamp exists in `run_dir` recording a
+/// completion time less than `throttle` before `now`.
+///
+/// The stamp stores the completion time as UNIX-epoch milliseconds in its
+/// contents (rather than relying on filesystem mtime, which std cannot set to
+/// a synthetic clock and which varies in resolution across platforms). A
+/// missing, unreadable, or unparseable stamp — or a stamp dated in the future
+/// relative to `now` (clock rollback) — is treated as "not fresh" so the sweep
+/// runs. We always prefer a redundant sweep over silently skipping artifact
+/// reclamation.
+fn sweep_recently_completed(run_dir: &Path, now: SystemTime, throttle: Duration) -> bool {
+    let stamp = run_dir.join(SWEEP_STAMP_FILE);
+    let Ok(contents) = fs::read_to_string(&stamp) else {
+        return false;
+    };
+    let Some(recorded) = parse_stamp_millis(&contents) else {
+        return false;
+    };
+    let Some(now_millis) = system_time_to_unix_millis(now) else {
+        return false;
+    };
+    // `now` before the recorded completion (clock moved backwards): not fresh.
+    now_millis
+        .checked_sub(recorded)
+        .map(|elapsed_ms| Duration::from_millis(elapsed_ms) < throttle)
+        .unwrap_or(false)
+}
+
+/// Records that a sweep just completed by writing the completion time
+/// (`now`, as UNIX-epoch milliseconds) into the stamp file. Best-effort: a
+/// failure here only means the next invocation re-runs the sweep, which is
+/// harmless.
+fn mark_sweep_completed(run_dir: &Path, now: SystemTime) {
+    let Some(now_millis) = system_time_to_unix_millis(now) else {
+        return;
+    };
+    let stamp = run_dir.join(SWEEP_STAMP_FILE);
+    if let Err(error) = fs::write(&stamp, now_millis.to_string()) {
+        debug!(error = %error, stamp = %stamp.display(), "failed to write startup sweep stamp");
+    }
+}
+
+fn parse_stamp_millis(contents: &str) -> Option<u64> {
+    contents.trim().parse::<u64>().ok()
+}
+
+fn system_time_to_unix_millis(time: SystemTime) -> Option<u64> {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
 }
 
 pub fn sweep_startup_runtime_artifacts(
@@ -1164,5 +1241,96 @@ mod tests {
 
         assert_eq!(report.removed_sockets, 1);
         assert!(!sock_path.exists());
+    }
+
+    #[test]
+    fn throttle_skips_when_stamp_is_within_window() {
+        let temp = tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run dir");
+        let now = SystemTime::now();
+        // Stamp recorded "now".
+        mark_sweep_completed(&run_dir, now);
+        // A check 10s later, with a 30s throttle, is still fresh → skip.
+        let later = now + Duration::from_secs(10);
+        assert!(sweep_recently_completed(
+            &run_dir,
+            later,
+            Duration::from_secs(30)
+        ));
+    }
+
+    #[test]
+    fn throttle_runs_when_stamp_is_older_than_window() {
+        let temp = tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run dir");
+        let now = SystemTime::now();
+        mark_sweep_completed(&run_dir, now);
+        // A check 31s later, with a 30s throttle, is stale → run.
+        let later = now + Duration::from_secs(31);
+        assert!(!sweep_recently_completed(
+            &run_dir,
+            later,
+            Duration::from_secs(30)
+        ));
+    }
+
+    #[test]
+    fn throttle_runs_when_no_stamp_exists() {
+        let temp = tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run dir");
+        // No stamp written → never throttled.
+        assert!(!sweep_recently_completed(
+            &run_dir,
+            SystemTime::now(),
+            Duration::from_secs(30)
+        ));
+    }
+
+    #[test]
+    fn throttle_runs_when_stamp_is_unparseable() {
+        let temp = tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run dir");
+        fs::write(run_dir.join(SWEEP_STAMP_FILE), "not-a-number").expect("write stamp");
+        assert!(!sweep_recently_completed(
+            &run_dir,
+            SystemTime::now(),
+            Duration::from_secs(30)
+        ));
+    }
+
+    #[test]
+    fn throttle_runs_when_clock_moved_backwards() {
+        let temp = tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run dir");
+        let now = SystemTime::now();
+        // Stamp recorded in the future relative to the check time (clock
+        // rollback). Conservatively treat as not-fresh so the sweep runs.
+        mark_sweep_completed(&run_dir, now + Duration::from_secs(60));
+        assert!(!sweep_recently_completed(
+            &run_dir,
+            now,
+            Duration::from_secs(30)
+        ));
+    }
+
+    #[test]
+    fn throttle_stamp_is_not_swept_as_a_runtime_artifact() {
+        // The stamp file shares `run_dir` with pid/socket artifacts; the
+        // sweep must never mistake it for a reclaimable artifact.
+        let temp = tempdir().expect("tempdir");
+        let options = options(temp.path());
+        fs::create_dir_all(&options.run_dir).expect("run dir");
+        mark_sweep_completed(&options.run_dir, SystemTime::now());
+        let stamp = options.run_dir.join(SWEEP_STAMP_FILE);
+        assert!(stamp.exists());
+
+        let _ = sweep_startup_runtime_artifacts(&options).expect("sweep");
+
+        assert!(stamp.exists(), "sweep must not delete its own stamp file");
     }
 }
