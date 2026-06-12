@@ -3058,7 +3058,10 @@ mod tests {
         let tail = read_log_tail_from(&path, 10).expect("tail");
         assert!(tail.starts_with("...[earlier log truncated]"));
         // Nothing is blanked: the kept bytes survive under the marker.
-        assert!(tail.trim_start_matches("...[earlier log truncated]").contains("x"));
+        assert!(
+            tail.trim_start_matches("...[earlier log truncated]")
+                .contains("x")
+        );
     }
 
     #[test]
@@ -3072,7 +3075,10 @@ mod tests {
 
         std::fs::write(&path, "").unwrap();
         assert_eq!(read_log_tail_from(&path, 16 * 1024), None); // empty → None
-        assert_eq!(read_log_tail_from(&dir.path().join("nope.log"), 16 * 1024), None); // missing → None
+        assert_eq!(
+            read_log_tail_from(&dir.path().join("nope.log"), 16 * 1024),
+            None
+        ); // missing → None
     }
 
     // ── Fake-child execution flows (no API, no network) ──
