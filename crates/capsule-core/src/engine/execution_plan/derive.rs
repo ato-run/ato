@@ -325,7 +325,8 @@ pub fn compile_oci_execution_plan_from_resolution(
         compute_policy_segment_hash(&runtime_section, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION)?;
     let provisioning_policy_hash = compute_provisioning_policy_hash(&provisioning)?;
 
-    let oci_policy = build_oci_policy_envelope(declared_image_ref, port, egress_allow, resolved_image);
+    let oci_policy =
+        build_oci_policy_envelope(declared_image_ref, port, egress_allow, resolved_image);
 
     Ok(ExecutionPlan {
         schema_version: EXECUTION_PLAN_SCHEMA_VERSION.to_string(),
