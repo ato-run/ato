@@ -8,6 +8,7 @@
 - [Sandbox](sandbox.md)
 - [Execution Identity](execution-identity.md)
 - [Desktop](desktop.md)
+- [Publishing to the Ato Store](publishing-to-ato-store.md)
 
 **Reference**
 
