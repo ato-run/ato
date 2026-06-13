@@ -110,7 +110,10 @@ jobs:
             echo "<FULL>" > changed.txt
           fi
           echo "----- changed files -----"; cat changed.txt
-          "$PY" .github/scripts/affected_crates.py < changed.txt > pkgs.txt
+          # Strip CR: Python's text-mode stdout emits CRLF on the Windows runner,
+          # which otherwise makes the reader below run `cargo test -p "ato-cli\r"`
+          # (and breaks `grep -qx ato-cli`). Normalize the crate list to LF.
+          "$PY" .github/scripts/affected_crates.py < changed.txt | tr -d '\r' > pkgs.txt
           echo "----- affected crates -----"; cat pkgs.txt
           count="$(grep -c . pkgs.txt || true)"; count="${count:-0}"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
