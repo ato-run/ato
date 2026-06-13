@@ -1237,16 +1237,49 @@ fn install_into_temp_then_promote(
     })
 }
 
+/// A binary that was *just* written can momentarily refuse to `exec` while the
+/// writer's handle is still settling: ETXTBSY ("Text file busy", errno 26) on
+/// Unix, or a sharing violation (os error 32) on Windows. Both are transient and
+/// clear on their own, so they're safe to retry — unlike a real exec failure
+/// (e.g. ENOENT), which must surface immediately.
+fn is_transient_exec_busy(err: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        err.raw_os_error() == Some(32)
+    }
+    #[cfg(not(windows))]
+    {
+        err.raw_os_error() == Some(26)
+    }
+}
+
+/// Run `exec`, retrying with a short bounded backoff while it reports a transient
+/// "file busy" condition (see [`is_transient_exec_busy`]). A freshly extracted
+/// binary can lose the write/exec race under parallel load; the backoff removes
+/// the flake without masking genuine exec failures.
+fn exec_retrying_busy<T>(mut exec: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt = 1u32;
+    loop {
+        match exec() {
+            Err(e) if attempt < MAX_ATTEMPTS && is_transient_exec_busy(&e) => {
+                std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt)));
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 fn verify_binary_runs(binary: &Path) -> Result<(), PodmanInstallError> {
-    let output = std::process::Command::new(binary)
-        .arg("--version")
-        .output()
-        .map_err(|e| PodmanInstallError::Extract {
-            message: format!(
-                "extracted binary at '{}' could not be executed: {e}",
-                binary.display()
-            ),
-        })?;
+    let output =
+        exec_retrying_busy(|| std::process::Command::new(binary).arg("--version").output())
+            .map_err(|e| PodmanInstallError::Extract {
+                message: format!(
+                    "extracted binary at '{}' could not be executed: {e}",
+                    binary.display()
+                ),
+            })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PodmanInstallError::Extract {
@@ -2171,6 +2204,67 @@ mod tests {
         let install_dir = tools.path().join("podman-9.9.9-test");
         let on_disk = read_provenance(&install_dir).expect("provenance file written");
         assert_eq!(on_disk, installed.provenance);
+    }
+
+    /// The transient "file busy" code for the host platform (the same one a
+    /// just-extracted binary races against): ETXTBSY on Unix, sharing violation
+    /// on Windows.
+    fn busy_error() -> std::io::Error {
+        #[cfg(windows)]
+        {
+            std::io::Error::from_raw_os_error(32)
+        }
+        #[cfg(not(windows))]
+        {
+            std::io::Error::from_raw_os_error(26)
+        }
+    }
+
+    #[test]
+    fn transient_exec_busy_matches_only_the_busy_code() {
+        assert!(is_transient_exec_busy(&busy_error()));
+        // A real exec failure (ENOENT) must NOT be treated as transient.
+        assert!(!is_transient_exec_busy(&std::io::Error::from_raw_os_error(
+            2
+        )));
+        assert!(!is_transient_exec_busy(&std::io::Error::other("boom")));
+    }
+
+    #[test]
+    fn exec_retrying_busy_recovers_after_transient_busy() {
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out = exec_retrying_busy(|| {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n < 2 { Err(busy_error()) } else { Ok(7u8) }
+        });
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls.get(), 3, "failed twice, then succeeded");
+    }
+
+    #[test]
+    fn exec_retrying_busy_does_not_retry_a_real_error() {
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out: std::io::Result<u8> = exec_retrying_busy(|| {
+            calls.set(calls.get() + 1);
+            Err(std::io::Error::from_raw_os_error(2)) // ENOENT — not busy
+        });
+        assert!(out.is_err());
+        assert_eq!(calls.get(), 1, "a non-busy error is surfaced immediately");
+    }
+
+    #[test]
+    fn exec_retrying_busy_gives_up_after_max_attempts() {
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out: std::io::Result<u8> = exec_retrying_busy(|| {
+            calls.set(calls.get() + 1);
+            Err(busy_error())
+        });
+        assert!(out.is_err());
+        assert_eq!(calls.get(), 5, "bounded at MAX_ATTEMPTS");
     }
 
     #[test]
