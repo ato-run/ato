@@ -216,12 +216,19 @@ pub fn build_heartbeat_body(
     public_base_url: Option<&str>,
     os: &str,
     arch: &str,
+    max_slots: usize,
+    active_slots: usize,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "capabilities": capabilities,
         "os": os,
         "arch": arch,
         "agent_version": agent_version(),
+        // Advertise concurrency so the control plane can stop dispatching to a
+        // full device instead of relying on the runner to silently decline
+        // (server-side capacity is the #3 follow-up; these fields are additive).
+        "max_slots": max_slots,
+        "active_slots": active_slots,
     });
     if let Some(url) = public_base_url {
         body["public_base_url"] = serde_json::Value::String(url.to_string());
@@ -517,8 +524,31 @@ pub async fn run_serve(
     display_name: Option<String>,
     public_base_url: Option<String>,
     proxy_listen: Option<String>,
+    max_slots: Option<usize>,
+    public_url_template: Option<String>,
 ) -> Result<()> {
     let proxy_listen = proxy_listen.unwrap_or_else(|| DEFAULT_PROXY_LISTEN.to_string());
+    let (proxy_host, proxy_base_port) = parse_proxy_listen(&proxy_listen)?;
+    // Slot count: flag > env > default. Default 1 keeps single-slot behavior;
+    // operators opt into concurrency explicitly.
+    let capacity = clamp_max_slots(
+        max_slots
+            .or_else(|| {
+                std::env::var("ATO_RUNNER_MAX_SLOTS")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+            })
+            .unwrap_or(DEFAULT_MAX_SLOTS),
+    );
+    let public_url_template = public_url_template
+        .or_else(|| std::env::var("ATO_RUNNER_PUBLIC_URL_TEMPLATE").ok())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    // Fail fast at startup on configurations that would violate the
+    // no-port-collision / no-fabricated-URL invariants, rather than discovering
+    // them per-slot at ready time.
+    validate_slot_port_range(proxy_base_port, capacity)?;
+    validate_public_url_template(public_url_template.as_deref())?;
     let path = credentials_path();
     let creds = load_credentials(&path)?;
     let api_base = api_base
@@ -557,14 +587,30 @@ pub async fn run_serve(
     // receipt) is never retried; a transient failure or unsatisfiable minimum
     // retries only after a cooldown. Reset when the requested minimum changes.
     let mut update_attempt: Option<UpdateAttempt> = None;
-    // One active run at a time (v0): while a dispatched child is alive the
-    // runner does not claim further leases — GET leases/next CLAIMS, so a
-    // busy runner must not even poll.
-    let busy = Arc::new(AtomicBool::new(false));
+    // N-slot executor (#632): the runner claims leases while a slot is free.
+    // GET leases/next CLAIMS, so a full runner must not poll — the pool gates
+    // the poll instead of a single `busy` boolean. Each slot owns its own proxy
+    // port so concurrent workloads never collide.
+    let pool = SlotPool::new(capacity, proxy_host, proxy_base_port);
+    println!(
+        "   Slots:  {} concurrent run(s); per-slot proxy from {}",
+        pool.capacity(),
+        proxy_listen
+    );
+    if let Some(template) = public_url_template.as_deref() {
+        println!("   Public URL template: {template}");
+    }
 
     loop {
         let capabilities = collect_capabilities();
-        let body = build_heartbeat_body(&capabilities, public_base_url.as_deref(), &os, &arch);
+        let body = build_heartbeat_body(
+            &capabilities,
+            public_base_url.as_deref(),
+            &os,
+            &arch,
+            pool.capacity(),
+            pool.active(),
+        );
         match send_heartbeat_once(
             &client,
             &api_base,
@@ -588,7 +634,7 @@ pub async fn run_serve(
                 // (no install receipt). On a successful update we re-exec into
                 // the new binary; startup reconcile settles orphaned leases.
                 if let Some(min) = update_min
-                    && !busy.load(Ordering::SeqCst)
+                    && pool.active() == 0
                 {
                     if update_attempt.as_ref().map(|a| a.min.as_str()) != Some(min.as_str()) {
                         update_attempt = Some(UpdateAttempt {
@@ -647,24 +693,55 @@ pub async fn run_serve(
             }
             remaining = remaining.saturating_sub(slice);
 
-            if busy.load(Ordering::SeqCst) {
+            // Don't poll (and therefore don't CLAIM) when every slot is taken.
+            if !pool.has_free() {
                 continue;
             }
             match fetch_next_lease(&client, &api_base, &creds.runner_id, &creds.runner_token).await
             {
                 LeasePoll::None => {}
-                LeasePoll::Claimed(lease) => {
-                    handle_claimed_lease(
-                        &client,
-                        &api_base,
-                        &creds.runner_token,
-                        lease,
-                        Arc::clone(&busy),
-                        public_base_url.clone(),
-                        proxy_listen.clone(),
-                    )
-                    .await;
-                }
+                LeasePoll::Claimed(lease) => match pool.acquire() {
+                    Some(slot) => {
+                        handle_claimed_lease(
+                            &client,
+                            &api_base,
+                            &creds.runner_token,
+                            lease,
+                            slot,
+                            public_base_url.clone(),
+                            public_url_template.clone(),
+                        )
+                        .await;
+                    }
+                    None => {
+                        // Defensive: `has_free()` was true immediately before the
+                        // claim and the serve loop is the only acquirer, so this
+                        // is unreachable in practice. If it ever happens, fail the
+                        // lease rather than strand it pending forever.
+                        eprintln!(
+                            "⚠️  lease {} claimed but no slot free; reporting at-capacity",
+                            lease.id
+                        );
+                        let report = LeaseReport::Failed {
+                            code: "runner_at_capacity".to_string(),
+                            message: "no free run slot on this runner".to_string(),
+                        };
+                        if let Err(err) = report_lease_status(
+                            &client,
+                            &api_base,
+                            &creds.runner_token,
+                            &lease.id,
+                            &report,
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "⚠️  failed to report at-capacity: {}",
+                                scrub_secrets(&format!("{err:#}"))
+                            );
+                        }
+                    }
+                },
                 LeasePoll::Revoked => {
                     bail!(
                         "this runner has been revoked by the account owner. Run `ato runner login` to enroll it again."
@@ -716,6 +793,185 @@ const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
 
 pub const LEASE_COMMAND_KIND: &str = "run_source_sandbox";
 pub const DEFAULT_PROXY_LISTEN: &str = "127.0.0.1:8420";
+
+/// Default number of concurrent run slots. `1` preserves the historical
+/// single-slot behavior exactly: slot 0 owns the base proxy port and the legacy
+/// `public_base_url` mapping. Operators opt into more with `--max-slots` /
+/// `ATO_RUNNER_MAX_SLOTS`; per-app public URLs then require a
+/// `--public-url-template` (or an ingress that maps each slot's proxy port),
+/// since one `public_base_url` can only reach one local port.
+pub const DEFAULT_MAX_SLOTS: usize = 1;
+/// Hard ceiling on slots so a fat-fingered value cannot exhaust ports/PIDs.
+pub const MAX_SLOTS_CEILING: usize = 64;
+
+/// Clamp an operator-requested slot count into `[1, MAX_SLOTS_CEILING]`.
+pub fn clamp_max_slots(requested: usize) -> usize {
+    requested.clamp(1, MAX_SLOTS_CEILING)
+}
+
+/// Split a `host:port` proxy-listen address into its host and base port. The
+/// port is the LAST `:`-separated field (so IPv4 hosts and bare hostnames work);
+/// slot `i` then listens on `base_port + i`. Errors rather than guessing if the
+/// port is missing or unparseable.
+pub fn parse_proxy_listen(listen: &str) -> Result<(String, u16)> {
+    let (host, port) = listen
+        .rsplit_once(':')
+        .with_context(|| format!("proxy listen address '{listen}' must be host:port"))?;
+    let port: u16 = port
+        .parse()
+        .with_context(|| format!("proxy listen port '{port}' is not a valid port"))?;
+    if host.is_empty() {
+        bail!("proxy listen address '{listen}' is missing a host");
+    }
+    Ok((host.to_string(), port))
+}
+
+/// Reject a proxy base port + slot count whose range would run past
+/// `u16::MAX`. Slot `i` listens on `base + i`, so the highest slot needs
+/// `base + capacity - 1` to fit. Without this check, saturating math would
+/// collapse high slots onto port 65535 and silently break the no-collision
+/// invariant — so we fail loudly at startup instead.
+pub fn validate_slot_port_range(proxy_base_port: u16, capacity: usize) -> Result<()> {
+    let capacity = capacity.max(1);
+    let highest = proxy_base_port as usize + capacity - 1;
+    if highest > u16::MAX as usize {
+        bail!(
+            "proxy listen base port {proxy_base_port} with max_slots={capacity} exceeds the valid port range (slot {} would need port {highest} > {})",
+            capacity - 1,
+            u16::MAX
+        );
+    }
+    Ok(())
+}
+
+/// A configured public URL template must distinguish slots: without a `{port}`
+/// or `{slot}` placeholder every slot would render the SAME URL, which is a
+/// collision/fabrication for a multi-slot runner. The template is a new flag
+/// (no back-compat user), so require a placeholder whenever it is set.
+pub fn validate_public_url_template(template: Option<&str>) -> Result<()> {
+    if let Some(t) = template
+        && !(t.contains("{port}") || t.contains("{slot}"))
+    {
+        bail!(
+            "public URL template must include {{port}} or {{slot}} so each slot renders a distinct URL"
+        );
+    }
+    Ok(())
+}
+
+/// A fixed pool of concurrent run slots. Slot `i` owns proxy port
+/// `proxy_base_port + i`, so concurrent workloads never collide on a listen port
+/// and an operator can map a stable external URL to each. The serve loop is the
+/// SOLE acquirer (single-threaded), so acquisition takes no lock; detached lease
+/// tasks only ever release their own slot.
+struct SlotPool {
+    occupied: Vec<Arc<AtomicBool>>,
+    proxy_host: String,
+    proxy_base_port: u16,
+}
+
+impl SlotPool {
+    fn new(capacity: usize, proxy_host: String, proxy_base_port: u16) -> Self {
+        let occupied = (0..capacity.max(1))
+            .map(|_| Arc::new(AtomicBool::new(false)))
+            .collect();
+        SlotPool {
+            occupied,
+            proxy_host,
+            proxy_base_port,
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        self.occupied.len()
+    }
+
+    fn active(&self) -> usize {
+        self.occupied
+            .iter()
+            .filter(|o| o.load(Ordering::SeqCst))
+            .count()
+    }
+
+    fn has_free(&self) -> bool {
+        self.occupied.iter().any(|o| !o.load(Ordering::SeqCst))
+    }
+
+    /// Claim the lowest free slot, if any. Returns `None` when at capacity.
+    fn acquire(&self) -> Option<SlotLease> {
+        for (index, occ) in self.occupied.iter().enumerate() {
+            if occ
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                // The base+capacity range is validated at startup
+                // (validate_slot_port_range), so this never overflows; checked
+                // arithmetic makes that invariant explicit rather than wrapping
+                // or saturating two slots onto the same port.
+                let proxy_port = self
+                    .proxy_base_port
+                    .checked_add(index as u16)
+                    .expect("slot port range validated at startup");
+                return Some(SlotLease {
+                    index,
+                    proxy_listen: format!("{}:{}", self.proxy_host, proxy_port),
+                    proxy_port,
+                    occupied: Arc::clone(occ),
+                    released: Arc::new(AtomicBool::new(false)),
+                });
+            }
+        }
+        None
+    }
+}
+
+/// A claimed concurrency slot, handed to the lease task. `release()` frees it
+/// for reuse and is idempotent (clones share the flag), so the many lease exit
+/// paths can each release without risk of double-freeing — and a slot whose
+/// workload could not be confirmed gone is simply never released (fail closed,
+/// same invariant the single-slot `busy` flag held).
+#[derive(Clone)]
+struct SlotLease {
+    index: usize,
+    proxy_listen: String,
+    proxy_port: u16,
+    occupied: Arc<AtomicBool>,
+    released: Arc<AtomicBool>,
+}
+
+impl SlotLease {
+    fn release(&self) {
+        if !self.released.swap(true, Ordering::SeqCst) {
+            self.occupied.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+/// The public URL the runner will claim for a slot — honestly.
+///
+/// * With a template (`{port}` / `{slot}` placeholders) the operator asserts
+///   their ingress maps each slot's proxy port to that URL, so it is filled in
+///   for every slot.
+/// * Without a template only the legacy single mapping exists: `public_base_url`
+///   reaches the base proxy port, which is slot 0. Any other slot gets `None`
+///   rather than a fabricated URL.
+fn public_ready_url(
+    public_base_url: Option<&str>,
+    public_url_template: Option<&str>,
+    slot: &SlotLease,
+) -> Option<String> {
+    if let Some(template) = public_url_template {
+        return Some(
+            template
+                .replace("{port}", &slot.proxy_port.to_string())
+                .replace("{slot}", &slot.index.to_string()),
+        );
+    }
+    match public_base_url {
+        Some(base) if slot.index == 0 => Some(format!("{}/", base.trim_end_matches('/'))),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct LeaseEnvelope {
@@ -1134,8 +1390,9 @@ async fn report_lease_status(
 // ── Ready reporting (/ready) + root proxy ──
 
 /// What the runner will claim on /ready. A ready_url appears ONLY when the
-/// full local chain is proven: public_base_url configured AND the observed
-/// workload port is known AND the local root proxy actually came up.
+/// full local chain is proven: a public URL candidate exists for this slot
+/// (`public_ready_url`) AND the observed workload port is known AND the local
+/// per-slot root proxy actually came up.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadyPayload {
     pub execution_id: String,
@@ -1144,17 +1401,20 @@ pub struct ReadyPayload {
 }
 
 /// Decide the /ready payload from what was actually observed/achieved.
+/// `candidate_url` is the slot's honest public URL (see `public_ready_url`);
 /// `proxy_started` is the result of the proxy bring-up attempt (None = not
-/// attempted because base or port was missing).
+/// attempted because no URL candidate or no port existed). The URL is claimed
+/// ONLY under full proof: a candidate exists AND the workload port is known AND
+/// the local proxy actually came up.
 pub fn decide_ready_payload(
     execution_id: String,
-    public_base_url: Option<&str>,
+    candidate_url: Option<&str>,
     port: Option<u16>,
     proxy_started: Option<bool>,
 ) -> ReadyPayload {
-    let ready_url = match (public_base_url, port, proxy_started) {
-        (Some(base), Some(_), Some(true)) => Some(format!("{}/", base.trim_end_matches('/'))),
-        // Missing base, unknown port, or a proxy that failed to start: a URL
+    let ready_url = match (candidate_url, port, proxy_started) {
+        (Some(url), Some(_), Some(true)) => Some(url.to_string()),
+        // No candidate, unknown port, or a proxy that failed to start: a URL
         // would be a fabrication — report ready without one.
         _ => None,
     };
@@ -1896,7 +2156,7 @@ async fn perform_stop_cleanup(
     child_pid: Option<u32>,
     monitor: tokio::task::JoinHandle<()>,
     proxy_handle: Option<tokio::task::JoinHandle<()>>,
-    busy: &Arc<AtomicBool>,
+    slot: &SlotLease,
 ) {
     println!("🛑 lease {lease_id}: owner requested stop; tearing down workload");
 
@@ -1916,11 +2176,11 @@ async fn perform_stop_cleanup(
 
     let cleanup = StopCleanup::from_teardown(process_terminated, proxy_stopped);
 
-    // Free the single slot ONLY on a fully confirmed teardown. If we cannot
-    // confirm the workload is gone, stay busy (fail closed) rather than offer a
+    // Free the slot ONLY on a fully confirmed teardown. If we cannot confirm
+    // the workload is gone, keep the slot held (fail closed) rather than offer a
     // slot a possibly-live workload still occupies.
     if cleanup.slot_released {
-        busy.store(false, Ordering::SeqCst);
+        slot.release();
         println!("🛑 lease {lease_id}: workload terminated, proxy stopped, slot released");
     } else {
         eprintln!(
@@ -2333,9 +2593,9 @@ async fn handle_claimed_lease(
     api_base: &str,
     runner_token: &str,
     lease: LeaseDto,
-    busy: Arc<AtomicBool>,
+    slot: SlotLease,
     public_base_url: Option<String>,
-    proxy_listen: String,
+    public_url_template: Option<String>,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
     let command = match parse_lease_command(&lease.command) {
@@ -2372,9 +2632,9 @@ async fn handle_claimed_lease(
 
     let log_path = run_log_path(&lease.id);
 
-    // The slot is held for the whole gated lifetime (preparing → optional
-    // needs_consent → running), released only on settle / stop / terminal.
-    busy.store(true, Ordering::SeqCst);
+    // The slot was acquired by the serve loop before dispatch and is held for
+    // the whole gated lifetime (preparing → optional needs_consent → running),
+    // released only on settle / stop / terminal.
     let client = client.clone();
     let api_base = api_base.to_string();
     let runner_token = runner_token.to_string();
@@ -2424,7 +2684,7 @@ async fn handle_claimed_lease(
                         report_lease_status(&client, &api_base, &runner_token, &lease_id, &report)
                             .await;
                     control.abort();
-                    busy.store(false, Ordering::SeqCst);
+                    slot.release();
                     return;
                 }
             };
@@ -2455,7 +2715,7 @@ async fn handle_claimed_lease(
                 _ = stop_notify.notified() => {
                     perform_stop_cleanup(
                         &client, &api_base, &runner_token, &lease_id,
-                        child_pid, monitor, None, &busy,
+                        child_pid, monitor, None, &slot,
                     )
                     .await;
                     control.abort();
@@ -2469,7 +2729,7 @@ async fn handle_claimed_lease(
                 let _ = monitor.await;
                 clear_workload_group(&lease_id);
                 control.abort();
-                busy.store(false, Ordering::SeqCst);
+                slot.release();
                 return;
             };
 
@@ -2498,7 +2758,7 @@ async fn handle_claimed_lease(
                 let _ = report_lease_status(&client, &api_base, &runner_token, &lease_id, &report)
                     .await;
                 control.abort();
-                busy.store(false, Ordering::SeqCst);
+                slot.release();
                 println!("🔓 lease {lease_id}: slot released");
                 return;
             }
@@ -2518,7 +2778,7 @@ async fn handle_claimed_lease(
                 let _ = report_lease_status(&client, &api_base, &runner_token, &lease_id, &report)
                     .await;
                 control.abort();
-                busy.store(false, Ordering::SeqCst);
+                slot.release();
                 return;
             }
             println!(
@@ -2553,7 +2813,7 @@ async fn handle_claimed_lease(
                     _ => {}
                 }
                 control.abort();
-                busy.store(false, Ordering::SeqCst);
+                slot.release();
                 println!("🔓 lease {lease_id}: slot released (no workload was running)");
                 return;
             };
@@ -2580,7 +2840,7 @@ async fn handle_claimed_lease(
                         report_lease_status(&client, &api_base, &runner_token, &lease_id, &report)
                             .await;
                     control.abort();
-                    busy.store(false, Ordering::SeqCst);
+                    slot.release();
                     println!("🔓 lease {lease_id}: slot released");
                     return;
                 }
@@ -2619,7 +2879,7 @@ async fn handle_claimed_lease(
                 let _ = report_lease_status(&client, &api_base, &runner_token, &lease_id, &report)
                     .await;
                 control.abort();
-                busy.store(false, Ordering::SeqCst);
+                slot.release();
                 println!("🔓 lease {lease_id}: slot released");
                 return;
             }
@@ -2655,17 +2915,25 @@ async fn handle_claimed_lease(
             }
             match report {
                 LeaseReport::Ready { execution_id, port } => {
-                    // Bring the root proxy up BEFORE claiming a URL; a proxy
-                    // that failed (or was never attempted) means ready is
-                    // reported without ready_url — never a fabricated one.
-                    let proxy_started = match (public_base_url.as_deref(), port) {
+                    // The honest public URL for THIS slot (None for a non-zero
+                    // slot without a template — never fabricated).
+                    let candidate = public_ready_url(
+                        public_base_url.as_deref(),
+                        public_url_template.as_deref(),
+                        &slot,
+                    );
+                    // Bring the per-slot root proxy up BEFORE claiming a URL; a
+                    // proxy that failed (or was never attempted because there is
+                    // no URL to claim) means ready is reported without ready_url
+                    // — never a fabricated one.
+                    let proxy_started = match (candidate.as_deref(), port) {
                         (Some(_), Some(workload_port)) => {
-                            match start_root_proxy(&proxy_listen, workload_port).await {
+                            match start_root_proxy(&slot.proxy_listen, workload_port).await {
                                 Ok(handle) => {
                                     proxy_handle = Some(handle);
                                     println!(
-                                        "🔀 lease {lease_id}: root proxy {} -> 127.0.0.1:{}",
-                                        proxy_listen, workload_port
+                                        "🔀 lease {lease_id}: slot {} proxy {} -> 127.0.0.1:{}",
+                                        slot.index, slot.proxy_listen, workload_port
                                     );
                                     Some(true)
                                 }
@@ -2682,7 +2950,7 @@ async fn handle_claimed_lease(
                     };
                     let payload = decide_ready_payload(
                         execution_id,
-                        public_base_url.as_deref(),
+                        candidate.as_deref(),
                         port,
                         proxy_started,
                     );
@@ -2735,7 +3003,7 @@ async fn handle_claimed_lease(
                 child_pid,
                 monitor,
                 proxy_handle,
-                &busy,
+                &slot,
             )
             .await;
         } else {
@@ -2745,7 +3013,7 @@ async fn handle_claimed_lease(
             if let Some(handle) = proxy_handle {
                 handle.abort();
             }
-            busy.store(false, Ordering::SeqCst);
+            slot.release();
             println!("📦 lease {lease_id}: child exited; runner is idle again");
         }
         control.abort();
@@ -2817,7 +3085,7 @@ mod tests {
     #[test]
     fn heartbeat_body_includes_public_base_url_only_when_configured() {
         let caps = vec!["linux".to_string()];
-        let without = build_heartbeat_body(&caps, None, "linux", "aarch64");
+        let without = build_heartbeat_body(&caps, None, "linux", "aarch64", 1, 0);
         assert!(
             without.get("public_base_url").is_none(),
             "absent public_base_url must not be sent (null would clear it server-side)"
@@ -2827,16 +3095,21 @@ mod tests {
             Some("https://oci-a1.example.com"),
             "linux",
             "aarch64",
+            3,
+            1,
         );
         assert_eq!(
             with["public_base_url"].as_str(),
             Some("https://oci-a1.example.com")
         );
+        // Concurrency is advertised so the control plane can route by capacity.
+        assert_eq!(with["max_slots"].as_u64(), Some(3));
+        assert_eq!(with["active_slots"].as_u64(), Some(1));
     }
 
     #[test]
     fn heartbeat_body_reports_agent_version() {
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64");
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
         assert_eq!(body["agent_version"].as_str(), Some(agent_version()));
         assert_eq!(agent_version(), env!("CARGO_PKG_VERSION"));
     }
@@ -3429,28 +3702,180 @@ mod tests {
     #[test]
     fn ready_payload_only_claims_a_url_under_full_proof() {
         let id = || "blake3:x".to_string();
-        // Full proof: base + port + proxy up -> root URL.
+        // Full proof: candidate URL + port + proxy up -> that URL.
         let payload =
-            decide_ready_payload(id(), Some("https://r.example.com"), Some(8000), Some(true));
+            decide_ready_payload(id(), Some("https://r.example.com/"), Some(8000), Some(true));
         assert_eq!(payload.ready_url.as_deref(), Some("https://r.example.com/"));
         assert_eq!(payload.local_port, Some(8000));
 
-        // No public base -> no URL.
+        // No candidate URL (e.g. a non-zero slot without a template) -> no URL.
         assert_eq!(
             decide_ready_payload(id(), None, Some(8000), None).ready_url,
             None
         );
         // Port unknown -> no URL.
         assert_eq!(
-            decide_ready_payload(id(), Some("https://r.example.com"), None, None).ready_url,
+            decide_ready_payload(id(), Some("https://r.example.com/"), None, None).ready_url,
             None
         );
         // Proxy failed to start -> no URL (never fabricate reachability).
         assert_eq!(
-            decide_ready_payload(id(), Some("https://r.example.com"), Some(8000), Some(false))
-                .ready_url,
+            decide_ready_payload(
+                id(),
+                Some("https://r.example.com/"),
+                Some(8000),
+                Some(false)
+            )
+            .ready_url,
             None
         );
+    }
+
+    #[test]
+    fn clamp_max_slots_bounds_to_one_through_ceiling() {
+        assert_eq!(clamp_max_slots(0), 1);
+        assert_eq!(clamp_max_slots(1), 1);
+        assert_eq!(clamp_max_slots(8), 8);
+        assert_eq!(clamp_max_slots(MAX_SLOTS_CEILING + 100), MAX_SLOTS_CEILING);
+    }
+
+    #[test]
+    fn parse_proxy_listen_splits_host_and_base_port() {
+        assert_eq!(
+            parse_proxy_listen("127.0.0.1:8420").unwrap(),
+            ("127.0.0.1".to_string(), 8420)
+        );
+        assert_eq!(
+            parse_proxy_listen("0.0.0.0:9000").unwrap(),
+            ("0.0.0.0".to_string(), 9000)
+        );
+        assert!(parse_proxy_listen("127.0.0.1").is_err()); // no port
+        assert!(parse_proxy_listen("127.0.0.1:notaport").is_err());
+        assert!(parse_proxy_listen(":8420").is_err()); // no host
+    }
+
+    #[test]
+    fn validate_slot_port_range_rejects_overflow() {
+        // Normal config fits.
+        assert!(validate_slot_port_range(8420, 64).is_ok());
+        // The very last port with a single slot is fine (base + 0 == 65535).
+        assert!(validate_slot_port_range(u16::MAX, 1).is_ok());
+        // Two slots from the last port would need 65536 -> rejected.
+        assert!(validate_slot_port_range(u16::MAX, 2).is_err());
+        // High base + many slots overflows -> rejected.
+        assert!(validate_slot_port_range(65530, 64).is_err());
+        // Exact boundary: base 65472 + 64 slots tops out at 65535 -> ok.
+        assert!(validate_slot_port_range(65535 - 63, 64).is_ok());
+    }
+
+    #[test]
+    fn validate_public_url_template_requires_a_placeholder() {
+        // Distinguishing placeholders pass.
+        assert!(validate_public_url_template(Some("https://{slot}.runner.example.com/")).is_ok());
+        assert!(validate_public_url_template(Some("https://runner.example.com:{port}/")).is_ok());
+        // A placeholder-less template would give every slot the same URL.
+        assert!(validate_public_url_template(Some("https://runner.example.com/")).is_err());
+        // No template is fine — legacy slot-0-only behavior.
+        assert!(validate_public_url_template(None).is_ok());
+    }
+
+    #[test]
+    fn slot_pool_allocates_lowest_free_index_with_per_slot_port() {
+        let pool = SlotPool::new(3, "127.0.0.1".to_string(), 8420);
+        assert_eq!(pool.capacity(), 3);
+        assert_eq!(pool.active(), 0);
+        assert!(pool.has_free());
+
+        let a = pool.acquire().expect("slot 0");
+        assert_eq!(a.index, 0);
+        assert_eq!(a.proxy_port, 8420);
+        assert_eq!(a.proxy_listen, "127.0.0.1:8420");
+        let b = pool.acquire().expect("slot 1");
+        assert_eq!(b.index, 1);
+        assert_eq!(b.proxy_port, 8421);
+        let _c = pool.acquire().expect("slot 2");
+        assert_eq!(pool.active(), 3);
+        assert!(!pool.has_free());
+        // At capacity: no more slots.
+        assert!(pool.acquire().is_none());
+
+        // Releasing the middle slot frees exactly that index for reuse.
+        b.release();
+        assert_eq!(pool.active(), 2);
+        assert!(pool.has_free());
+        let d = pool.acquire().expect("reused slot 1");
+        assert_eq!(d.index, 1);
+        assert_eq!(d.proxy_port, 8421);
+    }
+
+    #[test]
+    fn slot_release_is_idempotent_across_clones() {
+        let pool = SlotPool::new(1, "127.0.0.1".to_string(), 8420);
+        let slot = pool.acquire().expect("slot 0");
+        assert_eq!(pool.active(), 1);
+        slot.release();
+        slot.release(); // second release must not double-free
+        assert_eq!(pool.active(), 0);
+        // A clone shares the released flag — also a no-op now.
+        slot.clone().release();
+        assert_eq!(pool.active(), 0);
+    }
+
+    #[test]
+    fn unconfirmed_teardown_keeps_only_that_slot_held() {
+        // A slot whose workload couldn't be confirmed gone is simply never
+        // released (fail closed): its index stays held while the OTHER slot
+        // remains usable — strictly better than the single-slot lockup.
+        let pool = SlotPool::new(2, "127.0.0.1".to_string(), 8420);
+        let _held = pool.acquire().expect("slot 0"); // no release()
+        assert_eq!(pool.active(), 1);
+        assert!(pool.has_free());
+    }
+
+    #[test]
+    fn public_ready_url_template_fills_port_and_slot() {
+        let pool = SlotPool::new(2, "127.0.0.1".to_string(), 8420);
+        let s0 = pool.acquire().unwrap();
+        let s1 = pool.acquire().unwrap();
+        // {slot} subdomain form.
+        assert_eq!(
+            public_ready_url(None, Some("https://{slot}.runner.example.com/"), &s1).as_deref(),
+            Some("https://1.runner.example.com/")
+        );
+        // {port} form.
+        assert_eq!(
+            public_ready_url(None, Some("https://runner.example.com:{port}/"), &s1).as_deref(),
+            Some("https://runner.example.com:8421/")
+        );
+        // A template wins even when a base URL is also configured.
+        assert_eq!(
+            public_ready_url(
+                Some("https://base.example.com"),
+                Some("https://{port}.x/"),
+                &s0
+            )
+            .as_deref(),
+            Some("https://8420.x/")
+        );
+    }
+
+    #[test]
+    fn public_ready_url_without_template_is_slot0_only() {
+        let pool = SlotPool::new(2, "127.0.0.1".to_string(), 8420);
+        let s0 = pool.acquire().unwrap();
+        let s1 = pool.acquire().unwrap();
+        // Legacy single mapping: slot 0 reaches public_base_url; others don't
+        // (no fabricated URL for a slot the ingress can't reach).
+        assert_eq!(
+            public_ready_url(Some("https://r.example.com"), None, &s0).as_deref(),
+            Some("https://r.example.com/")
+        );
+        assert_eq!(
+            public_ready_url(Some("https://r.example.com"), None, &s1),
+            None
+        );
+        // No base and no template -> never a URL.
+        assert_eq!(public_ready_url(None, None, &s0), None);
     }
 
     #[tokio::test]
@@ -3587,6 +4012,8 @@ mod tests {
             Some("https://oci-a1.example.com"),
             "linux",
             "aarch64",
+            1,
+            0,
         );
         let outcome =
             send_heartbeat_once(&client, &base, "01TEST", "ato_rnr_test-token", &body).await;
@@ -3623,7 +4050,7 @@ mod tests {
             "{\"error\":\"runner_revoked\",\"message\":\"This runner was revoked\"}",
         );
         let client = reqwest::Client::new();
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64");
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
         let outcome =
             send_heartbeat_once(&client, &base, "01TEST", "ato_rnr_test-token", &body).await;
         let _ = server.join();
