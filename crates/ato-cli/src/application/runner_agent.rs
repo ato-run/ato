@@ -544,6 +544,11 @@ pub async fn run_serve(
         .or_else(|| std::env::var("ATO_RUNNER_PUBLIC_URL_TEMPLATE").ok())
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
+    // Fail fast at startup on configurations that would violate the
+    // no-port-collision / no-fabricated-URL invariants, rather than discovering
+    // them per-slot at ready time.
+    validate_slot_port_range(proxy_base_port, capacity)?;
+    validate_public_url_template(public_url_template.as_deref())?;
     let path = credentials_path();
     let creds = load_credentials(&path)?;
     let api_base = api_base
@@ -821,6 +826,39 @@ pub fn parse_proxy_listen(listen: &str) -> Result<(String, u16)> {
     Ok((host.to_string(), port))
 }
 
+/// Reject a proxy base port + slot count whose range would run past
+/// `u16::MAX`. Slot `i` listens on `base + i`, so the highest slot needs
+/// `base + capacity - 1` to fit. Without this check, saturating math would
+/// collapse high slots onto port 65535 and silently break the no-collision
+/// invariant — so we fail loudly at startup instead.
+pub fn validate_slot_port_range(proxy_base_port: u16, capacity: usize) -> Result<()> {
+    let capacity = capacity.max(1);
+    let highest = proxy_base_port as usize + capacity - 1;
+    if highest > u16::MAX as usize {
+        bail!(
+            "proxy listen base port {proxy_base_port} with max_slots={capacity} exceeds the valid port range (slot {} would need port {highest} > {})",
+            capacity - 1,
+            u16::MAX
+        );
+    }
+    Ok(())
+}
+
+/// A configured public URL template must distinguish slots: without a `{port}`
+/// or `{slot}` placeholder every slot would render the SAME URL, which is a
+/// collision/fabrication for a multi-slot runner. The template is a new flag
+/// (no back-compat user), so require a placeholder whenever it is set.
+pub fn validate_public_url_template(template: Option<&str>) -> Result<()> {
+    if let Some(t) = template
+        && !(t.contains("{port}") || t.contains("{slot}"))
+    {
+        bail!(
+            "public URL template must include {{port}} or {{slot}} so each slot renders a distinct URL"
+        );
+    }
+    Ok(())
+}
+
 /// A fixed pool of concurrent run slots. Slot `i` owns proxy port
 /// `proxy_base_port + i`, so concurrent workloads never collide on a listen port
 /// and an operator can map a stable external URL to each. The serve loop is the
@@ -866,7 +904,14 @@ impl SlotPool {
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
-                let proxy_port = self.proxy_base_port.saturating_add(index as u16);
+                // The base+capacity range is validated at startup
+                // (validate_slot_port_range), so this never overflows; checked
+                // arithmetic makes that invariant explicit rather than wrapping
+                // or saturating two slots onto the same port.
+                let proxy_port = self
+                    .proxy_base_port
+                    .checked_add(index as u16)
+                    .expect("slot port range validated at startup");
                 return Some(SlotLease {
                     index,
                     proxy_listen: format!("{}:{}", self.proxy_host, proxy_port),
@@ -3707,6 +3752,31 @@ mod tests {
         assert!(parse_proxy_listen("127.0.0.1").is_err()); // no port
         assert!(parse_proxy_listen("127.0.0.1:notaport").is_err());
         assert!(parse_proxy_listen(":8420").is_err()); // no host
+    }
+
+    #[test]
+    fn validate_slot_port_range_rejects_overflow() {
+        // Normal config fits.
+        assert!(validate_slot_port_range(8420, 64).is_ok());
+        // The very last port with a single slot is fine (base + 0 == 65535).
+        assert!(validate_slot_port_range(u16::MAX, 1).is_ok());
+        // Two slots from the last port would need 65536 -> rejected.
+        assert!(validate_slot_port_range(u16::MAX, 2).is_err());
+        // High base + many slots overflows -> rejected.
+        assert!(validate_slot_port_range(65530, 64).is_err());
+        // Exact boundary: base 65472 + 64 slots tops out at 65535 -> ok.
+        assert!(validate_slot_port_range(65535 - 63, 64).is_ok());
+    }
+
+    #[test]
+    fn validate_public_url_template_requires_a_placeholder() {
+        // Distinguishing placeholders pass.
+        assert!(validate_public_url_template(Some("https://{slot}.runner.example.com/")).is_ok());
+        assert!(validate_public_url_template(Some("https://runner.example.com:{port}/")).is_ok());
+        // A placeholder-less template would give every slot the same URL.
+        assert!(validate_public_url_template(Some("https://runner.example.com/")).is_err());
+        // No template is fine — legacy slot-0-only behavior.
+        assert!(validate_public_url_template(None).is_ok());
     }
 
     #[test]
