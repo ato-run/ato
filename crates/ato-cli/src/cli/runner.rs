@@ -55,10 +55,27 @@ pub(crate) enum RunnerCommands {
         #[arg(long, value_name = "URL")]
         public_base_url: Option<String>,
 
-        /// Local address the root proxy listens on when a run becomes ready
-        /// (the operator's tunnel/LB forwards public_base_url here).
+        /// Local address the BASE root proxy listens on. Slot `i` listens on
+        /// `base_port + i`, so concurrent runs never collide on a port (the
+        /// operator's tunnel/LB forwards public_base_url to the base port).
         /// Default: 127.0.0.1:8420
         #[arg(long, value_name = "ADDR:PORT")]
         proxy_listen: Option<String>,
+
+        /// Max concurrent run slots this device serves (default 1; also
+        /// `ATO_RUNNER_MAX_SLOTS`). Each slot runs one app and owns proxy port
+        /// `base_port + slot_index`. Values are clamped to [1, 64].
+        #[arg(long, value_name = "N")]
+        max_slots: Option<usize>,
+
+        /// Template for each slot's public URL, with `{port}` (the slot's proxy
+        /// port) and/or `{slot}` (its index) placeholders — e.g.
+        /// "https://{slot}.runner.example.com/" or
+        /// "https://runner.example.com:{port}/". Set this only when your ingress
+        /// maps each slot's proxy port to that URL; without it, only slot 0 gets
+        /// a public URL (from --public-base-url) and other slots report ready
+        /// without one. Also `ATO_RUNNER_PUBLIC_URL_TEMPLATE`.
+        #[arg(long, value_name = "TEMPLATE")]
+        public_url_template: Option<String>,
     },
 }
