@@ -1907,6 +1907,18 @@ async fn configure_python_lockfile(
         .await?;
     }
 
+    // ato#723: Python-backed App Builder stacks may drive their frontend with
+    // Bun (`runtime_tools = { node = "22", bun = "1.2", ... }`). Pin Bun in the
+    // lock from the manifest so it hydrates under locked/offline/managed runs.
+    if state.tools.bun.is_none()
+        && let Some(bun_version) = read_selected_runtime_tool(ctx.manifest_raw, "bun")
+    {
+        state.tools.bun = Some(resolve_bun_tool_targets(
+            ctx.runtime_platforms,
+            Some(bun_version.as_str()),
+        ));
+    }
+
     Ok(())
 }
 
@@ -1994,10 +2006,27 @@ async fn configure_node_lockfile(
         if lockfile_name == "yarn.lock" {
             state.tools.yarn = Some(resolve_yarn_tool_targets(ctx.runtime_platforms));
         } else if lockfile_name == "bun.lock" || lockfile_name == "bun.lockb" {
-            state.tools.bun = Some(resolve_bun_tool_targets(ctx.runtime_platforms));
+            state.tools.bun = Some(resolve_bun_tool_targets(
+                ctx.runtime_platforms,
+                read_selected_runtime_tool(ctx.manifest_raw, "bun").as_deref(),
+            ));
         } else {
             state.tools.pnpm = Some(resolve_pnpm_tool_targets(ctx.runtime_platforms));
         }
+    }
+
+    // ato#723: a capsule may declare `runtime_tools = { bun = "1.2" }` while
+    // shipping a non-bun (or no) ecosystem lockfile — e.g. a `package.json`
+    // it installs with `bun install`. Pin Bun in the lock from the manifest so
+    // locked / offline / managed-runner runs hydrate the declared Bun rather
+    // than silently falling back to host bun.
+    if state.tools.bun.is_none()
+        && let Some(bun_version) = read_selected_runtime_tool(ctx.manifest_raw, "bun")
+    {
+        state.tools.bun = Some(resolve_bun_tool_targets(
+            ctx.runtime_platforms,
+            Some(bun_version.as_str()),
+        ));
     }
 
     Ok(())
@@ -2342,6 +2371,28 @@ fn read_runtime_tools(manifest: &toml::Value) -> HashMap<String, String> {
     evaluate_lock_draft_with_minimal_host(manifest)
         .map(|draft| runtime_tools_from_draft(&draft))
         .unwrap_or_default()
+}
+
+/// Reads the declared version of a single `runtime_tools.<name>` entry for the
+/// selected target, tolerating both the folded `targets.<label>.runtime_tools`
+/// form and the flat top-level `runtime_tools = { ... }` inline-table form.
+/// Used to pin auxiliary native tools (e.g. Bun) into the lock from the
+/// manifest even when no matching ecosystem lockfile is shipped. See ato#723.
+fn read_selected_runtime_tool(manifest: &toml::Value, tool: &str) -> Option<String> {
+    if let Some(target) = selected_target_table(manifest) {
+        let tools = read_runtime_tools_from_target(target);
+        if let Some(version) = tools.get(&tool.to_ascii_lowercase()) {
+            return Some(version.clone());
+        }
+    }
+    manifest
+        .get("runtime_tools")
+        .and_then(|v| v.as_table())
+        .and_then(|table| table.get(tool))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn read_runtime_tools_from_target(target: &toml::Value) -> HashMap<String, String> {

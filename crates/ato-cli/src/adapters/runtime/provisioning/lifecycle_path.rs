@@ -1013,4 +1013,100 @@ runtime_tools = { bun = "1.2.8" }
         );
         assert_eq!(toolchains.provenance[0].source, ToolchainSource::Managed);
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn top_level_runtime_tools_bun_materialized_for_build_and_run() {
+        // ato#723: a flat v0.3 manifest declaring `runtime_tools = { bun = "1.2" }`
+        // at the top level must put Bun on the lifecycle PATH for BOTH the build
+        // command and the run command (they share `lifecycle_runtime_tools`).
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let ato_home = tempdir().expect("ato home");
+        let _ato_home = EnvGuard::set("ATO_HOME", ato_home.path());
+
+        // Seed a *complete, valid* Bun cache for the declared pin so the shared
+        // planner serves it offline (a partial pin like "1.2" is not a real
+        // release tag, so any network fallback would 404). This mirrors the
+        // layout `ensure_runtime_tool` validates: an executable shim, an
+        // executable extracted binary under a single top-level dir, and a
+        // 64-hex `binary.sha256` integrity marker.
+        let tools_root = ato_home.path().join("toolchains/tools/bun/1.2");
+        let shim_dir = tools_root.join("shim");
+        let extracted_bin = tools_root.join("extracted/bun-host/bun");
+        let write_executable = |path: &std::path::Path, contents: &str| {
+            fs::create_dir_all(path.parent().unwrap()).expect("tool dir");
+            fs::write(path, contents).expect("tool file");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(path).expect("metadata").permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(path, perms).expect("chmod");
+            }
+        };
+        write_executable(
+            &shim_dir.join(if cfg!(windows) { "bun.cmd" } else { "bun" }),
+            "#!/bin/sh\nexec bun \"$@\"\n",
+        );
+        write_executable(&extracted_bin, "#!/bin/sh\necho bun\n");
+        fs::write(tools_root.join("binary.sha256"), "a".repeat(64)).expect("sha");
+
+        let plan = build_plan(
+            ato_home.path(),
+            r#"
+schema_version = "0.3"
+name = "next-bun-sqlite-app"
+type = "app"
+
+runtime = "source/node"
+runtime_version = "20"
+runtime_tools = { bun = "1.2" }
+
+build = "bun install"
+run = "bun run start"
+port = 3000
+"#,
+        );
+
+        // Sanity: the fold placed bun under the selected target so the raw
+        // manifest read by lifecycle_runtime_tools resolves it.
+        let tools =
+            lifecycle_runtime_tools(&plan, Some("bun")).expect("lifecycle runtime tools");
+        let bun = tools
+            .iter()
+            .find(|tool| tool.spec.name == "bun")
+            .expect("bun spec present");
+        assert_eq!(bun.requested_version.as_deref(), Some("1.2"));
+
+        let reporter = Arc::new(CliReporter::new_run(false));
+
+        // Build command.
+        let build = materialize_lifecycle_toolchains(&plan, "bun install", &reporter)
+            .expect("materialize for build");
+        assert!(
+            build.bins.contains(&shim_dir),
+            "bun shim must be on the build PATH"
+        );
+        assert!(
+            build
+                .provenance
+                .iter()
+                .any(|p| p.tool == "bun" && p.requested_version.as_deref() == Some("1.2")),
+            "build provenance must record the declared bun pin"
+        );
+
+        // Run command — same shared planner path.
+        let run = materialize_lifecycle_toolchains(&plan, "bun run start", &reporter)
+            .expect("materialize for run");
+        assert!(
+            run.bins.contains(&shim_dir),
+            "bun shim must be on the run PATH"
+        );
+        assert!(
+            run.provenance
+                .iter()
+                .any(|p| p.tool == "bun" && p.requested_version.as_deref() == Some("1.2")),
+            "run provenance must record the declared bun pin"
+        );
+    }
 }

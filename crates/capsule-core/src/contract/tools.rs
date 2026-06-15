@@ -225,12 +225,16 @@ pub struct ToolHandle {
 /// 2. If `tools` is a TOML *table* → treat as the transitional `[tools.<name>]`
 ///    alias.
 /// 3. If `tools` is absent → fall back to the legacy
-///    `targets.<target_label>.runtime_tools.<name>` entry.
+///    `targets.<target_label>.runtime_tools.<name>` entry, and finally to a
+///    flat top-level `runtime_tools.<name>` table (the inline-table form used
+///    by v0.3 manifests, e.g. `runtime_tools = { bun = "1.2" }`).
 ///
-/// `[[tools]]` and `[tools.<name>]` cannot coexist in TOML, so this is a type
-/// dispatch rather than a precedence list. When `tools` is present but the
-/// requested name is missing, we deliberately do **not** fall back to legacy
-/// — the user opted into the new schema.
+/// `[[tools]]` and `[tools.<name>]` cannot coexist in TOML, so the first two
+/// are a type dispatch rather than a precedence list. When `tools` is present
+/// but the requested name is missing, we deliberately do **not** fall back to
+/// legacy — the user opted into the new schema. The top-level fallback is
+/// ordered *after* the target-level lookup, so an explicit
+/// `targets.<label>.runtime_tools` pin always wins. See ato#723.
 pub fn read_tool_version(
     manifest: &toml::Value,
     target_label: &str,
@@ -267,6 +271,14 @@ pub fn read_tool_version(
         .and_then(|rt| rt.get(tool_name))
         .and_then(toml::Value::as_str)
         .map(str::to_string)
+        .or_else(|| {
+            manifest
+                .get("runtime_tools")
+                .and_then(toml::Value::as_table)
+                .and_then(|rt| rt.get(tool_name))
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        })
 }
 
 /// Provisions a runtime tool and returns a directory containing a shim that
@@ -1301,6 +1313,48 @@ mod tests {
     }
 
     #[test]
+    fn read_tool_version_top_level_inline_table() {
+        // ato#723: a flat v0.3 manifest declares its tools as a top-level
+        // inline table. `read_tool_version` must resolve it as a fallback.
+        let manifest = parse(
+            r#"
+            schema_version = "0.3"
+            runtime = "source/node"
+            runtime_tools = { bun = "1.2", sqlite = "3" }
+            "#,
+        );
+        assert_eq!(
+            read_tool_version(&manifest, "main", "bun").as_deref(),
+            Some("1.2")
+        );
+        assert_eq!(
+            read_tool_version(&manifest, "main", "sqlite").as_deref(),
+            Some("3")
+        );
+        assert_eq!(read_tool_version(&manifest, "main", "uv"), None);
+    }
+
+    #[test]
+    fn read_tool_version_target_level_wins_over_top_level() {
+        // Precedence guard: an explicit target-level pin overrides the
+        // top-level inline-table form.
+        let manifest = parse(
+            r#"
+            schema_version = "0.3"
+            runtime_tools = { bun = "1.2" }
+
+            [targets.main.runtime_tools]
+            bun = "1.1"
+            "#,
+        );
+        assert_eq!(
+            read_tool_version(&manifest, "main", "bun").as_deref(),
+            Some("1.1"),
+            "target-level runtime_tools must win over the top-level form"
+        );
+    }
+
+    #[test]
     fn pinned_tool_version_disables_host_shortcut() {
         assert!(should_probe_host_runtime_tool(None));
         assert!(!should_probe_host_runtime_tool(Some("1.2.8")));
@@ -1568,6 +1622,7 @@ mod tests {
     struct FakeCacheDir {
         // Held for RAII only: dropping it removes the temp dir.
         _root: tempfile::TempDir,
+        spec: &'static RuntimeToolSpec,
         extracted_dir: PathBuf,
         shim_dir: PathBuf,
         sha_path: PathBuf,
@@ -1576,16 +1631,29 @@ mod tests {
 
     impl FakeCacheDir {
         fn new(tag: &str) -> Self {
+            Self::new_for(&UV, tag)
+        }
+
+        fn new_for(spec: &'static RuntimeToolSpec, tag: &str) -> Self {
             let root = tempfile::tempdir().expect("tempdir");
             let version = unique_version(tag);
-            let tools_root = root.path().join("toolchains/tools/uv").join(version);
+            let tools_root = root
+                .path()
+                .join("toolchains/tools")
+                .join(spec.name)
+                .join(version);
             let extracted_dir = tools_root.join("extracted");
             let shim_dir = tools_root.join("shim");
             let sha_path = tools_root.join("binary.sha256");
-            let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
+            let shim_name = if cfg!(windows) {
+                format!("{}.cmd", spec.name)
+            } else {
+                spec.name.to_string()
+            };
             let shim_path = shim_dir.join(shim_name);
             FakeCacheDir {
                 _root: root,
+                spec,
                 extracted_dir,
                 shim_dir,
                 sha_path,
@@ -1595,7 +1663,11 @@ mod tests {
 
         fn write_shim(&self, mode: u32) {
             fs::create_dir_all(&self.shim_dir).expect("shim_dir");
-            fs::write(&self.shim_path, b"#!/bin/sh\nexec uv \"$@\"\n").expect("shim");
+            fs::write(
+                &self.shim_path,
+                format!("#!/bin/sh\nexec {} \"$@\"\n", self.spec.name).as_bytes(),
+            )
+            .expect("shim");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1606,10 +1678,11 @@ mod tests {
         }
 
         fn write_target(&self, mode: u32) {
-            let layout = resolved_layout_path(&UV).expect("uv layout");
+            let layout = resolved_layout_path(self.spec).expect("layout");
             let target = self.extracted_dir.join(&layout);
             fs::create_dir_all(target.parent().unwrap()).expect("extracted_dir");
-            fs::write(&target, b"#!/bin/sh\necho uv\n").expect("target");
+            fs::write(&target, format!("#!/bin/sh\necho {}\n", self.spec.name).as_bytes())
+                .expect("target");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1625,7 +1698,7 @@ mod tests {
         }
 
         fn validate(&self) -> Result<String> {
-            validate_tool_cache(&UV, &self.shim_path, &self.extracted_dir, &self.sha_path)
+            validate_tool_cache(self.spec, &self.shim_path, &self.extracted_dir, &self.sha_path)
         }
     }
 
@@ -1704,6 +1777,96 @@ mod tests {
         cache.write_sha("not-a-hex-string");
         let err = cache.validate().expect_err("invalid sha must fail");
         assert!(err.to_string().contains("sha256"), "error: {err}");
+    }
+
+    // ── Bun-specific cache invalidation (ato#723, criterion 7) ────────────
+    // The issue explicitly requires invalidation of missing/corrupted *Bun*
+    // cache entries. Bun's layout differs from uv (`bun-{triple}/bun` vs a
+    // flat `uv`), so these run validate_tool_cache against the BUN spec.
+
+    #[test]
+    fn bun_cache_validation_succeeds_on_complete_install() {
+        let cache = FakeCacheDir::new_for(&BUN, "bun-valid");
+        cache.write_shim(0o755);
+        cache.write_target(0o755);
+        cache.write_sha(&"a".repeat(64));
+        assert!(
+            cache.validate().is_ok(),
+            "complete bun cache should be valid"
+        );
+    }
+
+    #[test]
+    fn bun_cache_validation_rejects_missing_target() {
+        let cache = FakeCacheDir::new_for(&BUN, "bun-no-target");
+        cache.write_shim(0o755);
+        fs::create_dir_all(&cache.extracted_dir).expect("extracted_dir");
+        cache.write_sha(&"a".repeat(64));
+        let err = cache
+            .validate()
+            .expect_err("missing bun target must fail validation");
+        assert!(
+            err.to_string().contains("missing") || err.to_string().contains("searched"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn bun_cache_validation_rejects_corrupted_sha() {
+        let cache = FakeCacheDir::new_for(&BUN, "bun-bad-sha");
+        cache.write_shim(0o755);
+        cache.write_target(0o755);
+        cache.write_sha("not-a-hex-string");
+        let err = cache
+            .validate()
+            .expect_err("corrupted bun sha must fail validation");
+        assert!(err.to_string().contains("sha256"), "error: {err}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn corrupt_bun_cache_is_discarded_by_reinstall() {
+        // Mirrors corrupt_cache_is_discarded_by_reinstall but for Bun: a
+        // corrupted Bun cache must fail validation, be discarded, and reinstall
+        // cleanly from the archive — the path ensure_runtime_tool takes on its
+        // Err branch.
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let version = unique_version("bun-reinstall");
+
+        let handle1 =
+            install_runtime_tool_archive(&BUN, &version, &ToolDeps::default(), &build_bun_zip())
+                .expect("first bun install");
+
+        let tools_root = ato_home.path().join("toolchains/tools/bun").join(&version);
+        let sha_path = tools_root.join("binary.sha256");
+        let shim_name = if cfg!(windows) { "bun.cmd" } else { "bun" };
+        let shim_path = handle1.bin_dir.join(shim_name);
+
+        // Corrupt the sha file.
+        fs::write(&sha_path, b"bad").expect("corrupt sha");
+        assert!(
+            validate_tool_cache(&BUN, &shim_path, &tools_root.join("extracted"), &sha_path)
+                .is_err(),
+            "corrupted bun cache must fail validation"
+        );
+
+        // Discard stale state (mirrors ensure_runtime_tool's Err branch).
+        fs::remove_dir_all(tools_root.join("extracted")).ok();
+        fs::remove_dir_all(tools_root.join("shim")).ok();
+        fs::remove_file(&sha_path).ok();
+        assert!(!shim_path.exists(), "shim must be gone after discard");
+
+        // Reinstall from the archive.
+        let handle2 =
+            install_runtime_tool_archive(&BUN, &version, &ToolDeps::default(), &build_bun_zip())
+                .expect("reinstall bun after discard");
+        assert_eq!(handle2.version, handle1.version);
+        assert!(
+            handle2.bin_dir.join(shim_name).is_file(),
+            "bun shim must be restored after reinstall"
+        );
     }
 
     #[test]
