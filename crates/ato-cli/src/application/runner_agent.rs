@@ -690,17 +690,15 @@ const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
 
 pub const LEASE_COMMAND_KIND: &str = "run_source_sandbox";
 
-/// Lease kind that carries a stable capsule identity (OCI / Store capsule) for
-/// the runner to launch via `ato run <ref> --managed-state-root ...`. Parsing is
-/// implemented (`parse_run_capsule_command`); the execution dispatch is a
-/// follow-up, so this kind is intentionally NOT yet in [`SUPPORTED_LEASE_KINDS`].
+/// Lease kind that carries a stable capsule identity (OCI / Store capsule) the
+/// runner launches via `ato run <ref> --managed-state-root ...` (see
+/// `resolve_lease_execution`). Executed and advertised.
 pub const RUN_CAPSULE_LEASE_KIND: &str = "run_capsule";
 
-/// Lease command kinds this runner can actually EXECUTE today. Advertised in the
+/// Lease command kinds this runner can actually EXECUTE. Advertised in the
 /// heartbeat so the control plane never dispatches a kind the runner would
-/// reject on-device. Add `RUN_CAPSULE_LEASE_KIND` here only once its execution
-/// path ships.
-pub const SUPPORTED_LEASE_KINDS: &[&str] = &[LEASE_COMMAND_KIND];
+/// reject on-device.
+pub const SUPPORTED_LEASE_KINDS: &[&str] = &[LEASE_COMMAND_KIND, RUN_CAPSULE_LEASE_KIND];
 
 pub const DEFAULT_PROXY_LISTEN: &str = "127.0.0.1:8420";
 
@@ -814,38 +812,32 @@ pub fn parse_lease_command(
     })
 }
 
-/// A validated `run_capsule` lease: a stable capsule identity the runner can
-/// launch via `ato run <ref> --managed-state-root ...`. The runner MUST use the
-/// stable fields (not `capsule_slug`) for resolution and state isolation, and
-/// MUST namespace persistent state by `owner_id` (server-confirmed) — never by
-/// `capsule_slug` or any other client-supplied display value.
+/// A validated `run_capsule` lease. The runner executes `run_ref` AND keys
+/// persistent state on it, so the executed artifact and the state namespace can
+/// never diverge. `owner_id` (server-confirmed) scopes the state namespace;
+/// `capsule_slug` is display-only and never drives execution or state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunCapsuleCommand {
-    /// Capsule identifier — the resolution key. CONTRACT: this MUST be a
-    /// revision-resolved **immutable** identity (not a mutable app-level slug),
-    /// so resolution, audit, and the managed state namespace are reproducible.
-    /// If a deployment can only supply an app-level id it MUST also send
-    /// `revision` and treat the pair as the immutable identity.
-    pub capsule_id: String,
+    /// The single capsule reference the runner runs via `ato run <run_ref>` and
+    /// uses as the immutable state-namespace identity. CONTRACT: the control
+    /// plane MUST resolve any mutable slug to an **immutable, point-in-time** ref
+    /// (revision/digest-pinned) before dispatch, so re-runs and the state
+    /// namespace are reproducible and the executed artifact matches the state.
+    /// Using one field for both makes execution/state divergence impossible.
+    pub run_ref: String,
     /// Owner/account id, confirmed server-side. Namespaces persistent state.
     /// Required: a runner must never key state off client-supplied input.
     pub owner_id: String,
-    pub version: Option<String>,
-    pub revision: Option<String>,
-    pub target: Option<String>,
+    /// Optional run id, for audit/logging only.
     pub run_id: Option<String>,
-    /// Display-only. MUST NOT drive resolution or state isolation.
+    /// Display-only. MUST NOT drive execution or state isolation.
     pub capsule_slug: Option<String>,
 }
 
-/// Parse a `run_capsule` lease into a validated stable identity. Rejects any
-/// other kind, and any payload missing the required `capsule_id` / `owner_id`.
-/// `capsule_slug` is accepted only as a display hint.
-///
-/// NOTE: parsing only. Wiring this into lease execution (spawning
-/// `ato run <ref> --managed-state-root ...`) is a follow-up; until then the
-/// runner does not advertise `run_capsule` in [`SUPPORTED_LEASE_KINDS`], so the
-/// control plane will not dispatch it here.
+/// Parse a `run_capsule` lease. Rejects any other kind and any payload missing
+/// the required `run_ref` / `owner_id`. `capsule_slug` is a display hint only.
+/// The validated lease is turned into an executable plan by
+/// [`resolve_lease_execution`].
 pub fn parse_run_capsule_command(
     command: &serde_json::Value,
 ) -> std::result::Result<RunCapsuleCommand, (String, String)> {
@@ -881,11 +873,8 @@ pub fn parse_run_capsule_command(
     };
 
     Ok(RunCapsuleCommand {
-        capsule_id: required("capsule_id")?,
+        run_ref: required("run_ref")?,
         owner_id: required("owner_id")?,
-        version: optional("version"),
-        revision: optional("revision"),
-        target: optional("target"),
         run_id: optional("run_id"),
         capsule_slug: optional("capsule_slug"),
     })
@@ -1847,16 +1836,21 @@ pub fn child_run_ref(source_url: &str) -> String {
     source_url.to_string()
 }
 
-fn spawn_run_child(source_url: &str) -> Result<tokio::process::Child> {
+fn spawn_run_child(
+    run_ref: &str,
+    managed_state_root: Option<&Path>,
+) -> Result<tokio::process::Child> {
     let child_bin = match std::env::var("ATO_RUNNER_CHILD_BIN") {
         Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
         _ => std::env::current_exe().context("failed to resolve the ato binary path")?,
     };
     let mut cmd = tokio::process::Command::new(child_bin);
-    cmd.arg("run")
-        .arg(child_run_ref(source_url))
-        .arg("--sandbox")
-        .arg("-y");
+    cmd.arg("run").arg(run_ref).arg("--sandbox").arg("-y");
+    // run_capsule leases bind persistent state under a runner-managed root
+    // (scoped by owner + immutable capsule identity); source leases pass None.
+    if let Some(root) = managed_state_root {
+        cmd.arg("--managed-state-root").arg(root);
+    }
     // Operator-controlled extras (e.g. --nacelle <path> on dev hosts). Comes
     // from the runner host env, never from the lease payload.
     if let Ok(extra) = std::env::var("ATO_RUNNER_RUN_ARGS") {
@@ -1877,6 +1871,93 @@ fn spawn_run_child(source_url: &str) -> Result<tokio::process::Child> {
     // file — it is never exported to the child environment.
     cmd.kill_on_drop(true);
     cmd.spawn().context("failed to spawn ato run child")
+}
+
+/// What a claimed lease resolves to for execution: the `ato run` positional ref
+/// and, for `run_capsule`, the runner-managed persistent state root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LeaseExecution {
+    run_ref: String,
+    managed_state_root: Option<PathBuf>,
+}
+
+/// Root for runner-managed persistent capsule state: `<runner-base>/state`.
+/// Sits beside the per-lease run logs under the credentials directory.
+fn runner_state_root() -> PathBuf {
+    credentials_path()
+        .parent()
+        .map(|parent| parent.join("state"))
+        .unwrap_or_else(|| PathBuf::from("state"))
+}
+
+/// Managed state root for a `run_capsule` lease:
+/// `<runner-base>/state/<owner>/<run_ref>`. The owner is the server-confirmed
+/// `owner_id`; the identity is `run_ref` — the SAME immutable ref the runner
+/// executes, so the executed artifact and the state namespace can never
+/// diverge. Both segments use the `path_segment` scheme the `ato run` resolver
+/// uses, so the namespace is consistent and collision-free; `ato run` then
+/// appends `<target>/<state_key>` beneath this.
+fn run_capsule_state_root(cmd: &RunCapsuleCommand) -> PathBuf {
+    runner_state_root()
+        .join(crate::application::pipeline::phases::run::path_segment(
+            &cmd.owner_id,
+        ))
+        .join(crate::application::pipeline::phases::run::path_segment(
+            &cmd.run_ref,
+        ))
+}
+
+/// Validate a `run_ref` before it becomes an `ato run` positional argument:
+/// non-empty, no whitespace/control chars, and not a flag. Immutable refs like
+/// `community/openlist@<rev>` or `capsule://…#blake3:…` are allowed; a leading
+/// `-` (flag smuggling) or whitespace is not. (Immutability itself is the
+/// control plane's contract — see `RunCapsuleCommand::run_ref`.)
+fn validate_capsule_run_ref(run_ref: &str) -> std::result::Result<String, (String, String)> {
+    let r = run_ref.trim();
+    if r.is_empty()
+        || r.starts_with('-')
+        || r.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err((
+            "invalid_command".to_string(),
+            format!("run_ref is not a safe `ato run` ref: {run_ref:?}"),
+        ));
+    }
+    Ok(r.to_string())
+}
+
+/// Resolve a claimed lease command into an executable plan, dispatching by kind.
+/// `run_source_sandbox` runs a source repo (no managed state); `run_capsule`
+/// runs a capsule ref with a runner-managed persistent state root. Unknown
+/// kinds are rejected without executing.
+fn resolve_lease_execution(
+    command: &serde_json::Value,
+) -> std::result::Result<LeaseExecution, (String, String)> {
+    let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    match kind {
+        LEASE_COMMAND_KIND => {
+            let c = parse_lease_command(command)?;
+            Ok(LeaseExecution {
+                run_ref: child_run_ref(&c.source_url),
+                managed_state_root: None,
+            })
+        }
+        RUN_CAPSULE_LEASE_KIND => {
+            let c = parse_run_capsule_command(command)?;
+            let run_ref = validate_capsule_run_ref(&c.run_ref)?;
+            let root = run_capsule_state_root(&c);
+            Ok(LeaseExecution {
+                run_ref,
+                managed_state_root: Some(root),
+            })
+        }
+        other => Err((
+            "unsupported_command".to_string(),
+            format!(
+                "unsupported lease command kind {other:?}; this runner executes {SUPPORTED_LEASE_KINDS:?}"
+            ),
+        )),
+    }
 }
 
 struct BoundedLog {
@@ -2091,8 +2172,8 @@ async fn handle_claimed_lease(
     proxy_listen: String,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
-    let command = match parse_lease_command(&lease.command) {
-        Ok(command) => command,
+    let execution = match resolve_lease_execution(&lease.command) {
+        Ok(execution) => execution,
         Err((code, message)) => {
             eprintln!("⚠️  lease {} rejected: {}", lease.id, message);
             let report = LeaseReport::Failed { code, message };
@@ -2132,7 +2213,10 @@ async fn handle_claimed_lease(
     let api_base = api_base.to_string();
     let runner_token = runner_token.to_string();
     let lease_id = lease.id.clone();
-    let source_url = command.source_url.clone();
+    let LeaseExecution {
+        run_ref,
+        managed_state_root,
+    } = execution;
     tokio::spawn(async move {
         // One control watcher for the whole lease lifetime: it flips stop_flag +
         // notifies on an owner stop in EITHER phase (needs_consent or running).
@@ -2166,7 +2250,7 @@ async fn handle_claimed_lease(
         let mut round: u32 = 0;
         let (mut report_rx, monitor, child_pid, first_report) = loop {
             round += 1;
-            let child = match spawn_run_child(&source_url) {
+            let child = match spawn_run_child(&run_ref, managed_state_root.as_deref()) {
                 Ok(child) => child,
                 Err(err) => {
                     let report = LeaseReport::Failed {
@@ -2185,7 +2269,7 @@ async fn handle_claimed_lease(
             // whole workload group.
             let child_pid = child.id();
             println!(
-                "🚀 lease {lease_id}: ato run {source_url} --sandbox (round {round}, log: {})",
+                "🚀 lease {lease_id}: ato run {run_ref} --sandbox (round {round}, log: {})",
                 log_path.display()
             );
             let (report_tx, mut report_rx) =
@@ -2712,32 +2796,26 @@ mod tests {
     }
 
     #[test]
-    fn run_capsule_command_parses_stable_identity() {
+    fn run_capsule_command_parses_run_ref_and_owner() {
         let cmd = parse_run_capsule_command(&serde_json::json!({
             "kind": "run_capsule",
-            "capsule_id": "cap_01H",
+            "run_ref": "community/openlist@7f3ac2b",
             "owner_id": "usr_01H",
-            "version": "1.2.3",
-            "revision": "blake3:abc",
-            "target": "app",
             "run_id": "run_01H",
             "capsule_slug": "openlist",
         }))
         .expect("valid run_capsule");
-        assert_eq!(cmd.capsule_id, "cap_01H");
+        assert_eq!(cmd.run_ref, "community/openlist@7f3ac2b");
         assert_eq!(cmd.owner_id, "usr_01H");
-        assert_eq!(cmd.version.as_deref(), Some("1.2.3"));
-        assert_eq!(cmd.revision.as_deref(), Some("blake3:abc"));
-        assert_eq!(cmd.target.as_deref(), Some("app"));
         assert_eq!(cmd.run_id.as_deref(), Some("run_01H"));
         assert_eq!(cmd.capsule_slug.as_deref(), Some("openlist"));
     }
 
     #[test]
-    fn run_capsule_command_requires_capsule_id_and_owner() {
+    fn run_capsule_command_requires_run_ref_and_owner() {
         let (code, _) = parse_run_capsule_command(&serde_json::json!({
             "kind": "run_capsule",
-            "capsule_id": "cap_01H",
+            "run_ref": "community/openlist@7f3ac2b",
         }))
         .unwrap_err();
         assert_eq!(code, "invalid_command", "missing owner_id must be rejected");
@@ -2747,7 +2825,7 @@ mod tests {
             "owner_id": "usr_01H",
         }))
         .unwrap_err();
-        assert_eq!(code, "invalid_command", "missing capsule_id must be rejected");
+        assert_eq!(code, "invalid_command", "missing run_ref must be rejected");
     }
 
     #[test]
@@ -2755,6 +2833,85 @@ mod tests {
         let (code, _) = parse_run_capsule_command(&serde_json::json!({
             "kind": "run_source_sandbox",
             "source_url": "https://github.com/x/y",
+        }))
+        .unwrap_err();
+        assert_eq!(code, "unsupported_command");
+    }
+
+    // ── Lease execution dispatch ──
+
+    #[test]
+    fn resolve_lease_execution_source_sandbox_has_no_managed_state() {
+        let exec = resolve_lease_execution(&serde_json::json!({
+            "kind": "run_source_sandbox",
+            "source_url": "https://github.com/Koh0920/hello-capsule",
+        }))
+        .expect("valid source lease");
+        assert_eq!(exec.run_ref, "github.com/Koh0920/hello-capsule");
+        assert!(
+            exec.managed_state_root.is_none(),
+            "source runs use no managed state root"
+        );
+    }
+
+    #[test]
+    fn resolve_lease_execution_run_capsule_keys_state_on_the_executed_ref() {
+        use crate::application::pipeline::phases::run::path_segment;
+        // An immutable, point-in-time ref (revision-pinned).
+        let run_ref = "community/openlist@7f3ac2b";
+        let exec = resolve_lease_execution(&serde_json::json!({
+            "kind": "run_capsule",
+            "run_ref": run_ref,
+            "owner_id": "usr_01H",
+        }))
+        .expect("valid capsule lease");
+        // The runner executes exactly the ref it was given...
+        assert_eq!(exec.run_ref, run_ref);
+        let root = exec
+            .managed_state_root
+            .expect("capsule runs get a managed state root");
+        let s = root.to_string_lossy();
+        // ...and keys state on the SAME ref, so execution and state can never
+        // diverge — namespaced by owner, both path-safe via the shared scheme.
+        assert!(s.contains(&path_segment("usr_01H")), "owner segment present");
+        assert!(
+            s.ends_with(&path_segment(run_ref)),
+            "state identity is the executed run_ref"
+        );
+        // Raw ref/owner strings are never used verbatim.
+        assert!(!s.contains(run_ref));
+    }
+
+    #[test]
+    fn resolve_lease_execution_distinct_run_refs_get_distinct_state() {
+        let a = resolve_lease_execution(&serde_json::json!({
+            "kind": "run_capsule", "run_ref": "community/x@rev1", "owner_id": "u",
+        }))
+        .unwrap()
+        .managed_state_root
+        .unwrap();
+        let b = resolve_lease_execution(&serde_json::json!({
+            "kind": "run_capsule", "run_ref": "community/x@rev2", "owner_id": "u",
+        }))
+        .unwrap()
+        .managed_state_root
+        .unwrap();
+        assert_ne!(a, b, "a different (immutable) run_ref gets a distinct state dir");
+    }
+
+    #[test]
+    fn resolve_lease_execution_rejects_unsafe_ref_and_unknown_kind() {
+        // Note: leading/trailing whitespace is trimmed before validation, so the
+        // bad cases use a flag prefix, an internal space/tab, or an empty ref.
+        for bad in ["--help", "-rf", "a b", "x\ty", ""] {
+            let (code, _) = resolve_lease_execution(&serde_json::json!({
+                "kind": "run_capsule", "run_ref": bad, "owner_id": "u",
+            }))
+            .unwrap_err();
+            assert_eq!(code, "invalid_command", "must reject run_ref {bad:?}");
+        }
+        let (code, _) = resolve_lease_execution(&serde_json::json!({
+            "kind": "shell", "command": "rm -rf /",
         }))
         .unwrap_err();
         assert_eq!(code, "unsupported_command");
@@ -2773,10 +2930,11 @@ mod tests {
             kinds.contains(&LEASE_COMMAND_KIND),
             "must advertise run_source_sandbox"
         );
-        // run_capsule execution is not wired yet, so it must NOT be advertised.
+        // run_capsule execution is wired (resolve_lease_execution), so it is
+        // advertised and the control plane may dispatch it.
         assert!(
-            !kinds.contains(&RUN_CAPSULE_LEASE_KIND),
-            "run_capsule must not be advertised until its execution path ships"
+            kinds.contains(&RUN_CAPSULE_LEASE_KIND),
+            "must advertise run_capsule now that execution is wired"
         );
     }
 
