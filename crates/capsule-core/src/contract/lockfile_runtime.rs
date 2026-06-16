@@ -877,7 +877,18 @@ pub(super) fn resolve_yarn_tool_targets(platforms: &[RuntimePlatform]) -> ToolTa
 }
 
 /// Bun is a native binary; the download URL is platform-specific.
-pub(super) fn resolve_bun_tool_targets(platforms: &[RuntimePlatform]) -> ToolTargets {
+///
+/// `version` is the declared `runtime_tools.bun` pin when present (e.g.
+/// `"1.2"`); falls back to [`BUN_VERSION`] otherwise. The declared value is
+/// written verbatim into the lock so it reflects the manifest. See ato#723.
+pub(super) fn resolve_bun_tool_targets(
+    platforms: &[RuntimePlatform],
+    version: Option<&str>,
+) -> ToolTargets {
+    let bun_version = version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(BUN_VERSION);
     let targets = platforms
         .iter()
         .filter_map(|platform| {
@@ -887,13 +898,13 @@ pub(super) fn resolve_bun_tool_targets(platforms: &[RuntimePlatform]) -> ToolTar
                 ToolArtifact {
                     url: format!(
                         "https://github.com/oven-sh/bun/releases/download/bun-v{}/bun-{}.zip",
-                        BUN_VERSION, bun_triple
+                        bun_version, bun_triple
                     ),
                     sha256: None,
                     // Resolved binary hash is not available at lock generation
                     // time (no extraction). See #469.
                     binary_sha256: None,
-                    version: Some(BUN_VERSION.to_string()),
+                    version: Some(bun_version.to_string()),
                 },
             ))
         })
