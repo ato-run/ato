@@ -1059,7 +1059,15 @@ runtime_tools = { bun = "1.2.8" }
         // 64-hex `binary.sha256` integrity marker.
         let tools_root = ato_home.path().join("toolchains/tools/bun/1.2");
         let shim_dir = tools_root.join("shim");
-        let extracted_bin = tools_root.join("extracted/bun-host/bun");
+        // Place the extracted binary at the platform-resolved entry path the
+        // cache validator expects (`windows-x64/bun.exe` on Windows, not a
+        // unix `bun`); otherwise validation misses, the planner treats the
+        // cache as incomplete, and falls back to a real network download —
+        // which 404s for the partial "1.2" pin (seen only once the windows
+        // test leg became blocking).
+        let entry_rel = capsule_core::tools::resolved_tool_entry_relpath(&capsule_core::tools::BUN)
+            .expect("bun layout");
+        let extracted_bin = tools_root.join("extracted").join(&entry_rel);
         let write_executable = |path: &std::path::Path, contents: &str| {
             fs::create_dir_all(path.parent().unwrap()).expect("tool dir");
             fs::write(path, contents).expect("tool file");
