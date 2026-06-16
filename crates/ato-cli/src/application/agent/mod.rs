@@ -481,10 +481,11 @@ impl AgentToolExecutor {
     }
 
     pub(crate) fn run_shadow_command(&self, command: &str, working_dir: &str) -> Result<String> {
-        // Validate + allowlist the command (package managers only, no shell
-        // control operators); the parsed form is discarded — the original
-        // string is handed to a shell below.
-        let _parsed = parse_safe_command(command)?;
+        // Validate + allowlist (package managers only) and resolve the program
+        // to a concrete path. The command is executed as argv — NEVER through a
+        // shell — so shell metacharacters cannot be interpreted; the validation
+        // is defense in depth on top of that.
+        let spawn = build_shadow_spawn(command)?;
         let current_dir = self.resolve_workspace_path(Path::new(working_dir))?;
         if !current_dir.exists() {
             anyhow::bail!(
@@ -493,30 +494,9 @@ impl AgentToolExecutor {
             );
         }
 
-        // Spawn through a shell rather than executing the program directly, the
-        // same way the run-lifecycle runner does (`run_lifecycle_shell_command`).
-        // On Windows `npm`/`pnpm`/`bun` are `.cmd` shims that `std::process::
-        // Command::new("npm")` cannot resolve (it only appends `.exe`, never
-        // consults PATHEXT), so a direct spawn fails before the process even
-        // starts. Going through `cmd.exe` lets it resolve the shim via PATHEXT.
-        #[cfg(windows)]
-        let mut cmd = {
-            use std::os::windows::process::CommandExt as _;
-            let mut cmd = Command::new("cmd");
-            // `/D` disables AutoRun; `/S` + one outer-quoted payload via raw_arg
-            // keeps any inner quotes intact for cmd's own tokeniser.
-            cmd.raw_arg(format!("/D /S /C \"{command}\""));
-            cmd
-        };
-
-        #[cfg(not(windows))]
-        let mut cmd = {
-            let mut cmd = Command::new("sh");
-            cmd.args(["-c", command]);
-            cmd
-        };
-
-        cmd.current_dir(&current_dir)
+        let mut cmd = Command::new(&spawn.program);
+        cmd.args(&spawn.args)
+            .current_dir(&current_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -1396,18 +1376,68 @@ fn normalize_working_dir(working_dir: &str) -> String {
     }
 }
 
+/// A validated agent shadow command resolved to a concrete program + argv.
+/// The original command string is intentionally NOT retained: callers spawn
+/// `program` with `args` directly, so no shell ever interprets the command.
+struct ShadowSpawn {
+    program: std::ffi::OsString,
+    args: Vec<String>,
+}
+
+/// Validate, allowlist, and resolve an agent shadow command into an argv that is
+/// safe to spawn WITHOUT a shell.
+///
+/// The command never reaches `cmd.exe`/`sh`: [`parse_safe_command`] rejects
+/// shell control and expansion syntax, and the resulting tokens are passed as
+/// distinct argv elements. On Windows the program is resolved to its real
+/// `.cmd`/`.exe` path because `std::process::Command` only appends `.exe` and
+/// cannot find a bare-name `.cmd` shim (`npm`/`pnpm`/`bun`); the Rust standard
+/// library (>= 1.77.2, CVE-2024-24576) then spawns the resolved `.cmd` through
+/// `cmd.exe` with every argv element individually escaped — so argv stays argv.
+fn build_shadow_spawn(command: &str) -> Result<ShadowSpawn> {
+    let parsed = parse_safe_command(command)?;
+    let mut tokens = parsed.into_iter();
+    let program = tokens
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("agent command is empty"))?;
+    Ok(ShadowSpawn {
+        program: resolve_shadow_program(&program),
+        args: tokens.collect(),
+    })
+}
+
+/// Resolve a shadow-command program to a concrete path. On Windows a bare
+/// `npm`/`pnpm`/`bun` is a `.cmd` shim that `Command::new` cannot locate (it
+/// only appends `.exe`), so resolve it via `PATHEXT`/`PATH`. Falls back to the
+/// bare name when resolution fails so spawn errors stay close to the original.
+fn resolve_shadow_program(program: &str) -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        if let Ok(path) = which::which(program) {
+            return path.into_os_string();
+        }
+    }
+    std::ffi::OsString::from(program)
+}
+
 fn parse_safe_command(command: &str) -> Result<Vec<String>> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         anyhow::bail!("agent command is empty");
     }
-    if trimmed.contains("&&")
-        || trimmed.contains("||")
-        || trimmed.contains(';')
-        || trimmed.contains('|')
-        || trimmed.contains('>')
-        || trimmed.contains('<')
-        || trimmed.contains('\n')
+    // Reject shell control and expansion syntax for both POSIX `sh` and Windows
+    // `cmd.exe`. The shadow runner spawns the parsed tokens as argv (never via a
+    // shell), so this is defense in depth — but it keeps the allowlist contract
+    // honest and prevents a future caller from reintroducing a shell-injection
+    // hole. Covers:
+    //   control / redirection / piping / chaining: & | ; < > newline / CR
+    //   command substitution: `backtick`  $(...)  ${...}
+    const FORBIDDEN_SUBSTRINGS: &[&str] = &["$(", "${"];
+    const FORBIDDEN_CHARS: &[char] = &['&', '|', ';', '<', '>', '`', '\n', '\r'];
+    if FORBIDDEN_CHARS.iter().any(|ch| trimmed.contains(*ch))
+        || FORBIDDEN_SUBSTRINGS
+            .iter()
+            .any(|needle| trimmed.contains(*needle))
     {
         anyhow::bail!("agent command contains unsupported shell control operators");
     }
@@ -1553,6 +1583,103 @@ mod tests {
     }
 
     #[test]
+    fn parse_safe_command_rejects_single_ampersand() {
+        // A single `&` chains a second command on both cmd.exe and POSIX sh.
+        // The previous check only caught `&&`, leaving `cmd & evil` open.
+        let err = parse_safe_command("npm install & calc.exe").expect_err("single & must reject");
+        assert!(
+            err.to_string().contains("unsupported shell control operators"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_safe_command_rejects_command_substitution() {
+        for command in [
+            "npm install $(touch pwn)",
+            "npm install ${IFS}evil",
+            "npm install `touch pwn`",
+        ] {
+            let result = parse_safe_command(command);
+            assert!(
+                result.is_err(),
+                "command substitution must be rejected: {command}"
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unsupported shell control operators"),
+                "wrong rejection reason for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_safe_command_still_accepts_plain_package_manager_commands() {
+        for command in [
+            "npm install",
+            "npm install --legacy-peer-deps",
+            "npm install --package-lock-only --ignore-scripts",
+            "pnpm install",
+            "bun install",
+            "uv sync --frozen",
+            "cargo fetch --locked",
+        ] {
+            assert!(
+                parse_safe_command(command).is_ok(),
+                "legitimate command was rejected: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_shadow_spawn_keeps_argv_and_rejects_shell_ops() {
+        // Allowlisted command parses into a clean argv (no shell involved).
+        let spawn = build_shadow_spawn("npm install --legacy-peer-deps").expect("valid command");
+        assert_eq!(spawn.args, vec!["install", "--legacy-peer-deps"]);
+
+        // Injection attempts are rejected before any resolution/spawn.
+        for command in [
+            "npm install & calc.exe",
+            "npm install $(touch pwn)",
+            "npm install `touch pwn`",
+            "npm install | findstr x",
+        ] {
+            assert!(
+                build_shadow_spawn(command).is_err(),
+                "shell-injection command must be rejected: {command}"
+            );
+        }
+
+        // On Windows the program is resolved to its real shim path so std can
+        // spawn the `.cmd` (a bare "npm" would fail). When the shim is present
+        // the resolved program must be an absolute path with an executable
+        // extension — never the bare token that std cannot launch.
+        #[cfg(windows)]
+        {
+            if which::which("cargo").is_ok() {
+                let spawn = build_shadow_spawn("cargo fetch --locked").expect("valid command");
+                let resolved = std::path::Path::new(&spawn.program);
+                assert!(
+                    resolved.is_absolute(),
+                    "resolved program must be absolute on Windows: {}",
+                    resolved.display()
+                );
+                let ext = resolved
+                    .extension()
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default();
+                assert!(
+                    ext == "exe" || ext == "cmd" || ext == "bat",
+                    "resolved program must carry an executable extension: {}",
+                    resolved.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn classifier_rejects_missing_env() {
         let err = anyhow::anyhow!(AtoExecutionError::missing_required_env(
             "missing required environment variables for target 'app': DATABASE_URL",
@@ -1592,11 +1719,12 @@ mod tests {
         let store =
             AgentSessionStore::create(tmp.path(), tmp.path(), &tmp.path().join("capsule.toml"))
                 .expect("store");
+        // Normalize separators: on Windows `Path::join` uses `\`, so compare on
+        // a `/`-canonicalized form rather than assuming POSIX separators.
+        let artifact = store.artifact_dir().to_string_lossy().replace('\\', "/");
         assert!(
-            store
-                .artifact_dir()
-                .to_string_lossy()
-                .contains(".ato/tmp/agent/runs/run-")
+            artifact.contains(".ato/tmp/agent/runs/run-"),
+            "unexpected artifact dir: {artifact}"
         );
         assert!(store.workspace_dir().join("package.json").exists());
         assert!(!store.workspace_dir().join(".tmp").exists());
