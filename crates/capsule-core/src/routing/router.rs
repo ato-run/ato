@@ -439,6 +439,17 @@ pub fn execution_descriptor_from_manifest_parts(
             .and_then(|s| toml::from_str::<IngressConfig>(&s).ok())
     });
 
+    // Fold a top-level inline `runtime_tools = { bun = "1.2", ... }` table into
+    // `targets.<selected>.runtime_tools` so the *raw* manifest stored below is
+    // understood by `read_tool_version` (which only inspects `tools` then
+    // `targets.<label>.runtime_tools`). The compat bridge normalizes this form
+    // already (manifest_v03::normalize), but the raw manifest consumed by the
+    // lifecycle PATH planner (`lifecycle_runtime_tools`) does not go through
+    // that normalization. Target-level keys win, so existing pins are
+    // preserved. See ato#723.
+    let mut manifest = manifest;
+    fold_top_level_runtime_tools(&mut manifest, &selected_target);
+
     Ok(ExecutionDescriptor {
         manifest: manifest.clone(),
         compat_manifest: CompatManifestBridge::from_manifest_value(&manifest).ok(),
@@ -453,6 +464,57 @@ pub fn execution_descriptor_from_manifest_parts(
         state_source_overrides,
         ingress,
     })
+}
+
+/// Folds a top-level inline `runtime_tools` table into
+/// `targets.<selected_target>.runtime_tools`, where
+/// [`crate::tools::read_tool_version`] looks for them.
+///
+/// Only keys absent at the target level are inserted, so an explicit
+/// `[targets.<label>.runtime_tools]` pin always wins over the top-level form
+/// (precedence preserved). The top-level key is left in place — other
+/// consumers (the lockfile, the compat normalizer) read it independently.
+///
+/// No-op unless the top-level `runtime_tools` is a table; a non-table value
+/// (e.g. a stray string) is ignored here and surfaced by manifest validation.
+fn fold_top_level_runtime_tools(manifest: &mut toml::Value, selected_target: &str) {
+    let Some(top_level) = manifest
+        .get("runtime_tools")
+        .and_then(toml::Value::as_table)
+        .cloned()
+    else {
+        return;
+    };
+    if top_level.is_empty() {
+        return;
+    }
+
+    let Some(root) = manifest.as_table_mut() else {
+        return;
+    };
+
+    let targets = root
+        .entry("targets".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let Some(targets) = targets.as_table_mut() else {
+        return;
+    };
+    let target = targets
+        .entry(selected_target.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let Some(target) = target.as_table_mut() else {
+        return;
+    };
+    let target_tools = target
+        .entry("runtime_tools".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let Some(target_tools) = target_tools.as_table_mut() else {
+        return;
+    };
+
+    for (name, version) in top_level {
+        target_tools.entry(name).or_insert(version);
+    }
 }
 
 pub fn route_lock(
@@ -1364,6 +1426,94 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("capsule.toml"), contents).expect("write manifest");
         dir
+    }
+
+    #[test]
+    fn top_level_runtime_tools_folded_into_raw_manifest() {
+        // ato#723: a flat v0.3 manifest with a top-level inline
+        // `runtime_tools = { bun = "1.2" }` must be resolvable from the *raw*
+        // manifest stored on the descriptor (the surface the lifecycle PATH
+        // planner reads via `read_tool_version`).
+        let dir = write_manifest(
+            r#"
+schema_version = "0.3"
+name = "next-bun-sqlite-app"
+version = "0.1.0"
+type = "app"
+
+runtime = "source/node"
+runtime_version = "20"
+runtime_tools = { bun = "1.2", sqlite = "3" }
+
+build = "bun install"
+run = "bun run dev"
+port = 3000
+"#,
+        );
+
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+
+        let target = decision.plan.selected_target_label();
+        assert_eq!(
+            crate::tools::read_tool_version(&decision.plan.manifest, target, "bun").as_deref(),
+            Some("1.2"),
+            "bun must resolve from the folded raw manifest"
+        );
+        assert_eq!(
+            crate::tools::read_tool_version(&decision.plan.manifest, target, "sqlite").as_deref(),
+            Some("3"),
+            "sqlite must resolve from the folded raw manifest"
+        );
+        // And via the normalized accessor (preflight path).
+        assert_eq!(
+            decision
+                .plan
+                .execution_runtime_tool_version("bun")
+                .as_deref(),
+            Some("1.2")
+        );
+    }
+
+    #[test]
+    fn top_level_runtime_tools_fold_preserves_target_override() {
+        // Target-level pin wins over the top-level inline-table form.
+        let dir = write_manifest(
+            r#"
+schema_version = "0.3"
+name = "demo-app"
+version = "0.1.0"
+type = "app"
+
+default_target = "main"
+
+runtime_tools = { bun = "1.2" }
+
+[targets.main]
+runtime = "source/node"
+run = "bun run dev"
+port = 3000
+runtime_tools = { bun = "1.1" }
+"#,
+        );
+
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+
+        let target = decision.plan.selected_target_label();
+        assert_eq!(
+            crate::tools::read_tool_version(&decision.plan.manifest, target, "bun").as_deref(),
+            Some("1.1"),
+            "target-level runtime_tools must win over the top-level form"
+        );
     }
 
     #[test]

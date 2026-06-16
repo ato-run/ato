@@ -11,7 +11,8 @@ use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
 
 use super::lockfile_runtime::{
-    deno_artifact_filename, required_env_keys_from_manifest, run_command_inner, uv_artifact_url,
+    deno_artifact_filename, required_env_keys_from_manifest, resolve_bun_tool_targets,
+    run_command_inner, uv_artifact_url,
 };
 use super::lockfile_support::{
     capsule_error_pack, create_atomic_temp_file, write_atomic_bytes_with_os_lock,
@@ -24,7 +25,7 @@ use super::{
     lockfile_has_required_platform_coverage, lockfile_inputs_snapshot_path, lockfile_output_path,
     lockfile_runtime_platforms, lockfile_runtime_target_labels,
     orchestration_service_target_labels, read_lockfile, read_runtime_tools,
-    required_runtime_version, resolve_external_capsule_dependencies,
+    read_selected_runtime_tool, required_runtime_version, resolve_external_capsule_dependencies,
     semantic_manifest_hash_from_text, tool_capsule_env_bindings, verify_lockfile_against_contracts,
     verify_lockfile_external_dependencies, verify_lockfile_manifest,
 };
@@ -344,6 +345,78 @@ runtime_tools = { node = "20.11.0", python = "3.11.7" }
     let tools = read_runtime_tools(&manifest);
     assert_eq!(tools.get("node"), Some(&"20.11.0".to_string()));
     assert_eq!(tools.get("python"), Some(&"3.11.7".to_string()));
+}
+
+#[test]
+fn read_selected_runtime_tool_reads_target_and_top_level_forms() {
+    // ato#723: the bun pin used for lock generation must resolve from both the
+    // folded target table and the flat top-level inline-table form.
+    let folded: toml::Value = toml::from_str(
+        r#"
+default_target = "main"
+[targets.main]
+runtime = "source"
+driver = "node"
+runtime_tools = { bun = "1.2" }
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read_selected_runtime_tool(&folded, "bun").as_deref(),
+        Some("1.2")
+    );
+
+    let top_level: toml::Value = toml::from_str(
+        r#"
+schema_version = "0.3"
+runtime = "source/node"
+runtime_tools = { bun = "1.2" }
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read_selected_runtime_tool(&top_level, "bun").as_deref(),
+        Some("1.2")
+    );
+
+    // Absent → None (no spurious pin).
+    let none: toml::Value = toml::from_str(
+        r#"
+default_target = "main"
+[targets.main]
+runtime = "source"
+driver = "node"
+"#,
+    )
+    .unwrap();
+    assert_eq!(read_selected_runtime_tool(&none, "bun"), None);
+}
+
+#[test]
+fn resolve_bun_tool_targets_uses_declared_version() {
+    // The declared runtime_tools.bun version is written verbatim into the lock
+    // (no network); falls back to the pinned default when None.
+    let declared = resolve_bun_tool_targets(SUPPORTED_RUNTIME_PLATFORMS, Some("1.2"));
+    let darwin = declared
+        .targets
+        .get("aarch64-apple-darwin")
+        .expect("darwin bun artifact");
+    assert_eq!(darwin.version.as_deref(), Some("1.2"));
+    assert!(
+        darwin.url.contains("bun-v1.2/"),
+        "url must carry the declared version: {}",
+        darwin.url
+    );
+
+    let defaulted = resolve_bun_tool_targets(SUPPORTED_RUNTIME_PLATFORMS, None);
+    let darwin_default = defaulted
+        .targets
+        .get("aarch64-apple-darwin")
+        .expect("darwin bun artifact");
+    assert!(
+        darwin_default.version.is_some(),
+        "default version must be pinned"
+    );
 }
 
 #[test]
