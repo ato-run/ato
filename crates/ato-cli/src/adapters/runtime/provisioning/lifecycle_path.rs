@@ -504,7 +504,14 @@ fn dependency_bin_provenance(
         }
         DependencyRootKind::Lifecycle => DependencyBinProvenance {
             role: "lifecycle-root".to_string(),
-            relative_path: root.join("node_modules/.bin").display().to_string(),
+            // Provenance strings are observability data; normalize to `/`
+            // like the workspace arm so records read identically across
+            // platforms.
+            relative_path: root
+                .join("node_modules/.bin")
+                .display()
+                .to_string()
+                .replace('\\', "/"),
         },
     }
 }
@@ -939,10 +946,42 @@ mod tests {
                         .path()
                         .join("admin/node_modules/.bin")
                         .display()
-                        .to_string(),
+                        .to_string()
+                        .replace('\\', "/"),
                 },
             ]
         );
+    }
+
+    /// Fabricates a complete, validation-passing bun 1.2.8 cache entry
+    /// (shim + extracted tool entry + `binary.sha256` marker) so the
+    /// materialization path is exercised hermetically — an incomplete fake
+    /// would be discarded by cache validation and trigger a real download.
+    fn write_complete_fake_bun_cache(ato_home: &Path) -> PathBuf {
+        let tools_root = ato_home.join("toolchains/tools/bun/1.2.8");
+        let extracted_dir = tools_root.join("extracted");
+        let shim_dir = tools_root.join("shim");
+
+        let entry_rel = capsule_core::tools::resolved_tool_entry_relpath(&capsule_core::tools::BUN)
+            .expect("bun layout");
+        let target = extracted_dir.join(entry_rel);
+        fs::create_dir_all(target.parent().expect("target parent")).expect("extracted dir");
+        fs::write(&target, "fake bun binary").expect("bun target");
+
+        fs::create_dir_all(&shim_dir).expect("bun shim dir");
+        let shim = shim_dir.join(if cfg!(windows) { "bun.cmd" } else { "bun" });
+        fs::write(&shim, "cached bun shim").expect("bun shim");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&target, &shim] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod");
+            }
+        }
+
+        fs::write(tools_root.join("binary.sha256"), "a".repeat(64)).expect("sha marker");
+        shim_dir
     }
 
     #[test]
@@ -951,13 +990,7 @@ mod tests {
         let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let ato_home = tempdir().expect("ato home");
         let _ato_home = EnvGuard::set("ATO_HOME", ato_home.path());
-        let shim_dir = ato_home.path().join("toolchains/tools/bun/1.2.8/shim");
-        fs::create_dir_all(&shim_dir).expect("bun shim dir");
-        fs::write(
-            shim_dir.join(if cfg!(windows) { "bun.cmd" } else { "bun" }),
-            "cached bun shim",
-        )
-        .expect("bun shim");
+        let shim_dir = write_complete_fake_bun_cache(ato_home.path());
 
         let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(CliReporter::new_run(false));
         let handle = ensure_runtime_tool_for_lifecycle(
@@ -977,13 +1010,7 @@ mod tests {
         let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let ato_home = tempdir().expect("ato home");
         let _ato_home = EnvGuard::set("ATO_HOME", ato_home.path());
-        let shim_dir = ato_home.path().join("toolchains/tools/bun/1.2.8/shim");
-        fs::create_dir_all(&shim_dir).expect("bun shim dir");
-        fs::write(
-            shim_dir.join(if cfg!(windows) { "bun.cmd" } else { "bun" }),
-            "cached bun shim",
-        )
-        .expect("bun shim");
+        let shim_dir = write_complete_fake_bun_cache(ato_home.path());
         let plan = build_plan(
             ato_home.path(),
             r#"

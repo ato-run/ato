@@ -116,7 +116,6 @@ rexpect = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.4.2"
-mslnk = "0.1.8"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Console",

@@ -23,7 +23,10 @@ pub fn execute(
         .ok_or_else(|| anyhow::anyhow!("shell executor requires targets.<label>.run_command"))?;
 
     let launch_spec = derive_launch_spec(plan)?;
-    let working_dir = launch_spec.working_dir;
+    // Strip Windows `\\?\` extended-length prefixes before handing the cwd to
+    // cmd.exe (which rejects them) and to PATH-resolved tools.
+    let working_dir =
+        capsule_core::common::paths::windows_child_compatible_path(&launch_spec.working_dir);
     let run_command = normalize_local_shell_command(&run_command, &working_dir);
     let mut cmd = shell_command(&run_command);
     cmd.current_dir(&working_dir);
@@ -112,11 +115,9 @@ fn apply_logged_stdio(cmd: &mut Command, log_path: &Path) -> Result<()> {
 fn shell_command(command: &str) -> Command {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("cmd");
-        // `/D` disables AutoRun so a broken/foreign \Command Processor\AutoRun script
-        // cannot pollute output or leak a non-zero exit code into the run command.
-        cmd.args(["/D", "/C", command]);
-        cmd
+        // `cmd.exe /D /S /C "<command>"` via raw_arg: deterministic quote
+        // handling, no std argv re-escaping (cmd.exe cannot parse `\"`).
+        crate::common::host_shell::windows_cmd_shell_command(command)
     }
 
     #[cfg(not(windows))]

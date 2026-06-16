@@ -390,9 +390,10 @@ fn local_shell_command(command_identity: &str) -> Command {
 
 #[cfg(windows)]
 fn local_shell_command(command_identity: &str) -> Command {
-    let mut command = Command::new("cmd");
-    command.arg("/C").arg(command_identity);
-    command
+    // `/D /S /C` via raw_arg: `/D` keeps a broken AutoRun script from
+    // polluting output and leaking exit codes; `/S` + raw_arg keep
+    // operators and quoting verbatim.
+    crate::common::host_shell::windows_cmd_shell_command(command_identity)
 }
 
 #[cfg(unix)]
@@ -508,8 +509,12 @@ mod tests {
         assert!(!worker_workspace.exists());
     }
 
+    // The four run_worker tests below drive the sh-script fixtures that
+    // emulate the (Linux) remote build worker contract; on Windows the sim's
+    // minimal System32 PATH has no `sh`, so they are unix-only by design.
     #[test]
     #[serial]
+    #[cfg(unix)]
     fn worker_sim_uses_disposable_workspace() {
         let temp = TempDir::new().expect("temp");
         let request = fixture_request();
@@ -523,6 +528,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(unix)]
     fn worker_sim_exports_v1_remote_layout() {
         let temp = TempDir::new().expect("temp");
         let request = fixture_request();
@@ -554,6 +560,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(unix)]
     fn worker_sim_response_does_not_create_install_revision() {
         let temp = TempDir::new().expect("temp");
         let response = run_worker(
@@ -592,6 +599,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(unix)]
     fn worker_sim_does_not_inherit_host_secret_env() {
         let secret_key = "ATO_TEST_SECRET_SHOULD_NOT_LEAK";
         let secret_value = "secret-value-must-not-appear-in-build";

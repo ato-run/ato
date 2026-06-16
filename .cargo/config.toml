@@ -1,0 +1,11 @@
+# Workspace-wide cargo configuration.
+
+[env]
+# Windows UAC "installer detection" treats any unsigned executable whose name
+# contains install/setup/update as an installer and demands elevation. Several
+# ato-cli test binaries (install_lifecycle_acceptance, run_install_semantics,
+# installed_relaunch_*, …) trip this in non-elevated local shells and die with
+# os error 740 before running a single test ("never executed"). RunAsInvoker
+# disables the heuristic for processes cargo spawns; it is inert on Unix and
+# on already-elevated shells (incl. GitHub Actions runners).
+__COMPAT_LAYER = "RunAsInvoker"

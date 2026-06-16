@@ -27,6 +27,31 @@ pub(crate) fn env_lock() -> &'static EnvLock {
     LOCK.get_or_init(|| EnvLock(Mutex::new(())))
 }
 
+/// Spawns a child that blocks on its (held-open) stdin pipe — a process
+/// that is deterministically alive on every platform until the caller
+/// kills it. Tests that need "a different live pid" use this instead of
+/// pid 1, which only exists on unix hosts.
+pub(crate) fn blocking_child() -> std::process::Child {
+    // Windows: a stdin-blocked reader is fragile under the suite's parallel
+    // spawn load (handle-inheritance races can EOF the pipe), so lean on the
+    // classic `ping -n 60` sleeper — ping.exe needs no stdin to stay alive
+    // and resolves via the normal `.exe` PATH lookup.
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("ping");
+        command.args(["-n", "60", "127.0.0.1"]);
+        command
+    } else {
+        let mut command = std::process::Command::new("cat");
+        command.stdin(std::process::Stdio::piped());
+        command
+    };
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn blocking child")
+}
+
 /// A poison-tolerant wrapper around the env mutex.
 ///
 /// A test that panics while holding the lock must not cascade into every

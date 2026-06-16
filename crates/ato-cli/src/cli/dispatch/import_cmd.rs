@@ -1481,20 +1481,49 @@ fn terminate_probe_process_tree(
     _shadow_dir: &Path,
     _observed_pgids: &std::collections::BTreeSet<i32>,
 ) -> ProbeCleanupOutcome {
-    match child.try_wait() {
-        Ok(Some(_)) => ProbeCleanupOutcome {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return ProbeCleanupOutcome {
             status: "already_exited".to_string(),
             error: None,
-        },
-        _ => match child.kill() {
-            Ok(()) => ProbeCleanupOutcome {
+        };
+    }
+    // `Child::kill` only reaches the immediate process, but on Windows the
+    // probe command is routinely wrapped (cmd /C → python, venv launcher →
+    // python, …); killing just the wrapper leaves the server grandchild
+    // running, holding the probe port and the inherited stdio pipes. Take
+    // down the whole tree.
+    let tree_kill = std::process::Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if matches!(&tree_kill, Ok(status) if status.success()) {
+        let _ = child.wait();
+        return ProbeCleanupOutcome {
+            status: "killed".to_string(),
+            error: None,
+        };
+    }
+    // taskkill can race a child that exited in the meantime; re-check before
+    // falling back to the direct kill.
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return ProbeCleanupOutcome {
+            status: "already_exited".to_string(),
+            error: None,
+        };
+    }
+    match child.kill() {
+        Ok(()) => {
+            let _ = child.wait();
+            ProbeCleanupOutcome {
                 status: "killed".to_string(),
                 error: None,
-            },
-            Err(error) => ProbeCleanupOutcome {
-                status: "failed".to_string(),
-                error: Some(error.to_string()),
-            },
+            }
+        }
+        Err(error) => ProbeCleanupOutcome {
+            status: "failed".to_string(),
+            error: Some(error.to_string()),
         },
     }
 }
@@ -1704,6 +1733,18 @@ fn run_ato_shadow(shadow_dir: &Path, import_probe_id: &str) -> Result<Output> {
                 });
             }
             None if start.elapsed() >= timeout => {
+                // On Windows `Child::kill` stops only the direct `ato run`
+                // process; its server children would survive, holding ports
+                // and the piped stdio (read_all below would block forever).
+                #[cfg(windows)]
+                {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
                 let _ = child.kill();
                 let stdout = read_all(child.stdout.take());
                 let stderr = read_all(child.stderr.take());

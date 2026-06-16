@@ -275,13 +275,9 @@ fn find_active_sessions(run_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-#[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
-    // kill(pid, 0) returns Ok if process exists.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn pid_is_alive(_pid: u32) -> bool {
-    true // Conservative: assume alive on non-unix
+    // Shared liveness probe (kill(pid, 0) on unix, OpenProcess on Windows).
+    // The previous non-unix stub returned a constant `true`, which meant a
+    // session watcher on Windows never observed its parent exiting.
+    ato_session_core::process::pid_is_alive(pid)
 }

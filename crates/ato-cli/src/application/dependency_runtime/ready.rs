@@ -471,10 +471,26 @@ mod tests {
         assert!(matches!(err, ReadyError::Timeout { .. }), "got {err:?}");
     }
 
+    /// Platform argv that exits with `code`.
+    fn exit_probe_argv(code: u8) -> Vec<String> {
+        if cfg!(windows) {
+            vec![
+                "cmd".to_string(),
+                "/c".to_string(),
+                "exit".to_string(),
+                code.to_string(),
+            ]
+        } else if code == 0 {
+            vec!["/usr/bin/true".to_string()]
+        } else {
+            vec!["/usr/bin/false".to_string()]
+        }
+    }
+
     #[test]
     fn probe_command_succeeds_on_exit_zero() {
         let kind = ReadyProbeKind::Probe {
-            argv: vec!["/usr/bin/true".to_string()],
+            argv: exit_probe_argv(0),
         };
         wait_for_ready(&kind, Duration::from_secs(1), Duration::from_millis(20)).expect("ready");
     }
@@ -482,7 +498,7 @@ mod tests {
     #[test]
     fn probe_command_times_out_on_nonzero_exit() {
         let kind = ReadyProbeKind::Probe {
-            argv: vec!["/usr/bin/false".to_string()],
+            argv: exit_probe_argv(1),
         };
         let err = wait_for_ready(&kind, Duration::from_millis(300), Duration::from_millis(50))
             .expect_err("must time out");

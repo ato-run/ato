@@ -2723,9 +2723,19 @@ fn desktop_execution_from_artifact(
     provenance_note: String,
 ) -> Result<DesktopExecutionOverride> {
     let launch_path = native_artifact_launch_path(artifact_path, artifact_type)?;
+    let launch = relative_or_absolute_path(project_root, &launch_path);
+    // Project-relative entrypoints land in the materialized lock; spell
+    // them with `/` on every platform so the artifact routing reads
+    // identically across OSes. Absolute (host) paths keep their native
+    // spelling.
+    let entrypoint = if launch.is_absolute() {
+        launch.to_string_lossy().into_owned()
+    } else {
+        launch.to_string_lossy().replace('\\', "/")
+    };
     Ok(desktop_execution_from_process(
         json!({
-            "entrypoint": relative_or_absolute_path(project_root, &launch_path),
+            "entrypoint": entrypoint,
             "cmd": [],
         }),
         source_field,

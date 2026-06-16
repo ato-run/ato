@@ -112,6 +112,11 @@ fn ipc_invoke_returns_service_unavailable_after_preflight() {
     let temp = TempDir::new().unwrap();
     write_ipc_service_fixture(temp.path());
 
+    // Both spellings are the preflight "service unavailable" verdict: unix
+    // reports the missing socket, Windows reports that the unix-socket
+    // transport itself is unavailable on the platform.
+    let unavailable_detail = predicate::str::contains("Socket not found")
+        .or(predicate::str::contains("transport is unavailable"));
     capsule()
         .args([
             "ipc",
@@ -125,8 +130,5 @@ fn ipc_invoke_returns_service_unavailable_after_preflight() {
         .arg(temp.path())
         .assert()
         .failure()
-        .stdout(
-            predicate::str::contains("\"code\": -32002")
-                .and(predicate::str::contains("Socket not found")),
-        );
+        .stdout(predicate::str::contains("\"code\": -32002").and(unavailable_detail));
 }
