@@ -182,6 +182,10 @@ pub fn build_heartbeat_body(
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "capabilities": capabilities,
+        // Lease command kinds this runner can actually EXECUTE today. The control
+        // plane gates dispatch on this so a runner is never sent a kind it would
+        // reject on-device (e.g. `run_capsule` before that execution path ships).
+        "supported_lease_kinds": SUPPORTED_LEASE_KINDS,
         "os": os,
         "arch": arch,
     });
@@ -685,6 +689,19 @@ const READY_PORT_GRACE: Duration = Duration::from_millis(2500);
 const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
 
 pub const LEASE_COMMAND_KIND: &str = "run_source_sandbox";
+
+/// Lease kind that carries a stable capsule identity (OCI / Store capsule) for
+/// the runner to launch via `ato run <ref> --managed-state-root ...`. Parsing is
+/// implemented (`parse_run_capsule_command`); the execution dispatch is a
+/// follow-up, so this kind is intentionally NOT yet in [`SUPPORTED_LEASE_KINDS`].
+pub const RUN_CAPSULE_LEASE_KIND: &str = "run_capsule";
+
+/// Lease command kinds this runner can actually EXECUTE today. Advertised in the
+/// heartbeat so the control plane never dispatches a kind the runner would
+/// reject on-device. Add `RUN_CAPSULE_LEASE_KIND` here only once its execution
+/// path ships.
+pub const SUPPORTED_LEASE_KINDS: &[&str] = &[LEASE_COMMAND_KIND];
+
 pub const DEFAULT_PROXY_LISTEN: &str = "127.0.0.1:8420";
 
 #[derive(Debug, Deserialize)]
@@ -794,6 +811,79 @@ pub fn parse_lease_command(
     Ok(ValidLeaseCommand {
         source_url,
         capsule_slug,
+    })
+}
+
+/// A validated `run_capsule` lease: a stable capsule identity the runner can
+/// launch via `ato run <ref> --managed-state-root ...`. The runner MUST use the
+/// stable fields (not `capsule_slug`) for resolution and state isolation, and
+/// MUST namespace persistent state by `owner_id` (server-confirmed) — never by
+/// `capsule_slug` or any other client-supplied display value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunCapsuleCommand {
+    /// Immutable capsule identifier — the resolution key.
+    pub capsule_id: String,
+    /// Owner/account id, confirmed server-side. Namespaces persistent state.
+    /// Required: a runner must never key state off client-supplied input.
+    pub owner_id: String,
+    pub version: Option<String>,
+    pub revision: Option<String>,
+    pub target: Option<String>,
+    pub run_id: Option<String>,
+    /// Display-only. MUST NOT drive resolution or state isolation.
+    pub capsule_slug: Option<String>,
+}
+
+/// Parse a `run_capsule` lease into a validated stable identity. Rejects any
+/// other kind, and any payload missing the required `capsule_id` / `owner_id`.
+/// `capsule_slug` is accepted only as a display hint.
+///
+/// NOTE: parsing only. Wiring this into lease execution (spawning
+/// `ato run <ref> --managed-state-root ...`) is a follow-up; until then the
+/// runner does not advertise `run_capsule` in [`SUPPORTED_LEASE_KINDS`], so the
+/// control plane will not dispatch it here.
+pub fn parse_run_capsule_command(
+    command: &serde_json::Value,
+) -> std::result::Result<RunCapsuleCommand, (String, String)> {
+    let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != RUN_CAPSULE_LEASE_KIND {
+        return Err((
+            "unsupported_command".to_string(),
+            format!("expected lease command kind {RUN_CAPSULE_LEASE_KIND:?}, got {kind:?}"),
+        ));
+    }
+
+    let required = |key: &str| -> std::result::Result<String, (String, String)> {
+        let value = command
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if value.is_empty() {
+            return Err((
+                "invalid_command".to_string(),
+                format!("run_capsule lease is missing {key}"),
+            ));
+        }
+        Ok(value)
+    };
+    let optional = |key: &str| -> Option<String> {
+        command
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+
+    Ok(RunCapsuleCommand {
+        capsule_id: required("capsule_id")?,
+        owner_id: required("owner_id")?,
+        version: optional("version"),
+        revision: optional("revision"),
+        target: optional("target"),
+        run_id: optional("run_id"),
+        capsule_slug: optional("capsule_slug"),
     })
 }
 
@@ -2615,6 +2705,75 @@ mod tests {
             .unwrap_err();
             assert_eq!(code, "invalid_command", "must reject {bad}");
         }
+    }
+
+    #[test]
+    fn run_capsule_command_parses_stable_identity() {
+        let cmd = parse_run_capsule_command(&serde_json::json!({
+            "kind": "run_capsule",
+            "capsule_id": "cap_01H",
+            "owner_id": "usr_01H",
+            "version": "1.2.3",
+            "revision": "blake3:abc",
+            "target": "app",
+            "run_id": "run_01H",
+            "capsule_slug": "openlist",
+        }))
+        .expect("valid run_capsule");
+        assert_eq!(cmd.capsule_id, "cap_01H");
+        assert_eq!(cmd.owner_id, "usr_01H");
+        assert_eq!(cmd.version.as_deref(), Some("1.2.3"));
+        assert_eq!(cmd.revision.as_deref(), Some("blake3:abc"));
+        assert_eq!(cmd.target.as_deref(), Some("app"));
+        assert_eq!(cmd.run_id.as_deref(), Some("run_01H"));
+        assert_eq!(cmd.capsule_slug.as_deref(), Some("openlist"));
+    }
+
+    #[test]
+    fn run_capsule_command_requires_capsule_id_and_owner() {
+        let (code, _) = parse_run_capsule_command(&serde_json::json!({
+            "kind": "run_capsule",
+            "capsule_id": "cap_01H",
+        }))
+        .unwrap_err();
+        assert_eq!(code, "invalid_command", "missing owner_id must be rejected");
+
+        let (code, _) = parse_run_capsule_command(&serde_json::json!({
+            "kind": "run_capsule",
+            "owner_id": "usr_01H",
+        }))
+        .unwrap_err();
+        assert_eq!(code, "invalid_command", "missing capsule_id must be rejected");
+    }
+
+    #[test]
+    fn run_capsule_command_rejects_other_kinds() {
+        let (code, _) = parse_run_capsule_command(&serde_json::json!({
+            "kind": "run_source_sandbox",
+            "source_url": "https://github.com/x/y",
+        }))
+        .unwrap_err();
+        assert_eq!(code, "unsupported_command");
+    }
+
+    #[test]
+    fn heartbeat_advertises_supported_lease_kinds() {
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64");
+        let kinds: Vec<&str> = body["supported_lease_kinds"]
+            .as_array()
+            .expect("supported_lease_kinds is an array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(
+            kinds.contains(&LEASE_COMMAND_KIND),
+            "must advertise run_source_sandbox"
+        );
+        // run_capsule execution is not wired yet, so it must NOT be advertised.
+        assert!(
+            !kinds.contains(&RUN_CAPSULE_LEASE_KIND),
+            "run_capsule must not be advertised until its execution path ships"
+        );
     }
 
     #[test]

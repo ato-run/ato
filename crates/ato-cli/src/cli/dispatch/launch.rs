@@ -144,6 +144,7 @@ pub(crate) fn execute_launch_command(
         /* read_write */ vec![],
         /* cwd */ None,
         /* state */ vec![],
+        /* managed_state_root */ None,
         /* inject */ vec![],
         /* build_policy */ crate::application::build_materialization::BuildPolicy::IfStale,
         /* cache_strategy_arg */ crate::cli::shared::CacheStrategyArg::Auto,
