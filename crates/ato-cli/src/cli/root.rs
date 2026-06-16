@@ -105,6 +105,17 @@ pub(crate) enum Commands {
         #[arg(long = "state", value_name = "STATE=/ABS/PATH|STATE=state-...")]
         state: Vec<String>,
 
+        /// Auto-bind every unbound persistent `[state.<name>]` (attach="explicit")
+        /// under this root, for non-interactive server/runner contexts. Each
+        /// state resolves to a stable, path-safe dir `<DIR>/<target>/<state_key>`
+        /// (reused across runs). `<DIR>` MUST already be scoped by the
+        /// server-confirmed owner/account AND a stable, immutable capsule identity
+        /// (e.g. `<base>/<owner_id>/<capsule_revision>`); this flag only appends
+        /// target + state_key and never derives owner or capsule identity.
+        /// `--state` bindings always win.
+        #[arg(long = "managed-state-root", value_name = "DIR")]
+        managed_state_root: Option<PathBuf>,
+
         /// Inject external data binding using KEY=VALUE for targets that declare [external_injection]
         #[arg(long = "inject", value_name = "KEY=VALUE")]
         inject: Vec<String>,
