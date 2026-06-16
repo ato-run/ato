@@ -738,6 +738,70 @@ run = "main.py"
     }
 
     #[test]
+    fn accepts_top_level_runtime_tools_inline_table() {
+        // ato#723: a flat v0.3 manifest with the inline-table form must
+        // validate clean (top-level runtime_tools fold into the target during
+        // normalization, then pass the per-target runtime_tools validation).
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "next-bun-sqlite-app"
+version = "0.1.0"
+type = "app"
+
+runtime = "source/node"
+runtime_version = "20"
+runtime_tools = { bun = "1.2", sqlite = "3" }
+
+build = "bun install"
+run = "bun run dev"
+port = 3000
+"#,
+        )
+        .unwrap();
+
+        assert!(
+            validate_manifest_for_build(&manifest_path, "app").is_ok(),
+            "flat manifest with top-level runtime_tools must validate clean"
+        );
+    }
+
+    #[test]
+    fn rejects_non_table_top_level_runtime_tools() {
+        // A non-table top-level runtime_tools (e.g. a stray string) must be
+        // rejected with a clear "must be a table" diagnostic.
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "bad-runtime-tools"
+version = "0.1.0"
+type = "app"
+
+runtime = "source/node"
+runtime_version = "20"
+runtime_tools = "bun"
+
+run = "bun run dev"
+port = 3000
+"#,
+        )
+        .unwrap();
+
+        let err = validate_manifest_for_build(&manifest_path, "app")
+            .expect_err("non-table runtime_tools must be rejected");
+        assert!(
+            err.to_string().contains("runtime_tools"),
+            "error should mention runtime_tools: {err}"
+        );
+    }
+
+    #[test]
     fn web_static_requires_existing_directory_entrypoint() {
         let dir = tempfile::tempdir().unwrap();
         let manifest_path = dir.path().join("capsule.toml");
