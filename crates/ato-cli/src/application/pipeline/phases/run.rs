@@ -1710,10 +1710,42 @@ where
     )?;
     let state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
-            authoritative_input
+            let mut overrides = authoritative_input
                 .effective_state
                 .state_source_overrides
-                .clone()
+                .clone();
+            // The lock path does not run `resolve_state_source_overrides_managed`
+            // (that lives on the manifest branch below), so apply the managed
+            // auto-bind here too: any persistent `[state.*]` the lock left unbound
+            // is bound under `managed_state_root`. Existing (explicit/lock)
+            // bindings always win. `--managed-state-root` is an explicit contract
+            // for non-interactive runner execution, so a manifest that cannot be
+            // read is a hard error — never a silent skip that surfaces later as a
+            // confusing unbound-state failure.
+            if let Some(root) = request.managed_state_root.as_deref() {
+                let capsule_toml = authoritative_input.workspace_root.join("capsule.toml");
+                let loaded = capsule_core::manifest::load_manifest_with_validation_mode(
+                    &capsule_toml,
+                    validation_mode,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to load {} to apply --managed-state-root",
+                        capsule_toml.display()
+                    )
+                })?;
+                let managed = resolve_state_source_overrides_managed(
+                    &loaded.model,
+                    &request.state_bindings,
+                    None,
+                    Some(root),
+                    effective_target_label,
+                )?;
+                for (key, value) in managed {
+                    overrides.entry(key).or_insert(value);
+                }
+            }
+            overrides
         } else {
             HashMap::new()
         };
@@ -4264,7 +4296,11 @@ fn managed_state_dir(root: &Path, target: &str, state_key: &str) -> PathBuf {
 /// The blake3 suffix is taken over the RAW input, so two distinct inputs that
 /// would otherwise sanitize to the same string (e.g. `a/b` vs `a_b`, `.` vs `_`)
 /// still resolve to distinct segments.
-fn path_segment(raw: &str) -> String {
+///
+/// Shared with the Connected Runner agent, which builds the owner/identity
+/// portion of a managed state root with the same scheme so the namespace is
+/// consistent end to end.
+pub(crate) fn path_segment(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
         .map(|c| {
