@@ -45,6 +45,33 @@ pub fn lifecycle_shell_command(command: &str) -> Command {
     }
 }
 
+/// Builds a `Command` for a CLI that ships as a `.cmd`/`.bat` shim on
+/// Windows (npm, npx, pnpm, yarn). CreateProcess cannot start those shims
+/// directly — PATH lookup only appends `.exe` — so Windows routes through
+/// cmd.exe, which resolves PATHEXT the way an interactive shell does.
+///
+/// Args are joined verbatim into the cmd.exe command line, so callers must
+/// pass fixed, shell-safe tokens (no user input, no embedded quotes or
+/// spaces inside a token).
+pub fn cmd_shim_command(program: &str, args: &[&str]) -> Command {
+    #[cfg(windows)]
+    {
+        let mut line = String::from(program);
+        for arg in args {
+            line.push(' ');
+            line.push_str(arg);
+        }
+        windows_cmd_shell_command(&line)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        cmd
+    }
+}
+
 const TAIL_MAX_LINES: usize = 20;
 const TAIL_MAX_LINE_BYTES: usize = 400;
 

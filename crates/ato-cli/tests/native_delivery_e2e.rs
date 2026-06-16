@@ -13,8 +13,11 @@ use capsule_core::packers::payload::build_distribution_manifest;
 use capsule_core::types::CapsuleManifest;
 use tempfile::{NamedTempFile, TempDir};
 
+// The Windows leg compiles the Tauri fixture from a cold cargo cache inside
+// `ato build`; that alone has been observed at ~283s on a hosted runner, so
+// give it real headroom while still catching genuine hangs.
 #[cfg(windows)]
-const COMMAND_TIMEOUT_SECS: u64 = 300;
+const COMMAND_TIMEOUT_SECS: u64 = 900;
 #[cfg(not(windows))]
 const COMMAND_TIMEOUT_SECS: u64 = 120;
 use walkdir::WalkDir;

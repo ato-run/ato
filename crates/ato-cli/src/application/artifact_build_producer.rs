@@ -268,10 +268,16 @@ fn validate_outputs(outputs: &[String]) -> Result<()> {
             anyhow::bail!("artifact build producer outputs must not contain empty paths");
         }
         let path = Path::new(output);
+        // RootDir is checked explicitly: on Windows `/private/build` is
+        // rooted but not `is_absolute()`, yet joining it would replace the
+        // base path and escape the workspace.
         if path.is_absolute()
-            || path
-                .components()
-                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                )
+            })
         {
             anyhow::bail!(
                 "artifact build producer output '{}' must stay relative",

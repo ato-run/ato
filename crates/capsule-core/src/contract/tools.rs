@@ -1065,6 +1065,15 @@ fn resolved_layout_path(spec: &RuntimeToolSpec) -> Result<String> {
     }
 }
 
+/// The archive-relative path of the resolved tool entry for the current host
+/// (e.g. `bun-windows-x64/bun.exe`, `package/bin/pnpm.cjs`).
+///
+/// Exposed so dependent crates' tests can fabricate complete, validation-
+/// passing cache entries without touching the network.
+pub fn resolved_tool_entry_relpath(spec: &RuntimeToolSpec) -> Result<String> {
+    resolved_layout_path(spec)
+}
+
 /// Maps the current host platform to a tool-specific triple string.
 /// Used to resolve `{triple}` placeholders in `GithubRelease` asset templates.
 fn host_triple(style: TripleStyle) -> Result<String> {

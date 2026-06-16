@@ -2920,7 +2920,14 @@ pub(super) fn resolve_github_auto_fix_working_dir(
         return Ok(canonical_checkout);
     };
     let relative = Path::new(raw);
-    if relative.is_absolute() {
+    // RootDir/Prefix are checked explicitly: on Windows `/srv` is rooted but
+    // not `is_absolute()`, and `C:foo` is drive-relative — both would resolve
+    // outside the checkout when joined.
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
+    {
         return Err(github_python_lock_auto_fix_error(format!(
             "GitHub auto-fix refuses absolute working_dir '{}'",
             raw
@@ -3431,8 +3438,15 @@ mod tests {
     }
 
     async fn resolve_export_target(manifest: &str) -> Result<ResolvedRunTarget> {
+        // Crate convention: every test that mutates process-global env vars
+        // holds the shared env lock for its whole run.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let home = tempfile::tempdir().expect("tempdir");
         let _home_guard = EnvVarGuard::set_path("HOME", home.path());
+        // Pin ATO_HOME explicitly: it is the first thing nacelle path
+        // resolution reads, and on Windows `dirs::home_dir()` consults the
+        // Known Folder API — no environment variable can redirect it.
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &home.path().join(".ato"));
         write_installed_capsule(home.path(), "team", "tool", "1.0.0", manifest);
 
         resolve_run_target_or_install(

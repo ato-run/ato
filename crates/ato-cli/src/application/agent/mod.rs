@@ -1580,6 +1580,7 @@ mod tests {
             store
                 .artifact_dir()
                 .to_string_lossy()
+                .replace('\\', "/")
                 .contains(".ato/tmp/agent/runs/run-")
         );
         assert!(store.workspace_dir().join("package.json").exists());

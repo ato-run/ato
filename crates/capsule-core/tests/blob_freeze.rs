@@ -60,8 +60,10 @@ fn mtime_drift_does_not_change_hash() {
     let later = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let a_path = tmp_a.path().join("data.txt");
     let b_path = tmp_b.path().join("data.txt");
-    let a_file = fs::File::open(&a_path).unwrap();
-    let b_file = fs::File::open(&b_path).unwrap();
+    // Windows requires write access on the handle to set file times;
+    // read-only `File::open` handles fail with access denied there.
+    let a_file = fs::OpenOptions::new().write(true).open(&a_path).unwrap();
+    let b_file = fs::OpenOptions::new().write(true).open(&b_path).unwrap();
     a_file.set_modified(earlier).unwrap();
     b_file.set_modified(later).unwrap();
 

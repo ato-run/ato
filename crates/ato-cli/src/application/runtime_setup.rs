@@ -996,12 +996,26 @@ mod tests {
     #[test]
     fn missing_managed_node_recommends_install() {
         // With no managed copy in a tool's cache, the recommended action is a
-        // managed install (host PATH copies don't make it "ready").
+        // managed install (host PATH copies don't make it "ready"). Pin
+        // ATO_HOME to an empty tempdir under the shared env lock so a real
+        // (or concurrently mutated) managed cache can never flip the verdict
+        // to UpgradeManaged.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let ato_home = tempfile::tempdir().expect("ato home");
+        let prior = std::env::var_os("ATO_HOME");
+        unsafe {
+            std::env::set_var("ATO_HOME", ato_home.path());
+        }
         let status =
             detect_managed_language_tool(ToolKind::Node, &["definitely-not-a-real-bin-xyz"]);
-        if !status.ready {
-            assert_eq!(status.action, RecommendedAction::InstallManaged);
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("ATO_HOME", value),
+                None => std::env::remove_var("ATO_HOME"),
+            }
         }
+        assert!(!status.ready, "empty managed cache cannot be ready");
+        assert_eq!(status.action, RecommendedAction::InstallManaged);
     }
 
     #[test]

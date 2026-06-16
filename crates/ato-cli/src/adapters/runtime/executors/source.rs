@@ -1373,7 +1373,12 @@ fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
         Path::new("/app").join(rel).display().to_string()
     } else {
         let relative = sandbox_source_entrypoint_relative(plan, entrypoint);
-        Path::new(".").join(relative).display().to_string()
+        // The normalized manifest is parsed by nacelle and the entrypoint
+        // crosses the sandbox boundary; spell it with `/` on every platform
+        // (Windows file APIs accept `/`, while `\` would need TOML escaping
+        // and breaks string-level assertions on the written manifest).
+        let rel = relative.display().to_string().replace('\\', "/");
+        format!("./{}", rel.trim_start_matches("./"))
     }
 }
 
@@ -1587,9 +1592,11 @@ pub(crate) fn spawn_host_lifecycle_events(
                 .unwrap_or(60);
             let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
             while std::time::Instant::now() < deadline {
-                // Stop polling if the process has already exited.
-                #[cfg(unix)]
-                if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                // Stop polling if the process has already exited. The shared
+                // probe covers Windows too — the previous unix-only check
+                // left this loop polling a dead pid's port for the full
+                // timeout there.
+                if !ato_session_core::process::pid_is_alive(pid) {
                     break;
                 }
                 if std::net::TcpStream::connect_timeout(
@@ -1734,9 +1741,14 @@ mod tests {
         // Ready. We reap a short-lived child first so its PID is dead, making the
         // process-liveness check break the poll loop promptly (deterministic, no
         // timeout/env mutation). A bound-then-dropped port is guaranteed closed.
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .expect("spawn a short-lived child");
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/d", "/c", "exit", "0"])
+                .spawn()
+        } else {
+            std::process::Command::new("true").spawn()
+        }
+        .expect("spawn a short-lived child");
         let pid = child.id();
         let _ = child.wait();
 
@@ -1835,7 +1847,11 @@ mod tests {
             .get("HOME")
             .and_then(|value| value.clone())
             .expect("HOME must be set");
-        assert!(isolated_home.contains(".ato-run-host/home"));
+        assert!(
+            isolated_home
+                .replace('\\', "/")
+                .contains(".ato-run-host/home")
+        );
         assert_eq!(
             envs.get("ATO_SERVICE_DB_HOST")
                 .and_then(|value| value.clone()),

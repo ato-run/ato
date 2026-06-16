@@ -13,7 +13,11 @@ fn assert_json_envelope_snapshot(name: &str, envelope: &JsonErrorEnvelopeV1) {
     let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/adapters/output/diagnostics/snapshots")
         .join(format!("{name}.json"));
-    let expected = fs::read_to_string(&snapshot_path).expect("snapshot fixture should be readable");
+    let expected = fs::read_to_string(&snapshot_path)
+        .expect("snapshot fixture should be readable")
+        // Windows checkouts may materialize the fixture with CRLF endings;
+        // the serializer always emits LF, so compare in LF form.
+        .replace("\r\n", "\n");
     let actual = serde_json::to_string_pretty(envelope).expect("json envelope should serialize")
         + "
 ";

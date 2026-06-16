@@ -670,8 +670,18 @@ fn free_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+/// A spawnable `python3` is not enough: on Windows the Microsoft Store
+/// app-execution alias (`AppInstallerPythonRedirector.exe`) spawns fine,
+/// prints a Store hint, and exits nonzero — so require a real interpreter
+/// that reports its version successfully.
 fn python3_available() -> bool {
-    Command::new("python3").arg("--version").output().is_ok()
+    Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).starts_with("Python 3")
+        })
 }
 
 /// Post-stop teardown is observed asynchronously: `ato stop` returns once the

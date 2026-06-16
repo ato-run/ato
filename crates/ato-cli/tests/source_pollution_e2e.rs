@@ -68,8 +68,11 @@ run = "true"
 "#,
     files: &[
         (
+            // `[workspace]` keeps cargo from walking up into ato's own repo
+            // workspace when the fixture runs un-sandboxed (Windows/macOS,
+            // where lifecycle commands see real host paths).
             "Cargo.toml",
-            "[package]\nname = \"pollution-rust\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            "[package]\nname = \"pollution-rust\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
         ),
         ("src/main.rs", "fn main() { println!(\"rust\"); }\n"),
         ("Cargo.lock", "# lock\n"),
@@ -201,10 +204,18 @@ fn write_fake_runtime_shims(root: &Path) -> Result<std::ffi::OsString> {
     let shims = root.join("shims");
     fs::create_dir_all(&shims)?;
     for binary in ["node", "python", "python3", "cargo", "go"] {
-        let path = shims.join(binary);
-        fs::write(&path, "#!/bin/sh\nexit 0\n")?;
-        #[cfg(unix)]
+        #[cfg(windows)]
         {
+            // CreateProcess only resolves .exe/.cmd/.bat from PATH; an
+            // extension-less shell script is invisible, letting the real
+            // host toolchain leak into the run.
+            let path = shims.join(format!("{binary}.cmd"));
+            fs::write(&path, "@echo off\r\nexit /B 0\r\n")?;
+        }
+        #[cfg(not(windows))]
+        {
+            let path = shims.join(binary);
+            fs::write(&path, "#!/bin/sh\nexit 0\n")?;
             use std::os::unix::fs::PermissionsExt;
             let mut permissions = fs::metadata(&path)?.permissions();
             permissions.set_mode(0o755);
