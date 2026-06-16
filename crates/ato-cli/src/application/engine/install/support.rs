@@ -3244,6 +3244,14 @@ fn copy_env_example_in_dir(dir: &Path, json: bool, prompt_for_secrets: bool) {
 
 #[cfg(test)]
 mod tests {
+    // The env-mutating async tests below hold the crate-wide env lock across
+    // `.await` so process-global env stays pinned for the whole resolve. They
+    // are `#[tokio::test]` (current-thread) + `#[serial_test::serial]`, so the
+    // !Send std guard never crosses threads and serial tests cannot contend —
+    // the lint's deadlock/move scenarios cannot occur. Matches the same allow
+    // in sibling test modules (install/tests.rs, registry/serve/tests.rs).
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use std::io::Cursor;
     use std::sync::Arc;
