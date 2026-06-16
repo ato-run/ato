@@ -1471,7 +1471,10 @@ port = 3000
         );
         // And via the normalized accessor (preflight path).
         assert_eq!(
-            decision.plan.execution_runtime_tool_version("bun").as_deref(),
+            decision
+                .plan
+                .execution_runtime_tool_version("bun")
+                .as_deref(),
             Some("1.2")
         );
     }

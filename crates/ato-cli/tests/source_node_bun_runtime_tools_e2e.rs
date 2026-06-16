@@ -87,15 +87,40 @@ fn reserve_free_port() -> u16 {
     // listener drops here, releasing the port; brief TOCTOU is acceptable in tests
 }
 
-/// Poll `addr` until a TCP connection succeeds or `timeout` elapses.
-fn wait_for_tcp(addr: &str, timeout: Duration) -> bool {
+/// Outcome of waiting for the capsule server to come up.
+enum Readiness {
+    /// The declared port accepted a TCP connection.
+    Ready,
+    /// `ato run` exited before the port was ready — the run phase failed. Carries
+    /// nothing; the caller reads the captured logs to classify the failure.
+    ChildExited,
+    /// Neither readiness nor exit within the timeout.
+    Timeout,
+}
+
+/// Wait until `addr` accepts a connection, the child process exits, or `timeout`
+/// elapses — whichever comes first. Polling the child means a crashed run phase
+/// is reported in seconds instead of stalling for the full readiness window.
+fn wait_for_server_or_exit(
+    addr: &str,
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Readiness {
     let deadline = Instant::now() + timeout;
     loop {
         if TcpStream::connect(addr).is_ok() {
-            return true;
+            return Readiness::Ready;
+        }
+        if child.try_wait().expect("try_wait").is_some() {
+            // Re-check the port once: the server could have bound and exited in
+            // the same poll window (not expected for this fixture, but cheap).
+            if TcpStream::connect(addr).is_ok() {
+                return Readiness::Ready;
+            }
+            return Readiness::ChildExited;
         }
         if Instant::now() >= deadline {
-            return false;
+            return Readiness::Timeout;
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -178,21 +203,23 @@ fn source_node_bun_runtime_tools_build_and_serve() {
         .spawn()
         .expect("spawn ato run");
 
-    // ── wait for the Bun server to come up ────────────────────────────────────
+    // ── wait for the Bun server to come up (or `ato run` to exit) ─────────────
     // Cold run: Node 20 + Bun downloads + `bun install`. Allow up to 5 minutes;
-    // a warm run (toolchains cached) is typically well under 30 s.
-    let server_ready = wait_for_tcp(&addr, Duration::from_secs(300));
+    // a warm run (toolchains cached) is typically well under 30 s. If the run
+    // phase fails, `ato run` exits early and we report in seconds, not minutes.
+    let readiness = wait_for_server_or_exit(&addr, &mut child, Duration::from_secs(300));
 
     let stderr_content = fs::read_to_string(&stderr_log).unwrap_or_default();
     let stdout_content = fs::read_to_string(&stdout_log).unwrap_or_default();
 
-    if !server_ready {
+    if !matches!(readiness, Readiness::Ready) {
         let _ = child.kill();
         let _ = child.wait();
 
         // Narrow skip: only skip in non-strict CI when ato output clearly
         // signals a toolchain download failure (network unavailable). Any other
-        // failure (including runtime_tools not being applied) must surface.
+        // failure (including runtime_tools not being applied at run time) must
+        // surface as a real failure so the regression is not masked.
         let is_download_failure = stderr_content.contains("managed node runtime is unavailable")
             || stderr_content.contains("failed to download")
             || stderr_content.contains("toolchain download")
@@ -205,10 +232,15 @@ fn source_node_bun_runtime_tools_build_and_serve() {
             return;
         }
 
-        panic!(
-            "bun server on {addr} did not become ready within 5 minutes\n\
-             stdout:\n{stdout_content}\nstderr:\n{stderr_content}"
-        );
+        let reason = match readiness {
+            Readiness::ChildExited => {
+                "`ato run` exited before the bun server became ready \
+                 (run phase failed — e.g. managed bun not on the run PATH)"
+            }
+            Readiness::Timeout => "bun server did not become ready within 5 minutes",
+            Readiness::Ready => unreachable!(),
+        };
+        panic!("{reason}\non {addr}\nstdout:\n{stdout_content}\nstderr:\n{stderr_content}");
     }
 
     // ── HTTP probes ───────────────────────────────────────────────────────────

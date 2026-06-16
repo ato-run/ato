@@ -835,20 +835,60 @@ fn build_host_node_entrypoint_command(
 /// abstraction lands in v0.5.x minor 1 (see RFC UNIFIED_EXECUTION_MODEL §4.2).
 fn prepend_managed_node_to_path(cmd: &mut Command, node_bin: &Path) {
     if let Some(node_dir) = node_bin.parent() {
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        #[cfg(windows)]
-        let separator = ";";
-        #[cfg(not(windows))]
-        let separator = ":";
-        cmd.env(
-            "PATH",
-            format!("{}{}{}", node_dir.display(), separator, current_path),
-        );
+        prepend_dirs_to_path(cmd, &[node_dir]);
     }
+}
+
+/// Prepend `dirs` (highest priority first) to the spawned command's `PATH`,
+/// ahead of the inherited environment. A single call so multiple prepends do
+/// not clobber each other (each derives from the *inherited* `PATH`, not the
+/// value a prior call set on `cmd`).
+fn prepend_dirs_to_path(cmd: &mut Command, dirs: &[&Path]) {
+    #[cfg(windows)]
+    let separator = ";";
+    #[cfg(not(windows))]
+    let separator = ":";
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let mut prefix = dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(separator);
+    if !current_path.is_empty() {
+        prefix.push_str(separator);
+        prefix.push_str(&current_path);
+    }
+    cmd.env("PATH", prefix);
 }
 
 fn is_package_manager_entrypoint(entrypoint: &str) -> bool {
     matches!(entrypoint, "npm" | "npx" | "yarn" | "pnpm" | "bun" | "deno")
+}
+
+/// When the run entrypoint is an Ato-managed runtime tool (`bun`, `pnpm`,
+/// `yarn`) declared in the manifest's `runtime_tools`, resolve its managed shim
+/// from the toolchain cache. Returns `(shim_dir, shim_path)` once the shim is
+/// present — materialized by the build/preflight lifecycle phase, which shares
+/// `runtime_tools` resolution with this path.
+///
+/// This is what puts a declared `runtime_tools.bun` on the **run** PATH, the
+/// same way the build phase does. Without it, `run = "bun run …"` resolves
+/// `bun` only next to managed node or via the host `PATH`, so a manifest-pinned
+/// Bun is silently ignored at run time (and a host without Bun fails to spawn).
+/// See ato#723.
+fn resolve_managed_runtime_tool_shim(
+    plan: &ManifestData,
+    entrypoint: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let spec = capsule_core::tools::lookup(entrypoint)?;
+    let version = capsule_core::tools::read_tool_version(
+        &plan.manifest,
+        plan.selected_target_label(),
+        entrypoint,
+    )?;
+    let shim_dir = capsule_core::tools::managed_tool_shim_dir(spec, &version).ok()?;
+    let shim_path = shim_dir.join(capsule_core::tools::tool_shim_filename(spec));
+    shim_path.is_file().then_some((shim_dir, shim_path))
 }
 
 fn resolve_package_manager_bin(node_bin: &Path, pm: &str) -> std::path::PathBuf {
@@ -873,14 +913,30 @@ fn build_package_manager_command(
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<PreparedCommand> {
     let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
-    let pm_bin = resolve_package_manager_bin(&node_bin, entrypoint);
+
+    // Prefer a manifest-pinned managed runtime tool (e.g. `runtime_tools.bun`)
+    // over a node-sibling / host-`PATH` binary, so the *run* command uses the
+    // same Bun the build phase did. Falls back to the legacy resolution when the
+    // entrypoint is not a managed/declared tool. See ato#723.
+    let managed_tool = resolve_managed_runtime_tool_shim(plan, entrypoint);
+    let pm_bin = match &managed_tool {
+        Some((_, shim_path)) => shim_path.clone(),
+        None => resolve_package_manager_bin(&node_bin, entrypoint),
+    };
 
     let mut cmd = Command::new(&pm_bin);
     // Package managers must run in the project root (manifest_dir), not the caller's CWD.
     cmd.current_dir(runtime_dir);
 
-    // Ensure the managed node binary directory is on PATH so npm can invoke node.
-    prepend_managed_node_to_path(&mut cmd, &node_bin);
+    // Ensure the managed node binary directory is on PATH so the tool can invoke
+    // node; when a managed runtime-tool shim resolved, prepend its dir *ahead*
+    // of node so any re-invocation of the tool name also hits the managed shim.
+    match (managed_tool.as_ref(), node_bin.parent()) {
+        (Some((shim_dir, _)), Some(node_dir)) => {
+            prepend_dirs_to_path(&mut cmd, &[shim_dir.as_path(), node_dir]);
+        }
+        _ => prepend_managed_node_to_path(&mut cmd, &node_bin),
+    }
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
@@ -1176,7 +1232,8 @@ mod tests {
     use super::{
         allow_net_hosts_for_resolved_port, is_provider_backed_node_workspace,
         map_deno_permission_error, map_node_compat_error, prepend_managed_node_to_path,
-        provider_resolution_metadata_path, resolve_readiness_port,
+        provider_resolution_metadata_path, resolve_managed_runtime_tool_shim,
+        resolve_readiness_port,
     };
 
     use capsule_core::launch_spec::{LaunchSpecSource, derive_launch_spec};
@@ -1551,5 +1608,62 @@ run = "node lib.js fixtures/db.json --port 3000"
             applied_path, expected,
             "managed Node bin dir must be first entry of PATH (#294)"
         );
+    }
+
+    /// ato#723: a `source/node` capsule that declares `runtime_tools.bun` and
+    /// runs `bun run …` must resolve the **managed** Bun shim (the one the build
+    /// phase materialized), not a node-sibling or host `bun`. This is the seam
+    /// that was missing — `run = "bun run …"` previously fell through to bare
+    /// `bun` on `PATH`, which fails to spawn on a host without Bun.
+    #[test]
+    fn resolve_managed_runtime_tool_shim_finds_declared_bun() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let ato_home = tempfile::tempdir().expect("ato home");
+        let original = std::env::var_os("ATO_HOME");
+        // SAFETY: serialized by env_lock; restored below before any assertion.
+        unsafe { std::env::set_var("ATO_HOME", ato_home.path()) };
+
+        // Seed the managed Bun shim the build/preflight phase would have created.
+        let shim_dir = ato_home.path().join("toolchains/tools/bun/1.1.38/shim");
+        std::fs::create_dir_all(&shim_dir).expect("shim dir");
+        let shim_name = if cfg!(windows) { "bun.cmd" } else { "bun" };
+        std::fs::write(shim_dir.join(shim_name), "#!/bin/sh\nexec bun \"$@\"\n").expect("shim");
+
+        let tmp = tempfile::tempdir().expect("workspace");
+        // Top-level inline-table form: the descriptor folds it into the target,
+        // exercising both the fold and the run-side resolution.
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+runtime_tools = { bun = "1.1.38" }
+run = "bun run server.ts"
+port = 3000
+"#,
+        );
+
+        let resolved = resolve_managed_runtime_tool_shim(&plan, "bun");
+
+        // Restore env before asserting so a failure doesn't poison other tests.
+        match original {
+            Some(v) => unsafe { std::env::set_var("ATO_HOME", v) },
+            None => unsafe { std::env::remove_var("ATO_HOME") },
+        }
+
+        let (resolved_dir, resolved_path) =
+            resolved.expect("declared managed bun shim must resolve");
+        assert_eq!(
+            resolved_dir, shim_dir,
+            "shim dir must be the managed cache dir"
+        );
+        assert_eq!(resolved_path, shim_dir.join(shim_name));
+
+        // A tool that is not declared in runtime_tools must not resolve.
+        assert!(
+            resolve_managed_runtime_tool_shim(&plan, "pnpm").is_none(),
+            "an undeclared tool must not resolve to a managed shim"
+        );
+        // A non-managed entrypoint (plain node) is never a managed runtime tool.
+        assert!(resolve_managed_runtime_tool_shim(&plan, "node").is_none());
     }
 }

@@ -132,6 +132,12 @@ pub static YARN: RuntimeToolSpec = RuntimeToolSpec {
     },
 };
 
+// ato#723: `runtime_tools.bun` versions are used **verbatim** as the GitHub
+// release tag (`bun-v{version}`), exactly like uv/pnpm/yarn map their pin onto a
+// download URL. For v0 the pin must therefore be an *exact* published release
+// (e.g. `"1.1.38"`); a partial pin like `"1.2"` resolves to the non-existent tag
+// `bun-v1.2` and fails the download. Partial-version → concrete-release
+// resolution is intentionally out of v0 scope (see the issue's non-goals).
 pub static BUN: RuntimeToolSpec = RuntimeToolSpec {
     name: "bun",
     default_version: "1.1.38",
@@ -288,6 +294,33 @@ fn should_probe_host_runtime_tool(version_override: Option<&str>) -> bool {
     version_override.is_none()
 }
 
+/// File name of the shim executable for `spec`: `<name>` on Unix, `<name>.cmd`
+/// on Windows. Single source of truth shared by [`ensure_runtime_tool`] (which
+/// writes it) and consumers that resolve a managed shim by path.
+pub fn tool_shim_filename(spec: &RuntimeToolSpec) -> String {
+    if cfg!(windows) {
+        format!("{}.cmd", spec.name)
+    } else {
+        spec.name.to_string()
+    }
+}
+
+/// Absolute path to the managed shim directory for `spec` at `version`:
+/// `<toolchain_cache>/tools/<name>/<version>/shim`. This is exactly the
+/// directory [`ensure_runtime_tool`] populates and returns as
+/// [`ToolHandle::bin_dir`] — keep the two in lockstep.
+///
+/// Lets callers outside the provisioner (e.g. the source/node run executor)
+/// resolve a managed `runtime_tools` shim that the build/preflight phase has
+/// already materialized, without re-running provisioning. See ato#723.
+pub fn managed_tool_shim_dir(spec: &RuntimeToolSpec, version: &str) -> Result<PathBuf> {
+    Ok(toolchain_cache_dir()?
+        .join("tools")
+        .join(spec.name)
+        .join(version)
+        .join("shim"))
+}
+
 pub async fn ensure_runtime_tool(
     spec: &RuntimeToolSpec,
     version_override: Option<&str>,
@@ -322,11 +355,7 @@ pub async fn ensure_runtime_tool(
     let shim_dir = tools_root.join("shim");
     let sha_path = tools_root.join("binary.sha256");
 
-    let shim_filename = if cfg!(windows) {
-        format!("{}.cmd", spec.name)
-    } else {
-        spec.name.to_string()
-    };
+    let shim_filename = tool_shim_filename(spec);
     let shim_path = shim_dir.join(&shim_filename);
 
     if shim_path.exists() {
@@ -1681,8 +1710,11 @@ mod tests {
             let layout = resolved_layout_path(self.spec).expect("layout");
             let target = self.extracted_dir.join(&layout);
             fs::create_dir_all(target.parent().unwrap()).expect("extracted_dir");
-            fs::write(&target, format!("#!/bin/sh\necho {}\n", self.spec.name).as_bytes())
-                .expect("target");
+            fs::write(
+                &target,
+                format!("#!/bin/sh\necho {}\n", self.spec.name).as_bytes(),
+            )
+            .expect("target");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1698,7 +1730,12 @@ mod tests {
         }
 
         fn validate(&self) -> Result<String> {
-            validate_tool_cache(self.spec, &self.shim_path, &self.extracted_dir, &self.sha_path)
+            validate_tool_cache(
+                self.spec,
+                &self.shim_path,
+                &self.extracted_dir,
+                &self.sha_path,
+            )
         }
     }
 

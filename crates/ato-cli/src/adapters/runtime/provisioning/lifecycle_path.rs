@@ -1070,8 +1070,7 @@ port = 3000
 
         // Sanity: the fold placed bun under the selected target so the raw
         // manifest read by lifecycle_runtime_tools resolves it.
-        let tools =
-            lifecycle_runtime_tools(&plan, Some("bun")).expect("lifecycle runtime tools");
+        let tools = lifecycle_runtime_tools(&plan, Some("bun")).expect("lifecycle runtime tools");
         let bun = tools
             .iter()
             .find(|tool| tool.spec.name == "bun")
