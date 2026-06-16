@@ -104,7 +104,12 @@ jobs:
             echo "<FULL>" > changed.txt
           fi
           echo "----- changed files -----"; cat changed.txt
-          "$PY" .github/scripts/affected_crates.py < changed.txt > pkgs.txt
+          # Strip CR: on the Windows runner Python's text-mode stdout writes
+          # CRLF, so a bare redirect leaves each crate name as `name\r`. That
+          # makes `cargo test -p "name\r"` fail ("invalid character in package
+          # name") and `grep -qx ato-cli` mis-match. Normalise to LF here so
+          # every consumer (the read loop, grep -c, grep -qx) sees clean names.
+          "$PY" .github/scripts/affected_crates.py < changed.txt | tr -d '\r' > pkgs.txt
           echo "----- affected crates -----"; cat pkgs.txt
           count="$(grep -c . pkgs.txt || true)"; count="${count:-0}"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
