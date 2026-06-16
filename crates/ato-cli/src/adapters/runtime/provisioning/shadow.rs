@@ -1153,8 +1153,33 @@ run_command = "python app.py"
     // `.ato/tmp/ato-auto-provision/run-<id>/`. The original source directory must
     // never be modified or have new files created directly in it.
 
+    #[serial_test::serial]
     #[test]
     fn prepare_shadow_workspace_does_not_modify_original_source_files() {
+        // `prepare_shadow_workspace` writes the shadow + audit under
+        // `ato_cache_dir()`, which resolves from `$ATO_HOME`. Other tests in this
+        // binary mutate `ATO_HOME` to their own tempdirs; without isolation this
+        // test can resolve the cache into *another* test's tempdir and then race
+        // its teardown (`write_audit` → ENOENT on a just-deleted parent). Pin
+        // `ATO_HOME` to a fresh owned tempdir under `env_lock` so the cache path
+        // is stable and exclusively ours.
+        let _env_guard = crate::tests::env_lock().lock().expect("env lock");
+        let isolated_ato_home = tempfile::tempdir().expect("ato_home tempdir");
+        let previous_ato_home = std::env::var_os("ATO_HOME");
+        unsafe {
+            std::env::set_var("ATO_HOME", isolated_ato_home.path());
+        }
+        struct AtoHomeRestore(Option<std::ffi::OsString>);
+        impl Drop for AtoHomeRestore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("ATO_HOME", value) },
+                    None => unsafe { std::env::remove_var("ATO_HOME") },
+                }
+            }
+        }
+        let _ato_home_restore = AtoHomeRestore(previous_ato_home);
+
         let dir = tempfile::tempdir().expect("tempdir");
         let original_pkg = r#"{"name":"demo","version":"0.1.0"}"#;
         let original_server = "console.log('hello');";
