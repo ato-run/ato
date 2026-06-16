@@ -416,6 +416,7 @@ dependencies = [
  "crossterm 0.29.0",
  "ctrlc",
  "dirs 5.0.1",
+ "dunce",
  "ed25519-dalek",
  "expectrl",
  "filetime",

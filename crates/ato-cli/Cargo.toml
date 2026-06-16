@@ -49,6 +49,7 @@ semver = "1.0"
 which = "6.0"
 ctrlc = "3.4"
 dirs = "5.0"
+dunce = "1.0"
 miette = { version = "7", features = ["fancy"] }
 hex = "0.4"
 sha2 = "0.10"

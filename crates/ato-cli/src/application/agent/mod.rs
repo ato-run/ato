@@ -481,7 +481,10 @@ impl AgentToolExecutor {
     }
 
     pub(crate) fn run_shadow_command(&self, command: &str, working_dir: &str) -> Result<String> {
-        let parsed = parse_safe_command(command)?;
+        // Validate + allowlist the command (package managers only, no shell
+        // control operators); the parsed form is discarded — the original
+        // string is handed to a shell below.
+        let _parsed = parse_safe_command(command)?;
         let current_dir = self.resolve_workspace_path(Path::new(working_dir))?;
         if !current_dir.exists() {
             anyhow::bail!(
@@ -490,9 +493,30 @@ impl AgentToolExecutor {
             );
         }
 
-        let mut cmd = Command::new(&parsed[0]);
-        cmd.args(parsed.iter().skip(1))
-            .current_dir(&current_dir)
+        // Spawn through a shell rather than executing the program directly, the
+        // same way the run-lifecycle runner does (`run_lifecycle_shell_command`).
+        // On Windows `npm`/`pnpm`/`bun` are `.cmd` shims that `std::process::
+        // Command::new("npm")` cannot resolve (it only appends `.exe`, never
+        // consults PATHEXT), so a direct spawn fails before the process even
+        // starts. Going through `cmd.exe` lets it resolve the shim via PATHEXT.
+        #[cfg(windows)]
+        let mut cmd = {
+            use std::os::windows::process::CommandExt as _;
+            let mut cmd = Command::new("cmd");
+            // `/D` disables AutoRun; `/S` + one outer-quoted payload via raw_arg
+            // keeps any inner quotes intact for cmd's own tokeniser.
+            cmd.raw_arg(format!("/D /S /C \"{command}\""));
+            cmd
+        };
+
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", command]);
+            cmd
+        };
+
+        cmd.current_dir(&current_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -1423,7 +1447,12 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
             .join(path)
     };
 
-    match absolute.canonicalize() {
+    // `dunce::canonicalize` instead of `std::fs::canonicalize`: on Windows the
+    // std version returns a `\\?\` verbatim extended-length path, which cmd.exe
+    // (and the `npm.cmd`/`bun.cmd` shims the shadow runner spawns through it)
+    // refuse as a working directory — see `run_shadow_command`. dunce strips the
+    // verbatim prefix for ordinary drive paths and is a no-op elsewhere.
+    match dunce::canonicalize(&absolute) {
         Ok(canonical) => Ok(canonical),
         Err(_) => Ok(absolute),
     }
@@ -1502,6 +1531,25 @@ mod tests {
             HashMap::new(),
         )
         .expect("execution descriptor")
+    }
+
+    #[test]
+    fn absolute_path_does_not_return_verbatim_prefix() {
+        // Regression: `std::fs::canonicalize` returns a `\\?\` verbatim path on
+        // Windows, which cmd.exe / the `npm.cmd` shim reject as a working
+        // directory in `run_shadow_command`. `absolute_path` must strip it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nested = tmp.path().join("workspace");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+
+        let resolved = absolute_path(&nested).expect("absolute path");
+
+        assert!(resolved.is_absolute(), "resolved path must be absolute");
+        assert!(
+            !resolved.to_string_lossy().starts_with(r"\\?\"),
+            "resolved path must not carry a \\\\?\\ verbatim prefix: {}",
+            resolved.display()
+        );
     }
 
     #[test]
