@@ -821,7 +821,11 @@ pub fn parse_lease_command(
 /// `capsule_slug` or any other client-supplied display value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunCapsuleCommand {
-    /// Immutable capsule identifier — the resolution key.
+    /// Capsule identifier — the resolution key. CONTRACT: this MUST be a
+    /// revision-resolved **immutable** identity (not a mutable app-level slug),
+    /// so resolution, audit, and the managed state namespace are reproducible.
+    /// If a deployment can only supply an app-level id it MUST also send
+    /// `revision` and treat the pair as the immutable identity.
     pub capsule_id: String,
     /// Owner/account id, confirmed server-side. Namespaces persistent state.
     /// Required: a runner must never key state off client-supplied input.

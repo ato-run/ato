@@ -232,8 +232,8 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) state_bindings: Vec<String>,
     /// When set, unbound persistent `[state.*]` (attach="explicit") entries are
     /// auto-bound under this root (server/runner context). See
-    /// `resolve_state_source_overrides_managed`. The caller encodes owner
-    /// isolation into the root; owner identity is never taken from here.
+    /// `resolve_state_source_overrides_managed`. The caller encodes owner AND
+    /// stable capsule identity into the root; neither is derived from here.
     pub(crate) managed_state_root: Option<PathBuf>,
     pub(crate) inject_bindings: Vec<String>,
     pub(crate) build_policy: crate::application::build_materialization::BuildPolicy,
@@ -4186,8 +4186,9 @@ pub(crate) fn resolve_state_source_overrides_with_store(
 /// Explicit `--state` bindings always win. `target_label` selects the effective
 /// target (so two targets of the same capsule get distinct directories);
 /// `None` falls back to the manifest `default_target`. The caller MUST encode
-/// owner/account isolation into `managed_state_root` — owner identity is never
-/// derived from capsule-controlled input here.
+/// the server-confirmed owner/account AND a stable, immutable capsule identity
+/// into `managed_state_root` (see [`managed_state_dir`]); neither is derived
+/// from capsule-controlled input here.
 pub(crate) fn resolve_state_source_overrides_managed(
     manifest: &CapsuleManifest,
     raw_bindings: &[String],
@@ -4240,33 +4241,31 @@ struct ManagedStateRoot<'a> {
     target: &'a str,
 }
 
-/// Stable, path-safe directory for a managed persistent-state binding:
-/// `<root>/<blake3(name \n version \n target)>/<sanitized state_key>`.
+/// Directory for a managed persistent-state binding: `<root>/<target>/<state_key>`,
+/// each appended segment made path-safe and collision-free by [`path_segment`].
 ///
-/// `name`, `version` and `target` are folded into one blake3 hash so a mutable
-/// slug, raw target string, case drift, or `..` can never shift or escape the
-/// directory. Owner/account isolation is the caller's responsibility and must be
-/// encoded into `root`; it is intentionally NOT derived from capsule input.
-/// `lease_id` (or any session-local id) MUST NOT appear in `root` — that would
-/// lose persistent data on every re-lease.
-fn managed_state_dir(
-    root: &Path,
-    manifest: &CapsuleManifest,
-    target: &str,
-    state_key: &str,
-) -> PathBuf {
-    let canonical = format!("{}\n{}\n{}", manifest.name, manifest.version, target);
-    let identity = blake3::hash(canonical.as_bytes()).to_hex();
-    root.join(identity.as_str())
-        .join(sanitize_state_segment(state_key))
+/// **Namespace contract — `root` MUST already be scoped** by the server-confirmed
+/// owner/account AND a stable, immutable capsule identity (e.g.
+/// `<base>/<owner_id>/<capsule_revision>`). This resolver only appends
+/// `target`/profile + `state_key`; it deliberately does NOT derive owner or
+/// capsule identity here, and in particular does NOT key off `name`/`version`,
+/// which are capsule-controlled and not globally unique (two different capsules
+/// could share them and would otherwise collide). `lease_id` or any
+/// session-local id MUST NOT appear in `root` — that would lose persistent data
+/// on every re-lease.
+fn managed_state_dir(root: &Path, target: &str, state_key: &str) -> PathBuf {
+    root.join(path_segment(target)).join(path_segment(state_key))
 }
 
-/// Map a manifest state key to a single path-safe segment. Everything outside
-/// `[A-Za-z0-9_-]` (including `.` and `/`) is replaced with `_`, so `.`, `..`,
-/// and embedded separators can never escape the parent directory. An empty
-/// result falls back to a hash of the raw key.
-fn sanitize_state_segment(state_key: &str) -> String {
-    let mapped: String = state_key
+/// A path-safe, collision-free single directory segment: `<sanitized>-<hash16>`.
+///
+/// Characters outside `[A-Za-z0-9_-]` (including `.` and `/`) are mapped to `_`
+/// so `.`, `..`, and embedded separators can never escape the parent directory.
+/// The blake3 suffix is taken over the RAW input, so two distinct inputs that
+/// would otherwise sanitize to the same string (e.g. `a/b` vs `a_b`, `.` vs `_`)
+/// still resolve to distinct segments.
+fn path_segment(raw: &str) -> String {
+    let sanitized: String = raw
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -4276,10 +4275,11 @@ fn sanitize_state_segment(state_key: &str) -> String {
             }
         })
         .collect();
-    if mapped.is_empty() {
-        format!("state-{}", &blake3::hash(state_key.as_bytes()).to_hex()[..16])
+    let hash = &blake3::hash(raw.as_bytes()).to_hex()[..16];
+    if sanitized.is_empty() {
+        format!("seg-{hash}")
     } else {
-        mapped
+        format!("{sanitized}-{hash}")
     }
 }
 
@@ -4330,7 +4330,7 @@ fn resolve_state_source_overrides_from_requested(
             if effective.contains_key(state_name.as_str()) {
                 continue;
             }
-            let dir = managed_state_dir(managed.root, manifest, managed.target, state_name);
+            let dir = managed_state_dir(managed.root, managed.target, state_name);
             std::fs::create_dir_all(&dir).map_err(|e| {
                 anyhow::anyhow!(
                     "failed to create managed state directory {}: {e}",
@@ -5405,50 +5405,48 @@ target = "/var/lib/app"
     }
 
     #[test]
-    fn sanitize_state_segment_is_path_safe() {
-        assert_eq!(super::sanitize_state_segment("data"), "data");
-        assert_eq!(super::sanitize_state_segment("my-state_1"), "my-state_1");
-        // `.` / `..` / separators can never escape: each maps to `_`.
-        assert_eq!(super::sanitize_state_segment("."), "_");
-        assert_eq!(super::sanitize_state_segment(".."), "__");
-        assert_eq!(super::sanitize_state_segment("a/b"), "a_b");
-        assert_eq!(super::sanitize_state_segment("a/../b"), "a____b");
-        // Empty falls back to a stable hash-derived segment.
-        let empty = super::sanitize_state_segment("");
-        assert!(empty.starts_with("state-"));
-        assert_eq!(super::sanitize_state_segment(""), empty);
+    fn path_segment_is_path_safe_and_collision_free() {
+        // Stable for a given input.
+        assert_eq!(super::path_segment("data"), super::path_segment("data"));
+        // Path-safe: separators / dots are neutralized and cannot escape.
+        for raw in ["a/b", "..", ".", "a/../b", "x\\y", "../../etc"] {
+            let seg = super::path_segment(raw);
+            assert!(
+                !seg.contains('/') && !seg.contains('\\') && !seg.contains(".."),
+                "segment must be path-safe: {raw:?} -> {seg}"
+            );
+        }
+        // Collision-free: inputs that sanitize to the same string still differ.
+        assert_ne!(super::path_segment("a/b"), super::path_segment("a_b"));
+        assert_ne!(super::path_segment("."), super::path_segment("_"));
+        // Readable prefix preserved; empty still yields a valid segment.
+        assert!(super::path_segment("data").starts_with("data-"));
+        assert!(!super::path_segment("").is_empty());
     }
 
     #[test]
-    fn managed_state_dir_is_stable_and_partitions_by_identity_and_target() {
-        let root = Path::new("/managed");
-        let m = managed_state_manifest("demo-app", "0.1.0");
+    fn managed_state_dir_appends_only_target_and_state_key() {
+        // Per the namespace contract, `root` already carries owner + capsule
+        // identity; the resolver only appends target + state_key.
+        let root = Path::new("/managed/owner-1/cap-rev-abc");
 
-        let a = super::managed_state_dir(root, &m, "app", "data");
+        let a = super::managed_state_dir(root, "app", "data");
         assert_eq!(
             a,
-            super::managed_state_dir(root, &m, "app", "data"),
+            super::managed_state_dir(root, "app", "data"),
             "same inputs -> same dir (reused across re-leases)"
         );
         assert!(a.starts_with(root));
-        assert!(a.ends_with("data"));
+        assert!(a.ends_with(super::path_segment("data")));
 
-        // Distinct target / version / name each yield a distinct directory.
-        assert_ne!(a, super::managed_state_dir(root, &m, "worker", "data"));
-        assert_ne!(
-            a,
-            super::managed_state_dir(root, &managed_state_manifest("demo-app", "0.2.0"), "app", "data")
-        );
-        assert_ne!(
-            a,
-            super::managed_state_dir(root, &managed_state_manifest("other-app", "0.1.0"), "app", "data")
-        );
+        // Distinct target / state_key each yield a distinct directory.
+        assert_ne!(a, super::managed_state_dir(root, "worker", "data"));
+        assert_ne!(a, super::managed_state_dir(root, "app", "cache"));
 
-        // The mutable slug never leaks into the path (identity is hashed).
-        assert!(
-            !a.to_string_lossy().contains("demo-app"),
-            "raw slug must not appear in the managed path: {}",
-            a.display()
+        // Collision-free even when sanitization would collapse inputs.
+        assert_ne!(
+            super::managed_state_dir(root, "app", "a/b"),
+            super::managed_state_dir(root, "app", "a_b"),
         );
     }
 
@@ -5471,7 +5469,7 @@ target = "/var/lib/app"
         assert!(overrides.contains_key("data"), "data auto-bound");
 
         // The directory was created at the derived, stable location under root.
-        let expected = super::managed_state_dir(root.as_path(), &m, "app", "data");
+        let expected = super::managed_state_dir(root.as_path(), "app", "data");
         assert!(expected.exists(), "managed state dir created at derived path");
         assert!(expected.starts_with(&root));
 
@@ -5508,7 +5506,7 @@ target = "/var/lib/app"
         assert!(overrides.contains_key("data"));
 
         // Explicit `--state` wins: the managed dir is never created.
-        let managed_dir = super::managed_state_dir(root.as_path(), &m, "app", "data");
+        let managed_dir = super::managed_state_dir(root.as_path(), "app", "data");
         assert!(
             !managed_dir.exists(),
             "managed dir must not be created when --state binds the state"
