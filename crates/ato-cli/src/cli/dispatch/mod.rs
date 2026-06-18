@@ -763,6 +763,19 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     public_base_url,
                     proxy_listen,
                 )),
+                crate::cli::RunnerCommands::Doctor { json } => {
+                    crate::application::gpu_provision::run_doctor(json)
+                }
+                crate::cli::RunnerCommands::Provision {
+                    profile,
+                    force,
+                    resume,
+                    enroll,
+                    json,
+                    dry_run,
+                } => rt.block_on(crate::application::gpu_provision::run_provision(
+                    &profile, force, resume, enroll, json, dry_run,
+                )),
             }
         }
 
