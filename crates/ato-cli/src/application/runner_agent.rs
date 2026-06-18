@@ -16,6 +16,7 @@
 //! file (0600 on Unix) and is never printed or logged afterwards.
 
 use anyhow::{Context, Result, bail};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -27,6 +28,17 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 
 const RUNNER_CREDENTIALS_RELATIVE: &str = "runner/credentials.json";
+/// Stable device identity file, kept SEPARATE from credentials.json so a
+/// re-login (which rewrites credentials.json with a fresh token) does not
+/// lose the device id. The API upserts on (user_id, device_id): re-login on
+/// the same physical device updates its existing row instead of duplicating
+/// it. Lost file → new id minted → semantically a new device enrollment
+/// (same as today's always-INSERT behavior), so this never corrupts state.
+const RUNNER_DEVICE_ID_RELATIVE: &str = "runner/device_id";
+/// A device id is a UUIDv4 (36 chars: 8-4-4-4-12 with hyphens). The API
+/// accepts 8–64 chars, but the CLI always emits this canonical shape so
+/// logs/inspections are uniform.
+const DEVICE_ID_LEN: usize = 36;
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 /// Floor so a misbehaving server value cannot turn the loop into a busy-spin.
 const MIN_HEARTBEAT_INTERVAL_SECS: u64 = 5;
@@ -109,6 +121,81 @@ pub fn load_credentials(path: &std::path::Path) -> Result<RunnerCredentials> {
             path.display()
         )
     })
+}
+
+// ─────────────────────────────────────────────
+// Stable device identity
+// ─────────────────────────────────────────────
+
+pub fn device_id_path() -> PathBuf {
+    ato_path_or_workspace_tmp(RUNNER_DEVICE_ID_RELATIVE)
+}
+
+/// Format 16 random bytes as a canonical UUIDv4 string
+/// (xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx, y ∈ {8,9,a,b}). Uses `rand`'s
+/// `RngCore::fill_bytes` so no new crate is needed; the variant/version
+/// bits are masked in to keep the shape uniform and recognizable.
+fn format_uuidv4(bytes: [u8; 16]) -> String {
+    let mut b = bytes;
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 1 (y ∈ 8..=b)
+    let h = |x: u8| format!("{:02x}", x);
+    format!(
+        "{}-{}-{}-{}-{}",
+        (0..4).map(|i| h(b[i])).collect::<String>(),
+        (4..6).map(|i| h(b[i])).collect::<String>(),
+        (6..8).map(|i| h(b[i])).collect::<String>(),
+        (8..10).map(|i| h(b[i])).collect::<String>(),
+        (10..16).map(|i| h(b[i])).collect::<String>(),
+    )
+}
+
+/// Read the persisted device id, or mint + persist a fresh UUIDv4 if none
+/// exists. The id is opaque to the server (the API just upserts on it), so
+/// an unreadable/truncated file is recovered by re-minting rather than by
+/// bailing — the worst case is the device appears as a new enrollment,
+/// which is exactly today's behavior. The file is created 0600 on Unix so a
+/// multi-user host cannot read or race on another user's device id.
+pub fn load_or_mint_device_id() -> Result<String> {
+    load_or_mint_device_id_at(&device_id_path())
+}
+
+/// Path-injected core of [`load_or_mint_device_id`], so the round-trip is
+/// testable with a tempdir (the real resolver goes through the ato home,
+/// which is not tempdir-based).
+pub fn load_or_mint_device_id_at(path: &std::path::Path) -> Result<String> {
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        let trimmed = raw.trim();
+        if is_valid_device_id(trimmed) {
+            return Ok(trimmed.to_string());
+        }
+        // Fall through and re-mint: a truncated/corrupt file must not block
+        // login, and a fresh id is a safe fallback (same as a lost file).
+    }
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let id = format_uuidv4(bytes);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(path, &id).with_context(|| format!("failed to write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(id)
+}
+
+/// A device id is a UUIDv4-shaped lowercase hex string. Lenient on purpose:
+/// any non-empty 8–64 char token the server accepts would work, but the CLI
+/// only ever writes this canonical shape, so we recognize it and reject
+/// obvious garbage (whitespace, wrong length, non-hex).
+fn is_valid_device_id(s: &str) -> bool {
+    s.len() == DEVICE_ID_LEN
+        && s.chars().filter(|c| *c == '-').count() == 4
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 // ─────────────────────────────────────────────
@@ -371,6 +458,12 @@ pub async fn run_login(
             .await?;
     let session_token = bridge.access_token;
 
+    // Stable device identity lets the API upsert this host's existing runner
+    // row on re-login (stop → reconnect) instead of duplicating it. Minted
+    // once at ~/.ato/runner/device_id and reused for every subsequent login
+    // on this host; losing the file just means a fresh enrollment (safe).
+    let device_id = load_or_mint_device_id()?;
+
     let capabilities = collect_capabilities();
     let mut register_body = serde_json::json!({
         "display_name": display_name,
@@ -379,6 +472,7 @@ pub async fn run_login(
         "arch": std::env::consts::ARCH,
         "capabilities": capabilities,
         "agent_version": agent_version(),
+        "device_id": device_id,
     });
     if let Some(url) = public_base_url.as_deref() {
         register_body["public_base_url"] = serde_json::Value::String(url.to_string());
@@ -3080,6 +3174,75 @@ mod tests {
             std::env::consts::ARCH
         )));
         assert!(caps.contains(&"source-sandbox".to_string()));
+    }
+
+    #[test]
+    fn format_uuidv4_is_canonical_lowercase_with_version_and_variant() {
+        let id = format_uuidv4([0; 16]);
+        // Canonical 36-char shape with hyphens at the right positions.
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.chars().filter(|c| *c == '-').count(), 4);
+        // Version 4 nibble at byte 6 (after the first hyphen group).
+        assert_eq!(&id[14..15], "4");
+        // Variant nibble (y ∈ 8..=b) at byte 8.
+        let y = id.chars().nth(19).expect("variant nibble");
+        assert!(matches!(y, '8' | '9' | 'a' | 'b'), "variant nibble: {y}");
+        // All hex (lowercase) or hyphen.
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        // Lowercase even with all-0xff input.
+        let upper = format_uuidv4([0xff; 16]);
+        assert!(upper.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        assert!(!upper.chars().any(|c| c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn is_valid_device_id_accepts_canonical_and_rejects_garbage() {
+        assert!(is_valid_device_id("01111111-2222-4333-8444-555555555555"));
+        assert!(!is_valid_device_id(""));
+        assert!(!is_valid_device_id("short"));
+        assert!(!is_valid_device_id(
+            "01111111-2222-4333-8444-555555555555-extra"
+        ));
+        // The validator is intentionally shape-only (version nibble is the
+        // minting helper's job, not the validator's), so a version-3-shaped
+        // UUID is still accepted — that's by design.
+        assert!(is_valid_device_id("01111111-2222-3333-8444-555555555555"));
+        assert!(!is_valid_device_id("0111111g-2222-4333-8444-555555555555")); // non-hex
+        assert!(!is_valid_device_id("01111111-2222-4333-8444-55555555555 ")); // trailing space (trim is caller's job)
+    }
+
+    #[test]
+    fn load_or_mint_device_id_mints_then_reuses_across_calls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("runner").join("device_id");
+
+        // First call: no file → mint + persist.
+        let first = load_or_mint_device_id_at(&path).expect("mint");
+        assert!(is_valid_device_id(&first));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("persisted").trim(),
+            first
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "device_id file must be 0600");
+        }
+
+        // Second call: same file → reuse the SAME id (this is the fix's
+        // guarantee: re-login on this host upserts the same runner row).
+        let second = load_or_mint_device_id_at(&path).expect("reuse");
+        assert_eq!(first, second);
+
+        // Corrupt the file: a fresh id is minted (safe fallback — login must
+        // never block on a bad device_id, and the worst case is a new
+        // enrollment, identical to today's always-INSERT behavior).
+        std::fs::write(&path, "garbage").expect("corrupt");
+        let third = load_or_mint_device_id_at(&path).expect("re-mint");
+        assert!(is_valid_device_id(&third));
+        assert_ne!(third, first);
     }
 
     #[test]
