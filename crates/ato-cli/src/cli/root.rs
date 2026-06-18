@@ -881,10 +881,7 @@ pub(crate) enum Commands {
         command: crate::cli::IdentitySessionCommands,
     },
 
-    #[command(
-        hide = true,
-        about = "Connected Runner agent: enroll this host and keep it online"
-    )]
+    #[command(about = "Connected Runner agent: enroll, serve, provision GPU host, or run doctor")]
     Runner {
         #[command(subcommand)]
         command: crate::cli::RunnerCommands,
