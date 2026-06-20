@@ -21,7 +21,7 @@
 //! executor or the launch hot path.
 
 use anyhow::{Result, bail};
-use capsule_core::installed_state::{
+use capsule::installed_state::{
     InstalledStateDb, LaunchConditionInput, RelaunchAdmission, RelaunchAdmissionReason,
     RelaunchResolutionContext, apply_capsule_launch_inputs_to_claims, evaluate_relaunch_admission,
     resolve_relaunch_conditions,
@@ -158,7 +158,7 @@ fn preflight_with_persist(
     install_revision_id: Option<&str>,
     resolver: &RelaunchResolutionContext,
     inputs: &[LaunchConditionInput],
-    persist: impl FnOnce(&[capsule_core::installed_state::LaunchConditionClaim]) -> Result<()>,
+    persist: impl FnOnce(&[capsule::installed_state::LaunchConditionClaim]) -> Result<()>,
 ) -> Result<Vec<RelaunchAdmissionReason>> {
     let mut input =
         db.load_relaunch_admission_input(install_profile_key, install_revision_id, None)?;
@@ -227,7 +227,7 @@ fn relaunch_blocked_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::installed_state::{
+    use capsule::installed_state::{
         InstalledStateDb, LaunchConditionClaim, LaunchConditionKind, LaunchConditionSource,
         LaunchConditionStatus, app_service_endpoint, launch_condition_from_port_declaration,
     };
@@ -342,7 +342,7 @@ mod tests {
 
     // ── Resolver-driven preflight (#508) ─────────────────────────────────────
 
-    use capsule_core::installed_state::RelaunchResolutionContext;
+    use capsule::installed_state::RelaunchResolutionContext;
 
     fn resolver(env: bool, grant: bool, binding: bool) -> RelaunchResolutionContext {
         RelaunchResolutionContext {
@@ -698,7 +698,7 @@ mod tests {
 
     // ── capsule:// query input overlay → preflight (#508) ────────────────────
 
-    use capsule_core::installed_state::parse_capsule_launch_input;
+    use capsule::installed_state::parse_capsule_launch_input;
 
     fn parse_inputs(url: &str) -> Vec<LaunchConditionInput> {
         parse_capsule_launch_input(url)

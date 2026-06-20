@@ -7,13 +7,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::blob::BlobManifest;
-use capsule_core::common::paths::{
+use capsule::blob::BlobManifest;
+use capsule::common::paths::{
     AtoRunLayout, ato_run_layout, ato_store_attestations_dir, ato_store_blobs_dir,
     ato_store_refs_dir, ato_trust_policies_dir, ato_trust_roots_dir,
 };
-use capsule_core::common::store::{BlobAddress, ato_store_dep_ref_path};
-use capsule_core::launch_spec::derive_launch_spec;
+use capsule::common::store::{BlobAddress, ato_store_dep_ref_path};
+use capsule::launch_spec::derive_launch_spec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -269,7 +269,7 @@ pub(crate) struct RunDependencyMaterialization {
 }
 
 pub(crate) fn materialize_for_run(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<Option<RunDependencyMaterialization>> {
     let launch_spec = derive_launch_spec(plan)?;
@@ -311,7 +311,7 @@ fn materialize_node_dependencies(
         }));
     }
 
-    let materialization_dir = capsule_core::common::paths::ato_cache_dir()
+    let materialization_dir = capsule::common::paths::ato_cache_dir()
         .join("dependency-materializations")
         .join("node")
         .join(hash_path_component(&derivation_hash));
@@ -540,7 +540,7 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
         let mut messages = Vec::new();
         if !projection
             .execution_deps_path
-            .starts_with(capsule_core::common::paths::ato_runs_dir())
+            .starts_with(capsule::common::paths::ato_runs_dir())
         {
             messages.push(format!(
                 "dependency projection is outside ~/.ato/runs: {}",

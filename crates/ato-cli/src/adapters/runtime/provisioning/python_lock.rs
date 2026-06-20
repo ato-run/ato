@@ -1,5 +1,5 @@
-use capsule_core::AtoError;
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule::AtoError;
+use capsule::execution_plan::error::AtoExecutionError;
 
 pub(crate) fn python_requirements_lock_hint() -> &'static str {
     "Run with `--auto-fix:all` to generate an Ato-compatible pip-compile uv.lock in the GitHub checkout, or run `uv pip compile requirements.txt -o uv.lock` and commit the generated lockfile upstream."

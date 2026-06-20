@@ -15,9 +15,7 @@
 //! source-tree blobs by hash, which is not yet a stable API.
 
 use anyhow::{Result, bail};
-use capsule_core::execution_identity::{
-    ExecutionReceiptDocument, ExecutionReceiptV2, TrackingStatus,
-};
+use capsule::execution_identity::{ExecutionReceiptDocument, ExecutionReceiptV2, TrackingStatus};
 use serde::Serialize;
 
 use crate::application::execution_receipts;
@@ -145,7 +143,7 @@ fn analyze_v2_receipt(receipt: &ExecutionReceiptV2) -> ReconstructDiagnosticView
     // original host launched with.
     if !matches!(
         receipt.environment.mode,
-        capsule_core::execution_identity::EnvironmentMode::Closed
+        capsule::execution_identity::EnvironmentMode::Closed
     ) {
         warnings.push(format!(
             "environment.mode is {:?}; foreign-host launch will not match the original env closure",

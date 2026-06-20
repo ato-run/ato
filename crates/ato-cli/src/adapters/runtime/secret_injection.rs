@@ -28,7 +28,7 @@
 //! [`RuntimeLaunchContext`]: crate::adapters::runtime::executors::launch_context::RuntimeLaunchContext
 
 use anyhow::{Context, Result, bail};
-use capsule_core::installed_state::{
+use capsule::installed_state::{
     InstalledStateDb, LaunchConditionClaim, LaunchConditionInput, LaunchConditionInputKind,
     LaunchConditionInputValue, LaunchConditionKind,
 };
@@ -307,7 +307,7 @@ fn grant_matches_condition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::installed_state::{LaunchConditionSource, LaunchConditionStatus};
+    use capsule::installed_state::{LaunchConditionSource, LaunchConditionStatus};
 
     const SECRET: &str = "sk-super-secret-value-1234567890";
 

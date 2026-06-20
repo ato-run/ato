@@ -14,10 +14,10 @@ use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
-use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
-use capsule_core::router::ManifestData;
-use capsule_core::runtime::oci::{OciContainerRequest, OciLogChunk, OciPortSpec};
+use capsule::CapsuleReporter;
+use capsule::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
+use capsule::router::ManifestData;
+use capsule::runtime::oci::{OciContainerRequest, OciLogChunk, OciPortSpec};
 
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::oci_provider::{
@@ -100,29 +100,27 @@ fn build_oci_container_env(
 /// (`observe_filesystem_v2`) hashes by source path. Routing them through
 /// `injected_mounts` would leak the raw host path into the receipt's filesystem
 /// identity; they are merged into the live request only here, never observed.
-fn build_oci_mounts(
-    launch_ctx: &RuntimeLaunchContext,
-) -> Vec<capsule_core::runtime::oci::OciMountSpec> {
+fn build_oci_mounts(launch_ctx: &RuntimeLaunchContext) -> Vec<capsule::runtime::oci::OciMountSpec> {
     launch_ctx
         .injected_mounts()
         .iter()
-        .map(|m| capsule_core::runtime::oci::OciMountSpec {
+        .map(|m| capsule::runtime::oci::OciMountSpec {
             source: m.source.to_string_lossy().to_string(),
             target: m.target.clone(),
             readonly: m.readonly,
             ownership: None,
-            source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
+            source_kind: capsule::runtime::oci::OciMountSourceKind::default(),
         })
         .chain(
             launch_ctx
                 .state_mounts()
                 .iter()
-                .map(|m| capsule_core::runtime::oci::OciMountSpec {
+                .map(|m| capsule::runtime::oci::OciMountSpec {
                     source: m.source.to_string_lossy().to_string(),
                     target: m.target.clone(),
                     readonly: m.readonly,
                     ownership: None,
-                    source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
+                    source_kind: capsule::runtime::oci::OciMountSourceKind::default(),
                 }),
         )
         .collect()
@@ -365,9 +363,9 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
 /// the same compiled plan (the receipt records exactly what the gate evaluated).
 pub(crate) fn compile_oci_execution_plan(
     plan: &ManifestData,
-) -> Result<capsule_core::execution_plan::model::ExecutionPlan> {
-    use capsule_core::contract::lock_runtime;
-    use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
+) -> Result<capsule::execution_plan::model::ExecutionPlan> {
+    use capsule::contract::lock_runtime;
+    use capsule::execution_plan::derive::{self, PlatformSnapshot};
 
     // Pure-OCI service capsules (`[targets.app] runtime="oci"`) have no source
     // `contract.process`, so the lock runtime model resolver — gated by
@@ -470,7 +468,7 @@ fn enforce_strict_oci_launch(
     use crate::application::provider_projection::strict_oci::{
         OciProviderEnforcement, OciStrictFacts, enforce_strict_oci,
     };
-    use capsule_core::realization::LaunchProfile;
+    use capsule::realization::LaunchProfile;
 
     let profile = if strict_realization {
         LaunchProfile::Strict
@@ -501,10 +499,10 @@ fn enforce_strict_oci_launch(
 /// builder's single declared projection (single-target).
 pub(crate) async fn persist_oci_launch_receipt(
     plan: &ManifestData,
-    execution_plan: &capsule_core::execution_plan::model::ExecutionPlan,
+    execution_plan: &capsule::execution_plan::model::ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     provider_projections_override: Option<
-        Vec<capsule_core::execution_identity::OciProviderReceiptEvidence>,
+        Vec<capsule::execution_identity::OciProviderReceiptEvidence>,
     >,
     // #501: when the strict-realization gate blocked the launch before any
     // pull/create, the gate error is threaded here so the persisted receipt is
@@ -604,8 +602,8 @@ fn oci_labels(session_id: &str, target_label: &str) -> std::collections::HashMap
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
-    use capsule_core::types::{OciImageResolution, OciPlatform};
+    use capsule::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
+    use capsule::types::{OciImageResolution, OciPlatform};
 
     fn make_resolved_image(declared_ref: &str) -> OciImageResolution {
         OciImageResolution {

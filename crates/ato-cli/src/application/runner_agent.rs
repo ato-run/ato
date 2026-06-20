@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule::common::paths::ato_path_or_workspace_tmp;
 
 const RUNNER_CREDENTIALS_RELATIVE: &str = "runner/credentials.json";
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -3208,7 +3208,7 @@ async fn handle_claimed_lease(
             // emitted ref, the recomputed ref (from the child's 5-tuple), and the
             // owner's approved ref ALL agree. A recompute error is unrecoverable
             // (cannot verify) → fail closed.
-            let recomputed = match capsule_core::execution_plan::canonical::consent_ref_from_parts(
+            let recomputed = match capsule::execution_plan::canonical::consent_ref_from_parts(
                 &request.identity.scoped_id,
                 &request.identity.version,
                 &request.identity.target_label,
@@ -4008,7 +4008,7 @@ mod tests {
     #[test]
     fn consent_required_line_uses_shared_wire_type_end_to_end() {
         let payload = ato_protocol::consent::ConsentRequiredLine {
-            schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
+            schema: capsule::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:bind".to_string(),
             identity: ato_protocol::consent::ConsentIdentity {
                 scoped_id: "community/hello-capsule".to_string(),
@@ -4831,7 +4831,7 @@ mod tests {
 
     fn sample_consent_request() -> ConsentRequest {
         ConsentRequest {
-            schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
+            schema: capsule::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:ref".to_string(),
             identity: ato_protocol::consent::ConsentIdentity {
                 scoped_id: "community/hello-capsule".to_string(),

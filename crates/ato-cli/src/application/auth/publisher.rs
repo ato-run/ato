@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 use ed25519_dalek::Signer;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -118,10 +118,10 @@ fn publisher_signing_key_path() -> Result<PathBuf> {
     ato_path("keys/publisher-signing-key.json").context("Cannot determine ato home directory")
 }
 
-fn ensure_publisher_signing_key() -> Result<capsule_core::types::signing::StoredKey> {
+fn ensure_publisher_signing_key() -> Result<capsule::types::signing::StoredKey> {
     let key_path = publisher_signing_key_path()?;
     if key_path.exists() {
-        return capsule_core::types::signing::StoredKey::read(&key_path)
+        return capsule::types::signing::StoredKey::read(&key_path)
             .with_context(|| format!("Failed to read {}", key_path.display()));
     }
 
@@ -129,7 +129,7 @@ fn ensure_publisher_signing_key() -> Result<capsule_core::types::signing::Stored
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
-    let generated = capsule_core::types::signing::StoredKey::generate();
+    let generated = capsule::types::signing::StoredKey::generate();
     generated
         .write(&key_path)
         .with_context(|| format!("Failed to write {}", key_path.display()))?;
@@ -435,7 +435,7 @@ async fn update_publisher_did(
     client: &reqwest::Client,
     api_base: &str,
     session_token: &str,
-    signing_key: &capsule_core::types::signing::StoredKey,
+    signing_key: &capsule::types::signing::StoredKey,
 ) -> Result<()> {
     let did = signing_key.did()?;
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);

@@ -119,12 +119,12 @@ AI showcase spike (separate branch):
 
 ```
 cargo fmt --all                             ✅
-cargo check -p capsule-core -p ato-cli     ✅
+cargo check -p capsule -p ato-cli     ✅
 cargo test -p ato-cli oci_multi_service    ✅
 cargo test -p ato-cli oci_session          ✅
 cargo test -p ato-cli oci_compose          ✅
 cargo test -p ato-cli oci_provider         ✅
-cargo test -p capsule-core docker_run_script ✅
-cargo test -p capsule-core oci_compose_lock  ✅
+cargo test -p capsule docker_run_script ✅
+cargo test -p capsule oci_compose_lock  ✅
 git diff --check                           ✅
 ```

@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 
 use crate::cli::ImportArgs;
 use crate::runtime::process::{ImportPreviewSession, ImportPreviewWorkloadPid, ProcessManager};
-use capsule_core::foundation::types::command_spec::contains_shell_operators;
+use capsule::foundation::types::command_spec::contains_shell_operators;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = "ato-cli-source-import";
@@ -578,13 +578,12 @@ fn import_workspace_root(input: &NormalizedGitHubInput) -> Result<PathBuf> {
         .duration_since(UNIX_EPOCH)
         .context("system time before UNIX_EPOCH")?
         .as_nanos();
-    let root =
-        capsule_core::common::paths::ato_path_or_workspace_tmp(IMPORT_ROOT_DIR).join(format!(
-            "{}-{}-{}-{now}",
-            input.owner,
-            input.repo,
-            std::process::id()
-        ));
+    let root = capsule::common::paths::ato_path_or_workspace_tmp(IMPORT_ROOT_DIR).join(format!(
+        "{}-{}-{}-{now}",
+        input.owner,
+        input.repo,
+        std::process::id()
+    ));
     fs::create_dir_all(&root)?;
     Ok(root)
 }
@@ -1398,7 +1397,7 @@ fn new_import_run_id(prefix: &str, source: &ImportSource) -> Result<String> {
 
 fn import_run_log_path(run_id: &str) -> Result<PathBuf> {
     Ok(
-        capsule_core::common::paths::ato_path_or_workspace_tmp(IMPORT_LOG_DIR)
+        capsule::common::paths::ato_path_or_workspace_tmp(IMPORT_LOG_DIR)
             .join(format!("{run_id}.log")),
     )
 }

@@ -13,10 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 use crate::ProviderToolchain;
-use capsule_core::ato_lock::AtoLock;
-use capsule_core::common::paths::ato_runs_dir;
-use capsule_core::input_resolver::ATO_LOCK_FILE_NAME;
-use capsule_core::python_runtime::{normalized_python_runtime_version, python_selector_env};
+use capsule::ato_lock::AtoLock;
+use capsule::common::paths::ato_runs_dir;
+use capsule::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule::python_runtime::{normalized_python_runtime_version, python_selector_env};
 
 mod synthetic;
 
@@ -1470,7 +1470,7 @@ pub(crate) fn persist_provider_authoritative_lock(
     lock: &AtoLock,
 ) -> Result<PathBuf> {
     let lock_path = workspace_root.join(ATO_LOCK_FILE_NAME);
-    capsule_core::ato_lock::write_pretty_to_path(lock, &lock_path)
+    capsule::ato_lock::write_pretty_to_path(lock, &lock_path)
         .with_context(|| format!("failed to write {}", lock_path.display()))?;
     record_provider_authoritative_lock_path(resolution_metadata_path, &lock_path)?;
     Ok(lock_path)
@@ -1574,7 +1574,7 @@ mod tests {
         resolve_effective_provider_toolchain, resolve_npm_bin_metadata,
     };
     use crate::ProviderToolchain;
-    use capsule_core::ato_lock;
+    use capsule::ato_lock;
     use serde_json::{Value, json};
     use serial_test::serial;
     use std::fs;

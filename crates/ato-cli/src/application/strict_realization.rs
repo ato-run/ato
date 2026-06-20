@@ -1,7 +1,7 @@
 //! Strict fail-closed realization gate wiring for `ato run` (#500).
 //!
 //! This is the thin launch-path adapter around the pure
-//! [`capsule_core::realization::strict`] gate. It runs at the prelaunch boundary
+//! [`capsule::realization::strict`] gate. It runs at the prelaunch boundary
 //! — after the [`LaunchGraphBundle`] is built and before any guest process,
 //! runtime process, or container is created — and only when the operator has
 //! explicitly opted into the strict profile (`--strict-realization`).
@@ -27,10 +27,10 @@
 //! a required input whose identity cannot yet be grounded is blocked rather than
 //! waved through. The default profile is unaffected and never consults the gate.
 
-use capsule_core::engine::execution_graph::LaunchGraphBundle;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::realization::bundle::RealizationEnvironment;
-use capsule_core::realization::{
+use capsule::engine::execution_graph::LaunchGraphBundle;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::realization::bundle::RealizationEnvironment;
+use capsule::realization::{
     LaunchProfile, MaterializationVerification, RealizationContract, StrictRealizationGateError,
     evaluate_strict_gate_with_materialization, materialization_request_from_launch_bundle,
     realization_from_launch_bundle, verify_materialization,
@@ -106,7 +106,7 @@ pub(crate) fn evaluate_contract(
 
 /// #500 — strict mode could not obtain a resolved launch graph to verify. This
 /// is an integration-level fail-closed block (deliberately **not** one of the
-/// per-node [`capsule_core::realization::StrictGateReasonCode`] values): strict
+/// per-node [`capsule::realization::StrictGateReasonCode`] values): strict
 /// mode must refuse to launch what it cannot even inspect, rather than silently
 /// proceeding when the graph is absent.
 pub(crate) fn missing_launch_graph_error() -> AtoExecutionError {
@@ -159,7 +159,7 @@ fn reason_code_str(error: &StrictRealizationGateError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::realization::{
+    use capsule::realization::{
         RealizationContract, RealizationEvidence, RealizationNodeKind, RealizationNodeStatus,
         RealizationResult, RealizationStatus, UnrealizableReason,
     };
@@ -308,10 +308,10 @@ mod tests {
             RealizationResult::Realized,
         );
         let hash_b = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
-        let materializations = vec![capsule_core::realization::MaterializationVerification {
+        let materializations = vec![capsule::realization::MaterializationVerification {
             node_id: "dep".to_string(),
             node_kind: RealizationNodeKind::DependencyOutput,
-            result: capsule_core::realization::MaterializationVerificationResult::Mismatch {
+            result: capsule::realization::MaterializationVerificationResult::Mismatch {
                 expected: HASH_A.to_string(),
                 actual: hash_b.to_string(),
             },
@@ -343,10 +343,10 @@ mod tests {
             },
             RealizationResult::Realized,
         );
-        let materializations = vec![capsule_core::realization::MaterializationVerification {
+        let materializations = vec![capsule::realization::MaterializationVerification {
             node_id: "dep".to_string(),
             node_kind: RealizationNodeKind::DependencyOutput,
-            result: capsule_core::realization::MaterializationVerificationResult::Verified,
+            result: capsule::realization::MaterializationVerificationResult::Verified,
             evidence: vec![],
         }];
         assert!(

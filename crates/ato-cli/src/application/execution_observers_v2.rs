@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::{ato_runs_dir, ato_store_dir, nacelle_home_dir_or_workspace_tmp};
-use capsule_core::execution_identity::{
+use capsule::common::paths::{ato_runs_dir, ato_store_dir, nacelle_home_dir_or_workspace_tmp};
+use capsule::execution_identity::{
     CanonicalPath, CaseSensitivity, DependencyIdentityV2, EnvOrigin, EnvironmentEntry,
     EnvironmentIdentityV2, EnvironmentMode, FdLayoutIdentity, FilesystemIdentityV2,
     FilesystemSemantics, LaunchArg, LaunchEntryPoint, LaunchIdentityV2, LocalExecutionLocator,
@@ -13,11 +13,11 @@ use capsule_core::execution_identity::{
     ValueNormalizationStatus, WorkspacePathCanonicalizer, WritableDirIdentity,
     WritableDirLifecycle,
 };
-use capsule_core::execution_plan::model::ExecutionPlan;
-use capsule_core::launch_spec::LaunchSpec;
-use capsule_core::lockfile::CapsuleLock;
-use capsule_core::router::ManifestData;
-use capsule_core::types::StateSharing;
+use capsule::execution_plan::model::ExecutionPlan;
+use capsule::launch_spec::LaunchSpec;
+use capsule::lockfile::CapsuleLock;
+use capsule::router::ManifestData;
+use capsule::types::StateSharing;
 use serde::Serialize;
 
 use crate::application::build_materialization::BuildObservation;
@@ -172,7 +172,7 @@ pub(crate) fn observe_dependencies_v2(
             .first()
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
-        capsule_core::execution_identity::DependencyDerivationInputsV2 {
+        capsule::execution_identity::DependencyDerivationInputsV2 {
             package_manager,
             package_manager_version: Tracked::unknown(
                 "package manager version observer not implemented",
@@ -203,8 +203,8 @@ pub(crate) fn observe_dependencies_v2(
         dep_v1.derivation_hash
     } else {
         match dep_v1.derivation_hash.status {
-            capsule_core::execution_identity::TrackingStatus::Known
-            | capsule_core::execution_identity::TrackingStatus::NotApplicable => {
+            capsule::execution_identity::TrackingStatus::Known
+            | capsule::execution_identity::TrackingStatus::NotApplicable => {
                 Tracked::known(hash_dependency_derivation_inputs(
                     dep_v1.derivation_hash.value,
                     direct_capsule_dependencies,
@@ -248,7 +248,7 @@ struct DirectCapsuleDependencyHashInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     contract: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    parameters: BTreeMap<String, capsule_core::types::ParamValue>,
+    parameters: BTreeMap<String, capsule::types::ParamValue>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     identity_exports: BTreeMap<String, String>,
 }
@@ -261,7 +261,7 @@ struct DependencyDerivationHashInput {
 }
 
 fn dependency_hash_input_from_locked_dependency(
-    dependency: capsule_core::lockfile::LockedCapsuleDependency,
+    dependency: capsule::lockfile::LockedCapsuleDependency,
 ) -> DirectCapsuleDependencyHashInput {
     DirectCapsuleDependencyHashInput {
         alias: dependency.name,
@@ -294,7 +294,7 @@ fn read_direct_capsule_dependency_inputs(
             .map(dependency_hash_input_from_locked_dependency)
             .collect::<Vec<_>>(),
         Err(capsule_lock_error) => {
-            let mut lock: capsule_core::ato_lock::AtoLock =
+            let mut lock: capsule::ato_lock::AtoLock =
                 serde_json::from_slice(&bytes).with_context(|| {
                     format!(
                         "failed to parse dependency identity lock data: {} (capsule.lock parse failed: {capsule_lock_error})",
@@ -305,7 +305,7 @@ fn read_direct_capsule_dependency_inputs(
                 .resolution
                 .entries
                 .remove("locked_dependencies")
-                .map(serde_json::from_value::<Vec<capsule_core::lockfile::LockedCapsuleDependency>>)
+                .map(serde_json::from_value::<Vec<capsule::lockfile::LockedCapsuleDependency>>)
                 .transpose()
                 .with_context(|| {
                     format!(
@@ -693,19 +693,19 @@ pub(crate) fn observe_filesystem_v2(
             semantics.tmp_policy.status,
         ),
         (
-            capsule_core::execution_identity::TrackingStatus::Known,
-            capsule_core::execution_identity::TrackingStatus::Known,
-            capsule_core::execution_identity::TrackingStatus::Known,
+            capsule::execution_identity::TrackingStatus::Known,
+            capsule::execution_identity::TrackingStatus::Known,
+            capsule::execution_identity::TrackingStatus::Known,
         )
     );
-    let mounts_complete = readonly_layers.iter().all(|layer| {
-        layer.identity.status == capsule_core::execution_identity::TrackingStatus::Known
-    });
+    let mounts_complete = readonly_layers
+        .iter()
+        .all(|layer| layer.identity.status == capsule::execution_identity::TrackingStatus::Known);
     let state_complete = persistent_state.iter().all(|binding| {
         matches!(
             binding.identity.status,
-            capsule_core::execution_identity::TrackingStatus::Known
-                | capsule_core::execution_identity::TrackingStatus::NotApplicable
+            capsule::execution_identity::TrackingStatus::Known
+                | capsule::execution_identity::TrackingStatus::NotApplicable
         )
     });
 
@@ -1041,7 +1041,7 @@ mod tests {
         let tracked = build_runtime_resolved_ref(Some("/usr/local/node/bin/node"), None);
         assert!(matches!(
             tracked.status,
-            capsule_core::execution_identity::TrackingStatus::Untracked
+            capsule::execution_identity::TrackingStatus::Untracked
         ));
     }
 
@@ -1217,13 +1217,13 @@ env_allowlist = ["DATABASE_URL"]
         write_capsule_lock(
             &workspace
                 .path()
-                .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME),
+                .join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME),
             "appdb",
             "secret-a",
         );
         first_plan.lock_path = workspace
             .path()
-            .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME);
+            .join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME);
 
         let mut second_plan = sample_plan(workspace.path().to_path_buf());
         write_capsule_lock(
@@ -1234,7 +1234,7 @@ env_allowlist = ["DATABASE_URL"]
         second_plan.lock_path = workspace.path().join("capsule-alt.lock.json");
 
         let launch_spec =
-            capsule_core::launch_spec::derive_launch_spec(&first_plan).expect("derive launch spec");
+            capsule::launch_spec::derive_launch_spec(&first_plan).expect("derive launch spec");
         let first = observe_dependencies_v2(
             &first_plan,
             &launch_spec,
@@ -1262,13 +1262,13 @@ env_allowlist = ["DATABASE_URL"]
         write_capsule_lock(
             &workspace
                 .path()
-                .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME),
+                .join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME),
             "appdb",
             "secret-a",
         );
         first_plan.lock_path = workspace
             .path()
-            .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME);
+            .join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME);
 
         let mut second_plan = sample_plan(workspace.path().to_path_buf());
         write_capsule_lock(
@@ -1279,7 +1279,7 @@ env_allowlist = ["DATABASE_URL"]
         second_plan.lock_path = workspace.path().join("capsule-rotated.lock.json");
 
         let launch_spec =
-            capsule_core::launch_spec::derive_launch_spec(&first_plan).expect("derive launch spec");
+            capsule::launch_spec::derive_launch_spec(&first_plan).expect("derive launch spec");
         let first = observe_dependencies_v2(
             &first_plan,
             &launch_spec,
@@ -1314,8 +1314,8 @@ env_allowlist = ["DATABASE_URL"]
         let mut ato_plan = sample_plan(workspace.path().to_path_buf());
         ato_plan.lock_path = ato_lock;
 
-        let launch_spec = capsule_core::launch_spec::derive_launch_spec(&capsule_plan)
-            .expect("derive launch spec");
+        let launch_spec =
+            capsule::launch_spec::derive_launch_spec(&capsule_plan).expect("derive launch spec");
         let capsule_observed = observe_dependencies_v2(
             &capsule_plan,
             &launch_spec,
@@ -1368,7 +1368,7 @@ env_allowlist = ["DATABASE_URL"]
         plan_b.lock_path = lock_b;
 
         let launch_spec =
-            capsule_core::launch_spec::derive_launch_spec(&plan_a).expect("derive launch spec");
+            capsule::launch_spec::derive_launch_spec(&plan_a).expect("derive launch spec");
         let first = observe_dependencies_v2(
             &plan_a,
             &launch_spec,
@@ -1396,14 +1396,14 @@ env_allowlist = ["DATABASE_URL"]
         path: &Path,
         identity_exports: BTreeMap<String, String>,
     ) {
-        let lock = capsule_core::lockfile::CapsuleLock {
+        let lock = capsule::lockfile::CapsuleLock {
             version: "1".to_string(),
-            meta: capsule_core::lockfile::LockMeta {
+            meta: capsule::lockfile::LockMeta {
                 created_at: "2026-05-04T00:00:00Z".to_string(),
                 manifest_hash: "sha256:deadbeef".to_string(),
             },
             allowlist: None,
-            capsule_dependencies: vec![capsule_core::lockfile::LockedCapsuleDependency {
+            capsule_dependencies: vec![capsule::lockfile::LockedCapsuleDependency {
                 name: "db".to_string(),
                 source: "capsule://ato/acme-postgres@16".to_string(),
                 source_type: "store".to_string(),
@@ -1411,7 +1411,7 @@ env_allowlist = ["DATABASE_URL"]
                 injection_bindings: BTreeMap::new(),
                 parameters: BTreeMap::from([(
                     "database".to_string(),
-                    capsule_core::types::ParamValue::String("appdb".to_string()),
+                    capsule::types::ParamValue::String("appdb".to_string()),
                 )]),
                 credentials: BTreeMap::new(),
                 identity_exports,
@@ -1452,11 +1452,11 @@ run = "main.py"
     fn sample_plan_from_manifest(workspace_root: PathBuf, manifest: &str) -> ManifestData {
         let manifest_path = workspace_root.join("capsule.toml");
         let parsed: toml::Value = toml::from_str(manifest).expect("parse manifest");
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             parsed,
             manifest_path,
             workspace_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             Some("app"),
             std::collections::HashMap::new(),
         )
@@ -1470,7 +1470,7 @@ run = "main.py"
             binary_hash: Tracked::unknown("not needed for dependency tests"),
             dynamic_linkage: Tracked::unknown("not needed for dependency tests"),
             completeness: RuntimeCompleteness::DeclaredOnly,
-            platform: capsule_core::execution_identity::PlatformIdentity {
+            platform: capsule::execution_identity::PlatformIdentity {
                 os: std::env::consts::OS.to_string(),
                 arch: std::env::consts::ARCH.to_string(),
                 libc: "unknown".to_string(),
@@ -1479,7 +1479,7 @@ run = "main.py"
     }
 
     fn write_ato_lock(path: &Path, database: &str, password: &str) {
-        let locked_dependencies = vec![capsule_core::lockfile::LockedCapsuleDependency {
+        let locked_dependencies = vec![capsule::lockfile::LockedCapsuleDependency {
             name: "db".to_string(),
             source: "capsule://ato/acme-postgres@16".to_string(),
             source_type: "store".to_string(),
@@ -1487,7 +1487,7 @@ run = "main.py"
             injection_bindings: BTreeMap::new(),
             parameters: BTreeMap::from([(
                 "database".to_string(),
-                capsule_core::types::ParamValue::String(database.to_string()),
+                capsule::types::ParamValue::String(database.to_string()),
             )]),
             credentials: BTreeMap::from([(
                 "password".to_string(),
@@ -1500,8 +1500,8 @@ run = "main.py"
             sha256: Some("sha256:beadfeed".to_string()),
             artifact_url: Some("https://example.test/postgres.capsule".to_string()),
         }];
-        let lock = capsule_core::ato_lock::AtoLock {
-            resolution: capsule_core::ato_lock::ResolutionSection {
+        let lock = capsule::ato_lock::AtoLock {
+            resolution: capsule::ato_lock::ResolutionSection {
                 entries: BTreeMap::from([(
                     "locked_dependencies".to_string(),
                     serde_json::to_value(&locked_dependencies)
@@ -1516,14 +1516,14 @@ run = "main.py"
     }
 
     fn write_capsule_lock(path: &Path, database: &str, password: &str) {
-        let lock = capsule_core::lockfile::CapsuleLock {
+        let lock = capsule::lockfile::CapsuleLock {
             version: "1".to_string(),
-            meta: capsule_core::lockfile::LockMeta {
+            meta: capsule::lockfile::LockMeta {
                 created_at: "2026-05-04T00:00:00Z".to_string(),
                 manifest_hash: "sha256:deadbeef".to_string(),
             },
             allowlist: None,
-            capsule_dependencies: vec![capsule_core::lockfile::LockedCapsuleDependency {
+            capsule_dependencies: vec![capsule::lockfile::LockedCapsuleDependency {
                 name: "db".to_string(),
                 source: "capsule://ato/acme-postgres@16".to_string(),
                 source_type: "store".to_string(),
@@ -1531,7 +1531,7 @@ run = "main.py"
                 injection_bindings: BTreeMap::new(),
                 parameters: BTreeMap::from([(
                     "database".to_string(),
-                    capsule_core::types::ParamValue::String(database.to_string()),
+                    capsule::types::ParamValue::String(database.to_string()),
                 )]),
                 credentials: BTreeMap::from([(
                     "password".to_string(),

@@ -1,4 +1,4 @@
-use capsule_core::types::EpochPointer;
+use capsule::types::EpochPointer;
 use serde::{Deserialize, Serialize};
 
 use crate::application::ports::publish::PublishArtifactMetadata;

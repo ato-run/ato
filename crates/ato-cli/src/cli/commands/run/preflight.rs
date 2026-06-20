@@ -7,15 +7,15 @@ use crate::adapters::runtime::provisioning::{
 use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
 use crate::executors::target_runner;
-use capsule_core::importer::{
+use capsule::importer::{
     ImportedEvidence, ImporterId, ProbeResult, probe_required_cargo_lockfile,
     probe_required_node_lockfile, probe_required_python_lockfile,
 };
-use capsule_core::lockfile::parse_lockfile_text;
+use capsule::lockfile::parse_lockfile_text;
 
 pub(crate) fn preflight_native_sandbox(
     nacelle_override: Option<PathBuf>,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     prepared: &PreparedRunContext,
     effective_cwd: Option<&Path>,
     reporter: &Arc<CliReporter>,
@@ -27,11 +27,8 @@ pub(crate) fn preflight_native_sandbox(
     preflight_single_script_effective_cwd_compat(plan, prepared, effective_cwd)?;
 
     let nacelle = resolve_nacelle_for_tier2(nacelle_override, plan, prepared, reporter)?;
-    let response = capsule_core::engine::run_internal(
-        &nacelle,
-        "features",
-        &json!({ "spec_version": "0.1.0" }),
-    )?;
+    let response =
+        capsule::engine::run_internal(&nacelle, "features", &json!({ "spec_version": "0.1.0" }))?;
     let capabilities = response
         .get("data")
         .and_then(|v| v.get("capabilities"))
@@ -55,7 +52,7 @@ pub(crate) fn preflight_native_sandbox(
 }
 
 fn preflight_single_script_effective_cwd_compat(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     prepared: &PreparedRunContext,
     effective_cwd: Option<&Path>,
 ) -> Result<()> {
@@ -117,7 +114,7 @@ fn is_relative_entrypoint_path(entrypoint: &str) -> bool {
 
 fn resolve_nacelle_for_tier2(
     nacelle_override: Option<PathBuf>,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     prepared: &PreparedRunContext,
     reporter: &Arc<CliReporter>,
 ) -> Result<PathBuf> {
@@ -137,13 +134,13 @@ fn resolve_nacelle_for_tier2(
             });
     }
 
-    let request = capsule_core::engine::EngineRequest {
+    let request = capsule::engine::EngineRequest {
         explicit_path: nacelle_override.clone(),
         manifest_path: Some(plan.manifest_path.clone()),
         compat_input: None,
     };
 
-    match capsule_core::engine::discover_nacelle(request) {
+    match capsule::engine::discover_nacelle(request) {
         Ok(path) => Ok(path),
         Err(err) => {
             if !should_attempt_nacelle_auto_bootstrap(nacelle_override.as_deref(), prepared)? {
@@ -210,7 +207,7 @@ fn manifest_declares_engine_override(prepared: &PreparedRunContext) -> bool {
 
 #[cfg(test)]
 pub(super) fn preflight_required_environment_variables(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
 ) -> Result<()> {
     target_runner::preflight_required_environment_variables(
         plan,
@@ -219,7 +216,7 @@ pub(super) fn preflight_required_environment_variables(
 }
 
 pub(crate) async fn run_v03_lifecycle_steps(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     reporter: &Arc<CliReporter>,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
 ) -> Result<()> {
@@ -407,7 +404,7 @@ struct RootInstallCommand {
 }
 
 fn build_lifecycle_targets(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     target_labels: &[String],
 ) -> Result<Vec<LifecycleTarget>> {
     target_labels
@@ -472,7 +469,7 @@ fn build_root_install_plan(
 }
 
 pub(crate) fn explicit_install_command_string(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
 ) -> Result<Option<String>> {
     let target_command =
         install_command_from_scope(&plan.manifest, &["targets", plan.selected_target_label()])?;
@@ -521,7 +518,7 @@ fn install_command_from_scope(manifest: &toml::Value, path: &[&str]) -> Result<O
 /// Install runs with managed toolchains only; build/run are allowed to see
 /// dependency output bins materialized by the completed install phase.
 async fn build_lifecycle_phase_path_plan(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     phase: LifecyclePhase,
     command: &str,
     lifecycle_roots: &[PathBuf],
@@ -532,7 +529,7 @@ async fn build_lifecycle_phase_path_plan(
 }
 
 pub(super) fn plan_v03_provision_command(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
 ) -> Result<Option<String>> {
     let runtime = plan.execution_runtime().unwrap_or_default();
     let driver = plan.execution_driver().unwrap_or_default();
@@ -605,7 +602,7 @@ pub(super) fn plan_v03_provision_command(
 /// driver→importer table but keyed off the manifest's `[targets.<label>]`
 /// entry instead of `plan.execution_runtime/driver/runtime_version`.
 fn fallback_provision_command_from_manifest(
-    manifest: Option<&capsule_core::types::CapsuleManifest>,
+    manifest: Option<&capsule::types::CapsuleManifest>,
     target_label: &str,
     working_dir: &Path,
 ) -> Result<Option<String>> {
@@ -779,7 +776,7 @@ fn node_install_command_from_evidence(evidence: &ImportedEvidence) -> Result<Str
 }
 
 fn run_lifecycle_shell_command(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
     command: &str,
     phase: &str,
@@ -798,7 +795,7 @@ fn run_lifecycle_shell_command(
     // Ato canonicalizes workspace paths internally, which on Windows yields
     // `\\?\C:\…` extended-length forms that cmd.exe/uv/npm/pnpm mis-handle.
     // Children always get the normal spelling.
-    let child_cwd = capsule_core::common::paths::windows_child_compatible_path(working_dir);
+    let child_cwd = capsule::common::paths::windows_child_compatible_path(working_dir);
 
     cmd.current_dir(&child_cwd)
         .stdin(std::process::Stdio::null())
@@ -845,7 +842,7 @@ fn run_lifecycle_shell_command(
     ))
 }
 
-fn preflight_macos_compat(plan: &capsule_core::router::ManifestData) -> Result<()> {
+fn preflight_macos_compat(plan: &capsule::router::ManifestData) -> Result<()> {
     let required_raw = match detect_required_macos_from_entrypoint(plan)? {
         Some(value) => value,
         None => return Ok(()),
@@ -898,9 +895,7 @@ fn preflight_macos_compat(plan: &capsule_core::router::ManifestData) -> Result<(
     Ok(())
 }
 
-fn preflight_python_uv_lock_for_source_driver(
-    plan: &capsule_core::router::ManifestData,
-) -> Result<()> {
+fn preflight_python_uv_lock_for_source_driver(plan: &capsule::router::ManifestData) -> Result<()> {
     if !is_python_source_target(plan) {
         return Ok(());
     }
@@ -939,8 +934,8 @@ fn preflight_python_uv_lock_for_source_driver(
 }
 
 fn preflight_python_uv_binary_for_source_driver(
-    plan: &capsule_core::router::ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    plan: &capsule::router::ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
 ) -> Result<()> {
     if !is_python_source_target(plan) {
         return Ok(());
@@ -968,7 +963,7 @@ fn preflight_python_uv_binary_for_source_driver(
         })
 }
 
-fn is_python_source_target(plan: &capsule_core::router::ManifestData) -> bool {
+fn is_python_source_target(plan: &capsule::router::ManifestData) -> bool {
     let runtime = plan.execution_runtime().unwrap_or_default();
     if !runtime.eq_ignore_ascii_case("source") {
         return false;
@@ -986,7 +981,7 @@ fn is_python_source_target(plan: &capsule_core::router::ManifestData) -> bool {
 }
 
 fn preflight_glibc_compat(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     prepared: &PreparedRunContext,
 ) -> Result<()> {
     let required_from_elf = detect_required_glibc_from_entrypoint(plan)?;
@@ -1108,7 +1103,7 @@ fn extract_glibc_constraint_from_toml(value: &toml::Value) -> Option<String> {
 }
 
 fn detect_required_glibc_from_entrypoint(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
 ) -> Result<Option<String>> {
     let entrypoint = match plan
         .execution_entrypoint()
@@ -1195,7 +1190,7 @@ fn first_command_token(command: &str) -> Option<String> {
 }
 
 fn detect_required_macos_from_entrypoint(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
 ) -> Result<Option<String>> {
     let entrypoint = match plan
         .execution_entrypoint()
@@ -1441,19 +1436,19 @@ mod tests {
             effective_state: None,
             execution_override: None,
             bridge_manifest: DerivedBridgeManifest::new(toml::Value::Table(toml::map::Map::new())),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
             install_profile_key: None,
         }
     }
 
-    fn build_plan(manifest_dir: &Path, manifest: &str) -> capsule_core::router::ManifestData {
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+    fn build_plan(manifest_dir: &Path, manifest: &str) -> capsule::router::ManifestData {
+        capsule::router::execution_descriptor_from_manifest_parts(
             toml::from_str::<toml::Value>(manifest).expect("parse manifest"),
             manifest_dir.join("capsule.toml"),
             manifest_dir.to_path_buf(),
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             Some("default"),
             std::collections::HashMap::new(),
         )

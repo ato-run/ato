@@ -21,7 +21,7 @@
 //! * bare scoped: `<pub>/<slug>` and the npm-style `@<pub>/<slug>`.
 
 use anyhow::{Context, Result};
-use capsule_core::handle::{CanonicalHandle, normalize_capsule_handle};
+use capsule::handle::{CanonicalHandle, normalize_capsule_handle};
 use serde::Serialize;
 
 use crate::install::{fetch_capsule_detail, parse_capsule_ref};

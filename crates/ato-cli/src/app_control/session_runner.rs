@@ -26,8 +26,8 @@ use ato_session_core::{
     MaterializedLaunchRecord, MaterializedLaunchValidationOutcome,
     validate_materialized_launch_record,
 };
-use capsule_core::launch_spec::LaunchSpec;
-use capsule_core::router::ManifestData;
+use capsule::launch_spec::LaunchSpec;
+use capsule::router::ManifestData;
 
 use crate::application::build_materialization as bm;
 use crate::application::execution_receipt_builder;
@@ -392,7 +392,7 @@ impl SessionStartPhaseRunner {
             );
         }
 
-        let launch = capsule_core::launch_spec::derive_launch_spec(&plan).with_context(|| {
+        let launch = capsule::launch_spec::derive_launch_spec(&plan).with_context(|| {
             format!(
                 "failed to derive launch spec for materialized manifest {}",
                 manifest_path.display()
@@ -489,7 +489,7 @@ impl SessionStartPhaseRunner {
             target_runner::preflight_required_environment_variables(&plan, &self.launch_ctx)?;
         }
 
-        let launch = capsule_core::launch_spec::derive_launch_spec(&plan).with_context(|| {
+        let launch = capsule::launch_spec::derive_launch_spec(&plan).with_context(|| {
             format!(
                 "failed to derive launch spec for community manifest {}",
                 manifest_path.display()
@@ -578,7 +578,7 @@ impl SessionStartPhaseRunner {
         // phases, matching the session contract; if the 5-condition reuse check
         // passes we short-circuit and skip projection, build, and execute.
         let is_registry_capsule = if !is_orchestration {
-            capsule_core::common::paths::runtime_cache_dir()
+            capsule::common::paths::runtime_cache_dir()
                 .map(|cache| plan.workspace_root.starts_with(&cache))
                 .unwrap_or(false)
         } else {
@@ -1196,11 +1196,11 @@ impl SessionStartPhaseRunner {
         &self,
     ) -> Result<(
         super::session::ExecutionReceiptSessionMetadata,
-        Option<capsule_core::engine::execution_graph::LaunchGraphBundle>,
+        Option<capsule::engine::execution_graph::LaunchGraphBundle>,
     )> {
-        use capsule_core::engine::execution_plan::derive::compile_execution_plan;
-        use capsule_core::execution_identity::ExecutionReceiptDocument;
-        use capsule_core::router::ExecutionProfile;
+        use capsule::engine::execution_plan::derive::compile_execution_plan;
+        use capsule::execution_identity::ExecutionReceiptDocument;
+        use capsule::router::ExecutionProfile;
 
         let manifest_path = self
             .manifest_path
@@ -1351,7 +1351,7 @@ fn maybe_project_to_session(
     plan: &mut ManifestData,
     launch: &mut LaunchSpec,
 ) -> Result<Option<PathBuf>> {
-    use capsule_core::common::paths::{ato_runs_dir, runtime_cache_dir};
+    use capsule::common::paths::{ato_runs_dir, runtime_cache_dir};
 
     let runtime_cache = runtime_cache_dir().ok();
     let install_workspace = plan.workspace_root.clone();

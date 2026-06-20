@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result};
-use capsule_core::types::ExternalCapsuleDependency;
+use capsule::types::ExternalCapsuleDependency;
 
 use super::ExternalCapsuleOptions;
 

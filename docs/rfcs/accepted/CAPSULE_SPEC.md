@@ -4,12 +4,12 @@ status: accepted
 date: "2026-03-14"
 author: "@egamikohsuke"
 ssot:
-  - "crates/capsule-core/src/foundation/types/manifest.rs"
+  - "crates/capsule/src/foundation/types/manifest.rs"
 ---
 
 # Capsule Manifest Specification for ato-cli (Current)
 
-この文書は、現在の `ato-cli` / `capsule-core` が実際に読み取っている `capsule.toml` 契約をまとめたものである。将来案や Store/Theater 側の理想仕様ではなく、`ato run` / `ato build` / `ato validate` / `ato inspect requirements` / `ato publish` で使われる現行実装を優先する。
+この文書は、現在の `ato-cli` / `capsule` が実際に読み取っている `capsule.toml` 契約をまとめたものである。将来案や Store/Theater 側の理想仕様ではなく、`ato run` / `ato build` / `ato validate` / `ato inspect requirements` / `ato publish` で使われる現行実装を優先する。
 
 ## 1. 位置づけ
 

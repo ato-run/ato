@@ -1,4 +1,4 @@
-use capsule_core::schema_registry::SchemaRegistry;
+use capsule::schema_registry::SchemaRegistry;
 use serde_json::json;
 
 #[test]

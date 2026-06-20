@@ -7,9 +7,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{AtoLock, compute_closure_digest, recompute_lock_id, to_pretty_json};
-use capsule_core::packers::payload::compute_manifest_hash_without_signatures;
-use capsule_core::types::CapsuleManifest;
+use capsule::ato_lock::{AtoLock, compute_closure_digest, recompute_lock_id, to_pretty_json};
+use capsule::packers::payload::compute_manifest_hash_without_signatures;
+use capsule::types::CapsuleManifest;
 use tempfile::TempDir;
 
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";

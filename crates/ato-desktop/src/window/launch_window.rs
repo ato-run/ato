@@ -620,7 +620,7 @@ fn build_consent_preview(
 
     match preflight {
         Ok(data) => {
-            use capsule_core::interactive_resolution::InteractiveResolutionKind;
+            use capsule::interactive_resolution::InteractiveResolutionKind;
 
             let requirements = data
                 .requirements

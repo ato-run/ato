@@ -14,7 +14,7 @@
 |---|---|---|
 | Cargo workspace | ⭕️ 統合 | 単一リポジトリ + `crates/` 配下 |
 | Git repo | ⭕️ 統合（履歴保存） | `git subtree` |
-| プロセス主従 | ❌ 統合しない | `capsule-core` から `gpui`/`wry`/`std::process::Command::new("ato-desktop")` 系を **lint で禁止** |
+| プロセス主従 | ❌ 統合しない | `capsule` から `gpui`/`wry`/`std::process::Command::new("ato-desktop")` 系を **lint で禁止** |
 | ato-cli が ato-desktop を spawn | ❌ 永久禁止 | CI lint + ARCHITECTURE.md |
 | ato-desktop が ato-cli を spawn | ⭕️ 唯一の許可ルート | 既存 `orchestrator.rs` を維持 |
 
@@ -42,7 +42,7 @@ ato/                              # github.com/ato-run/ato (新リポジトリ)
 ├── rust-toolchain.toml           # 統一: stable
 ├── deny.toml                     # 統一: cargo-deny
 ├── crates/
-│   ├── capsule-core/             # 🆕 純粋ロジック (Desktop/CLI 双方が depends_on)
+│   ├── capsule/             # 🆕 純粋ロジック (Desktop/CLI 双方が depends_on)
 │   │   ├── src/
 │   │   │   ├── ccp/              #  ← apps/ato-desktop/src/ccp_envelope.rs から移設
 │   │   │   │   ├── schema.rs    #     + producer 側の構造体定義
@@ -54,15 +54,15 @@ ato/                              # github.com/ato-run/ato (新リポジトリ)
 │   │
 │   ├── ato-cli/                  # ← apps/ato-cli/ から移植
 │   │   ├── src/
-│   │   ├── core/                 #  もとの core/ は capsule-core に吸収後、空 or runtime-only
-│   │   └── Cargo.toml            #  depends_on: capsule-core
+│   │   ├── core/                 #  もとの core/ は capsule に吸収後、空 or runtime-only
+│   │   └── Cargo.toml            #  depends_on: capsule
 │   │
 │   ├── ato-desktop/              # ← apps/ato-desktop/ から移植
 │   │   ├── src/
-│   │   │   ├── ccp_envelope.rs   #  → 削除 (capsule-core に統合)
+│   │   │   ├── ccp_envelope.rs   #  → 削除 (capsule に統合)
 │   │   │   ├── orchestrator.rs   #  CLI を spawn する唯一の場所 (維持)
 │   │   │   └── ...
-│   │   └── Cargo.toml            #  depends_on: capsule-core (ato-cli には依存しない)
+│   │   └── Cargo.toml            #  depends_on: capsule (ato-cli には依存しない)
 │   │
 │   └── ato-tsnetd/               # 既存サイドカーがあれば一緒に
 │
@@ -98,7 +98,7 @@ ato/                              # github.com/ato-run/ato (新リポジトリ)
 
 ---
 
-## 4. `capsule-core` に入れるもの / 入れないもの
+## 4. `capsule` に入れるもの / 入れないもの
 
 ### 入れる（共有）
 
@@ -120,7 +120,7 @@ ato/                              # github.com/ato-run/ato (新リポジトリ)
 | GPUI / Wry / state layer | Desktop の GUI 詳細、core に漏らしたら negate される |
 | `orchestrator.rs` (Desktop が CLI を spawn) | Desktop 専属 — ここは「主従の場所」そのもの |
 
-**ガードレール:** `capsule-core/Cargo.toml` には以下を **絶対に** 入れない:
+**ガードレール:** `capsule/Cargo.toml` には以下を **絶対に** 入れない:
 
 ```toml
 # 禁則 (CI で grep 落とす)
@@ -133,7 +133,7 @@ nix         # POSIX runtime
 sandbox-exec # OS sandbox driver
 ```
 
-これは現行の `state-layer-lint.yml` パターンを `capsule-core` にも適用する形で実現する（既に `apps/ato-desktop/.github/workflows/state-layer-lint.yml` と `apps/ato-cli/.github/workflows/core-purity-lint.yml` で雛形が landed しているので、monorepo 後はこの 2 つを 1 本に統合するだけ）。
+これは現行の `state-layer-lint.yml` パターンを `capsule` にも適用する形で実現する（既に `apps/ato-desktop/.github/workflows/state-layer-lint.yml` と `apps/ato-cli/.github/workflows/core-purity-lint.yml` で雛形が landed しているので、monorepo 後はこの 2 つを 1 本に統合するだけ）。
 
 ---
 
@@ -159,7 +159,7 @@ sandbox-exec # OS sandbox driver
      (将来許可するとしても、それは `ato-cli` でなく別の小さな
       `ato-open` バイナリとして切り出す)
 
-4. capsule-core は std::process を含む I/O ライブラリに依存しない。
+4. capsule は std::process を含む I/O ライブラリに依存しない。
    - producer/consumer の wire shape のみを所有する
 ```
 
@@ -182,8 +182,8 @@ CI 強制:
 | Phase | Repo 構成 | 期間 |
 |---|---|---|
 | **Now → v0.5.0 tag** | 既存の 2 repo のまま | 11 PR の distribution work が landed 済み、これを壊さない |
-| v0.5.0 ship 直後 | monorepo migration (M1〜M3) | コード移動のみ。capsule-core 抽出はまだ |
-| v0.5.x | capsule-core extraction (M4〜M5) | wire shape 重複の解消 |
+| v0.5.0 ship 直後 | monorepo migration (M1〜M3) | コード移動のみ。capsule 抽出はまだ |
+| v0.5.x | capsule extraction (M4〜M5) | wire shape 重複の解消 |
 | v0.6 | monorepo 前提でリリース | xtask + cargo-dist 統合 CI |
 
 **理由:** v0.5 は「同じバージョン pair = 同じ CCP version」の保証 (PR-1) を売り文句にしている。リリース直前に repo 構造を弄ると、ad-hoc 署名済みバンドルの再生成・Cask の SHA 再計算など、検証のやり直しが発生する。
@@ -255,12 +255,12 @@ tracing = "0.1"
 
 **Vendor 戦略決定 (確定):** 当面は Cargo の `git = "..." rev = "..."` による pinning を採用。submodule 移行は「fork で patch を当てたい」要件が具体化した時点で別 PR として実施する（GPUI 周りで上流 breaking が来た場合など）。
 
-### M4 — `capsule-core` 抽出 (Phase 1: CCP)
+### M4 — `capsule` 抽出 (Phase 1: CCP)
 
 最初に切るのは **CCP envelope の wire shape** だけ。一番依存関係が浅く、両側から型として参照される。
 
 ```
-crates/ato-cli/core/src/ccp/        # capsule-core crate (relocation deferred to M5+)
+crates/ato-cli/core/src/ccp/        # capsule crate (relocation deferred to M5+)
 ├── mod.rs                          # re-exports, module-level docs
 ├── schema.rs                       # CcpHeader (payload-agnostic deserializer)
 ├── tolerance.rs                    # classify_schema_version, enforce_ccp_compat,
@@ -268,36 +268,36 @@ crates/ato-cli/core/src/ccp/        # capsule-core crate (relocation deferred to
 └── version.rs                      # SCHEMA_VERSION = "ccp/v1" 定数
 ```
 
-- ato-desktop/src/ccp_envelope.rs → ✅ 削除済み、`use capsule_core::ccp::*;` に置換 (orchestrator.rs)
+- ato-desktop/src/ccp_envelope.rs → ✅ 削除済み、`use capsule::ccp::*;` に置換 (orchestrator.rs)
 - ato-cli/src/app_control.rs → ✅ ローカル `const SCHEMA_VERSION` を削除し
-  `use capsule_core::ccp::SCHEMA_VERSION;` 経由で参照。子モジュール (resolve / session) は
+  `use capsule::ccp::SCHEMA_VERSION;` 経由で参照。子モジュール (resolve / session) は
   `super::SCHEMA_VERSION` 経由で同じ name resolution を継承
 - 既存スナップショット fixture (`bootstrap.json`/`status.json`/`repair.json`) を
   `crates/ato-cli/core/tests/fixtures/ccp/` に移動し、producer (ato-cli の `assert_snapshot`) と
-  consumer (`capsule-core/tests/ccp_fixtures.rs` の golden test 3 本) の **両方** が同一バイト列を
+  consumer (`capsule/tests/ccp_fixtures.rs` の golden test 3 本) の **両方** が同一バイト列を
   読む構造にした。これで wire shape の二重管理が物理的に不可能になる。
 - 完了範囲外: producer 側の envelope 構造体 (`StatusEnvelope` / `BootstrapEnvelope` /
   `RepairEnvelope` など) と consumer 側の `ResolveEnvelope` / `SessionStartEnvelope` /
   `SessionStopEnvelope` は **まだ各 crate に閉じている**。これらの統合は payload type
-  (manifest / config / E-code) が capsule-core に来る M5 以降に実施。
-- crate ディレクトリそのものの `crates/ato-cli/core/` → `crates/capsule-core/` への移設は
-  パッケージ名 (`capsule-core`) が既に一致しているため import パスに影響せず、後段で
+  (manifest / config / E-code) が capsule に来る M5 以降に実施。
+- crate ディレクトリそのものの `crates/ato-cli/core/` → `crates/capsule/` への移設は
+  パッケージ名 (`capsule`) が既に一致しているため import パスに影響せず、後段で
   まとめて実施可能。M4 ではディレクトリ移動は見送り。
 
-### M5 — `capsule-core` 抽出 (Phase 2: Manifest + Error + Config) ✅ landed
+### M5 — `capsule` 抽出 (Phase 2: Manifest + Error + Config) ✅ landed
 
-**事前調査の結果**: `manifest_v03`, E-code envelopes (E103 含む), `ConfigField`/`ConfigKind` は **既に** `crates/ato-cli/core/` (= `capsule-core` パッケージ) 内に存在。M5 のリテラルなスコープ (「manifest を移動」「error を移動」「config を移動」) は M2 の workspace 化時点で完了済み。
+**事前調査の結果**: `manifest_v03`, E-code envelopes (E103 含む), `ConfigField`/`ConfigKind` は **既に** `crates/ato-cli/core/` (= `capsule` パッケージ) 内に存在。M5 のリテラルなスコープ (「manifest を移動」「error を移動」「config を移動」) は M2 の workspace 化時点で完了済み。
 
 **M5 で残っていた本質的な作業** = **wire shape の二重定義の解消** (M4 の `ccp_envelope` パターンを config/error layer に適用):
 
-- `crates/ato-desktop/src/cli_envelope.rs` の `ConfigFieldDto` / `ConfigKindDto` を **削除**し、`capsule_core::types::{ConfigField, ConfigKind}` を直接 import する形に統一。
+- `crates/ato-desktop/src/cli_envelope.rs` の `ConfigFieldDto` / `ConfigKindDto` を **削除**し、`capsule::types::{ConfigField, ConfigKind}` を直接 import する形に統一。
 - `MissingEnvDetailsDto.missing_schema` の型を `Vec<ConfigFieldDto>` → `Vec<ConfigField>` に変更。
 - 呼び出し側 (`state/mod.rs`, `orchestrator.rs`, `ui/mod.rs`, `ui/modals/config_form.rs`) を canonical 型名に追従。
 - 既存の 7 個のパーサテストは canonical 型に対しても全て pass — wire JSON が一切変わっていないことの証左。
 
 **Day 2 contract test との関係**: CLI 側の `apps/ato-cli/src/adapters/output/diagnostics/tests.rs::maps_missing_required_env_error_to_e103_with_schema` が JSON 出力形を pin している。Desktop 側の 7 テストも同じ JSON を canonical 型でデコードする。両者が同じ型を共有することで、シリアライズ⇄デシリアライズ間の drift が物理的に発生し得なくなった (M4 と同パターン)。
 
-**ディレクトリ移動について**: `capsule-core` は package 名としては既に正しい (`crates/ato-cli/core/Cargo.toml` の `name = "capsule-core"`)。物理的な top-level `crates/capsule-core/` への移動は M5 のスコープ外 — import path (`capsule_core::...`) は不変であり、移動は cosmetic な再配置に過ぎないため M6 以降または専用 PR で扱う。
+**ディレクトリ移動について**: `capsule` は package 名としては既に正しい (`crates/ato-cli/core/Cargo.toml` の `name = "capsule"`)。物理的な top-level `crates/capsule/` への移動は M5 のスコープ外 — import path (`capsule::...`) は不変であり、移動は cosmetic な再配置に過ぎないため M6 以降または専用 PR で扱う。
 
 ### M6 — リリース統合 ✅ landed
 
@@ -318,41 +318,41 @@ crates/ato-cli/core/src/ccp/        # capsule-core crate (relocation deferred to
 
 ### N1–N4 — `crates/` 再構成 (5-crate モデル) ✅ landed
 
-M6 後の workspace は (1) `capsule-core` がまだ `crates/ato-cli/core/` の入れ子、(2) `ato-desktop` が CCP / handle / ConfigField の **3 モジュールしか使っていないのに** `capsule-core` 全体 (bollard / tonic / rusqlite-bundled / reqwest / axum / prost / tokio-`full`) をリンクしている、という 2 つの構造的歪みを抱えていた。N1–N4 はこの 2 点を最小コストで解消する。
+M6 後の workspace は (1) `capsule` がまだ `crates/ato-cli/core/` の入れ子、(2) `ato-desktop` が CCP / handle / ConfigField の **3 モジュールしか使っていないのに** `capsule` 全体 (bollard / tonic / rusqlite-bundled / reqwest / axum / prost / tokio-`full`) をリンクしている、という 2 つの構造的歪みを抱えていた。N1–N4 はこの 2 点を最小コストで解消する。
 
 提案された 9-crate split (capsule-spec / capsule-ipc / capsule-error / capsule-resolve / capsule-runtime / capsule-nacelle / ato-cli / ato-desktop / lock-draft-engine) は将来の方向としては妥当だが、resolve / runtime / nacelle 境界はまだ実コードで自明ではないため、**今回は確定している境界 (wire vs runtime) のみ切り出す保守的な 5-crate モデル**を採用:
 
 ```
 ato-protocol    ← IPC surface (DAG root, no ato-* deps)
-capsule-core    ← runtime / orchestration / packers / engine / contract
+capsule    ← runtime / orchestration / packers / engine / contract
 ato-cli         ← CLI バイナリ (`ato`)
 ato-desktop     ← GPUI バイナリ
 lock-draft-engine ← lock-draft WASM (現状のまま、ato-cli 配下に nest)
 ```
 
-#### N1 — `crates/capsule-core/` への昇格
+#### N1 — `crates/capsule/` への昇格
 
-`crates/ato-cli/core/` を `crates/capsule-core/` に物理移動。package 名は M2 時点で既に `capsule-core` だったため import path は不変。ato-cli / ato-desktop / capsule-core 自身の Cargo.toml の path dep と `app_control.rs` の CCP fixture path のみ更新。
+`crates/ato-cli/core/` を `crates/capsule/` に物理移動。package 名は M2 時点で既に `capsule` だったため import path は不変。ato-cli / ato-desktop / capsule 自身の Cargo.toml の path dep と `app_control.rs` の CCP fixture path のみ更新。
 
 #### N2 — `crates/ato-protocol/` 抽出
 
-CCP envelope (`ccp/`)、handle 分類 (`routing/handle.rs`)、`ConfigField` / `ConfigKind` を新クレート `ato-protocol` に移し、capsule-core 側は re-export で公開パスを維持 (`capsule_core::ccp::*`、`capsule_core::routing::handle::*`、`capsule_core::types::ConfigField`)。
+CCP envelope (`ccp/`)、handle 分類 (`routing/handle.rs`)、`ConfigField` / `ConfigKind` を新クレート `ato-protocol` に移し、capsule 側は re-export で公開パスを維持 (`capsule::ccp::*`、`capsule::routing::handle::*`、`capsule::types::ConfigField`)。
 
-`ato-protocol` の deps は `serde` / `dirs` / `thiserror` / `tracing` のみ。handle.rs が必要としていた `CapsuleError::Config` は slim な `WireError::Config` として local に再定義し、capsule-core 側に `impl From<WireError> for CapsuleError` を置くことで CLI の `?` 連鎖は無改変で通る。
+`ato-protocol` の deps は `serde` / `dirs` / `thiserror` / `tracing` のみ。handle.rs が必要としていた `CapsuleError::Config` は slim な `WireError::Config` として local に再定義し、capsule 側に `impl From<WireError> for CapsuleError` を置くことで CLI の `?` 連鎖は無改変で通る。
 
 ATO_DESKTOP の link 表面が劇的に縮む下地が整う。
 
 #### N3 — `ato-desktop` の wire 移行
 
-`capsule_core::{handle, types::{ConfigField, ConfigKind}, ccp}` への参照を `ato_protocol::{handle, config::*, ccp}` に置換 (cli_envelope / state / orchestrator / ui / ui/modals/config_form / webview の 6 ファイル)。
+`capsule::{handle, types::{ConfigField, ConfigKind}, ccp}` への参照を `ato_protocol::{handle, config::*, ccp}` に置換 (cli_envelope / state / orchestrator / ui / ui/modals/config_form / webview の 6 ファイル)。
 
-**意図的に残したもの**: `crates/ato-desktop/src/orchestrator.rs` が `capsule_core::share::execute_share` を library 呼び出ししている部分 (4 箇所)。これは share タブから `ato share` を spawn するランタイム経路であり、wire 型ではない。ato-protocol に share executor を入れると "純粋な IPC 表面" のセマンティクスが崩れるため、 ato-desktop が capsule-core に持つ依存はこの経路のためだけに保持する。完全な解消は (a) execute_share 呼び出しを `Command::new("ato share")` に置き換えるか、(b) share executor を第 3 のクレートに切り出すかの follow-up となる。
+**意図的に残したもの**: `crates/ato-desktop/src/orchestrator.rs` が `capsule::share::execute_share` を library 呼び出ししている部分 (4 箇所)。これは share タブから `ato share` を spawn するランタイム経路であり、wire 型ではない。ato-protocol に share executor を入れると "純粋な IPC 表面" のセマンティクスが崩れるため、 ato-desktop が capsule に持つ依存はこの経路のためだけに保持する。完全な解消は (a) execute_share 呼び出しを `Command::new("ato share")` に置き換えるか、(b) share executor を第 3 のクレートに切り出すかの follow-up となる。
 
 #### N4 — dep-direction CI lint
 
 `.github/workflows/dep-direction.yml` で `cargo tree` ベースの 4 つのアサーションを CI 化:
 
-1. `ato-protocol` is a DAG root: `ato-cli` / `capsule-core` / `ato-desktop` / `ato-desktop-xtask` / `lock-draft-engine` のいずれも依存に出てこない。
+1. `ato-protocol` is a DAG root: `ato-cli` / `capsule` / `ato-desktop` / `ato-desktop-xtask` / `lock-draft-engine` のいずれも依存に出てこない。
 2. `ato-protocol` は GUI / runtime / clap / heavy-network deps を引き込まない (`tokio` / `hyper` / `reqwest` / `axum` / `tonic` / `bollard` / `gpui*` / `wry` / `rusqlite` / `wasmtime` / `clap` / `jsonschema` / `toml` ほか)。
 3. `ato-desktop` は `ato-cli` クレートを Cargo dep として linkしない (process-spawn 境界; `ato` バイナリは subprocess としてのみ起動する)。
 4. `ato-cli` は `ato-desktop` / `gpui*` / `wry` を引き込まない (一方向の矢印を保つ)。
@@ -362,7 +362,7 @@ ATO_DESKTOP の link 表面が劇的に縮む下地が整う。
 #### N1–N4 後の到達点
 
 - `cargo tree -p ato-protocol` の transitive set には `serde` / `dirs` / `thiserror` / `tracing` 系のみ残り、 ato-desktop が wire 経路で取り込むコードベースが激減。
-- ato-desktop が `capsule-core` に残している依存はもはや `share::*` の 4 行のみ。次の自然な step は share executor の subprocess spawn 化 (M7 までに着地できれば理想だが必須ではない)。
+- ato-desktop が `capsule` に残している依存はもはや `share::*` の 4 行のみ。次の自然な step は share executor の subprocess spawn 化 (M7 までに着地できれば理想だが必須ではない)。
 - proposal にあった resolve / runtime / nacelle の更なる split は引き続き open。実コードの境界が固まり次第 (e.g. nacelle が独立バイナリ化する瞬間)、N5+ として再評価。
 
 ### M7 — 旧 repo の archive
@@ -394,8 +394,8 @@ monorepo 化後も死守する CI ガード：
 ```yaml
 # .github/workflows/purity-lint.yml
 jobs:
-  capsule-core-purity:
-    name: capsule-core must not depend on GUI / OS / process libs
+  capsule-purity:
+    name: capsule must not depend on GUI / OS / process libs
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -403,8 +403,8 @@ jobs:
         run: |
           set -e
           banned='^(gpui|wry|objc2|windows|clap|nix)\b'
-          if rg -n "$banned" crates/capsule-core/Cargo.toml; then
-            echo "::error::capsule-core has a forbidden dep (ARCHITECTURE.md §1.4)"
+          if rg -n "$banned" crates/capsule/Cargo.toml; then
+            echo "::error::capsule has a forbidden dep (ARCHITECTURE.md §1.4)"
             exit 1
           fi
 
@@ -427,7 +427,7 @@ jobs:
 
 | 項目 | Before (現状) | After (monorepo) |
 |---|---|---|
-| CCP wire shape 変更 | 2 repo に同時 PR、レビューも 2 セット | 1 PR、capsule-core の型を変えるだけで両側ビルド失敗 |
+| CCP wire shape 変更 | 2 repo に同時 PR、レビューも 2 セット | 1 PR、capsule の型を変えるだけで両側ビルド失敗 |
 | `capsule.toml` 型変更 | CLI で変更 → Desktop は subprocess 出力を再パース | 型を共有するだけで両側 type-checked |
 | バージョン同期 | PR-1 で「規約として」担保 | workspace.version で物理的に同じ番号 |
 | CI 分散 | ato-cli CI + ato-desktop CI、相互無関係 | 1 push で両方ビルドされ wire shape 不整合が即発覚 |
@@ -442,8 +442,8 @@ jobs:
 |---|---|---|
 | 新 repo 名 | **`ato-run/ato`** | 短く、ブランド一致、ato という製品名そのもの |
 | デフォルトブランチ | **`main`** | ato-desktop 側に寄せる、release tag が main で打たれる業界標準 |
-| 移行タイミング | **`v0.5.0` ship 直後** | M1〜M3 を即実行、capsule-core 抽出は v0.5.x で gradual |
-| `capsule-core` の crate 名 | **`capsule-core`** | ato という製品名と protocol/spec の境界を分離 |
+| 移行タイミング | **`v0.5.0` ship 直後** | M1〜M3 を即実行、capsule 抽出は v0.5.x で gradual |
+| `capsule` の crate 名 | **`capsule`** | ato という製品名と protocol/spec の境界を分離 |
 | xtask の所属 | **workspace member** | 前回 standalone にした制約は M2 で解消されるため復帰 |
 | 旧 repo の扱い | **archive (read-only)** | URL は永続、forks は read-only に保たれる |
 

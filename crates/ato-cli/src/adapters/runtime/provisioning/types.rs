@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use capsule_core::router::ManifestData;
+use capsule::router::ManifestData;
 use serde::{Deserialize, Serialize};
 
 use crate::executors::launch_context::InjectedMount;

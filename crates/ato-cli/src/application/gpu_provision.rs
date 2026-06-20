@@ -3,16 +3,16 @@
 //! Implements `ato runner doctor` (read-only diagnostics) and
 //! `ato runner provision` (Ubuntu + NVIDIA driver / Docker / toolkit
 //! installation). Detection logic lives in
-//! `capsule_core::foundation::host_gpu`; receipt and marker types live
-//! in `capsule_core::foundation::provision_receipt`.
+//! `capsule::foundation::host_gpu`; receipt and marker types live
+//! in `capsule::foundation::provision_receipt`.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::host_gpu::HostGpuProfile;
-use capsule_core::foundation::provision_receipt::{
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::host_gpu::HostGpuProfile;
+use capsule::foundation::provision_receipt::{
     GpuDeviceSummary, ProvisionMarker, ProvisionPhase, ProvisionReceipt, SmokeResult,
 };
 use serde::Serialize;
@@ -71,7 +71,7 @@ struct DoctorOutput {
 
 /// Run `ato runner doctor`: probe the host and report GPU readiness.
 pub fn run_doctor(json: bool) -> Result<()> {
-    let profile = capsule_core::foundation::host_gpu::detect_host_gpu_profile()
+    let profile = capsule::foundation::host_gpu::detect_host_gpu_profile()
         .context("Failed to detect host GPU profile")?;
 
     let checks = diagnose(&profile);
@@ -364,7 +364,7 @@ pub async fn run_provision(
     dry_run: bool,
 ) -> Result<()> {
     // ── Phase A: Preflight ──
-    let pre = capsule_core::foundation::host_gpu::detect_host_gpu_profile()
+    let pre = capsule::foundation::host_gpu::detect_host_gpu_profile()
         .context("Failed to detect host GPU profile")?;
 
     emit_event(
@@ -514,7 +514,7 @@ pub async fn run_provision(
     }
 
     // ── Re-detect after driver install (or resume) ──
-    let post_driver = capsule_core::foundation::host_gpu::detect_host_gpu_profile()
+    let post_driver = capsule::foundation::host_gpu::detect_host_gpu_profile()
         .context("Failed to re-detect host GPU profile after driver install")?;
 
     if !post_driver.driver_installed() && !dry_run {
@@ -671,7 +671,7 @@ pub async fn run_provision(
     }
 
     // ── Phase F: Receipt ──
-    let final_profile = capsule_core::foundation::host_gpu::detect_host_gpu_profile()
+    let final_profile = capsule::foundation::host_gpu::detect_host_gpu_profile()
         .context("Failed to detect final host GPU profile")?;
 
     let receipt = ProvisionReceipt {
@@ -976,7 +976,7 @@ fn run_gpu_smoke_test(warnings: &mut Vec<String>) -> SmokeResult {
 fn count_gpus_in_smoke_output() -> Option<usize> {
     // Re-run the smoke test and count GPUs (or read from the receipt path)
     // For simplicity, re-detect from host profile.
-    let profile = capsule_core::foundation::host_gpu::detect_host_gpu_profile().ok()?;
+    let profile = capsule::foundation::host_gpu::detect_host_gpu_profile().ok()?;
     if profile.gpus.is_empty() {
         None
     } else {
@@ -1097,9 +1097,7 @@ fn clear_marker() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::host_gpu::{
-        DockerInfo, DriverInfo, GpuDevice, OsInfo, ToolkitInfo,
-    };
+    use capsule::foundation::host_gpu::{DockerInfo, DriverInfo, GpuDevice, OsInfo, ToolkitInfo};
 
     fn test_profile() -> HostGpuProfile {
         HostGpuProfile {

@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 
 /// Toolchain family (i.e. the ecosystem the binary is part of).
 ///

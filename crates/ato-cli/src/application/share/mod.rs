@@ -8,8 +8,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use capsule_core::CapsuleReporter;
-use capsule_core::share::{
+use capsule::CapsuleReporter;
+use capsule::share::{
     self as share_types, EntryEnvSpec, EnvRequirementSpec, EnvState, GeneratedFrom,
     InstallStepSpec, InstallStepState, LoadedShareInput, ResolvedSourceLock, ResolvedToolLock,
     ServiceSpec, ShareEntrySpec, ShareLock, ShareNotes, ShareSourceSpec, ShareSourceState,
@@ -239,7 +239,7 @@ fn execute_encap_dry_run(
     reporter: &Arc<CliReporter>,
 ) -> Result<()> {
     use crate::application::secrets::scanner::{SecretScanHit, scan_for_secret_patterns};
-    use capsule_core::packers::pack_filter::PackFilter;
+    use capsule::packers::pack_filter::PackFilter;
 
     futures::executor::block_on(
         reporter
@@ -532,20 +532,20 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
     ));
 
     // Delegate to capsule-core ShareExecutor (nacelle-sandboxed execution)
-    let result = capsule_core::share::execute_share(capsule_core::share::ShareRunRequest {
+    let result = capsule::share::execute_share(capsule::share::ShareRunRequest {
         input: args.input.clone(),
         entry: Some(entry.id.clone()),
         extra_args: args.args,
         env_overlay,
-        mode: capsule_core::share::ShareExecutionMode::Inherited,
+        mode: capsule::share::ShareExecutionMode::Inherited,
         nacelle_path: None,
         ato_path: None,
         compat_host: args.compat_host,
     })?;
 
     match result {
-        capsule_core::share::ShareExecutionResult::Completed { exit_code: 0 } => Ok(()),
-        capsule_core::share::ShareExecutionResult::Completed { exit_code } => {
+        capsule::share::ShareExecutionResult::Completed { exit_code: 0 } => Ok(()),
+        capsule::share::ShareExecutionResult::Completed { exit_code } => {
             anyhow::bail!("share entry `{}` exited with code {}", entry.id, exit_code);
         }
         _ => unreachable!("Inherited mode always returns Completed"),
@@ -2535,7 +2535,7 @@ fn ephemeral_run_root(loaded: &LoadedShareInput, entry: &ShareEntrySpec) -> Resu
     // sha256_label returns "sha256:<hex>"; strip the prefix so the directory
     // name contains no colon (some tools reject CWD paths with ':' in them).
     let digest = raw.trim_start_matches("sha256:");
-    Ok(capsule_core::common::paths::workspace_tmp_dir(&cwd)
+    Ok(capsule::common::paths::workspace_tmp_dir(&cwd)
         .join("ato-run")
         .join(digest))
 }
@@ -2679,8 +2679,8 @@ fn extract_capsule_into(capsule_path: &Path, target_root: &Path) -> Result<()> {
     archive
         .unpack(target_root)
         .with_context(|| format!("Failed to extract capsule into {}", target_root.display()))?;
-    let cas_provider = capsule_core::capsule::CasProvider::from_env();
-    capsule_core::capsule::unpack_payload_from_capsule_root_with_provider(
+    let cas_provider = capsule::capsule::CasProvider::from_env();
+    capsule::capsule::unpack_payload_from_capsule_root_with_provider(
         target_root,
         target_root,
         &cas_provider,
@@ -2699,7 +2699,7 @@ fn target_env_fingerprint(input: &str, entry_id: Option<&str>) -> String {
 
 #[allow(dead_code)]
 fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
-    capsule_core::common::paths::ato_path(format!("env/targets/{fingerprint}.env"))
+    capsule::common::paths::ato_path(format!("env/targets/{fingerprint}.env"))
         .context("failed to resolve ato home for saved env store")
 }
 

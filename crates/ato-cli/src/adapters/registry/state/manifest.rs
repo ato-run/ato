@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-use capsule_core::types::CapsuleManifest;
+use capsule::types::CapsuleManifest;
 
 pub fn resolve_manifest_path(path: &Path) -> Result<PathBuf> {
     let manifest_path = if path.is_dir() {

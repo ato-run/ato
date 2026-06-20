@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::AtoError;
-use capsule_core::execution_plan::error::{AtoErrorClassification, AtoExecutionError};
-use capsule_core::types::{CapsuleManifest, StateAttach, StateDurability};
+use capsule::AtoError;
+use capsule::execution_plan::error::{AtoErrorClassification, AtoExecutionError};
+use capsule::types::{CapsuleManifest, StateAttach, StateDurability};
 
 use crate::state::ensure_registered_state_binding;
 

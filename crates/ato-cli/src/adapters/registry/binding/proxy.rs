@@ -111,7 +111,7 @@ pub fn bootstrap_tls(
     install_system_trust: bool,
     yes: bool,
 ) -> Result<IngressTlsBootstrapRecord> {
-    let base_dir = capsule_core::config::config_dir()?.join("state");
+    let base_dir = capsule::config::config_dir()?.join("state");
     bootstrap_tls_in_dir(
         &base_dir,
         binding_id,
@@ -122,7 +122,7 @@ pub fn bootstrap_tls(
 }
 
 pub fn load_tls_bootstrap(binding_id: &str) -> Result<Option<IngressTlsBootstrapRecord>> {
-    let base_dir = capsule_core::config::config_dir()?.join("state");
+    let base_dir = capsule::config::config_dir()?.join("state");
     load_tls_bootstrap_from_dir(&base_dir, binding_id)
 }
 

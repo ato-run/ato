@@ -9,8 +9,8 @@ use globset::{Glob, GlobSet};
 use serde_json::Value;
 use walkdir::{DirEntry, WalkDir};
 
-use capsule_core::CapsuleReporter;
-use capsule_core::router::ManifestData;
+use capsule::CapsuleReporter;
+use capsule::router::ManifestData;
 
 use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
@@ -284,14 +284,14 @@ pub(crate) fn materialize_lifecycle_toolchains(
     for tool in runtime_tools {
         let spec = tool.spec;
         let requested_version = tool.requested_version;
-        let mut deps = capsule_core::tools::ToolDeps::default();
+        let mut deps = capsule::tools::ToolDeps::default();
         if spec.depends_on.contains(&"node") {
             deps.node_bin = managed_node_bin.clone();
         }
         let reporter_dyn: Arc<dyn CapsuleReporter + 'static> = reporter.clone();
         let handle =
             ensure_runtime_tool_for_lifecycle(spec, requested_version.clone(), deps, reporter_dyn)?;
-        let managed_tool_root = capsule_core::common::paths::toolchain_cache_dir()?
+        let managed_tool_root = capsule::common::paths::toolchain_cache_dir()?
             .join("tools")
             .join(spec.name);
         let source = if handle.bin_dir.starts_with(&managed_tool_root) {
@@ -338,7 +338,7 @@ pub(crate) fn materialize_lifecycle_toolchains(
 
 #[derive(Clone)]
 struct LifecycleRuntimeTool {
-    spec: &'static capsule_core::tools::RuntimeToolSpec,
+    spec: &'static capsule::tools::RuntimeToolSpec,
     requested_version: Option<String>,
 }
 
@@ -349,8 +349,8 @@ fn lifecycle_runtime_tools(
     let mut tools = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for spec in capsule_core::tools::registry() {
-        let Some(requested_version) = capsule_core::tools::read_tool_version(
+    for spec in capsule::tools::registry() {
+        let Some(requested_version) = capsule::tools::read_tool_version(
             &plan.manifest,
             plan.selected_target_label(),
             spec.name,
@@ -367,7 +367,7 @@ fn lifecycle_runtime_tools(
     if let Some(tool_name) = command_name.and_then(runtime_tool_name_for_command)
         && seen.insert(tool_name)
     {
-        let spec = capsule_core::tools::lookup(tool_name)
+        let spec = capsule::tools::lookup(tool_name)
             .with_context(|| format!("runtime tool '{tool_name}' is not registered"))?;
         tools.push(LifecycleRuntimeTool {
             spec,
@@ -379,30 +379,23 @@ fn lifecycle_runtime_tools(
 }
 
 fn ensure_runtime_tool_for_lifecycle(
-    spec: &'static capsule_core::tools::RuntimeToolSpec,
+    spec: &'static capsule::tools::RuntimeToolSpec,
     requested_version: Option<String>,
-    deps: capsule_core::tools::ToolDeps,
+    deps: capsule::tools::ToolDeps,
     reporter: Arc<dyn CapsuleReporter + 'static>,
-) -> Result<capsule_core::tools::ToolHandle> {
+) -> Result<capsule::tools::ToolHandle> {
     block_on_runtime_tool_materialization(async move {
-        capsule_core::tools::ensure_runtime_tool(
-            spec,
-            requested_version.as_deref(),
-            &deps,
-            reporter,
-        )
-        .await
+        capsule::tools::ensure_runtime_tool(spec, requested_version.as_deref(), &deps, reporter)
+            .await
     })
 }
 
-fn block_on_runtime_tool_materialization<F>(future: F) -> Result<capsule_core::tools::ToolHandle>
+fn block_on_runtime_tool_materialization<F>(future: F) -> Result<capsule::tools::ToolHandle>
 where
-    F: std::future::Future<Output = capsule_core::Result<capsule_core::tools::ToolHandle>>
-        + Send
-        + 'static,
+    F: std::future::Future<Output = capsule::Result<capsule::tools::ToolHandle>> + Send + 'static,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let materialize = move || -> Result<capsule_core::tools::ToolHandle> {
+        let materialize = move || -> Result<capsule::tools::ToolHandle> {
             std::thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -746,7 +739,7 @@ async fn emit_command_tool_resolution_marker(
     let Some(resolved_path) = which::which_in(tool_name, Some(path_env), cwd).ok() else {
         return Ok(());
     };
-    let managed_tool_root = capsule_core::common::paths::toolchain_cache_dir()?
+    let managed_tool_root = capsule::common::paths::toolchain_cache_dir()?
         .join("tools")
         .join(tool_name);
     if resolved_path.starts_with(&managed_tool_root) {
@@ -832,11 +825,11 @@ mod tests {
     }
 
     fn build_plan(manifest_dir: &Path, manifest: &str) -> ManifestData {
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             toml::from_str::<toml::Value>(manifest).expect("parse manifest"),
             manifest_dir.join("capsule.toml"),
             manifest_dir.to_path_buf(),
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             Some("app"),
             std::collections::HashMap::new(),
         )
@@ -962,8 +955,8 @@ mod tests {
         let extracted_dir = tools_root.join("extracted");
         let shim_dir = tools_root.join("shim");
 
-        let entry_rel = capsule_core::tools::resolved_tool_entry_relpath(&capsule_core::tools::BUN)
-            .expect("bun layout");
+        let entry_rel =
+            capsule::tools::resolved_tool_entry_relpath(&capsule::tools::BUN).expect("bun layout");
         let target = extracted_dir.join(entry_rel);
         fs::create_dir_all(target.parent().expect("target parent")).expect("extracted dir");
         fs::write(&target, "fake bun binary").expect("bun target");
@@ -994,9 +987,9 @@ mod tests {
 
         let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(CliReporter::new_run(false));
         let handle = ensure_runtime_tool_for_lifecycle(
-            &capsule_core::tools::BUN,
+            &capsule::tools::BUN,
             Some("1.2.8".to_string()),
-            capsule_core::tools::ToolDeps::default(),
+            capsule::tools::ToolDeps::default(),
             reporter,
         )
         .expect("materialized bun");
@@ -1065,8 +1058,8 @@ runtime_tools = { bun = "1.2.8" }
         // cache as incomplete, and falls back to a real network download —
         // which 404s for the partial "1.2" pin (seen only once the windows
         // test leg became blocking).
-        let entry_rel = capsule_core::tools::resolved_tool_entry_relpath(&capsule_core::tools::BUN)
-            .expect("bun layout");
+        let entry_rel =
+            capsule::tools::resolved_tool_entry_relpath(&capsule::tools::BUN).expect("bun layout");
         let extracted_bin = tools_root.join("extracted").join(&entry_rel);
         let write_executable = |path: &std::path::Path, contents: &str| {
             fs::create_dir_all(path.parent().unwrap()).expect("tool dir");
