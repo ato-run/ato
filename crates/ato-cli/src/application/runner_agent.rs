@@ -194,13 +194,16 @@ struct HeartbeatResponse {
     update: Option<UpdateDirective>,
 }
 
-/// The slice of an API error body the agent acts on. Only the machine `error`
-/// code drives behavior (revoked vs invalid token); serde ignores any other
-/// fields (e.g. the human-facing `message`).
+/// The slice of an API error body the agent acts on. The machine `error` code
+/// drives behavior (revoked vs invalid token); the human-facing `message` is
+/// surfaced only in operator-facing failures (e.g. enrollment) and never drives
+/// control flow.
 #[derive(Debug, Deserialize, Default)]
 struct ApiErrorBody {
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 /// This runner's `ato` agent version, reported to the control plane so the
@@ -221,6 +224,10 @@ pub fn build_heartbeat_body(
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "capabilities": capabilities,
+        // Lease command kinds this runner can actually EXECUTE today. The control
+        // plane gates dispatch on this so a runner is never sent a kind it would
+        // reject on-device (e.g. `run_capsule` before that execution path ships).
+        "supported_lease_kinds": SUPPORTED_LEASE_KINDS,
         "os": os,
         "arch": arch,
         "agent_version": agent_version(),
@@ -352,10 +359,23 @@ pub async fn run_login(
     display_name: Option<String>,
     public_base_url: Option<String>,
     headless: bool,
+    enrollment_token: Option<String>,
 ) -> Result<()> {
     let api_base = api_base
         .map(|value| value.trim_end_matches('/').to_string())
         .unwrap_or_else(crate::application::auth::store_api_base_url);
+
+    // Headless hosted-runner enrollment (#699): a Managed Cloud VM exchanges a
+    // single-use enrollment token for a runner token — no operator device flow.
+    // Precedence is explicit: an `--enrollment-token` flag wins; otherwise fall
+    // back to ATO_RUNNER_ENROLLMENT_TOKEN (convenient for cloud-init). The token
+    // VALUE is never logged. With neither set, the normal device flow runs.
+    let enrollment_token = enrollment_token.or_else(enrollment_token_from_env);
+    if let Some(token) = enrollment_token {
+        return run_login_with_enrollment_token(api_base, display_name, public_base_url, token)
+            .await;
+    }
+
     let site_base = site_base
         .map(|value| value.trim_end_matches('/').to_string())
         .unwrap_or_else(crate::application::auth::store_site_base_url);
@@ -515,6 +535,139 @@ fn reexec_serve() -> ! {
             }
         }
     }
+}
+
+/// Build the `POST /v1/runners/enroll` body. Pure (unit-tested). The enrollment
+/// token is the body's only credential — there is NO bearer auth — and it is
+/// never logged. os/arch/capabilities are the honest host probe.
+fn build_enroll_body(
+    enrollment_token: &str,
+    display_name: &str,
+    capabilities: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "enrollment_token": enrollment_token,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "capabilities": capabilities,
+        "display_name": display_name,
+    })
+}
+
+/// Human-readable failure for a non-2xx enroll response. NEVER echoes the raw
+/// response body — only the server's typed `{ error, message }` — so a single-
+/// use enrollment token can never leak into logs through an error path.
+fn enroll_failure_message(status_code: u16, body: &str) -> String {
+    let parsed: ApiErrorBody = serde_json::from_str(body).unwrap_or_default();
+    let detail = parsed
+        .message
+        .or(parsed.error)
+        .unwrap_or_else(|| format!("HTTP {status_code}"));
+    format!("runner enrollment failed (HTTP {status_code}): {detail}")
+}
+
+/// Resolve an enrollment token from `ATO_RUNNER_ENROLLMENT_TOKEN` when the
+/// `--enrollment-token` flag was not passed (cloud-init convenience). Logs that
+/// the env var is being used — NEVER its value. Empty/whitespace is treated as
+/// absent.
+fn enrollment_token_from_env() -> Option<String> {
+    match std::env::var("ATO_RUNNER_ENROLLMENT_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => {
+            eprintln!(
+                "Using enrollment token from ATO_RUNNER_ENROLLMENT_TOKEN environment variable (value hidden)."
+            );
+            Some(token)
+        }
+        _ => None,
+    }
+}
+
+/// Exchange a single-use enrollment token for the runner credential via
+/// `POST /v1/runners/enroll`. The returned `RunnerCredentials` are the SAME
+/// shape, store fields, and identifiers device-flow `run_login` produces — only
+/// the acquisition path differs, so `serve`/`logout`/`status` all read it
+/// unchanged. Does NOT persist (the caller saves), which keeps it unit-testable
+/// against a mock server without touching the on-disk credential store. The
+/// enrollment token is never logged; HTTP failures surface only the server's
+/// typed `{ error, message }`, never the raw body.
+async fn enroll_for_credentials(
+    api_base: &str,
+    display_name: &str,
+    enrollment_token: String,
+) -> Result<RunnerCredentials> {
+    let capabilities = collect_capabilities();
+    let body = build_enroll_body(&enrollment_token, display_name, &capabilities);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/runners/enroll", api_base))
+        .json(&body)
+        .send()
+        .await
+        .context("failed to call POST /v1/runners/enroll")?;
+    // The single-use token is spent server-side now; drop it promptly.
+    drop(enrollment_token);
+
+    let status = response.status();
+    if !status.is_success() {
+        let raw = response.text().await.unwrap_or_default();
+        bail!("{}", enroll_failure_message(status.as_u16(), &raw));
+    }
+    let registered: RegisterResponse = response
+        .json()
+        .await
+        .context("invalid /v1/runners/enroll response")?;
+
+    Ok(RunnerCredentials {
+        api_base: api_base.to_string(),
+        runner_id: registered.runner.id.clone(),
+        runner_token: registered.runner_token,
+        display_name: registered.runner.display_name.clone(),
+        heartbeat_interval_seconds: registered
+            .heartbeat
+            .interval_seconds
+            .max(MIN_HEARTBEAT_INTERVAL_SECS),
+    })
+}
+
+/// `ato runner login --enrollment-token <TOKEN>`: headless hosted-runner
+/// enrollment. Exchanges a single-use `ato_enr_…` token for a runner token via
+/// `POST /v1/runners/enroll`, then persists credentials EXACTLY like device-flow
+/// login. No browser, no operator session — used by a Managed Cloud VM whose
+/// cloud-init injected the token. The runner knows nothing about the provider
+/// (Fly/Hetzner/…): it sends the token, stores the returned `ato_rnr_` token,
+/// and `ato runner serve` proceeds on the existing heartbeat/poll/claim loop
+/// unchanged. The enrollment token is never printed and never written to disk.
+async fn run_login_with_enrollment_token(
+    api_base: String,
+    display_name: Option<String>,
+    public_base_url: Option<String>,
+    enrollment_token: String,
+) -> Result<()> {
+    let display_name = display_name.unwrap_or_else(default_display_name);
+    if public_base_url.is_some() {
+        // A hosted runner's public origin is assigned by the control plane at
+        // enrollment, not chosen by the runner. Say so rather than silently
+        // dropping the flag.
+        eprintln!(
+            "⚠️  --public-base-url is ignored with --enrollment-token: a hosted runner's public URL is assigned by the control plane."
+        );
+    }
+
+    println!("🛰  Enrolling this host as a hosted runner");
+    println!("   API:  {}", api_base);
+    println!("   Name: {}", display_name);
+
+    let creds = enroll_for_credentials(&api_base, &display_name, enrollment_token).await?;
+    let path = credentials_path();
+    save_credentials(&path, &creds)?;
+
+    println!("✅ Hosted runner enrolled");
+    println!("   Runner ID: {}", creds.runner_id);
+    println!("   Credentials: {} (0600)", path.display());
+    println!("   The runner token was saved and will not be shown.");
+    println!("   Start heartbeats with: ato runner serve");
+    Ok(())
 }
 
 /// `ato runner serve`: heartbeat loop. Runner-token auth only; fails closed
@@ -792,6 +945,17 @@ const READY_RECEIPT_GRACE: Duration = Duration::from_millis(2500);
 const MAX_RUN_LOG_BYTES: usize = 2 * 1024 * 1024;
 
 pub const LEASE_COMMAND_KIND: &str = "run_source_sandbox";
+
+/// Lease kind that carries a stable capsule identity (OCI / Store capsule) the
+/// runner launches via `ato run <ref> --managed-state-root ...` (see
+/// `resolve_lease_execution`). Executed and advertised.
+pub const RUN_CAPSULE_LEASE_KIND: &str = "run_capsule";
+
+/// Lease command kinds this runner can actually EXECUTE. Advertised in the
+/// heartbeat so the control plane never dispatches a kind the runner would
+/// reject on-device.
+pub const SUPPORTED_LEASE_KINDS: &[&str] = &[LEASE_COMMAND_KIND, RUN_CAPSULE_LEASE_KIND];
+
 pub const DEFAULT_PROXY_LISTEN: &str = "127.0.0.1:8420";
 
 /// Default number of concurrent run slots. `1` preserves the historical
@@ -1083,6 +1247,89 @@ pub fn parse_lease_command(
     })
 }
 
+/// A validated `run_capsule` lease. The runner executes `run_ref` AND keys
+/// persistent state on it, so the executed artifact and the state namespace can
+/// never diverge. `owner_id` (server-confirmed) scopes the state namespace;
+/// `capsule_slug` is display-only and never drives execution or state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunCapsuleCommand {
+    /// The single capsule reference the runner runs via `ato run <run_ref>` and
+    /// uses as the immutable state-namespace identity. CONTRACT: the control
+    /// plane MUST resolve any mutable slug to an **immutable, point-in-time** ref
+    /// (revision/digest-pinned) before dispatch, so re-runs and the state
+    /// namespace are reproducible and the executed artifact matches the state.
+    /// Using one field for both makes execution/state divergence impossible.
+    pub run_ref: String,
+    /// Owner/account id, confirmed server-side. Namespaces persistent state.
+    /// Required: a runner must never key state off client-supplied input.
+    pub owner_id: String,
+    /// Optional inline recipe `capsule.toml` content. Present for capsules that
+    /// have no installable release/manifest (community Store recipes are
+    /// published as a recipe TOML, not a built version) — `ato run <run_ref>`
+    /// would fail "no installable version". When set, the runner materializes
+    /// this TOML to a per-lease dir and runs THAT dir, while still keying
+    /// persistent state on `run_ref` (the immutable identity). When absent, the
+    /// runner installs `run_ref` directly (developer-published, versioned apps).
+    pub recipe_toml: Option<String>,
+    /// Optional run id, for audit/logging only.
+    pub run_id: Option<String>,
+    /// Display-only. MUST NOT drive execution or state isolation.
+    pub capsule_slug: Option<String>,
+}
+
+/// Parse a `run_capsule` lease. Rejects any other kind and any payload missing
+/// the required `run_ref` / `owner_id`. `capsule_slug` is a display hint only.
+/// The validated lease is turned into an executable plan by
+/// [`resolve_lease_execution`].
+pub fn parse_run_capsule_command(
+    command: &serde_json::Value,
+) -> std::result::Result<RunCapsuleCommand, (String, String)> {
+    let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != RUN_CAPSULE_LEASE_KIND {
+        return Err((
+            "unsupported_command".to_string(),
+            format!("expected lease command kind {RUN_CAPSULE_LEASE_KIND:?}, got {kind:?}"),
+        ));
+    }
+
+    let required = |key: &str| -> std::result::Result<String, (String, String)> {
+        let value = command
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if value.is_empty() {
+            return Err((
+                "invalid_command".to_string(),
+                format!("run_capsule lease is missing {key}"),
+            ));
+        }
+        Ok(value)
+    };
+    let optional = |key: &str| -> Option<String> {
+        command
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+
+    Ok(RunCapsuleCommand {
+        run_ref: required("run_ref")?,
+        owner_id: required("owner_id")?,
+        // Recipe TOML is file CONTENT, not an identifier — preserve it verbatim
+        // (do not trim, unlike the id/ref fields).
+        recipe_toml: command
+            .get("recipe_toml")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string()),
+        run_id: optional("run_id"),
+        capsule_slug: optional("capsule_slug"),
+    })
+}
+
 // ── Secret scrubbing ──
 
 /// The single redaction placeholder used for every scrubbed secret value.
@@ -1359,6 +1606,10 @@ async fn report_lease_status(
             unreachable!("consent gates go through report_consent_required (/consent-required)")
         }
         LeaseReport::Failed { code, message } => {
+            // On failure ONLY, attach the scrubbed tail of the child log so an
+            // operator can triage remotely (GET /v1/runs/:id error_log_tail)
+            // without shelling into the runner. Failure-only + bounded = no
+            // steady-state log flooding.
             let mut error = serde_json::json!({
                 "code": code,
                 "message": scrub_secrets(message),
@@ -2298,16 +2549,21 @@ pub fn child_run_ref(source_url: &str) -> String {
     source_url.to_string()
 }
 
-fn spawn_run_child(source_url: &str) -> Result<tokio::process::Child> {
+fn spawn_run_child(
+    run_ref: &str,
+    managed_state_root: Option<&Path>,
+) -> Result<tokio::process::Child> {
     let child_bin = match std::env::var("ATO_RUNNER_CHILD_BIN") {
         Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
         _ => std::env::current_exe().context("failed to resolve the ato binary path")?,
     };
     let mut cmd = tokio::process::Command::new(child_bin);
-    cmd.arg("run")
-        .arg(child_run_ref(source_url))
-        .arg("--sandbox")
-        .arg("-y");
+    cmd.arg("run").arg(run_ref).arg("--sandbox").arg("-y");
+    // run_capsule leases bind persistent state under a runner-managed root
+    // (scoped by owner + immutable capsule identity); source leases pass None.
+    if let Some(root) = managed_state_root {
+        cmd.arg("--managed-state-root").arg(root);
+    }
     // Operator-controlled extras (e.g. --nacelle <path> on dev hosts). Comes
     // from the runner host env, never from the lease payload.
     if let Ok(extra) = std::env::var("ATO_RUNNER_RUN_ARGS") {
@@ -2328,6 +2584,135 @@ fn spawn_run_child(source_url: &str) -> Result<tokio::process::Child> {
     // file — it is never exported to the child environment.
     cmd.kill_on_drop(true);
     cmd.spawn().context("failed to spawn ato run child")
+}
+
+/// What a claimed lease resolves to for execution: the `ato run` positional ref
+/// and, for `run_capsule`, the runner-managed persistent state root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LeaseExecution {
+    run_ref: String,
+    managed_state_root: Option<PathBuf>,
+}
+
+/// Root for runner-managed persistent capsule state: `<runner-base>/state`.
+/// Sits beside the per-lease run logs under the credentials directory.
+fn runner_state_root() -> PathBuf {
+    credentials_path()
+        .parent()
+        .map(|parent| parent.join("state"))
+        .unwrap_or_else(|| PathBuf::from("state"))
+}
+
+/// Managed state root for a `run_capsule` lease:
+/// `<runner-base>/state/<owner>/<run_ref>`. The owner is the server-confirmed
+/// `owner_id`; the identity is `run_ref` — the SAME immutable ref the runner
+/// executes, so the executed artifact and the state namespace can never
+/// diverge. Both segments use the `path_segment` scheme the `ato run` resolver
+/// uses, so the namespace is consistent and collision-free; `ato run` then
+/// appends `<target>/<state_key>` beneath this.
+fn run_capsule_state_root(cmd: &RunCapsuleCommand) -> PathBuf {
+    runner_state_root()
+        .join(crate::application::pipeline::phases::run::path_segment(
+            &cmd.owner_id,
+        ))
+        .join(crate::application::pipeline::phases::run::path_segment(
+            &cmd.run_ref,
+        ))
+}
+
+/// Validate a `run_ref` before it becomes an `ato run` positional argument:
+/// non-empty, no whitespace/control chars, and not a flag. Immutable refs like
+/// `community/openlist@<rev>` or `capsule://…#blake3:…` are allowed; a leading
+/// `-` (flag smuggling) or whitespace is not. (Immutability itself is the
+/// control plane's contract — see `RunCapsuleCommand::run_ref`.)
+fn validate_capsule_run_ref(run_ref: &str) -> std::result::Result<String, (String, String)> {
+    let r = run_ref.trim();
+    if r.is_empty()
+        || r.starts_with('-')
+        || r.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err((
+            "invalid_command".to_string(),
+            format!("run_ref is not a safe `ato run` ref: {run_ref:?}"),
+        ));
+    }
+    Ok(r.to_string())
+}
+
+/// Resolve a claimed lease command into an executable plan, dispatching by kind.
+/// `run_source_sandbox` runs a source repo (no managed state); `run_capsule`
+/// runs a capsule ref with a runner-managed persistent state root. Unknown
+/// kinds are rejected without executing.
+fn resolve_lease_execution(
+    command: &serde_json::Value,
+    recipe_dir: &Path,
+) -> std::result::Result<LeaseExecution, (String, String)> {
+    let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    match kind {
+        LEASE_COMMAND_KIND => {
+            let c = parse_lease_command(command)?;
+            Ok(LeaseExecution {
+                run_ref: child_run_ref(&c.source_url),
+                managed_state_root: None,
+            })
+        }
+        RUN_CAPSULE_LEASE_KIND => {
+            let c = parse_run_capsule_command(command)?;
+            // Persistent state is ALWAYS keyed on the immutable `run_ref`
+            // identity — whether we execute that ref directly or a materialized
+            // inline recipe — so re-runs reuse the same state regardless of the
+            // ephemeral recipe dir.
+            let root = run_capsule_state_root(&c);
+            let run_ref = match c.recipe_toml.as_deref() {
+                Some(toml) => materialize_inline_recipe(recipe_dir, toml)?,
+                None => validate_capsule_run_ref(&c.run_ref)?,
+            };
+            Ok(LeaseExecution {
+                run_ref,
+                managed_state_root: Some(root),
+            })
+        }
+        other => Err((
+            "unsupported_command".to_string(),
+            format!(
+                "unsupported lease command kind {other:?}; this runner executes {SUPPORTED_LEASE_KINDS:?}"
+            ),
+        )),
+    }
+}
+
+/// Materialize an inline recipe `capsule.toml` into `recipe_dir` and return that
+/// dir as the `ato run` positional. Community Store recipes have no installable
+/// release (`ato run <run_ref>` → "no installable version"), so the control
+/// plane ships the recipe TOML inline; the runner runs the materialized dir
+/// while persistent state stays keyed on the lease's immutable `run_ref`.
+fn materialize_inline_recipe(
+    recipe_dir: &Path,
+    recipe_toml: &str,
+) -> std::result::Result<String, (String, String)> {
+    std::fs::create_dir_all(recipe_dir).map_err(|e| {
+        (
+            "inline_recipe_write_failed".to_string(),
+            format!("failed to create recipe dir {}: {e}", recipe_dir.display()),
+        )
+    })?;
+    let toml_path = recipe_dir.join("capsule.toml");
+    std::fs::write(&toml_path, recipe_toml).map_err(|e| {
+        (
+            "inline_recipe_write_failed".to_string(),
+            format!("failed to write {}: {e}", toml_path.display()),
+        )
+    })?;
+    Ok(recipe_dir.to_string_lossy().into_owned())
+}
+
+/// Per-lease directory for a materialized inline recipe. MUST live OUTSIDE
+/// `~/.ato/` — `ato run <dir>` rejects a run target inside Ato's internal state
+/// directory ("cannot be used as a run target"). Use a per-lease temp dir.
+fn inline_recipe_dir(lease_id: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("ato-runner-recipes")
+        .join(format!("{lease_id}-recipe"))
 }
 
 struct BoundedLog {
@@ -2598,8 +2983,8 @@ async fn handle_claimed_lease(
     public_url_template: Option<String>,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
-    let command = match parse_lease_command(&lease.command) {
-        Ok(command) => command,
+    let execution = match resolve_lease_execution(&lease.command, &inline_recipe_dir(&lease.id)) {
+        Ok(execution) => execution,
         Err((code, message)) => {
             eprintln!("⚠️  lease {} rejected: {}", lease.id, message);
             let report = LeaseReport::Failed { code, message };
@@ -2639,7 +3024,10 @@ async fn handle_claimed_lease(
     let api_base = api_base.to_string();
     let runner_token = runner_token.to_string();
     let lease_id = lease.id.clone();
-    let source_url = command.source_url.clone();
+    let LeaseExecution {
+        run_ref,
+        managed_state_root,
+    } = execution;
     tokio::spawn(async move {
         // One control watcher for the whole lease lifetime: it flips stop_flag +
         // notifies on an owner stop in EITHER phase (needs_consent or running).
@@ -2673,7 +3061,7 @@ async fn handle_claimed_lease(
         let mut round: u32 = 0;
         let (mut report_rx, monitor, child_pid, first_report) = loop {
             round += 1;
-            let child = match spawn_run_child(&source_url) {
+            let child = match spawn_run_child(&run_ref, managed_state_root.as_deref()) {
                 Ok(child) => child,
                 Err(err) => {
                     let report = LeaseReport::Failed {
@@ -2697,7 +3085,7 @@ async fn handle_claimed_lease(
             // evidence (#645).
             record_workload_group(&lease_id, child_pid);
             println!(
-                "🚀 lease {lease_id}: ato run {source_url} --sandbox (round {round}, log: {})",
+                "🚀 lease {lease_id}: ato run {run_ref} --sandbox (round {round}, log: {})",
                 log_path.display()
             );
             let (report_tx, mut report_rx) = tokio::sync::mpsc::unbounded_channel::<LeaseReport>();
@@ -3027,6 +3415,85 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
+    fn build_enroll_body_carries_token_and_honest_host_facts() {
+        let caps = vec!["linux".to_string(), "sandbox=linux-bwrap".to_string()];
+        let body = build_enroll_body("ato_enr_secret", "my-runner", &caps);
+        assert_eq!(body["enrollment_token"], "ato_enr_secret");
+        assert_eq!(body["display_name"], "my-runner");
+        assert_eq!(body["os"], std::env::consts::OS);
+        assert_eq!(body["arch"], std::env::consts::ARCH);
+        assert_eq!(body["capabilities"][1], "sandbox=linux-bwrap");
+    }
+
+    #[test]
+    fn enroll_failure_message_is_typed_and_never_leaks_the_token() {
+        // Typed API error → actionable message surfaced verbatim.
+        let m = enroll_failure_message(
+            410,
+            r#"{"error":"expired","message":"Enrollment token has expired."}"#,
+        );
+        assert!(m.contains("410"));
+        assert!(m.contains("Enrollment token has expired."));
+        // A body that somehow reflected the raw token must never surface it:
+        // only the server's typed fields are used, never the raw body.
+        let leaky = "ato_enr_should_never_appear_in_logs";
+        let m2 = enroll_failure_message(401, leaky);
+        assert!(!m2.contains("ato_enr_should_never_appear_in_logs"));
+    }
+
+    #[tokio::test]
+    async fn headless_enrollment_persists_runner_token_through_the_existing_store() {
+        // Mock control plane: POST /v1/runners/enroll → 201 with the enrolled
+        // runner + its runner token (the exact shape POST /v1/runners returns,
+        // plus an extra lease_id the CLI ignores).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock api");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"runner":{"id":"01HOSTED","display_name":"Managed microvm-burst"},"runner_token":"ato_rnr_returned-secret","lease_id":"01LEASE","heartbeat":{"interval_seconds":30}}"#;
+                let response = format!(
+                    "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let api_base = format!("http://127.0.0.1:{port}");
+        let creds = enroll_for_credentials(
+            &api_base,
+            "Managed microvm-burst",
+            "ato_enr_single-use-secret".to_string(),
+        )
+        .await
+        .expect("headless enrollment succeeds");
+        server.join().ok();
+
+        // Same credential shape device-flow login produces — readable by serve.
+        assert_eq!(creds.runner_id, "01HOSTED");
+        assert_eq!(creds.runner_token, "ato_rnr_returned-secret");
+        assert_eq!(creds.api_base, api_base);
+        assert_eq!(creds.heartbeat_interval_seconds, 30);
+
+        // Persist through the EXISTING store + reader the serve loop uses.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("runner").join("credentials.json");
+        save_credentials(&path, &creds).expect("save");
+        let loaded = load_credentials(&path).expect("load");
+        assert_eq!(loaded.runner_token, "ato_rnr_returned-secret");
+
+        // The single-use enrollment token must NEVER be written to disk.
+        let on_disk = std::fs::read_to_string(&path).expect("read creds");
+        assert!(
+            !on_disk.contains("ato_enr_single-use-secret"),
+            "enrollment token must not be persisted"
+        );
+    }
+
+    #[test]
     fn credentials_roundtrip_sets_0600_and_holds_no_session_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("runner").join("credentials.json");
@@ -3218,6 +3685,186 @@ mod tests {
             .unwrap_err();
             assert_eq!(code, "invalid_command", "must reject {bad}");
         }
+    }
+
+    #[test]
+    fn run_capsule_command_parses_run_ref_and_owner() {
+        let cmd = parse_run_capsule_command(&serde_json::json!({
+            "kind": "run_capsule",
+            "run_ref": "community/openlist@7f3ac2b",
+            "owner_id": "usr_01H",
+            "run_id": "run_01H",
+            "capsule_slug": "openlist",
+        }))
+        .expect("valid run_capsule");
+        assert_eq!(cmd.run_ref, "community/openlist@7f3ac2b");
+        assert_eq!(cmd.owner_id, "usr_01H");
+        assert_eq!(cmd.run_id.as_deref(), Some("run_01H"));
+        assert_eq!(cmd.capsule_slug.as_deref(), Some("openlist"));
+    }
+
+    #[test]
+    fn run_capsule_command_requires_run_ref_and_owner() {
+        let (code, _) = parse_run_capsule_command(&serde_json::json!({
+            "kind": "run_capsule",
+            "run_ref": "community/openlist@7f3ac2b",
+        }))
+        .unwrap_err();
+        assert_eq!(code, "invalid_command", "missing owner_id must be rejected");
+
+        let (code, _) = parse_run_capsule_command(&serde_json::json!({
+            "kind": "run_capsule",
+            "owner_id": "usr_01H",
+        }))
+        .unwrap_err();
+        assert_eq!(code, "invalid_command", "missing run_ref must be rejected");
+    }
+
+    #[test]
+    fn run_capsule_command_rejects_other_kinds() {
+        let (code, _) = parse_run_capsule_command(&serde_json::json!({
+            "kind": "run_source_sandbox",
+            "source_url": "https://github.com/x/y",
+        }))
+        .unwrap_err();
+        assert_eq!(code, "unsupported_command");
+    }
+
+    // ── Lease execution dispatch ──
+
+    #[test]
+    fn resolve_lease_execution_source_sandbox_has_no_managed_state() {
+        let exec = resolve_lease_execution(&serde_json::json!({
+            "kind": "run_source_sandbox",
+            "source_url": "https://github.com/Koh0920/hello-capsule",
+        }), std::path::Path::new("unused-recipe"))
+        .expect("valid source lease");
+        assert_eq!(exec.run_ref, "github.com/Koh0920/hello-capsule");
+        assert!(
+            exec.managed_state_root.is_none(),
+            "source runs use no managed state root"
+        );
+    }
+
+    #[test]
+    fn resolve_lease_execution_run_capsule_keys_state_on_the_executed_ref() {
+        use crate::application::pipeline::phases::run::path_segment;
+        // An immutable, point-in-time ref (revision-pinned).
+        let run_ref = "community/openlist@7f3ac2b";
+        let exec = resolve_lease_execution(&serde_json::json!({
+            "kind": "run_capsule",
+            "run_ref": run_ref,
+            "owner_id": "usr_01H",
+        }), std::path::Path::new("unused-recipe"))
+        .expect("valid capsule lease");
+        // The runner executes exactly the ref it was given...
+        assert_eq!(exec.run_ref, run_ref);
+        let root = exec
+            .managed_state_root
+            .expect("capsule runs get a managed state root");
+        let s = root.to_string_lossy();
+        // ...and keys state on the SAME ref, so execution and state can never
+        // diverge — namespaced by owner, both path-safe via the shared scheme.
+        assert!(s.contains(&path_segment("usr_01H")), "owner segment present");
+        assert!(
+            s.ends_with(&path_segment(run_ref)),
+            "state identity is the executed run_ref"
+        );
+        // Raw ref/owner strings are never used verbatim.
+        assert!(!s.contains(run_ref));
+    }
+
+    #[test]
+    fn resolve_lease_execution_distinct_run_refs_get_distinct_state() {
+        let a = resolve_lease_execution(&serde_json::json!({
+            "kind": "run_capsule", "run_ref": "community/x@rev1", "owner_id": "u",
+        }), std::path::Path::new("unused-recipe"))
+        .unwrap()
+        .managed_state_root
+        .unwrap();
+        let b = resolve_lease_execution(&serde_json::json!({
+            "kind": "run_capsule", "run_ref": "community/x@rev2", "owner_id": "u",
+        }), std::path::Path::new("unused-recipe"))
+        .unwrap()
+        .managed_state_root
+        .unwrap();
+        assert_ne!(a, b, "a different (immutable) run_ref gets a distinct state dir");
+    }
+
+    #[test]
+    fn resolve_lease_execution_inline_recipe_runs_dir_keyed_on_run_ref() {
+        use crate::application::pipeline::phases::run::path_segment;
+        // Community recipes have no installable release, so the lease ships the
+        // recipe TOML inline. The runner materializes + runs the DIR, but state
+        // stays keyed on the immutable run_ref identity.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run_ref = "community/openlist-google-drive-crypt-openlist";
+        let recipe = "schema_version = \"0.3\"\n[targets.app]\nruntime = \"oci\"\n";
+        let exec = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule",
+                "run_ref": run_ref,
+                "owner_id": "usr_9",
+                "recipe_toml": recipe,
+            }),
+            dir.path(),
+        )
+        .expect("valid inline-recipe lease");
+        // Executes the materialized recipe dir, not the uninstallable run_ref.
+        assert_eq!(exec.run_ref, dir.path().to_string_lossy());
+        let written = std::fs::read_to_string(dir.path().join("capsule.toml"))
+            .expect("capsule.toml materialized");
+        assert_eq!(written, recipe);
+        // State is STILL keyed on the immutable run_ref identity, not the dir.
+        let s = exec
+            .managed_state_root
+            .expect("managed state root")
+            .to_string_lossy()
+            .into_owned();
+        assert!(s.contains(&path_segment("usr_9")), "owner segment present");
+        assert!(
+            s.ends_with(&path_segment(run_ref)),
+            "state keyed on the immutable run_ref, not the recipe dir"
+        );
+    }
+
+    #[test]
+    fn resolve_lease_execution_rejects_unsafe_ref_and_unknown_kind() {
+        // Note: leading/trailing whitespace is trimmed before validation, so the
+        // bad cases use a flag prefix, an internal space/tab, or an empty ref.
+        for bad in ["--help", "-rf", "a b", "x\ty", ""] {
+            let (code, _) = resolve_lease_execution(&serde_json::json!({
+                "kind": "run_capsule", "run_ref": bad, "owner_id": "u",
+            }), std::path::Path::new("unused-recipe"))
+            .unwrap_err();
+            assert_eq!(code, "invalid_command", "must reject run_ref {bad:?}");
+        }
+        let (code, _) = resolve_lease_execution(&serde_json::json!({
+            "kind": "shell", "command": "rm -rf /",
+        }), std::path::Path::new("unused-recipe"))
+        .unwrap_err();
+        assert_eq!(code, "unsupported_command");
+    }
+
+    #[test]
+    fn heartbeat_advertises_supported_lease_kinds() {
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
+        let kinds: Vec<&str> = body["supported_lease_kinds"]
+            .as_array()
+            .expect("supported_lease_kinds is an array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(
+            kinds.contains(&LEASE_COMMAND_KIND),
+            "must advertise run_source_sandbox"
+        );
+        // run_capsule execution is wired (resolve_lease_execution), so it is
+        // advertised and the control plane may dispatch it.
+        assert!(
+            kinds.contains(&RUN_CAPSULE_LEASE_KIND),
+            "must advertise run_capsule now that execution is wired"
+        );
     }
 
     #[test]

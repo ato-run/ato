@@ -914,6 +914,31 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
         None
     };
 
+    // Emit the canonical machine-readable readiness line so a non-TTY supervisor
+    // (the Connected Runner agent, CI) recognizes OCI readiness and its port.
+    // The runner monitor keys on `LIFECYCLE: ready[ port=N]`; the human
+    // "🌐 OCI service available" line below is NOT machine-parsed, so without
+    // this an OCI run on a runner stays `provisioning` forever even though the
+    // container is serving. Mirrors the source path's `lifecycle_ready_line`.
+    // The port is the published host port of the user-facing service (the one
+    // the runner's root proxy maps).
+    let ready_port = started
+        .iter()
+        .find(|r| {
+            orch_plan
+                .services
+                .iter()
+                .find(|s| s.name == r.service_name)
+                .map(|s| s.network.publish)
+                .unwrap_or(false)
+        })
+        .and_then(|r| r.host_port);
+    let ready_line = match ready_port {
+        Some(port) => format!("LIFECYCLE: ready port={port}"),
+        None => "LIFECYCLE: ready".to_string(),
+    };
+    let _ = reporter.notify(ready_line).await;
+
     // The primary endpoint shown to users prefers the ingress URL when present.
     let display_endpoint = ingress_metadata
         .as_ref()
