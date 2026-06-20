@@ -4,22 +4,16 @@
 //! scope. Slice A intentionally ships **no** ingress proxy, **no** DNS
 //! resolver, **no** egress CONNECT proxy. It exposes only the control
 //! plane (`status`, `shutdown`) so subsequent slices can build on a
-//! stable client / server boundary defined in `ato_net::control`.
+//! stable client / server boundary defined in `ato_netd::net::control`.
 //!
 //! **Platform note.** The daemon uses a Unix domain socket on Unix
 //! and a Windows named pipe on Windows. Both transports share the
-//! same newline-delimited JSON control protocol from `ato_net::control`.
+//! same newline-delimited JSON control protocol from `ato_netd::net::control`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-
-mod egress;
-mod identity;
-mod ingress;
-mod server;
-mod state;
 
 /// Command-line surface. Same binary handles two callers:
 ///
@@ -97,7 +91,7 @@ fn resolve_socket_path(override_path: Option<PathBuf>) -> Result<PathBuf, String
     if let Some(path) = override_path {
         return Ok(path);
     }
-    ato_net::control::default_socket_path().map_err(|err| err.to_string())
+    ato_netd::net::control::default_socket_path().map_err(|err| err.to_string())
 }
 
 /// `--status` codepath. Connects, prints, exits. Never starts a daemon.
@@ -109,7 +103,7 @@ async fn run_status_client(override_path: Option<PathBuf>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match ato_net::control::Client::connect(&socket).await {
+    match ato_netd::net::control::Client::connect(&socket).await {
         Ok(mut client) => match client.status().await {
             Ok(report) => match serde_json::to_string(&report) {
                 Ok(json) => {
@@ -126,7 +120,7 @@ async fn run_status_client(override_path: Option<PathBuf>) -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        Err(ato_net::control::Error::NotRunning { .. }) => {
+        Err(ato_netd::net::control::Error::NotRunning { .. }) => {
             println!(r#"{{"status":"not_running"}}"#);
             // Exit code 3 distinguishes "daemon not up" from generic
             // failure (exit 2). Stable for shell consumers.
@@ -150,7 +144,7 @@ async fn run_shutdown_client(override_path: Option<PathBuf>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match ato_net::control::Client::connect(&socket).await {
+    match ato_netd::net::control::Client::connect(&socket).await {
         Ok(client) => match client.shutdown().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
@@ -158,7 +152,7 @@ async fn run_shutdown_client(override_path: Option<PathBuf>) -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        Err(ato_net::control::Error::NotRunning { .. }) => {
+        Err(ato_netd::net::control::Error::NotRunning { .. }) => {
             // Idempotent: shutting down a daemon that isn't running is
             // a no-op success from the caller's perspective.
             ExitCode::SUCCESS
@@ -181,9 +175,9 @@ async fn run_daemon(override_path: Option<PathBuf>) -> ExitCode {
         }
     };
 
-    // Derive ATO_HOME from capsule-core's path resolver so that
+    // Derive ATO_HOME from the shared wire-crate path resolver so that
     // `ato-netd` and every other ato binary agree on the root.
-    let ato_home = match capsule::common::paths::nacelle_home_dir() {
+    let ato_home = match ato_netd::net::control::ato_home_dir() {
         Ok(p) => p,
         Err(err) => {
             eprintln!("ato-netd: cannot resolve ATO_HOME: {err}");
@@ -191,9 +185,9 @@ async fn run_daemon(override_path: Option<PathBuf>) -> ExitCode {
         }
     };
 
-    let daemon = match server::Daemon::start(socket, ato_home).await {
+    let daemon = match ato_netd::server::Daemon::start(socket, ato_home).await {
         Ok(d) => d,
-        Err(server::StartError::AlreadyRunning { pid, path }) => {
+        Err(ato_netd::server::StartError::AlreadyRunning { pid, path }) => {
             // Typed failure so a wrapping process can observe the
             // distinct "another daemon already owns this socket"
             // condition without parsing stderr.

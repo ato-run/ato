@@ -17,6 +17,7 @@ mod ipc;
 mod launch_intent;
 mod localization;
 mod logging;
+mod net_client;
 mod netd;
 mod orchestrator;
 mod proc_util;
@@ -128,8 +129,7 @@ fn main() {
     // Program Files install works. An explicit override is honored.
     #[cfg(target_os = "windows")]
     if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
-        let data_folder =
-            capsule::common::paths::ato_path_or_workspace_tmp("desktop/webview2");
+        let data_folder = capsule::common::paths::ato_path_or_workspace_tmp("desktop/webview2");
         // Best-effort: WebView2 will create the folder itself, but creating it
         // up front surfaces any permission problem in the log rather than as a
         // later WebView2 failure.

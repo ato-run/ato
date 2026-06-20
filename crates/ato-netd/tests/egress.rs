@@ -3,7 +3,7 @@
 //! Each test spawns a real `ato-netd` subprocess, reads the
 //! `egress_proxy_port` from the `Status` report, and drives the proxy
 //! with raw TCP CONNECT requests.  No `ato-netd` crate internals are
-//! imported; the only ato crate used is `ato_net::control::Client`.
+//! imported; the only ato crate used is `ato_netd::net::control::Client`.
 
 #![cfg(unix)]
 
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use ato_net::control::{Client, Error as ControlError};
+use ato_netd::net::control::{Client, Error as ControlError};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
