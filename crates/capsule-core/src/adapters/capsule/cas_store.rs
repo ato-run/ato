@@ -711,7 +711,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_parent_sync_is_best_effort() {
-        let non_existing = PathBuf::from(r"C:\not-existing-parent-dir");
+        let non_existing = std::path::PathBuf::from(r"C:\not-existing-parent-dir");
         assert!(sync_parent_directory(&non_existing).is_ok());
     }
 }

@@ -279,9 +279,11 @@ pub fn run_prepare_command(spec: &PrepareSpec, json_output: bool) -> Result<()> 
 
 #[cfg(windows)]
 fn shell_command_for(command: &str) -> Command {
-    let mut cmd = Command::new("cmd");
-    cmd.arg("/C").arg(command);
-    cmd
+    // `cmd.exe /D /S /C "<command>"` via raw_arg: `/D` keeps a broken
+    // AutoRun script from polluting output and leaking a non-zero exit
+    // code into the prepare step; `/S` + raw_arg keep operators and
+    // quoting verbatim.
+    crate::common::host_shell::windows_cmd_shell_command(command)
 }
 
 #[cfg(not(windows))]

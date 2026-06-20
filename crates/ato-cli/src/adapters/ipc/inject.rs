@@ -428,8 +428,10 @@ name = "ping"
             from = "{}"
             activation = "lazy"
             "#,
-            eager_service.display(),
-            lazy_service.display()
+            // Forward slashes keep the embedded paths valid inside TOML
+            // basic strings on Windows (backslashes parse as escapes).
+            eager_service.display().to_string().replace('\\', "/"),
+            lazy_service.display().to_string().replace('\\', "/")
         ))
         .unwrap();
 

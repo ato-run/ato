@@ -1755,7 +1755,11 @@ fn detect_install_steps(
         acc.push(InstallStepSpec {
             id: step_id(relative_dir, "install"),
             cwd: relative_dir.to_string(),
-            run: "uv venv --seed && uv pip install -r requirements.txt 'setuptools<72'".to_string(),
+            // Double quotes group the constraint in both POSIX sh and cmd.exe;
+            // single quotes are literal characters to cmd.exe, which would
+            // parse the `<` as input redirection on Windows consumers.
+            run: "uv venv --seed && uv pip install -r requirements.txt \"setuptools<72\""
+                .to_string(),
             depends_on: Vec::new(),
             evidence: vec!["requirements.txt inferred into uv venv install".to_string()],
         });
@@ -2648,11 +2652,13 @@ fn run_shell_streaming(
     cwd: &Path,
     env_overlay: &BTreeMap<String, String>,
 ) -> Result<std::process::ExitStatus> {
-    let mut process = if cfg!(windows) {
-        let mut command_process = Command::new("cmd");
-        command_process.arg("/C").arg(command);
-        command_process
-    } else {
+    #[cfg(windows)]
+    // `/D /S /C` via raw_arg: `/D` keeps a broken AutoRun script from
+    // polluting output and leaking exit codes; `/S` + raw_arg keep
+    // operators and quoting verbatim.
+    let mut process = crate::common::host_shell::windows_cmd_shell_command(command);
+    #[cfg(not(windows))]
+    let mut process = {
         let mut command_process = Command::new("/bin/sh");
         command_process.arg("-lc").arg(command);
         command_process
@@ -2884,11 +2890,13 @@ fn run_shell_command_with_env(
     cwd: &Path,
     env_overrides: &std::collections::HashMap<String, String>,
 ) -> Result<ShellOutput> {
-    let mut builder = if cfg!(windows) {
-        let mut b = Command::new("cmd");
-        b.arg("/C").arg(command);
-        b
-    } else {
+    #[cfg(windows)]
+    // `/D /S /C` via raw_arg: `/D` keeps a broken AutoRun script from
+    // polluting output and leaking exit codes; `/S` + raw_arg keep
+    // operators and quoting verbatim.
+    let mut builder = crate::common::host_shell::windows_cmd_shell_command(command);
+    #[cfg(not(windows))]
+    let mut builder = {
         let mut b = Command::new("/bin/sh");
         b.arg("-lc").arg(command);
         b
@@ -2899,10 +2907,11 @@ fn run_shell_command_with_env(
         if key == "PATH" {
             // Prepend to existing PATH so system tools remain available.
             let existing = std::env::var("PATH").unwrap_or_default();
+            let separator = if cfg!(windows) { ';' } else { ':' };
             let merged = if existing.is_empty() {
                 value.clone()
             } else {
-                format!("{value}:{existing}")
+                format!("{value}{separator}{existing}")
             };
             builder.env("PATH", merged);
         } else {

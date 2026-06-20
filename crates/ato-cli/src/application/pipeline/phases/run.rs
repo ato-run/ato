@@ -393,6 +393,10 @@ fn normalize_existing_path(path: &Path) -> Result<(PathBuf, SandboxGrantScope)> 
     } else {
         SandboxGrantScope::Exact
     };
+    // Grant paths become sandbox mount sources; strip the `\\?\` prefix
+    // canonicalize() adds on Windows so downstream consumers see the
+    // normal spelling.
+    let canonical = capsule_core::common::paths::windows_child_compatible_path(&canonical);
     Ok((canonical, scope))
 }
 
@@ -417,6 +421,8 @@ fn normalize_write_path(path: &Path) -> Result<(PathBuf, SandboxGrantScope)> {
     })?;
     let canonical_parent = fs::canonicalize(parent)
         .with_context(|| format!("failed to resolve parent directory {}", parent.display()))?;
+    let canonical_parent =
+        capsule_core::common::paths::windows_child_compatible_path(&canonical_parent);
     Ok((canonical_parent.join(file_name), SandboxGrantScope::Exact))
 }
 
@@ -493,15 +499,19 @@ fn normalize_candidate_path(
         effective_cwd.join(candidate)
     };
 
+    // Candidates compare against grant source paths, which are produced in
+    // the `\\?\`-stripped canonical form (see normalize_existing_path);
+    // strip here too so the comparison stays apples-to-apples on Windows.
+    let strip = |path: PathBuf| capsule_core::common::paths::windows_child_compatible_path(&path);
     match kind {
-        InferredIoKind::Read => fs::canonicalize(&absolute).ok(),
+        InferredIoKind::Read => fs::canonicalize(&absolute).ok().map(strip),
         InferredIoKind::Write => {
             if absolute.exists() {
-                fs::canonicalize(&absolute).ok()
+                fs::canonicalize(&absolute).ok().map(strip)
             } else {
                 let parent = absolute.parent()?;
                 let file_name = absolute.file_name()?;
-                let canonical_parent = fs::canonicalize(parent).ok()?;
+                let canonical_parent = strip(fs::canonicalize(parent).ok()?);
                 Some(canonical_parent.join(file_name))
             }
         }
@@ -6052,16 +6062,34 @@ run = "python main.py"
         );
     }
 
+    /// Creates `link -> target`, returning false when the host cannot create
+    /// symlinks (Windows without Developer Mode/admin reports error 1314) so
+    /// callers can skip rather than fail. CI runners are elevated, so the
+    /// assertions still run there.
+    fn symlink_dir_or_skip(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let result = std::os::windows::fs::symlink_dir(target, link);
+        match result {
+            Ok(()) => true,
+            Err(err) if err.raw_os_error() == Some(1314) => {
+                eprintln!("skipping: creating symlinks needs Developer Mode or admin rights");
+                false
+            }
+            Err(err) => panic!("create symlink: {err:?}"),
+        }
+    }
+
     #[test]
     fn existing_grant_rejects_symlink_traversal() {
         let temp = tempfile::tempdir().expect("tempdir");
         let outside_dir = tempfile::tempdir().expect("outside tempdir");
         let link_path = temp.path().join("outside-link");
 
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(outside_dir.path(), &link_path).expect("create symlink");
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(outside_dir.path(), &link_path).expect("create symlink");
+        if !symlink_dir_or_skip(outside_dir.path(), &link_path) {
+            return;
+        }
 
         let err = normalize_existing_path(&link_path).expect_err("must reject symlink grants");
         assert!(err.to_string().contains("traverses symlink"));
@@ -6073,10 +6101,9 @@ run = "python main.py"
         let outside_dir = tempfile::tempdir().expect("outside tempdir");
         let link_path = temp.path().join("outside-link");
 
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(outside_dir.path(), &link_path).expect("create symlink");
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(outside_dir.path(), &link_path).expect("create symlink");
+        if !symlink_dir_or_skip(outside_dir.path(), &link_path) {
+            return;
+        }
 
         let err = normalize_write_path(&link_path.join("output.txt"))
             .expect_err("must reject symlink parent traversal");
@@ -6294,9 +6321,12 @@ url = "http://127.0.0.1:8787/health"
 
         let grants = resolve_sandbox_grants(&request, guest_manifest.path()).expect("grants");
         assert_eq!(grants.len(), 1);
+        // Grant sources are recorded in `\\?\`-stripped canonical form.
         assert_eq!(
             grants[0].source_path,
-            input.canonicalize().expect("canonical input")
+            capsule_core::common::paths::windows_child_compatible_path(
+                &input.canonicalize().expect("canonical input")
+            )
         );
         assert_eq!(grants[0].guest_target, explicit.path().join("in.pdf"));
     }
