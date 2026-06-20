@@ -1020,7 +1020,7 @@ fn process_start_time_matches(pid: i32, expected_start_time_unix_ms: Option<u64>
     let Ok(pid) = u32::try_from(pid) else {
         return false;
     };
-    ato_session_core::process::process_start_time_unix_ms(pid) == Some(expected)
+    capsule::state::session::process::process_start_time_unix_ms(pid) == Some(expected)
 }
 
 fn import_preview_session_is_stale(session: &ImportPreviewSession) -> bool {
@@ -2383,12 +2383,12 @@ mod tests {
             owner_process_start_time_unix_ms: owner_pid
                 .try_into()
                 .ok()
-                .and_then(ato_session_core::process::process_start_time_unix_ms),
+                .and_then(capsule::state::session::process::process_start_time_unix_ms),
             ato_run_pid,
             ato_run_process_start_time_unix_ms: ato_run_pid
                 .try_into()
                 .ok()
-                .and_then(ato_session_core::process::process_start_time_unix_ms),
+                .and_then(capsule::state::session::process::process_start_time_unix_ms),
             process_group_ids: Vec::new(),
             workload_pids: Vec::new(),
             primary_port: None,
@@ -2572,7 +2572,7 @@ mod tests {
             pid: workload_pid,
             start_time_unix_ms: u32::try_from(workload_pid)
                 .ok()
-                .and_then(ato_session_core::process::process_start_time_unix_ms),
+                .and_then(capsule::state::session::process::process_start_time_unix_ms),
         }];
 
         let result = stop_import_preview_session_record(&session, true);

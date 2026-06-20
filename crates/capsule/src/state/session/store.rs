@@ -6,11 +6,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::common::paths::ato_path;
 use anyhow::{Context, Result};
-use capsule::common::paths::ato_path;
 use tracing::{debug, warn};
 
-use crate::record::StoredSessionInfo;
+use crate::state::session::record::StoredSessionInfo;
 
 /// Environment variable that overrides the default session root. Honored
 /// by both `ato-cli` (which writes records here) and `ato-desktop`
@@ -130,7 +130,7 @@ pub fn write_session_record_atomic(root: &Path, session: &StoredSessionInfo) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
+    use crate::state::session::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};

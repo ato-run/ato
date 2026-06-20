@@ -22,12 +22,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use ato_session_core::{
+use capsule::launch_spec::LaunchSpec;
+use capsule::router::ManifestData;
+use capsule::state::session::{
     MaterializedLaunchRecord, MaterializedLaunchValidationOutcome,
     validate_materialized_launch_record,
 };
-use capsule::launch_spec::LaunchSpec;
-use capsule::router::ManifestData;
 
 use crate::application::build_materialization as bm;
 use crate::application::execution_receipt_builder;
@@ -337,11 +337,11 @@ impl SessionStartPhaseRunner {
         if record.run_config_hash != expected_run_config_hash {
             anyhow::bail!("materialized launch record is stale: run config changed");
         }
-        if record.platform != ato_session_core::current_platform_tag() {
+        if record.platform != capsule::state::session::current_platform_tag() {
             anyhow::bail!(
                 "materialized launch record is stale: platform changed from {} to {}",
                 record.platform,
-                ato_session_core::current_platform_tag()
+                capsule::state::session::current_platform_tag()
             );
         }
         let manifest_path_str = manifest_path.to_string_lossy().to_string();

@@ -122,7 +122,7 @@ pub(crate) fn teardown_in_order(
 /// when multi-node, missing pid/state_dir, etc.) must fall back to
 /// the legacy two-path teardown.
 pub fn teardown_from_graph(
-    graph: &ato_session_core::StoredExecutionGraph,
+    graph: &capsule::state::session::StoredExecutionGraph,
     grace: Duration,
 ) -> Result<(), TeardownError> {
     use crate::application::session_graph_populate::{NODE_KIND_PROVIDER, NODE_KIND_SERVICE};
@@ -130,7 +130,7 @@ pub fn teardown_from_graph(
     let teardown_order = compute_teardown_order(graph)?;
 
     // Index nodes by identifier for kind dispatch.
-    let nodes_by_id: BTreeMap<&str, &ato_session_core::StoredGraphNode> = graph
+    let nodes_by_id: BTreeMap<&str, &capsule::state::session::StoredGraphNode> = graph
         .nodes
         .iter()
         .map(|node| (node.identifier.as_str(), node))
@@ -196,7 +196,7 @@ pub fn teardown_from_graph(
 /// eligible node (sorted), then reverses the resulting forward-topo
 /// order. Cycles surface as `TeardownError::CycleDetected`.
 pub(crate) fn compute_teardown_order(
-    graph: &ato_session_core::StoredExecutionGraph,
+    graph: &capsule::state::session::StoredExecutionGraph,
 ) -> Result<Vec<String>, TeardownError> {
     use crate::application::session_graph_populate::{
         EDGE_KIND_DEPENDS_ON, EDGE_KIND_PROVIDES, EDGE_KIND_USES, NODE_KIND_PROVIDER,
@@ -268,8 +268,8 @@ pub(crate) fn compute_teardown_order(
 /// `orchestration_teardown::stop_orchestration_service_record`
 /// consumes. Mirror of the writer in `session_graph_populate.rs`.
 fn service_record_from_node(
-    node: &ato_session_core::StoredGraphNode,
-) -> ato_session_core::StoredOrchestrationService {
+    node: &capsule::state::session::StoredGraphNode,
+) -> capsule::state::session::StoredOrchestrationService {
     let target_label = node
         .metadata
         .get("target_label")
@@ -293,7 +293,7 @@ fn service_record_from_node(
         .get("published_port")
         .and_then(|s| s.parse::<u16>().ok())
         .or(node.port);
-    ato_session_core::StoredOrchestrationService {
+    capsule::state::session::StoredOrchestrationService {
         name: node.identifier.clone(),
         target_label,
         local_pid: node.pid,
@@ -527,7 +527,7 @@ mod tests {
     /// so the test doesn't actually try to kill processes.
     #[test]
     fn teardown_from_graph_visits_service_and_provider_kinds() {
-        use ato_session_core::{StoredExecutionGraph, StoredGraphNode};
+        use capsule::state::session::{StoredExecutionGraph, StoredGraphNode};
         use std::collections::BTreeMap;
 
         let provider_node = StoredGraphNode {
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn teardown_from_graph_empty_graph_is_noop() {
-        use ato_session_core::StoredExecutionGraph;
+        use capsule::state::session::StoredExecutionGraph;
         let graph = StoredExecutionGraph {
             schema_version: StoredExecutionGraph::SCHEMA_VERSION,
             nodes: vec![],
@@ -576,8 +576,8 @@ mod tests {
 
     // ---------- PR-5b-fix: edge-traversal ordering tests ----------
 
-    fn node(kind: &str, id: &str) -> ato_session_core::StoredGraphNode {
-        ato_session_core::StoredGraphNode {
+    fn node(kind: &str, id: &str) -> capsule::state::session::StoredGraphNode {
+        capsule::state::session::StoredGraphNode {
             kind: kind.to_string(),
             identifier: id.to_string(),
             pid: Some(0),
@@ -589,8 +589,8 @@ mod tests {
         }
     }
 
-    fn edge(source: &str, target: &str, kind: &str) -> ato_session_core::StoredGraphEdge {
-        ato_session_core::StoredGraphEdge {
+    fn edge(source: &str, target: &str, kind: &str) -> capsule::state::session::StoredGraphEdge {
+        capsule::state::session::StoredGraphEdge {
             source: source.to_string(),
             target: target.to_string(),
             kind: kind.to_string(),
@@ -599,11 +599,11 @@ mod tests {
     }
 
     fn graph(
-        nodes: Vec<ato_session_core::StoredGraphNode>,
-        edges: Vec<ato_session_core::StoredGraphEdge>,
-    ) -> ato_session_core::StoredExecutionGraph {
-        ato_session_core::StoredExecutionGraph {
-            schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+        nodes: Vec<capsule::state::session::StoredGraphNode>,
+        edges: Vec<capsule::state::session::StoredGraphEdge>,
+    ) -> capsule::state::session::StoredExecutionGraph {
+        capsule::state::session::StoredExecutionGraph {
+            schema_version: capsule::state::session::StoredExecutionGraph::SCHEMA_VERSION,
             nodes,
             edges,
         }
