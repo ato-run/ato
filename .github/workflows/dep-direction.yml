@@ -2,8 +2,8 @@ name: dep-direction
 
 # Enforces the workspace dependency DAG so the wire / runtime / shell
 # layering can't silently regress. The single biggest invariant is that
-# `ato-protocol` stays a DAG root (consumed by both `ato-cli` and
-# `ato-desktop`, depends on neither), since that's what lets the Desktop
+# `ato-protocol` stays a DAG root (consumed by both `cli` and
+# `desktop`, depends on neither), since that's what lets the Desktop
 # link the IPC surface without dragging in capsule's runtime stack
 # (bollard / tonic / rusqlite / reqwest / axum / prost / tokio-`full`).
 #
@@ -48,7 +48,7 @@ jobs:
           # violations.
           tree=$(cargo tree -p ato-protocol --prefix=none --edges=normal,build,dev)
           violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
-            grep -E '^(ato-cli|capsule|ato-desktop|ato-desktop-xtask|lock-draft-engine)$' || true)
+            grep -E '^(cli|capsule|desktop|ato-desktop-xtask|lock-draft-engine)$' || true)
           if [ -n "$violations" ]; then
             echo "::error::ato-protocol pulled in a forbidden ato-/capsule/lock-draft dep:"
             echo "$violations"
@@ -81,66 +81,66 @@ jobs:
           fi
           echo "OK: ato-protocol stays free of GUI / runtime deps."
 
-      - name: ato-desktop does not depend on the ato-cli crate (process-spawn boundary)
+      - name: desktop does not depend on the cli crate (process-spawn boundary)
         run: |
           set -euo pipefail
-          # ato-desktop spawns the `ato` binary as a subprocess; it must
-          # never link the ato-cli library. Catching this at Cargo-dep
+          # desktop spawns the `ato` binary as a subprocess; it must
+          # never link the cli library. Catching this at Cargo-dep
           # level keeps the boundary honest even if the spawn site looks
           # innocuous.
-          # NOTE: ato-desktop lives outside the workspace (see root
+          # NOTE: desktop lives outside the workspace (see root
           # Cargo.toml `exclude` — its git-only deps would break
           # `cargo package --workspace`), so we must address it via
-          # --manifest-path rather than `-p ato-desktop`.
-          tree=$(cargo tree --manifest-path crates/ato-desktop/Cargo.toml --prefix=none --edges=normal,build,dev)
-          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^ato-cli$' > /dev/null; then
-            echo "::error::ato-desktop linked ato-cli as a Cargo dep — that violates the process-spawn boundary."
-            echo "ato-desktop must spawn the ato binary, not link its library."
+          # --manifest-path rather than `-p desktop`.
+          tree=$(cargo tree --manifest-path crates/desktop/Cargo.toml --prefix=none --edges=normal,build,dev)
+          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^cli$' > /dev/null; then
+            echo "::error::desktop linked cli as a Cargo dep — that violates the process-spawn boundary."
+            echo "desktop must spawn the ato binary, not link its library."
             exit 1
           fi
-          echo "OK: ato-desktop does not depend on the ato-cli crate."
+          echo "OK: desktop does not depend on the cli crate."
 
-      - name: ato-cli does not depend on ato-desktop (one-way arrow)
+      - name: cli does not depend on desktop (one-way arrow)
         run: |
           set -euo pipefail
-          # The arrow is ato-desktop → ato-cli (process spawn). The
+          # The arrow is desktop → cli (process spawn). The
           # reverse direction would let CLI builds drag in GPUI, which
           # is exactly what we don't want.
-          tree=$(cargo tree -p ato-cli --prefix=none --edges=normal,build,dev)
-          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^(ato-desktop|ato-desktop-xtask|gpui|gpui-component|gpui_platform|wry)$' > /dev/null; then
-            echo "::error::ato-cli pulled in a Desktop-only dep (above)."
+          tree=$(cargo tree -p cli --prefix=none --edges=normal,build,dev)
+          if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^(desktop|ato-desktop-xtask|gpui|gpui-component|gpui_platform|wry)$' > /dev/null; then
+            echo "::error::cli pulled in a Desktop-only dep (above)."
             exit 1
           fi
-          echo "OK: ato-cli stays Desktop-free."
+          echo "OK: cli stays Desktop-free."
 
-      - name: nacelle is a sibling binary, not linked from ato-cli (process-spawn boundary)
+      - name: nacelle is a sibling binary, not linked from cli (process-spawn boundary)
         run: |
           set -euo pipefail
-          # ato-cli invokes nacelle via subprocess (--nacelle <path>),
-          # never as a Cargo dep. Same shape as ato-desktop → ato-cli.
+          # cli invokes nacelle via subprocess (--nacelle <path>),
+          # never as a Cargo dep. Same shape as desktop → cli.
           # If anyone tries to link nacelle into the CLI to "share types",
           # they should hoist those types into ato-protocol instead — see
           # docs/monorepo-consolidation-plan.md §P3 for the rationale.
-          tree=$(cargo tree -p ato-cli --prefix=none --edges=normal,build,dev)
+          tree=$(cargo tree -p cli --prefix=none --edges=normal,build,dev)
           if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^nacelle$' > /dev/null; then
-            echo "::error::ato-cli linked nacelle as a Cargo dep — that violates the process-spawn boundary."
-            echo "ato-cli must spawn the nacelle binary, not link its library."
+            echo "::error::cli linked nacelle as a Cargo dep — that violates the process-spawn boundary."
+            echo "cli must spawn the nacelle binary, not link its library."
             exit 1
           fi
-          echo "OK: ato-cli does not link nacelle."
+          echo "OK: cli does not link nacelle."
 
       - name: nacelle does not depend on ato-* / capsule-* crates (sandbox stays independent)
         run: |
           set -euo pipefail
           # nacelle is the sandbox runtime; it must not pull in any
-          # workspace crate. A reverse arrow (nacelle → ato-cli or
+          # workspace crate. A reverse arrow (nacelle → cli or
           # nacelle → capsule) would create a dependency cycle the
-          # moment ato-cli starts wanting types from nacelle. Keep the
+          # moment cli starts wanting types from nacelle. Keep the
           # sandbox a clean DAG leaf so the CLI can spawn it from any
           # version pin (release matrix, vendored cache, system PATH).
           tree=$(cargo tree -p nacelle --prefix=none --edges=normal,build,dev)
           violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
-            grep -E '^(ato-cli|ato-desktop|ato-desktop-xtask|capsule|ato-protocol|lock-draft-engine)$' || true)
+            grep -E '^(cli|desktop|ato-desktop-xtask|capsule|ato-protocol|lock-draft-engine)$' || true)
           if [ -n "$violations" ]; then
             echo "::error::nacelle pulled in a forbidden workspace dep:"
             echo "$violations"
