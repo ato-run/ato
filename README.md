@@ -379,11 +379,11 @@ This repository contains the CLI, runtime libraries, desktop app, and supporting
 ```text
 ato/
 ├── crates/
-│   ├── ato-cli/          # command-line interface
-│   ├── capsule-core/     # project detection, locking, packing, runtime logic
-│   ├── capsule-wire/     # small shared message types
-│   ├── ato-session-core/ # session process and state helpers
-│   ├── ato-desktop/      # desktop app
+│   ├── ato-protocol/     # IPC/wire surface — pure message types, DAG root
+│   ├── capsule/          # project detection, locking, packing, runtime logic + local session state
+│   ├── ato-cli/          # command-line interface (orchestrator)
+│   ├── ato-desktop/      # desktop app (shell)
+│   ├── ato-netd/         # networking daemon (pairing, reachability, transport)
 │   └── nacelle/          # source runtime sandbox
 ├── sidecars/
 │   └── ato-tsnetd/       # optional network sidecar
@@ -392,14 +392,36 @@ ato/
 └── .github/workflows/    # CI
 ```
 
-Most users should use the installer. Contributors usually work in `crates/ato-cli`, `crates/ato-desktop`, `capsule-core`, and the runtime sidecars.
+Most users should use the installer. Contributors usually work in `crates/ato-cli`, `crates/ato-desktop`, `crates/capsule`, and the runtime sidecars.
+
+### Dependency invariants
+
+The crates form a one-way dependency DAG, enforced in CI by
+`scripts/check-dep-direction.sh`:
+
+- **`ato-protocol`** is the DAG root: pure IPC/wire types with **no
+  workspace-crate dependencies**. Both `ato-cli` and `ato-desktop` link it to
+  share the wire surface without dragging in heavy runtime deps.
+- **`capsule`** owns the domain logic (detection, locking, packing, runtime
+  graph) **and** local session state. It may depend on `ato-protocol`; it must
+  not depend on `ato-cli`, `ato-desktop`, `ato-netd`, or `nacelle`.
+- **`ato-netd`** speaks the protocol: it may depend on `ato-protocol`; it must
+  not depend on `capsule`, `ato-cli`, `ato-desktop`, or `nacelle`.
+- **`nacelle`** enforces the sandbox only. It stays a clean leaf — no workspace
+  dependencies beyond (optionally) `ato-protocol`.
+- **`ato-cli`** orchestrates: it may depend on `capsule`, `ato-protocol`, and
+  `nacelle`; it must not depend on `ato-desktop` (the arrow points the other
+  way — Desktop spawns the `ato` binary as a subprocess).
+- **`ato-desktop`** is the shell: it speaks `ato-protocol` and reads a
+  lightweight slice of `capsule` state, and **spawns the `ato` CLI** rather
+  than linking it. It must not depend on `ato-cli`, `ato-netd`, or `nacelle`.
 
 ## Develop
 
 ```bash
 cargo check --workspace --all-targets
 cargo test -p ato-cli
-cargo test -p capsule-core
+cargo test -p capsule
 cargo run -p ato-cli -- --help
 ```
 

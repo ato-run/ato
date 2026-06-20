@@ -34,7 +34,7 @@ pub use session::{start_session, stop_session, watch_parent_and_stop_session};
 // few in-module helpers from session. Re-exported as pub(crate) so the
 // materialization layer can share storage / probe primitives without
 // flipping the entire `session` module to public. The session-record
-// schema itself now lives in `ato-session-core` (RFC §3.2 PR 4A.0);
+// schema itself now lives in `capsule` (RFC §3.2 PR 4A.0);
 // `session::StoredSessionInfo` is a re-export of that shared type.
 pub(crate) use session::{StoredSessionInfo, http_get_ok, session_root};
 
@@ -1377,7 +1377,7 @@ mod tests {
     }
 
     fn assert_snapshot(name: &str, actual: String) {
-        // CCP envelope fixtures live in `capsule-core` so the consumer
+        // CCP envelope fixtures live in `capsule` so the consumer
         // (`ato-desktop`) can run the same golden checks against the same
         // bytes. See `docs/monorepo-consolidation-plan.md` §M4.
         let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))

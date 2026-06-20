@@ -1,4 +1,4 @@
-//! Error types for the `capsule-core` crate.
+//! Error types for the `capsule` crate.
 //!
 //! Two distinct error types serve different roles and must not be merged:
 //!

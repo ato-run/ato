@@ -3785,7 +3785,7 @@ volumes:
         assert!(spec.readonly);
     }
 
-    // resolve_oci_mount strategy selection is unit-tested in capsule-core
+    // resolve_oci_mount strategy selection is unit-tested in capsule
     // (`engine::runtime::oci::mount_source_tests`) since the helper now lives
     // there and is shared by both the multi-service and orchestrator paths (#444).
 

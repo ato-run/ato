@@ -1,4 +1,4 @@
-//! `ato-session-core` — session record schema + validation helpers shared
+//! `capsule` — session record schema + validation helpers shared
 //! by `ato-cli` (which writes records when a capsule session starts) and
 //! `ato-desktop` (which reads records to skip the resolve / session-start
 //! subprocesses on warm clicks).
@@ -6,7 +6,7 @@
 //! ## Why a dedicated crate
 //!
 //! `ato-cli` carries heavy dependencies (clap, tokio, axum, reqwest,
-//! wasmtime, …) that the Desktop binary should not absorb. `capsule-wire`
+//! wasmtime, …) that the Desktop binary should not absorb. `ato-protocol`
 //! is constitutionally pure-DTO and refuses runtime/network helpers.
 //! Validation needs both the DTO **and** small OS helpers (PID alive,
 //! process start time, HTTP healthcheck) — so a shared crate sits between

@@ -199,7 +199,7 @@ pub fn lookup(name: &str) -> Option<&'static RuntimeToolSpec> {
 }
 
 /// Per-call dependency injection. Keeping resolution in the caller avoids a
-/// dependency back into the runtime manager (ato-cli) from capsule-core.
+/// dependency back into the runtime manager (ato-cli) from capsule.
 #[derive(Debug, Default, Clone)]
 pub struct ToolDeps {
     pub node_bin: Option<PathBuf>,

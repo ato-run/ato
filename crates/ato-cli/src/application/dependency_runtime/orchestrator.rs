@@ -8,7 +8,7 @@
 //!
 //! # Pure with respect to fetching
 //!
-//! Like the lock-time verifier in `capsule-core`, this orchestrator does
+//! Like the lock-time verifier in `capsule`, this orchestrator does
 //! **not** fetch provider capsules. The caller supplies an
 //! [`OrchestratorProvider`] for each dep, containing the parsed provider
 //! manifest body and the local filesystem path where the provider was
@@ -34,7 +34,7 @@
 //!
 //! Out of scope for MVP (deferred): `[provision]` block execution, exec
 //! variants `Stdin` / `EnvVar` (TempFile is the v1 default), HTTP / unix
-//! socket ready probes (lock-fail-closed in capsule-core).
+//! socket ready probes (lock-fail-closed in capsule).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
@@ -1024,7 +1024,7 @@ fn ready_probe_kind(
                 database: rendered_database,
             })
         }
-        // Reserved variants are lock-fail-closed in capsule-core; if they
+        // Reserved variants are lock-fail-closed in capsule; if they
         // somehow reach here it's a programming bug.
         ReadyProbe::Http { .. } => Err(OrchestratorError::TemplateExpansion {
             alias: "<ready>".to_string(),

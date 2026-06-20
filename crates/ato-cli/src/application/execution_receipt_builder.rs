@@ -740,8 +740,8 @@ mod graph_identity_tests {
     //! `FilesystemIdentityV2` / `PolicyIdentityV2` inputs so we don't
     //! have to spin up the full observer pipeline.
     //!
-    //! The capsule-core canonicalization tests
-    //! (`crates/capsule-core/src/engine/execution_graph/canonical.rs`)
+    //! The capsule canonicalization tests
+    //! (`crates/capsule/src/engine/execution_graph/canonical.rs`)
     //! pin sensitivity at the canonical-form layer; these tests pin
     //! that the receipt-builder helpers route the right facts into the
     //! right domain.
@@ -822,7 +822,7 @@ contract = "service@1"
 
     /// #493: the launch graph the receipt builder projects into node/edge
     /// receipts is non-empty for a normal dependency-bearing launch. This
-    /// closes the loop with the capsule-core mapping tests: the production
+    /// closes the loop with the capsule mapping tests: the production
     /// graph source the builder feeds to `with_graph_projection` actually
     /// carries nodes and edges, so the wired receipts are non-empty.
     #[test]

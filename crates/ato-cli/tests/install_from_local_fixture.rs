@@ -343,9 +343,9 @@ struct StoredCondition {
 }
 
 /// Read the launch-condition ledger for an ipk from the hermetic installed-state
-/// DB via the public capsule-core API (not raw SQL).
+/// DB via the public capsule API (not raw SQL).
 fn read_launch_conditions(ato_home: &Path, ipk: &str) -> Vec<StoredCondition> {
-    // The DB lives at $ATO_HOME/state/. Point capsule-core's home resolution at
+    // The DB lives at $ATO_HOME/state/. Point capsule's home resolution at
     // the hermetic ATO_HOME for this read.
     // SAFETY: tests in this file run serially (`#[serial]`), so mutating the
     // process env here does not race another test.

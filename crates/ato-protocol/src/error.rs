@@ -1,15 +1,15 @@
-//! Slim error type for capsule-wire's pure parsers.
+//! Slim error type for ato-protocol's pure parsers.
 //!
-//! `capsule-core::CapsuleError` is rich (it carries variants for HTTP,
+//! `capsule::CapsuleError` is rich (it carries variants for HTTP,
 //! container engines, sidecar IPC, crypto, etc.) and pulls in `reqwest`
 //! transitively. The handle parser only ever needs to say "the input was
 //! malformed" — there is no I/O, no network, no process. Defining a slim
-//! local [`WireError`] here keeps `capsule-wire`'s dependency surface
+//! local [`WireError`] here keeps `ato-protocol`'s dependency surface
 //! minimal (`thiserror` only).
 //!
-//! Callers in `capsule-core` that propagate handle-parser errors into a
+//! Callers in `capsule` that propagate handle-parser errors into a
 //! `Result<_, CapsuleError>` get auto-conversion via an `impl
-//! From<WireError> for CapsuleError` declared in capsule-core's
+//! From<WireError> for CapsuleError` declared in capsule's
 //! `foundation::error` — the `?` operator at the call site is unchanged.
 
 use thiserror::Error;
@@ -23,6 +23,6 @@ pub enum WireError {
     Config(String),
 }
 
-/// Convenience alias matching the `capsule-core` shape so files moved
+/// Convenience alias matching the `capsule` shape so files moved
 /// from there keep their `Result<T>` signatures verbatim.
 pub type Result<T> = std::result::Result<T, WireError>;

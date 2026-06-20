@@ -12,7 +12,7 @@ use super::types::{ExecutionGraph, ExecutionGraphNode};
 /// This type deliberately carries graph facts rather than `ato-cli` runtime
 /// handles. It can be populated from a manifest/router decision, lockfile,
 /// execution plan, launch context, consent/policy facts, and source
-/// materialization observations without making `capsule-core` depend on CLI
+/// materialization observations without making `capsule` depend on CLI
 /// crates. All downstream execution views should be projections from the
 /// resulting [`LaunchGraphBundle`].
 #[derive(Debug, Clone, Default)]
@@ -78,7 +78,7 @@ pub struct GraphLaunchInput {
 
 /// PR-4b: consent identity input. Mirrors the 5 fields the consent
 /// log keys on (3 from `ConsentKey` + 2 policy hashes). Callers feed
-/// this from `ExecutionPlan.consent`; capsule-core stays
+/// this from `ExecutionPlan.consent`; capsule stays
 /// compile-plan-agnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphConsentInput {

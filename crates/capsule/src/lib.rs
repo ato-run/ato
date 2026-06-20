@@ -1,4 +1,4 @@
-//! # capsule-core
+//! # capsule
 //!
 //! Core library for the `ato` capsule runtime system.
 //!
@@ -98,15 +98,15 @@ pub mod config;
 // ── Layer 8b: State ───────────────────────────────────────────────────────
 //
 // Runtime state schemas + validation helpers. `state::session` was formerly
-// the standalone `ato-session-core` crate; absorbed here (N-series
+// the standalone `capsule` crate; absorbed here (N-series
 // consolidation) so the session record schema lives beside the wire surface.
 pub mod state;
 
 // ── Layer 9: Wire protocols (cross-crate) ─────────────────────────────────
 //
 // Schema/tolerance for the Capsule Control Protocol. Originally lived in
-// capsule-core (M4); extracted to `capsule-wire` (N2) so `ato-desktop` can
-// link the wire surface without pulling in capsule-core's runtime deps.
+// capsule (M4); extracted to `ato-protocol` (N2) so `ato-desktop` can
+// link the wire surface without pulling in capsule's runtime deps.
 // Re-exported here so existing `capsule::ccp::*` paths in the CLI
 // keep working unchanged. See `docs/monorepo-consolidation-plan.md` §N2.
 pub use ato_protocol::ccp;

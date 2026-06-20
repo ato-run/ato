@@ -14,7 +14,7 @@
 //! Unix shell.
 //!
 //! The shell-detection logic and the diagnostics marker live in
-//! [`capsule::shell_support`] so the smoke runner (capsule-core) and this
+//! [`capsule::shell_support`] so the smoke runner (capsule) and this
 //! run pipeline share one implementation; this module is the thin run-pipeline
 //! wrapper. See issue #377.
 
