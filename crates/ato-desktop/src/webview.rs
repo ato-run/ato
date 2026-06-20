@@ -72,7 +72,7 @@ use crate::state::{
     PendingConsentRequest, ShellMode, WebSessionState, session::SessionRegistry,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
-use capsule_wire::handle::CapsuleDisplayStrategy;
+use ato_protocol::handle::CapsuleDisplayStrategy;
 use share_icon::{ShareIconSource, resolve_share_icon};
 use tracing::{debug, error, info, warn};
 
@@ -5058,7 +5058,7 @@ fn clear_matching_pending_resolution_secrets(
 
     request.secrets.retain(|item| {
         item.fields.iter().any(|field| match &field.kind {
-            capsule_wire::config::ConfigKind::Secret => !resolved_secret_keys.contains(&field.name),
+            ato_protocol::config::ConfigKind::Secret => !resolved_secret_keys.contains(&field.name),
             _ => true,
         })
     });
@@ -6067,7 +6067,7 @@ mod tests {
         use crate::state::{
             PendingConfigRequest, PendingConsentItem, PendingResolutionRequest, PendingSecretsItem,
         };
-        use capsule_wire::config::{ConfigField, ConfigKind};
+        use ato_protocol::config::{ConfigField, ConfigKind};
         use std::ffi::OsString;
         use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -7032,7 +7032,7 @@ mod tests {
 mod share_icon {
     use std::path::Path;
 
-    use capsule_wire::handle::CapsuleDisplayStrategy;
+    use ato_protocol::handle::CapsuleDisplayStrategy;
 
     use crate::logging::TARGET_FAVICON;
     use crate::orchestrator::CapsuleLaunchSession;

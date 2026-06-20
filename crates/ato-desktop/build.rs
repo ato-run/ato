@@ -104,7 +104,7 @@ fn rebuild_helpers(manifest_dir: &Path) {
         "../ato-cli",
         "../nacelle",
         "../capsule-core",
-        "../capsule-wire",
+        "../ato-protocol",
         "../ato-session-core",
     ] {
         println!("cargo:rerun-if-changed={dir}");

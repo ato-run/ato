@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 # This crate intentionally has minimal dependencies: it sits between
-# `capsule-wire` (pure DTO root) and the runtime crates that need both
+# `ato-protocol` (pure DTO root) and the runtime crates that need both
 # the on-disk session record schema and the small set of OS helpers
 # (PID alive, process start time, HTTP healthcheck) used to validate a
 # stored session before reuse. Keep this crate free of CLI / GUI /
@@ -27,7 +27,7 @@ path = "src/lib.rs"
 anyhow = "1.0"
 blake3 = "1.5"
 capsule-core = { path = "../capsule-core", version = "0.11.0" }
-capsule-wire = { path = "../capsule-wire", version = "0.1.0" }
+ato-protocol = { path = "../ato-protocol", version = "0.1.0" }
 dirs = "5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
