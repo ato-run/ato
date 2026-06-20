@@ -30,7 +30,7 @@ cargo test <test_name>
 | `ui/` | GPUI render tree — `DesktopShell` owns state and dispatches actions to sub-renderers |
 | `webview.rs` | `WebViewManager` — creates/destroys Wry child WebViews from `AppState` on each render pass |
 | `bridge.rs` | `BridgeProxy` — handles JSON-RPC messages from guest JS over the custom protocol |
-| `orchestrator.rs` | Subprocess wrapper around `ato-cli` for guest session lifecycle (resolve, start, stop) |
+| `orchestrator.rs` | Subprocess wrapper around the `cli` crate for guest session lifecycle (resolve, start, stop) |
 
 ### State → WebView sync model
 
@@ -42,7 +42,7 @@ Each pane gets a scheme derived from its `partition_id`. All asset requests are 
 
 ### Guest session lifecycle
 
-For `GuestRoute::LocalCapsule`, `webview.rs` calls `orchestrator::resolve_and_start_guest`, which shells out to `ato-cli` via `cargo run --manifest-path ../ato-cli/Cargo.toml`. Session state files live under `~/.ato/apps/desky/sessions/` (override with `DESKY_SESSION_ROOT`). On pane close or process exit, the session is stopped via `ato-cli app session stop`.
+For `GuestRoute::LocalCapsule`, `webview.rs` calls `orchestrator::resolve_and_start_guest`, which shells out to the `cli` crate via `cargo run --manifest-path ../cli/Cargo.toml`. Session state files live under `~/.ato/apps/desky/sessions/` (override with `DESKY_SESSION_ROOT`). On pane close or process exit, the session is stopped via `ato app session stop`.
 
 ### Preload scripts (`assets/preload/`)
 

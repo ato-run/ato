@@ -45,7 +45,7 @@ This root directory (`capsuled-dev/`) is **NOT** a git repository. Each app unde
 apps/
 ├── ato-cli/            # Meta-CLI (Rust)
 │   ├── src/                # CLI commands (open, pack, ipc, profile, key, etc.)
-│   ├── core/src/           # capsule-core library (router, resource, signing, IPC)
+│   ├── core/src/           # capsule library (router, resource, signing, IPC)
 │   └── tests/              # CLI integration & E2E tests
 ├── nacelle/            # Source Runtime Engine (Rust)
 │   └── src/                # Sandbox (Landlock/eBPF), execution, supervision
@@ -83,13 +83,13 @@ Hermetic CLI, desktop, MCP, and manual smoke verification must use a fresh env r
 ```bash
 # Build
  cargo build --workspace                    # All crates
- cargo build -p ato-cli                 # Single crate
+ cargo build -p cli                 # Single crate
  cargo build --release -p nacelle          # Release
 
 # Test
  cargo test --workspace                     # All tests
- cargo test -p ato-cli test_name       # Single test
- cargo test -p capsule-core --lib test_fn  # Library test
+ cargo test -p cli test_name       # Single test
+ cargo test -p capsule --lib test_fn  # Library test
  cargo test -- --nocapture                 # Show output
 
 # Lint/Format

@@ -48,7 +48,7 @@ metadata and map it to `~/.ato/executions/<execution_id>/receipt.json`.
 References:
 
 - [`rfcs/draft/beyond-reproducible-build.ja.md`](rfcs/draft/beyond-reproducible-build.ja.md)
-- [`crates/ato-desktop/src/orchestrator.rs`](https://github.com/ato-run/ato/blob/main/crates/ato-desktop/src/orchestrator.rs)
+- [`crates/desktop/src/orchestrator.rs`](https://github.com/ato-run/ato/blob/main/crates/desktop/src/orchestrator.rs)
 
 ## Same source is not same execution
 

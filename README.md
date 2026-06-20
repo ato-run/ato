@@ -423,15 +423,15 @@ The crates form a one-way dependency DAG, enforced in CI by
 
 ```bash
 cargo check --workspace --all-targets
-cargo test -p ato-cli
+cargo test -p cli
 cargo test -p capsule
-cargo run -p ato-cli -- --help
+cargo run -p cli -- --help
 ```
 
 Desktop bundle examples:
 
 ```bash
-cd crates/ato-desktop
+cd crates/desktop
 cargo xtask bundle darwin-arm64
 cargo xtask bundle windows-x86_64
 cargo xtask bundle linux-x86_64
