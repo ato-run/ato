@@ -4,7 +4,7 @@
 //! the old `handle_stable_origin_proxy_request` path in `webview.rs`.
 //!
 //! # Control-plane contract
-//! Desktop only talks to `ato-netd` through [`ato_net::control::SyncClient`].
+//! Desktop only talks to `ato-netd` through [`crate::net_client::SyncClient`].
 //! The wire protocol (newline-delimited JSON over a local control transport) is an
 //! implementation detail of `ato-net` / `ato-netd` and must not be re-implemented
 //! here.
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use crate::proc_util::CommandNoWindowExt;
 
-use ato_net::control::SyncClient;
+use crate::net_client::SyncClient;
 
 use crate::state::GuestRoute;
 
@@ -58,7 +58,7 @@ pub(crate) enum IngressError {
 
     /// Generic control-plane error (not PersistedPortTaken).
     #[error("ato-netd control error: {0}")]
-    Control(#[from] ato_net::control::Error),
+    Control(#[from] crate::net_client::Error),
 
     /// Platform does not support ato-netd in the current build.
     #[error("ato-netd ingress is not supported on this platform in the current release")]
@@ -83,15 +83,15 @@ pub(crate) enum IngressError {
 /// - [`GuestRoute::Terminal`] — terminal pane, not a web capsule
 pub(crate) fn logical_key_for_route(route: &GuestRoute) -> Option<String> {
     match route {
-        GuestRoute::CapsuleHandle { handle, .. } => {
-            Some(ato_net::stable_origin::logical_key_for_handle(handle))
-        }
-        GuestRoute::LocalManifest(local) => Some(ato_net::stable_origin::logical_key_for_handle(
-            &local.source_handle,
-        )),
-        GuestRoute::Capsule { session, .. } => {
-            Some(ato_net::stable_origin::logical_key_for_session(session))
-        }
+        GuestRoute::CapsuleHandle { handle, .. } => Some(
+            ato_protocol::net::stable_origin::logical_key_for_handle(handle),
+        ),
+        GuestRoute::LocalManifest(local) => Some(
+            ato_protocol::net::stable_origin::logical_key_for_handle(&local.source_handle),
+        ),
+        GuestRoute::Capsule { session, .. } => Some(
+            ato_protocol::net::stable_origin::logical_key_for_session(session),
+        ),
         GuestRoute::CapsuleUrl { .. }
         | GuestRoute::ExternalUrl(_)
         | GuestRoute::Terminal { .. } => None,
@@ -146,7 +146,7 @@ pub(crate) fn register_stable_ingress(key: &str, upstream_url: &str) -> Result<u
     let mut client = ensure_netd_connected()?;
     match client.register_ingress(key, &normalized) {
         Ok(info) => Ok(info.port),
-        Err(ato_net::control::Error::DaemonError { code, message }) => {
+        Err(crate::net_client::Error::DaemonError { code, message }) => {
             Err(map_daemon_error(key, &code, &message))
         }
         Err(other) => Err(IngressError::Control(other)),
@@ -165,7 +165,7 @@ pub(crate) fn deregister_stable_ingress(key: &str) {
                 "failed to deregister ato-netd ingress route (best-effort)"
             ),
         },
-        Err(ato_net::control::Error::NotRunning { .. }) => {
+        Err(crate::net_client::Error::NotRunning { .. }) => {
             // Daemon already stopped — nothing to deregister.
         }
         Err(err) => tracing::warn!(
@@ -218,7 +218,7 @@ pub(crate) fn register_ephemeral_ingress(
     let mut client = ensure_netd_connected()?;
     match client.register_ephemeral_ingress(key, &normalized) {
         Ok(info) => Ok(info.port),
-        Err(ato_net::control::Error::DaemonError { code, message }) => {
+        Err(crate::net_client::Error::DaemonError { code, message }) => {
             Err(map_daemon_error(key, &code, &message))
         }
         Err(other) => Err(IngressError::Control(other)),
@@ -249,7 +249,7 @@ pub(crate) fn deregister_ephemeral_ingress(key: &str) {
                     "failed to deregister ato-netd ephemeral ingress route (best-effort)"
                 ),
             },
-            Err(ato_net::control::Error::NotRunning { .. }) => {
+            Err(crate::net_client::Error::NotRunning { .. }) => {
                 // Daemon already stopped — nothing to deregister.
             }
             Err(err) => tracing::warn!(
@@ -271,10 +271,10 @@ fn ensure_netd_connected() -> Result<SyncClient, IngressError> {
     // Fast path: daemon already running.
     match SyncClient::connect_default() {
         Ok(client) => return Ok(client),
-        Err(ato_net::control::Error::NotRunning { .. }) => {}
-        Err(ato_net::control::Error::PermissionDenied { path, .. }) => {
+        Err(crate::net_client::Error::NotRunning { .. }) => {}
+        Err(crate::net_client::Error::PermissionDenied { path, .. }) => {
             return Err(IngressError::Control(
-                ato_net::control::Error::PermissionDenied {
+                crate::net_client::Error::PermissionDenied {
                     path,
                     source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
                 },
@@ -307,7 +307,7 @@ fn ensure_netd_connected() -> Result<SyncClient, IngressError> {
                 tracing::info!("ato-netd is ready (attempt {})", i + 1);
                 return Ok(client);
             }
-            Err(ato_net::control::Error::NotRunning { .. }) => continue,
+            Err(crate::net_client::Error::NotRunning { .. }) => continue,
             Err(other) => return Err(IngressError::Control(other)),
         }
     }
@@ -429,7 +429,7 @@ fn map_daemon_error(key: &str, code: &str, message: &str) -> IngressError {
             port,
         };
     }
-    IngressError::Control(ato_net::control::Error::DaemonError {
+    IngressError::Control(crate::net_client::Error::DaemonError {
         code: code.to_string(),
         message: message.to_string(),
     })
@@ -561,7 +561,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                IngressError::Control(ato_net::control::Error::DaemonError { .. })
+                IngressError::Control(crate::net_client::Error::DaemonError { .. })
             ),
             "non-claimed error should pass through as Control"
         );

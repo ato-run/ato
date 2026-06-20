@@ -15,14 +15,14 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::resolver::ResolvedRecord;
+use super::resolver::ResolvedRecord;
 
 // ── DnsResolutionRecord ───────────────────────────────────────────────────────
 
 /// A complete record of one DNS resolution attempt, suitable for inclusion
 /// in an Ato session receipt.
 ///
-/// Mirrors [`crate::resolver::ResolvedRecord`] but drops non-serialisable
+/// Mirrors [`super::resolver::ResolvedRecord`] but drops non-serialisable
 /// fields and adds receipt-specific metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DnsResolutionRecord {
@@ -44,7 +44,7 @@ pub struct DnsResolutionRecord {
     /// Which resolver backend answered (e.g. `"system"`, `"doh:https://…"`).
     pub backend: String,
 
-    /// Present when a [`crate::resolver::Chain`] fell back to this backend.
+    /// Present when a a resolver `Chain` fell back to this backend.
     pub fallback_reason: Option<String>,
 
     /// Wall-clock timestamp (Unix seconds) at which the query was issued.
@@ -61,7 +61,7 @@ pub struct DnsResolutionRecord {
 }
 
 impl DnsResolutionRecord {
-    /// Construct a success record from a [`ResolvedRecord`] plus timing.
+    /// Construct a success record from a [`super::resolver::ResolvedRecord`] plus timing.
     pub fn from_resolved(record: &ResolvedRecord, queried_at_unix: u64, latency_ms: u32) -> Self {
         Self {
             name: record.name.clone(),

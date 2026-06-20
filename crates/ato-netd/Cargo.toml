@@ -22,17 +22,33 @@ publish = false
 [package.metadata.dist]
 dist = false
 
+[lib]
+name = "ato_netd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ato-netd"
 path = "src/main.rs"
 
+[features]
+default = []
+# Enable DNS-over-HTTPS support in the DohResolver backend (requires a TLS
+# stack). Without it the struct exists but `DohResolver::new` returns
+# `BackendUnavailable`.
+doh = ["hickory-resolver/dns-over-https-rustls"]
+
 [dependencies]
-# Shared types live in ato-net; depending on it keeps client/server in
-# lockstep on the wire protocol (Request / Response enums).
-ato-net = { path = "../ato-net", version = "0.5.2" }
-# Path resolution for the canonical control socket location under
-# ${ATO_HOME}/run/. Same resolver every other ato crate uses.
-capsule = { path = "../capsule", version = "0.11.0" }
+# Shared wire types (control envelopes, resolver / receipt DTOs,
+# stable-origin derivation) live in ato-protocol; depending on it keeps
+# client/server in lockstep on the wire protocol (Request / Response enums)
+# without pulling capsule or a separate network crate into the daemon.
+ato-protocol = { path = "../ato-protocol" }
+
+# Async trait support for the object-safe Resolver trait.
+async-trait = "0.1"
+# DNS resolver backends — Hickory provides structured CNAME chains,
+# per-record TTL, and typed errors that tokio::net::lookup_host cannot.
+hickory-resolver = "0.24"
 
 clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -72,7 +88,6 @@ rand = "0.8"
 hex = "0.4"
 
 [dev-dependencies]
-ato-net = { path = "../ato-net", version = "0.5.2" }
 tempfile = "3.8"
 tokio = { version = "1", features = ["full"] }
 # For test HTTP clients in ingress acceptance tests.

@@ -1,134 +1,31 @@
-//! DNS resolver abstraction — Slice D (#299).
+//! DNS resolver backends — Slice D (#299).
+//!
+//! The transport-neutral DTOs ([`ResolveOptions`], [`ResolvedRecord`],
+//! [`ResolverError`]) live in `ato_protocol::net::resolver`; this module
+//! holds the runtime backends that pull in `hickory-resolver` and Tokio.
 //!
 //! # Design
 //!
 //! - [`Resolver`] is the single async trait.  All backends implement it.
-//! - [`ResolvedRecord`] carries the full resolution result: requested name,
-//!   CNAME chain, A + AAAA addresses, per-record TTL, which backend answered,
-//!   and (for `Chain` fallback) why fallback occurred.
-//! - [`ResolverError`] is typed so callers can match `NxDomain` vs `Timeout`
-//!   without parsing error strings.
-//!
-//! # Backends
-//!
-//! | Backend         | When to use |
-//! |-----------------|-------------|
-//! | [`SystemResolver`] | Default. Reads `/etc/resolv.conf` (or OS equivalent). |
-//! | [`DohResolver`] | Optional. DNS-over-HTTPS fallback. Enabled at runtime by explicit construction; not used unless added to a [`Chain`]. |
-//! | [`Chain`]       | Tries backends in order; falls back on `Timeout` / `TransportFailure` / `BackendUnavailable`. `NxDomain` / `Servfail` / `PolicyDenied` short-circuit immediately. |
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use ato_net::resolver::{Chain, ResolveOptions, Resolver, SystemResolver};
-//!
-//! let sys = SystemResolver::new().expect("system resolver");
-//! let chain = Chain::new(vec![Box::new(sys)]);
-//! let opts = ResolveOptions::default();
-//! let record = chain.resolve("localhost", &opts).await.unwrap();
-//! assert!(!record.addrs_v4.is_empty() || !record.addrs_v6.is_empty());
-//! ```
+//! - [`SystemResolver`] reads the OS resolver configuration.
+//! - [`DohResolver`] is an optional DNS-over-HTTPS backend.
+//! - [`Chain`] tries backends in order; falls back on `Timeout` /
+//!   `TransportFailure` / `BackendUnavailable`. `NxDomain` / `Servfail` /
+//!   `PolicyDenied` short-circuit immediately.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use ato_protocol::net::resolver::{ResolveOptions, ResolvedRecord, ResolverError};
 use hickory_resolver::{
     TokioAsyncResolver,
     config::{ResolverConfig, ResolverOpts},
     error::{ResolveError, ResolveErrorKind},
     proto::rr::{RData, RecordType},
 };
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use tokio::time::{Duration, timeout};
-
-// ── Public types ─────────────────────────────────────────────────────────────
-
-/// Options passed to each [`Resolver::resolve`] call.
-#[derive(Debug, Clone)]
-pub struct ResolveOptions {
-    /// Per-lookup timeout in milliseconds. Defaults to 5 000 ms.
-    pub timeout_ms: u64,
-}
-
-impl Default for ResolveOptions {
-    fn default() -> Self {
-        Self { timeout_ms: 5_000 }
-    }
-}
-
-/// The result of a successful DNS resolution.
-///
-/// Both `addrs_v4` and `addrs_v6` may be empty if no records of that type
-/// exist; a non-empty `addrs_v4` or `addrs_v6` constitutes success.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ResolvedRecord {
-    /// The name that was originally requested.
-    pub name: String,
-
-    /// All names traversed via CNAME records, in query order.
-    ///
-    /// Empty when the name resolves directly (no CNAMEs).
-    /// For `a.example → b.example → 1.2.3.4` the chain is
-    /// `["a.example", "b.example"]`.
-    pub cname_chain: Vec<String>,
-
-    /// IPv4 addresses from A records.
-    pub addrs_v4: Vec<Ipv4Addr>,
-
-    /// IPv6 addresses from AAAA records.
-    pub addrs_v6: Vec<Ipv6Addr>,
-
-    /// TTL of the first A or AAAA record, in seconds.  `None` when no
-    /// address records were returned (should not happen on success).
-    pub ttl_seconds: Option<u32>,
-
-    /// Which backend produced this answer (e.g. `"system"`, `"doh"`).
-    pub backend: String,
-
-    /// If this record was produced by a fallback in [`Chain`], explains
-    /// why the primary backend was skipped (e.g. `"fallback_from_system"`).
-    pub fallback_reason: Option<String>,
-}
-
-/// Typed DNS resolution errors.
-///
-/// [`Chain`] treats [`Timeout`][ResolverError::Timeout],
-/// [`TransportFailure`][ResolverError::TransportFailure], and
-/// [`BackendUnavailable`][ResolverError::BackendUnavailable] as retryable
-/// (falls through to the next backend).  All other variants short-circuit.
-#[derive(Debug, Clone, Error)]
-pub enum ResolverError {
-    #[error("NXDOMAIN: {0}")]
-    NxDomain(String),
-
-    #[error("timeout resolving {0}")]
-    Timeout(String),
-
-    #[error("SERVFAIL: {0}")]
-    Servfail(String),
-
-    #[error("transport failure: {0}")]
-    TransportFailure(String),
-
-    #[error("policy denied: {0}")]
-    PolicyDenied(String),
-
-    #[error("backend unavailable: {0}")]
-    BackendUnavailable(String),
-}
-
-impl ResolverError {
-    /// Returns true for errors that [`Chain`] treats as retryable.
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Timeout(_) | Self::TransportFailure(_) | Self::BackendUnavailable(_)
-        )
-    }
-}
 
 // ── Resolver trait ────────────────────────────────────────────────────────────
 
@@ -260,7 +157,7 @@ impl DohResolver {
         #[cfg(not(feature = "doh"))]
         {
             Err(ResolverError::BackendUnavailable(format!(
-                "DohResolver is not available: recompile ato-net with the `doh` feature. \
+                "DohResolver is not available: recompile ato-netd with the `doh` feature. \
                  upstream_url={upstream_url}"
             )))
         }

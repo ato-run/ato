@@ -66,7 +66,7 @@ impl DaemonState {
     /// Failure here is a hard daemon startup error.
     pub async fn init_egress(
         &self,
-        resolver: Arc<dyn ato_net::resolver::Resolver + Send + Sync>,
+        resolver: Arc<dyn crate::net::resolver::Resolver + Send + Sync>,
     ) -> anyhow::Result<()> {
         let policy = Arc::new(EgressPolicy::permissive());
         // Bounded channel — receipts are best-effort; a closed or full

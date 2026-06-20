@@ -21,7 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(unix)]
-use ato_net::control::SyncClient;
+use crate::net_client::SyncClient;
 
 /// Environment variable that overrides the `ato-netd` binary path.
 const NETD_BIN_ENV: &str = "ATO_NETD_BIN";
@@ -46,7 +46,7 @@ pub enum EgressProxyError {
     EgressPortNotAvailable,
 
     #[error("ato-netd control error: {0}")]
-    Control(#[from] ato_net::control::Error),
+    Control(#[from] crate::net_client::Error),
 
     #[error("ato-netd egress proxy is not supported on this platform")]
     NotSupported,
@@ -114,10 +114,10 @@ fn ensure_netd_connected() -> Result<SyncClient, EgressProxyError> {
     // Fast path: daemon already running.
     match SyncClient::connect_default() {
         Ok(client) => return Ok(client),
-        Err(ato_net::control::Error::NotRunning { .. }) => {}
-        Err(ato_net::control::Error::PermissionDenied { path, .. }) => {
+        Err(crate::net_client::Error::NotRunning { .. }) => {}
+        Err(crate::net_client::Error::PermissionDenied { path, .. }) => {
             return Err(EgressProxyError::Control(
-                ato_net::control::Error::PermissionDenied {
+                crate::net_client::Error::PermissionDenied {
                     path,
                     source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
                 },
@@ -146,7 +146,7 @@ fn ensure_netd_connected() -> Result<SyncClient, EgressProxyError> {
                 tracing::info!("ato-netd is ready (attempt {})", i + 1);
                 return Ok(client);
             }
-            Err(ato_net::control::Error::NotRunning { .. }) => continue,
+            Err(crate::net_client::Error::NotRunning { .. }) => continue,
             Err(other) => return Err(EgressProxyError::Control(other)),
         }
     }

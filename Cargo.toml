@@ -6,7 +6,6 @@ members = [
     "crates/ato-protocol",
     "crates/ato-cli/lock-draft-engine",
     "crates/nacelle",
-    "crates/ato-net",
     "crates/ato-netd",
 ]
 

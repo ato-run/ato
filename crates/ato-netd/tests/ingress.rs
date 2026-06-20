@@ -3,7 +3,7 @@
 //! Each test:
 //! 1. Spins up an in-process upstream HTTP server.
 //! 2. Launches `ato-netd` as a subprocess with its own `ATO_HOME` tempdir.
-//! 3. Registers the ingress route via `ato_net::control::Client`.
+//! 3. Registers the ingress route via `ato_netd::net::control::Client`.
 //! 4. Sends HTTP / WebSocket traffic to `127.0.0.1:<stable_port>`.
 //! 5. Asserts the expected behaviour.
 //! 6. Shuts down `ato-netd` cleanly via `Client::shutdown`.
@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-use ato_net::control::{Client, IngressInfo};
+use ato_netd::net::control::{Client, IngressInfo};
 use bytes::Bytes;
 use http::Request;
 use http_body_util::{BodyExt, Empty, Full};
