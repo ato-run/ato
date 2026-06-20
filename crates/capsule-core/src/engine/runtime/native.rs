@@ -2,7 +2,7 @@ use crate::error::{CapsuleError, Result};
 use crate::metrics::{MetricsSession, ResourceStats, RuntimeMetadata, UnifiedMetrics};
 use crate::runtime::{Measurable, RuntimeHandle};
 use async_trait::async_trait;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io;
 #[cfg(unix)]
 use std::mem;
@@ -72,7 +72,34 @@ impl RuntimeHandle for NativeHandle {
             ))
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{
+                OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+            };
+
+            // SAFETY: terminate-only handle, closed on every path.
+            unsafe {
+                let handle = OpenProcess(PROCESS_TERMINATE, 0, self.pid);
+                if handle.is_null() {
+                    return Err(CapsuleError::Runtime(
+                        io::Error::last_os_error().to_string(),
+                    ));
+                }
+                let terminated = TerminateProcess(handle, 1);
+                CloseHandle(handle);
+                if terminated != 0 {
+                    Ok(())
+                } else {
+                    Err(CapsuleError::Runtime(
+                        io::Error::last_os_error().to_string(),
+                    ))
+                }
+            }
+        }
+
+        #[cfg(not(any(unix, windows)))]
         {
             Err(CapsuleError::Runtime("kill is not implemented".to_string()))
         }
@@ -137,10 +164,84 @@ impl Measurable for NativeHandle {
             return Ok(self.session.finalize(resources, self.metadata(exit_code)));
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let pid = self.pid;
+            let (exit_code, cpu_seconds) = tokio::task::spawn_blocking(move || {
+                use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_OBJECT_0};
+                use windows_sys::Win32::System::Threading::{
+                    GetExitCodeProcess, GetProcessTimes, INFINITE, OpenProcess,
+                    PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+                };
+
+                // Generic SYNCHRONIZE access right; windows-sys gates its
+                // definition behind unrelated feature flags, so spell the
+                // stable constant locally.
+                const SYNCHRONIZE: u32 = 0x0010_0000;
+
+                // SAFETY: wait/query-only handle, closed on every path.
+                unsafe {
+                    let handle =
+                        OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                    if handle.is_null() {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if WaitForSingleObject(handle, INFINITE) != WAIT_OBJECT_0 {
+                        let err = io::Error::last_os_error();
+                        CloseHandle(handle);
+                        return Err(err);
+                    }
+                    let mut code: u32 = 0;
+                    let exit_code = if GetExitCodeProcess(handle, &mut code) != 0 {
+                        Some(code as i32)
+                    } else {
+                        None
+                    };
+                    let empty = || FILETIME {
+                        dwLowDateTime: 0,
+                        dwHighDateTime: 0,
+                    };
+                    let (mut creation, mut exit, mut kernel, mut user) =
+                        (empty(), empty(), empty(), empty());
+                    let cpu_seconds = if GetProcessTimes(
+                        handle,
+                        &mut creation,
+                        &mut exit,
+                        &mut kernel,
+                        &mut user,
+                    ) != 0
+                    {
+                        // FILETIME durations count 100ns ticks.
+                        let ticks = |ft: &FILETIME| {
+                            ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
+                        };
+                        (ticks(&kernel) + ticks(&user)) as f64 / 10_000_000.0
+                    } else {
+                        0.0
+                    };
+                    CloseHandle(handle);
+                    Ok((exit_code, cpu_seconds))
+                }
+            })
+            .await
+            .map_err(|err| CapsuleError::Runtime(format!("process wait task failed: {err}")))
+            .and_then(|res| res.map_err(|err| CapsuleError::Runtime(err.to_string())))?;
+
+            let resources = ResourceStats {
+                duration_ms: self.session.elapsed_ms(),
+                cpu_seconds,
+                // Peak memory needs psapi's process memory counters; left at
+                // the default until metrics parity work picks it up.
+                ..ResourceStats::default()
+            };
+
+            return Ok(self.session.finalize(resources, self.metadata(exit_code)));
+        }
+
+        #[cfg(not(any(unix, windows)))]
         {
             Err(CapsuleError::Runtime(
-                "wait4 is not implemented".to_string(),
+                "wait_and_finalize is not implemented on this platform".to_string(),
             ))
         }
     }

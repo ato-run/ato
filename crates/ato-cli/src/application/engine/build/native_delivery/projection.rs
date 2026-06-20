@@ -899,8 +899,11 @@ fn inspect_projection_path(path: &Path, target: &Path) -> Result<ProjectionPathS
 
     #[cfg(windows)]
     {
-        if junction::exists(path)
-            .with_context(|| format!("Failed to inspect junction {}", path.display()))?
+        // Junctions only exist on directories; probing a plain file would
+        // error out of the inspection (and mask a name conflict verdict).
+        if metadata.is_dir()
+            && junction::exists(path)
+                .with_context(|| format!("Failed to inspect junction {}", path.display()))?
         {
             let junction_target = junction::get_target(path)
                 .with_context(|| format!("Failed to read junction {}", path.display()))?;
@@ -1018,20 +1021,33 @@ fn projection_shortcut_path(path: &Path) -> PathBuf {
 
 #[cfg(windows)]
 fn create_projection_shortcut(target: &Path, destination: &Path) -> io::Result<()> {
-    let shortcut = ShellLink::new(target).map_err(|err| {
-        io::Error::other(format!(
-            "Failed to prepare shortcut target {}: {}",
-            target.display(),
-            err
-        ))
-    })?;
-    shortcut.create_lnk(destination).map_err(|err| {
-        io::Error::other(format!(
+    // Written through the same WScript.Shell COM surface the resolver reads
+    // with — .lnk files produced by lighter-weight writers can read back
+    // with an empty TargetPath. Paths travel via env vars (with `-Command`,
+    // further argv tokens are appended to the script text), and the target
+    // is de-`\\?\`-prefixed so the stored TargetPath round-trips verbatim.
+    let target = capsule_core::common::paths::windows_child_compatible_path(target);
+    let output = powershell_command()
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut($env:ATO_PROJECTION_SHORTCUT); $s.TargetPath = $env:ATO_PROJECTION_TARGET; $s.Save()",
+        ])
+        .env("ATO_PROJECTION_SHORTCUT", destination)
+        .env("ATO_PROJECTION_TARGET", &target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
             "Failed to write shortcut {}: {}",
             destination.display(),
-            err
-        ))
-    })
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1042,14 +1058,18 @@ fn resolve_projection_shortcut_target(path: &Path) -> Result<PathBuf> {
             path.display()
         );
     }
+    // The path travels via an env var: with `-Command`, PowerShell appends
+    // any further argv tokens to the command text (they never reach
+    // `$args`), so an inline path would be re-parsed — and break — as
+    // script source.
     let output = powershell_command()
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "$ws = New-Object -ComObject WScript.Shell; $shortcut = $ws.CreateShortcut($args[0]); if (-not $shortcut.TargetPath) { exit 1 }; [Console]::Out.Write($shortcut.TargetPath)",
+            "$ws = New-Object -ComObject WScript.Shell; $shortcut = $ws.CreateShortcut($env:ATO_PROJECTION_SHORTCUT); if (-not $shortcut.TargetPath) { exit 1 }; [Console]::Out.Write($shortcut.TargetPath)",
         ])
-        .arg(path)
+        .env("ATO_PROJECTION_SHORTCUT", path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1208,6 +1228,22 @@ fn escape_desktop_entry_exec_value(path: &Path) -> String {
 fn remove_projected_path(path: &Path, projection_kind: &str) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
+            #[cfg(windows)]
+            {
+                // Windows distinguishes file and directory symlinks:
+                // remove_file on a directory symlink fails with access
+                // denied. Classify through the live target, falling back to
+                // remove_dir for dangling directory links.
+                let target_is_dir = fs::metadata(path)
+                    .map(|target| target.is_dir())
+                    .unwrap_or(false);
+                if target_is_dir {
+                    fs::remove_dir(path)?;
+                } else if let Err(remove_file_err) = fs::remove_file(path) {
+                    fs::remove_dir(path).map_err(|_| remove_file_err)?;
+                }
+            }
+            #[cfg(not(windows))]
             fs::remove_file(path)?;
             Ok(true)
         }

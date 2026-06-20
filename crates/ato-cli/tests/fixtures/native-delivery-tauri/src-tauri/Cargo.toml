@@ -9,5 +9,9 @@ tauri-build = { version = "2.5.6" }
 
 [dependencies]
 tauri = { version = "2.10.3" }
+# The fixture has no lockfile, so each `ato build` resolves fresh. time
+# 0.3.48 (2026-06-12) trips E0119 coherence conflicts inside tauri-utils
+# 2.9.x; hold it back until a fixed tauri-utils ships.
+time = "=0.3.47"
 
 [workspace]

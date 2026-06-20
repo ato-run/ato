@@ -1358,9 +1358,17 @@ fn configure_native_build_process_rehomes_nested_cargo_outputs() {
         envs.iter()
             .any(|(key, value)| { key == "CARGO_BUILD_TARGET" && value.is_none() })
     );
+    // The rehomed dir is produced with host-native joins; compare as paths
+    // so the separator spelling stays platform-agnostic.
+    let expected_target_dir = PathBuf::from("/workspace/app")
+        .join("src-tauri")
+        .join("target");
     assert!(envs.iter().any(|(key, value)| {
         key == "CARGO_TARGET_DIR"
-            && value.as_ref() == Some(&std::ffi::OsString::from("/workspace/app/src-tauri/target"))
+            && value
+                .as_ref()
+                .map(PathBuf::from)
+                .is_some_and(|value| value == expected_target_dir)
     }));
 }
 
@@ -1929,8 +1937,13 @@ fn project_rejects_name_conflict() -> Result<()> {
     let command_dir = sample_projection_command_dir(tmp.path());
     let (_derived_dir, derived_app) = sample_finalized_app(tmp.path())?;
     fs::create_dir_all(&launcher_dir)?;
+    // The planted conflict must use the projected name for THIS platform:
+    // linux projects a .desktop entry, macOS the .app bundle name, Windows
+    // the bare app name (with `.lnk` as the shortcut-fallback sibling).
     let conflict_path = if cfg!(target_os = "linux") {
         launcher_dir.join("my-app.desktop")
+    } else if cfg!(windows) {
+        launcher_dir.join("MyApp")
     } else {
         launcher_dir.join("MyApp.app")
     };

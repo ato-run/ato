@@ -155,7 +155,9 @@ pub static BUN: RuntimeToolSpec = RuntimeToolSpec {
         triple_style: TripleStyle::Bun,
     },
     layout: ToolLayout::NativeBinary {
-        rel_path: "bun-{triple}/bun",
+        // Bun's Windows zip ships `bun-windows-x64/bun.exe`; without the
+        // `{exe_suffix}` placeholder the Windows entry could never resolve.
+        rel_path: "bun-{triple}/bun{exe_suffix}",
     },
 };
 
@@ -351,16 +353,33 @@ pub async fn ensure_runtime_tool(
         .join("tools")
         .join(spec.name)
         .join(&version);
+    fs::create_dir_all(&tools_root).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to create tool dir {}: {}",
+            tools_root.display(),
+            e
+        ))
+    })?;
+    // Serialize validation + rebuild of one cache entry across processes.
+    // Without this, a concurrent session can delete/rewrite `extracted/`
+    // while another is executing the binary from it — on Windows that
+    // surfaces as "Access is denied" from half-written or vanishing tools.
+    let _install_lock = acquire_tool_cache_lock(spec, &version, &tools_root)?;
+
     let extracted_dir = tools_root.join("extracted");
     let shim_dir = tools_root.join("shim");
     let sha_path = tools_root.join("binary.sha256");
-
-    let shim_filename = tool_shim_filename(spec);
-    let shim_path = shim_dir.join(&shim_filename);
+    let shim_path = shim_dir.join(tool_shim_filename(spec));
 
     if shim_path.exists() {
         match validate_tool_cache(spec, &shim_path, &extracted_dir, &sha_path) {
             Ok(binary_sha256) => {
+                tracing::debug!(
+                    tool = spec.name,
+                    version = %version,
+                    cache = %tools_root.display(),
+                    "reusing validated runtime tool cache entry"
+                );
                 return Ok(ToolHandle {
                     bin_dir: shim_dir,
                     version,
@@ -372,65 +391,81 @@ pub async fn ensure_runtime_tool(
                 });
             }
             Err(err) => {
-                fs::remove_dir_all(&extracted_dir).ok();
-                fs::remove_dir_all(&shim_dir).ok();
-                fs::remove_file(&sha_path).ok();
+                discard_tool_cache_entry(&extracted_dir, &shim_dir, &sha_path);
                 tracing::warn!(
                     tool = spec.name,
                     version = %version,
+                    cache = %tools_root.display(),
+                    expected_executable = %resolved_layout_path(spec).unwrap_or_default(),
                     error = %err,
-                    "discarding incomplete cached runtime tool"
+                    "runtime tool cache entry is invalid; cache not reused, rebuilding"
                 );
             }
         }
     }
-
-    fs::create_dir_all(&tools_root).map_err(|e| {
-        CapsuleError::Pack(format!(
-            "Failed to create tool dir {}: {}",
-            tools_root.display(),
-            e
-        ))
-    })?;
-    if extracted_dir.exists() {
-        fs::remove_dir_all(&extracted_dir).map_err(|e| {
-            CapsuleError::Pack(format!(
-                "Failed to reset tool extract dir {}: {}",
-                extracted_dir.display(),
-                e
-            ))
-        })?;
-    }
-    if shim_dir.exists() {
-        fs::remove_dir_all(&shim_dir).map_err(|e| {
-            CapsuleError::Pack(format!(
-                "Failed to reset tool shim dir {}: {}",
-                shim_dir.display(),
-                e
-            ))
-        })?;
-    }
-    fs::create_dir_all(&extracted_dir).map_err(|e| {
-        CapsuleError::Pack(format!(
-            "Failed to create tool extract dir {}: {}",
-            extracted_dir.display(),
-            e
-        ))
-    })?;
-    fs::create_dir_all(&shim_dir).map_err(|e| {
-        CapsuleError::Pack(format!(
-            "Failed to create tool shim dir {}: {}",
-            shim_dir.display(),
-            e
-        ))
-    })?;
 
     let url = build_fetch_url(&spec.fetch, &version)?;
     reporter
         .notify(format!("⬇️  Downloading {} {}", spec.name, version))
         .await?;
     let archive_bytes = download_bytes(&url).await?;
-    install_runtime_tool_archive(spec, &version, deps, &archive_bytes)
+    install_runtime_tool_archive_locked(spec, &version, deps, &archive_bytes)
+}
+
+/// Takes an exclusive advisory lock on the cache entry for one
+/// `<tool>/<version>`. The lock is released when the returned handle drops.
+fn acquire_tool_cache_lock(
+    spec: &RuntimeToolSpec,
+    version: &str,
+    tools_root: &Path,
+) -> Result<fs::File> {
+    use fs2::FileExt;
+
+    let lock_path = tools_root.join(".install.lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        // Never truncate: this file exists only to carry the advisory lock.
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to open tool cache lock {}: {}",
+                lock_path.display(),
+                e
+            ))
+        })?;
+    if let Err(err) = lock.try_lock_exclusive() {
+        if err.kind() != fs2::lock_contended_error().kind() {
+            return Err(CapsuleError::Pack(format!(
+                "Failed to lock tool cache {}: {}",
+                lock_path.display(),
+                err
+            )));
+        }
+        tracing::info!(
+            tool = spec.name,
+            version = %version,
+            "waiting for a concurrent install of this runtime tool to finish"
+        );
+        lock.lock_exclusive().map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to lock tool cache {}: {}",
+                lock_path.display(),
+                e
+            ))
+        })?;
+    }
+    Ok(lock)
+}
+
+fn discard_tool_cache_entry(extracted_dir: &Path, shim_dir: &Path, sha_path: &Path) {
+    // The sha marker goes first: with it gone, a partially-deleted entry can
+    // never validate as complete.
+    fs::remove_file(sha_path).ok();
+    fs::remove_dir_all(extracted_dir).ok();
+    fs::remove_dir_all(shim_dir).ok();
 }
 
 fn build_fetch_url(fetch: &FetchKind, version: &str) -> Result<String> {
@@ -620,6 +655,11 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<()> {
     }
 }
 
+/// Lock-acquiring wrapper around [`install_runtime_tool_archive_locked`] for
+/// callers that do not already hold the per-entry install lock. (Production
+/// code locks in `ensure_runtime_tool`; only tests install archives
+/// directly.)
+#[cfg(test)]
 fn install_runtime_tool_archive(
     spec: &RuntimeToolSpec,
     version: &str,
@@ -630,18 +670,6 @@ fn install_runtime_tool_archive(
         .join("tools")
         .join(spec.name)
         .join(version);
-    let extracted_dir = tools_root.join("extracted");
-    let shim_dir = tools_root.join("shim");
-    let sha_path = tools_root.join("binary.sha256");
-    let archive_sha256 = hex::encode(Sha256::digest(archive_bytes));
-
-    let shim_filename = if cfg!(windows) {
-        format!("{}.cmd", spec.name)
-    } else {
-        spec.name.to_string()
-    };
-    let shim_path = shim_dir.join(&shim_filename);
-
     fs::create_dir_all(&tools_root).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to create tool dir {}: {}",
@@ -649,22 +677,81 @@ fn install_runtime_tool_archive(
             e
         ))
     })?;
-    fs::create_dir_all(&extracted_dir).map_err(|e| {
-        CapsuleError::Pack(format!(
-            "Failed to create tool extract dir {}: {}",
-            extracted_dir.display(),
-            e
-        ))
-    })?;
-    fs::create_dir_all(&shim_dir).map_err(|e| {
-        CapsuleError::Pack(format!(
-            "Failed to create tool shim dir {}: {}",
-            shim_dir.display(),
-            e
-        ))
-    })?;
+    let _install_lock = acquire_tool_cache_lock(spec, version, &tools_root)?;
+    install_runtime_tool_archive_locked(spec, version, deps, archive_bytes)
+}
 
-    let archive_path = tools_root.join(archive_filename(&spec.fetch, version)?);
+/// Installs a downloaded tool archive into the cache entry for `version`.
+///
+/// The archive is extracted and validated inside a `partial/` staging
+/// directory first; only a fully-validated build is promoted (via rename)
+/// into the canonical `extracted/` and `shim/` directories. `binary.sha256`
+/// is written last as the completion marker, so an interrupted install can
+/// never validate as complete on the next run. Callers must hold the
+/// per-entry install lock.
+fn install_runtime_tool_archive_locked(
+    spec: &RuntimeToolSpec,
+    version: &str,
+    deps: &ToolDeps,
+    archive_bytes: &[u8],
+) -> Result<ToolHandle> {
+    let tools_root = toolchain_cache_dir()?
+        .join("tools")
+        .join(spec.name)
+        .join(version);
+    stage_and_promote_tool_archive(spec, version, deps, archive_bytes, &tools_root).map_err(
+        |err| {
+            CapsuleError::Pack(format!(
+                "{} {} runtime tool install (cache rebuild) failed: expected executable '{}' under {}: {}",
+                spec.name,
+                version,
+                resolved_layout_path(spec).unwrap_or_default(),
+                tools_root.display(),
+                err
+            ))
+        },
+    )
+}
+
+fn stage_and_promote_tool_archive(
+    spec: &RuntimeToolSpec,
+    version: &str,
+    deps: &ToolDeps,
+    archive_bytes: &[u8],
+    tools_root: &Path,
+) -> Result<ToolHandle> {
+    let extracted_dir = tools_root.join("extracted");
+    let shim_dir = tools_root.join("shim");
+    let sha_path = tools_root.join("binary.sha256");
+    let staging_root = tools_root.join("partial");
+    let staging_extracted = staging_root.join("extracted");
+    let staging_shim = staging_root.join("shim");
+    let archive_sha256 = hex::encode(Sha256::digest(archive_bytes));
+
+    fs::create_dir_all(tools_root).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to create tool dir {}: {}",
+            tools_root.display(),
+            e
+        ))
+    })?;
+    // A leftover staging dir is a previous interrupted install — never reuse it.
+    if staging_root.exists() {
+        fs::remove_dir_all(&staging_root).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to discard stale staging dir {}: {}",
+                staging_root.display(),
+                e
+            ))
+        })?;
+    }
+    for dir in [&staging_extracted, &staging_shim] {
+        fs::create_dir_all(dir).map_err(|e| {
+            CapsuleError::Pack(format!("Failed to create {}: {}", dir.display(), e))
+        })?;
+    }
+
+    let archive_path = staging_root.join(archive_filename(&spec.fetch, version)?);
     fs::write(&archive_path, archive_bytes).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to write archive {}: {}",
@@ -672,17 +759,63 @@ fn install_runtime_tool_archive(
             e
         ))
     })?;
-    extract_archive(&archive_path, &extracted_dir)?;
+    extract_archive(&archive_path, &staging_extracted)?;
 
-    let target_path = resolve_tool_target(spec, &extracted_dir)?;
+    let staged_target = resolve_tool_target(spec, &staging_extracted)?;
 
-    write_shim(spec, deps, &target_path, &shim_path)?;
+    // The shim must reference the canonical (post-promote) target path, not
+    // the staging path it was validated at.
+    let relative_target = staged_target
+        .strip_prefix(&staging_extracted)
+        .map_err(|_| {
+            CapsuleError::Pack(format!(
+                "{} staged tool entry {} escaped staging dir {}",
+                spec.name,
+                staged_target.display(),
+                staging_extracted.display()
+            ))
+        })?
+        .to_path_buf();
+    let final_target = extracted_dir.join(&relative_target);
+    let shim_path = staging_shim.join(tool_shim_filename(spec));
+    write_shim(spec, deps, &final_target, &shim_path)?;
 
     // Hash of the resolved executable, not the archive. The cache-side
     // `binary.sha256` file stores this resolved hash so its name matches its
     // contents (older builds wrote the archive hash here — the #469 bug).
-    let binary_sha256 = sha256_file(&target_path)?;
+    let binary_sha256 = sha256_file(&staged_target)?;
 
+    // Promote. Removing the sha marker first means an interruption between
+    // the renames leaves an entry that fails validation and gets rebuilt
+    // instead of being half-reused.
+    fs::remove_file(&sha_path).ok();
+    for dir in [&extracted_dir, &shim_dir] {
+        if dir.exists() {
+            fs::remove_dir_all(dir).map_err(|e| {
+                CapsuleError::Pack(format!(
+                    "Failed to replace stale cache dir {}: {}",
+                    dir.display(),
+                    e
+                ))
+            })?;
+        }
+    }
+    fs::rename(&staging_extracted, &extracted_dir).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to promote {} -> {}: {}",
+            staging_extracted.display(),
+            extracted_dir.display(),
+            e
+        ))
+    })?;
+    fs::rename(&staging_shim, &shim_dir).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to promote {} -> {}: {}",
+            staging_shim.display(),
+            shim_dir.display(),
+            e
+        ))
+    })?;
     fs::write(&sha_path, &binary_sha256).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to write binary hash {}: {}",
@@ -690,6 +823,8 @@ fn install_runtime_tool_archive(
             e
         ))
     })?;
+    // Only the downloaded archive bytes remain in staging at this point.
+    fs::remove_dir_all(&staging_root).ok();
 
     Ok(ToolHandle {
         bin_dir: shim_dir,
@@ -912,6 +1047,18 @@ fn validate_tool_target(spec: &RuntimeToolSpec, path: &Path) -> Result<()> {
         )));
     }
 
+    // A zero-length tool entry is never valid; on Windows executing one
+    // surfaces as an opaque "Access is denied".
+    let metadata = fs::metadata(path)
+        .map_err(|e| CapsuleError::Pack(format!("Failed to stat {}: {}", path.display(), e)))?;
+    if metadata.len() == 0 {
+        return Err(CapsuleError::Pack(format!(
+            "{} tool entry is empty (0 bytes): {}",
+            spec.name,
+            path.display()
+        )));
+    }
+
     if matches!(spec.layout, ToolLayout::NativeBinary { .. }) {
         validate_native_executable(spec.name, path)?;
     }
@@ -953,6 +1100,15 @@ fn resolved_layout_path(spec: &RuntimeToolSpec) -> Result<String> {
         }
         _ => Ok(apply_layout_template(target_rel, "", cfg!(windows))),
     }
+}
+
+/// The archive-relative path of the resolved tool entry for the current host
+/// (e.g. `bun-windows-x64/bun.exe`, `package/bin/pnpm.cjs`).
+///
+/// Exposed so dependent crates' tests can fabricate complete, validation-
+/// passing cache entries without touching the network.
+pub fn resolved_tool_entry_relpath(spec: &RuntimeToolSpec) -> Result<String> {
+    resolved_layout_path(spec)
 }
 
 /// Maps the current host platform to a tool-specific triple string.
@@ -1196,6 +1352,17 @@ mod tests {
     fn build_uv_archive() -> Vec<u8> {
         #[cfg(windows)]
         {
+            build_uv_archive_with_payload(b"uv binary")
+        }
+        #[cfg(not(windows))]
+        {
+            build_uv_archive_with_payload(b"#!/bin/sh\necho uv\n")
+        }
+    }
+
+    fn build_uv_archive_with_payload(payload: &[u8]) -> Vec<u8> {
+        #[cfg(windows)]
+        {
             let mut cursor = Cursor::new(Vec::new());
             let mut zip = zip::ZipWriter::new(&mut cursor);
             let options = SimpleFileOptions::default()
@@ -1203,14 +1370,13 @@ mod tests {
                 .unix_permissions(0o755);
             let path = resolved_layout_path(&UV).expect("uv layout");
             zip.start_file(path, options).expect("start uv file");
-            zip.write_all(b"uv binary").expect("write uv");
+            zip.write_all(payload).expect("write uv");
             zip.finish().expect("finish uv zip");
-            return cursor.into_inner();
+            cursor.into_inner()
         }
         #[cfg(not(windows))]
         {
             let mut builder = tar::Builder::new(Vec::new());
-            let payload = b"#!/bin/sh\necho uv\n";
             let mut header = tar::Header::new_gnu();
             header.set_size(payload.len() as u64);
             header.set_mode(0o755);
@@ -1480,7 +1646,11 @@ mod tests {
         assert_eq!(resolved_layout_path(&YARN).unwrap(), "package/bin/yarn.js");
         assert_eq!(
             resolved_layout_path(&BUN).unwrap(),
-            format!("bun-{}/bun", host_triple(TripleStyle::Bun).unwrap())
+            format!(
+                "bun-{}/bun{}",
+                host_triple(TripleStyle::Bun).unwrap(),
+                if cfg!(windows) { ".exe" } else { "" }
+            )
         );
         assert_eq!(
             resolved_layout_path(&UV).unwrap(),
@@ -1950,6 +2120,183 @@ mod tests {
         assert!(
             handle2.bin_dir.join(shim_name).is_file(),
             "shim must be restored after reinstall"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_partial_staging_dir_is_discarded_not_reused() {
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let version = unique_version("uv-partial");
+        let tools_root = ato_home.path().join("toolchains/tools/uv").join(&version);
+        let staging_root = tools_root.join("partial");
+
+        // Simulate a previous interrupted install: junk in the staging dir.
+        fs::create_dir_all(staging_root.join("extracted")).expect("stale staging");
+        fs::write(
+            staging_root.join("extracted/garbage"),
+            b"truncated download",
+        )
+        .expect("junk");
+
+        let handle =
+            install_runtime_tool_archive(&UV, &version, &ToolDeps::default(), &build_uv_archive())
+                .expect("install over stale staging");
+
+        assert!(
+            !staging_root.exists(),
+            "staging dir must be removed after a completed install"
+        );
+        assert!(
+            !tools_root.join("extracted/garbage").exists(),
+            "stale staging contents must never be promoted"
+        );
+        let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
+        let binary_sha256 = validate_tool_cache(
+            &UV,
+            &handle.bin_dir.join(shim_name),
+            &tools_root.join("extracted"),
+            &tools_root.join("binary.sha256"),
+        )
+        .expect("promoted cache entry must validate");
+        assert_eq!(binary_sha256, handle.binary_sha256);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn install_replaces_corrupt_canonical_entry() {
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let version = unique_version("uv-corrupt");
+        let tools_root = ato_home.path().join("toolchains/tools/uv").join(&version);
+
+        // A canonical entry whose shim exists but whose extracted target is
+        // missing (the shape an interrupted legacy install left behind).
+        let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
+        fs::create_dir_all(tools_root.join("shim")).expect("shim dir");
+        fs::write(tools_root.join("shim").join(shim_name), b"stale shim").expect("stale shim");
+        fs::create_dir_all(tools_root.join("extracted")).expect("extracted dir");
+
+        let handle =
+            install_runtime_tool_archive(&UV, &version, &ToolDeps::default(), &build_uv_archive())
+                .expect("install over corrupt entry");
+
+        validate_tool_cache(
+            &UV,
+            &handle.bin_dir.join(shim_name),
+            &tools_root.join("extracted"),
+            &tools_root.join("binary.sha256"),
+        )
+        .expect("rebuilt cache entry must validate");
+        let shim_body = fs::read(handle.bin_dir.join(shim_name)).expect("shim body");
+        assert_ne!(shim_body, b"stale shim", "stale shim must be replaced");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn empty_tool_entry_in_archive_fails_install_with_context() {
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let version = unique_version("uv-empty");
+        let err = install_runtime_tool_archive(
+            &UV,
+            &version,
+            &ToolDeps::default(),
+            &build_uv_archive_with_payload(b""),
+        )
+        .expect_err("zero-byte tool entry must fail validation");
+        let message = err.to_string();
+        assert!(message.contains("uv"), "tool name missing: {message}");
+        assert!(
+            message.contains("empty (0 bytes)"),
+            "empty-entry cause missing: {message}"
+        );
+        assert!(
+            message.contains("toolchains"),
+            "cache path missing: {message}"
+        );
+
+        // The failed install must not leave a canonical entry that validates.
+        let tools_root = ato_home.path().join("toolchains/tools/uv").join(&version);
+        let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
+        assert!(
+            validate_tool_cache(
+                &UV,
+                &tools_root.join("shim").join(shim_name),
+                &tools_root.join("extracted"),
+                &tools_root.join("binary.sha256"),
+            )
+            .is_err(),
+            "failed install must not produce a valid cache entry"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_installs_of_same_entry_serialize_on_the_cache_lock() {
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let version = unique_version("uv-race");
+        let archive = build_uv_archive();
+        let results = std::thread::scope(|scope| {
+            let handles = [
+                scope.spawn(|| {
+                    install_runtime_tool_archive(&UV, &version, &ToolDeps::default(), &archive)
+                }),
+                scope.spawn(|| {
+                    install_runtime_tool_archive(&UV, &version, &ToolDeps::default(), &archive)
+                }),
+            ];
+            handles.map(|handle| handle.join().expect("install thread"))
+        });
+        for result in results {
+            result.expect("concurrent install must succeed");
+        }
+
+        let tools_root = ato_home.path().join("toolchains/tools/uv").join(&version);
+        let shim_name = if cfg!(windows) { "uv.cmd" } else { "uv" };
+        validate_tool_cache(
+            &UV,
+            &tools_root.join("shim").join(shim_name),
+            &tools_root.join("extracted"),
+            &tools_root.join("binary.sha256"),
+        )
+        .expect("cache entry must be valid after concurrent installs");
+        assert!(
+            !tools_root.join("partial").exists(),
+            "no staging dir may survive concurrent installs"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cache_validation_on_windows_does_not_require_unix_exec_bits() {
+        // Plain fs::write produces no Unix permission bits on Windows; the
+        // validator must accept the entry based on presence + content alone.
+        let cache = FakeCacheDir::new("win-noexec");
+        cache.write_shim(0o644);
+        cache.write_target(0o644);
+        cache.write_sha(&"a".repeat(64));
+        assert!(cache.validate().is_ok(), "complete cache should be valid");
+    }
+
+    #[test]
+    fn bun_windows_layout_resolves_to_exe() {
+        let ToolLayout::NativeBinary { rel_path } = &BUN.layout else {
+            panic!("BUN must use NativeBinary layout");
+        };
+        assert_eq!(
+            apply_layout_template(rel_path, "windows-x64", true),
+            "bun-windows-x64/bun.exe"
+        );
+        assert_eq!(
+            apply_layout_template(rel_path, "linux-x64", false),
+            "bun-linux-x64/bun"
         );
     }
 

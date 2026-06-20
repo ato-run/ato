@@ -635,7 +635,10 @@ driver = "python"
 working_dir = "{}"
 run = "python app.py"
 "#,
-        checkout.display()
+        // Forward slashes keep the embedded path valid inside a TOML basic
+        // string on Windows (backslashes would be parsed as escapes); the
+        // drive-prefixed form stays absolute either way.
+        checkout.display().to_string().replace('\\', "/")
     );
 
     let err = support::github_python_lock_repair_targets(&manifest, &checkout)

@@ -1385,8 +1385,11 @@ mod tests {
         let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../capsule-core/tests/fixtures/ccp")
             .join(format!("{name}.json"));
-        let expected =
-            fs::read_to_string(&snapshot_path).expect("snapshot fixture should be readable");
+        let expected = fs::read_to_string(&snapshot_path)
+            .expect("snapshot fixture should be readable")
+            // Windows checkouts may materialize the fixture with CRLF
+            // endings; the producer always emits LF, so compare in LF form.
+            .replace("\r\n", "\n");
         assert_eq!(
             actual,
             expected,
