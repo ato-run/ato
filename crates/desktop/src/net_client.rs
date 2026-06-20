@@ -1,7 +1,7 @@
 //! Blocking transport client for the `ato-netd` control plane.
 //!
 //! The wire types ([`Request`], [`Response`], [`StatusReport`], [`Error`],
-//! …) are single-sourced from `ato_protocol::net::control` and re-exported
+//! …) are single-sourced from `protocol::net::control` and re-exported
 //! here; this module owns only the blocking local-socket transport (a
 //! Unix-domain socket on Unix, a named pipe on Windows).
 //!
@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 #[allow(unused_imports)]
-pub use ato_protocol::net::control::{
+pub use protocol::net::control::{
     BootstrapTokenInfo, Error, ErrorPayload, IngressInfo, ListenerInfo, Request, Response,
     ResponseResult, StatusReport, default_socket_path,
 };

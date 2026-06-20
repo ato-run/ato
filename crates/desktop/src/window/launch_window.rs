@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use ato_protocol::config::ConfigKind;
+use protocol::config::ConfigKind;
 use gpui::prelude::*;
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render, Size, WeakEntity,
@@ -1034,7 +1034,7 @@ pub fn start_boot_launch(
             })),
         );
         if let Ok(ref session) = result
-            && session.display_strategy == ato_protocol::handle::CapsuleDisplayStrategy::WebUrl
+            && session.display_strategy == protocol::handle::CapsuleDisplayStrategy::WebUrl
         {
             super::app_capsule_shell::wait_for_session_upstream_ready(
                 session,

@@ -8,7 +8,7 @@ use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use ato_protocol::handle::{
+use protocol::handle::{
     CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
     normalize_capsule_handle,
 };
@@ -309,7 +309,7 @@ pub enum LaunchError {
         /// `details.missing_schema` verbatim — drives the dynamic
         /// form. Iterated as-is by the modal; never index-aligned
         /// with `details.missing_keys`.
-        fields: Vec<ato_protocol::config::ConfigField>,
+        fields: Vec<protocol::config::ConfigField>,
         /// Snapshot of secrets passed to the original
         /// `start_capsule` call. Cloned at error-construction time so
         /// a concurrent SecretStore mutation can't corrupt the retry.
@@ -931,13 +931,13 @@ pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Resul
 #[derive(Clone, Debug, Deserialize)]
 struct ResolveEnvelope {
     /// CCP wire-contract field. `None` for legacy CLIs that predate v0.5.
-    /// See `ato_protocol::ccp::enforce_ccp_compat` for the tolerance rules.
+    /// See `protocol::ccp::enforce_ccp_compat` for the tolerance rules.
     #[serde(default)]
     schema_version: Option<String>,
     resolution: ResolvePayload,
 }
 
-impl ato_protocol::ccp::HasSchemaVersion for ResolveEnvelope {
+impl protocol::ccp::HasSchemaVersion for ResolveEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -975,7 +975,7 @@ struct SessionStartEnvelope {
     session: SessionStartInfo,
 }
 
-impl ato_protocol::ccp::HasSchemaVersion for SessionStartEnvelope {
+impl protocol::ccp::HasSchemaVersion for SessionStartEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -1046,7 +1046,7 @@ struct SessionStopEnvelope {
     stopped: bool,
 }
 
-impl ato_protocol::ccp::HasSchemaVersion for SessionStopEnvelope {
+impl protocol::ccp::HasSchemaVersion for SessionStopEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -1202,7 +1202,7 @@ pub fn resolve_and_start_capsule(
 pub fn stop_capsule_session(session_id: &str) -> Result<bool> {
     let stopped: SessionStopEnvelope =
         run_ato_json(&["app", "session", "stop", session_id, "--json"])?;
-    ato_protocol::ccp::enforce_ccp_compat(&stopped, "session_stop")?;
+    protocol::ccp::enforce_ccp_compat(&stopped, "session_stop")?;
     Ok(stopped.stopped)
 }
 
@@ -1497,7 +1497,7 @@ fn free_owned_shm() -> usize {
 
 fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
     let envelope: ResolveEnvelope = run_ato_json(&["app", "resolve", handle, "--json"])?;
-    ato_protocol::ccp::enforce_ccp_compat(&envelope, "resolve_handle")?;
+    protocol::ccp::enforce_ccp_compat(&envelope, "resolve_handle")?;
     Ok(envelope.resolution)
 }
 
@@ -1508,7 +1508,7 @@ struct LatestEnvelope {
     result: LatestResult,
 }
 
-impl ato_protocol::ccp::HasSchemaVersion for LatestEnvelope {
+impl protocol::ccp::HasSchemaVersion for LatestEnvelope {
     fn schema_version(&self) -> Option<&str> {
         self.schema_version.as_deref()
     }
@@ -1531,7 +1531,7 @@ struct LatestResult {
 /// banner.
 pub fn fetch_latest_capsule_version(handle: &str) -> Result<Option<String>> {
     let envelope: LatestEnvelope = run_ato_json(&["app", "latest", handle, "--json"])?;
-    ato_protocol::ccp::enforce_ccp_compat(&envelope, "fetch_latest")?;
+    protocol::ccp::enforce_ccp_compat(&envelope, "fetch_latest")?;
     Ok(envelope.result.latest_version)
 }
 
@@ -1752,7 +1752,7 @@ fn run_session_start_command(
     let envelope: SessionStartEnvelope = serde_json::from_slice(&output.stdout).map_err(|err| {
         LaunchError::Other(format!("failed to parse session start response: {err}"))
     })?;
-    ato_protocol::ccp::enforce_ccp_compat(&envelope, "session_start")
+    protocol::ccp::enforce_ccp_compat(&envelope, "session_start")
         .map_err(|err| LaunchError::Other(err.to_string()))?;
     Ok(envelope.session)
 }
@@ -2796,11 +2796,11 @@ fn build_launch_session_from_stored(
     };
 
     let trust_state = match stored.trust_state {
-        ato_protocol::handle::TrustState::Unknown => "unknown",
-        ato_protocol::handle::TrustState::Untrusted => "untrusted",
-        ato_protocol::handle::TrustState::Trusted => "trusted",
-        ato_protocol::handle::TrustState::Promoted => "promoted",
-        ato_protocol::handle::TrustState::Local => "local",
+        protocol::handle::TrustState::Unknown => "unknown",
+        protocol::handle::TrustState::Untrusted => "untrusted",
+        protocol::handle::TrustState::Trusted => "trusted",
+        protocol::handle::TrustState::Promoted => "promoted",
+        protocol::handle::TrustState::Local => "local",
     }
     .to_string();
 
@@ -3469,7 +3469,7 @@ fn process_is_alive(pid: i32) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
+    use protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor};
 
     use super::{
         DesktopLaunchInput, ENV_PODMAN_ENABLED, ResolvePayload, SessionStartInfo,
@@ -5651,7 +5651,7 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
 #[cfg(test)]
 mod fast_path_tests {
     use super::*;
-    use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+    use protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use capsule::state::session::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use capsule::state::session::write_session_record_atomic;
     use serial_test::serial;

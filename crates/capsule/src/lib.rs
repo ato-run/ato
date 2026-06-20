@@ -105,11 +105,10 @@ pub mod state;
 // ── Layer 9: Wire protocols (cross-crate) ─────────────────────────────────
 //
 // Schema/tolerance for the Capsule Control Protocol. Originally lived in
-// capsule (M4); extracted to `ato-protocol` (N2) so `ato-desktop` can
+// capsule (M4); extracted to `protocol` (N2) so `ato-desktop` can
 // link the wire surface without pulling in capsule's runtime deps.
 // Re-exported here so existing `capsule::ccp::*` paths in the CLI
 // keep working unchanged. See `docs/monorepo-consolidation-plan.md` §N2.
-pub use ato_protocol::ccp;
 pub use config::bootstrap;
 pub use config::diagnostics;
 pub use config::python_runtime;
@@ -117,6 +116,7 @@ pub use config::runtime_config;
 pub use config::schema_registry;
 pub use config::shell_support;
 pub use config::smoke;
+pub use protocol::ccp;
 
 // ── Re-exports (public API — unchanged) ───────────────────────────────────
 pub use error::{AtoError, AtoErrorPhase, CapsuleError, PendingPermissionGate, Result};
