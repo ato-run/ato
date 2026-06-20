@@ -13,8 +13,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use capsule_wire::config::ConfigField;
-use capsule_wire::handle::{
+use ato_protocol::config::ConfigField;
+use ato_protocol::handle::{
     HandleInput, InputSurface as CapsuleInputSurface, SurfaceInput as CapsuleSurfaceInput,
     classify_surface_input, normalize_capsule_handle, parse_host_route,
 };

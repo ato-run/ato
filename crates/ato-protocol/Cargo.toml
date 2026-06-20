@@ -1,5 +1,5 @@
 [package]
-name = "capsule-wire"
+name = "ato-protocol"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ repository = "https://github.com/ato-run/ato"
 dist = false
 
 [lib]
-name = "capsule_wire"
+name = "ato_protocol"
 path = "src/lib.rs"
 
 [dependencies]

@@ -189,7 +189,7 @@ fn healthcheck_url_for(record: &StoredSessionInfo) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
-    use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+    use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
     fn base_record() -> StoredSessionInfo {
         StoredSessionInfo {
