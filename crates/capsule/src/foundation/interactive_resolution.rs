@@ -78,7 +78,7 @@ pub enum InteractiveResolutionKind {
     /// `state_key` and a user-facing `label` only — **never** a host path. The
     /// Desktop's requirement-aggregation modal surfaces this as a "choose
     /// folder" prompt; the chosen path is resolved through
-    /// `capsule_core::installed_state::resolve_state_binding_from_path`, which
+    /// `capsule::installed_state::resolve_state_binding_from_path`, which
     /// keeps the raw path local-private.
     StateBindingRequired {
         /// The logical state key (e.g. `data`). Re-submitted as

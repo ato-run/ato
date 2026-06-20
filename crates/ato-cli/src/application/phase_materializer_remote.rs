@@ -8,8 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::blob::{BlobManifest, hash_tree};
-use capsule_core::common::store::BlobAddress;
+use capsule::blob::{BlobManifest, hash_tree};
+use capsule::common::store::BlobAddress;
 use serde::{Deserialize, Serialize};
 
 use crate::application::build_materialization::{

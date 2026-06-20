@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use capsule_core::blob::hash_tree;
+use capsule::blob::hash_tree;
 use tempfile::TempDir;
 
 fn write_file(root: &Path, rel: &str, contents: &[u8]) {

@@ -3,17 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Error as AnyhowError, Result};
-use capsule_core::ato_lock::{AtoLock, UnresolvedValue, closure_info};
-use capsule_core::common::paths::ato_runs_dir;
-use capsule_core::execution_identity::{
+use capsule::ato_lock::{AtoLock, UnresolvedValue, closure_info};
+use capsule::common::paths::ato_runs_dir;
+use capsule::execution_identity::{
     ExecutionReceipt, ExecutionReceiptDocument, ReproducibilityCause, ReproducibilityClass,
     Tracked, TrackingStatus,
 };
-use capsule_core::input_resolver::{
+use capsule::input_resolver::{
     ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
-use capsule_core::manifest;
-use capsule_core::types::{
+use capsule::manifest;
+use capsule::types::{
     CapsuleManifest, EgressIdType, ServiceSpec, StateAttach, StateDurability, StateKind,
     StateSharing,
 };
@@ -1976,7 +1976,7 @@ fn diff_kind(path: &str) -> &'static str {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
-    use capsule_core::execution_identity::{
+    use capsule::execution_identity::{
         DependencyIdentity, EnvironmentIdentity, EnvironmentMode, ExecutionIdentityInput,
         FilesystemIdentity, LaunchIdentity, PlatformIdentity, PolicyIdentity,
         ReproducibilityIdentity, RuntimeIdentity, SourceIdentity,

@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use capsule_core::packers::payload::build_distribution_manifest;
-use capsule_core::types::CapsuleManifest;
+use capsule::packers::payload::build_distribution_manifest;
+use capsule::types::CapsuleManifest;
 use tempfile::{NamedTempFile, TempDir};
 
 // The Windows leg compiles the Tauri fixture from a cold cargo cache inside

@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule::common::paths::ato_path_or_workspace_tmp;
 use gpui::{AnyWindowHandle, App, BackgroundExecutor};
 use serde::Deserialize;
 

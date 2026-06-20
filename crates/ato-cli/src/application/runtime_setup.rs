@@ -24,16 +24,16 @@ use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 
-use capsule_core::packers::runtime_fetcher::{RuntimeFetcher, locate_runtime_binary};
-use capsule_core::reporter::CapsuleReporter;
-use capsule_core::runtime_setup::{
+use capsule::packers::runtime_fetcher::{RuntimeFetcher, locate_runtime_binary};
+use capsule::reporter::CapsuleReporter;
+use capsule::runtime_setup::{
     InstallPhase, InstallProgress, RecommendedAction, RuntimeSetupStatus, SUPPORTED_NODE_VERSION,
     SUPPORTED_PYTHON_VERSION, SUPPORTED_UV_VERSION, ToolKind, ToolSource, ToolStatus,
     VirtualizationStatus, WindowsSubstrateAction, WindowsSubstrateActionKind,
     WindowsSubstrateStatus, WslStatus,
 };
 
-use capsule_core::podman::ATO_PODMAN_MACHINE_NAME;
+use capsule::podman::ATO_PODMAN_MACHINE_NAME;
 
 use crate::adapters::runtime::podman_machine::{PodmanMachineStatus, parse_podman_machine_list};
 
@@ -247,7 +247,7 @@ fn managed_versions(tool: ToolKind) -> Vec<String> {
         ToolKind::Python => "python-",
         _ => return Vec::new(),
     };
-    let Ok(cache_dir) = capsule_core::common::paths::toolchain_cache_dir() else {
+    let Ok(cache_dir) = capsule::common::paths::toolchain_cache_dir() else {
         return Vec::new();
     };
     let Ok(entries) = std::fs::read_dir(&cache_dir) else {
@@ -399,7 +399,7 @@ struct ManagedProbe {
 /// is incomplete or corrupt (no executable, not runnable, unreadable version),
 /// so a stale/broken directory never counts as "ready".
 fn probe_managed_version(tool: ToolKind, version_dir: &str) -> Option<ManagedProbe> {
-    let cache = capsule_core::common::paths::toolchain_cache_dir().ok()?;
+    let cache = capsule::common::paths::toolchain_cache_dir().ok()?;
     let runtime_dir = cache.join(format!("{}-{}", tool.as_str(), version_dir));
     let bin = locate_runtime_binary(&runtime_dir, managed_binary_candidates(tool))?;
     if !is_executable(&bin) {
@@ -506,13 +506,13 @@ fn tool_version(bin: &str) -> Option<String> {
 /// or inits/starts a machine — that is `ato internal runtime prepare`. It may
 /// run `podman --version`, `podman machine list`, and `podman info` (all reads).
 ///
-/// Resolution goes through [`capsule_core::podman`] rather than a bare
+/// Resolution goes through [`capsule::podman`] rather than a bare
 /// `which("podman")` so a GUI-launched probe with a minimal PATH still finds
 /// Homebrew/known-location Podman instead of reporting a false "missing".
 fn detect_podman() -> ToolStatus {
-    let mut resolved = match capsule_core::podman::resolve_podman() {
+    let mut resolved = match capsule::podman::resolve_podman() {
         Ok(resolved) => resolved,
-        Err(capsule_core::podman::PodmanResolveError::InvalidEnvOverride { path }) => {
+        Err(capsule::podman::PodmanResolveError::InvalidEnvOverride { path }) => {
             return ToolStatus::missing(
                 ToolKind::Podman,
                 RecommendedAction::OpenInstructions,
@@ -523,7 +523,7 @@ fn detect_podman() -> ToolStatus {
                 ),
             );
         }
-        Err(capsule_core::podman::PodmanResolveError::NotFound { .. }) => {
+        Err(capsule::podman::PodmanResolveError::NotFound { .. }) => {
             return ToolStatus::missing(
                 ToolKind::Podman,
                 RecommendedAction::PrepareHostRuntime,
@@ -815,20 +815,20 @@ impl InstallReporter {
 
 #[async_trait::async_trait]
 impl CapsuleReporter for InstallReporter {
-    async fn notify(&self, _message: String) -> capsule_core::Result<()> {
+    async fn notify(&self, _message: String) -> capsule::Result<()> {
         Ok(())
     }
-    async fn warn(&self, _message: String) -> capsule_core::Result<()> {
+    async fn warn(&self, _message: String) -> capsule::Result<()> {
         Ok(())
     }
-    async fn progress_start(&self, label: String, _total: Option<u64>) -> capsule_core::Result<()> {
+    async fn progress_start(&self, label: String, _total: Option<u64>) -> capsule::Result<()> {
         self.emit(InstallPhase::Downloading, label);
         Ok(())
     }
-    async fn progress_inc(&self, _amount: u64) -> capsule_core::Result<()> {
+    async fn progress_inc(&self, _amount: u64) -> capsule::Result<()> {
         Ok(())
     }
-    async fn progress_finish(&self, _message: Option<String>) -> capsule_core::Result<()> {
+    async fn progress_finish(&self, _message: Option<String>) -> capsule::Result<()> {
         self.emit(InstallPhase::Installing, "Unpacking…");
         Ok(())
     }
@@ -1403,7 +1403,7 @@ mod tests {
         // independently of PATH; on hosts with a real podman the NotFound
         // branch under test is unreachable, and `status` describes machine
         // state instead. Detect that while the scrubbed PATH is active.
-        let host_podman_resolvable = capsule_core::podman::resolve_podman().is_ok();
+        let host_podman_resolvable = capsule::podman::resolve_podman().is_ok();
         let status = detect_podman();
         unsafe {
             match prev_bin {

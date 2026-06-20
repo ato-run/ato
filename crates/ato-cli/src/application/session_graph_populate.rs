@@ -874,7 +874,7 @@ mod tests {
         use ato_session_core::{
             StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
         };
-        use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
         let provider_node = StoredGraphNode {
             kind: NODE_KIND_PROVIDER.to_string(),
@@ -1012,7 +1012,7 @@ mod tests {
     #[test]
     fn graph_complete_for_teardown_rejects_multi_provider_without_ordering() {
         use ato_session_core::StoredSessionInfo;
-        use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
         let p1 = StoredGraphNode {
             kind: NODE_KIND_PROVIDER.to_string(),
@@ -1119,7 +1119,7 @@ mod tests {
         use ato_session_core::{
             StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
         };
-        use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
         let s1 = StoredGraphNode {
             kind: NODE_KIND_SERVICE.to_string(),
@@ -1288,7 +1288,7 @@ mod tests {
         use ato_session_core::{
             StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
         };
-        use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
         // Provider and service share the identifier "db".
         let provider_node = StoredGraphNode {

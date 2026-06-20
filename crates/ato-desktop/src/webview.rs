@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule::common::paths::ato_path_or_workspace_tmp;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
 use http::header::{CONTENT_TYPE, COOKIE};
 use http::{HeaderMap, HeaderValue};
@@ -1903,7 +1903,7 @@ impl WebViewManager {
                     // unified resolution modal sees one populated
                     // request with everything visible at once instead
                     // of accumulating across N launch retries.
-                    use capsule_core::interactive_resolution::InteractiveResolutionKind;
+                    use capsule::interactive_resolution::InteractiveResolutionKind;
                     info!(
                         pane_id,
                         handle = %handle,
@@ -1944,7 +1944,7 @@ impl WebViewManager {
                             // #404: the unified modal does not yet render a
                             // folder picker for state-binding requirements. The
                             // backend resolve seam
-                            // (`capsule_core::installed_state::resolve_state_binding_from_path`)
+                            // (`capsule::installed_state::resolve_state_binding_from_path`)
                             // exists; wiring the GPUI picker that calls it is a
                             // follow-up PR. Log so the requirement is observable.
                             InteractiveResolutionKind::StateBindingRequired {
@@ -7126,7 +7126,7 @@ mod share_icon {
                 return None;
             }
         };
-        let manifest: capsule_core::types::CapsuleManifest = match toml::from_str(&raw) {
+        let manifest: capsule::types::CapsuleManifest = match toml::from_str(&raw) {
             Ok(manifest) => manifest,
             Err(error) => {
                 tracing::error!(

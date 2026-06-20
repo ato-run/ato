@@ -26,14 +26,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
-use capsule_core::execution_plan::model::OciPolicyMode;
-use capsule_core::oci_compose_lock::{self, OciComposeLock, OciImageLockEntry, OciImportMeta};
-use capsule_core::routing::importer::docker_run_script::{
+use capsule::CapsuleReporter;
+use capsule::execution_plan::model::OciPolicyMode;
+use capsule::oci_compose_lock::{self, OciComposeLock, OciImageLockEntry, OciImportMeta};
+use capsule::routing::importer::docker_run_script::{
     DockerRunScriptImportInput, DockerRunScriptImportOutput, detect_install_script_candidate,
     import_docker_run_script,
 };
-use capsule_core::types::OciImageResolution;
+use capsule::types::OciImageResolution;
 
 use super::launch_context::RuntimeLaunchContext;
 use super::oci_multi_service::execute_service_graph_with_provider;
@@ -78,9 +78,7 @@ pub(crate) async fn execute_install_sh_run(
     let script_text = std::fs::read_to_string(&script_path)
         .with_context(|| format!("failed to read {}", script_path.display()))?;
     let source_hash =
-        capsule_core::routing::importer::docker_run_script::compute_script_source_hash(
-            &script_text,
-        );
+        capsule::routing::importer::docker_run_script::compute_script_source_hash(&script_text);
     let script_rel_path = script_path
         .strip_prefix(project_dir)
         .unwrap_or(&script_path)
@@ -149,7 +147,7 @@ pub(crate) async fn execute_install_sh_run(
     let existing_lock = {
         let main_lock_path = project_dir.join("ato.lock.json");
         let main_lock = if main_lock_path.exists() {
-            let lock = capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path)
+            let lock = capsule::ato_lock::load_unvalidated_from_path(&main_lock_path)
                 .map_err(|e| anyhow::anyhow!("failed to read ato.lock.json: {e}"))?;
             Some(lock)
         } else {
@@ -157,11 +155,11 @@ pub(crate) async fn execute_install_sh_run(
         };
 
         let oci_read = match &main_lock {
-            Some(lock) => capsule_core::ato_lock::read_oci_lock(lock, project_dir)
+            Some(lock) => capsule::ato_lock::read_oci_lock(lock, project_dir)
                 .map_err(|e| anyhow::anyhow!("ato.lock.json OCI resolution is invalid: {e}"))?,
             None => {
-                let empty = capsule_core::ato_lock::AtoLock::default();
-                capsule_core::ato_lock::read_oci_lock(&empty, project_dir)
+                let empty = capsule::ato_lock::AtoLock::default();
+                capsule::ato_lock::read_oci_lock(&empty, project_dir)
                     .map_err(|e| anyhow::anyhow!("failed to read OCI lock: {e}"))?
             }
         };
@@ -217,7 +215,7 @@ pub(crate) async fn execute_install_sh_run(
 
     // Also write OCI facts into main ato.lock.json.
     {
-        use capsule_core::ato_lock::oci::{
+        use capsule::ato_lock::oci::{
             OciImageLockEntry as MainOciImageLockEntry, OciImportEntry,
             construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
         };
@@ -322,7 +320,7 @@ pub(crate) async fn resolve_install_sh_images_with_lock_replay<P: OciProvider>(
                     &entry.resolved_digest[..std::cmp::min(19, entry.resolved_digest.len())]
                 ))
                 .await?;
-            let platform = capsule_core::oci_compose_lock::parse_platform_str(&entry.platform);
+            let platform = capsule::oci_compose_lock::parse_platform_str(&entry.platform);
             images.insert(
                 svc.name.clone(),
                 OciImageResolution {
@@ -443,10 +441,10 @@ pub(crate) async fn execute_install_sh_run_with_provider<P: OciProvider>(
 mod tests {
     use std::path::PathBuf;
 
-    use capsule_core::routing::importer::docker_run_script::{
+    use capsule::routing::importer::docker_run_script::{
         DockerRunScriptImportInput, import_docker_run_script,
     };
-    use capsule_core::types::OciImageResolution;
+    use capsule::types::OciImageResolution;
 
     use super::*;
     use crate::adapters::runtime::oci_provider::FakeOciProvider;
@@ -458,7 +456,7 @@ mod tests {
         OciImageResolution {
             declared_ref: declared_ref.to_string(),
             resolved_digest: format!("sha256:{}", "a".repeat(64)),
-            platform: capsule_core::types::OciPlatform {
+            platform: capsule::types::OciPlatform {
                 os: "linux".to_string(),
                 architecture: "arm64".to_string(),
                 variant: None,
@@ -976,7 +974,7 @@ echo "done"
 
         // Sidecar write (existing behavior).
         let tmp = tempfile::tempdir().unwrap();
-        capsule_core::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
+        capsule::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
         assert!(tmp.path().join("ato.oci.lock.json").exists());
 
         // Main lock write (Phase 2).
@@ -984,7 +982,7 @@ echo "done"
             .images
             .iter()
             .map(|(name, entry)| {
-                let resolved_ref = capsule_core::ato_lock::construct_resolved_ref_from_sidecar(
+                let resolved_ref = capsule::ato_lock::construct_resolved_ref_from_sidecar(
                     &entry.declared_ref,
                     &entry.resolved_digest,
                 );
@@ -1010,17 +1008,17 @@ echo "done"
                 source_hash: source_hash.clone(),
             },
         );
-        capsule_core::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
+        capsule::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
             .unwrap();
 
         // Verify main lock.
         let main_lock_path = tmp.path().join("ato.lock.json");
         assert!(main_lock_path.exists(), "ato.lock.json must be created");
-        let loaded = capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
-        let oci_read = capsule_core::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
+        let loaded = capsule::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let oci_read = capsule::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
         assert_eq!(
             oci_read.source,
-            capsule_core::ato_lock::OciLockSource::MainLock,
+            capsule::ato_lock::OciLockSource::MainLock,
             "read must prefer main lock when present"
         );
         assert!(
@@ -1041,7 +1039,7 @@ echo "done"
         }
 
         // Sidecar must remain readable (compatibility).
-        let sidecar_loaded = capsule_core::oci_compose_lock::load_from_dir(tmp.path())
+        let sidecar_loaded = capsule::oci_compose_lock::load_from_dir(tmp.path())
             .unwrap()
             .unwrap();
         assert_eq!(sidecar_loaded.images.len(), 2);
@@ -1050,8 +1048,8 @@ echo "done"
         assert_eq!(images.len(), 2);
     }
 
-    use capsule_core::ato_lock::OciImageLockEntry as MainOciImageLockEntry;
-    use capsule_core::ato_lock::OciImportEntry;
+    use capsule::ato_lock::OciImageLockEntry as MainOciImageLockEntry;
+    use capsule::ato_lock::OciImportEntry;
 
     fn build_fresh_lock(
         source_hash: &str,

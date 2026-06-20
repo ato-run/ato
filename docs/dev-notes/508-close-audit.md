@@ -93,5 +93,5 @@ paths, closed secret-prompt loop, typed not-implemented for unsafe state — is 
 
 Generated from a session audit cross-checked against `git log origin/dev` and
 `gh pr list --state merged --search 508`. Code anchors: installed-state DB at
-`crates/capsule-core/src/foundation/installed_state/` (db.rs ledger + grant/binding
+`crates/capsule/src/foundation/installed_state/` (db.rs ledger + grant/binding
 refs); runtime injection at `crates/ato-cli/src/adapters/runtime/secret_injection.rs`.

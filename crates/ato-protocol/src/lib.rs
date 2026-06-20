@@ -22,7 +22,7 @@
 //! # Modules
 //!
 //! - [`error`] — [`WireError`], the slim parser error returned by the
-//!   handle classifier. Convertible into `capsule_core::CapsuleError` via
+//!   handle classifier. Convertible into `capsule::CapsuleError` via
 //!   a `From` impl living in capsule-core, so existing `?` paths in the
 //!   CLI keep working unchanged.
 //! - [`ccp`] — Capsule Control Protocol envelope header + tolerance rules.

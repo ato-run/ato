@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 use tracing::{debug, warn};
 
 use crate::record::StoredSessionInfo;

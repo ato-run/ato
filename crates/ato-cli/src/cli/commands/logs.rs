@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::reporters::CliReporter;
 use crate::runtime::process::ProcessManager;
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 
 const LOG_FILE_EXT: &str = ".log";
 
@@ -67,7 +67,7 @@ pub fn execute(args: LogsArgs, reporter: Arc<CliReporter>) -> Result<()> {
 }
 
 fn get_log_path(id: &str) -> PathBuf {
-    capsule_core::common::paths::ato_path_or_workspace_tmp(format!("logs/{}{}", id, LOG_FILE_EXT))
+    capsule::common::paths::ato_path_or_workspace_tmp(format!("logs/{}{}", id, LOG_FILE_EXT))
 }
 
 fn show_log(log_path: &PathBuf, tail: Option<usize>) -> Result<()> {

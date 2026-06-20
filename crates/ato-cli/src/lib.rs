@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 use clap::{CommandFactory, Parser};
 
 pub(crate) mod adapters;
@@ -148,16 +148,16 @@ fn stop_sidecar(
 
 fn stop_sidecar_cleanup_action(
     sidecar: &Arc<Mutex<Option<common::sidecar::SidecarHandle>>>,
-) -> capsule_core::execution_plan::error::CleanupActionRecord {
+) -> capsule::execution_plan::error::CleanupActionRecord {
     match stop_sidecar(sidecar) {
-        Ok(_) => capsule_core::execution_plan::error::CleanupActionRecord {
+        Ok(_) => capsule::execution_plan::error::CleanupActionRecord {
             action: "stop_sidecar".to_string(),
-            status: capsule_core::execution_plan::error::CleanupActionStatus::Succeeded,
+            status: capsule::execution_plan::error::CleanupActionStatus::Succeeded,
             detail: Some("tsnet sidecar".to_string()),
         },
-        Err(error) => capsule_core::execution_plan::error::CleanupActionRecord {
+        Err(error) => capsule::execution_plan::error::CleanupActionRecord {
             action: "stop_sidecar".to_string(),
-            status: capsule_core::execution_plan::error::CleanupActionStatus::Failed,
+            status: capsule::execution_plan::error::CleanupActionStatus::Failed,
             detail: Some(format!("tsnet sidecar: {}", error)),
         },
     }

@@ -6,9 +6,9 @@ mod spawn;
 use std::collections::HashMap;
 
 use anyhow::Result;
-use capsule_core::CapsuleReporter;
-use capsule_core::lockfile::{CapsuleLock, manifest_external_capsule_dependencies};
-use capsule_core::router::{ExecutionProfile, ManifestData};
+use capsule::CapsuleReporter;
+use capsule::lockfile::{CapsuleLock, manifest_external_capsule_dependencies};
+use capsule::router::{ExecutionProfile, ManifestData};
 
 use crate::reporters::CliReporter;
 
@@ -88,14 +88,14 @@ pub async fn start_external_capsules(
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "{} is missing capsule dependency '{}'",
-                    capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME,
+                    capsule::lockfile::CAPSULE_LOCK_FILE_NAME,
                     dependency.alias
                 )
             })?;
 
         let manifest_path = ensure_runtime_tree_for_dependency(&locked).await?;
         let decision =
-            capsule_core::router::route_manifest(&manifest_path, ExecutionProfile::Dev, None)?;
+            capsule::router::route_manifest(&manifest_path, ExecutionProfile::Dev, None)?;
 
         let inject_args = merged_dependency_bindings(&decision.plan, &locked, &cli_bindings);
         let port = decision.plan.execution_port();

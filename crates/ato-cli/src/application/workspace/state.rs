@@ -4,10 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{AtoLock, UnresolvedValue};
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::model::ExecutionPlan;
-use capsule_core::lock_runtime::LockCompilerOverlay;
+use capsule::ato_lock::{AtoLock, UnresolvedValue};
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::model::ExecutionPlan;
+use capsule::lock_runtime::LockCompilerOverlay;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -251,7 +251,7 @@ pub(crate) fn validate_execution_plan_against_policy(
 }
 
 pub(crate) fn validate_config_against_policy(
-    config: &capsule_core::runtime_config::ConfigJson,
+    config: &capsule::runtime_config::ConfigJson,
     policy: &WorkspacePolicyBundle,
 ) -> Result<(), AtoExecutionError> {
     let mut allow_hosts = Vec::new();
@@ -592,7 +592,7 @@ mod tests {
 
     fn sample_lock() -> AtoLock {
         let mut lock = AtoLock {
-            lock_id: Some(capsule_core::ato_lock::LockId::new(
+            lock_id: Some(capsule::ato_lock::LockId::new(
                 "blake3:1111111111111111111111111111111111111111111111111111111111111111",
             )),
             ..AtoLock::default()
@@ -780,47 +780,47 @@ mod tests {
             ..WorkspacePolicyBundle::default()
         };
 
-        let plan = capsule_core::execution_plan::model::ExecutionPlan {
+        let plan = capsule::execution_plan::model::ExecutionPlan {
             schema_version: "1".to_string(),
-            capsule: capsule_core::execution_plan::model::CapsuleRef {
+            capsule: capsule::execution_plan::model::CapsuleRef {
                 scoped_id: "local/test".to_string(),
                 version: "0.0.0".to_string(),
             },
-            target: capsule_core::execution_plan::model::TargetRef {
+            target: capsule::execution_plan::model::TargetRef {
                 label: "default".to_string(),
-                runtime: capsule_core::execution_plan::model::ExecutionRuntime::Source,
-                driver: capsule_core::execution_plan::model::ExecutionDriver::Native,
+                runtime: capsule::execution_plan::model::ExecutionRuntime::Source,
+                driver: capsule::execution_plan::model::ExecutionDriver::Native,
                 language: None,
             },
-            provisioning: capsule_core::execution_plan::model::Provisioning {
-                network: capsule_core::execution_plan::model::ProvisioningNetwork {
+            provisioning: capsule::execution_plan::model::Provisioning {
+                network: capsule::execution_plan::model::ProvisioningNetwork {
                     allow_registry_hosts: Vec::new(),
                 },
                 lock_required: true,
                 integrity_required: true,
                 allowed_registries: Vec::new(),
             },
-            runtime: capsule_core::execution_plan::model::Runtime {
-                policy: capsule_core::execution_plan::model::RuntimePolicy {
-                    network: capsule_core::execution_plan::model::RuntimeNetworkPolicy {
+            runtime: capsule::execution_plan::model::Runtime {
+                policy: capsule::execution_plan::model::RuntimePolicy {
+                    network: capsule::execution_plan::model::RuntimeNetworkPolicy {
                         allow_hosts: vec!["example.com".to_string()],
                     },
-                    filesystem: capsule_core::execution_plan::model::RuntimeFilesystemPolicy {
+                    filesystem: capsule::execution_plan::model::RuntimeFilesystemPolicy {
                         read_only: Vec::new(),
                         read_write: Vec::new(),
                     },
-                    secrets: capsule_core::execution_plan::model::RuntimeSecretsPolicy {
+                    secrets: capsule::execution_plan::model::RuntimeSecretsPolicy {
                         allow_secret_ids: Vec::new(),
-                        delivery: capsule_core::execution_plan::model::SecretDelivery::Fd,
+                        delivery: capsule::execution_plan::model::SecretDelivery::Fd,
                     },
                     args: Vec::new(),
                 },
                 fail_closed: true,
                 non_interactive_behavior:
-                    capsule_core::execution_plan::model::NonInteractiveBehavior::DenyIfUnconsented,
+                    capsule::execution_plan::model::NonInteractiveBehavior::DenyIfUnconsented,
             },
-            consent: capsule_core::execution_plan::model::Consent {
-                key: capsule_core::execution_plan::model::ConsentKey {
+            consent: capsule::execution_plan::model::Consent {
+                key: capsule::execution_plan::model::ConsentKey {
                     scoped_id: "local/test".to_string(),
                     version: "0.0.0".to_string(),
                     target_label: "default".to_string(),
@@ -830,8 +830,8 @@ mod tests {
                 mount_set_algo_id: "algo".to_string(),
                 mount_set_algo_version: 1,
             },
-            reproducibility: capsule_core::execution_plan::model::Reproducibility {
-                platform: capsule_core::execution_plan::model::Platform {
+            reproducibility: capsule::execution_plan::model::Reproducibility {
+                platform: capsule::execution_plan::model::Platform {
                     os: "macos".to_string(),
                     arch: "aarch64".to_string(),
                     libc: "system".to_string(),

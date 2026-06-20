@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 
-use capsule_core::packers::payload as manifest_payload;
-use capsule_core::types::CapsuleManifest;
+use capsule::packers::payload as manifest_payload;
+use capsule::types::CapsuleManifest;
 
 const CURRENT_SYMLINK: &str = "current";
 const PROMOTED_NAMESPACE: &str = "promoted";
@@ -180,11 +180,11 @@ fn runtime_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ATO_RUNTIME_ROOT") {
         return Ok(PathBuf::from(path));
     }
-    capsule_core::common::paths::runtime_cache_dir().map_err(Into::into)
+    capsule::common::paths::runtime_cache_dir().map_err(Into::into)
 }
 
 fn store_root() -> Result<PathBuf> {
-    Ok(capsule_core::common::paths::ato_store_dir())
+    Ok(capsule::common::paths::ato_store_dir())
 }
 
 fn parse_store_capsule_identity_at(

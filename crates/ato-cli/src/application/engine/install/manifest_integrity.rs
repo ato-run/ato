@@ -7,7 +7,7 @@ pub(crate) struct ReconstructResult {
 
 pub(crate) fn manifest_distribution(
     manifest: &CapsuleManifest,
-) -> Result<&capsule_core::types::DistributionInfo> {
+) -> Result<&capsule::types::DistributionInfo> {
     manifest.distribution.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "{}: distribution metadata is missing from capsule.toml",
@@ -430,7 +430,7 @@ pub(crate) fn extract_manifest_toml_from_capsule(bytes: &[u8]) -> Result<String>
 
 pub(crate) fn extract_embedded_ato_lock_from_capsule(
     bytes: &[u8],
-) -> Result<Option<capsule_core::ato_lock::AtoLock>> {
+) -> Result<Option<capsule::ato_lock::AtoLock>> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     let entries = archive
         .entries()
@@ -446,7 +446,7 @@ pub(crate) fn extract_embedded_ato_lock_from_capsule(
                 .context("Failed to read embedded lock from artifact")?;
             let lock_raw =
                 String::from_utf8(lock_raw).with_context(|| "embedded lock must be UTF-8")?;
-            let lock = capsule_core::ato_lock::load_unvalidated_from_str(&lock_raw)
+            let lock = capsule::ato_lock::load_unvalidated_from_str(&lock_raw)
                 .map_err(anyhow::Error::from)
                 .with_context(|| "embedded lock is invalid")?;
             return Ok(Some(lock));
@@ -561,7 +561,7 @@ pub(crate) fn verify_manifest_merkle_root(manifest: &CapsuleManifest) -> Result<
 }
 
 pub(crate) fn epoch_guard_path() -> PathBuf {
-    capsule_core::common::paths::ato_state_dir().join("epoch-guard.json")
+    capsule::common::paths::ato_state_dir().join("epoch-guard.json")
 }
 
 pub(crate) fn enforce_epoch_monotonicity(

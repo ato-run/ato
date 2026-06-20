@@ -31,7 +31,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     DependencyIdentityV2, EnvironmentIdentityV2, EnvironmentMode, ExecutionIdentityInputV2,
     ExecutionReceiptDocument, ExecutionReceiptV2, FilesystemIdentityV2, FilesystemSemantics,
     LaunchArg, LaunchEntryPoint, LaunchIdentityV2, PlatformIdentity, PolicyIdentityV2,

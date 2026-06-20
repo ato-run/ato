@@ -149,9 +149,9 @@ tag. Mixing algorithms within one tree is not allowed.
 
 ## Reference implementation
 
-`crates/capsule-core/src/foundation/blob/tree_hash.rs` is the canonical
+`crates/capsule/src/foundation/blob/tree_hash.rs` is the canonical
 reference implementation. It is gated by tests in
-`crates/capsule-core/tests/blob_freeze.rs` covering:
+`crates/capsule/tests/blob_freeze.rs` covering:
 
 - two consecutive freezes of the same input yield the same hash,
 - a one-byte content change changes the hash,

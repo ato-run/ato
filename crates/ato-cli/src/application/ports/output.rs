@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use capsule_core::{CapsuleReporter, UsageReporter};
+use capsule::{CapsuleReporter, UsageReporter};
 
 #[async_trait]
 pub trait OutputPort: CapsuleReporter + UsageReporter + Send + Sync {

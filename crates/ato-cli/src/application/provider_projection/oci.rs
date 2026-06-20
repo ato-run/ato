@@ -9,15 +9,13 @@
 
 use std::collections::BTreeMap;
 
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     OciEnforcementStatus, OciImageDigestStatus, OciMountReceiptEvidence, OciPortReceiptEvidence,
     OciProviderReceiptEvidence,
 };
-use capsule_core::realization::RedactedProjectionCommand;
-use capsule_core::runtime::oci::{
-    OciContainerRequest, OciMountSourceKind, OciMountSpec, OciPortSpec,
-};
-use capsule_core::types::OciPlatform;
+use capsule::realization::RedactedProjectionCommand;
+use capsule::runtime::oci::{OciContainerRequest, OciMountSourceKind, OciMountSpec, OciPortSpec};
+use capsule::types::OciPlatform;
 
 use super::{ProviderCapabilities, ProviderId, ProviderKind};
 
@@ -638,8 +636,8 @@ impl OciProjectionPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::runtime::oci::{OciMountSourceKind, OciMountSpec, OciPortSpec};
-    use capsule_core::types::{MountOwnership, OciPlatform};
+    use capsule::runtime::oci::{OciMountSourceKind, OciMountSpec, OciPortSpec};
+    use capsule::types::{MountOwnership, OciPlatform};
     use std::collections::HashMap;
 
     fn base_request() -> OciContainerRequest {

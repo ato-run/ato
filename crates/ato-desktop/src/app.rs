@@ -1,4 +1,4 @@
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 use gpui::{Action, App, AssetSource, KeyBinding, SharedString, actions};
 #[cfg(target_os = "macos")]
 use gpui::{Menu, MenuItem, OsAction, SystemMenuType};

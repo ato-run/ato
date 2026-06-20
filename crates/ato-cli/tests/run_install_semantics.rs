@@ -26,7 +26,7 @@ mod predicates {
     //! layout to move — and instead look for the recognizable file shapes
     //! that the `install_lifecycle` store emits.
     //!
-    //! The shapes mirror `capsule_core::foundation::install_lifecycle::store`:
+    //! The shapes mirror `capsule::foundation::install_lifecycle::store`:
     //!   - `<root>/instances/<installed_app_id>/app.json`
     //!   - `<root>/instances/<installed_app_id>/profiles/<profile_id>/profile.json`
     //!   - `<root>/revisions/<install_revision_id>/...`

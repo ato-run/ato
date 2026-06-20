@@ -1,14 +1,14 @@
 //! Project init helpers for lock-first durable materialization and legacy manifest scaffolds.
 
 use anyhow::{Context, Result};
-use capsule_core::input_resolver::{
+use capsule::input_resolver::{
     ResolveInputOptions, ResolvedCompatibilityProject, ResolvedInput, ResolvedSourceOnly,
     resolve_authoritative_input,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 
 use crate::application::source_inference;
 
@@ -49,7 +49,7 @@ pub fn execute_durable_init(
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. `ato init` only materializes a durable baseline when canonical input is missing.",
-                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                capsule::input_resolver::ATO_LOCK_FILE_NAME,
                 canonical.path.display()
             );
         }
@@ -66,16 +66,16 @@ pub fn execute_durable_init(
                 project_root: input_path.clone(),
                 single_script: None,
             },
-            provenance: capsule_core::input_resolver::InputProvenance {
+            provenance: capsule::input_resolver::InputProvenance {
                 requested_path: input_path.clone(),
-                explicit_input_kind: capsule_core::input_resolver::ExplicitInputKind::Directory,
+                explicit_input_kind: capsule::input_resolver::ExplicitInputKind::Directory,
                 project_root: input_path.clone(),
-                discovered: capsule_core::input_resolver::DiscoveredArtifacts {
+                discovered: capsule::input_resolver::DiscoveredArtifacts {
                     canonical_lock_path: None,
                     compatibility_manifest_path: None,
                     compatibility_lock_path: None,
                 },
-                selected_kind: capsule_core::input_resolver::ResolvedInputKind::SourceOnly,
+                selected_kind: capsule::input_resolver::ResolvedInputKind::SourceOnly,
                 authoritative_path: None,
             },
             advisories: Vec::new(),
@@ -167,7 +167,7 @@ pub fn write_manual_manifest_stub(
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. `ato init` manual starter generation is not available on top of canonical lock input.",
-                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                capsule::input_resolver::ATO_LOCK_FILE_NAME,
                 canonical.path.display()
             );
         }
@@ -215,7 +215,7 @@ pub fn write_legacy_detected_manifest(
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. Legacy manifest generation is not available on top of canonical lock input.",
-                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                capsule::input_resolver::ATO_LOCK_FILE_NAME,
                 canonical.path.display()
             );
         }

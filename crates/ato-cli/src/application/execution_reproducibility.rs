@@ -1,9 +1,9 @@
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     DependencyIdentity, EnvironmentIdentity, EnvironmentMode, FilesystemIdentity,
     ReproducibilityCause, ReproducibilityClass, ReproducibilityIdentity, RuntimeIdentity,
     TrackingStatus,
 };
-use capsule_core::execution_plan::model::ExecutionPlan;
+use capsule::execution_plan::model::ExecutionPlan;
 
 pub(crate) fn classify_execution(
     execution_plan: &ExecutionPlan,
@@ -85,7 +85,7 @@ fn classify_observations(
 
 #[cfg(test)]
 mod tests {
-    use capsule_core::execution_identity::{
+    use capsule::execution_identity::{
         DependencyIdentity, EnvironmentIdentity, EnvironmentMode, FilesystemIdentity,
         PlatformIdentity, RuntimeIdentity, Tracked,
     };

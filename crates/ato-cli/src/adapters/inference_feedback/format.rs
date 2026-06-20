@@ -1,7 +1,7 @@
 use rand::RngCore;
 use std::path::Path;
 
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::error::AtoExecutionError;
 
 use super::MAX_SMOKE_ERROR_EXCERPT_CHARS;
 
@@ -23,7 +23,7 @@ pub fn summarize_manifest_diff(inferred_toml: &str, actual_toml: &str) -> String
     )
 }
 
-pub(super) fn build_smoke_excerpt(report: &capsule_core::smoke::SmokeFailureReport) -> String {
+pub(super) fn build_smoke_excerpt(report: &capsule::smoke::SmokeFailureReport) -> String {
     let message = report.message.trim();
     let stderr = report.stderr_tail.trim();
     let combined = if stderr.is_empty() {

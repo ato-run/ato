@@ -26,7 +26,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
-use capsule_core::types::{TemplateExpr, TemplateSegment, TemplatedString};
+use capsule::types::{TemplateExpr, TemplateSegment, TemplatedString};
 use thiserror::Error;
 use zeroize::Zeroize;
 

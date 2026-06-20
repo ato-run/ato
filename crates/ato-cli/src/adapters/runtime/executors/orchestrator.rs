@@ -15,18 +15,16 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use capsule_core::CapsuleReporter;
-use capsule_core::common::readiness::http_status_indicates_ready;
-use capsule_core::execution_plan::guard::ExecutorKind;
-use capsule_core::lifecycle::LifecycleEvent;
-use capsule_core::router::ManifestData;
-use capsule_core::runtime::oci::{
+use capsule::CapsuleReporter;
+use capsule::common::readiness::http_status_indicates_ready;
+use capsule::execution_plan::guard::ExecutorKind;
+use capsule::lifecycle::LifecycleEvent;
+use capsule::router::ManifestData;
+use capsule::runtime::oci::{
     BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciMountSourceKind,
     OciNetworkRequest, OciPortSpec, OciRuntimeClient, resolve_oci_mount,
 };
-use capsule_core::types::{
-    OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceRuntime,
-};
+use capsule::types::{OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceRuntime};
 
 use super::launch_context::RuntimeLaunchContext;
 use super::oci_multi_service::{
@@ -746,9 +744,9 @@ async fn launch_service<C: OciRuntimeClient>(
             let service_prepared = prepared.with_bridge_manifest(
                 service_plan.manifest.clone(),
                 if options.target_launch_options().preview_mode {
-                    capsule_core::types::ValidationMode::Preview
+                    capsule::types::ValidationMode::Preview
                 } else {
-                    capsule_core::types::ValidationMode::Strict
+                    capsule::types::ValidationMode::Strict
                 },
                 service_plan.manifest.get("engine").is_some(),
             );
@@ -1815,8 +1813,8 @@ fn send_sigterm(child: &mut Child) -> Result<()> {
 mod tests {
     use super::execute_with_client;
     use super::*;
-    use capsule_core::runtime::oci::OciContainerInspect;
-    use capsule_core::types::ResolvedTargetRuntime;
+    use capsule::runtime::oci::OciContainerInspect;
+    use capsule::types::ResolvedTargetRuntime;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -1837,15 +1835,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OciRuntimeClient for FakeClient {
-        async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+        async fn pull_image(&self, image: &str) -> capsule::Result<()> {
             self.events.lock().unwrap().push(format!("pull:{image}"));
             Ok(())
         }
 
-        async fn create_network(
-            &self,
-            request: &OciNetworkRequest,
-        ) -> capsule_core::Result<String> {
+        async fn create_network(&self, request: &OciNetworkRequest) -> capsule::Result<String> {
             self.events
                 .lock()
                 .unwrap()
@@ -1853,7 +1848,7 @@ mod tests {
             Ok(request.name.clone())
         }
 
-        async fn remove_network(&self, network_name: &str) -> capsule_core::Result<()> {
+        async fn remove_network(&self, network_name: &str) -> capsule::Result<()> {
             self.events
                 .lock()
                 .unwrap()
@@ -1861,10 +1856,7 @@ mod tests {
             Ok(())
         }
 
-        async fn create_container(
-            &self,
-            request: &OciContainerRequest,
-        ) -> capsule_core::Result<String> {
+        async fn create_container(&self, request: &OciContainerRequest) -> capsule::Result<String> {
             let service = request
                 .labels
                 .get("io.ato.service")
@@ -1905,7 +1897,7 @@ mod tests {
             Ok(request.name.clone())
         }
 
-        async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+        async fn start_container(&self, container_id: &str) -> capsule::Result<()> {
             self.events
                 .lock()
                 .unwrap()
@@ -1919,7 +1911,7 @@ mod tests {
         async fn inspect_container(
             &self,
             container_id: &str,
-        ) -> capsule_core::Result<OciContainerInspect> {
+        ) -> capsule::Result<OciContainerInspect> {
             let mut states = self.states.lock().unwrap();
             let state = states.get_mut(container_id).expect("state");
             state.inspect_calls += 1;
@@ -1937,17 +1929,12 @@ mod tests {
             &self,
             _container_id: &str,
             _follow: bool,
-        ) -> capsule_core::Result<tokio::sync::mpsc::Receiver<capsule_core::Result<OciLogChunk>>>
-        {
+        ) -> capsule::Result<tokio::sync::mpsc::Receiver<capsule::Result<OciLogChunk>>> {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             Ok(rx)
         }
 
-        async fn exec_container(
-            &self,
-            container_id: &str,
-            cmd: &[String],
-        ) -> capsule_core::Result<i64> {
+        async fn exec_container(&self, container_id: &str, cmd: &[String]) -> capsule::Result<i64> {
             self.events
                 .lock()
                 .unwrap()
@@ -1955,7 +1942,7 @@ mod tests {
             Ok(0)
         }
 
-        async fn wait_container(&self, _container_id: &str) -> capsule_core::Result<i64> {
+        async fn wait_container(&self, _container_id: &str) -> capsule::Result<i64> {
             Ok(0)
         }
 
@@ -1963,7 +1950,7 @@ mod tests {
             &self,
             container_id: &str,
             _timeout_secs: i64,
-        ) -> capsule_core::Result<()> {
+        ) -> capsule::Result<()> {
             self.events
                 .lock()
                 .unwrap()
@@ -1974,11 +1961,7 @@ mod tests {
             Ok(())
         }
 
-        async fn remove_container(
-            &self,
-            container_id: &str,
-            _force: bool,
-        ) -> capsule_core::Result<()> {
+        async fn remove_container(&self, container_id: &str, _force: bool) -> capsule::Result<()> {
             self.events
                 .lock()
                 .unwrap()
@@ -1986,7 +1969,7 @@ mod tests {
             Ok(())
         }
 
-        async fn remove_volume(&self, volume_name: &str) -> capsule_core::Result<()> {
+        async fn remove_volume(&self, volume_name: &str) -> capsule::Result<()> {
             self.events
                 .lock()
                 .unwrap()
@@ -2051,11 +2034,11 @@ mod tests {
     }
 
     fn manifest_data(manifest_toml: &str) -> ManifestData {
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             toml::from_str(manifest_toml).expect("manifest toml"),
             PathBuf::from("/tmp/capsule.toml"),
             PathBuf::from("/tmp"),
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             Some("app"),
             HashMap::new(),
         )
@@ -2300,7 +2283,7 @@ target = "db"
                     crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                         plan.manifest.clone(),
                     ),
-                validation_mode: capsule_core::types::ValidationMode::Strict,
+                validation_mode: capsule::types::ValidationMode::Strict,
                 engine_override_declared: false,
                 compatibility_legacy_lock: None,
                 install_profile_key: None,
@@ -2415,7 +2398,7 @@ readiness_probe = { http_get = "/", port = "MISSING_PORT", timeout_seconds = 1 }
                     crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                         plan.manifest.clone(),
                     ),
-                validation_mode: capsule_core::types::ValidationMode::Strict,
+                validation_mode: capsule::types::ValidationMode::Strict,
                 engine_override_declared: false,
                 compatibility_legacy_lock: None,
                 install_profile_key: None,
@@ -2509,7 +2492,7 @@ readiness_probe = { exec = ["pg_isready", "-U", "postgres"], timeout_seconds = 6
                     crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                         plan.manifest.clone(),
                     ),
-                validation_mode: capsule_core::types::ValidationMode::Strict,
+                validation_mode: capsule::types::ValidationMode::Strict,
                 engine_override_declared: false,
                 compatibility_legacy_lock: None,
                 install_profile_key: None,
@@ -2598,7 +2581,7 @@ depends_on = ["db"]
                     crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                         plan.manifest.clone(),
                     ),
-                validation_mode: capsule_core::types::ValidationMode::Strict,
+                validation_mode: capsule::types::ValidationMode::Strict,
                 engine_override_declared: false,
                 compatibility_legacy_lock: None,
                 install_profile_key: None,
@@ -2656,7 +2639,7 @@ depends_on = ["db"]
     /// `ATO_HOME`.
     #[test]
     fn determine_publish_mode_respects_ephemeral_main_service_policy() {
-        use capsule_core::types::{
+        use capsule::types::{
             OrchestrationPlan, ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime,
             ResolvedTargetRuntime,
         };

@@ -12,7 +12,7 @@ use super::command_spec::CommandSpec;
 // `ConfigField` / `ConfigKind` were extracted to `capsule-wire` in N2 so
 // `ato-desktop` can consume them without linking capsule-core's heavy
 // runtime deps. They are re-exported here so existing
-// `capsule_core::types::{ConfigField, ConfigKind}` import paths
+// `capsule::types::{ConfigField, ConfigKind}` import paths
 // (`error.rs`, `manifest_tests.rs`, the CLI diagnostics tests) keep
 // compiling unchanged.
 pub use ato_protocol::config::{ConfigField, ConfigKind};
@@ -1246,7 +1246,7 @@ pub struct CapsuleRequirements {
 
     /// Optional capability declarations surfaced to registry search and
     /// agent-facing SKILL.md vocab. See
-    /// `capsule_core::schema::capabilities::Capabilities`. Absence means
+    /// `capsule::schema::capabilities::Capabilities`. Absence means
     /// "not declared"; do not infer a default level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<crate::schema::capabilities::Capabilities>,

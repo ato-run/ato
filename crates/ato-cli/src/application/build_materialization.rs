@@ -129,7 +129,7 @@ pub(crate) struct BuildObservation {
 /// `preflight.rs::run_v03_lifecycle_steps` uses, so the digest reflects the
 /// same source/lockfile set the build executor sees.
 pub(crate) fn observe_for_plan(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
 ) -> Result<Option<BuildObservation>> {
     let working_dir = resolve_lifecycle_working_dir(plan);
@@ -149,7 +149,7 @@ pub(crate) fn observe_for_plan(
 /// capsules sometimes lay out their project files under `source/` while the
 /// outer manifest dir does not contain `package.json`. The build digest must
 /// hash the same directory the build executor will shell into.
-fn resolve_lifecycle_working_dir(plan: &capsule_core::router::ManifestData) -> PathBuf {
+fn resolve_lifecycle_working_dir(plan: &capsule::router::ManifestData) -> PathBuf {
     let source_dir = plan.manifest_dir.join("source");
     if source_dir.join("package.json").exists() {
         return source_dir;
@@ -159,7 +159,7 @@ fn resolve_lifecycle_working_dir(plan: &capsule_core::router::ManifestData) -> P
 
 /// Public toolchain fingerprint helper for callers that need to record the
 /// same value on the materialization record after a successful build.
-pub(crate) fn toolchain_fingerprint_for_plan(plan: &capsule_core::router::ManifestData) -> String {
+pub(crate) fn toolchain_fingerprint_for_plan(plan: &capsule::router::ManifestData) -> String {
     let runtime = plan
         .execution_runtime()
         .unwrap_or_else(|| "unknown".to_string());
@@ -183,7 +183,7 @@ pub(crate) fn toolchain_fingerprint_for_plan(plan: &capsule_core::router::Manife
 /// fields as `unknown` so the digest still changes when resolution improves
 /// later.
 fn derive_toolchain_fingerprint(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     _launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
 ) -> String {
     let runtime = plan
@@ -919,7 +919,7 @@ pub(crate) struct PreparedBuildDecision {
 /// Observe the plan and consult the policy + state. Idempotent (no side
 /// effects on disk); safe to call before every build invocation.
 pub(crate) fn prepare_decision(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
     policy: BuildPolicy,
     workspace_root: &Path,
@@ -949,7 +949,7 @@ pub(crate) fn prepare_decision(
 /// lock, then pass the result here so that capture and state-record write are
 /// covered by the same lock region as the build executor.
 pub(crate) fn persist_after_execute(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     workspace_root: &Path,
     observation: &BuildObservation,
     suppress_recommendation: bool,
@@ -967,7 +967,7 @@ pub(crate) fn persist_after_execute(
 /// After a successful remote build-output projection, upsert the
 /// materialization record without implying that the local build executor ran.
 pub(crate) fn persist_after_remote_project(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     workspace_root: &Path,
     observation: &BuildObservation,
     suppress_recommendation: bool,
@@ -983,7 +983,7 @@ pub(crate) fn persist_after_remote_project(
 }
 
 fn persist_materialization_record(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     workspace_root: &Path,
     observation: &BuildObservation,
     suppress_recommendation: bool,

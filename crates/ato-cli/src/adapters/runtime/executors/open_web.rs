@@ -4,7 +4,7 @@ use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use capsule_core::router::ManifestData;
+use capsule::router::ManifestData;
 
 use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
@@ -140,7 +140,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn ensure_static_server_script() -> Result<PathBuf> {
-    let script_path = capsule_core::common::paths::ato_cache_dir()
+    let script_path = capsule::common::paths::ato_cache_dir()
         .join("scripts")
         .join("static_file_server.ts");
     if let Some(parent) = script_path.parent() {

@@ -3,11 +3,11 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use anyhow::Result;
 use serde_json::json;
 
-use capsule_core::execution_plan::error::{
+use capsule::execution_plan::error::{
     AtoErrorClassification, AtoExecutionError, ManifestSuggestion,
 };
-use capsule_core::router::ManifestData;
-use capsule_core::types::{OrchestrationPlan, ServiceSpec};
+use capsule::router::ManifestData;
+use capsule::types::{OrchestrationPlan, ServiceSpec};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceGraphPlan {
@@ -260,7 +260,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::ServiceGraphPlan;
-    use capsule_core::types::{
+    use capsule::types::{
         OrchestrationPlan, ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime,
         ResolvedTargetRuntime, ServiceConnectionInfo, ServiceSpec,
     };

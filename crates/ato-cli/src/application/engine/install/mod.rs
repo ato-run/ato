@@ -19,24 +19,24 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::install_lifecycle::{
     AppRecord, ArtifactBuildId, FinalizerInput, InstallBuildFacts, InstallInstanceStore,
     InstallProfileKey, InstallRevisionFinalizer, InstallRevisionId, InstalledAppId, LaunchProfile,
     ProfileId, path_safe_app_id,
 };
 
-use capsule_core::installed_state::{
+use capsule::installed_state::{
     InstalledStateDb, LaunchConditionClaim, LaunchConditionKind, LaunchConditionStatus,
     StorageAdmission, StorageClaim, app_service_endpoint, launch_condition_extraction_status,
     launch_condition_from_env_projection, launch_condition_from_port_declaration,
     launch_condition_from_secret_requirement, launch_condition_from_state_binding,
     launch_condition_from_storage_claim,
 };
-use capsule_core::packers::payload as manifest_payload;
-use capsule_core::resource::cas::LocalCasIndex;
-use capsule_core::types::identity::public_key_to_did;
-use capsule_core::types::{CapsuleManifest, StateAttach, StateDurability};
+use capsule::packers::payload as manifest_payload;
+use capsule::resource::cas::LocalCasIndex;
+use capsule::types::identity::public_key_to_did;
+use capsule::types::{CapsuleManifest, StateAttach, StateDurability};
 
 use crate::artifact_hash::{
     compute_blake3_label as compute_blake3, compute_sha256_hex as compute_sha256, equals_hash,
@@ -517,7 +517,7 @@ enum DeltaInstallResult {
 enum V3SyncOutcome {
     Synced,
     SkippedUnsupportedRegistry,
-    SkippedDisabledCas(capsule_core::capsule::CasDisableReason),
+    SkippedDisabledCas(capsule::capsule::CasDisableReason),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -710,7 +710,7 @@ pub fn resolve_local_slug(slug: &str) -> Result<LocalSlugResolution> {
     if slug.is_empty() || slug.contains('/') {
         return Ok(LocalSlugResolution::NotFound);
     }
-    let store_root = capsule_core::common::paths::ato_path_or_workspace_tmp("store");
+    let store_root = capsule::common::paths::ato_path_or_workspace_tmp("store");
     if !store_root.exists() {
         return Ok(LocalSlugResolution::NotFound);
     }
@@ -1613,7 +1613,7 @@ fn materialize_ato_managed_environment(
         return Ok(None);
     };
     let Some(environment) =
-        capsule_core::ato_lock::delivery_environment(&lock).map_err(|err| anyhow::anyhow!(err))?
+        capsule::ato_lock::delivery_environment(&lock).map_err(|err| anyhow::anyhow!(err))?
     else {
         return Ok(None);
     };
@@ -2317,7 +2317,7 @@ fn declared_disk_requirement_bytes(manifest_toml: Option<&str>) -> Result<Option
 fn install_volume_probe(output_dir: Option<&Path>) -> PathBuf {
     output_dir
         .map(Path::to_path_buf)
-        .unwrap_or_else(capsule_core::common::paths::ato_store_dir)
+        .unwrap_or_else(capsule::common::paths::ato_store_dir)
 }
 
 fn fmt_bytes(n: u64) -> String {

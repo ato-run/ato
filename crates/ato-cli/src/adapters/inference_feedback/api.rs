@@ -122,7 +122,7 @@ pub async fn submit_attempt(
 
 pub async fn submit_smoke_failed(
     attempt: &InferenceAttemptHandle,
-    report: &capsule_core::smoke::SmokeFailureReport,
+    report: &capsule::smoke::SmokeFailureReport,
 ) -> Result<()> {
     if !telemetry_enabled() {
         return Ok(());
@@ -184,7 +184,7 @@ pub async fn request_retry_install_draft(
     repository: &str,
     install_draft: &GitHubInstallDraftResponse,
     attempt: Option<&InferenceAttemptHandle>,
-    report: &capsule_core::smoke::SmokeFailureReport,
+    report: &capsule::smoke::SmokeFailureReport,
     retry_ordinal: u8,
 ) -> Result<GitHubInstallDraftResponse> {
     let request = install::GitHubInstallDraftRetryRequest {

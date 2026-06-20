@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```rust
-//! use capsule_core::types::identity::{public_key_to_did, did_to_public_key};
+//! use capsule::types::identity::{public_key_to_did, did_to_public_key};
 //!
 //! let public_key = [0u8; 32]; // Example key
 //! let did = public_key_to_did(&public_key);
@@ -44,7 +44,7 @@ const BASE58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghij
 /// # Example
 ///
 /// ```rust
-/// use capsule_core::types::identity::public_key_to_did;
+/// use capsule::types::identity::public_key_to_did;
 ///
 /// let key = [0u8; 32];
 /// let did = public_key_to_did(&key);

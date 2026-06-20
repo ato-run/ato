@@ -98,8 +98,8 @@ fn manual_manifest_path_uses_repo_tmp_directory() {
 
 #[test]
 fn smoke_excerpt_is_capped_to_store_limit() {
-    let report = capsule_core::smoke::SmokeFailureReport {
-        class: capsule_core::smoke::SmokeFailureClass::ProcessExitedEarly,
+    let report = capsule::smoke::SmokeFailureReport {
+        class: capsule::smoke::SmokeFailureClass::ProcessExitedEarly,
         message: "process exited while waiting for port 8000".to_string(),
         stderr_tail: "x".repeat(5000),
         exit_status: Some(1),

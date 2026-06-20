@@ -19,11 +19,11 @@
 //!
 //! Every API used here is a pure manifest computation:
 //!
-//! - [`capsule_core::execution_plan::derive::compile_execution_plan`]
+//! - [`capsule::execution_plan::derive::compile_execution_plan`]
 //!   only loads the manifest, applies routing logic, and constructs an
 //!   `ExecutionPlan` value. It does not spawn subprocesses, write
 //!   files, or contact registries.
-//! - [`capsule_core::router::ManifestData::services`] reads the
+//! - [`capsule::router::ManifestData::services`] reads the
 //!   `[services]` table and returns target labels.
 //! - [`crate::application::auth::consent_store::has_consent`] reads
 //!   the JSONL consent log under `${ATO_HOME}/consent/`; it never
@@ -46,14 +46,14 @@ use serde::Serialize;
 use crate::runtime::oci_provider::{
     OciProvider, OciProviderError, OciProviderProbe, OciProviderSelector,
 };
-use capsule_core::execution_plan::derive::compile_execution_plan;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::interactive_resolution::{
+use capsule::execution_plan::derive::compile_execution_plan;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::interactive_resolution::{
     InteractiveResolutionEnvelope, InteractiveResolutionKind, ResolutionDisplay,
 };
-use capsule_core::lockfile::manifest_external_capsule_dependencies;
-use capsule_core::router::ExecutionProfile;
-use capsule_core::types::{ConfigField, ConfigKind, OciProviderKind, OciProviderMode, StateAttach};
+use capsule::lockfile::manifest_external_capsule_dependencies;
+use capsule::router::ExecutionProfile;
+use capsule::types::{ConfigField, ConfigKind, OciProviderKind, OciProviderMode, StateAttach};
 
 use crate::app_control::sample_recipes::{
     resolve_sample_recipe_for_github, resolve_sample_recipe_for_input,
@@ -222,7 +222,7 @@ pub enum PreflightError {
     #[error("failed to load capsule manifest at {path}: {source}")]
     ManifestLoad {
         path: PathBuf,
-        source: capsule_core::error::CapsuleError,
+        source: capsule::error::CapsuleError,
     },
 
     #[error("execution plan derivation failed for target '{target}': {source}")]
@@ -244,7 +244,7 @@ pub enum PreflightError {
     #[error("failed to derive external dependencies from raw manifest at {path}: {source}")]
     ManifestParse {
         path: PathBuf,
-        source: capsule_core::error::CapsuleError,
+        source: capsule::error::CapsuleError,
     },
 }
 
@@ -270,13 +270,12 @@ pub fn collect_aggregate_requirements(
 ) -> Result<AggregatePreflightResult, PreflightError> {
     let manifest_path = resolve_offline_manifest_path(target)?;
 
-    let loaded =
-        capsule_core::contract::manifest::load_manifest(&manifest_path).map_err(|err| {
-            PreflightError::ManifestLoad {
-                path: manifest_path.clone(),
-                source: err,
-            }
-        })?;
+    let loaded = capsule::contract::manifest::load_manifest(&manifest_path).map_err(|err| {
+        PreflightError::ManifestLoad {
+            path: manifest_path.clone(),
+            source: err,
+        }
+    })?;
     let manifest = &loaded.model;
 
     let capsule_id = manifest.name.clone();
@@ -475,14 +474,12 @@ pub fn collect_aggregate_requirements(
         // true via short-circuit and the view returns false because
         // no record is in the log — both reach the same "no envelope
         // pushed" outcome).
-        let target_deps = capsule_core::lockfile::manifest_external_capsule_dependencies(
-            &loaded.raw,
-        )
-        .map_err(|source| PreflightError::ManifestParse {
-            path: manifest_path.clone(),
-            source,
-        })?;
-        let consent_input = capsule_core::engine::execution_graph::GraphConsentInput {
+        let target_deps = capsule::lockfile::manifest_external_capsule_dependencies(&loaded.raw)
+            .map_err(|source| PreflightError::ManifestParse {
+                path: manifest_path.clone(),
+                source,
+            })?;
+        let consent_input = capsule::engine::execution_graph::GraphConsentInput {
             scoped_id: plan.consent.key.scoped_id.clone(),
             version: plan.consent.key.version.clone(),
             target_label: plan.consent.key.target_label.clone(),
@@ -698,7 +695,7 @@ fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> 
         Some((repo, pinned_ref)) if !pinned_ref.is_empty() => (repo, Some(pinned_ref)),
         _ => (parts[1], None),
     };
-    let ato_home = capsule_core::common::paths::nacelle_home_dir_or_workspace_tmp();
+    let ato_home = capsule::common::paths::nacelle_home_dir_or_workspace_tmp();
 
     // The publisher-scoped external-capsule cache. Layout:
     // `${ATO_HOME}/external-capsules/github/<owner>/<repo>/<commit>/`.
@@ -759,7 +756,7 @@ fn derive_target_labels(
     // the CLI's run pipeline uses for its own orchestration walk; no
     // provisioning side effects.
     let decision =
-        capsule_core::router::route_manifest(manifest_path, profile, None).map_err(|err| {
+        capsule::router::route_manifest(manifest_path, profile, None).map_err(|err| {
             PreflightError::ExecutionPlan {
                 target: "<resolution>".to_string(),
                 source: AtoExecutionError::policy_violation(format!(
@@ -801,7 +798,7 @@ fn derive_target_labels(
     Ok(targets)
 }
 
-fn collect_global_required_env(manifest: &capsule_core::types::CapsuleManifest) -> Vec<String> {
+fn collect_global_required_env(manifest: &capsule::types::CapsuleManifest) -> Vec<String> {
     manifest.required_env.clone()
 }
 
@@ -813,7 +810,7 @@ fn sorted_dedup(mut values: Vec<String>) -> Vec<String> {
 }
 
 fn collect_target_required_env(
-    manifest: &capsule_core::types::CapsuleManifest,
+    manifest: &capsule::types::CapsuleManifest,
     target_label: &str,
 ) -> Vec<String> {
     manifest
@@ -1447,7 +1444,7 @@ target = "/var/lib/app/cache"
     #[serial_test::serial]
     fn bundle_dependency_aliases_carry_raw_manifest_dependencies() {
         use crate::application::graph_views::{PreflightView, build_declared_only_bundle};
-        use capsule_core::lockfile::manifest_external_capsule_dependencies;
+        use capsule::lockfile::manifest_external_capsule_dependencies;
 
         let home = TempDir::new().expect("home");
         let ato_home = TempDir::new().expect("ato_home");
@@ -1484,7 +1481,7 @@ contract = "service@1"
         // Mirror the path the collector takes: load the manifest,
         // feed `loaded.raw` (NOT `toml::Value::try_from(&loaded.model)`)
         // into the dependency derivation.
-        let loaded = capsule_core::contract::manifest::load_manifest(&manifest_path).expect("load");
+        let loaded = capsule::contract::manifest::load_manifest(&manifest_path).expect("load");
         let manifest_dependencies =
             manifest_external_capsule_dependencies(&loaded.raw).expect("derive deps");
         assert_eq!(

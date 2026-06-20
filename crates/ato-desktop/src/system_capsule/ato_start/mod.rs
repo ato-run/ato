@@ -177,7 +177,7 @@ fn featured_sample_alias_to_github(value: &str) -> Option<&'static str> {
 /// `install_profile_key` / `app_url` carry the **install-owned identity** of an
 /// entry that came from an installed app. When present, the entry can be
 /// relaunched through its stable profile key (`ato launch <ipk>`) and the
-/// Desktop opens its stable [`app_url`](capsule_core::foundation::install_lifecycle::derive_app_url)
+/// Desktop opens its stable [`app_url`](capsule::foundation::install_lifecycle::derive_app_url)
 /// instead of treating the `handle` as a fresh `ato run` target. Both are
 /// `Option` and serde-defaulted so history files written before this field
 /// existed (handle-only entries) continue to load unchanged.
@@ -304,7 +304,7 @@ impl StartPageHistoryStore {
 }
 
 fn history_path() -> anyhow::Result<PathBuf> {
-    capsule_core::common::paths::ato_path("start-history.json").map_err(anyhow::Error::from)
+    capsule::common::paths::ato_path("start-history.json").map_err(anyhow::Error::from)
 }
 
 // ─── Local app scanner ───────────────────────────────────────────────────────
@@ -1138,9 +1138,9 @@ fn resolve_open_intent(handle: &str) -> crate::launch_intent::DesktopLaunchInten
 }
 
 fn open_install_store()
--> anyhow::Result<capsule_core::foundation::install_lifecycle::InstallInstanceStore> {
-    let root = capsule_core::common::paths::ato_path_or_workspace_tmp("instances");
-    capsule_core::foundation::install_lifecycle::InstallInstanceStore::new(&root)
+-> anyhow::Result<capsule::foundation::install_lifecycle::InstallInstanceStore> {
+    let root = capsule::common::paths::ato_path_or_workspace_tmp("instances");
+    capsule::foundation::install_lifecycle::InstallInstanceStore::new(&root)
 }
 
 /// Persist an installed-app open with its stable install identity. Mirrors

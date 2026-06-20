@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-use capsule_core::types::CapsuleManifest;
+use capsule::types::CapsuleManifest;
 
 pub(super) fn load_manifest(path: &Path) -> Result<CapsuleManifest> {
     let manifest_path = if path.is_dir() {

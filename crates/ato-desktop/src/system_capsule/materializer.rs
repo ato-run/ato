@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 use serde::{Deserialize, Serialize};
 
 use super::registry::{

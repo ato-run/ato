@@ -34,7 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
-use capsule_core::router::ManifestData;
+use capsule::router::ManifestData;
 
 /// Absolute path to the capsule's dependency / project root.
 ///
@@ -102,7 +102,7 @@ pub(crate) fn looks_like_source_project(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::router::{
+    use capsule::router::{
         ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts,
     };
     use std::collections::HashMap;

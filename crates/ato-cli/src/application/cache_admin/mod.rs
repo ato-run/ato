@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::{ato_store_blobs_dir, ato_store_dir, ato_store_refs_dir};
-use capsule_core::common::store::BlobAddress;
+use capsule::common::paths::{ato_store_blobs_dir, ato_store_dir, ato_store_refs_dir};
+use capsule::common::store::BlobAddress;
 use serde::{Deserialize, Serialize};
 
 use crate::application::dependency_materializer::StoreRefRecord;

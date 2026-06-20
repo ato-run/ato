@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, PathBuf};
 
 use anyhow::Result;
-use capsule_core::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
 use serde_json::{Value, json};
 
 use crate::application::engine::build::native_delivery::{
@@ -390,7 +390,7 @@ fn import_workloads(
     Ok(workloads)
 }
 
-fn is_executable_target(target: &capsule_core::types::NamedTarget) -> bool {
+fn is_executable_target(target: &capsule::types::NamedTarget) -> bool {
     if target.package_type.as_deref() == Some("library") {
         return false;
     }
@@ -404,7 +404,7 @@ fn is_executable_target(target: &capsule_core::types::NamedTarget) -> bool {
         || !target.cmd.is_empty()
 }
 
-fn workload_from_named_target(label: &str, target: &capsule_core::types::NamedTarget) -> Value {
+fn workload_from_named_target(label: &str, target: &capsule::types::NamedTarget) -> Value {
     json!({
         "name": label,
         "target": label,

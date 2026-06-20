@@ -14,8 +14,8 @@
 //! and `src/ipc/schema.rs` (97 tests total, run via `cargo test --bin ato`).
 
 use assert_cmd::Command;
-use capsule_core::packers::payload::compute_manifest_hash_without_signatures;
-use capsule_core::types::CapsuleManifest;
+use capsule::packers::payload::compute_manifest_hash_without_signatures;
+use capsule::types::CapsuleManifest;
 use predicates::prelude::*;
 use std::fs;
 use std::path::PathBuf;

@@ -62,7 +62,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
-    use capsule_core::types::ServiceSpec;
+    use capsule::types::ServiceSpec;
 
     use super::{ServicePhaseCoordinator, ServicePhaseRuntime};
     use crate::application::services::ServiceGraphPlan;

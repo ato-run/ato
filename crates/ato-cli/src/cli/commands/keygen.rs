@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 
-use capsule_core::CapsuleReporter;
-use capsule_core::types::signing::StoredKey;
+use capsule::CapsuleReporter;
+use capsule::types::signing::StoredKey;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;

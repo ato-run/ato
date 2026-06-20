@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use capsule_core::smoke::{SmokeFailureClass, SmokeFailureReport};
+use capsule::smoke::{SmokeFailureClass, SmokeFailureReport};
 
 use super::{
     DerivedExecutionPlan, ENV_PREVIEW_ROOT, PreviewPromotionEligibility, PreviewSession,

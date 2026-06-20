@@ -3,18 +3,18 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use capsule_core::CapsuleReporter;
-use capsule_core::execution_plan::canonical::{
+use capsule::CapsuleReporter;
+use capsule::execution_plan::canonical::{
     compute_policy_segment_hash, compute_provisioning_policy_hash,
 };
-use capsule_core::execution_plan::derive::{self, PlatformSnapshot};
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::guard::{self, RuntimeGuardMode, RuntimeGuardResult};
-use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionTier};
-use capsule_core::launch_spec::derive_launch_spec;
-use capsule_core::lock_runtime;
-use capsule_core::lockfile;
-use capsule_core::router::{ManifestData, RuntimeDecision};
+use capsule::execution_plan::derive::{self, PlatformSnapshot};
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::guard::{self, RuntimeGuardMode, RuntimeGuardResult};
+use capsule::execution_plan::model::{ExecutionPlan, ExecutionTier};
+use capsule::launch_spec::derive_launch_spec;
+use capsule::lock_runtime;
+use capsule::lockfile;
+use capsule::router::{ManifestData, RuntimeDecision};
 use tracing::debug;
 
 use super::launch_context::RuntimeLaunchContext;
@@ -178,17 +178,17 @@ pub fn prepare_target_execution(
             let tier =
                 derive::derive_tier(execution_plan.target.runtime, execution_plan.target.driver)?;
             let kind = match execution_plan.target.runtime {
-                capsule_core::execution_plan::model::ExecutionRuntime::Oci => {
-                    capsule_core::router::RuntimeKind::Oci
+                capsule::execution_plan::model::ExecutionRuntime::Oci => {
+                    capsule::router::RuntimeKind::Oci
                 }
-                capsule_core::execution_plan::model::ExecutionRuntime::Wasm => {
-                    capsule_core::router::RuntimeKind::Wasm
+                capsule::execution_plan::model::ExecutionRuntime::Wasm => {
+                    capsule::router::RuntimeKind::Wasm
                 }
-                capsule_core::execution_plan::model::ExecutionRuntime::Web => {
-                    capsule_core::router::RuntimeKind::Web
+                capsule::execution_plan::model::ExecutionRuntime::Web => {
+                    capsule::router::RuntimeKind::Web
                 }
-                capsule_core::execution_plan::model::ExecutionRuntime::Source => {
-                    capsule_core::router::RuntimeKind::Source
+                capsule::execution_plan::model::ExecutionRuntime::Source => {
+                    capsule::router::RuntimeKind::Source
                 }
             };
             (
@@ -202,7 +202,7 @@ pub fn prepare_target_execution(
             )
         } else {
             let compiled =
-                capsule_core::execution_plan::derive::compile_execution_plan_with_validation_mode(
+                capsule::execution_plan::derive::compile_execution_plan_with_validation_mode(
                     &plan.manifest_path,
                     plan.profile,
                     Some(plan.selected_target_label()),
@@ -292,7 +292,7 @@ pub fn prepare_target_execution(
 
         if sandbox_gate_pending && consent_gate_pending {
             return Err(AtoExecutionError::from_ato_error(
-                capsule_core::AtoError::PermissionGatesRequired {
+                capsule::AtoError::PermissionGatesRequired {
                     message: "This capsule requires permission approvals before it can run."
                         .to_string(),
                     hint: Some(
@@ -301,7 +301,7 @@ pub fn prepare_target_execution(
                             .to_string(),
                     ),
                     pending_gates: vec![
-                        capsule_core::PendingPermissionGate {
+                        capsule::PendingPermissionGate {
                             code: "E301".to_string(),
                             name: "sandbox_opt_in".to_string(),
                             message: "This capsule runs source code that requires explicit \
@@ -310,7 +310,7 @@ pub fn prepare_target_execution(
                             resolution: "Re-run with --sandbox to enable sandboxed execution."
                                 .to_string(),
                         },
-                        capsule_core::PendingPermissionGate {
+                        capsule::PendingPermissionGate {
                             code: "E302".to_string(),
                             name: "execution_plan_consent".to_string(),
                             message: "This capsule's execution plan has not been approved yet."
@@ -385,7 +385,7 @@ pub fn preflight_required_environment_variables(
     // same iterator so they stay index-aligned by construction:
     // `missing_schema[i].name == missing_keys[i]`.
     let mut missing_keys: Vec<String> = Vec::new();
-    let mut missing_schema: Vec<capsule_core::types::ConfigField> = Vec::new();
+    let mut missing_schema: Vec<capsule::types::ConfigField> = Vec::new();
     for field in resolved {
         if crate::application::pipeline::phases::run::is_env_satisfied(
             &field.name,
@@ -473,12 +473,12 @@ mod tests {
     };
     use crate::executors::launch_context::RuntimeLaunchContext;
     use crate::reporters::CliReporter;
-    use capsule_core::execution_plan::canonical::{
+    use capsule::execution_plan::canonical::{
         compute_policy_segment_hash, compute_provisioning_policy_hash,
     };
-    use capsule_core::launch_spec::derive_launch_spec;
-    use capsule_core::lockfile::{CapsuleLock, LockMeta};
-    use capsule_core::router::{self, ExecutionProfile};
+    use capsule::launch_spec::derive_launch_spec;
+    use capsule::lockfile::{CapsuleLock, LockMeta};
+    use capsule::router::{self, ExecutionProfile};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use tempfile::{TempDir, tempdir};
@@ -515,7 +515,7 @@ mod tests {
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             toml::Value::Table(manifest),
             PathBuf::from("/tmp/capsule.toml"),
             PathBuf::from("/tmp"),
@@ -557,7 +557,7 @@ entrypoint = "index.js"
         )
         .expect("parse manifest");
 
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             raw_manifest.clone(),
             manifest_path,
             manifest_dir.clone(),
@@ -575,7 +575,7 @@ entrypoint = "index.js"
             bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                 raw_manifest,
             ),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
             install_profile_key: None,
@@ -612,7 +612,7 @@ entrypoint = "index.js"
         )
         .expect("parse manifest");
 
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             raw_manifest.clone(),
             manifest_path,
             manifest_dir.clone(),
@@ -631,7 +631,7 @@ entrypoint = "index.js"
             bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                 raw_manifest.clone(),
             ),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
             install_profile_key,
@@ -681,7 +681,7 @@ from = "./missing-service"
         )
         .expect("parse manifest");
 
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             raw_manifest,
             manifest_path.clone(),
             temp_dir.path().to_path_buf(),
@@ -699,7 +699,7 @@ from = "./missing-service"
             bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                 toml::Value::Table(toml::map::Map::new()),
             ),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
             install_profile_key: None,
@@ -750,14 +750,12 @@ run = "node server.js"
         std::fs::write(&manifest_path, manifest_text).expect("write manifest");
 
         let raw_manifest: toml::Value = toml::from_str(manifest_text).expect("parse manifest");
-        let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(&raw_manifest)
+        let bridge = capsule::router::CompatManifestBridge::from_manifest_value(&raw_manifest)
             .expect("compat bridge");
-        let compat_input = capsule_core::router::CompatProjectInput::from_bridge(
-            temp_dir.path().to_path_buf(),
-            bridge,
-        )
-        .expect("compat input");
-        let lock_path = capsule_core::contract::lockfile::ensure_lockfile_for_compat_input(
+        let compat_input =
+            capsule::router::CompatProjectInput::from_bridge(temp_dir.path().to_path_buf(), bridge)
+                .expect("compat input");
+        let lock_path = capsule::contract::lockfile::ensure_lockfile_for_compat_input(
             &compat_input,
             Arc::new(CliReporter::new(false)),
             false,
@@ -773,7 +771,7 @@ run = "node server.js"
             ExecutionProfile::Dev,
             Some("web"),
             HashMap::new(),
-            capsule_core::types::ValidationMode::Strict,
+            capsule::types::ValidationMode::Strict,
         )
         .expect("route manifest");
         let prepared = PreparedRunContext {
@@ -783,7 +781,7 @@ run = "node server.js"
             effective_state: None,
             execution_override: None,
             bridge_manifest: DerivedBridgeManifest::new(raw_manifest),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: Some(CompatibilityLegacyLockContext {
                 manifest_path,
@@ -810,7 +808,7 @@ run = "node server.js"
 
         assert!(matches!(
             execution.tier,
-            capsule_core::execution_plan::model::ExecutionTier::Tier1
+            capsule::execution_plan::model::ExecutionTier::Tier1
         ));
     }
 
@@ -836,7 +834,7 @@ run = "python3 tool.py --from-target""#;
             ExecutionProfile::Dev,
             Some("export"),
             HashMap::new(),
-            capsule_core::types::ValidationMode::Strict,
+            capsule::types::ValidationMode::Strict,
         )
         .expect("route manifest");
 
@@ -852,7 +850,7 @@ run = "python3 tool.py --from-target""#;
             bridge_manifest: DerivedBridgeManifest::new(
                 toml::from_str(manifest_text).expect("parse manifest toml"),
             ),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
             install_profile_key: None,
@@ -923,7 +921,7 @@ run = "python3 default.py --from-default""#;
             ExecutionProfile::Dev,
             Some("default"),
             HashMap::new(),
-            capsule_core::types::ValidationMode::Strict,
+            capsule::types::ValidationMode::Strict,
         )
         .expect("route manifest");
 
@@ -939,7 +937,7 @@ run = "python3 default.py --from-default""#;
             bridge_manifest: DerivedBridgeManifest::new(
                 toml::from_str(manifest_text).expect("parse manifest toml"),
             ),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
             install_profile_key: None,

@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use capsule_core::ato_lock::DeliveryEnvironment;
-use capsule_core::ccp::SCHEMA_VERSION;
-use capsule_core::types::ServiceSpec;
+use capsule::ato_lock::DeliveryEnvironment;
+use capsule::ccp::SCHEMA_VERSION;
+use capsule::types::ServiceSpec;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +51,7 @@ const ATO_DESKTOP_PACKAGE_ID: &str = "ato/ato-desktop";
 /// install alias map (`cli/dispatch/install.rs::CURATED_INSTALL_ALIASES`).
 #[allow(dead_code)]
 const LEGACY_DESKY_PACKAGE_ID: &str = "ato/desky";
-// CCP wire version is owned by `capsule_core::ccp::SCHEMA_VERSION` so the
+// CCP wire version is owned by `capsule::ccp::SCHEMA_VERSION` so the
 // Desktop consumer and the CLI producer share one source of truth. See
 // `docs/monorepo-consolidation-plan.md` §M4.
 const STATE_VERSION: u32 = 1;
@@ -500,14 +500,14 @@ fn ato_desktop_delivery_environment() -> DeliveryEnvironment {
         strategy: "ato-managed".to_string(),
         target: Some("desktop".to_string()),
         services: vec![
-            capsule_core::ato_lock::DeliveryService {
+            capsule::ato_lock::DeliveryService {
                 name: "ollama".to_string(),
                 from: "dependency:ollama".to_string(),
                 lifecycle: "managed".to_string(),
                 depends_on: Vec::new(),
                 healthcheck: None,
             },
-            capsule_core::ato_lock::DeliveryService {
+            capsule::ato_lock::DeliveryService {
                 name: "opencode".to_string(),
                 from: "dependency:opencode".to_string(),
                 lifecycle: "on-demand".to_string(),
@@ -745,7 +745,7 @@ fn write_materialized_service_record(
 }
 
 fn evaluate_service_status(
-    service: &capsule_core::ato_lock::DeliveryService,
+    service: &capsule::ato_lock::DeliveryService,
     helper_command: Option<&str>,
 ) -> String {
     let record = MaterializedServiceRecord {
@@ -1101,9 +1101,7 @@ fn known_service_binary_exists(name: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(binary).exists()))
 }
 
-fn default_service_helper_command(
-    service: &capsule_core::ato_lock::DeliveryService,
-) -> Option<String> {
+fn default_service_helper_command(service: &capsule::ato_lock::DeliveryService) -> Option<String> {
     match service.name.to_ascii_lowercase().as_str() {
         "ollama" => Some("ollama serve".to_string()),
         "opencode" => Some("opencode serve".to_string()),
@@ -1175,14 +1173,14 @@ fn bootstrap_state_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    capsule_core::common::paths::ato_path_or_workspace_tmp("apps/ato-desktop/bootstrap-state.json")
+    capsule::common::paths::ato_path_or_workspace_tmp("apps/ato-desktop/bootstrap-state.json")
 }
 
 /// Pre-rename bootstrap-state location. Returned only when the canonical
 /// `bootstrap_state_path()` does not yet exist, so existing users keep their
 /// state across the upgrade. Writes always go to the canonical path.
 fn legacy_bootstrap_state_path() -> Option<PathBuf> {
-    capsule_core::common::paths::ato_path("apps/desky/bootstrap-state.json").ok()
+    capsule::common::paths::ato_path("apps/desky/bootstrap-state.json").ok()
 }
 
 fn load_state_from_path(path: &Path) -> Result<StoredBootstrapState> {
@@ -1383,7 +1381,7 @@ mod tests {
         // (`ato-desktop`) can run the same golden checks against the same
         // bytes. See `docs/monorepo-consolidation-plan.md` §M4.
         let snapshot_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../capsule-core/tests/fixtures/ccp")
+            .join("../capsule/tests/fixtures/ccp")
             .join(format!("{name}.json"));
         let expected = fs::read_to_string(&snapshot_path)
             .expect("snapshot fixture should be readable")

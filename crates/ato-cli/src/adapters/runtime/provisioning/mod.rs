@@ -16,8 +16,8 @@ pub(crate) use python_lock::{
 use std::sync::Arc;
 
 use anyhow::Result;
-use capsule_core::CapsuleReporter;
-use capsule_core::router::ManifestData;
+use capsule::CapsuleReporter;
+use capsule::router::ManifestData;
 
 use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::reporters::CliReporter;
@@ -181,7 +181,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use capsule::router::{ExecutionProfile, ManifestData};
 
     use super::{
         AuditReporter, AutoProvisioningOptions,
@@ -192,7 +192,7 @@ mod tests {
     };
 
     fn manifest_data() -> ManifestData {
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             toml::from_str(
                 r#"
 name = "demo"

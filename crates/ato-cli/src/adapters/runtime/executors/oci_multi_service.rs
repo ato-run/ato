@@ -23,20 +23,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
-use capsule_core::contract::lock_runtime::resolve_oci_image_for_target;
-use capsule_core::execution_plan::model::OciPolicyMode;
-use capsule_core::router::ManifestData;
-use capsule_core::runtime::oci::{
+use capsule::CapsuleReporter;
+use capsule::contract::lock_runtime::resolve_oci_image_for_target;
+use capsule::execution_plan::model::OciPolicyMode;
+use capsule::router::ManifestData;
+use capsule::runtime::oci::{
     OciContainerRequest, OciMountSourceKind, OciMountSpec, OciNetworkRequest, OciPortSpec,
     resolve_oci_mount,
 };
-use capsule_core::types::{
+use capsule::types::{
     IngressConfig, OciImageResolution, OciProviderKind, OrchestrationPlan, ResolvedService,
     ResolvedServiceRuntime, StateDurability,
 };
 
-use capsule_core::execution_identity::OciProviderReceiptEvidence;
+use capsule::execution_identity::OciProviderReceiptEvidence;
 
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::ingress_router;
@@ -365,9 +365,9 @@ fn enforce_strict_oci_orchestration(
     strict_realization: bool,
 ) -> Result<()> {
     let profile = if strict_realization {
-        capsule_core::realization::LaunchProfile::Strict
+        capsule::realization::LaunchProfile::Strict
     } else {
-        capsule_core::realization::LaunchProfile::Normal
+        capsule::realization::LaunchProfile::Normal
     };
     let network_policy_required = !egress_allow.is_empty();
     let inputs: Vec<OciServiceStrict> = build_oci_service_projections(orch_plan, images, is_podman)
@@ -1321,7 +1321,7 @@ const OCI_EXIT_WATCH_POLL: Duration = Duration::from_millis(500);
 ///   `oci_healthcheck_timeout` (unchanged behavior for genuinely slow services)
 async fn await_service_readiness<P: OciProvider>(
     provider: &P,
-    probe: &capsule_core::types::ReadinessProbe,
+    probe: &capsule::types::ReadinessProbe,
     host_port: Option<u16>,
     container_id: &str,
     container_name: &str,
@@ -1405,9 +1405,7 @@ async fn collect_log_tail<P: OciProvider>(
 /// `MAX_PARTIAL_LINE_BYTES`, so a chatty or newline-less container can't make us
 /// buffer its entire log.
 pub(crate) async fn collect_log_tail_from_rx(
-    mut rx: tokio::sync::mpsc::Receiver<
-        capsule_core::Result<capsule_core::runtime::oci::OciLogChunk>,
-    >,
+    mut rx: tokio::sync::mpsc::Receiver<capsule::Result<capsule::runtime::oci::OciLogChunk>>,
     max_lines: usize,
 ) -> Vec<String> {
     use std::collections::VecDeque;
@@ -1741,7 +1739,7 @@ pub(crate) async fn wait_exec_ready(
 ///
 /// Returns `true` when the service is ready, `false` on timeout.
 async fn run_readiness_probe(
-    probe: &capsule_core::types::ReadinessProbe,
+    probe: &capsule::types::ReadinessProbe,
     host_port: Option<u16>,
     container_name: Option<&str>,
     service_label: &str,
@@ -1898,9 +1896,9 @@ trait OciProviderKindStr {
     fn as_str(&self) -> &'static str;
 }
 
-impl OciProviderKindStr for capsule_core::types::OciProviderKind {
+impl OciProviderKindStr for capsule::types::OciProviderKind {
     fn as_str(&self) -> &'static str {
-        use capsule_core::types::OciProviderKind;
+        use capsule::types::OciProviderKind;
         match self {
             OciProviderKind::Podman => "podman",
             OciProviderKind::DockerCompatible => "docker-compatible",
@@ -1918,8 +1916,8 @@ use std::io::Write;
 mod tests {
     use super::*;
     use crate::adapters::runtime::oci_provider::FakeOciProvider;
-    use capsule_core::runtime::oci::{OciContainerInspect, engine_state_volume_name};
-    use capsule_core::types::{
+    use capsule::runtime::oci::{OciContainerInspect, engine_state_volume_name};
+    use capsule::types::{
         OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
         ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
         ServiceConnectionInfo,
@@ -2576,7 +2574,7 @@ mod tests {
 
     #[test]
     fn imported_graph_can_be_executed_with_fake_multi_service_provider() {
-        use capsule_core::routing::importer::compose::{ComposeImportInput, import_compose};
+        use capsule::routing::importer::compose::{ComposeImportInput, import_compose};
         use std::path::PathBuf;
 
         let compose_text = r#"
@@ -3157,7 +3155,7 @@ volumes:
     /// Verify two services sharing same-capsule state receive the same mount locator.
     #[tokio::test]
     async fn shared_state_same_capsule_services_receive_same_mount() {
-        use capsule_core::types::Mount;
+        use capsule::types::Mount;
 
         let provider = make_provider_with_unique_ids();
         // Queue 3 container IDs: db, api, worker.
@@ -3290,7 +3288,7 @@ volumes:
 
     #[allow(dead_code)]
     fn make_service_with_egress_proxy(egress_proxy: bool) -> ResolvedService {
-        use capsule_core::types::orchestration::ResolvedServiceNetwork;
+        use capsule::types::orchestration::ResolvedServiceNetwork;
         let svc = make_service("app", "app", vec![], true, Some(8080), vec![]);
         ResolvedService {
             network: ResolvedServiceNetwork {
@@ -3405,7 +3403,7 @@ volumes:
     #[tokio::test]
     async fn oci_multi_service_strips_proxy_when_egress_proxy_false() {
         use crate::adapters::runtime::executors::launch_context::RuntimeLaunchContext;
-        use capsule_core::types::orchestration::{ResolvedService, ResolvedServiceNetwork};
+        use capsule::types::orchestration::{ResolvedService, ResolvedServiceNetwork};
 
         // Build a single-service plan with egress_proxy = false.
         let svc = make_service("app", "blinko", vec![], true, Some(3000), vec![]);
@@ -3562,8 +3560,8 @@ volumes:
 
     // ── Exit-before-ready readiness tests (#429) ───────────────────────────────
 
-    fn tcp_probe(addr: &str, timeout_seconds: u32) -> capsule_core::types::ReadinessProbe {
-        capsule_core::types::ReadinessProbe {
+    fn tcp_probe(addr: &str, timeout_seconds: u32) -> capsule::types::ReadinessProbe {
+        capsule::types::ReadinessProbe {
             http_get: None,
             tcp_connect: Some(addr.to_string()),
             exec: None,
@@ -3576,8 +3574,8 @@ volumes:
 
     /// A probe with no recognizable target resolves to "ready" immediately
     /// (see `run_readiness_probe`'s final branch).
-    fn always_ready_probe() -> capsule_core::types::ReadinessProbe {
-        capsule_core::types::ReadinessProbe {
+    fn always_ready_probe() -> capsule::types::ReadinessProbe {
+        capsule::types::ReadinessProbe {
             http_get: None,
             tcp_connect: None,
             exec: None,
@@ -3632,7 +3630,7 @@ volumes:
     #[tokio::test]
     async fn collect_log_tail_truncates_to_max_lines() {
         let mut provider = FakeOciProvider::ready();
-        provider.log_chunks = vec![capsule_core::runtime::oci::OciLogChunk {
+        provider.log_chunks = vec![capsule::runtime::oci::OciLogChunk {
             stderr: true,
             message: b"l1\nl2\nl3\nl4\nl5\n".to_vec(),
         }];
@@ -3650,11 +3648,11 @@ volumes:
         // A line split across chunk boundaries, plus a final line with no
         // terminating newline — both must be reassembled/flushed correctly.
         provider.log_chunks = vec![
-            capsule_core::runtime::oci::OciLogChunk {
+            capsule::runtime::oci::OciLogChunk {
                 stderr: false,
                 message: b"first line\nsec".to_vec(),
             },
-            capsule_core::runtime::oci::OciLogChunk {
+            capsule::runtime::oci::OciLogChunk {
                 stderr: false,
                 message: b"ond line\nthird (no newline)".to_vec(),
             },
@@ -3676,7 +3674,7 @@ volumes:
             exit_code: Some(1),
             host_ports: std::collections::HashMap::new(),
         });
-        provider.log_chunks = vec![capsule_core::runtime::oci::OciLogChunk {
+        provider.log_chunks = vec![capsule::runtime::oci::OciLogChunk {
             stderr: true,
             message:
                 b"Error: Current user does not have write and/or execute permissions for the ./data directory: /opt/openlist/data\n"
@@ -3753,11 +3751,11 @@ volumes:
 
     #[test]
     fn oci_mount_spec_ownership_propagates_from_manifest_mount() {
-        let manifest_mount = capsule_core::types::Mount {
+        let manifest_mount = capsule::types::Mount {
             source: "/host/state".to_string(),
             target: "/app/state".to_string(),
             readonly: false,
-            ownership: Some(capsule_core::types::MountOwnership {
+            ownership: Some(capsule::types::MountOwnership {
                 uid: Some(1001),
                 gid: Some(1001),
                 recursive: false,
@@ -3833,7 +3831,7 @@ volumes:
     fn make_oci_mount(
         source: &str,
         readonly: bool,
-        ownership: Option<capsule_core::types::MountOwnership>,
+        ownership: Option<capsule::types::MountOwnership>,
     ) -> OciMountSpec {
         OciMountSpec {
             source: source.to_string(),
@@ -3844,8 +3842,8 @@ volumes:
         }
     }
 
-    fn ownership_with_mode(mode: u32) -> capsule_core::types::MountOwnership {
-        capsule_core::types::MountOwnership {
+    fn ownership_with_mode(mode: u32) -> capsule::types::MountOwnership {
+        capsule::types::MountOwnership {
             uid: Some(1001),
             gid: Some(1001),
             recursive: false,
@@ -3853,8 +3851,8 @@ volumes:
         }
     }
 
-    fn ownership_no_mode() -> capsule_core::types::MountOwnership {
-        capsule_core::types::MountOwnership {
+    fn ownership_no_mode() -> capsule::types::MountOwnership {
+        capsule::types::MountOwnership {
             uid: Some(1001),
             gid: Some(1001),
             recursive: false,
@@ -3967,8 +3965,8 @@ volumes:
 
     // ── #501: orchestration strict gate + per-service provider evidence ──
 
-    use capsule_core::execution_identity::{OciEnforcementStatus, OciImageDigestStatus};
-    use capsule_core::execution_plan::error::AtoExecutionError;
+    use capsule::execution_identity::{OciEnforcementStatus, OciImageDigestStatus};
+    use capsule::execution_plan::error::AtoExecutionError;
 
     #[test]
     fn orchestration_provider_evidence_is_produced_per_service() {

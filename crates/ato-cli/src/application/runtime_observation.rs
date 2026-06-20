@@ -3,7 +3,7 @@
 //! readiness.
 //!
 //! This is the ato-cli side of the capsule-core observation model
-//! ([`capsule_core::execution_identity::ObservedLaunchEnvelope`]). It collects
+//! ([`capsule::execution_identity::ObservedLaunchEnvelope`]). It collects
 //! only host-independent, leak-free facts (see the capsule-core module docs):
 //! logical runtime kind/identity, the post-profile logical entrypoint, a
 //! workspace-relative working directory, observed env **keys**, and in-guest
@@ -16,9 +16,9 @@
 
 use std::path::Path;
 
-use capsule_core::execution_identity::{ObservedLaunchEnvelope, ObservedRuntimeEvidence};
-use capsule_core::launch_spec::LaunchSpec;
-use capsule_core::router::ManifestData;
+use capsule::execution_identity::{ObservedLaunchEnvelope, ObservedRuntimeEvidence};
+use capsule::launch_spec::LaunchSpec;
+use capsule::router::ManifestData;
 
 use crate::adapters::runtime::executors::launch_context::RuntimeLaunchContext;
 

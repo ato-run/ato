@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 
 pub struct ScaffoldDockerArgs {
     pub manifest_path: PathBuf,

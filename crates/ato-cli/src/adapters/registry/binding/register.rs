@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::registry::store::{NewServiceBindingRecord, ServiceBindingRecord};
 use crate::runtime::process::{ProcessInfo, ProcessManager};
-use capsule_core::types::CapsuleManifest;
+use capsule::types::CapsuleManifest;
 
 use super::contract::{
     SERVICE_BINDING_KIND_SERVICE, auto_bindable_service_names, derive_service_endpoint_locator,

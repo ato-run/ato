@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
-use capsule_core::lockfile::LockedCapsuleDependency;
-use capsule_core::router::ManifestData;
+use capsule::lockfile::LockedCapsuleDependency;
+use capsule::router::ManifestData;
 
 pub(super) fn parse_cli_bindings(raw_bindings: &[String]) -> Result<BTreeMap<String, String>> {
     let mut bindings = BTreeMap::new();

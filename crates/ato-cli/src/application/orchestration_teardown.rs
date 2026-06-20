@@ -641,7 +641,7 @@ pub(crate) enum VolumeRemovalOutcome {
 }
 
 /// Returns `true` when `name` looks like an Ato-managed engine state volume.
-/// [`engine_state_volume_name`](capsule_core::runtime::oci::engine_state_volume_name)
+/// [`engine_state_volume_name`](capsule::runtime::oci::engine_state_volume_name)
 /// always prefixes `ato-state-`, so that prefix is a sufficient guard.
 fn is_ato_managed_volume(name: &str) -> bool {
     name.starts_with("ato-state-")

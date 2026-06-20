@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 
 use anyhow::{Result as AnyhowResult, anyhow, bail};
-use capsule_core::runtime_setup::ToolKind;
+use capsule::runtime_setup::ToolKind;
 use gpui::App;
 use serde_json::Value;
 
@@ -378,7 +378,7 @@ fn run_runtime_worker(
 /// Reveal the desktop log directory (`~/.ato/logs`) in the OS file manager so
 /// the user can read runtime-setup failures. Settings-only.
 pub(crate) fn open_runtime_setup_logs(cx: &mut App, request_id: Option<String>) {
-    let logs_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("logs");
+    let logs_dir = capsule::common::paths::ato_path_or_workspace_tmp("logs");
     let result = crate::proc_util::open_path(&logs_dir);
     let response = match &result {
         Ok(()) => serde_json::json!({
@@ -401,7 +401,7 @@ pub(crate) fn open_runtime_setup_logs(cx: &mut App, request_id: Option<String>) 
 /// drain to decide whether to resume an interrupted capsule launch (#460 PR3b).
 fn refreshed_status_if_successful(
     payload: &Value,
-) -> Option<capsule_core::runtime_setup::RuntimeSetupStatus> {
+) -> Option<capsule::runtime_setup::RuntimeSetupStatus> {
     let complete = payload.get("runtimeInstallComplete")?;
     if !complete
         .get("success")

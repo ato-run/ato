@@ -33,7 +33,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use capsule_core::installed_state::{
+use capsule::installed_state::{
     InstalledStateDb, LaunchConditionClaim, LaunchConditionInput, LaunchConditionInputKind,
     LaunchConditionInputValue, LaunchConditionKind,
 };
@@ -276,7 +276,7 @@ fn matches_key(claim_key: &str, namespace: &str, input_key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::installed_state::{LaunchConditionSource, LaunchConditionStatus};
+    use capsule::installed_state::{LaunchConditionSource, LaunchConditionStatus};
 
     const RAW_PATH: &str = "/Users/koh/.local/share/app/data";
 

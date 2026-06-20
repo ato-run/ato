@@ -237,7 +237,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
-    use capsule_core::execution_plan::error::{CleanupActionRecord, CleanupActionStatus};
+    use capsule::execution_plan::error::{CleanupActionRecord, CleanupActionStatus};
 
     use super::{HourglassPhaseRunner, HourglassPipeline, PhaseAnnotation};
     use crate::application::pipeline::cleanup::{PipelineAttemptContext, PipelineAttemptError};

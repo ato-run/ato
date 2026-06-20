@@ -15,7 +15,7 @@ use ato_session_core::{
     validate_record_for_install_profile_key, validate_record_only,
 };
 use base64::Engine as _;
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 use ato_protocol::handle::{
     CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
     normalize_capsule_handle,
@@ -369,7 +369,7 @@ pub enum LaunchError {
         /// global) or a `ConsentRequired` carrying the five identity
         /// fields the modal needs for `ato internal consent
         /// approve-execution-plan`.
-        requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+        requirements: Vec<capsule::interactive_resolution::InteractiveResolutionEnvelope>,
         /// Snapshot of secrets passed to the original
         /// `start_capsule` call. Cloned so the post-Submit retry uses
         /// exactly the same input.
@@ -565,11 +565,11 @@ pub fn resolve_and_start_guest_from_materialized_record(
 /// invariant so a future divergence breaks here instead of silently
 /// re-opening the modal.
 fn filter_already_provided_secrets(
-    envelopes: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+    envelopes: Vec<capsule::interactive_resolution::InteractiveResolutionEnvelope>,
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
-) -> Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope> {
-    use capsule_core::interactive_resolution::{
+) -> Vec<capsule::interactive_resolution::InteractiveResolutionEnvelope> {
+    use capsule::interactive_resolution::{
         InteractiveResolutionEnvelope, InteractiveResolutionKind,
     };
     let provided: std::collections::HashSet<String> = secrets
@@ -620,7 +620,7 @@ fn filter_already_provided_secrets(
 
 fn collect_preflight_requirements_with_input(
     input: &DesktopLaunchInput,
-) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
+) -> Result<Vec<capsule::interactive_resolution::InteractiveResolutionEnvelope>> {
     Ok(collect_preflight_envelope_for_input(input)?.requirements)
 }
 
@@ -630,7 +630,7 @@ pub(crate) struct ConsentPreflightData {
     pub capsule_id: String,
     pub capsule_version: String,
     pub visited_targets: Vec<String>,
-    pub requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+    pub requirements: Vec<capsule::interactive_resolution::InteractiveResolutionEnvelope>,
 }
 
 /// Collect full preflight data for the consent wizard UI.
@@ -857,7 +857,7 @@ struct PreflightAggregateEnvelope {
     #[serde(default)]
     visited_targets: Vec<String>,
     #[serde(default)]
-    requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+    requirements: Vec<capsule::interactive_resolution::InteractiveResolutionEnvelope>,
 }
 
 pub fn stop_guest_session(session_id: &str) -> Result<bool> {
@@ -1994,7 +1994,7 @@ fn installed_launch_log_path(install_profile_key: &str) -> PathBuf {
             }
         })
         .collect();
-    capsule_core::common::paths::ato_path_or_workspace_tmp("logs")
+    capsule::common::paths::ato_path_or_workspace_tmp("logs")
         .join(format!("installed-launch-{safe}.log"))
 }
 
@@ -3373,12 +3373,12 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
         "starting share URL execution via nacelle sandbox"
     );
 
-    let result = capsule_core::share::execute_share(capsule_core::share::ShareRunRequest {
+    let result = capsule::share::execute_share(capsule::share::ShareRunRequest {
         input: share_url.to_string(),
         entry: None,
         extra_args: vec![],
         env_overlay: std::collections::BTreeMap::new(),
-        mode: capsule_core::share::ShareExecutionMode::Piped {
+        mode: capsule::share::ShareExecutionMode::Piped {
             cols: 120,
             rows: 40,
         },
@@ -3391,7 +3391,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
     })?;
 
     match result {
-        capsule_core::share::ShareExecutionResult::Spawned(piped) => {
+        capsule::share::ShareExecutionResult::Spawned(piped) => {
             let session_id = piped.session_id.clone();
             info!(share_url, %session_id, "share terminal session spawned via nacelle");
 
@@ -3445,7 +3445,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
                 install_profile_key: None,
             })
         }
-        capsule_core::share::ShareExecutionResult::Completed { exit_code } => {
+        capsule::share::ShareExecutionResult::Completed { exit_code } => {
             bail!("share execution completed unexpectedly (code {exit_code}) in piped mode")
         }
     }
@@ -3944,7 +3944,7 @@ mod tests {
     fn find_ato_toolchain_binary_finds_real_python_if_installed() {
         // Integration-ish: only asserts when the real ~/.ato/toolchains
         // contains a python install. Otherwise skipped.
-        let toolchains = match capsule_core::common::paths::ato_path("toolchains") {
+        let toolchains = match capsule::common::paths::ato_path("toolchains") {
             Ok(path) => path,
             Err(_) => return,
         };
@@ -3980,7 +3980,7 @@ mod tests {
     /// was incorrectly routed through `ato run --` and hit `scoped_id_required`.
     #[test]
     fn find_ato_toolchain_binary_finds_npm_inside_node_family() {
-        let toolchains = match capsule_core::common::paths::ato_path("toolchains") {
+        let toolchains = match capsule::common::paths::ato_path("toolchains") {
             Ok(path) => path,
             Err(_) => return,
         };
@@ -4006,7 +4006,7 @@ mod tests {
     /// Companion regression for Python family siblings.
     #[test]
     fn find_ato_toolchain_binary_finds_pip_inside_python_family() {
-        let toolchains = match capsule_core::common::paths::ato_path("toolchains") {
+        let toolchains = match capsule::common::paths::ato_path("toolchains") {
             Ok(path) => path,
             Err(_) => return,
         };

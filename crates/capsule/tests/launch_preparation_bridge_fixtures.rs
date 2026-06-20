@@ -11,8 +11,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capsule_core::engine::launch_preparation_bridge::LaunchPreparationBridgeResult;
-use capsule_core::foundation::install_lifecycle::launch_template::RunnerClass;
+use capsule::engine::launch_preparation_bridge::LaunchPreparationBridgeResult;
+use capsule::foundation::install_lifecycle::launch_template::RunnerClass;
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -82,7 +82,7 @@ fn prepared_fixture_is_managed_runner_prepare_session_only() {
     assert!(plan.execution_id.starts_with("exec_"));
     assert!(matches!(
         plan.prepare_command,
-        capsule_core::engine::runner_command::RunnerCommandPayload::PrepareSession { .. }
+        capsule::engine::runner_command::RunnerCommandPayload::PrepareSession { .. }
     ));
 }
 

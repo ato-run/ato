@@ -1,7 +1,7 @@
 use super::locks::env_lock;
 use super::policy::{AutoBootstrapMode, resolve_auto_bootstrap_policy};
 use super::*;
-use capsule_core::bootstrap::{BootstrapAuthorityKind, BootstrapCacheScope};
+use capsule::bootstrap::{BootstrapAuthorityKind, BootstrapCacheScope};
 
 #[test]
 fn test_parse_engine_filename() {

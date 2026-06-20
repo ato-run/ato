@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::Result;
-use capsule_core::execution_identity::EnvOrigin;
+use capsule::execution_identity::EnvOrigin;
 
 use crate::adapters::runtime::secret_injection::RuntimeSecretEnv;
 use crate::adapters::runtime::state_binding_injection::RuntimeStateBindingMount;
@@ -363,9 +363,10 @@ impl RuntimeLaunchContext {
                 }
 
                 return Err(
-                    capsule_core::execution_plan::error::AtoExecutionError::policy_violation(
-                        format!("session_token env '{}' is not allowlisted", key),
-                    )
+                    capsule::execution_plan::error::AtoExecutionError::policy_violation(format!(
+                        "session_token env '{}' is not allowlisted",
+                        key
+                    ))
                     .into(),
                 );
             }

@@ -62,7 +62,7 @@ Desktop GUI experience is not yet end-to-end complete.
   (#558).
 - **Desktop**: `ato internal preflight --json` now emits a typed
   `state_binding_required { state_key, label }` (never a path) for unresolved
-  `state.*`, and `resolve_state_binding_from_path` (capsule-core, callable from
+  `state.*`, and `resolve_state_binding_from_path` (capsule, callable from
   ato-desktop which doesn't link ato-cli) records target→ref and returns the
   `binding:<id>` to re-submit — the exact seam the GPUI picker will call (#560).
 
@@ -92,7 +92,7 @@ no shared state). No conflict markers remain; no semantic conflict; no bug found
 `cargo check --workspace --all-targets` (incl. ato-desktop targets touched by
 #560) are clean on the integrated tree. Focused suites on the integrated tree:
 `secret_injection` 19, `state_binding` 25, `port` 216, `preflight` 78,
-`capsule-core installed_state` 177, `relaunch` 27, `installed_relaunch_fixture_install` 1
+`capsule installed_state` 177, `relaunch` 27, `installed_relaunch_fixture_install` 1
 — all passing. (The pre-existing clap-recursion stack-overflow test
 `run_command_parses_explicit_state_bindings` exists on `dev` itself and is
 excluded; not introduced here.)
@@ -135,7 +135,7 @@ addressed:
 pre-spawn gates), resolved by union; `cargo build -p ato-cli` and
 `cargo check --workspace --all-targets` clean; focused suites **560 passed / 0
 failed** (secret_injection 23, state_binding 29, port 220, preflight 78, relaunch
-27, capsule-core installed_state 183). No regressions; the new proof-boundary
+27, capsule installed_state 183). No regressions; the new proof-boundary
 checks hold under integration. Live CLI smoke remains blocked by #561.
 
 #559 landed on `dev` first; #556/#558/#560 and this audit were then combined into

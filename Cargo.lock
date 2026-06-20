@@ -407,7 +407,7 @@ dependencies = [
  "axum-server",
  "base64 0.22.1",
  "blake3",
- "capsule-core",
+ "capsule",
  "chrono",
  "clap",
  "cliclack",
@@ -484,7 +484,7 @@ name = "ato-net"
 version = "0.5.2"
 dependencies = [
  "async-trait",
- "capsule-core",
+ "capsule",
  "hickory-resolver",
  "serde",
  "serde_json",
@@ -502,7 +502,7 @@ dependencies = [
  "async-trait",
  "ato-net",
  "bytes",
- "capsule-core",
+ "capsule",
  "clap",
  "futures-util",
  "hex",
@@ -543,7 +543,7 @@ dependencies = [
  "anyhow",
  "ato-protocol",
  "blake3",
- "capsule-core",
+ "capsule",
  "dirs 5.0.1",
  "libc",
  "serde",
@@ -1168,7 +1168,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "capsule-core"
+name = "capsule"
 version = "0.11.0"
 dependencies = [
  "anyhow",

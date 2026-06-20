@@ -48,8 +48,8 @@ pub struct StartupSweepOptions {
 impl StartupSweepOptions {
     pub fn from_current_ato_home() -> Result<Self> {
         Ok(Self {
-            run_dir: capsule_core::common::paths::ato_path("run")?,
-            runs_dir: capsule_core::common::paths::ato_runs_dir(),
+            run_dir: capsule::common::paths::ato_path("run")?,
+            runs_dir: capsule::common::paths::ato_runs_dir(),
             session_root: session_root()?,
             now: SystemTime::now(),
             socket_grace: DEFAULT_SOCKET_GRACE,

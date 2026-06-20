@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use capsule_core::common::paths::workspace_tmp_dir;
+use capsule::common::paths::workspace_tmp_dir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

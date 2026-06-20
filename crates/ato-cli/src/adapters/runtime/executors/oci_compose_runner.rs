@@ -26,15 +26,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
-use capsule_core::execution_plan::model::OciPolicyMode;
-use capsule_core::oci_compose_lock::{
+use capsule::CapsuleReporter;
+use capsule::execution_plan::model::OciPolicyMode;
+use capsule::oci_compose_lock::{
     self, OciComposeLock, OciImageLockEntry, OciImportMeta, compute_compose_source_hash,
 };
-use capsule_core::routing::importer::compose::{
+use capsule::routing::importer::compose::{
     ComposeImportInput, ComposeImportOutput, detect_compose_candidate, import_compose,
 };
-use capsule_core::types::OciImageResolution;
+use capsule::types::OciImageResolution;
 
 use super::launch_context::RuntimeLaunchContext;
 use super::oci_multi_service::execute_service_graph_with_provider;
@@ -127,7 +127,7 @@ pub(crate) async fn execute_compose_run(
     let existing_lock = {
         let main_lock_path = project_dir.join("ato.lock.json");
         let main_lock = if main_lock_path.exists() {
-            let lock = capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path)
+            let lock = capsule::ato_lock::load_unvalidated_from_path(&main_lock_path)
                 .map_err(|e| anyhow::anyhow!("failed to read ato.lock.json: {e}"))?;
             Some(lock)
         } else {
@@ -135,11 +135,11 @@ pub(crate) async fn execute_compose_run(
         };
 
         let oci_read = match &main_lock {
-            Some(lock) => capsule_core::ato_lock::read_oci_lock(lock, project_dir)
+            Some(lock) => capsule::ato_lock::read_oci_lock(lock, project_dir)
                 .map_err(|e| anyhow::anyhow!("ato.lock.json OCI resolution is invalid: {e}"))?,
             None => {
-                let empty = capsule_core::ato_lock::AtoLock::default();
-                capsule_core::ato_lock::read_oci_lock(&empty, project_dir)
+                let empty = capsule::ato_lock::AtoLock::default();
+                capsule::ato_lock::read_oci_lock(&empty, project_dir)
                     .map_err(|e| anyhow::anyhow!("failed to read OCI lock: {e}"))?
             }
         };
@@ -195,7 +195,7 @@ pub(crate) async fn execute_compose_run(
 
     // Also write OCI facts into main ato.lock.json.
     {
-        use capsule_core::ato_lock::oci::{
+        use capsule::ato_lock::oci::{
             OciImageLockEntry as MainOciImageLockEntry, OciImportEntry,
             construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
         };
@@ -300,7 +300,7 @@ pub(crate) async fn resolve_images_with_lock_replay<P: OciProvider>(
                     &entry.resolved_digest[..std::cmp::min(19, entry.resolved_digest.len())]
                 ))
                 .await?;
-            let platform = capsule_core::oci_compose_lock::parse_platform_str(&entry.platform);
+            let platform = capsule::oci_compose_lock::parse_platform_str(&entry.platform);
             images.insert(
                 svc.name.clone(),
                 OciImageResolution {
@@ -419,10 +419,10 @@ pub(crate) async fn execute_compose_run_with_provider<P: OciProvider>(
 mod tests {
     use std::path::PathBuf;
 
-    use capsule_core::routing::importer::compose::{
+    use capsule::routing::importer::compose::{
         ComposeImportInput, detect_compose_candidate, import_compose,
     };
-    use capsule_core::types::OciImageResolution;
+    use capsule::types::OciImageResolution;
 
     use super::*;
     use crate::adapters::runtime::oci_provider::{FakeOciProvider, fake_oci_semantics};
@@ -479,7 +479,7 @@ volumes:
         OciImageResolution {
             declared_ref: declared_ref.to_string(),
             resolved_digest: format!("sha256:{}", "a".repeat(64)),
-            platform: capsule_core::types::OciPlatform {
+            platform: capsule::types::OciPlatform {
                 os: "linux".to_string(),
                 architecture: "amd64".to_string(),
                 variant: None,
@@ -624,7 +624,7 @@ services:
         let reporter = fake_reporter();
 
         let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+            capsule::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (images, _lock) = rt
             .block_on(resolve_images_with_lock_replay(
@@ -694,7 +694,7 @@ services:
         let sem = provider.semantics();
         assert_eq!(
             sem.kind,
-            capsule_core::types::OciProviderKind::Podman,
+            capsule::types::OciProviderKind::Podman,
             "provider kind must be Podman, not legacy Bollard"
         );
     }
@@ -834,7 +834,7 @@ services:
         let reporter = fake_reporter();
 
         let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+            capsule::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(resolve_images_with_lock_replay(
             &import_output,
@@ -873,7 +873,7 @@ services:
         let reporter = fake_reporter();
 
         let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+            capsule::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(resolve_images_with_lock_replay(
             &import_output,
@@ -1080,7 +1080,7 @@ volumes: {}
         declared_ref: &str,
         digest: &str,
     ) -> OciComposeLock {
-        use capsule_core::oci_compose_lock::{OciImageLockEntry, OciImportMeta};
+        use capsule::oci_compose_lock::{OciImageLockEntry, OciImportMeta};
         use std::collections::BTreeMap;
         let mut images = BTreeMap::new();
         images.insert(
@@ -1119,7 +1119,7 @@ volumes: {}
         let provider = FakeOciProvider::ready();
         let reporter = fake_reporter();
         let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+            capsule::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (images, lock) = rt
@@ -1134,14 +1134,14 @@ volumes: {}
             .unwrap();
 
         // Persist to disk.
-        capsule_core::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
+        capsule::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
 
         // Verify lock file was written.
         let lock_path = tmp.path().join("ato.oci.lock.json");
         assert!(lock_path.exists(), "ato.oci.lock.json should be created");
 
         // Load back and verify entries.
-        let loaded = capsule_core::oci_compose_lock::load_from_dir(tmp.path())
+        let loaded = capsule::oci_compose_lock::load_from_dir(tmp.path())
             .unwrap()
             .unwrap();
         assert_eq!(loaded.images.len(), 2);
@@ -1159,7 +1159,7 @@ volumes: {}
     #[test]
     fn compose_run_reuses_existing_lock_resolution() {
         let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+            capsule::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let persisted_digest = format!("sha256:{}", "b".repeat(64));
 
         // Build an existing lock with a fresh "db" entry.
@@ -1203,7 +1203,7 @@ volumes: {}
     fn compose_source_hash_drift_triggers_fresh_resolution() {
         let stale_hash = "sha256:000000000000000000000000000000000000000000000000000000000000dead";
         let real_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+            capsule::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
 
         // Lock was written with a different source hash (stale).
         let stale_digest = format!("sha256:{}", "c".repeat(64));
@@ -1256,7 +1256,7 @@ services:
         let import_output = import_compose(&input).unwrap();
         let provider = FakeOciProvider::ready();
         let reporter = fake_reporter();
-        let source_hash = capsule_core::oci_compose_lock::compute_compose_source_hash(yaml);
+        let source_hash = capsule::oci_compose_lock::compute_compose_source_hash(yaml);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (images, lock) = rt
@@ -1285,7 +1285,7 @@ services:
         let yaml = format!(
             "services:\n  db:\n    image: {digest_ref}\n    volumes:\n      - db-data:/data\nvolumes:\n  db-data: {{}}\n"
         );
-        let source_hash = capsule_core::oci_compose_lock::compute_compose_source_hash(&yaml);
+        let source_hash = capsule::oci_compose_lock::compute_compose_source_hash(&yaml);
 
         // Build a lock where "db" has this exact digest already.
         let existing_lock = make_lock_with_entry(
@@ -1334,8 +1334,7 @@ services:
         let import_output = import_compose(&input).unwrap();
         let provider = FakeOciProvider::ready();
         let reporter = fake_reporter();
-        let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(BLINKO_COMPOSE);
+        let source_hash = capsule::oci_compose_lock::compute_compose_source_hash(BLINKO_COMPOSE);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (_images, lock) = rt
@@ -1369,13 +1368,12 @@ services:
 
     #[test]
     fn blinko_style_compose_lock_replay_with_fake_provider() {
-        let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(BLINKO_COMPOSE);
+        let source_hash = capsule::oci_compose_lock::compute_compose_source_hash(BLINKO_COMPOSE);
         let pg_digest = format!("sha256:{}", "e".repeat(64));
         let blinko_digest = format!("sha256:{}", "f".repeat(64));
 
         // Build a pre-existing lock simulating a previous run.
-        use capsule_core::oci_compose_lock::{OciImageLockEntry, OciImportMeta};
+        use capsule::oci_compose_lock::{OciImageLockEntry, OciImportMeta};
         use std::collections::BTreeMap;
         let mut existing_images = BTreeMap::new();
         existing_images.insert(
@@ -1475,7 +1473,7 @@ services:
         .unwrap();
 
         let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+            capsule::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let input = ComposeImportInput::new(
             SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
             tmp.path().join("docker-compose.yml"),
@@ -1497,7 +1495,7 @@ services:
             .unwrap();
 
         // Sidecar write (existing behavior).
-        capsule_core::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
+        capsule::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
         let sidecar_path = tmp.path().join("ato.oci.lock.json");
         assert!(sidecar_path.exists(), "sidecar lock must still be written");
 
@@ -1506,7 +1504,7 @@ services:
             .images
             .iter()
             .map(|(name, entry)| {
-                let resolved_ref = capsule_core::ato_lock::construct_resolved_ref_from_sidecar(
+                let resolved_ref = capsule::ato_lock::construct_resolved_ref_from_sidecar(
                     &entry.declared_ref,
                     &entry.resolved_digest,
                 );
@@ -1532,17 +1530,17 @@ services:
                 source_hash: source_hash.clone(),
             },
         );
-        capsule_core::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
+        capsule::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
             .unwrap();
 
         // Verify main lock.
         let main_lock_path = tmp.path().join("ato.lock.json");
         assert!(main_lock_path.exists(), "ato.lock.json must be created");
-        let loaded = capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
-        let oci_read = capsule_core::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
+        let loaded = capsule::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let oci_read = capsule::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
         assert_eq!(
             oci_read.source,
-            capsule_core::ato_lock::OciLockSource::MainLock,
+            capsule::ato_lock::OciLockSource::MainLock,
             "read must prefer main lock when present"
         );
         assert_eq!(oci_read.images.len(), 2, "must contain both services");
@@ -1558,7 +1556,7 @@ services:
         }
 
         // Sidecar must remain readable (compatibility).
-        let sidecar_loaded = capsule_core::oci_compose_lock::load_from_dir(tmp.path())
+        let sidecar_loaded = capsule::oci_compose_lock::load_from_dir(tmp.path())
             .unwrap()
             .unwrap();
         assert_eq!(sidecar_loaded.images.len(), 2);
@@ -1576,7 +1574,7 @@ services:
         .unwrap();
 
         let source_hash =
-            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+            capsule::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
         let input = ComposeImportInput::new(
             SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
             nested.join("docker-compose.yml"),
@@ -1601,7 +1599,7 @@ services:
             .images
             .iter()
             .map(|(name, entry)| {
-                let resolved_ref = capsule_core::ato_lock::construct_resolved_ref_from_sidecar(
+                let resolved_ref = capsule::ato_lock::construct_resolved_ref_from_sidecar(
                     &entry.declared_ref,
                     &entry.resolved_digest,
                 );
@@ -1627,13 +1625,13 @@ services:
                 source_hash: source_hash.clone(),
             },
         );
-        capsule_core::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
+        capsule::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
             .unwrap();
 
         let loaded =
-            capsule_core::ato_lock::load_unvalidated_from_path(&tmp.path().join("ato.lock.json"))
+            capsule::ato_lock::load_unvalidated_from_path(&tmp.path().join("ato.lock.json"))
                 .unwrap();
-        let oci_read = capsule_core::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
+        let oci_read = capsule::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
         let import = oci_read.imports.get("default").unwrap();
         assert_eq!(
             import.source_path, "subdir/docker-compose.yml",
@@ -1647,6 +1645,6 @@ services:
 
     // Re-declare main-lock OCI types for use in tests above.
     // (Not re-exported from parent scope since the parent module uses the sidecar type.)
-    use capsule_core::ato_lock::OciImageLockEntry as MainOciImageLockEntry;
-    use capsule_core::ato_lock::OciImportEntry;
+    use capsule::ato_lock::OciImageLockEntry as MainOciImageLockEntry;
+    use capsule::ato_lock::OciImportEntry;
 }

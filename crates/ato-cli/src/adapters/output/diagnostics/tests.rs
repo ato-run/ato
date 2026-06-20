@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
-use capsule_core::execution_plan::error::{
+use capsule::execution_plan::error::{
     AtoErrorClassification, AtoErrorCode, AtoExecutionError, CleanupActionRecord,
     CleanupActionStatus, CleanupStatus, ManifestSuggestion,
 };
@@ -31,7 +31,7 @@ fn assert_json_envelope_snapshot(name: &str, envelope: &JsonErrorEnvelopeV1) {
 
 #[test]
 fn maps_manifest_parse_to_e001() {
-    let err = anyhow!(capsule_core::CapsuleError::Manifest(
+    let err = anyhow!(capsule::CapsuleError::Manifest(
         PathBuf::from("capsule.toml"),
         "Failed to parse manifest TOML: expected value".to_string()
     ));
@@ -42,7 +42,7 @@ fn maps_manifest_parse_to_e001() {
 
 #[test]
 fn maps_required_default_target_to_e003() {
-    let err = anyhow!(capsule_core::CapsuleError::Manifest(
+    let err = anyhow!(capsule::CapsuleError::Manifest(
         PathBuf::from("capsule.toml"),
         "Manifest validation failed: default_target is required".to_string()
     ));
@@ -53,7 +53,7 @@ fn maps_required_default_target_to_e003() {
 
 #[test]
 fn maps_entrypoint_failure_to_e101() {
-    let err = anyhow!(capsule_core::CapsuleError::Pack(
+    let err = anyhow!(capsule::CapsuleError::Pack(
         "Entrypoint not found".to_string()
     ));
     let diagnostic = from_anyhow(&err, CommandContext::Build);
@@ -84,11 +84,9 @@ fn maps_lifecycle_command_failure_report_to_e203() {
 
 #[test]
 fn maps_strict_manifest_error_to_e106() {
-    let err = anyhow!(
-        capsule_core::CapsuleError::StrictManifestFallbackNotAllowed(
-            "fallback blocked".to_string()
-        )
-    );
+    let err = anyhow!(capsule::CapsuleError::StrictManifestFallbackNotAllowed(
+        "fallback blocked".to_string()
+    ));
     let diagnostic = from_anyhow(&err, CommandContext::Build);
     assert_eq!(diagnostic.code, CliDiagnosticCode::E106);
     assert_eq!(diagnostic.field.as_deref(), Some("strict-v3"));
@@ -252,7 +250,7 @@ fn maps_missing_required_env_error_to_e103() {
 ///    are omitted when `None`, never serialized as `null`.
 #[test]
 fn maps_missing_required_env_error_to_e103_with_schema() {
-    use capsule_core::types::{ConfigField, ConfigKind};
+    use capsule::types::{ConfigField, ConfigKind};
 
     let missing_schema = vec![
         ConfigField {

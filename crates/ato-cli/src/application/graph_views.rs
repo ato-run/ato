@@ -14,11 +14,11 @@
 //! The bundle itself is built upstream (manifest + lock + policy facts);
 //! these views are pure projections.
 
-use capsule_core::engine::execution_graph::{
+use capsule::engine::execution_graph::{
     ExecutionGraphBuilder, GraphPolicyInput, GraphPreflightInput, GraphSourceInput,
 };
-use capsule_core::engine::execution_graph::{LaunchGraphBundle, LaunchGraphBundleInput};
-use capsule_core::types::ExternalCapsuleDependency;
+use capsule::engine::execution_graph::{LaunchGraphBundle, LaunchGraphBundleInput};
+use capsule::types::ExternalCapsuleDependency;
 
 use crate::application::execution_graph_adapter::build_input_from_external_dependencies;
 
@@ -170,7 +170,7 @@ pub(crate) fn build_declared_only_bundle_with_consent(
     manifest_source_identifier: Option<String>,
     declared_policy: Option<GraphPolicyInput>,
     required_env: Vec<String>,
-    consent: capsule_core::engine::execution_graph::GraphConsentInput,
+    consent: capsule::engine::execution_graph::GraphConsentInput,
 ) -> LaunchGraphBundle {
     let base = build_input_from_external_dependencies(dependencies, manifest_source_identifier);
 
@@ -354,7 +354,7 @@ impl ExecutionConsentView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::lockfile::manifest_external_capsule_dependencies;
+    use capsule::lockfile::manifest_external_capsule_dependencies;
 
     fn manifest_with_two_dependencies() -> toml::Value {
         toml::from_str(
@@ -519,7 +519,7 @@ contract = "service@1"
     /// the same field values.
     #[test]
     fn execution_consent_view_with_consent_input_carries_all_five_facets() {
-        use capsule_core::engine::execution_graph::GraphConsentInput;
+        use capsule::engine::execution_graph::GraphConsentInput;
 
         let manifest = manifest_with_two_dependencies();
         let dependencies = manifest_external_capsule_dependencies(&manifest).expect("deps");

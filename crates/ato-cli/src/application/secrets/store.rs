@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use capsule_core::common::paths::nacelle_home_dir;
+use capsule::common::paths::nacelle_home_dir;
 use serde::{Deserialize, Serialize};
 
 use super::policy::SecretPolicy;

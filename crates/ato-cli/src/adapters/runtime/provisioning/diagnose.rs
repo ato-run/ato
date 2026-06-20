@@ -1,6 +1,6 @@
 use anyhow::Result;
-use capsule_core::launch_spec::derive_launch_spec;
-use capsule_core::router::ManifestData;
+use capsule::launch_spec::derive_launch_spec;
+use capsule::router::ManifestData;
 
 use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::runtime::overrides as runtime_overrides;
@@ -176,7 +176,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use capsule::router::{ExecutionProfile, ManifestData};
 
     use crate::executors::launch_context::RuntimeLaunchContext;
 
@@ -196,7 +196,7 @@ mod tests {
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             toml::Value::Table(manifest),
             PathBuf::from("/tmp/capsule.toml"),
             PathBuf::from("/tmp"),

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use assert_cmd::Command;
-use capsule_core::ato_lock::{
+use capsule::ato_lock::{
     AtoLock, UnresolvedReason, UnresolvedValue, recompute_lock_id, to_pretty_json,
 };
 use predicates::prelude::*;

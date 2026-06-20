@@ -3,8 +3,8 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use capsule_core::launch_spec::derive_launch_spec;
-use capsule_core::router::ManifestData;
+use capsule::launch_spec::derive_launch_spec;
+use capsule::router::ManifestData;
 
 use crate::common::proxy;
 use crate::runtime::overrides as runtime_overrides;
@@ -26,7 +26,7 @@ pub fn execute(
     // Strip Windows `\\?\` extended-length prefixes before handing the cwd to
     // cmd.exe (which rejects them) and to PATH-resolved tools.
     let working_dir =
-        capsule_core::common::paths::windows_child_compatible_path(&launch_spec.working_dir);
+        capsule::common::paths::windows_child_compatible_path(&launch_spec.working_dir);
     let run_command = normalize_local_shell_command(&run_command, &working_dir);
     let mut cmd = shell_command(&run_command);
     cmd.current_dir(&working_dir);

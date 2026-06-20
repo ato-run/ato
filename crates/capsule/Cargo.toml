@@ -1,5 +1,5 @@
 [package]
-name = "capsule-core"
+name = "capsule"
 version = "0.11.0"
 edition = "2024"
 license = "MPL-2.0"
@@ -10,7 +10,7 @@ repository = "https://github.com/ato-run/ato"
 dist = false
 
 [lib]
-name = "capsule_core"
+name = "capsule"
 path = "src/lib.rs"
 
 [dependencies]

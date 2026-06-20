@@ -131,9 +131,9 @@ fn build_capsule_bytes(manifest: &str) -> Vec<u8> {
 fn build_capsule_bytes_with_files(manifest: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
     let payload_tar = build_payload_tar().expect("build payload tar");
     let parsed_manifest =
-        capsule_core::types::CapsuleManifest::from_toml(manifest).expect("parse manifest");
+        capsule::types::CapsuleManifest::from_toml(manifest).expect("parse manifest");
     let (distribution_manifest, _) =
-        capsule_core::packers::payload::build_distribution_manifest(&parsed_manifest, &payload_tar)
+        capsule::packers::payload::build_distribution_manifest(&parsed_manifest, &payload_tar)
             .expect("build distribution manifest");
     let mut raw_manifest: toml::Value = toml::from_str(manifest).expect("parse raw manifest");
     let raw_manifest_table = raw_manifest
@@ -205,9 +205,9 @@ fn build_capsule_bytes_with_payload_files(
 ) -> Vec<u8> {
     let payload_tar = build_payload_tar_with_files(payload_files).expect("build payload tar");
     let parsed_manifest =
-        capsule_core::types::CapsuleManifest::from_toml(manifest).expect("parse manifest");
+        capsule::types::CapsuleManifest::from_toml(manifest).expect("parse manifest");
     let (distribution_manifest, _) =
-        capsule_core::packers::payload::build_distribution_manifest(&parsed_manifest, &payload_tar)
+        capsule::packers::payload::build_distribution_manifest(&parsed_manifest, &payload_tar)
             .expect("build distribution manifest");
     let mut raw_manifest: toml::Value = toml::from_str(manifest).expect("parse raw manifest");
     let raw_manifest_table = raw_manifest
@@ -908,16 +908,15 @@ async fn install_profiles_read_ato_home_instances_root() {
     let _ato_home = AtoHomeGuard::set("install-profiles");
 
     let root = install_profile_store_root();
-    let store = capsule_core::foundation::install_lifecycle::InstallInstanceStore::new(&root)
+    let store = capsule::foundation::install_lifecycle::InstallInstanceStore::new(&root)
         .expect("install store");
-    let app_id = capsule_core::foundation::install_lifecycle::InstalledAppId::new(
-        "app_runtime_profile_test",
-    );
-    let profile_id = capsule_core::foundation::install_lifecycle::ProfileId::new("default");
+    let app_id =
+        capsule::foundation::install_lifecycle::InstalledAppId::new("app_runtime_profile_test");
+    let profile_id = capsule::foundation::install_lifecycle::ProfileId::new("default");
     let revision_id =
-        capsule_core::foundation::install_lifecycle::InstallRevisionId::new("rev_runtime_test");
+        capsule::foundation::install_lifecycle::InstallRevisionId::new("rev_runtime_test");
     store
-        .write_app_record(&capsule_core::foundation::install_lifecycle::AppRecord {
+        .write_app_record(&capsule::foundation::install_lifecycle::AppRecord {
             installed_app_id: app_id.clone(),
             publisher: "koh0920".to_string(),
             slug: "runtime-demo".to_string(),
@@ -930,7 +929,7 @@ async fn install_profiles_read_ato_home_instances_root() {
     store
         .write_profile(
             &app_id,
-            &capsule_core::foundation::install_lifecycle::LaunchProfile {
+            &capsule::foundation::install_lifecycle::LaunchProfile {
                 profile_id: profile_id.clone(),
                 port_policy: "fixed:8123".to_string(),
                 isolation: "strict".to_string(),
@@ -1480,7 +1479,7 @@ fn launch_response_user_visible_url_is_never_loopback() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_launch_non_default_profile_returns_501() {
-    use capsule_core::foundation::install_lifecycle::{
+    use capsule::foundation::install_lifecycle::{
         AppRecord, InstallInstanceStore, InstalledAppId, LaunchProfile, ProfileId,
     };
     let _lock = env_lock().lock().unwrap();
@@ -1512,7 +1511,7 @@ async fn runtime_launch_non_default_profile_returns_501() {
         )
         .expect("write profile");
 
-    use capsule_core::foundation::install_lifecycle::derive_install_profile_key;
+    use capsule::foundation::install_lifecycle::derive_install_profile_key;
     let ipk = derive_install_profile_key(&app_id, &profile_id)
         .as_str()
         .to_string();
@@ -1559,7 +1558,7 @@ async fn runtime_session_logs_sse_streams_beyond_channel_capacity() {
 
     // Write 600 lines — more than the channel capacity of 512.
     let session_id = "sse-backlog-session";
-    let log_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("logs");
+    let log_dir = capsule::common::paths::ato_path_or_workspace_tmp("logs");
     std::fs::create_dir_all(&log_dir).expect("create log dir");
     let log_path = log_dir.join(format!("{session_id}.log"));
     let log_content: String = (0..600).map(|i| format!("line {i}\n")).collect();

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn process_runtime_label(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     dangerous_skip_permissions: bool,
     compatibility_host_mode: CompatibilityHostMode,
 ) -> String {
@@ -141,7 +141,7 @@ pub(super) struct BackgroundCompletionOptions {
     pub execution_id: Option<String>,
 }
 
-fn background_process_name(plan: &capsule_core::router::ManifestData) -> String {
+fn background_process_name(plan: &capsule::router::ManifestData) -> String {
     plan.manifest_path
         .file_stem()
         .and_then(|n| n.to_str())
@@ -151,7 +151,7 @@ fn background_process_name(plan: &capsule_core::router::ManifestData) -> String 
 
 fn background_process_info(
     process: &crate::executors::source::CapsuleProcess,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     process_id: &str,
     runtime: String,
     scoped_id: Option<String>,
@@ -190,7 +190,7 @@ fn background_process_info(
 
 pub(super) async fn complete_background_source_process(
     mut process: crate::executors::source::CapsuleProcess,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     runtime: String,
     scoped_id: Option<String>,
     options: BackgroundCompletionOptions,
@@ -781,7 +781,7 @@ pub(super) fn foreground_native_event_messages(
 }
 
 pub(super) async fn notify_web_endpoint(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     reporter: &Arc<CliReporter>,
 ) -> Result<()> {
     let port = runtime_overrides::override_port(plan.execution_port()).ok_or_else(|| {

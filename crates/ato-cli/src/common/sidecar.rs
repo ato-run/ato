@@ -4,7 +4,7 @@ use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use capsule_core::{
+use capsule::{
     SidecarBaseConfig, SidecarRequest, SidecarSpawnConfig, TsnetClient, TsnetConfig, TsnetEndpoint,
     TsnetHandle, TsnetState, TsnetWaitConfig, discover_sidecar, spawn_sidecar, wait_for_ready,
 };
@@ -111,7 +111,7 @@ async fn start_and_wait(
     auth_key: String,
     hostname: String,
     socks_port: u16,
-) -> Result<capsule_core::TsnetStatus> {
+) -> Result<capsule::TsnetStatus> {
     let endpoint_for_client = endpoint.clone();
     let client = TsnetClient::from_endpoint(endpoint_for_client)?;
     let config = TsnetConfig {
@@ -127,7 +127,7 @@ async fn start_and_wait(
     let status = loop {
         match client.start(config.clone()).await {
             Ok(status) => break status,
-            Err(capsule_core::CapsuleError::SidecarIpc(_)) if attempts < 10 => {
+            Err(capsule::CapsuleError::SidecarIpc(_)) if attempts < 10 => {
                 attempts += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

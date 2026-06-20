@@ -8,19 +8,19 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use capsule_core::CapsuleReporter;
-use capsule_core::ato_lock::AtoLock;
-use capsule_core::dependency_contracts::{
+use capsule::CapsuleReporter;
+use capsule::ato_lock::AtoLock;
+use capsule::dependency_contracts::{
     DependencyLock, DependencyLockInput, ResolvedProviderManifest, verify_and_lock,
 };
-use capsule_core::execution_identity::EnvOrigin;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::guard::ExecutorKind;
-use capsule_core::lockfile::{
+use capsule::execution_identity::EnvOrigin;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::guard::ExecutorKind;
+use capsule::lockfile::{
     CAPSULE_LOCK_FILE_NAME, CapsuleLock, manifest_external_capsule_dependencies,
     verify_lockfile_external_dependencies,
 };
-use capsule_core::types::{CapsuleManifest, CapsuleType, ConfigField, ConfigKind, StateDurability};
+use capsule::types::{CapsuleManifest, CapsuleType, ConfigField, ConfigKind, StateDurability};
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
@@ -54,7 +54,7 @@ use crate::state::{
     parse_state_reference, resolve_registered_state_reference,
     resolve_registered_state_reference_in_store,
 };
-use capsule_core::router;
+use capsule::router;
 
 use crate::ProviderToolchain;
 use crate::RunAgentMode;
@@ -101,7 +101,7 @@ pub(crate) struct PreparedRunContext {
     pub(crate) effective_state: Option<EffectiveLockState>,
     pub(crate) execution_override: Option<RunExecutionOverride>,
     pub(crate) bridge_manifest: DerivedBridgeManifest,
-    pub(crate) validation_mode: capsule_core::types::ValidationMode,
+    pub(crate) validation_mode: capsule::types::ValidationMode,
     pub(crate) engine_override_declared: bool,
     pub(crate) compatibility_legacy_lock: Option<CompatibilityLegacyLockContext>,
     /// Install profile key for an installed-app launch (`ato launch`), `None`
@@ -131,16 +131,16 @@ impl DerivedBridgeManifest {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedDerivedExecution {
-    pub(crate) execution_plan: capsule_core::execution_plan::model::ExecutionPlan,
-    pub(crate) tier: capsule_core::execution_plan::model::ExecutionTier,
-    pub(crate) guard_result: capsule_core::execution_plan::guard::RuntimeGuardResult,
+    pub(crate) execution_plan: capsule::execution_plan::model::ExecutionPlan,
+    pub(crate) tier: capsule::execution_plan::model::ExecutionTier,
+    pub(crate) guard_result: capsule::execution_plan::guard::RuntimeGuardResult,
 }
 
 impl PreparedRunContext {
     pub(crate) fn from_authoritative_input(
         authoritative_input: Option<&RunAuthoritativeInput>,
         workspace_root: &Path,
-        validation_mode: capsule_core::types::ValidationMode,
+        validation_mode: capsule::types::ValidationMode,
         target_label: Option<&str>,
     ) -> Result<Self> {
         let routed_manifest = authoritative_input
@@ -182,7 +182,7 @@ impl PreparedRunContext {
     pub(crate) fn with_bridge_manifest(
         &self,
         bridge_manifest: toml::Value,
-        validation_mode: capsule_core::types::ValidationMode,
+        validation_mode: capsule::types::ValidationMode,
         engine_override_declared: bool,
     ) -> Self {
         Self {
@@ -270,7 +270,7 @@ pub(crate) struct ConsumerRunRequest {
     /// Launch-condition inputs from a `capsule://…?<query>` launch URL, overlaid
     /// onto the in-memory installed-state claims before the relaunch preflight
     /// resolves them (inputs, not proof). Empty for `ato run` / `ato launch <ipk>`.
-    pub(crate) capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
+    pub(crate) capsule_launch_inputs: Vec<capsule::installed_state::LaunchConditionInput>,
 }
 
 impl ConsumerRunRequest {
@@ -401,7 +401,7 @@ fn normalize_existing_path(path: &Path) -> Result<(PathBuf, SandboxGrantScope)> 
     // Grant paths become sandbox mount sources; strip the `\\?\` prefix
     // canonicalize() adds on Windows so downstream consumers see the
     // normal spelling.
-    let canonical = capsule_core::common::paths::windows_child_compatible_path(&canonical);
+    let canonical = capsule::common::paths::windows_child_compatible_path(&canonical);
     Ok((canonical, scope))
 }
 
@@ -426,8 +426,7 @@ fn normalize_write_path(path: &Path) -> Result<(PathBuf, SandboxGrantScope)> {
     })?;
     let canonical_parent = fs::canonicalize(parent)
         .with_context(|| format!("failed to resolve parent directory {}", parent.display()))?;
-    let canonical_parent =
-        capsule_core::common::paths::windows_child_compatible_path(&canonical_parent);
+    let canonical_parent = capsule::common::paths::windows_child_compatible_path(&canonical_parent);
     Ok((canonical_parent.join(file_name), SandboxGrantScope::Exact))
 }
 
@@ -507,7 +506,7 @@ fn normalize_candidate_path(
     // Candidates compare against grant source paths, which are produced in
     // the `\\?\`-stripped canonical form (see normalize_existing_path);
     // strip here too so the comparison stays apples-to-apples on Windows.
-    let strip = |path: PathBuf| capsule_core::common::paths::windows_child_compatible_path(&path);
+    let strip = |path: PathBuf| capsule::common::paths::windows_child_compatible_path(&path);
     match kind {
         InferredIoKind::Read => fs::canonicalize(&absolute).ok().map(strip),
         InferredIoKind::Write => {
@@ -630,7 +629,7 @@ pub(crate) struct RunPipelineState {
     pub(crate) preview_mode: bool,
     pub(crate) use_progressive_ui: bool,
     pub(crate) prepared: PreparedRunContext,
-    pub(crate) decision: capsule_core::router::RuntimeDecision,
+    pub(crate) decision: capsule::router::RuntimeDecision,
     pub(crate) launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
     pub(crate) external_capsules: Option<crate::external_capsule::ExternalCapsuleGuard>,
     pub(crate) dep_contracts: Option<DependencyContractGuard>,
@@ -961,7 +960,7 @@ fn detach_dependency_contracts_for_background(dep_contracts: &mut Option<Depende
 
 pub(crate) async fn start_dependency_contracts_for_run(
     prepared: &PreparedRunContext,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     lockfile: &CapsuleLock,
 ) -> Result<DependencyContractGuard> {
     let consumer =
@@ -986,7 +985,7 @@ pub(crate) async fn start_dependency_contracts_for_run(
                         locked.name
                     )
                 })?;
-        let loaded = capsule_core::manifest::load_manifest_with_validation_mode(
+        let loaded = capsule::manifest::load_manifest_with_validation_mode(
             &manifest_path,
             prepared.validation_mode,
         )
@@ -1030,7 +1029,7 @@ pub(crate) async fn start_dependency_contracts_for_run(
         lock: &dependency_lock,
         providers: providers_for_run,
         consumer: &consumer,
-        ato_home: capsule_core::common::paths::nacelle_home_dir_or_workspace_tmp(),
+        ato_home: capsule::common::paths::nacelle_home_dir_or_workspace_tmp(),
         parent_package_id: parent_package_id(&consumer),
         host_env: &host_env,
         redaction,
@@ -1049,9 +1048,7 @@ pub(crate) async fn start_dependency_contracts_for_run(
     Ok(DependencyContractGuard::new(graph, dependency_lock))
 }
 
-fn locked_dependency_resolved_ref(
-    locked: &capsule_core::lockfile::LockedCapsuleDependency,
-) -> String {
+fn locked_dependency_resolved_ref(locked: &capsule::lockfile::LockedCapsuleDependency) -> String {
     if let Some(digest) = locked.digest.as_deref().or(locked.sha256.as_deref()) {
         return format!("{}#{}", locked.source, digest);
     }
@@ -1075,7 +1072,7 @@ fn parent_package_id(consumer: &CapsuleManifest) -> String {
 
 pub(crate) fn inject_dependency_contract_env(
     mut launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     lock: &DependencyLock,
     graph: &RunningGraph,
 ) -> Result<crate::executors::launch_context::RuntimeLaunchContext> {
@@ -1132,9 +1129,7 @@ pub(crate) fn collect_missing_dependency_contract_manifest_env(
     manifest_value: &toml::Value,
     host_env: &dyn HostEnv,
 ) -> Result<MissingDependencyContractEnvReport> {
-    use capsule_core::foundation::types::{
-        ParamValue, TemplateExpr, TemplateSegment, TemplatedString,
-    };
+    use capsule::foundation::types::{ParamValue, TemplateExpr, TemplateSegment, TemplatedString};
 
     let capsule_dependencies = manifest_external_capsule_dependencies(manifest_value)
         .context("failed to read consumer dependency declarations for dependency env preflight")?;
@@ -1215,7 +1210,7 @@ pub(crate) fn collect_missing_dependency_contract_manifest_env(
 }
 
 pub(crate) fn preflight_dependency_contract_manifest_env(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     manifest_value: &toml::Value,
     host_env: &dyn HostEnv,
     action: &str,
@@ -1263,9 +1258,9 @@ pub(crate) fn is_env_satisfied(
 }
 
 pub(crate) fn preflight_orchestration_session_environment(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     manifest_value: &toml::Value,
-    orchestration: &capsule_core::foundation::types::OrchestrationPlan,
+    orchestration: &capsule::foundation::types::OrchestrationPlan,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
     host_env: &dyn HostEnv,
     action: &str,
@@ -1281,8 +1276,8 @@ pub(crate) fn preflight_orchestration_session_environment(
 }
 
 fn preflight_orchestration_service_required_env(
-    plan: &capsule_core::router::ManifestData,
-    orchestration: &capsule_core::foundation::types::OrchestrationPlan,
+    plan: &capsule::router::ManifestData,
+    orchestration: &capsule::foundation::types::OrchestrationPlan,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
     host_env: &dyn HostEnv,
     action: &str,
@@ -1343,7 +1338,7 @@ fn preflight_orchestration_service_required_env(
 }
 
 pub(crate) async fn setup_dependency_contracts_launch_context(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     prepared: &mut PreparedRunContext,
     reporter: &Arc<CliReporter>,
     launch_ctx: &mut crate::executors::launch_context::RuntimeLaunchContext,
@@ -1362,16 +1357,16 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
     let compatibility_legacy_lock = match prepared.compatibility_legacy_lock.as_ref() {
         Some(ctx) => ctx.clone(),
         None => {
-            let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
+            let bridge = capsule::router::CompatManifestBridge::from_manifest_value(
                 prepared.bridge_manifest.as_toml(),
             )
             .context("failed to build compatibility bridge for auto-lock")?;
-            let compat_input = capsule_core::router::CompatProjectInput::from_bridge(
+            let compat_input = capsule::router::CompatProjectInput::from_bridge(
                 prepared.workspace_root.clone(),
                 bridge,
             )
             .context("failed to build CompatProjectInput for auto-lock")?;
-            let lock_path = capsule_core::contract::lockfile::ensure_lockfile_for_compat_input(
+            let lock_path = capsule::contract::lockfile::ensure_lockfile_for_compat_input(
                 &compat_input,
                 reporter.clone(),
                 false,
@@ -1381,7 +1376,7 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
             let bytes = std::fs::read(&lock_path).with_context(|| {
                 format!("failed to read auto-generated lock {}", lock_path.display())
             })?;
-            let lock: capsule_core::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
+            let lock: capsule::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
                 .with_context(|| {
                     format!(
                         "failed to parse auto-generated lock {}",
@@ -1415,7 +1410,7 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
             None,
             Vec::new(),
         );
-        capsule_core::lockfile::verify_lockfile_against_contracts(
+        capsule::lockfile::verify_lockfile_against_contracts(
             &bundle.derived.dependency_contracts,
             &compatibility_legacy_lock.lock,
         )?;
@@ -1459,7 +1454,7 @@ fn render_consumer_dependency_template(
     lock: &DependencyLock,
     graph: &RunningGraph,
 ) -> Result<(String, Option<EnvOrigin>)> {
-    use capsule_core::types::{TemplateExpr, TemplateSegment, TemplatedString};
+    use capsule::types::{TemplateExpr, TemplateSegment, TemplatedString};
 
     let template = TemplatedString::parse(raw)
         .map_err(|err| anyhow::anyhow!("invalid dependency template '{raw}': {err}"))?;
@@ -1689,11 +1684,11 @@ fn infer_package_manager(root: &Path) -> Option<String> {
     .find_map(|(file, manager)| root.join(file).exists().then(|| manager.to_string()))
 }
 
-fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMode {
+fn run_validation_mode(preview_mode: bool) -> capsule::types::ValidationMode {
     if preview_mode {
-        capsule_core::types::ValidationMode::Preview
+        capsule::types::ValidationMode::Preview
     } else {
-        capsule_core::types::ValidationMode::Strict
+        capsule::types::ValidationMode::Strict
     }
 }
 
@@ -1710,10 +1705,10 @@ fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMod
 /// Other `Literal` values (non-numeric, out-of-range) are dropped: parsing
 /// already rejects them, so they should never reach here.
 fn collect_port_preferences(
-    inputs: &[capsule_core::installed_state::LaunchConditionInput],
+    inputs: &[capsule::installed_state::LaunchConditionInput],
 ) -> HashMap<String, crate::executors::launch_context::PortPreference> {
     use crate::executors::launch_context::PortPreference;
-    use capsule_core::installed_state::{LaunchConditionInputKind, LaunchConditionInputValue};
+    use capsule::installed_state::{LaunchConditionInputKind, LaunchConditionInputValue};
     let mut prefs = HashMap::new();
     for input in inputs {
         if input.kind != LaunchConditionInputKind::Port {
@@ -1869,7 +1864,7 @@ where
             // confusing unbound-state failure.
             if let Some(root) = request.managed_state_root.as_deref() {
                 let capsule_toml = authoritative_input.workspace_root.join("capsule.toml");
-                let loaded = capsule_core::manifest::load_manifest_with_validation_mode(
+                let loaded = capsule::manifest::load_manifest_with_validation_mode(
                     &capsule_toml,
                     validation_mode,
                 )
@@ -1905,10 +1900,8 @@ where
     if request.sandbox_mode
         && request.authoritative_input.is_some()
         && manifest_path.exists()
-        && let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
-            &manifest_path,
-            validation_mode,
-        )
+        && let Ok(loaded) =
+            capsule::manifest::load_manifest_with_validation_mode(&manifest_path, validation_mode)
     {
         let normalized_source_ref =
             headless_normalized_source_ref(request, preview_session.as_ref());
@@ -1933,7 +1926,7 @@ where
         register_headless_ephemeral_state_cleanup(attempt.as_deref_mut(), &outcome.ephemeral_dirs);
     }
     let mut decision = if let Some(authoritative_input) = request.authoritative_input.as_ref() {
-        let mut decision = capsule_core::router::route_lock_with_state_overrides(
+        let mut decision = capsule::router::route_lock_with_state_overrides(
             &authoritative_input.lock_path,
             &authoritative_input.lock,
             &authoritative_input.materialization_root,
@@ -1961,7 +1954,7 @@ where
         // phase's authoritative_input into this branch.
         let capsule_toml = authoritative_input.workspace_root.join("capsule.toml");
         if capsule_toml.exists()
-            && let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
+            && let Ok(loaded) = capsule::manifest::load_manifest_with_validation_mode(
                 &capsule_toml,
                 validation_mode,
             )
@@ -1970,9 +1963,7 @@ where
                 &loaded.raw,
                 decision.plan.selected_target_label(),
             );
-            if let Ok(bridge) =
-                capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
-            {
+            if let Ok(bridge) = capsule::router::CompatManifestBridge::from_manifest_value(&raw) {
                 decision.plan.compat_manifest = Some(bridge);
             }
             if let Ok(value) = toml::from_str::<toml::Value>(&loaded.raw_text) {
@@ -1981,10 +1972,8 @@ where
         }
         decision
     } else {
-        let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
-            &manifest_path,
-            validation_mode,
-        )?;
+        let loaded_manifest =
+            capsule::manifest::load_manifest_with_validation_mode(&manifest_path, validation_mode)?;
         prepared.bridge_manifest = DerivedBridgeManifest::new(
             toml::from_str(&loaded_manifest.raw_text)
                 .unwrap_or_else(|_| loaded_manifest.raw.clone()),
@@ -2045,7 +2034,7 @@ where
                 &outcome.ephemeral_dirs,
             );
         }
-        capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
+        capsule::router::route_manifest_with_state_overrides_and_validation_mode(
             &manifest_path,
             router::ExecutionProfile::Dev,
             effective_target_label,
@@ -2115,7 +2104,7 @@ where
                 None,
                 Vec::new(),
             );
-            capsule_core::lockfile::verify_lockfile_against_contracts(
+            capsule::lockfile::verify_lockfile_against_contracts(
                 &bundle.derived.dependency_contracts,
                 &compatibility_legacy_lock.lock,
             )?;
@@ -2176,15 +2165,15 @@ where
         let has_secret_grant = request.capsule_launch_inputs.iter().any(|input| {
             matches!(
                 input.kind,
-                capsule_core::installed_state::LaunchConditionInputKind::Secret
-                    | capsule_core::installed_state::LaunchConditionInputKind::Env
+                capsule::installed_state::LaunchConditionInputKind::Secret
+                    | capsule::installed_state::LaunchConditionInputKind::Env
             ) && matches!(
                 input.value,
-                capsule_core::installed_state::LaunchConditionInputValue::Grant(_)
+                capsule::installed_state::LaunchConditionInputValue::Grant(_)
             )
         });
         if has_secret_grant {
-            let db = capsule_core::installed_state::InstalledStateDb::open_default()
+            let db = capsule::installed_state::InstalledStateDb::open_default()
                 .context("open installed-state DB for secret injection")?;
             let secret_env = crate::adapters::runtime::secret_injection::resolve_secret_injection(
                 &db,
@@ -2207,14 +2196,14 @@ where
     // execution receipt / session record / logs.
     if let Some(lifecycle) = request.install_lifecycle_context.as_ref() {
         let has_state_binding = request.capsule_launch_inputs.iter().any(|input| {
-            input.kind == capsule_core::installed_state::LaunchConditionInputKind::State
+            input.kind == capsule::installed_state::LaunchConditionInputKind::State
                 && matches!(
                     input.value,
-                    capsule_core::installed_state::LaunchConditionInputValue::Binding(_)
+                    capsule::installed_state::LaunchConditionInputValue::Binding(_)
                 )
         });
         if has_state_binding {
-            let db = capsule_core::installed_state::InstalledStateDb::open_default()
+            let db = capsule::installed_state::InstalledStateDb::open_default()
                 .context("open installed-state DB for state binding materialization")?;
             let state_mounts =
                 crate::adapters::runtime::state_binding_injection::resolve_state_binding_materialization(
@@ -2291,7 +2280,7 @@ where
         // (registered for run cleanup); it lives OUTSIDE the materialized source
         // tree so it does not perturb the source-tree hash.
         const SESSION_DATA_GUEST: &str = "/runs/ato/session";
-        let host_session_dir = capsule_core::common::paths::ato_runs_dir()
+        let host_session_dir = capsule::common::paths::ato_runs_dir()
             .join("session-data")
             .join(format!(
                 "{}-{}",
@@ -2397,7 +2386,7 @@ where
             // run_v03_lifecycle_steps sees the build step (#301).
             let capsule_toml = pre_reroute_workspace_root.join("capsule.toml");
             if capsule_toml.exists()
-                && let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
+                && let Ok(loaded) = capsule::manifest::load_manifest_with_validation_mode(
                     &capsule_toml,
                     validation_mode,
                 )
@@ -2406,8 +2395,7 @@ where
                     &loaded.raw,
                     decision.plan.selected_target_label(),
                 );
-                if let Ok(bridge) =
-                    capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
+                if let Ok(bridge) = capsule::router::CompatManifestBridge::from_manifest_value(&raw)
                 {
                     decision.plan.compat_manifest = Some(bridge);
                 }
@@ -3117,7 +3105,7 @@ async fn maybe_apply_dependency_materialization(
 }
 
 fn try_remote_build_output_projection(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     workspace_root: &std::path::Path,
     observation: &bm::BuildObservation,
     suppress_recommendation: bool,
@@ -3167,7 +3155,7 @@ where
         return Ok(state);
     }
 
-    if matches!(state.decision.kind, capsule_core::router::RuntimeKind::Oci) {
+    if matches!(state.decision.kind, capsule::router::RuntimeKind::Oci) {
         if request.background {
             anyhow::bail!("--background is not supported for runtime=oci");
         }
@@ -3258,7 +3246,7 @@ where
         return Ok(state);
     }
 
-    if matches!(state.decision.kind, capsule_core::router::RuntimeKind::Oci) {
+    if matches!(state.decision.kind, capsule::router::RuntimeKind::Oci) {
         target_runner::preflight_required_environment_variables(
             &state.decision.plan,
             &state.launch_ctx,
@@ -3305,7 +3293,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
     fn preflight_native_sandbox(
         &self,
         nacelle_override: Option<PathBuf>,
-        plan: &capsule_core::router::ManifestData,
+        plan: &capsule::router::ManifestData,
         prepared: &PreparedRunContext,
         effective_cwd: Option<&Path>,
         reporter: &Arc<CliReporter>,
@@ -3314,7 +3302,7 @@ pub(crate) trait ConsumerRunExecuteHooks {
     async fn complete_background_source_process(
         &self,
         process: crate::executors::source::CapsuleProcess,
-        plan: &capsule_core::router::ManifestData,
+        plan: &capsule::router::ManifestData,
         runtime: String,
         scoped_id: Option<String>,
         is_one_shot: bool,
@@ -3345,13 +3333,13 @@ pub(crate) trait ConsumerRunExecuteHooks {
 
     async fn notify_web_endpoint(
         &self,
-        plan: &capsule_core::router::ManifestData,
+        plan: &capsule::router::ManifestData,
         reporter: &Arc<CliReporter>,
     ) -> Result<()>;
 
     fn process_runtime_label(
         &self,
-        plan: &capsule_core::router::ManifestData,
+        plan: &capsule::router::ManifestData,
         dangerous_skip_permissions: bool,
         compatibility_host_mode: CompatibilityHostMode,
     ) -> String;
@@ -3504,7 +3492,7 @@ where
         return Ok(());
     }
 
-    if matches!(decision.kind, capsule_core::router::RuntimeKind::Oci) {
+    if matches!(decision.kind, capsule::router::RuntimeKind::Oci) {
         if request.background {
             anyhow::bail!("--background is not supported for runtime=oci");
         }
@@ -3608,7 +3596,7 @@ where
             .await?;
     }
 
-    if execution_plan.target.runtime == capsule_core::execution_plan::model::ExecutionRuntime::Web {
+    if execution_plan.target.runtime == capsule::execution_plan::model::ExecutionRuntime::Web {
         hooks
             .notify_web_endpoint(&decision.plan, &request.reporter)
             .await?;
@@ -3642,10 +3630,10 @@ where
             &execution_receipt_document,
         )?;
     let (execution_id, schema_label) = match &execution_receipt_document {
-        capsule_core::execution_identity::ExecutionReceiptDocument::V1(receipt) => {
+        capsule::execution_identity::ExecutionReceiptDocument::V1(receipt) => {
             (receipt.execution_id.clone(), "v1")
         }
-        capsule_core::execution_identity::ExecutionReceiptDocument::V2(receipt) => {
+        capsule::execution_identity::ExecutionReceiptDocument::V2(receipt) => {
             (receipt.execution_id.clone(), "v2-experimental")
         }
     };
@@ -3816,12 +3804,12 @@ where
         let plan_granted = crate::consent_store::has_consent(&execution_plan)?;
         debug_assert!(
             {
-                let consent_deps = capsule_core::lockfile::manifest_external_capsule_dependencies(
+                let consent_deps = capsule::lockfile::manifest_external_capsule_dependencies(
                     &decision.plan.manifest,
                 )
                 .ok();
                 let view_granted = consent_deps.map(|deps| {
-                    let consent_input = capsule_core::engine::execution_graph::GraphConsentInput {
+                    let consent_input = capsule::engine::execution_graph::GraphConsentInput {
                         scoped_id: execution_plan.consent.key.scoped_id.clone(),
                         version: execution_plan.consent.key.version.clone(),
                         target_label: execution_plan.consent.key.target_label.clone(),
@@ -3865,7 +3853,7 @@ where
             if !crate::progressive_ui::confirm_action(prompt, false)? {
                 crate::progressive_ui::show_cancel("Execution cancelled.")?;
                 return Err(AtoExecutionError::from_ato_error(
-                    capsule_core::AtoError::ExecutionContractInvalid {
+                    capsule::AtoError::ExecutionContractInvalid {
                         message: "ExecutionPlan consent rejected by user".to_string(),
                         hint: Some(
                             "Execution Plan の要約を確認し、許可する場合のみ再実行してください。"
@@ -4391,24 +4379,24 @@ where
 }
 
 pub(crate) async fn reroute_auto_provisioned_execution(
-    decision: capsule_core::router::RuntimeDecision,
+    decision: capsule::router::RuntimeDecision,
     launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
     prepared: &PreparedRunContext,
     reporter: Arc<CliReporter>,
     preview_mode: bool,
     shadow_manifest_path: &Path,
 ) -> Result<(
-    capsule_core::router::RuntimeDecision,
+    capsule::router::RuntimeDecision,
     crate::executors::launch_context::RuntimeLaunchContext,
     PreparedRunContext,
 )> {
     let validation_mode = run_validation_mode(preview_mode);
-    let loaded_manifest = capsule_core::manifest::load_manifest_with_validation_mode(
+    let loaded_manifest = capsule::manifest::load_manifest_with_validation_mode(
         shadow_manifest_path,
         validation_mode,
     )?;
     let rerouted_decision =
-        capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
+        capsule::router::route_manifest_with_state_overrides_and_validation_mode(
             shadow_manifest_path,
             router::ExecutionProfile::Dev,
             Some(decision.plan.selected_target_label()),
@@ -4441,7 +4429,7 @@ pub(crate) async fn reroute_auto_provisioned_execution(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn maybe_run_agent_setup(
     request: &ConsumerRunRequest,
-    decision: &capsule_core::router::RuntimeDecision,
+    decision: &capsule::router::RuntimeDecision,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
     prepared: &PreparedRunContext,
     preview_mode: bool,
@@ -4452,7 +4440,7 @@ pub(crate) async fn maybe_run_agent_setup(
     force_reroute: bool,
 ) -> Result<
     Option<(
-        capsule_core::router::RuntimeDecision,
+        capsule::router::RuntimeDecision,
         crate::executors::launch_context::RuntimeLaunchContext,
         PreparedRunContext,
     )>,
@@ -4920,7 +4908,7 @@ fn headless_source_ref_is_unstable(source_ref: &str) -> bool {
     if trimmed.is_empty() {
         return true;
     }
-    use capsule_core::common::paths;
+    use capsule::common::paths;
     let unstable_roots = [
         paths::ato_runs_dir(),
         paths::ato_cache_dir(),
@@ -4970,7 +4958,7 @@ fn auto_provision_headless_state_overrides(
     existing_overrides: &HashMap<String, String>,
     key_inputs: &HeadlessStateKeyInputs<'_>,
 ) -> Result<HeadlessStateProvisionOutcome> {
-    use capsule_core::types::{StateDurability, StateKind, StateRequirement};
+    use capsule::types::{StateDurability, StateKind, StateRequirement};
 
     let mut overrides = existing_overrides.clone();
     let mut ephemeral_dirs = Vec::new();
@@ -5019,7 +5007,7 @@ fn auto_provision_headless_state_overrides(
     let persistent_root = if needs_persistent {
         let instance_id = headless_state_instance_id(manifest, key_inputs)?;
         Some(
-            capsule_core::common::paths::ato_state_dir()
+            capsule::common::paths::ato_state_dir()
                 .join("run")
                 .join(instance_id),
         )
@@ -5045,7 +5033,7 @@ fn auto_provision_headless_state_overrides(
                         // `ato_run_layout` mints a fresh `~/.ato/runs/state-…`
                         // root; we use its `root` as the per-run cleanup-scoped
                         // base and place state under `<root>/state/<name>`.
-                        let root = capsule_core::common::paths::ato_run_layout("headless-state")
+                        let root = capsule::common::paths::ato_run_layout("headless-state")
                             .root
                             .join("state");
                         ephemeral_root = Some(root.clone());
@@ -5099,7 +5087,7 @@ fn headless_state_instance_id(
         // source tree so two different sources never collide, while re-runs of the
         // same tree resolve to the same instance. (Git commit SHA is deliberately
         // not used: it is provenance, not materialized-source identity.)
-        fallback_tree_hash = capsule_core::blob::hash_tree(inputs.workspace_root_for_fallback)
+        fallback_tree_hash = capsule::blob::hash_tree(inputs.workspace_root_for_fallback)
             .map(|tree| tree.blob_hash)
             .with_context(|| {
                 format!(
@@ -5133,7 +5121,7 @@ fn headless_state_instance_id(
 
     // `canonical_hash` returns `blake3:<hex>`; strip the algorithm prefix so the
     // value is a single path-safe segment.
-    let hashed = capsule_core::foundation::install_lifecycle::canonical_hash(&material)
+    let hashed = capsule::foundation::install_lifecycle::canonical_hash(&material)
         .context("failed to derive headless state instance id")?;
     let id = hashed.split(':').next_back().unwrap_or(&hashed).to_string();
     Ok(id)
@@ -5209,7 +5197,7 @@ fn build_target_launch_options(
 }
 
 fn render_execution_roots_note(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
 ) -> Result<()> {
     let writable_mounts = launch_ctx
@@ -5320,8 +5308,8 @@ mod tests {
         resolve_sandbox_grants, sandbox_session_data_env, sandbox_session_data_env_dir,
         unavailable_service_message, validate_sandbox_grants_best_effort,
     };
-    use capsule_core::ato_lock::AtoLock;
-    use capsule_core::types::{CapsuleManifest, ParamValue};
+    use capsule::ato_lock::AtoLock;
+    use capsule::types::{CapsuleManifest, ParamValue};
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
@@ -5389,7 +5377,7 @@ mod tests {
     #[test]
     fn collect_port_preferences_records_concrete_ports_and_explicit_auto() {
         use crate::executors::launch_context::PortPreference;
-        use capsule_core::installed_state::{
+        use capsule::installed_state::{
             LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
         };
         let port = |key: &str, value: &str| LaunchConditionInput {
@@ -5421,7 +5409,7 @@ mod tests {
 
     #[test]
     fn collect_port_preferences_drops_unparseable_literal() {
-        use capsule_core::installed_state::{
+        use capsule::installed_state::{
             LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
         };
         // Parsing already rejects non-numeric / out-of-range port literals, but the
@@ -5499,25 +5487,25 @@ mod tests {
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             toml::Value::Table(manifest),
             manifest_dir.join("capsule.toml"),
             manifest_dir.clone(),
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             Some("default"),
             std::collections::HashMap::new(),
         )
         .expect("execution descriptor");
 
-        let decision = capsule_core::router::RuntimeDecision {
-            kind: capsule_core::router::RuntimeKind::Source,
+        let decision = capsule::router::RuntimeDecision {
+            kind: capsule::router::RuntimeKind::Source,
             reason: "test fixture".to_string(),
             plan,
         };
         let prepared = PreparedRunContext::from_authoritative_input(
             None,
             &manifest_dir,
-            capsule_core::types::ValidationMode::Strict,
+            capsule::types::ValidationMode::Strict,
             Some("default"),
         )
         .expect("prepared run context");
@@ -6038,7 +6026,7 @@ image = "ghcr.io/example/app:latest"
 
     #[test]
     fn locked_dependency_resolved_ref_prefers_content_digest() {
-        let locked = capsule_core::lockfile::LockedCapsuleDependency {
+        let locked = capsule::lockfile::LockedCapsuleDependency {
             name: "db".to_string(),
             source: "capsule://ato/postgres@16".to_string(),
             source_type: "store".to_string(),
@@ -6089,7 +6077,7 @@ image = "ghcr.io/example/app:latest"
             ),
             execution_override: None,
             bridge_manifest: DerivedBridgeManifest::new(toml::Value::String("old".to_string())),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
             install_profile_key: Some("ipk_authority".to_string()),
@@ -6097,7 +6085,7 @@ image = "ghcr.io/example/app:latest"
 
         let rerouted = prepared.with_bridge_manifest(
             toml::Value::String("new".to_string()),
-            capsule_core::types::ValidationMode::Preview,
+            capsule::types::ValidationMode::Preview,
             true,
         );
 
@@ -6111,7 +6099,7 @@ image = "ghcr.io/example/app:latest"
         );
         assert_eq!(
             rerouted.validation_mode,
-            capsule_core::types::ValidationMode::Preview
+            capsule::types::ValidationMode::Preview
         );
         assert!(rerouted.engine_override_declared);
         // Install identity must survive the reroute so the rerouted launch
@@ -6479,7 +6467,7 @@ url = "http://127.0.0.1:8787/health"
         // Grant sources are recorded in `\\?\`-stripped canonical form.
         assert_eq!(
             grants[0].source_path,
-            capsule_core::common::paths::windows_child_compatible_path(
+            capsule::common::paths::windows_child_compatible_path(
                 &input.canonicalize().expect("canonical input")
             )
         );
@@ -6676,7 +6664,7 @@ build = "npm run build"
     /// when the execution descriptor uses the lock target label.
     #[test]
     fn reconcile_enables_build_lifecycle_build_via_lock_target() {
-        use capsule_core::router::{ExecutionProfile, execution_descriptor_from_manifest_parts};
+        use capsule::router::{ExecutionProfile, execution_descriptor_from_manifest_parts};
 
         let tmp = workspace_tempdir("reconcile-build-test-");
         let manifest_dir = tmp.path().to_path_buf();

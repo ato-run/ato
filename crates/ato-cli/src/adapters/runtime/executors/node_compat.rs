@@ -15,13 +15,13 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use capsule_core::execution_plan::canonical::{
+use capsule::execution_plan::canonical::{
     compute_policy_segment_hash, compute_provisioning_policy_hash,
 };
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionRuntime};
-use capsule_core::launch_spec::derive_launch_spec;
-use capsule_core::router::ManifestData;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::model::{ExecutionPlan, ExecutionRuntime};
+use capsule::launch_spec::derive_launch_spec;
+use capsule::router::ManifestData;
 
 use crate::common::proxy;
 use crate::runtime::manager as runtime_manager;
@@ -46,7 +46,7 @@ struct PreparedCommand {
 /// `None` falls through to [`spawn`] without installing the override.
 pub fn spawn_with_selected_port(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -64,7 +64,7 @@ pub fn spawn_with_selected_port(
 
 pub fn spawn(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -167,7 +167,7 @@ pub fn spawn(
 /// caller controls stdio and spawn timing.
 fn build_orchestration_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -248,7 +248,7 @@ fn build_orchestration_command(
 /// A capsule with neither a declared port nor an override resolves to `None`,
 /// which `spawn_host_lifecycle_events` maps to an honest `Started` (never a
 /// fake `Ready`), preserving `StartedWithoutReadiness` (#623).
-fn resolve_readiness_port(launch_spec: &capsule_core::launch_spec::LaunchSpec) -> Option<u16> {
+fn resolve_readiness_port(launch_spec: &capsule::launch_spec::LaunchSpec) -> Option<u16> {
     runtime_overrides::override_port(launch_spec.port)
 }
 
@@ -256,7 +256,7 @@ fn resolve_readiness_port(launch_spec: &capsule_core::launch_spec::LaunchSpec) -
 /// Returns a `CapsuleProcess` with port-based readiness detection.
 pub fn spawn_background(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -307,7 +307,7 @@ pub fn spawn_background(
 /// behavior (no fake ready), matching the host source executor (#623).
 pub fn spawn_foreground(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -384,7 +384,7 @@ fn run_provisioning(
 
 fn maybe_build_direct_node_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -453,7 +453,7 @@ fn allow_net_hosts_for_resolved_port(
 fn build_runtime_command(
     deno_bin: &Path,
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -630,7 +630,7 @@ fn log_runtime_cmd(cmd: &Command, runtime_dir: &Path, entrypoint: &str) {
 
 fn build_host_node_package_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     package_bin: &str,
@@ -674,7 +674,7 @@ fn build_host_node_package_command(
 
 fn build_host_node_entrypoint_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -778,14 +778,14 @@ fn resolve_managed_runtime_tool_shim(
     plan: &ManifestData,
     entrypoint: &str,
 ) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    let spec = capsule_core::tools::lookup(entrypoint)?;
-    let version = capsule_core::tools::read_tool_version(
+    let spec = capsule::tools::lookup(entrypoint)?;
+    let version = capsule::tools::read_tool_version(
         &plan.manifest,
         plan.selected_target_label(),
         entrypoint,
     )?;
-    let shim_dir = capsule_core::tools::managed_tool_shim_dir(spec, &version).ok()?;
-    let shim_path = shim_dir.join(capsule_core::tools::tool_shim_filename(spec));
+    let shim_dir = capsule::tools::managed_tool_shim_dir(spec, &version).ok()?;
+    let shim_path = shim_dir.join(capsule::tools::tool_shim_filename(spec));
     shim_path.is_file().then_some((shim_dir, shim_path))
 }
 
@@ -803,7 +803,7 @@ fn resolve_package_manager_bin(node_bin: &Path, pm: &str) -> std::path::PathBuf 
 #[allow(clippy::too_many_arguments)]
 fn build_package_manager_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -1134,8 +1134,8 @@ mod tests {
         resolve_readiness_port,
     };
 
-    use capsule_core::launch_spec::{LaunchSpecSource, derive_launch_spec};
-    use capsule_core::router::{
+    use capsule::launch_spec::{LaunchSpecSource, derive_launch_spec};
+    use capsule::router::{
         ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts,
     };
     use std::collections::HashMap;
