@@ -425,7 +425,7 @@ pub fn installed_launch_command_args(install_profile_key: &str) -> Vec<String> {
 // ── Session attachment (Blocker 4 fix: only alive sessions) ─────────────────
 
 pub fn attach_running_sessions(items: &mut [InstalledAppDashboardItem]) -> Result<()> {
-    let session_root = match ato_session_core::store::session_root() {
+    let session_root = match capsule::state::session::store::session_root() {
         Ok(p) => p,
         Err(_) => return Ok(()),
     };
@@ -452,7 +452,7 @@ pub fn attach_running_sessions(items: &mut [InstalledAppDashboardItem]) -> Resul
                 continue;
             }
         };
-        let record: ato_session_core::record::StoredSessionInfo = match serde_json::from_str(&raw) {
+        let record: capsule::state::session::record::StoredSessionInfo = match serde_json::from_str(&raw) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
@@ -490,18 +490,18 @@ pub fn attach_running_sessions(items: &mut [InstalledAppDashboardItem]) -> Resul
     Ok(())
 }
 
-fn session_record_is_alive(record: &ato_session_core::record::StoredSessionInfo) -> bool {
+fn session_record_is_alive(record: &capsule::state::session::record::StoredSessionInfo) -> bool {
     #[cfg(unix)]
     {
         if let Some(pid) = nix_pid(record.pid)
-            && ato_session_core::process::pid_is_alive(pid)
+            && capsule::state::session::process::pid_is_alive(pid)
         {
             return true;
         }
         if let Some(svcs) = &record.orchestration_services {
             for svc in &svcs.services {
                 if let Some(pid) = svc.local_pid.and_then(nix_pid)
-                    && ato_session_core::process::pid_is_alive(pid)
+                    && capsule::state::session::process::pid_is_alive(pid)
                 {
                     return true;
                 }

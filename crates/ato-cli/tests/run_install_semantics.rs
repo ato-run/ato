@@ -286,7 +286,7 @@ fn run_does_not_create_install_revision() {
 /// Desktop direct-read fast path.
 #[test]
 fn run_session_records_are_scoped_as_ephemeral() {
-    use ato_session_core::record::StoredSessionInfo;
+    use capsule::state::session::record::StoredSessionInfo;
 
     // Run-owned minimal record (schema=1 wire shape; omits the install
     // identifier fields entirely, which serde maps to `None`).

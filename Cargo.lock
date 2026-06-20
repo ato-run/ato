@@ -401,7 +401,6 @@ dependencies = [
  "async-trait",
  "ato-net",
  "ato-protocol",
- "ato-session-core",
  "axoupdater",
  "axum 0.7.9",
  "axum-server",
@@ -534,24 +533,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "ato-session-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ato-protocol",
- "blake3",
- "capsule",
- "dirs 5.0.1",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "toml 0.8.23",
- "tracing",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

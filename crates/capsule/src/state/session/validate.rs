@@ -10,9 +10,9 @@
 
 use std::time::Duration;
 
-use crate::healthcheck::http_get_ok;
-use crate::process::{pid_is_alive, process_start_time_unix_ms};
-use crate::record::{SCHEMA_VERSION_V2, StoredSessionInfo};
+use crate::state::session::healthcheck::http_get_ok;
+use crate::state::session::process::{pid_is_alive, process_start_time_unix_ms};
+use crate::state::session::record::{SCHEMA_VERSION_V2, StoredSessionInfo};
 
 /// Inputs to `validate_record_only`. Lets the caller distinguish
 /// "no candidate found" from "found but rejected" without relying on
@@ -188,7 +188,7 @@ fn healthcheck_url_for(record: &StoredSessionInfo) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
+    use crate::state::session::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
     fn base_record() -> StoredSessionInfo {
@@ -242,7 +242,7 @@ mod tests {
             launch_digest: Some("d".repeat(64)),
             // Match the running process so the start-time check passes
             // and the test reaches the healthcheck step deterministically.
-            process_start_time_unix_ms: crate::process::process_start_time_unix_ms(
+            process_start_time_unix_ms: crate::state::session::process::process_start_time_unix_ms(
                 std::process::id(),
             ),
             installed_app_id: None,
