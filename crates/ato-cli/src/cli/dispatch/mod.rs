@@ -88,6 +88,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             nacelle,
             registry,
             state,
+            managed_state_root,
             inject,
             enforcement,
             sandbox_mode,
@@ -130,6 +131,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             nacelle,
             registry,
             state,
+            managed_state_root,
             inject,
             enforcement,
             sandbox_mode,
@@ -751,12 +753,14 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     display_name,
                     public_base_url,
                     headless,
+                    enrollment_token,
                 } => rt.block_on(crate::application::runner_agent::run_login(
                     api_base,
                     site_base,
                     display_name,
                     public_base_url,
                     headless,
+                    enrollment_token,
                 )),
                 crate::cli::RunnerCommands::Serve {
                     api_base,
@@ -772,6 +776,19 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     proxy_listen,
                     max_slots,
                     public_url_template,
+                )),
+                crate::cli::RunnerCommands::Doctor { json } => {
+                    crate::application::gpu_provision::run_doctor(json)
+                }
+                crate::cli::RunnerCommands::Provision {
+                    profile,
+                    force,
+                    resume,
+                    enroll,
+                    json,
+                    dry_run,
+                } => rt.block_on(crate::application::gpu_provision::run_provision(
+                    &profile, force, resume, enroll, json, dry_run,
                 )),
             }
         }

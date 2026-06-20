@@ -242,6 +242,11 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) allow_unverified: bool,
     pub(crate) export_request: Option<ResolvedCliExportRequest>,
     pub(crate) state_bindings: Vec<String>,
+    /// When set, unbound persistent `[state.*]` (attach="explicit") entries are
+    /// auto-bound under this root (server/runner context). See
+    /// `resolve_state_source_overrides_managed`. The caller encodes owner AND
+    /// stable capsule identity into the root; neither is derived from here.
+    pub(crate) managed_state_root: Option<PathBuf>,
     pub(crate) inject_bindings: Vec<String>,
     pub(crate) build_policy: crate::application::build_materialization::BuildPolicy,
     pub(crate) cache_strategy: CacheStrategy,
@@ -1850,10 +1855,42 @@ where
     )?;
     let mut state_source_overrides =
         if let Some(authoritative_input) = request.authoritative_input.as_ref() {
-            authoritative_input
+            let mut overrides = authoritative_input
                 .effective_state
                 .state_source_overrides
-                .clone()
+                .clone();
+            // The lock path does not run `resolve_state_source_overrides_managed`
+            // (that lives on the manifest branch below), so apply the managed
+            // auto-bind here too: any persistent `[state.*]` the lock left unbound
+            // is bound under `managed_state_root`. Existing (explicit/lock)
+            // bindings always win. `--managed-state-root` is an explicit contract
+            // for non-interactive runner execution, so a manifest that cannot be
+            // read is a hard error — never a silent skip that surfaces later as a
+            // confusing unbound-state failure.
+            if let Some(root) = request.managed_state_root.as_deref() {
+                let capsule_toml = authoritative_input.workspace_root.join("capsule.toml");
+                let loaded = capsule_core::manifest::load_manifest_with_validation_mode(
+                    &capsule_toml,
+                    validation_mode,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to load {} to apply --managed-state-root",
+                        capsule_toml.display()
+                    )
+                })?;
+                let managed = resolve_state_source_overrides_managed(
+                    &loaded.model,
+                    &request.state_bindings,
+                    None,
+                    Some(root),
+                    effective_target_label,
+                )?;
+                for (key, value) in managed {
+                    overrides.entry(key).or_insert(value);
+                }
+            }
+            overrides
         } else {
             HashMap::new()
         };
@@ -1962,11 +1999,26 @@ where
         }
         let mut state_source_overrides =
             resolve_explicit_or_auto_state_source_overrides(&manifest, request)?;
+        // #731: when the runner supplies a server-managed state root, bind any
+        // persistent `[state.*]` left unbound by explicit `--state` under it.
+        // Mirrors the lock path above; explicit bindings always win.
+        if let Some(root) = request.managed_state_root.as_deref() {
+            let managed = resolve_state_source_overrides_managed(
+                &manifest,
+                &request.state_bindings,
+                None,
+                Some(root),
+                effective_target_label,
+            )?;
+            for (key, value) in managed {
+                state_source_overrides.entry(key).or_insert(value);
+            }
+        }
         // Headless / Connected Runner state auto-provisioning (#687): fill in
         // a `~/.ato/state/run/...` directory for any declared state still
-        // unbound after the explicit `--state` bindings were applied. Keyed on a
-        // stable source-derived id (#700), with ephemeral state routed to a
-        // per-run cleanup-scoped dir.
+        // unbound after the explicit `--state` and managed bindings were
+        // applied. Keyed on a stable source-derived id (#700), with ephemeral
+        // state routed to a per-run cleanup-scoped dir.
         if request.sandbox_mode {
             let normalized_source_ref =
                 headless_normalized_source_ref(request, preview_session.as_ref());
@@ -4530,7 +4582,7 @@ fn resolve_explicit_or_auto_state_source_overrides(
     if !request.sandbox_mode {
         return resolve_state_source_overrides(manifest, &request.state_bindings);
     }
-    let requested = parse_explicit_state_bindings(&request.state_bindings)?;
+    let requested = parse_state_bindings(&request.state_bindings)?;
     resolve_requested_state_source_overrides_lenient(manifest, &requested, None)
 }
 
@@ -4539,11 +4591,36 @@ pub(crate) fn resolve_state_source_overrides_with_store(
     raw_bindings: &[String],
     store: Option<&RegistryStore>,
 ) -> Result<HashMap<String, String>> {
-    let requested = parse_explicit_state_bindings(raw_bindings)?;
-    resolve_state_source_overrides_from_requested(manifest, &requested, store)
+    let requested = parse_state_bindings(raw_bindings)?;
+    resolve_state_source_overrides_from_requested(manifest, &requested, store, None)
 }
 
-fn parse_explicit_state_bindings(raw_bindings: &[String]) -> Result<HashMap<String, String>> {
+/// Like [`resolve_state_source_overrides_with_store`], but additionally
+/// auto-binds any *unbound* persistent `[state.*]` entry under `managed_state_root`
+/// (server/runner contexts where no interactive folder prompt is possible).
+///
+/// Explicit `--state` bindings always win. `target_label` selects the effective
+/// target (so two targets of the same capsule get distinct directories);
+/// `None` falls back to the manifest `default_target`. The caller MUST encode
+/// the server-confirmed owner/account AND a stable, immutable capsule identity
+/// into `managed_state_root` (see [`managed_state_dir`]); neither is derived
+/// from capsule-controlled input here.
+pub(crate) fn resolve_state_source_overrides_managed(
+    manifest: &CapsuleManifest,
+    raw_bindings: &[String],
+    store: Option<&RegistryStore>,
+    managed_state_root: Option<&Path>,
+    target_label: Option<&str>,
+) -> Result<HashMap<String, String>> {
+    let requested = parse_state_bindings(raw_bindings)?;
+    let managed = managed_state_root.map(|root| ManagedStateRoot {
+        root,
+        target: target_label.unwrap_or(manifest.default_target.as_str()),
+    });
+    resolve_state_source_overrides_from_requested(manifest, &requested, store, managed)
+}
+
+fn parse_state_bindings(raw_bindings: &[String]) -> Result<HashMap<String, String>> {
     let mut requested = HashMap::new();
     for raw in raw_bindings {
         let (state_name, locator) = raw.split_once('=').ok_or_else(|| {
@@ -4622,10 +4699,64 @@ fn resolve_requested_state_source_overrides_lenient(
     Ok(resolved)
 }
 
+/// A managed state root plus the effective target, used to derive stable
+/// per-capsule state directories for runner/server runs.
+struct ManagedStateRoot<'a> {
+    root: &'a Path,
+    target: &'a str,
+}
+
+/// Directory for a managed persistent-state binding: `<root>/<target>/<state_key>`,
+/// each appended segment made path-safe and collision-free by [`path_segment`].
+///
+/// **Namespace contract — `root` MUST already be scoped** by the server-confirmed
+/// owner/account AND a stable, immutable capsule identity (e.g.
+/// `<base>/<owner_id>/<capsule_revision>`). This resolver only appends
+/// `target`/profile + `state_key`; it deliberately does NOT derive owner or
+/// capsule identity here, and in particular does NOT key off `name`/`version`,
+/// which are capsule-controlled and not globally unique (two different capsules
+/// could share them and would otherwise collide). `lease_id` or any
+/// session-local id MUST NOT appear in `root` — that would lose persistent data
+/// on every re-lease.
+fn managed_state_dir(root: &Path, target: &str, state_key: &str) -> PathBuf {
+    root.join(path_segment(target)).join(path_segment(state_key))
+}
+
+/// A path-safe, collision-free single directory segment: `<sanitized>-<hash16>`.
+///
+/// Characters outside `[A-Za-z0-9_-]` (including `.` and `/`) are mapped to `_`
+/// so `.`, `..`, and embedded separators can never escape the parent directory.
+/// The blake3 suffix is taken over the RAW input, so two distinct inputs that
+/// would otherwise sanitize to the same string (e.g. `a/b` vs `a_b`, `.` vs `_`)
+/// still resolve to distinct segments.
+///
+/// Shared with the Connected Runner agent, which builds the owner/identity
+/// portion of a managed state root with the same scheme so the namespace is
+/// consistent end to end.
+pub(crate) fn path_segment(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let hash = &blake3::hash(raw.as_bytes()).to_hex()[..16];
+    if sanitized.is_empty() {
+        format!("seg-{hash}")
+    } else {
+        format!("{sanitized}-{hash}")
+    }
+}
+
 fn resolve_state_source_overrides_from_requested(
     manifest: &CapsuleManifest,
     requested: &HashMap<String, String>,
     store: Option<&RegistryStore>,
+    managed: Option<ManagedStateRoot<'_>>,
 ) -> Result<HashMap<String, String>> {
     for state_name in requested.keys() {
         let requirement = manifest.state.get(state_name).ok_or_else(|| {
@@ -4657,10 +4788,32 @@ fn resolve_state_source_overrides_from_requested(
         );
     }
 
+    // Auto-bind any unbound persistent state under the managed root (runner /
+    // server context, where no interactive folder prompt is possible). Explicit
+    // `--state` entries in `requested` always win. Each synthesized directory is
+    // created up front and then flows through the SAME path-binding resolution
+    // as an explicit `--state <key>=<dir>` below (no parallel logic).
+    let mut effective = requested.clone();
+    if let Some(managed) = managed.as_ref() {
+        for (state_name, _) in &persistent_states {
+            if effective.contains_key(state_name.as_str()) {
+                continue;
+            }
+            let dir = managed_state_dir(managed.root, managed.target, state_name);
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to create managed state directory {}: {e}",
+                    dir.display()
+                )
+            })?;
+            effective.insert((*state_name).clone(), dir.to_string_lossy().into_owned());
+        }
+    }
+
     let mut resolved = HashMap::new();
 
     for (state_name, _) in persistent_states {
-        let locator = requested.get(state_name.as_str()).ok_or_else(|| {
+        let locator = effective.get(state_name.as_str()).ok_or_else(|| {
             anyhow::anyhow!(
                 "persistent state '{}' requires an explicit --state {}=/absolute/path or --state {}=state-... binding",
                 state_name,
@@ -6291,6 +6444,7 @@ url = "http://127.0.0.1:8787/health"
             allow_unverified: false,
             export_request: None,
             state_bindings: Vec::new(),
+            managed_state_root: None,
             inject_bindings: Vec::new(),
             build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
@@ -6567,6 +6721,155 @@ node = "20"
             plan.execution_runtime_tool_version("node").as_deref(),
             Some("20"),
             "node runtime_tools should be visible via the aliased target label"
+        );
+    }
+
+    fn managed_state_manifest(name: &str, version: &str) -> CapsuleManifest {
+        CapsuleManifest::from_toml(&format!(
+            r#"
+schema_version = "0.3"
+name = "{name}"
+version = "{version}"
+type = "app"
+default_target = "app"
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "primary-data"
+attach = "explicit"
+schema_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app"
+"#
+        ))
+        .expect("parse managed-state manifest")
+    }
+
+    #[test]
+    fn path_segment_is_path_safe_and_collision_free() {
+        // Stable for a given input.
+        assert_eq!(super::path_segment("data"), super::path_segment("data"));
+        // Path-safe: separators / dots are neutralized and cannot escape.
+        for raw in ["a/b", "..", ".", "a/../b", "x\\y", "../../etc"] {
+            let seg = super::path_segment(raw);
+            assert!(
+                !seg.contains('/') && !seg.contains('\\') && !seg.contains(".."),
+                "segment must be path-safe: {raw:?} -> {seg}"
+            );
+        }
+        // Collision-free: inputs that sanitize to the same string still differ.
+        assert_ne!(super::path_segment("a/b"), super::path_segment("a_b"));
+        assert_ne!(super::path_segment("."), super::path_segment("_"));
+        // Readable prefix preserved; empty still yields a valid segment.
+        assert!(super::path_segment("data").starts_with("data-"));
+        assert!(!super::path_segment("").is_empty());
+    }
+
+    #[test]
+    fn managed_state_dir_appends_only_target_and_state_key() {
+        // Per the namespace contract, `root` already carries owner + capsule
+        // identity; the resolver only appends target + state_key.
+        let root = Path::new("/managed/owner-1/cap-rev-abc");
+
+        let a = super::managed_state_dir(root, "app", "data");
+        assert_eq!(
+            a,
+            super::managed_state_dir(root, "app", "data"),
+            "same inputs -> same dir (reused across re-leases)"
+        );
+        assert!(a.starts_with(root));
+        assert!(a.ends_with(super::path_segment("data")));
+
+        // Distinct target / state_key each yield a distinct directory.
+        assert_ne!(a, super::managed_state_dir(root, "worker", "data"));
+        assert_ne!(a, super::managed_state_dir(root, "app", "cache"));
+
+        // Collision-free even when sanitization would collapse inputs.
+        assert_ne!(
+            super::managed_state_dir(root, "app", "a/b"),
+            super::managed_state_dir(root, "app", "a_b"),
+        );
+    }
+
+    #[test]
+    fn resolve_managed_auto_binds_unbound_persistent_state() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            super::RegistryStore::open(&tmp.path().join("state-store")).expect("open store");
+        let root = tmp.path().join("owner-123");
+        let m = managed_state_manifest("demo-app", "0.1.0");
+
+        let overrides = super::resolve_state_source_overrides_managed(
+            &m,
+            &[],
+            Some(&store),
+            Some(root.as_path()),
+            Some("app"),
+        )
+        .expect("managed resolve");
+        assert!(overrides.contains_key("data"), "data auto-bound");
+
+        // The directory was created at the derived, stable location under root.
+        let expected = super::managed_state_dir(root.as_path(), "app", "data");
+        assert!(expected.exists(), "managed state dir created at derived path");
+        assert!(expected.starts_with(&root));
+
+        // Stable across runs (re-lease reuse): identical returned binding.
+        let again = super::resolve_state_source_overrides_managed(
+            &m,
+            &[],
+            Some(&store),
+            Some(root.as_path()),
+            Some("app"),
+        )
+        .expect("managed resolve 2");
+        assert_eq!(overrides.get("data"), again.get("data"));
+    }
+
+    #[test]
+    fn resolve_managed_explicit_state_wins_over_managed_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            super::RegistryStore::open(&tmp.path().join("state-store")).expect("open store");
+        let root = tmp.path().join("owner-123");
+        let explicit = tmp.path().join("explicit-data");
+        std::fs::create_dir_all(&explicit).unwrap();
+        let m = managed_state_manifest("demo-app", "0.1.0");
+
+        let overrides = super::resolve_state_source_overrides_managed(
+            &m,
+            &[format!("data={}", explicit.display())],
+            Some(&store),
+            Some(root.as_path()),
+            Some("app"),
+        )
+        .expect("managed resolve");
+        assert!(overrides.contains_key("data"));
+
+        // Explicit `--state` wins: the managed dir is never created.
+        let managed_dir = super::managed_state_dir(root.as_path(), "app", "data");
+        assert!(
+            !managed_dir.exists(),
+            "managed dir must not be created when --state binds the state"
+        );
+    }
+
+    #[test]
+    fn resolve_managed_without_root_still_requires_explicit_binding() {
+        let m = managed_state_manifest("demo-app", "0.1.0");
+        let err = super::resolve_state_source_overrides_managed(&m, &[], None, None, Some("app"))
+            .expect_err("unbound persistent state without a managed root must fail");
+        assert!(
+            err.to_string().contains("requires an explicit"),
+            "expected explicit-binding error, got: {err}"
         );
     }
 }
