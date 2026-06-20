@@ -595,9 +595,12 @@ fn resolve_desktop_delivery_entrypoint(runtime_dir: &Path, artifact_path: &str) 
         return resolved.to_string_lossy().into_owned();
     }
 
-    let value = resolved.to_string_lossy();
+    // Relative entrypoints land in the rewritten manifest; spell them with
+    // `/` on every platform (`resolve_macos_bundle_binary` joins with the
+    // host separator, which is `\` on Windows).
+    let value = resolved.to_string_lossy().replace('\\', "/");
     if value.starts_with("./") || value.starts_with("../") {
-        value.into_owned()
+        value
     } else {
         format!("./{}", value)
     }

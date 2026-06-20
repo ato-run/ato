@@ -22,9 +22,10 @@
 //! - **Per-file copy**: walks the tree and uses `fs::copy` per file. On
 //!   Linux this opportunistically gets reflink semantics on btrfs/xfs via
 //!   `copy_file_range(2)`. Symlinks are recreated, directories are
-//!   `mkdir`'d, regular files are copied byte-for-byte.
-//! - **Windows**: not implemented for this projection strategy yet; returns
-//!   an error so callers can surface the limitation without claiming support.
+//!   `mkdir`'d, regular files are copied byte-for-byte. This is also the
+//!   Windows strategy; payload symlinks become NTFS file/directory
+//!   symlinks (creating those needs Developer Mode or admin rights — when
+//!   the privilege is missing the error says which link failed).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,8 +69,6 @@ pub enum ProjectionError {
     TargetExists(PathBuf),
     #[error("blob payload is not a directory: {0}")]
     PayloadNotDirectory(PathBuf),
-    #[error("projection is not supported on this platform yet")]
-    Unsupported,
 }
 
 /// Projects `payload` (the immutable blob payload directory) into `target`.
@@ -139,13 +138,7 @@ fn project_inner(payload: &Path, target: &Path) -> Result<ProjectionOutcome> {
         }
     }
 
-    #[cfg(any(unix, target_os = "macos"))]
-    {
-        return project_via_copy(payload, target);
-    }
-
-    #[allow(unreachable_code)]
-    Err(ProjectionError::Unsupported.into())
+    project_via_copy(payload, target)
 }
 
 #[cfg(target_os = "macos")]
@@ -212,8 +205,28 @@ fn project_via_copy(src: &Path, dst: &Path) -> Result<ProjectionOutcome> {
                     link.display()
                 )
             })?;
-            #[cfg(not(unix))]
-            return Err(ProjectionError::Unsupported.into());
+            #[cfg(windows)]
+            {
+                // NTFS distinguishes file and directory symlinks; classify by
+                // resolving through the source link, defaulting dangling
+                // links to file symlinks.
+                let result = if fs::metadata(entry.path())
+                    .map(|metadata| metadata.is_dir())
+                    .unwrap_or(false)
+                {
+                    std::os::windows::fs::symlink_dir(&link, &target)
+                } else {
+                    std::os::windows::fs::symlink_file(&link, &target)
+                };
+                result.with_context(|| {
+                    format!(
+                        "failed to recreate symlink {} -> {} (on Windows this needs \
+                         Developer Mode or administrator rights)",
+                        target.display(),
+                        link.display()
+                    )
+                })?;
+            }
             stats.symlinks += 1;
         } else if ft.is_file() {
             if let Some(parent) = target.parent() {

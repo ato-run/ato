@@ -340,10 +340,42 @@ fn version_satisfies(tool: ToolKind, detected: &str, supported: &str) -> bool {
     }
 }
 
+/// A freshly-written binary executed before the writer's handle settles fails
+/// with a transient "busy" error: ETXTBSY ("Text file busy", errno 26) on Unix,
+/// sharing-violation (errno 32) on Windows. Both clear on retry. This is the
+/// same race `podman_install` guards (#708); kept local here so each module's
+/// fix is self-contained.
+fn is_transient_exec_busy(err: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        err.raw_os_error() == Some(32)
+    }
+    #[cfg(not(windows))]
+    {
+        err.raw_os_error() == Some(26)
+    }
+}
+
+/// Run `exec`, retrying briefly (bounded, 20ms·attempt backoff) only on the
+/// transient busy code so a just-written binary's version probe does not flake
+/// under parallel load. Any other error returns immediately.
+fn exec_retrying_busy<T>(mut exec: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match exec() {
+            Err(err) if is_transient_exec_busy(&err) && attempt < 5 => {
+                std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt)));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Read a resolved binary's `--version`, trimmed to a single line. Running the
 /// binary doubles as an executability probe.
 fn tool_version_at(path: &Path) -> Option<String> {
-    let output = Command::new(path).arg("--version").output().ok()?;
+    let output = exec_retrying_busy(|| Command::new(path).arg("--version").output()).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -457,7 +489,7 @@ fn detect_managed_language_tool(tool: ToolKind, path_bins: &[&str]) -> ToolStatu
 
 /// Read a tool's `--version` output, trimmed to a single line.
 fn tool_version(bin: &str) -> Option<String> {
-    let output = Command::new(bin).arg("--version").output().ok()?;
+    let output = exec_retrying_busy(|| Command::new(bin).arg("--version").output()).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -996,12 +1028,26 @@ mod tests {
     #[test]
     fn missing_managed_node_recommends_install() {
         // With no managed copy in a tool's cache, the recommended action is a
-        // managed install (host PATH copies don't make it "ready").
+        // managed install (host PATH copies don't make it "ready"). Pin
+        // ATO_HOME to an empty tempdir under the shared env lock so a real
+        // (or concurrently mutated) managed cache can never flip the verdict
+        // to UpgradeManaged.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let ato_home = tempfile::tempdir().expect("ato home");
+        let prior = std::env::var_os("ATO_HOME");
+        unsafe {
+            std::env::set_var("ATO_HOME", ato_home.path());
+        }
         let status =
             detect_managed_language_tool(ToolKind::Node, &["definitely-not-a-real-bin-xyz"]);
-        if !status.ready {
-            assert_eq!(status.action, RecommendedAction::InstallManaged);
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("ATO_HOME", value),
+                None => std::env::remove_var("ATO_HOME"),
+            }
         }
+        assert!(!status.ready, "empty managed cache cannot be ready");
+        assert_eq!(status.action, RecommendedAction::InstallManaged);
     }
 
     #[test]
@@ -1075,6 +1121,42 @@ mod tests {
         let mut perm = std::fs::metadata(path).unwrap().permissions();
         perm.set_mode(0o755);
         std::fs::set_permissions(path, perm).unwrap();
+    }
+
+    fn transient_busy_error() -> std::io::Error {
+        #[cfg(windows)]
+        {
+            std::io::Error::from_raw_os_error(32)
+        }
+        #[cfg(not(windows))]
+        {
+            std::io::Error::from_raw_os_error(26)
+        }
+    }
+
+    #[test]
+    fn exec_retrying_busy_recovers_after_transient_busy() {
+        let mut calls = 0u32;
+        let result = exec_retrying_busy(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(transient_busy_error())
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(result.ok(), Some(3), "should retry past a transient busy");
+    }
+
+    #[test]
+    fn exec_retrying_busy_does_not_retry_other_errors() {
+        let mut calls = 0u32;
+        let result: std::io::Result<()> = exec_retrying_busy(|| {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(2)) // ENOENT — a real failure
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "non-busy errors must surface immediately");
     }
 
     #[cfg(unix)]
