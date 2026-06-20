@@ -18,6 +18,7 @@
     })();
   </script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0/dist/css/theme-simple.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-plugin-toc@1.3.1/dist/light.css">
   <style>
     :root {
       --base-font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -360,6 +361,51 @@
     .theme-toggle .icon-moon { display: inline; }
     [data-theme="dark"] .theme-toggle .icon-sun { display: inline; }
     [data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+
+    /* Header nav (_navbar.md) — GitHub / Community badge icons, top-right */
+    .app-nav {
+      margin-top: 14px;
+    }
+    .app-nav li {
+      margin: 0 6px;
+    }
+    .app-nav a {
+      border-bottom: 0 !important;
+    }
+    .app-nav img {
+      display: inline-block;
+      vertical-align: middle;
+      margin: 0;
+    }
+
+    /* "On this page" TOC (docsify-plugin-toc) — theme-matched colors over the plugin's positioning */
+    .page_toc {
+      border-left: 1px solid var(--border-color);
+      padding-left: 14px;
+    }
+    .page_toc p.title {
+      color: var(--sidebar-heading-color);
+      font-size: 0.7em;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+    .page_toc a,
+    .page_toc .anchor span {
+      color: var(--sidebar-nav-link-color);
+      border-bottom: 0;
+      text-decoration: none;
+    }
+    .page_toc a:hover,
+    .page_toc .anchor:hover span,
+    .page_toc .active a,
+    .page_toc a.active {
+      color: var(--theme-color);
+    }
+    .page_toc .active a,
+    .page_toc a.active {
+      font-weight: 600;
+    }
   </style>
 </head>
 <body>
@@ -384,9 +430,9 @@
     window.$docsify = {
       name: "Ato",
       nameLink: "#/",
-      repo: "https://github.com/ato-run/ato",
       homepage: "README.md",
       loadSidebar: true,
+      loadNavbar: true,
       alias: {
         "/GLOSSARY": "/glossary-reference.md",
         "/GLOSSARY.md": "/glossary-reference.md",
@@ -400,8 +446,13 @@
         "/.*/_sidebar.md": "/_sidebar.md"
       },
       relativePath: false,
-      subMaxLevel: 2,
+      subMaxLevel: 3,
       auto2top: true,
+      toc: {
+        scope: ".markdown-section",
+        headings: "h2, h3",
+        title: "On this page"
+      },
       search: {
         maxAge: 86400000,
         paths: "auto",
@@ -419,6 +470,7 @@
   </script>
   <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/docsify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/plugins/search.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-plugin-toc@1.3.1/dist/docsify-plugin-toc.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code@2"></script>
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-rust.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-toml.min.js"></script>
