@@ -17,7 +17,7 @@ Apply **YAGNI** rigorously: ship the minimum code that satisfies the spec. No sp
 
 ---
 
-## GPUI Patterns (`apps/ato-desktop`)
+## GPUI Patterns (`apps/desktop`)
 
 ### Core types
 
@@ -82,7 +82,7 @@ GPUI does **not** manage the Wry event loop directly. The desktop app embeds nat
 
 ---
 
-## Wry Patterns (`apps/ato-desktop/src/webview.rs`)
+## Wry Patterns (`apps/desktop/src/webview.rs`)
 
 ### Building a WebView
 
@@ -186,7 +186,7 @@ Use a PID-qualified path to avoid socket collisions when multiple instances run 
 
 ---
 
-## State Architecture (`apps/ato-desktop/src/state/`)
+## State Architecture (`apps/desktop/src/state/`)
 
 - `AppState` is the single source of truth for UI and session state.
 - State is **read-only during render** — mutate only through actions/events.
