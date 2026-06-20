@@ -90,6 +90,7 @@ pub(super) fn execute_replay_command(
         nacelle,
         registry: None,
         state: Vec::new(),
+        managed_state_root: None,
         inject: Vec::new(),
         enforcement: EnforcementMode::Strict,
         sandbox_mode: false,
