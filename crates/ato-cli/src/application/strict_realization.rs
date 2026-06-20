@@ -15,7 +15,7 @@
 //!    failures into a single typed [`AtoExecutionError`] carrying the redacted
 //!    structured payload.
 //!
-//! All realization *logic* lives in `capsule-core`; this module makes no launch
+//! All realization *logic* lives in `capsule`; this module makes no launch
 //! decisions of its own beyond "strict on ⇒ consult the gate".
 //!
 //! ## Evidence scope (#501)

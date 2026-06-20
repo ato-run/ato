@@ -2,9 +2,9 @@
 //! realized launch facts after a session's workload has spawned and reached
 //! readiness.
 //!
-//! This is the ato-cli side of the capsule-core observation model
+//! This is the ato-cli side of the capsule observation model
 //! ([`capsule::execution_identity::ObservedLaunchEnvelope`]). It collects
-//! only host-independent, leak-free facts (see the capsule-core module docs):
+//! only host-independent, leak-free facts (see the capsule module docs):
 //! logical runtime kind/identity, the post-profile logical entrypoint, a
 //! workspace-relative working directory, observed env **keys**, and in-guest
 //! mount **targets**. The bound port / local URL are carried as diagnostic-only

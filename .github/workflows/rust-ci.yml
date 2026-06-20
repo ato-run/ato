@@ -20,6 +20,16 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  dep-direction:
+    name: dependency direction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pure-bash Cargo.toml parse — no toolchain/build needed. Enforces the
+      # protocol/capsule/netd/cli/desktop/nacelle layering DAG and bans the
+      # pre-reorg crate names. See scripts/check-dep-direction.sh.
+      - run: bash scripts/check-dep-direction.sh
+
   check:
     name: cargo check (workspace)
     runs-on: ubuntu-latest

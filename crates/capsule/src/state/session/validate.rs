@@ -419,5 +419,5 @@ mod tests {
     // The identity contract this function changes is covered deterministically
     // by the tests above; the shared liveness path (schema/digest/pid/start-
     // time/healthcheck) is unchanged from `validate_record_only` and exercised
-    // by `ato_session_core::healthcheck::tests` plus the handle-keyed suite.
+    // by `capsule::healthcheck::tests` plus the handle-keyed suite.
 }

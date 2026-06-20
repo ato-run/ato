@@ -571,7 +571,10 @@ mod tests {
             false,
         );
         let ipk = derive_install_profile_key(&app_id, &ProfileId::new("default"));
-        assert_eq!(installed_target_for_ipk(&store, ipk.as_str()).unwrap(), None);
+        assert_eq!(
+            installed_target_for_ipk(&store, ipk.as_str()).unwrap(),
+            None
+        );
     }
 
     #[test]

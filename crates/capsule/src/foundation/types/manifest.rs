@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::command_spec::CommandSpec;
 
-// `ConfigField` / `ConfigKind` were extracted to `capsule-wire` in N2 so
-// `ato-desktop` can consume them without linking capsule-core's heavy
+// `ConfigField` / `ConfigKind` were extracted to `ato-protocol` in N2 so
+// `ato-desktop` can consume them without linking capsule's heavy
 // runtime deps. They are re-exported here so existing
 // `capsule::types::{ConfigField, ConfigKind}` import paths
 // (`error.rs`, `manifest_tests.rs`, the CLI diagnostics tests) keep

@@ -867,7 +867,7 @@ impl WebViewManager {
             if !self.terminal_sessions.contains_key(&session_id)
                 && !self.completed_terminal_sessions.contains(&session_id)
             {
-                // Priority 1: pending share terminal (spawned by capsule-core executor).
+                // Priority 1: pending share terminal (spawned by capsule executor).
                 if let Some(proc) = take_pending_share_terminal(&session_id) {
                     info!(session_id = %session_id, "Using share-spawned terminal session");
                     self.terminal_sessions
@@ -1593,7 +1593,7 @@ impl WebViewManager {
                             title.clone(),
                         );
 
-                        // Check for a pending share terminal (piped PTY from capsule-core executor)
+                        // Check for a pending share terminal (piped PTY from capsule executor)
                         // before falling back to log-tail.
                         let terminal_ok = if let Some(proc) =
                             take_pending_share_terminal(&terminal_session_id)
