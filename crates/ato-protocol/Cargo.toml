@@ -22,6 +22,9 @@ path = "src/lib.rs"
 [dependencies]
 dirs = "5.0"
 serde = { version = "1.0", features = ["derive"] }
+# The net control wire types surface a `serde_json::Error` variant in their
+# typed `Error`, so serde_json is a normal (not dev-only) dependency.
+serde_json = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
 

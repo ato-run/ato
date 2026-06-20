@@ -17,6 +17,7 @@ pub(crate) mod cli;
 pub(crate) mod common;
 pub(crate) mod community;
 pub(crate) mod logging;
+pub(crate) mod net_client;
 pub(crate) mod utils;
 
 pub mod projection {

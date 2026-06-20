@@ -2,7 +2,7 @@
 //!
 //! Per the acceptance criteria: exercise start, double-start (typed
 //! error), clean stop, `--status` against a running daemon, and
-//! `--status` without a daemon — all through `ato_net::control::Client`
+//! `--status` without a daemon — all through `ato_netd::net::control::Client`
 //! (no reaching into `ato-netd` internals). This pins the API boundary
 //! from day one so follow-up slices can add verbs without re-shaping
 //! the consumer surface.
@@ -11,7 +11,7 @@
 //! the canonical control socket path.
 //!
 //! Unix-only in slice A. The whole file is gated behind `#[cfg(unix)]`
-//! because the `ato_net::control::Client` it drives is Unix-only —
+//! because the `ato_netd::net::control::Client` it drives is Unix-only —
 //! when slice A's TCP fallback (tracked under #294) lands, these tests
 //! can be split into transport-specific variants.
 
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use ato_net::control::{Client, Error as ControlError};
+use ato_netd::net::control::{Client, Error as ControlError};
 use tempfile::TempDir;
 use tokio::process::{Child, Command};
 

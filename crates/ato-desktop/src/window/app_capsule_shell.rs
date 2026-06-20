@@ -760,7 +760,8 @@ impl AppCapsuleShell {
                 // For WebUrl sessions, register a stable ato-netd ingress route
                 // so the WebView URL is stable across backend restarts.
                 let effective_url = if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-                    let key = ato_net::stable_origin::logical_key_for_handle(&self.handle);
+                    let key =
+                        ato_protocol::net::stable_origin::logical_key_for_handle(&self.handle);
                     tracing::info!(
                         handle = %self.handle,
                         session_id = %session.session_id,
@@ -1006,8 +1007,10 @@ pub(crate) fn wait_for_session_upstream_ready(
             tracing::debug!(probe_url = %probe_url, "upstream probe aborted");
             return ProbeOutcome::Aborted;
         }
-        if capsule::state::session::healthcheck::http_is_responsive(&probe_url, Duration::from_millis(800))
-        {
+        if capsule::state::session::healthcheck::http_is_responsive(
+            &probe_url,
+            Duration::from_millis(800),
+        ) {
             tracing::info!(probe_url = %probe_url, "upstream HTTP readiness probe passed");
             return ProbeOutcome::Ready;
         }
