@@ -7,7 +7,7 @@ use super::parse_binding_reference;
 use super::proxy as ingress_proxy;
 
 pub fn open_binding_store() -> Result<RegistryStore> {
-    let store_dir = capsule_core::config::config_dir()?.join("state");
+    let store_dir = capsule::config::config_dir()?.join("state");
     RegistryStore::open(&store_dir)
 }
 

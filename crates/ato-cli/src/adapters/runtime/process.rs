@@ -196,7 +196,7 @@ pub struct ProcessManager {
 
 impl ProcessManager {
     pub fn new() -> Result<Self> {
-        let run_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("run");
+        let run_dir = capsule::common::paths::ato_path_or_workspace_tmp("run");
 
         if !run_dir.exists() {
             fs::create_dir_all(&run_dir).with_context(|| {
@@ -1951,7 +1951,7 @@ pub fn format_duration(duration: std::time::Duration) -> String {
 impl Default for ProcessManager {
     fn default() -> Self {
         Self::new().unwrap_or_else(|_| {
-            let run_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("run");
+            let run_dir = capsule::common::paths::ato_path_or_workspace_tmp("run");
             Self { run_dir }
         })
     }

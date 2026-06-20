@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use capsule_core::common::fs::{SymlinkPolicy, copy_dir_recursive};
-use capsule_core::lockfile::LockedCapsuleDependency;
+use capsule::common::fs::{SymlinkPolicy, copy_dir_recursive};
+use capsule::lockfile::LockedCapsuleDependency;
 use sha2::{Digest, Sha256};
 
 use crate::runtime::tree as runtime_tree;
@@ -30,7 +30,7 @@ async fn ensure_store_runtime_tree_for_dependency(
     let artifact_url = locked.artifact_url.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
             "{} capsule dependency '{}' is missing artifact_url",
-            capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME,
+            capsule::lockfile::CAPSULE_LOCK_FILE_NAME,
             locked.name
         )
     })?;
@@ -78,7 +78,7 @@ async fn ensure_store_runtime_tree_for_dependency(
 async fn ensure_github_runtime_tree_for_dependency(
     locked: &LockedCapsuleDependency,
 ) -> Result<PathBuf> {
-    let parsed = capsule_core::lockfile::parse_github_capsule_source(&locked.source)
+    let parsed = capsule::lockfile::parse_github_capsule_source(&locked.source)
         .with_context(|| format!("invalid github source '{}'", locked.source))?;
     // Defense-in-depth: lock generation pins the commit; verify the lock
     // entry's resolved_version matches the URL we're about to fetch.
@@ -195,13 +195,11 @@ fn verify_github_cache_fingerprint(manifest_path: &Path, fingerprint_path: &Path
 
 use std::path::Path;
 
-fn github_capsule_cache_dir(
-    parsed: &capsule_core::lockfile::GitHubCapsuleSource,
-) -> Result<PathBuf> {
+fn github_capsule_cache_dir(parsed: &capsule::lockfile::GitHubCapsuleSource) -> Result<PathBuf> {
     let base = if let Ok(path) = std::env::var(EXTERNAL_CAPSULE_CACHE_DIR_ENV) {
         PathBuf::from(path)
     } else {
-        capsule_core::common::paths::ato_path("external-capsules")
+        capsule::common::paths::ato_path("external-capsules")
             .context("failed to determine ato home")?
     };
     Ok(base
@@ -215,7 +213,7 @@ fn external_capsule_cache_path(locked: &LockedCapsuleDependency) -> Result<PathB
     let base = if let Ok(path) = std::env::var(EXTERNAL_CAPSULE_CACHE_DIR_ENV) {
         PathBuf::from(path)
     } else {
-        capsule_core::common::paths::ato_path("external-capsules")
+        capsule::common::paths::ato_path("external-capsules")
             .context("failed to determine ato home")?
     };
     let key = locked

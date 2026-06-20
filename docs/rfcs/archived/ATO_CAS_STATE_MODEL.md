@@ -514,7 +514,7 @@ stateDiagram-v2
 
 ### 13.1 実装順の推奨
 
-1. `GraphId`, `RootKinds`, `GraphState`, `Transition` を `capsule-core` に導入する
+1. `GraphId`, `RootKinds`, `GraphState`, `Transition` を `capsule` に導入する
 2. `resolve` を pure API として固定する
 3. `attach_root` / `detach_root` を filesystem backend 付きで実装する
 4. `gc` を graph traversal として実装する
@@ -565,4 +565,4 @@ Ato の理想的な local system は、単一 CAS を物理層とし、その上
 
 この構成では、`install`, `run`, `preview`, `promote`, `pin`, `uninstall`, `gc` は別々の機能群ではなく、同一 object graph に対する root attach/detach と placement/materialization/launch の差分として表現される。
 
-この model を `capsule-core` の state machine として固定することにより、Ato は package manager と runtime orchestrator を同一の数学的枠組みで実装できる。
+この model を `capsule` の state machine として固定することにより、Ato は package manager と runtime orchestrator を同一の数学的枠組みで実装できる。

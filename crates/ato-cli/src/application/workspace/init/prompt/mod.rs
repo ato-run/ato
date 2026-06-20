@@ -1,9 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use capsule_core::input_resolver::{
-    ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
-};
+use capsule::input_resolver::{ResolveInputOptions, ResolvedInput, resolve_authoritative_input};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +25,7 @@ pub fn execute(
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. `ato init` prompt generation applies to source-only projects in this migration stage.",
-                capsule_core::input_resolver::ATO_LOCK_FILE_NAME,
+                capsule::input_resolver::ATO_LOCK_FILE_NAME,
                 canonical.path.display()
             );
         }

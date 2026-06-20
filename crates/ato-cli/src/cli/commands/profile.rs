@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use capsule_core::CapsuleReporter;
-use capsule_core::types::profile::{
+use capsule::CapsuleReporter;
+use capsule::types::profile::{
     ProfileInfo, ProfileManifest, ProfileMeta, ProfilePermissions, ProfilePolicy, ProfileSignature,
     ProfileSync,
 };
-use capsule_core::types::signing::StoredKey;
+use capsule::types::signing::StoredKey;
 
 #[derive(Debug)]
 pub struct CreateArgs {

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{info, warn};
 
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 
 /// Persistent configuration for the ato-desktop application.
 ///

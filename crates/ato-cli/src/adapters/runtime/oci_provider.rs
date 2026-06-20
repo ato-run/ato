@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
-use capsule_core::CapsuleError;
-use capsule_core::runtime::oci::{
+use capsule::CapsuleError;
+use capsule::runtime::oci::{
     BollardOciRuntimeClient, OciContainerInspect, OciContainerRequest, OciLogChunk,
     OciNetworkRequest, OciRuntimeClient,
 };
-use capsule_core::types::{
+use capsule::types::{
     OciImageResolution, OciPlatform, OciProviderKind, OciProviderMode, OciProviderSemantics,
     OciProviderSubstrate,
 };
@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use capsule_core::podman::ATO_PODMAN_MACHINE_NAME;
+use capsule::podman::ATO_PODMAN_MACHINE_NAME;
 
 use crate::adapters::runtime::podman_machine::{
     PodmanMachine, PodmanMachineStatus, parse_machine_entries, parse_podman_machine_list,
@@ -320,7 +320,7 @@ impl OciProviderError {
         }
     }
 
-    fn operation(operation: &'static str, err: capsule_core::CapsuleError) -> Self {
+    fn operation(operation: &'static str, err: capsule::CapsuleError) -> Self {
         Self::Operation {
             operation,
             message: err.to_string(),
@@ -372,7 +372,7 @@ pub(crate) trait OciProvider: Send + Sync {
         &self,
         container_id: &str,
         follow: bool,
-    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError>;
+    ) -> Result<mpsc::Receiver<capsule::Result<OciLogChunk>>, OciProviderError>;
 
     async fn wait_container(&self, container_id: &str) -> Result<i64, OciProviderError>;
 
@@ -620,7 +620,7 @@ impl OciCommandRunner for SystemCommandRunner {
         // override) so GUI-launched processes with a minimal PATH still find
         // Homebrew/known-location Podman. Other programs run unchanged.
         let mut command = if program == "podman" {
-            let invocation = capsule_core::podman::podman_invocation();
+            let invocation = capsule::podman::podman_invocation();
             let mut command = Command::new(&invocation.program);
             if let Some(path_env) = &invocation.path_env {
                 command.env("PATH", path_env);
@@ -674,7 +674,7 @@ impl PodmanProbePlatform {
 /// Returns the option suffix for a `-v` mount argument (`""`, `":ro"`, or
 /// `":U"`). Thin adapter over the projection renderer
 /// `provider_projection::oci::podman_mount_opts`; retained for its unit tests.
-fn podman_mount_opts(mount: &capsule_core::runtime::oci::OciMountSpec) -> &'static str {
+fn podman_mount_opts(mount: &capsule::runtime::oci::OciMountSpec) -> &'static str {
     crate::application::provider_projection::oci::podman_mount_opts(
         mount.readonly,
         mount.ownership.is_some(),
@@ -685,7 +685,7 @@ fn podman_mount_opts(mount: &capsule_core::runtime::oci::OciMountSpec) -> &'stat
 /// Thin adapter over the projection renderer
 /// `provider_projection::oci::render_podman_mount_value` (#444 bind-path vs
 /// engine-volume logic lives there); retained for its unit tests.
-fn podman_mount_arg(mount: &capsule_core::runtime::oci::OciMountSpec) -> String {
+fn podman_mount_arg(mount: &capsule::runtime::oci::OciMountSpec) -> String {
     render_podman_mount_value(&OciMountProjection::from_spec(mount))
 }
 
@@ -693,7 +693,7 @@ fn podman_mount_arg(mount: &capsule_core::runtime::oci::OciMountSpec) -> String 
 /// Thin adapter over the projection renderer
 /// `provider_projection::oci::render_podman_port_value`; retained for its
 /// unit tests.
-fn podman_publish_port_arg(port: &capsule_core::runtime::oci::OciPortSpec) -> String {
+fn podman_publish_port_arg(port: &capsule::runtime::oci::OciPortSpec) -> String {
     render_podman_port_value(&OciPortProjection::from_spec(port))
 }
 
@@ -800,7 +800,7 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
     /// the caller appends) whenever a connection was selected, so every
     /// container/image/network op targets the same machine readiness verified.
     fn podman_command(&self) -> tokio::process::Command {
-        let invocation = capsule_core::podman::podman_invocation();
+        let invocation = capsule::podman::podman_invocation();
         let mut command = tokio::process::Command::new(&invocation.program);
         if let Some(path_env) = &invocation.path_env {
             command.env("PATH", path_env);
@@ -1412,7 +1412,7 @@ where
         &self,
         container_id: &str,
         follow: bool,
-    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+    ) -> Result<mpsc::Receiver<capsule::Result<OciLogChunk>>, OciProviderError> {
         use tokio::io::AsyncBufReadExt;
         let mut args = vec!["logs".to_string()];
         if follow {
@@ -1552,7 +1552,7 @@ where
 
 #[async_trait]
 impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
-    async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+    async fn pull_image(&self, image: &str) -> capsule::Result<()> {
         // For a digest-pinned reference (`...@sha256:...`) the image is
         // immutable — if it's already in the local store, the registry round
         // trip can never produce a different result. Skip the pull in that
@@ -1620,37 +1620,31 @@ impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
         )))
     }
 
-    async fn create_network(&self, request: &OciNetworkRequest) -> capsule_core::Result<String> {
+    async fn create_network(&self, request: &OciNetworkRequest) -> capsule::Result<String> {
         <Self as OciProvider>::create_network(self, request)
             .await
             .map_err(provider_error_to_capsule_error)
     }
 
-    async fn remove_network(&self, network_name: &str) -> capsule_core::Result<()> {
+    async fn remove_network(&self, network_name: &str) -> capsule::Result<()> {
         <Self as OciProvider>::remove_network(self, network_name)
             .await
             .map_err(provider_error_to_capsule_error)
     }
 
-    async fn create_container(
-        &self,
-        request: &OciContainerRequest,
-    ) -> capsule_core::Result<String> {
+    async fn create_container(&self, request: &OciContainerRequest) -> capsule::Result<String> {
         <Self as OciProvider>::create_container(self, request)
             .await
             .map_err(provider_error_to_capsule_error)
     }
 
-    async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+    async fn start_container(&self, container_id: &str) -> capsule::Result<()> {
         <Self as OciProvider>::start_container(self, container_id)
             .await
             .map_err(provider_error_to_capsule_error)
     }
 
-    async fn inspect_container(
-        &self,
-        container_id: &str,
-    ) -> capsule_core::Result<OciContainerInspect> {
+    async fn inspect_container(&self, container_id: &str) -> capsule::Result<OciContainerInspect> {
         <Self as OciProvider>::inspect_container(self, container_id)
             .await
             .map_err(provider_error_to_capsule_error)
@@ -1660,17 +1654,13 @@ impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
         &self,
         container_id: &str,
         follow: bool,
-    ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+    ) -> capsule::Result<mpsc::Receiver<capsule::Result<OciLogChunk>>> {
         <Self as OciProvider>::logs(self, container_id, follow)
             .await
             .map_err(provider_error_to_capsule_error)
     }
 
-    async fn exec_container(
-        &self,
-        container_id: &str,
-        cmd: &[String],
-    ) -> capsule_core::Result<i64> {
+    async fn exec_container(&self, container_id: &str, cmd: &[String]) -> capsule::Result<i64> {
         let output = self
             .podman_command()
             .arg("exec")
@@ -1684,23 +1674,19 @@ impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
         Ok(output.status.code().unwrap_or(1) as i64)
     }
 
-    async fn wait_container(&self, container_id: &str) -> capsule_core::Result<i64> {
+    async fn wait_container(&self, container_id: &str) -> capsule::Result<i64> {
         <Self as OciProvider>::wait_container(self, container_id)
             .await
             .map_err(provider_error_to_capsule_error)
     }
 
-    async fn stop_container(
-        &self,
-        container_id: &str,
-        timeout_secs: i64,
-    ) -> capsule_core::Result<()> {
+    async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> capsule::Result<()> {
         <Self as OciProvider>::stop_container(self, container_id, timeout_secs)
             .await
             .map_err(provider_error_to_capsule_error)
     }
 
-    async fn remove_container(&self, container_id: &str, force: bool) -> capsule_core::Result<()> {
+    async fn remove_container(&self, container_id: &str, force: bool) -> capsule::Result<()> {
         <Self as OciProvider>::remove_container(self, container_id, force)
             .await
             .map_err(provider_error_to_capsule_error)
@@ -1749,8 +1735,8 @@ fn run_provider_command<R: OciCommandRunner>(
         if err.kind() == std::io::ErrorKind::NotFound && program == "podman" {
             // Distinguish an invalid ATO_PODMAN_BIN override from a genuinely
             // absent binary so the user gets an actionable message.
-            if let Err(capsule_core::podman::PodmanResolveError::InvalidEnvOverride { path }) =
-                capsule_core::podman::resolve_podman()
+            if let Err(capsule::podman::PodmanResolveError::InvalidEnvOverride { path }) =
+                capsule::podman::resolve_podman()
             {
                 return OciProviderError::InvalidBinaryOverride {
                     path: path.display().to_string(),
@@ -2075,8 +2061,8 @@ pub(crate) fn build_digest_pull_ref(image: &OciImageResolution) -> String {
 
 fn podman_async_io_error(command: &'static str, err: std::io::Error) -> OciProviderError {
     if err.kind() == std::io::ErrorKind::NotFound {
-        if let Err(capsule_core::podman::PodmanResolveError::InvalidEnvOverride { path }) =
-            capsule_core::podman::resolve_podman()
+        if let Err(capsule::podman::PodmanResolveError::InvalidEnvOverride { path }) =
+            capsule::podman::resolve_podman()
         {
             return OciProviderError::InvalidBinaryOverride {
                 path: path.display().to_string(),
@@ -2343,7 +2329,7 @@ where
         &self,
         container_id: &str,
         follow: bool,
-    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+    ) -> Result<mpsc::Receiver<capsule::Result<OciLogChunk>>, OciProviderError> {
         self.client
             .logs(container_id, follow)
             .await
@@ -2385,33 +2371,27 @@ impl<C> OciRuntimeClient for DockerCompatibleOciProvider<C>
 where
     C: OciRuntimeClient + Send + Sync,
 {
-    async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+    async fn pull_image(&self, image: &str) -> capsule::Result<()> {
         self.client.pull_image(image).await
     }
 
-    async fn create_network(&self, request: &OciNetworkRequest) -> capsule_core::Result<String> {
+    async fn create_network(&self, request: &OciNetworkRequest) -> capsule::Result<String> {
         self.client.create_network(request).await
     }
 
-    async fn remove_network(&self, network_name: &str) -> capsule_core::Result<()> {
+    async fn remove_network(&self, network_name: &str) -> capsule::Result<()> {
         self.client.remove_network(network_name).await
     }
 
-    async fn create_container(
-        &self,
-        request: &OciContainerRequest,
-    ) -> capsule_core::Result<String> {
+    async fn create_container(&self, request: &OciContainerRequest) -> capsule::Result<String> {
         self.client.create_container(request).await
     }
 
-    async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+    async fn start_container(&self, container_id: &str) -> capsule::Result<()> {
         self.client.start_container(container_id).await
     }
 
-    async fn inspect_container(
-        &self,
-        container_id: &str,
-    ) -> capsule_core::Result<OciContainerInspect> {
+    async fn inspect_container(&self, container_id: &str) -> capsule::Result<OciContainerInspect> {
         self.client.inspect_container(container_id).await
     }
 
@@ -2419,31 +2399,23 @@ where
         &self,
         container_id: &str,
         follow: bool,
-    ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+    ) -> capsule::Result<mpsc::Receiver<capsule::Result<OciLogChunk>>> {
         self.client.logs(container_id, follow).await
     }
 
-    async fn wait_container(&self, container_id: &str) -> capsule_core::Result<i64> {
+    async fn wait_container(&self, container_id: &str) -> capsule::Result<i64> {
         self.client.wait_container(container_id).await
     }
 
-    async fn stop_container(
-        &self,
-        container_id: &str,
-        timeout_secs: i64,
-    ) -> capsule_core::Result<()> {
+    async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> capsule::Result<()> {
         self.client.stop_container(container_id, timeout_secs).await
     }
 
-    async fn remove_container(&self, container_id: &str, force: bool) -> capsule_core::Result<()> {
+    async fn remove_container(&self, container_id: &str, force: bool) -> capsule::Result<()> {
         self.client.remove_container(container_id, force).await
     }
 
-    async fn exec_container(
-        &self,
-        container_id: &str,
-        cmd: &[String],
-    ) -> capsule_core::Result<i64> {
+    async fn exec_container(&self, container_id: &str, cmd: &[String]) -> capsule::Result<i64> {
         self.client.exec_container(container_id, cmd).await
     }
 }
@@ -2539,7 +2511,7 @@ impl OciProvider for RuntimeOciProvider {
         &self,
         container_id: &str,
         follow: bool,
-    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+    ) -> Result<mpsc::Receiver<capsule::Result<OciLogChunk>>, OciProviderError> {
         match self {
             Self::Podman(provider) => OciProvider::logs(provider, container_id, follow).await,
             Self::DockerCompatible(provider) => {
@@ -2590,14 +2562,14 @@ impl OciProvider for RuntimeOciProvider {
 
 #[async_trait]
 impl OciRuntimeClient for RuntimeOciProvider {
-    async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+    async fn pull_image(&self, image: &str) -> capsule::Result<()> {
         match self {
             Self::Podman(provider) => OciRuntimeClient::pull_image(provider, image).await,
             Self::DockerCompatible(provider) => OciRuntimeClient::pull_image(provider, image).await,
         }
     }
 
-    async fn create_network(&self, request: &OciNetworkRequest) -> capsule_core::Result<String> {
+    async fn create_network(&self, request: &OciNetworkRequest) -> capsule::Result<String> {
         match self {
             Self::Podman(provider) => OciRuntimeClient::create_network(provider, request).await,
             Self::DockerCompatible(provider) => {
@@ -2606,7 +2578,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         }
     }
 
-    async fn remove_network(&self, network_name: &str) -> capsule_core::Result<()> {
+    async fn remove_network(&self, network_name: &str) -> capsule::Result<()> {
         match self {
             Self::Podman(provider) => {
                 OciRuntimeClient::remove_network(provider, network_name).await
@@ -2617,10 +2589,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         }
     }
 
-    async fn create_container(
-        &self,
-        request: &OciContainerRequest,
-    ) -> capsule_core::Result<String> {
+    async fn create_container(&self, request: &OciContainerRequest) -> capsule::Result<String> {
         match self {
             Self::Podman(provider) => OciRuntimeClient::create_container(provider, request).await,
             Self::DockerCompatible(provider) => {
@@ -2629,7 +2598,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         }
     }
 
-    async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+    async fn start_container(&self, container_id: &str) -> capsule::Result<()> {
         match self {
             Self::Podman(provider) => {
                 OciRuntimeClient::start_container(provider, container_id).await
@@ -2640,10 +2609,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         }
     }
 
-    async fn inspect_container(
-        &self,
-        container_id: &str,
-    ) -> capsule_core::Result<OciContainerInspect> {
+    async fn inspect_container(&self, container_id: &str) -> capsule::Result<OciContainerInspect> {
         match self {
             Self::Podman(provider) => {
                 OciRuntimeClient::inspect_container(provider, container_id).await
@@ -2658,7 +2624,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         &self,
         container_id: &str,
         follow: bool,
-    ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+    ) -> capsule::Result<mpsc::Receiver<capsule::Result<OciLogChunk>>> {
         match self {
             Self::Podman(provider) => OciRuntimeClient::logs(provider, container_id, follow).await,
             Self::DockerCompatible(provider) => {
@@ -2667,7 +2633,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         }
     }
 
-    async fn wait_container(&self, container_id: &str) -> capsule_core::Result<i64> {
+    async fn wait_container(&self, container_id: &str) -> capsule::Result<i64> {
         match self {
             Self::Podman(provider) => {
                 OciRuntimeClient::wait_container(provider, container_id).await
@@ -2678,11 +2644,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         }
     }
 
-    async fn stop_container(
-        &self,
-        container_id: &str,
-        timeout_secs: i64,
-    ) -> capsule_core::Result<()> {
+    async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> capsule::Result<()> {
         match self {
             Self::Podman(provider) => {
                 OciRuntimeClient::stop_container(provider, container_id, timeout_secs).await
@@ -2693,7 +2655,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         }
     }
 
-    async fn remove_container(&self, container_id: &str, force: bool) -> capsule_core::Result<()> {
+    async fn remove_container(&self, container_id: &str, force: bool) -> capsule::Result<()> {
         match self {
             Self::Podman(provider) => {
                 OciRuntimeClient::remove_container(provider, container_id, force).await
@@ -2704,11 +2666,7 @@ impl OciRuntimeClient for RuntimeOciProvider {
         }
     }
 
-    async fn exec_container(
-        &self,
-        container_id: &str,
-        cmd: &[String],
-    ) -> capsule_core::Result<i64> {
+    async fn exec_container(&self, container_id: &str, cmd: &[String]) -> capsule::Result<i64> {
         match self {
             Self::Podman(provider) => {
                 OciRuntimeClient::exec_container(provider, container_id, cmd).await
@@ -2973,7 +2931,7 @@ impl OciProvider for FakeOciProvider {
         &self,
         _container_id: &str,
         _follow: bool,
-    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+    ) -> Result<mpsc::Receiver<capsule::Result<OciLogChunk>>, OciProviderError> {
         let (tx, rx) = mpsc::channel(64);
         for chunk in &self.log_chunks {
             let _ = tx.try_send(Ok(chunk.clone()));
@@ -3033,10 +2991,10 @@ impl OciProvider for FakeOciProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::runtime::oci::{
+    use capsule::runtime::oci::{
         OciContainerInspect, OciMountSourceKind, OciMountSpec, OciPortSpec,
     };
-    use capsule_core::types::{OciProviderKind, OciProviderMode, OciProviderSubstrate};
+    use capsule::types::{OciProviderKind, OciProviderMode, OciProviderSubstrate};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -3128,26 +3086,20 @@ mod tests {
 
     #[async_trait]
     impl OciRuntimeClient for FakeClient {
-        async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+        async fn pull_image(&self, image: &str) -> capsule::Result<()> {
             self.events.lock().unwrap().push(format!("pull:{image}"));
             Ok(())
         }
 
-        async fn create_network(
-            &self,
-            request: &OciNetworkRequest,
-        ) -> capsule_core::Result<String> {
+        async fn create_network(&self, request: &OciNetworkRequest) -> capsule::Result<String> {
             Ok(request.name.clone())
         }
 
-        async fn remove_network(&self, _network_name: &str) -> capsule_core::Result<()> {
+        async fn remove_network(&self, _network_name: &str) -> capsule::Result<()> {
             Ok(())
         }
 
-        async fn create_container(
-            &self,
-            request: &OciContainerRequest,
-        ) -> capsule_core::Result<String> {
+        async fn create_container(&self, request: &OciContainerRequest) -> capsule::Result<String> {
             self.events
                 .lock()
                 .unwrap()
@@ -3155,7 +3107,7 @@ mod tests {
             Ok(request.name.clone())
         }
 
-        async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+        async fn start_container(&self, container_id: &str) -> capsule::Result<()> {
             self.events
                 .lock()
                 .unwrap()
@@ -3166,7 +3118,7 @@ mod tests {
         async fn inspect_container(
             &self,
             _container_id: &str,
-        ) -> capsule_core::Result<OciContainerInspect> {
+        ) -> capsule::Result<OciContainerInspect> {
             Ok(OciContainerInspect::default())
         }
 
@@ -3174,7 +3126,7 @@ mod tests {
             &self,
             _container_id: &str,
             _follow: bool,
-        ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+        ) -> capsule::Result<mpsc::Receiver<capsule::Result<OciLogChunk>>> {
             let (_tx, rx) = mpsc::channel(1);
             Ok(rx)
         }
@@ -3183,11 +3135,11 @@ mod tests {
             &self,
             _container_id: &str,
             _cmd: &[String],
-        ) -> capsule_core::Result<i64> {
+        ) -> capsule::Result<i64> {
             Ok(0)
         }
 
-        async fn wait_container(&self, _container_id: &str) -> capsule_core::Result<i64> {
+        async fn wait_container(&self, _container_id: &str) -> capsule::Result<i64> {
             Ok(0)
         }
 
@@ -3195,15 +3147,11 @@ mod tests {
             &self,
             _container_id: &str,
             _timeout_secs: i64,
-        ) -> capsule_core::Result<()> {
+        ) -> capsule::Result<()> {
             Ok(())
         }
 
-        async fn remove_container(
-            &self,
-            _container_id: &str,
-            _force: bool,
-        ) -> capsule_core::Result<()> {
+        async fn remove_container(&self, _container_id: &str, _force: bool) -> capsule::Result<()> {
             Ok(())
         }
     }
@@ -3418,7 +3366,7 @@ mod tests {
 
     #[test]
     fn podman_publish_port_arg_honors_loopback_host_ip() {
-        use capsule_core::runtime::oci::OciPortSpec;
+        use capsule::runtime::oci::OciPortSpec;
 
         let fixed = OciPortSpec {
             container_port: 8080,
@@ -4200,8 +4148,8 @@ mod tests {
 
     // ── Podman mount :U / ReadOnlyOwnershipConflict tests (#428 followup) ────
 
-    fn test_ownership() -> capsule_core::types::MountOwnership {
-        capsule_core::types::MountOwnership {
+    fn test_ownership() -> capsule::types::MountOwnership {
+        capsule::types::MountOwnership {
             uid: Some(1001),
             gid: Some(1001),
             recursive: false,
@@ -4212,7 +4160,7 @@ mod tests {
     fn oci_mount_spec(
         target: &str,
         readonly: bool,
-        ownership: Option<capsule_core::types::MountOwnership>,
+        ownership: Option<capsule::types::MountOwnership>,
     ) -> OciMountSpec {
         OciMountSpec {
             source: "/host/src".to_string(),

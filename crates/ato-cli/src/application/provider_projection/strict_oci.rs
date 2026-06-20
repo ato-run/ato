@@ -21,10 +21,10 @@
 //! the (content-hash) image digest as a *materialization* input. The strict-gate
 //! error payload is already redacted by construction (see #500).
 
-use capsule_core::execution_identity::{OciEnforcementStatus, OciProviderReceiptEvidence};
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::model::OciPolicyEnvelope;
-use capsule_core::realization::{
+use capsule::execution_identity::{OciEnforcementStatus, OciProviderReceiptEvidence};
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::model::OciPolicyEnvelope;
+use capsule::realization::{
     LaunchProfile, MountFact, RealizationContract, RealizationNode, RealizationNodeFacts,
     RealizationRequest, classify,
 };

@@ -1485,7 +1485,7 @@ pub(crate) fn missing_helpers_for(podman_bin: &Path, os: &str, arch: &str) -> Ve
 }
 
 fn is_ato_managed_install(podman_bin: &Path) -> bool {
-    capsule_core::common::paths::ato_tools_dir()
+    capsule::common::paths::ato_tools_dir()
         .map(|tools| podman_bin.starts_with(&tools))
         .unwrap_or(false)
 }

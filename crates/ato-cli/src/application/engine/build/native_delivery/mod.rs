@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
-use capsule_core::bootstrap::BootstrapBoundary;
-use capsule_core::common::paths::workspace_tmp_dir;
-use capsule_core::router::{CompatManifestBridge, ExecutionDescriptor};
+use capsule::bootstrap::BootstrapBoundary;
+use capsule::common::paths::workspace_tmp_dir;
+use capsule::router::{CompatManifestBridge, ExecutionDescriptor};
 use chrono::{SecondsFormat, Utc};
 use goblin::Object;
 use serde::{Deserialize, Serialize};
@@ -394,7 +394,7 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
 
     let manifest_raw = fs::read_to_string(&manifest_path)
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
+    let manifest = capsule::types::CapsuleManifest::from_toml(&manifest_raw)
         .map_err(|err| anyhow::anyhow!("Failed to parse {}: {}", manifest_path.display(), err))?;
     let Ok(target) = manifest.resolve_default_target() else {
         return Ok(None);
@@ -405,8 +405,7 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
             "{} is no longer accepted in source projects. Move native delivery metadata into capsule.toml [artifact] and [finalize].",
             // Strip the `\\?\` prefix a canonicalized workspace root drags
             // in on Windows — this path is user-facing.
-            capsule_core::common::paths::windows_child_compatible_path(&delivery_config_path)
-                .display()
+            capsule::common::paths::windows_child_compatible_path(&delivery_config_path).display()
         );
     }
 
@@ -477,8 +476,7 @@ pub(crate) fn detect_build_strategy_from_descriptor(
             "{} is no longer accepted in source projects. Move native delivery metadata into capsule.toml [artifact] and [finalize].",
             // Strip the `\\?\` prefix a canonicalized workspace root drags
             // in on Windows — this path is user-facing.
-            capsule_core::common::paths::windows_child_compatible_path(&delivery_config_path)
-                .display()
+            capsule::common::paths::windows_child_compatible_path(&delivery_config_path).display()
         );
     }
 
@@ -1352,7 +1350,7 @@ pub(crate) fn native_delivery_draft_contract_from_manifest(
 ) -> Result<Option<Value>> {
     let manifest_raw = fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
+    let manifest = capsule::types::CapsuleManifest::from_toml(&manifest_raw)
         .map_err(|err| anyhow::anyhow!("Failed to parse {}: {}", manifest_path.display(), err))?;
     let target = match manifest.resolve_default_target() {
         Ok(target) if target.driver.as_deref() == Some("native") => target,
@@ -1609,7 +1607,7 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 }
 
 fn detect_native_manifest_contract(
-    target: &capsule_core::types::NamedTarget,
+    target: &capsule::types::NamedTarget,
 ) -> Result<Option<DeliveryConfig>> {
     if target.driver.as_deref() != Some("native") {
         return Ok(None);
@@ -1639,7 +1637,7 @@ fn detect_native_manifest_contract(
 }
 
 fn detect_native_build_command(
-    target: &capsule_core::types::NamedTarget,
+    target: &capsule::types::NamedTarget,
     manifest_dir: &Path,
     has_explicit_delivery_config: bool,
 ) -> Result<Option<NativeBuildCommand>> {
@@ -2430,9 +2428,7 @@ fn host_supports_projection_target(target: &str) -> bool {
     delivery_target_os_family(target) == host_projection_os_family()
 }
 
-fn extract_capsule_manifest_from_archive(
-    bytes: &[u8],
-) -> Result<capsule_core::types::CapsuleManifest> {
+fn extract_capsule_manifest_from_archive(bytes: &[u8]) -> Result<capsule::types::CapsuleManifest> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     let entries = archive
         .entries()
@@ -2452,7 +2448,7 @@ fn extract_capsule_manifest_from_archive(
         entry
             .read_to_string(&mut manifest)
             .context("Failed to read capsule.toml from source artifact")?;
-        return capsule_core::types::CapsuleManifest::from_toml(&manifest).map_err(|err| {
+        return capsule::types::CapsuleManifest::from_toml(&manifest).map_err(|err| {
             anyhow::anyhow!("Failed to parse capsule.toml from source artifact: {err}")
         });
     }

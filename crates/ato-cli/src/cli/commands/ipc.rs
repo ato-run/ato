@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::error::AtoExecutionError;
 use serde_json::Value;
 
 use crate::ipc::broker::IpcBroker;
@@ -487,7 +487,7 @@ fn default_socket_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ATO_SOCKET_DIR") {
         return PathBuf::from(dir);
     }
-    capsule_core::common::paths::ato_path_or_workspace_tmp("run/capsule-ipc")
+    capsule::common::paths::ato_path_or_workspace_tmp("run/capsule-ipc")
 }
 
 #[derive(Debug, Clone)]

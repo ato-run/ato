@@ -1,8 +1,8 @@
 //! `ato revisions <install_profile_key>` — list install revisions for a profile.
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::install_lifecycle::{
     InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
 };
 use serde::Serialize;
@@ -118,7 +118,7 @@ fn find_profile_revisions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{
+    use capsule::foundation::install_lifecycle::{
         AppRecord, LaunchProfile, derive_install_profile_key,
     };
     use serial_test::serial;
@@ -134,7 +134,7 @@ mod tests {
     ) -> (
         InstalledAppId,
         ProfileId,
-        capsule_core::foundation::install_lifecycle::InstallProfileKey,
+        capsule::foundation::install_lifecycle::InstallProfileKey,
     ) {
         let app_id = InstalledAppId::new("app_test_rev001");
         let profile_id = ProfileId::new("default");
@@ -170,10 +170,10 @@ mod tests {
         let (_dir, store) = make_store();
         let (app_id, profile_id, _ipk) = write_app_and_profile(&store);
 
-        let rev1 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+        let rev1 = capsule::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_0000000000000000000000000000000a",
         );
-        let rev2 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+        let rev2 = capsule::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_0000000000000000000000000000000b",
         );
         store.scaffold_revision(&rev1).unwrap();
@@ -196,7 +196,7 @@ mod tests {
         let (_dir, store) = make_store();
         let (app_id, profile_id, ipk) = write_app_and_profile(&store);
 
-        let rev = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+        let rev = capsule::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_0000000000000000000000000000000c",
         );
         store.scaffold_revision(&rev).unwrap();
@@ -243,10 +243,10 @@ mod tests {
                 },
             )
             .unwrap();
-        let rev1 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+        let rev1 = capsule::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_cc00000000000000000000000000001a",
         );
-        let rev2 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+        let rev2 = capsule::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_cc00000000000000000000000000001b",
         );
         store.scaffold_revision(&rev1).unwrap();
@@ -279,7 +279,7 @@ mod tests {
         let (app_id, profile_id, _ipk) = write_app_and_profile(&store);
 
         // Scaffold one revision so the profile directory is created.
-        let rev = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+        let rev = capsule::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_dd00000000000000000000000000001a",
         );
         store.scaffold_revision(&rev).unwrap();

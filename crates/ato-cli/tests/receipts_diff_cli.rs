@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use assert_cmd::Command;
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     CaseSensitivity, DependencyIdentityV2, EnvOrigin, EnvironmentEntry, EnvironmentIdentityV2,
     EnvironmentMode, ExecutionIdentityInputV2, ExecutionReceiptV2, FdLayoutIdentity,
     FilesystemIdentityV2, FilesystemSemantics, LaunchArg, LaunchEntryPoint, LaunchIdentityV2,

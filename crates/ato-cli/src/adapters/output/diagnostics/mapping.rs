@@ -1,5 +1,5 @@
 use anyhow::Error as AnyhowError;
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::error::AtoExecutionError;
 
 use crate::application::pipeline::cleanup::PipelineAttemptError;
 
@@ -48,7 +48,7 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
         return from_execution_error(execution_err, causes);
     }
 
-    if let Some(core_err) = err.downcast_ref::<capsule_core::CapsuleError>() {
+    if let Some(core_err) = err.downcast_ref::<capsule::CapsuleError>() {
         return from_capsule_error(core_err, causes);
     }
 
@@ -536,13 +536,13 @@ fn exited_before_ready_diagnostic(err: &AnyhowError, causes: &[String]) -> Optio
 }
 
 pub fn map_exit_code(diagnostic: &CliDiagnostic, err: &AnyhowError) -> i32 {
-    if let Some(core_err) = err.downcast_ref::<capsule_core::CapsuleError>() {
+    if let Some(core_err) = err.downcast_ref::<capsule::CapsuleError>() {
         return match core_err {
-            capsule_core::CapsuleError::Network(_) => error_codes::EXIT_NETWORK_ERROR,
-            capsule_core::CapsuleError::ContainerEngine(_)
-            | capsule_core::CapsuleError::Runtime(_)
-            | capsule_core::CapsuleError::ProcessStart(_)
-            | capsule_core::CapsuleError::Timeout => error_codes::EXIT_RUNTIME_ERROR,
+            capsule::CapsuleError::Network(_) => error_codes::EXIT_NETWORK_ERROR,
+            capsule::CapsuleError::ContainerEngine(_)
+            | capsule::CapsuleError::Runtime(_)
+            | capsule::CapsuleError::ProcessStart(_)
+            | capsule::CapsuleError::Timeout => error_codes::EXIT_RUNTIME_ERROR,
             _ => code_to_exit(diagnostic.code),
         };
     }
@@ -610,9 +610,9 @@ fn map_execution_code(code: &str) -> CliDiagnosticCode {
     }
 }
 
-fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>) -> CliDiagnostic {
+fn from_capsule_error(core_err: &capsule::CapsuleError, causes: Vec<String>) -> CliDiagnostic {
     match core_err {
-        capsule_core::CapsuleError::Manifest(path, detail) => {
+        capsule::CapsuleError::Manifest(path, detail) => {
             if is_manifest_parse(detail) {
                 return CliDiagnostic::new(
                     CliDiagnosticCode::E001,
@@ -651,7 +651,7 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
                 causes,
             )
         }
-        capsule_core::CapsuleError::Pack(detail) => {
+        capsule::CapsuleError::Pack(detail) => {
             if is_entrypoint_issue(detail) {
                 return CliDiagnostic::new(
                     CliDiagnosticCode::E101,
@@ -679,7 +679,7 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
                 causes,
             )
         }
-        capsule_core::CapsuleError::StrictManifestFallbackNotAllowed(detail) => CliDiagnostic::new(
+        capsule::CapsuleError::StrictManifestFallbackNotAllowed(detail) => CliDiagnostic::new(
             CliDiagnosticCode::E106,
             detail,
             Some(
@@ -692,7 +692,7 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
             false,
             causes,
         ),
-        capsule_core::CapsuleError::AuthRequired(detail) => CliDiagnostic::new(
+        capsule::CapsuleError::AuthRequired(detail) => CliDiagnostic::new(
             CliDiagnosticCode::E201,
             format!("Authentication required: {}", detail),
             Some("`ato login` を実行して認証情報を設定してください。"),
@@ -728,9 +728,9 @@ mod podman_disabled_tests {
         // The smoke runner reports a SpawnFailed whose message carries the
         // shared marker when `executable = "sh"` and no host shell exists. That
         // must reach E213 through from_anyhow, not the generic E999. (#377)
-        let report = capsule_core::smoke::SmokeFailureReport {
-            class: capsule_core::smoke::SmokeFailureClass::SpawnFailed,
-            message: capsule_core::shell_support::source_build_shell_unavailable_message(
+        let report = capsule::smoke::SmokeFailureReport {
+            class: capsule::smoke::SmokeFailureClass::SpawnFailed,
+            message: capsule::shell_support::source_build_shell_unavailable_message(
                 "sh", "windows",
             ),
             stderr_tail: String::new(),
@@ -750,8 +750,8 @@ mod podman_disabled_tests {
     fn smoke_non_shell_spawn_failure_does_not_map_to_e213() {
         // A non-shell SpawnFailed (e.g. a missing binary) carries no marker and
         // must NOT be reclassified as the shell-unavailable error.
-        let report = capsule_core::smoke::SmokeFailureReport {
-            class: capsule_core::smoke::SmokeFailureClass::SpawnFailed,
+        let report = capsule::smoke::SmokeFailureReport {
+            class: capsule::smoke::SmokeFailureClass::SpawnFailed,
             message: "failed to start process 'node' for smoke: No such file or directory"
                 .to_string(),
             stderr_tail: String::new(),

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::registry::store::{NewPersistentStateRecord, PersistentStateRecord, RegistryStore};
-use capsule_core::types::CapsuleManifest;
+use capsule::types::CapsuleManifest;
 
 use super::contract::{
     ensure_record_matches_contract, persistent_state_contract, prepare_backend_locator,
@@ -9,7 +9,7 @@ use super::contract::{
 use super::parse_state_reference;
 
 pub fn open_state_store() -> Result<RegistryStore> {
-    let store_dir = capsule_core::config::config_dir()?.join("state");
+    let store_dir = capsule::config::config_dir()?.join("state");
     RegistryStore::open(&store_dir)
 }
 

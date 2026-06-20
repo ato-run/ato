@@ -147,7 +147,7 @@ static SAMPLE_RECIPE_CATALOG: &[SampleRecipeBinding] = &[
 ];
 
 fn materialize_recipe(binding: &SampleRecipeBinding) -> Result<PathBuf> {
-    let root = capsule_core::common::paths::ato_path_or_workspace_tmp("sample-recipes");
+    let root = capsule::common::paths::ato_path_or_workspace_tmp("sample-recipes");
     let dir = root.join(binding.slug);
     let manifest_path = dir.join("capsule.toml");
 
@@ -391,7 +391,7 @@ mod tests {
         let _env = crate::tests::env_lock().lock().unwrap();
         materialize_all_sample_recipes().expect("materialize all");
         for binding in SAMPLE_RECIPE_CATALOG {
-            let root = capsule_core::common::paths::ato_path_or_workspace_tmp("sample-recipes");
+            let root = capsule::common::paths::ato_path_or_workspace_tmp("sample-recipes");
             let manifest_path = root.join(binding.slug).join("capsule.toml");
             assert!(
                 manifest_path.exists(),

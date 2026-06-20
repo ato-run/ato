@@ -9,7 +9,7 @@
 //! This module is the Desktop counterpart of the CLI's
 //! `ato-cli::application::runtime_setup_launch`: it reads/writes the **same**
 //! marker file (`~/.ato/runtime-setup/launch-intent.json`) using the shared
-//! [`capsule_core::runtime_setup::RuntimeSetupLaunchIntent`] model, so the two
+//! [`capsule::runtime_setup::RuntimeSetupLaunchIntent`] model, so the two
 //! sides cannot drift. PR3a wired the CLI read + `resume-after-reboot`
 //! `launchContinuation`; this PR wires the Desktop write/consume + replay.
 //!
@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use capsule_core::runtime_setup::{
+use capsule::runtime_setup::{
     LaunchClientKind, LaunchIntentKind, LaunchIntentNextStep,
     RUNTIME_SETUP_LAUNCH_INTENT_SCHEMA_VERSION, RuntimeSetupLaunchIntent, RuntimeSetupStatus,
     ToolKind,
@@ -44,7 +44,7 @@ const PGWEB_SAMPLE_HANDLE: &str = "capsule://github.com/sosedoff/pgweb";
 /// home (falling back to a workspace-local `.ato/` tree, never the system tmp);
 /// matches `ato-cli::application::runtime_setup_launch::launch_intent_path`.
 pub(crate) fn launch_intent_path() -> PathBuf {
-    capsule_core::common::paths::ato_path_or_workspace_tmp("runtime-setup/launch-intent.json")
+    capsule::common::paths::ato_path_or_workspace_tmp("runtime-setup/launch-intent.json")
 }
 
 /// Current wall-clock as unix milliseconds (0 on a pre-epoch clock).
@@ -675,7 +675,7 @@ mod tests {
     }
 
     fn ready_status(podman_ready: bool) -> RuntimeSetupStatus {
-        use capsule_core::runtime_setup::{RecommendedAction, ToolSource, ToolStatus};
+        use capsule::runtime_setup::{RecommendedAction, ToolSource, ToolStatus};
         let podman = if podman_ready {
             ToolStatus::ready(ToolKind::Podman, ToolSource::External, None, "ready")
         } else {

@@ -1,8 +1,8 @@
 use std::io::{BufRead, BufReader, Write};
 
 use anyhow::Result;
-use capsule_core::common::readiness::http_status_indicates_ready;
-use capsule_core::types::ReadinessProbe;
+use capsule::common::readiness::http_status_indicates_ready;
+use capsule::types::ReadinessProbe;
 
 use super::spawn::ExternalCapsuleChild;
 use super::{EXTERNAL_READY_INTERVAL, EXTERNAL_READY_TIMEOUT};

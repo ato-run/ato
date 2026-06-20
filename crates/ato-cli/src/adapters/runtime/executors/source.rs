@@ -16,9 +16,9 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 use tracing::debug;
 
-use capsule_core::common::paths::{ato_cache_dir, workspace_artifacts_dir};
-use capsule_core::runtime::native::NativeHandle;
-use capsule_core::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
+use capsule::common::paths::{ato_cache_dir, workspace_artifacts_dir};
+use capsule::runtime::native::NativeHandle;
+use capsule::{RuntimeMetadata, SessionRunner, SessionRunnerConfig};
 
 use super::launch_context::RuntimeLaunchContext;
 use crate::application::workspace::state::EffectiveLockState;
@@ -29,16 +29,16 @@ use crate::runtime::overrides as runtime_overrides;
 use crate::runtime::provider_workspace;
 use crate::runtime::provisioning::dependency_root;
 
-use capsule_core::engine;
-use capsule_core::isolation::HostIsolationContext;
-use capsule_core::launch_spec::derive_launch_spec;
-use capsule_core::lifecycle::LifecycleEvent;
-use capsule_core::lock_runtime;
-use capsule_core::python_runtime::{
+use capsule::engine;
+use capsule::isolation::HostIsolationContext;
+use capsule::launch_spec::derive_launch_spec;
+use capsule::lifecycle::LifecycleEvent;
+use capsule::lock_runtime;
+use capsule::python_runtime::{
     extend_python_selector_env, normalized_python_runtime_version, python_selector_env,
 };
-use capsule_core::router::ManifestData;
-use capsule_core::runtime_config;
+use capsule::router::ManifestData;
+use capsule::runtime_config;
 
 const NACELLE_MANIFEST_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -80,7 +80,7 @@ pub enum ExecuteMode {
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     effective_state: Option<&EffectiveLockState>,
     nacelle_override: Option<PathBuf>,
     _reporter: std::sync::Arc<CliReporter>,
@@ -141,7 +141,7 @@ pub fn execute(
 
 pub fn execute_host(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     _reporter: std::sync::Arc<CliReporter>,
     mode: ExecuteMode,
     launch_ctx: &RuntimeLaunchContext,
@@ -170,7 +170,7 @@ pub fn execute_host(
     // Strip Windows `\\?\` extended-length prefixes (introduced by upstream
     // canonicalization) before the path becomes the child's cwd — Python,
     // Node, and cmd.exe-based tooling mis-handle extended-length cwds.
-    let execution_cwd = capsule_core::common::paths::windows_child_compatible_path(
+    let execution_cwd = capsule::common::paths::windows_child_compatible_path(
         &resolve_host_execution_cwd(launch_ctx, &launch_spec.working_dir),
     );
 
@@ -464,7 +464,7 @@ fn validated_launch_context_env(
             }
 
             return Err(
-                capsule_core::execution_plan::error::AtoExecutionError::policy_violation(format!(
+                capsule::execution_plan::error::AtoExecutionError::policy_violation(format!(
                     "session_token env '{}' is not allowlisted",
                     key
                 ))
@@ -484,7 +484,7 @@ enum ManagedRuntimeKind {
 
 fn resolve_host_managed_runtime_binary(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     runtime: ManagedRuntimeKind,
 ) -> Result<PathBuf> {
     match runtime {
@@ -515,14 +515,14 @@ fn executable_extensions() -> Vec<String> {
 #[allow(dead_code)]
 pub fn should_launch_desktop_native_with_host_open(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
 ) -> bool {
     desktop_native_open_bundle_path(plan, authoritative_lock).is_some()
 }
 
 fn desktop_native_open_bundle_path(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
 ) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -549,7 +549,7 @@ fn desktop_native_open_bundle_path_from_runtime_lock(manifest_dir: &Path) -> Opt
 #[cfg(target_os = "macos")]
 fn desktop_native_open_bundle_path_from_authoritative_lock(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
 ) -> Option<PathBuf> {
     let mut root = serde_json::Map::new();
     let mut contract = serde_json::Map::new();
@@ -1207,7 +1207,7 @@ fn write_normalized_manifest(
     // ~/.ato/runs/nacelle-manifests/ instead of plan.manifest_dir so it cannot
     // perturb the source_tree_hash observation. The file lifetime is still
     // managed via cleanup_paths.
-    let nacelle_dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+    let nacelle_dir = capsule::common::paths::ato_runs_dir().join("nacelle-manifests");
     sweep_stale_nacelle_manifests_on_startup_best_effort(&nacelle_dir);
     fs::create_dir_all(&nacelle_dir).with_context(|| {
         format!(
@@ -1649,7 +1649,7 @@ pub async fn wait_for_pid_exit(pid: u32) -> Result<i32> {
     Ok(extract_exit_code(&metrics))
 }
 
-fn extract_exit_code(metrics: &capsule_core::UnifiedMetrics) -> i32 {
+fn extract_exit_code(metrics: &capsule::UnifiedMetrics) -> i32 {
     match &metrics.metadata {
         RuntimeMetadata::Nacelle { exit_code, .. } => (*exit_code).unwrap_or(1),
         _ => 1,
@@ -1791,11 +1791,11 @@ mod tests {
         table
             .entry("default_target".to_string())
             .or_insert_with(|| toml::Value::String(target.to_string()));
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             parsed,
             manifest_path,
             dir.path().to_path_buf(),
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             Some(target),
             HashMap::new(),
         )
@@ -2116,7 +2116,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        let dir = capsule::common::paths::ato_runs_dir().join("nacelle-manifests");
         fs::create_dir_all(&dir).expect("create nacelle manifest dir");
         let stale = dir.join("nacelle-123-456.toml");
         fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
@@ -2139,7 +2139,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        let dir = capsule::common::paths::ato_runs_dir().join("nacelle-manifests");
         fs::create_dir_all(&dir).expect("create nacelle manifest dir");
         let fresh = dir.join("nacelle-123-789.toml");
         fs::write(&fresh, "schema_version = \"0.3\"\n").expect("write fresh manifest");
@@ -2162,7 +2162,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        let dir = capsule::common::paths::ato_runs_dir().join("nacelle-manifests");
         fs::create_dir_all(&dir).expect("create nacelle manifest dir");
         let active_manifest = dir.join(format_nacelle_manifest_file_name(
             current_nacelle_manifest_owner(),
@@ -2190,7 +2190,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        let dir = capsule::common::paths::ato_runs_dir().join("nacelle-manifests");
         fs::create_dir_all(&dir).expect("create nacelle manifest dir");
         let stale = dir.join(format!("nacelle-{}-1-77.toml", std::process::id()));
         fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
@@ -2214,7 +2214,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let nacelle_dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        let nacelle_dir = capsule::common::paths::ato_runs_dir().join("nacelle-manifests");
         fs::create_dir_all(&nacelle_dir).expect("create nacelle manifest dir");
         let stale = nacelle_dir.join("nacelle-123-stale.toml");
         fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
@@ -2839,7 +2839,7 @@ mod tests {
             "desktop",
         );
 
-        let mut lock = capsule_core::ato_lock::AtoLock::default();
+        let mut lock = capsule::ato_lock::AtoLock::default();
         lock.contract.entries.insert(
             "delivery".to_string(),
             json!({

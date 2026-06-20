@@ -17,7 +17,7 @@
 //! a follow-up; this module returns a plan that a retry loop can re-run.
 
 use anyhow::{Result, bail};
-use capsule_core::installed_state::{ConflictPolicy, InstalledStateDb, PortAdmission, PortClaim};
+use capsule::installed_state::{ConflictPolicy, InstalledStateDb, PortAdmission, PortClaim};
 
 /// Resolved port + the claim to record after a successful launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +41,7 @@ pub fn logical_endpoint(install_profile_key: &str, service_name: &str) -> String
 /// `Ok(None)` when admission does not apply (no install identity or no preferred
 /// port → existing resolution is left alone). `os_available` is the OS-port
 /// availability probe — pass
-/// [`os_port_is_free`](capsule_core::installed_state::os_port_is_free) in
+/// [`os_port_is_free`](capsule::installed_state::os_port_is_free) in
 /// production; inject a deterministic closure in tests.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_port_admission_with(

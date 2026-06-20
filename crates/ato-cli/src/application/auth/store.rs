@@ -575,7 +575,7 @@ pub(crate) async fn bridge_authenticate_ephemeral(
 #[allow(clippy::needless_return)]
 pub async fn login_with_store_device_flow_desktop() -> Result<()> {
     use crate::application::credential::AgeFileBackend;
-    use capsule_core::common::paths::nacelle_home_dir;
+    use capsule::common::paths::nacelle_home_dir;
 
     // ── Age identity bootstrap (non-interactive) ──────────────────────────────
     let ato_home = nacelle_home_dir().context("failed to resolve ato home")?;

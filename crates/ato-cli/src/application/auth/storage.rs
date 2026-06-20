@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use capsule_core::common::paths::nacelle_home_dir;
+use capsule::common::paths::nacelle_home_dir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

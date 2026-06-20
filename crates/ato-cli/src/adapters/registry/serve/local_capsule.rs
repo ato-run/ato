@@ -202,9 +202,9 @@ pub(super) async fn handle_run_local_capsule(
     } else {
         run_target.clone()
     };
-    let compiled = match capsule_core::execution_plan::derive::compile_execution_plan(
+    let compiled = match capsule::execution_plan::derive::compile_execution_plan(
         &consent_manifest_path,
-        capsule_core::router::ExecutionProfile::Dev,
+        capsule::router::ExecutionProfile::Dev,
         effective_target.as_deref(),
     ) {
         Ok(compiled) => Some(compiled),
@@ -613,7 +613,7 @@ pub(super) async fn handle_delete_local_capsule(
 }
 
 pub(super) fn process_log_path(id: &str) -> PathBuf {
-    capsule_core::common::paths::ato_path_or_workspace_tmp(format!("logs/{id}.log"))
+    capsule::common::paths::ato_path_or_workspace_tmp(format!("logs/{id}.log"))
 }
 
 pub(super) fn read_process_log_lines(path: &Path, tail: usize) -> Vec<String> {

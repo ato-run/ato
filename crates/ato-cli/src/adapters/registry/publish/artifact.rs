@@ -58,7 +58,7 @@ struct ArtifactPayload {
     bytes: Vec<u8>,
     sha256: String,
     blake3: String,
-    payload_manifest: Option<capsule_core::capsule::PayloadManifest>,
+    payload_manifest: Option<capsule::capsule::PayloadManifest>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,7 +66,7 @@ pub(crate) struct SyncPayload {
     publisher: String,
     slug: String,
     version: String,
-    manifest: capsule_core::capsule::PayloadManifest,
+    manifest: capsule::capsule::PayloadManifest,
 }
 
 impl ArtifactPayload {
@@ -136,7 +136,7 @@ pub(crate) struct SyncCommitRequest {
     pub(crate) publisher: String,
     pub(crate) slug: String,
     pub(crate) version: String,
-    pub(crate) manifest: capsule_core::capsule::PayloadManifest,
+    pub(crate) manifest: capsule::capsule::PayloadManifest,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -227,7 +227,7 @@ pub fn inspect_artifact_manifest(path: &Path) -> Result<ArtifactManifestInfo> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
     let manifest = extract_manifest_from_capsule(&bytes)?;
-    let parsed = toml::from_str::<capsule_core::types::CapsuleManifest>(&manifest)
+    let parsed = toml::from_str::<capsule::types::CapsuleManifest>(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
 
     Ok(ArtifactManifestInfo {
@@ -253,7 +253,7 @@ pub fn verify_artifact(path: &Path) -> Result<VerifiedArtifactInfo> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
     let manifest = extract_manifest_from_capsule(&bytes)?;
-    let parsed = toml::from_str::<capsule_core::types::CapsuleManifest>(&manifest)
+    let parsed = toml::from_str::<capsule::types::CapsuleManifest>(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
     let _ = extract_payload_payload_manifest_from_capsule(&bytes)?;
 
@@ -403,7 +403,7 @@ fn load_artifact_payload_from_bytes(bytes: &[u8], scoped_id: &str) -> Result<Art
     let scoped = crate::install::parse_capsule_ref(scoped_id)?;
     let manifest = extract_manifest_from_capsule(bytes)?;
     let payload_manifest = extract_payload_payload_manifest_from_capsule(bytes)?;
-    let parsed = toml::from_str::<capsule_core::types::CapsuleManifest>(&manifest)
+    let parsed = toml::from_str::<capsule::types::CapsuleManifest>(&manifest)
         .map_err(|err| anyhow::anyhow!("Failed to parse capsule.toml from artifact: {}", err))?;
 
     if parsed.name != scoped.slug {
@@ -462,9 +462,7 @@ fn extract_manifest_from_capsule(bytes: &[u8]) -> Result<String> {
     bail!("Invalid artifact: capsule.toml not found in .capsule archive")
 }
 
-fn extract_capsule_lock_from_capsule(
-    bytes: &[u8],
-) -> Result<Option<capsule_core::ato_lock::AtoLock>> {
+fn extract_capsule_lock_from_capsule(bytes: &[u8]) -> Result<Option<capsule::ato_lock::AtoLock>> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     let entries = archive
         .entries()
@@ -539,7 +537,7 @@ fn infer_publish_metadata_from_finalized_payload(
 
 fn extract_payload_payload_manifest_from_capsule(
     bytes: &[u8],
-) -> Result<Option<capsule_core::capsule::PayloadManifest>> {
+) -> Result<Option<capsule::capsule::PayloadManifest>> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     let entries = archive
         .entries()
@@ -552,7 +550,7 @@ fn extract_payload_payload_manifest_from_capsule(
             .context("Failed to read archive entry path")?
             .to_string_lossy()
             .to_string();
-        if entry_path != capsule_core::capsule::PAYLOAD_MANIFEST_PATH {
+        if entry_path != capsule::capsule::PAYLOAD_MANIFEST_PATH {
             continue;
         }
 
@@ -560,10 +558,10 @@ fn extract_payload_payload_manifest_from_capsule(
         entry
             .read_to_end(&mut manifest_bytes)
             .context("Failed to read payload.v3.manifest.json from artifact")?;
-        let manifest: capsule_core::capsule::PayloadManifest =
+        let manifest: capsule::capsule::PayloadManifest =
             serde_json::from_slice(&manifest_bytes)
                 .context("Failed to parse payload.v3.manifest.json from artifact")?;
-        capsule_core::capsule::verify_artifact_hash(&manifest)
+        capsule::capsule::verify_artifact_hash(&manifest)
             .context("Invalid payload.v3.manifest.json artifact_hash")?;
         return Ok(Some(manifest));
     }
@@ -579,10 +577,10 @@ pub(crate) fn sync_v3_chunks_if_present(
         return Ok(());
     };
 
-    let cas = match capsule_core::capsule::CasProvider::from_env() {
-        capsule_core::capsule::CasProvider::Enabled(store) => store,
-        capsule_core::capsule::CasProvider::Disabled(reason) => {
-            capsule_core::capsule::CasProvider::log_disabled_once("publish_v3_chunk_sync", &reason);
+    let cas = match capsule::capsule::CasProvider::from_env() {
+        capsule::capsule::CasProvider::Enabled(store) => store,
+        capsule::capsule::CasProvider::Disabled(reason) => {
+            capsule::capsule::CasProvider::log_disabled_once("publish_v3_chunk_sync", &reason);
             return Ok(());
         }
     };
@@ -916,7 +914,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::{post, put};
     use axum::{Json, Router};
-    use capsule_core::capsule::{ChunkMeta, PayloadManifest, set_artifact_hash};
+    use capsule::capsule::{ChunkMeta, PayloadManifest, set_artifact_hash};
     use tar::Builder;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::time::sleep;
@@ -1108,7 +1106,7 @@ mod tests {
     }
 
     fn build_v3_sync_test_payload(
-        cas: &capsule_core::capsule::CasStore,
+        cas: &capsule::capsule::CasStore,
         chunk_count: usize,
     ) -> (SyncPayload, Vec<String>) {
         let mut chunks = Vec::new();
@@ -1116,7 +1114,7 @@ mod tests {
 
         for i in 0..chunk_count {
             let raw = vec![(i % 251) as u8; 2_048 + (i % 7) * 13];
-            let raw_hash = capsule_core::capsule::manifest::blake3_digest(&raw);
+            let raw_hash = capsule::capsule::manifest::blake3_digest(&raw);
             let zstd = compress_chunk(&raw);
             cas.put_chunk_zstd(&raw_hash, &zstd)
                 .expect("write local CAS chunk");
@@ -1216,7 +1214,7 @@ run = "main.ts""#
             builder
                 .append_data(
                     &mut v3_header,
-                    capsule_core::capsule::PAYLOAD_MANIFEST_PATH,
+                    capsule::capsule::PAYLOAD_MANIFEST_PATH,
                     Cursor::new(manifest_bytes),
                 )
                 .expect("append v3 manifest");
@@ -1226,7 +1224,7 @@ run = "main.ts""#
     }
 
     fn build_native_source_lock_bytes() -> Vec<u8> {
-        let mut lock = capsule_core::ato_lock::AtoLock::default();
+        let mut lock = capsule::ato_lock::AtoLock::default();
         lock.contract.entries.insert(
             "delivery".to_string(),
             serde_json::json!({

@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue, closure_info};
-use capsule_core::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue, closure_info};
+use capsule::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 use serde_json::Value;
 

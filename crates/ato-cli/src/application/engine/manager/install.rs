@@ -123,7 +123,7 @@ impl EngineManager {
         version: &str,
         url: &str,
         sha256: &str,
-        reporter: &dyn capsule_core::CapsuleReporter,
+        reporter: &dyn capsule::CapsuleReporter,
     ) -> Result<std::path::PathBuf> {
         let _lock = self.acquire_install_lock(name, version)?;
         let output_path = self.engine_path(name, version);
@@ -273,7 +273,7 @@ pub(crate) fn install_engine_release(
     engine: &str,
     requested_version: Option<&str>,
     skip_verify: bool,
-    reporter: &dyn capsule_core::CapsuleReporter,
+    reporter: &dyn capsule::CapsuleReporter,
 ) -> Result<EngineInstallResult> {
     match engine {
         "nacelle" => install_nacelle_release(requested_version, skip_verify, reporter),
@@ -285,7 +285,7 @@ pub(crate) fn install_engine_release(
 }
 
 pub(crate) fn auto_bootstrap_nacelle(
-    reporter: &dyn capsule_core::CapsuleReporter,
+    reporter: &dyn capsule::CapsuleReporter,
 ) -> Result<EngineInstallResult> {
     let policy = resolve_auto_bootstrap_policy_from_env();
     let boundary = policy.bootstrap_boundary();
@@ -318,7 +318,7 @@ pub(crate) fn auto_bootstrap_nacelle(
 fn install_nacelle_release(
     requested_version: Option<&str>,
     skip_verify: bool,
-    reporter: &dyn capsule_core::CapsuleReporter,
+    reporter: &dyn capsule::CapsuleReporter,
 ) -> Result<EngineInstallResult> {
     install_nacelle_release_with_base_url(
         requested_version,
@@ -331,7 +331,7 @@ fn install_nacelle_release(
 fn install_nacelle_release_with_base_url(
     requested_version: Option<&str>,
     skip_verify: bool,
-    reporter: &dyn capsule_core::CapsuleReporter,
+    reporter: &dyn capsule::CapsuleReporter,
     release_base_url: &str,
 ) -> Result<EngineInstallResult> {
     let resolved_version = match requested_version {
@@ -358,16 +358,16 @@ fn install_nacelle_release_with_base_url(
 
 fn register_engine(name: &str, path: &Path, set_default_if_missing: bool) -> Result<()> {
     let _lock = acquire_config_lock()?;
-    let mut cfg = capsule_core::config::load_config()?;
+    let mut cfg = capsule::config::load_config()?;
     cfg.engines.insert(
         name.to_string(),
-        capsule_core::config::EngineRegistration {
+        capsule::config::EngineRegistration {
             path: path.display().to_string(),
         },
     );
     if set_default_if_missing && cfg.default_engine.is_none() {
         cfg.default_engine = Some(name.to_string());
     }
-    capsule_core::config::save_config(&cfg)?;
+    capsule::config::save_config(&cfg)?;
     Ok(())
 }

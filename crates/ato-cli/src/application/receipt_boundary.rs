@@ -39,11 +39,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     ExecutionReceiptDocument, ExecutionReceiptV2, ExecutionRunnerIdentity, ReceiptFailureEnvelope,
     ReceiptFailureKind, ReceiptResultClass,
 };
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::error::AtoExecutionError;
 
 use crate::application::execution_receipts::write_receipt_document_atomic;
 #[cfg(test)]
@@ -420,8 +420,8 @@ fn classify_phase(phase: &str) -> ReceiptFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::engine::execution_plan::error::AtoErrorCode;
-    use capsule_core::execution_plan::error::AtoErrorClassification;
+    use capsule::engine::execution_plan::error::AtoErrorCode;
+    use capsule::execution_plan::error::AtoErrorClassification;
 
     fn execution_error(code: AtoErrorCode) -> AtoExecutionError {
         AtoExecutionError::new(code, "fixture failure", None, None, None)

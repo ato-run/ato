@@ -20,7 +20,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
