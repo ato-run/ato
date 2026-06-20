@@ -1,4 +1,4 @@
-//! Integration tests for `ato_net::resolver` — Slice D (#299).
+//! Integration tests for `ato_netd::net::resolver` — Slice D (#299).
 //!
 //! All tests except `localhost_happy_path` use stub resolvers so they are
 //! network-free and safe in CI.
@@ -6,7 +6,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use async_trait::async_trait;
-use ato_net::resolver::{
+use ato_netd::net::resolver::{
     Chain, ResolveOptions, ResolvedRecord, Resolver, ResolverError, SystemResolver,
 };
 
@@ -228,7 +228,7 @@ async fn chain_no_fallback_on_nxdomain() {
 
 #[tokio::test]
 async fn receipt_json_roundtrip() {
-    use ato_net::receipt::{DnsResolutionRecord, NetworkReceiptEvent};
+    use ato_netd::net::receipt::{DnsResolutionRecord, NetworkReceiptEvent};
 
     let dns_record = DnsResolutionRecord {
         name: "example.com".to_string(),
@@ -283,7 +283,7 @@ fn default_config_no_doh() {
     // Without `doh` feature, DohResolver::new must return BackendUnavailable.
     #[cfg(not(feature = "doh"))]
     {
-        use ato_net::resolver::DohResolver;
+        use ato_netd::net::resolver::DohResolver;
         let err = DohResolver::new("https://1.1.1.1/dns-query").unwrap_err();
         assert!(
             matches!(err, ResolverError::BackendUnavailable(_)),

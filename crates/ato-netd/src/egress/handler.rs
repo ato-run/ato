@@ -29,7 +29,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ato_net::{
+use crate::net::{
     receipt::{EgressDecision, NetworkEgressDecision},
     resolver::{ResolveOptions, Resolver, ResolverError},
 };
@@ -404,11 +404,11 @@ fn unix_secs_now() -> u64 {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use async_trait::async_trait;
-    use ato_net::{
+    use crate::net::{
         receipt::EgressDecision,
         resolver::{ResolvedRecord, ResolverError},
     };
+    use async_trait::async_trait;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 

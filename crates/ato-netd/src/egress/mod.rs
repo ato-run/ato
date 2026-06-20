@@ -28,7 +28,7 @@ pub mod policy;
 
 use std::sync::Arc;
 
-use ato_net::{receipt::NetworkEgressDecision, resolver::Resolver};
+use crate::net::{receipt::NetworkEgressDecision, resolver::Resolver};
 use tokio::{
     net::TcpListener,
     sync::{mpsc, watch},

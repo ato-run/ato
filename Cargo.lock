@@ -399,7 +399,6 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
- "ato-net",
  "ato-protocol",
  "axoupdater",
  "axum 0.7.9",
@@ -479,32 +478,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "ato-net"
-version = "0.5.2"
-dependencies = [
- "async-trait",
- "capsule",
- "hickory-resolver",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "ato-netd"
 version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
- "ato-net",
+ "ato-protocol",
  "bytes",
- "capsule",
  "clap",
  "futures-util",
  "hex",
+ "hickory-resolver",
  "http 1.4.2",
  "http-body-util",
  "hyper 1.10.1",
