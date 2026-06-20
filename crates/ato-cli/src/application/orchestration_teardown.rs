@@ -30,7 +30,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use ato_session_core::StoredOrchestrationService;
+use capsule::state::session::StoredOrchestrationService;
 
 /// PR-5b: stop a single orchestration service record. Returns
 /// `Ok(true)` if a process or container was actually signalled,
@@ -425,8 +425,9 @@ pub(crate) fn listener_pids_on_port(port: u16) -> Result<Vec<u32>> {
 /// `docker stop` can hang waiting on the unix socket indefinitely.
 fn container_stop_cli_candidates() -> Vec<&'static str> {
     let docker_host_set = std::env::var("DOCKER_HOST").is_ok();
-    let docker_enabled =
-        std::env::var(ato_session_core::process::ATO_ENABLE_DOCKER_ENV).as_deref() == Ok("1");
+    let docker_enabled = std::env::var(capsule::state::session::process::ATO_ENABLE_DOCKER_ENV)
+        .as_deref()
+        == Ok("1");
     if docker_host_set || docker_enabled {
         vec!["podman", "docker"]
     } else {
@@ -591,7 +592,7 @@ fn try_remove_network_subprocess(network_name: &str) -> NetworkRemovalOutcome {
     // hosts where the docker CLI is installed but its daemon is down,
     // `docker network rm` hangs on the unix socket with no internal
     // timeout, blocking session teardown indefinitely.
-    for cmd in ato_session_core::process::oci_probe_runtimes() {
+    for cmd in capsule::state::session::process::oci_probe_runtimes() {
         // `--force` (podman only) disconnects any lingering endpoints before
         // removing the network. Without it, `network rm` fails with "network
         // is being used" when a container is still attached at removal time —
@@ -661,7 +662,7 @@ pub(crate) fn remove_volume_if_present(volume_name: &str) -> VolumeRemovalOutcom
     }
 
     let mut last_error = String::new();
-    for cmd in ato_session_core::process::oci_probe_runtimes() {
+    for cmd in capsule::state::session::process::oci_probe_runtimes() {
         let result = Command::new(cmd)
             .args(["volume", "rm", "--force", volume_name])
             .output();
@@ -820,7 +821,7 @@ mod tests {
         // When neither DOCKER_HOST nor ATO_ENABLE_DOCKER is set, only podman
         // is tried so we don't accidentally hang on a down Docker daemon.
         let _g1 = EnvGuard::remove("DOCKER_HOST");
-        let _g2 = EnvGuard::remove(ato_session_core::process::ATO_ENABLE_DOCKER_ENV);
+        let _g2 = EnvGuard::remove(capsule::state::session::process::ATO_ENABLE_DOCKER_ENV);
         assert_eq!(container_stop_cli_candidates(), vec!["podman"]);
     }
 
@@ -829,7 +830,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         // DOCKER_HOST means the user has an explicit endpoint — no hang risk.
         let _g1 = EnvGuard::set("DOCKER_HOST", "unix:///tmp/docker.sock");
-        let _g2 = EnvGuard::remove(ato_session_core::process::ATO_ENABLE_DOCKER_ENV);
+        let _g2 = EnvGuard::remove(capsule::state::session::process::ATO_ENABLE_DOCKER_ENV);
         assert_eq!(container_stop_cli_candidates(), vec!["podman", "docker"]);
     }
 
@@ -837,7 +838,7 @@ mod tests {
     fn stop_cli_candidates_includes_docker_when_ato_enable_docker_set() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _g1 = EnvGuard::remove("DOCKER_HOST");
-        let _g2 = EnvGuard::set(ato_session_core::process::ATO_ENABLE_DOCKER_ENV, "1");
+        let _g2 = EnvGuard::set(capsule::state::session::process::ATO_ENABLE_DOCKER_ENV, "1");
         assert_eq!(container_stop_cli_candidates(), vec!["podman", "docker"]);
     }
 
@@ -845,7 +846,7 @@ mod tests {
     fn stop_cli_candidates_podman_only_when_ato_enable_docker_not_one() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _g1 = EnvGuard::remove("DOCKER_HOST");
-        let _g2 = EnvGuard::set(ato_session_core::process::ATO_ENABLE_DOCKER_ENV, "0");
+        let _g2 = EnvGuard::set(capsule::state::session::process::ATO_ENABLE_DOCKER_ENV, "0");
         assert_eq!(container_stop_cli_candidates(), vec!["podman"]);
     }
 

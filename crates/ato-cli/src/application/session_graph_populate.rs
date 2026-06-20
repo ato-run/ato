@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 
-use ato_session_core::{
+use capsule::state::session::{
     StoredDependencyContracts, StoredDependencyProvider, StoredExecutionGraph, StoredGraphEdge,
     StoredGraphNode, StoredOrchestrationServices,
 };
@@ -480,7 +480,9 @@ pub(crate) fn append_orchestration_services_to_graph_with_deps(
 /// Sessions written before PR-5a (no `depends_on` edges, no
 /// completeness facts populated) naturally return `false` here and
 /// take the legacy teardown path.
-pub(crate) fn graph_complete_for_teardown(record: &ato_session_core::StoredSessionInfo) -> bool {
+pub(crate) fn graph_complete_for_teardown(
+    record: &capsule::state::session::StoredSessionInfo,
+) -> bool {
     let Some(graph) = record.graph.as_ref() else {
         return false;
     };
@@ -586,7 +588,7 @@ pub(crate) fn graph_complete_for_teardown(record: &ato_session_core::StoredSessi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ato_session_core::StoredDependencyProvider;
+    use capsule::state::session::StoredDependencyProvider;
     use std::path::PathBuf;
 
     fn provider(alias: &str, pid: i32) -> StoredDependencyProvider {
@@ -776,7 +778,7 @@ mod tests {
     /// orchestration manifest with service-to-provider dependencies.
     #[test]
     fn service_uses_provider_edges_round_trip() {
-        use ato_session_core::{StoredOrchestrationService, StoredOrchestrationServices};
+        use capsule::state::session::{StoredOrchestrationService, StoredOrchestrationServices};
 
         let contracts = StoredDependencyContracts {
             consumer_pid: 4242,
@@ -822,7 +824,7 @@ mod tests {
     /// orchestration manifest with inter-service dependencies.
     #[test]
     fn service_depends_on_service_edges_round_trip() {
-        use ato_session_core::{StoredOrchestrationService, StoredOrchestrationServices};
+        use capsule::state::session::{StoredOrchestrationService, StoredOrchestrationServices};
 
         let services = StoredOrchestrationServices {
             wrapper_pid: 5555,
@@ -871,10 +873,10 @@ mod tests {
     /// populated record and false for any missing facet.
     #[test]
     fn graph_complete_for_teardown_requires_every_facet() {
-        use ato_session_core::{
+        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+        use capsule::state::session::{
             StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
         };
-        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
         let provider_node = StoredGraphNode {
             kind: NODE_KIND_PROVIDER.to_string(),
@@ -1011,8 +1013,8 @@ mod tests {
     /// info, fall back to legacy.
     #[test]
     fn graph_complete_for_teardown_rejects_multi_provider_without_ordering() {
-        use ato_session_core::StoredSessionInfo;
         use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+        use capsule::state::session::StoredSessionInfo;
 
         let p1 = StoredGraphNode {
             kind: NODE_KIND_PROVIDER.to_string(),
@@ -1116,10 +1118,10 @@ mod tests {
     /// (service→provider) don't order services among themselves.
     #[test]
     fn graph_complete_for_teardown_rejects_multi_service_without_ordering() {
-        use ato_session_core::{
+        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+        use capsule::state::session::{
             StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
         };
-        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
         let s1 = StoredGraphNode {
             kind: NODE_KIND_SERVICE.to_string(),
@@ -1285,10 +1287,10 @@ mod tests {
     /// teardown handles such a session.
     #[test]
     fn graph_complete_for_teardown_rejects_provider_service_identifier_collision() {
-        use ato_session_core::{
+        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+        use capsule::state::session::{
             StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
         };
-        use capsule::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
         // Provider and service share the identifier "db".
         let provider_node = StoredGraphNode {

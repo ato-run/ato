@@ -9,11 +9,11 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::debug;
 
-use crate::process::{
+use crate::state::session::process::{
     current_user_owns_process, oci_container_is_running, pid_is_alive, process_start_time_unix_ms,
 };
-use crate::record::StoredSessionInfo;
-use crate::store::session_root;
+use crate::state::session::record::StoredSessionInfo;
+use crate::state::session::store::session_root;
 
 const DEFAULT_SOCKET_GRACE: Duration = Duration::from_secs(60);
 const DEFAULT_RUN_DIR_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -48,8 +48,8 @@ pub struct StartupSweepOptions {
 impl StartupSweepOptions {
     pub fn from_current_ato_home() -> Result<Self> {
         Ok(Self {
-            run_dir: capsule::common::paths::ato_path("run")?,
-            runs_dir: capsule::common::paths::ato_runs_dir(),
+            run_dir: crate::common::paths::ato_path("run")?,
+            runs_dir: crate::common::paths::ato_runs_dir(),
             session_root: session_root()?,
             now: SystemTime::now(),
             socket_grace: DEFAULT_SOCKET_GRACE,
@@ -924,7 +924,9 @@ mod tests {
     /// `ato app session stop`, leaking them on the leaf port.
     #[test]
     fn sweep_keeps_session_record_when_orchestration_services_pid_is_alive() {
-        use crate::record::{StoredOrchestrationService, StoredOrchestrationServices};
+        use crate::state::session::record::{
+            StoredOrchestrationService, StoredOrchestrationServices,
+        };
 
         let temp = tempdir().expect("tempdir");
         let options = options(temp.path());
@@ -1024,7 +1026,7 @@ mod tests {
     /// `stop_session` can find the provider on the next `ato` invocation.
     #[test]
     fn sweep_keeps_session_record_when_dependency_contract_pid_is_alive() {
-        use crate::record::{StoredDependencyContracts, StoredDependencyProvider};
+        use crate::state::session::record::{StoredDependencyContracts, StoredDependencyProvider};
 
         let temp = tempdir().expect("tempdir");
         let options = options(temp.path());
