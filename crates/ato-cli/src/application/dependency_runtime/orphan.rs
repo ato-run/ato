@@ -345,7 +345,7 @@ fn pid_is_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
-    ato_session_core::process::pid_is_alive(pid as u32)
+    capsule::state::session::process::pid_is_alive(pid as u32)
 }
 
 #[cfg(test)]

@@ -89,9 +89,9 @@ pub fn ensure_egress_proxy() -> Result<u16, EgressProxyError> {
 pub fn try_shutdown_if_last_session() {
     #[cfg(unix)]
     {
-        let remaining = match ato_session_core::store::session_root()
+        let remaining = match capsule::state::session::store::session_root()
             .ok()
-            .and_then(|root| ato_session_core::store::read_session_records(&root).ok())
+            .and_then(|root| capsule::state::session::store::read_session_records(&root).ok())
         {
             Some(records) => records.len(),
             None => return, // can't determine count, leave daemon running

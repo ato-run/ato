@@ -1024,7 +1024,7 @@ fn runtime_process_fixture() -> ProcessInfo {
         status: ProcessStatus::Ready,
         runtime: "source".to_string(),
         start_time: std::time::SystemTime::now(),
-        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+        os_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
             std::process::id(),
         ),
         workload_os_start_time_unix_ms: None,
@@ -1040,7 +1040,7 @@ fn runtime_process_fixture() -> ProcessInfo {
     }
 }
 
-fn stored_runtime_session_record() -> ato_session_core::StoredSessionInfo {
+fn stored_runtime_session_record() -> capsule::state::session::StoredSessionInfo {
     serde_json::from_value(serde_json::json!({
         "session_id": "runtime-session-1",
         "handle": "publisher/slug",

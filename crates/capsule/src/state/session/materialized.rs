@@ -2,10 +2,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::common::paths::ato_path;
 use anyhow::{Context, Result};
 use ato_protocol::handle::{ResolvedSnapshot, TrustState};
 use blake3::Hasher;
-use capsule::common::paths::ato_path;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 

@@ -3720,7 +3720,9 @@ where
                 status: crate::runtime::process::ProcessStatus::Ready,
                 runtime: "shell".to_string(),
                 start_time: now,
-                os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(pid),
+                os_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
+                    pid,
+                ),
                 workload_os_start_time_unix_ms: None,
                 manifest_path: Some(decision.plan.manifest_path.clone()),
                 scoped_id: run_scoped_id.clone(),
@@ -4210,9 +4212,8 @@ where
                     status: crate::runtime::process::ProcessStatus::Ready,
                     runtime: "web-static".to_string(),
                     start_time: now,
-                    os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
-                        pid,
-                    ),
+                    os_start_time_unix_ms:
+                        capsule::state::session::process::process_start_time_unix_ms(pid),
                     workload_os_start_time_unix_ms: None,
                     manifest_path: Some(decision.plan.manifest_path.clone()),
                     scoped_id: run_scoped_id.clone(),
