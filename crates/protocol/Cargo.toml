@@ -1,5 +1,5 @@
 [package]
-name = "ato-protocol"
+name = "protocol"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ repository = "https://github.com/ato-run/ato"
 dist = false
 
 [lib]
-name = "ato_protocol"
+name = "protocol"
 path = "src/lib.rs"
 
 [dependencies]

@@ -100,7 +100,7 @@ fn rebuild_helpers(manifest_dir: &Path) {
     // Watch helper crate dirs so cargo re-runs build.rs when their sources
     // change. These watches are additive: existing rerun-if-changed entries
     // for asset dist dirs above still apply.
-    for dir in ["../cli", "../nacelle", "../capsule", "../ato-protocol"] {
+    for dir in ["../cli", "../nacelle", "../capsule", "../protocol"] {
         println!("cargo:rerun-if-changed={dir}");
     }
 
