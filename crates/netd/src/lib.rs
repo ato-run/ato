@@ -2,7 +2,7 @@
 //!
 //! The library target exposes the daemon's internals so the integration
 //! tests (and the thin `main.rs` binary) can drive them. The control-plane
-//! wire types are single-sourced from `ato_protocol::net`; the runtime
+//! wire types are single-sourced from `protocol::net`; the runtime
 //! transport client and the `hickory`-backed resolver backends live in
 //! [`net`] (previously the standalone `ato-net` crate).
 

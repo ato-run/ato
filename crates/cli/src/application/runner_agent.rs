@@ -1474,20 +1474,20 @@ fn scrub_runner_tokens(text: &str) -> String {
 
 /// Parsed payload of a `CONSENT-REQUIRED: <json>` line from `ato run` (P4-A).
 ///
-/// This is the shared wire type [`ato_protocol::consent::ConsentRequiredLine`]:
-/// the full identity 5-tuple (under [`identity`](ato_protocol::consent::ConsentRequiredLine::identity))
+/// This is the shared wire type [`protocol::consent::ConsentRequiredLine`]:
+/// the full identity 5-tuple (under [`identity`](protocol::consent::ConsentRequiredLine::identity))
 /// is the decision contract; `consent_ref` is its hash
 /// (blake3(JCS(schema + 5-tuple))). The runner reports this as needs_consent
 /// and, only after the owner approves this exact `consent_ref`, calls the
 /// local `approve-execution-plan` primitive and retries.
 ///
 /// All fields are required (no serde defaults) and the line is honored only
-/// when [`is_valid`](ato_protocol::consent::ConsentRequiredLine::is_valid)
+/// when [`is_valid`](protocol::consent::ConsentRequiredLine::is_valid)
 /// holds — an incomplete or ill-formed signal must never reach the control
-/// plane. Validation lives in `ato-protocol` so the producer
+/// plane. Validation lives in `protocol` so the producer
 /// (`consent_store`), this consumer, and the desktop stderr consumer can
 /// never drift.
-pub use ato_protocol::consent::ConsentRequiredLine as ConsentRequest;
+pub use protocol::consent::ConsentRequiredLine as ConsentRequest;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChildSignal {
@@ -3997,8 +3997,8 @@ mod tests {
     }
 
     /// Regression (#661): the `CONSENT-REQUIRED:` line is the SHARED
-    /// `ato-protocol` type, so a payload serialized from
-    /// `ato_protocol::consent::ConsentRequiredLine` — exactly what the CLI
+    /// `protocol` type, so a payload serialized from
+    /// `protocol::consent::ConsentRequiredLine` — exactly what the CLI
     /// producer emits — round-trips through the runner's `parse_child_line`.
     /// This binds producer and consumer to one type + one validation: a
     /// schema bump or field rename can no longer compile on both sides while
@@ -4007,10 +4007,10 @@ mod tests {
     /// validator checks, so the two cannot disagree.
     #[test]
     fn consent_required_line_uses_shared_wire_type_end_to_end() {
-        let payload = ato_protocol::consent::ConsentRequiredLine {
+        let payload = protocol::consent::ConsentRequiredLine {
             schema: capsule::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:bind".to_string(),
-            identity: ato_protocol::consent::ConsentIdentity {
+            identity: protocol::consent::ConsentIdentity {
                 scoped_id: "community/hello-capsule".to_string(),
                 version: "0.3.0".to_string(),
                 target_label: "main".to_string(),
@@ -4833,7 +4833,7 @@ mod tests {
         ConsentRequest {
             schema: capsule::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:ref".to_string(),
-            identity: ato_protocol::consent::ConsentIdentity {
+            identity: protocol::consent::ConsentIdentity {
                 scoped_id: "community/hello-capsule".to_string(),
                 version: "0.3.0".to_string(),
                 target_label: "main".to_string(),

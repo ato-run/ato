@@ -6,7 +6,7 @@
 //! ## Why a dedicated crate
 //!
 //! `ato-cli` carries heavy dependencies (clap, tokio, axum, reqwest,
-//! wasmtime, …) that the Desktop binary should not absorb. `ato-protocol`
+//! wasmtime, …) that the Desktop binary should not absorb. `protocol`
 //! is constitutionally pure-DTO and refuses runtime/network helpers.
 //! Validation needs both the DTO **and** small OS helpers (PID alive,
 //! process start time, HTTP healthcheck) — so a shared crate sits between

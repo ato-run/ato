@@ -108,10 +108,10 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
         // skip the line and still return the unchanged E302 below (fail closed).
         if let Ok(consent_ref) = capsule::execution_plan::canonical::consent_ref(&plan.consent)
             && let Ok(machine_line) =
-                serde_json::to_string(&ato_protocol::consent::ConsentRequiredLine {
-                    schema: ato_protocol::consent::CONSENT_REQUIRED_SCHEMA.to_string(),
+                serde_json::to_string(&protocol::consent::ConsentRequiredLine {
+                    schema: protocol::consent::CONSENT_REQUIRED_SCHEMA.to_string(),
                     consent_ref,
-                    identity: ato_protocol::consent::ConsentIdentity {
+                    identity: protocol::consent::ConsentIdentity {
                         scoped_id: scoped_id.clone(),
                         version: version.clone(),
                         target_label: target_label.clone(),

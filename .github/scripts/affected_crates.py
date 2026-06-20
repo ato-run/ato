@@ -27,7 +27,7 @@ import sys
 #     terminal_e2e PTY tests) are not stable on headless CI runners and were
 #     deliberately never in the CI test list; keep that policy. A change to one
 #     of these still tests any *dependent* in the proven set (e.g. an ato-netd
-#     change runs ato-cli's tests because ato-cli depends, via ato-protocol,
+#     change runs ato-cli's tests because ato-cli depends, via protocol,
 #     on the same wire surface).
 EXCLUDE = {
     "desktop",

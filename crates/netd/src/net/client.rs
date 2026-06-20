@@ -1,7 +1,7 @@
 //! Async control-plane client for the `ato-netd` daemon.
 //!
 //! The wire types ([`Request`], [`Response`], [`StatusReport`], [`Error`],
-//! …) are single-sourced from `ato_protocol::net::control`; this module owns
+//! …) are single-sourced from `protocol::net::control`; this module owns
 //! only the Tokio transport that exchanges them over the local control socket
 //! (a Unix-domain socket on Unix, a named pipe on Windows).
 //!
@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ato_protocol::net::control::{
+use protocol::net::control::{
     BootstrapTokenInfo, Error, IngressInfo, Request, Response, ResponseResult, StatusReport,
     default_socket_path,
 };

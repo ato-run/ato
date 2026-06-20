@@ -390,17 +390,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ato-protocol"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "atomic"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1019,7 +1008,6 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "ato-protocol",
  "axum 0.7.9",
  "base64 0.22.1",
  "blake3",
@@ -1043,6 +1031,7 @@ dependencies = [
  "libc",
  "lock-draft-engine",
  "prost 0.13.5",
+ "protocol",
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
@@ -1240,7 +1229,6 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
- "ato-protocol",
  "axoupdater",
  "axum 0.7.9",
  "axum-server",
@@ -1275,6 +1263,7 @@ dependencies = [
  "openssl-sys",
  "pathdiff",
  "predicates",
+ "protocol",
  "rand 0.8.6",
  "ratatui 0.29.0",
  "rcgen",
@@ -4238,7 +4227,6 @@ version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
- "ato-protocol",
  "bytes",
  "clap",
  "futures-util",
@@ -4249,6 +4237,7 @@ dependencies = [
  "hyper 1.10.1",
  "hyper-util",
  "ipnet",
+ "protocol",
  "rand 0.8.6",
  "serde",
  "serde_json",
@@ -5130,6 +5119,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
