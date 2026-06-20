@@ -1,7 +1,7 @@
 //! Launch-preparation **bridge contract** (#581 ↔ #593).
 //!
 //! [`super::launch_preparation::LaunchPreparationPlan`] is the rich, in-process
-//! plan capsule-core produces. The control plane (ato-api) cannot import Rust,
+//! plan capsule produces. The control plane (ato-api) cannot import Rust,
 //! and does not need the full plan — it needs a small, stable, JSON-shaped
 //! result it can persist and reason about. This module defines that boundary:
 //! [`LaunchPreparationBridgeResult`], a deliberately minimal projection of the
@@ -28,7 +28,7 @@
 //! `docs/specs/launch-preparation-plan.schema.json` and
 //! `docs/specs/launch-preparation-plan.md`; the golden fixtures consumed by both
 //! this crate and ato-api live at
-//! `crates/capsule-core/tests/fixtures/launch_preparation/`.
+//! `crates/capsule/tests/fixtures/launch_preparation/`.
 
 use serde::{Deserialize, Serialize};
 
@@ -64,7 +64,7 @@ pub enum LaunchPreparationBridgeResult {
 /// Every field is a content hash, a control-plane reference, or the
 /// reference-only `PrepareSession` command. The typed-newtype ids of the source
 /// plan are flattened to `String` so the control plane has no dependency on
-/// capsule-core's id types.
+/// capsule's id types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchPreparationBridgePlan {
     pub install_revision_id: String,

@@ -1139,7 +1139,7 @@ mod tests {
         let path = bridge_fixture_path("prepared_managed_runner");
         let raw = fs::read_to_string(&path).unwrap_or_else(|e| {
             panic!(
-                "read golden {} ({e}); regenerate with `cargo test -p capsule-core --lib \
+                "read golden {} ({e}); regenerate with `cargo test -p capsule --lib \
                  regenerate_launch_preparation_bridge_golden_fixtures -- --ignored`",
                 path.display()
             )
@@ -1170,7 +1170,7 @@ mod tests {
 
     /// Regenerate the committed golden bridge fixtures. Ignored by default; run
     /// explicitly after an intentional contract change:
-    /// `cargo test -p capsule-core --lib \
+    /// `cargo test -p capsule --lib \
     ///  regenerate_launch_preparation_bridge_golden_fixtures -- --ignored`.
     #[test]
     #[ignore = "writes golden fixtures into the source tree; run explicitly"]

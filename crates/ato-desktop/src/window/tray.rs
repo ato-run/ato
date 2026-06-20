@@ -262,10 +262,7 @@ async fn stop_all_bounded(aa: gpui::AsyncApp, quit_after: bool) {
             registry.finish_stop_session(sid, result.clone());
         }
         for sid in &pending {
-            registry.finish_stop_session(
-                sid,
-                Err("stop did not confirm within 12s".to_string()),
-            );
+            registry.finish_stop_session(sid, Err("stop did not confirm within 12s".to_string()));
         }
         crate::window::card_switcher::refresh_session_snapshot(cx);
         tracing::info!(stopped, unconfirmed, "tray: stop all running apps complete");
@@ -299,11 +296,12 @@ fn confirm_quit_dialog(running: usize) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         IDOK, MB_ICONWARNING, MB_OKCANCEL, MessageBoxW,
     };
-    let body = format!(
-        "{running} running app(s) are still active.\n\nStop them and quit Ato?"
-    );
+    let body = format!("{running} running app(s) are still active.\n\nStop them and quit Ato?");
     let text: Vec<u16> = body.encode_utf16().chain(std::iter::once(0)).collect();
-    let caption: Vec<u16> = "Quit Ato".encode_utf16().chain(std::iter::once(0)).collect();
+    let caption: Vec<u16> = "Quit Ato"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // SAFETY: null owner HWND, NUL-terminated UTF-16 strings kept alive across
     // the call. MessageBoxW is a synchronous, side-effect-free modal.
     let ret = unsafe {

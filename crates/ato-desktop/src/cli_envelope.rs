@@ -31,7 +31,7 @@
 //! As of M5, `ConfigField` / `ConfigKind` are the canonical wire shape
 //! for both the CLI emitter and the Desktop consumer. As of N3 they
 //! live in the dedicated [`ato_protocol`] crate so the Desktop links
-//! only the IPC surface and not capsule-core's runtime stack. The
+//! only the IPC surface and not capsule's runtime stack. The
 //! contract test in `crates/ato-cli/src/adapters/output/diagnostics/
 //! tests.rs::maps_missing_required_env_error_to_e103_with_schema`
 //! pins the JSON shape on the CLI side; the Desktop test suite below
@@ -57,7 +57,7 @@ pub struct MissingEnvDetailsDto {
 
 // The consent-required wire shape (`ConsentRequiredDetails`) and its routing
 // discriminator (`ato_protocol::consent::CONSENT_REQUIRED_REASON`) now live
-// in `capsule-wire`, single-sourced with the CLI producer and the runner's
+// in `ato-protocol`, single-sourced with the CLI producer and the runner's
 // stdout consumer. The desktop deserializes into that shared type directly
 // (see `consent_required_details` below) instead of mirroring the tuple.
 
@@ -96,7 +96,7 @@ impl AtoCliErrorEventDto {
     /// validated [`ConsentIdentity`]. Returns `None` unless
     /// `details.reason == "execution_plan_consent_required"` AND every
     /// consent-key field is well-formed — both gates (applied by the
-    /// shared `capsule-wire` validation) protect the caller from routing
+    /// shared `ato-protocol` validation) protect the caller from routing
     /// an unrelated or unsatisfiable E302 to the consent modal. Old E302
     /// envelopes (no `reason` field, or a generic `ExecutionContractInvalid`
     /// whose `details` lacks the identity tuple) yield `None` here — the

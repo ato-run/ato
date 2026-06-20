@@ -7,7 +7,7 @@
 //!   - delete_revision safety, ipk stability, multiple profiles/apps
 //!   - Rollback edge cases, pin/unpin cycle
 //!
-//! These tests exercise the store layer from `capsule-core` directly,
+//! These tests exercise the store layer from `capsule` directly,
 //! without depending on network or nacelle.
 
 mod support;

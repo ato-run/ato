@@ -81,7 +81,7 @@ pub(crate) fn execute_gc_command(args: GcArgs) -> Result<()> {
     }
 
     // 2. revisions referenced by active sessions
-    //    We read session records from the ato-session-core session root.
+    //    We read session records from the capsule session root.
     //    Sessions that have a live PID and an `install_revision_id` are
     //    protected. Non-Unix targets fall back to protecting every record
     //    that has an `install_revision_id` (fail-safe) since we cannot
@@ -511,7 +511,7 @@ mod tests {
 
         // Write a minimal session record referencing revs[0] with our own
         // pid (guaranteed alive). We craft the JSON directly so the test
-        // does not need to depend on `capsule-wire` for struct
+        // does not need to depend on `ato-protocol` for struct
         // construction.
         let session_root = dir.path().join("desktop_sessions");
         std::fs::create_dir_all(&session_root).unwrap();

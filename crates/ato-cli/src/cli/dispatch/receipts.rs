@@ -1,6 +1,6 @@
 //! `ato receipts diff <old> <new>` — component-level execution-receipt drift.
 //!
-//! Loads two receipt JSON files, runs the pure drift differ in `capsule-core`
+//! Loads two receipt JSON files, runs the pure drift differ in `capsule`
 //! (`execution_identity::diff_receipt_documents`), and prints either a
 //! human-readable, class-grouped summary or `--json` machine output. The diff
 //! reports which nodes / edges / facet fields changed and classifies each as

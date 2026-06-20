@@ -1484,7 +1484,7 @@ fn scrub_runner_tokens(text: &str) -> String {
 /// All fields are required (no serde defaults) and the line is honored only
 /// when [`is_valid`](ato_protocol::consent::ConsentRequiredLine::is_valid)
 /// holds — an incomplete or ill-formed signal must never reach the control
-/// plane. Validation lives in `capsule-wire` so the producer
+/// plane. Validation lives in `ato-protocol` so the producer
 /// (`consent_store`), this consumer, and the desktop stderr consumer can
 /// never drift.
 pub use ato_protocol::consent::ConsentRequiredLine as ConsentRequest;
@@ -3997,7 +3997,7 @@ mod tests {
     }
 
     /// Regression (#661): the `CONSENT-REQUIRED:` line is the SHARED
-    /// `capsule-wire` type, so a payload serialized from
+    /// `ato-protocol` type, so a payload serialized from
     /// `ato_protocol::consent::ConsentRequiredLine` — exactly what the CLI
     /// producer emits — round-trips through the runner's `parse_child_line`.
     /// This binds producer and consumer to one type + one validation: a

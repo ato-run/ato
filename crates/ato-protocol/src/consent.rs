@@ -37,8 +37,8 @@ use serde::{Deserialize, Serialize};
 
 /// Schema tag baked into the `consent_ref` hash input and emitted on the
 /// `CONSENT-REQUIRED:` line. Single-sourced here so the runner's validation,
-/// the CLI's emitted line, and `capsule-core`'s `consent_ref` hash all agree
-/// on one literal. `capsule-core` re-exports this as `CONSENT_REF_SCHEMA`.
+/// the CLI's emitted line, and `capsule`'s `consent_ref` hash all agree
+/// on one literal. `capsule` re-exports this as `CONSENT_REF_SCHEMA`.
 pub const CONSENT_REQUIRED_SCHEMA: &str = "execution_plan_consent_v1";
 
 /// Discriminator written into the stderr `details.reason` field so a

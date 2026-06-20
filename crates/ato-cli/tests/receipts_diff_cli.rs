@@ -1,6 +1,6 @@
 //! Integration tests for `ato receipts diff <old> <new>` (#496).
 //!
-//! Builds synthetic v2 execution receipts via the public `capsule-core` API,
+//! Builds synthetic v2 execution receipts via the public `capsule` API,
 //! serializes them in the on-disk (bare) receipt shape, and drives the real
 //! `ato` binary. No real launch is required.
 

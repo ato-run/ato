@@ -120,7 +120,9 @@ fn start_run_dir_from_manifest() -> String {
 /// construction time via `with_initialization_script`.
 pub fn open_start_window(cx: &mut App) -> Result<()> {
     let config = crate::config::load_config();
-    cx.set_global(crate::config::LocalRegistryPort(config.registry.local_registry_port));
+    cx.set_global(crate::config::LocalRegistryPort(
+        config.registry.local_registry_port,
+    ));
     let locale = resolve_locale(config.general.language);
     let snapshot = build_start_snapshot(cx, &config, locale);
     let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());

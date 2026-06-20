@@ -5,12 +5,12 @@
 //! `executable = "sh"` entry. On Windows there is no `/bin/sh` unless the user
 //! installed Git Bash / MSYS2, so the spawn fails with `os error 2`.
 //!
-//! These helpers let both the smoke runner (capsule-core) and the run pipeline
+//! These helpers let both the smoke runner (capsule) and the run pipeline
 //! (ato-cli) detect that gap and emit a single, marker-tagged message that the
 //! ato-cli diagnostics layer maps to a typed `E213 source_build_shell_unavailable`
 //! instead of a generic E999.
 //!
-//! Living in capsule-core keeps the marker and the detection logic in one place
+//! Living in capsule keeps the marker and the detection logic in one place
 //! that ato-cli can depend on (the reverse dependency is not allowed).
 //!
 //! See issue #377.

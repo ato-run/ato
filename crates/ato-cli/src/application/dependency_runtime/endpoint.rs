@@ -10,7 +10,7 @@
 //! ("endpoint allocation race") and is acceptable for the current scope.
 //!
 //! `unix_socket = "auto"` is reserved-only in v1 (lock fail-closed in
-//! `capsule-core::foundation::dependency_contracts`); this module does not
+//! `capsule::foundation::dependency_contracts`); this module does not
 //! implement it.
 
 use std::collections::BTreeSet;
