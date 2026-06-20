@@ -320,10 +320,10 @@ fn check_import_resolvability(
             let store_path = if from.starts_with('@') {
                 let without_at = from.strip_prefix('@').unwrap_or(from);
                 let name = without_at.split(':').next().unwrap_or(without_at);
-                capsule_core::common::paths::ato_path_or_workspace_tmp("store")
+                capsule::common::paths::ato_path_or_workspace_tmp("store")
                     .join(format!("@{}", name))
             } else {
-                capsule_core::common::paths::ato_path_or_workspace_tmp("store").join(from)
+                capsule::common::paths::ato_path_or_workspace_tmp("store").join(from)
             };
 
             if !store_path.exists() {

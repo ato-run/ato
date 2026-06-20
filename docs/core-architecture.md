@@ -5,12 +5,12 @@
 The current Ato implementation is split across four public layers:
 
 - `crates/ato-cli`: the human-facing CLI surface
-- `crates/capsule-core`: manifest, lock, routing, engine bridge, and execution identity
+- `crates/capsule`: manifest, lock, routing, engine bridge, and execution identity
 - `crates/nacelle`: the machine-oriented execution engine
 - `crates/ato-desktop`: the GPUI/Wry desktop shell that consumes session metadata
 
 If you want to understand how Ato behaves today, start from `ato-cli`, then
-follow the handoff into `capsule-core`, and only then drop into `nacelle`.
+follow the handoff into `capsule`, and only then drop into `nacelle`.
 
 ## How it works
 
@@ -32,8 +32,8 @@ The current `ato run` path is:
 5. hourglass execution in `cli/commands/run.rs`
 6. install / prepare / build / verify / dry-run / execute phase logic in
    `application/pipeline/phases/run.rs`
-7. manifest or lock routing in `capsule-core/src/routing/router.rs`
-8. engine resolution in `capsule-core/src/engine/engine_impl.rs`
+7. manifest or lock routing in `capsule/src/routing/router.rs`
+8. engine resolution in `capsule/src/engine/engine_impl.rs`
 9. machine-oriented execution in `nacelle internal exec`
 
 ### Responsibility split
@@ -41,7 +41,7 @@ The current `ato run` path is:
 | Layer | Responsibility |
 |---|---|
 | `ato-cli` | user CLI, input normalization, reporter UX, orchestration |
-| `capsule-core` | manifest model, lock model, runtime routing, host isolation context, execution receipts |
+| `capsule` | manifest model, lock model, runtime routing, host isolation context, execution receipts |
 | `nacelle` | internal engine protocol, sandbox enforcement, process execution |
 | `ato-desktop` | local desktop shell, webview orchestration, session / receipt display |
 
@@ -70,7 +70,7 @@ it: they describe the launch envelope that is about to run.
 - the canonical `discover_nacelle()` path disables PATH fallback; other
   nacelle-resolution paths (`resolve_nacelle_binary`, `find_nacelle_binary`)
   may fall back to PATH as a last resort
-- `capsule-core` is the contract layer for manifest shape, routing, and
+- `capsule` is the contract layer for manifest shape, routing, and
   execution identity
 - `ato-desktop` is a consumer of session / receipt metadata, not the source of
   execution truth
@@ -81,8 +81,8 @@ References:
 - [`crates/ato-cli/src/cli/root.rs`](https://github.com/ato-run/ato/blob/main/crates/ato-cli/src/cli/root.rs)
 - [`crates/ato-cli/src/cli/commands/run.rs`](https://github.com/ato-run/ato/blob/main/crates/ato-cli/src/cli/commands/run.rs)
 - [`crates/ato-cli/src/application/pipeline/phases/run.rs`](https://github.com/ato-run/ato/blob/main/crates/ato-cli/src/application/pipeline/phases/run.rs)
-- [`crates/capsule-core/src/routing/router.rs`](https://github.com/ato-run/ato/blob/main/crates/capsule-core/src/routing/router.rs)
-- [`crates/capsule-core/src/engine/engine_impl.rs`](https://github.com/ato-run/ato/blob/main/crates/capsule-core/src/engine/engine_impl.rs)
+- [`crates/capsule/src/routing/router.rs`](https://github.com/ato-run/ato/blob/main/crates/capsule/src/routing/router.rs)
+- [`crates/capsule/src/engine/engine_impl.rs`](https://github.com/ato-run/ato/blob/main/crates/capsule/src/engine/engine_impl.rs)
 - [`crates/nacelle/src/cli/mod.rs`](https://github.com/ato-run/ato/blob/main/crates/nacelle/src/cli/mod.rs)
 
 ## Design Notes

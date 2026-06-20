@@ -10,7 +10,7 @@
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule::common::paths::ato_path_or_workspace_tmp;
 
 // Share the timeout policy with `ato-desktop` so client and server budgets stay
 // in lockstep (#69). The lib crate has no published library target, so we

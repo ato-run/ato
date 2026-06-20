@@ -2,10 +2,10 @@ use anyhow::Error as AnyhowError;
 use serde::Serialize;
 use serde_json::Value;
 
-use capsule_core::execution_plan::error::{
+use capsule::execution_plan::error::{
     AtoExecutionError, CleanupActionRecord, CleanupStatus, ManifestSuggestion,
 };
-use capsule_core::interactive_resolution::InteractiveResolutionEnvelope;
+use capsule::interactive_resolution::InteractiveResolutionEnvelope;
 
 use crate::application::pipeline::cleanup::PipelineAttemptError;
 
@@ -199,8 +199,8 @@ fn legacy_message_fallback(err: &AnyhowError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::AtoError;
-    use capsule_core::execution_plan::error::AtoExecutionError;
+    use capsule::AtoError;
+    use capsule::execution_plan::error::AtoExecutionError;
 
     /// `try_emit_from_anyhow` keeps its existing contract: gated on
     /// `--json`. Without it, no envelope is emitted (regardless of error

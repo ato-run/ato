@@ -14,7 +14,7 @@ use rand::RngCore;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-use capsule_core::types::IngressConfig;
+use capsule::types::IngressConfig;
 
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -504,12 +504,12 @@ fn filter_resp_headers(headers: &HeaderMap) -> HeaderMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::types::IngressRoute;
+    use capsule::types::IngressRoute;
     use std::collections::BTreeMap;
 
     fn sample_ingress_config() -> IngressConfig {
         IngressConfig {
-            mode: capsule_core::types::IngressMode::Path,
+            mode: capsule::types::IngressMode::Path,
             routes: BTreeMap::from([
                 (
                     "web".to_string(),

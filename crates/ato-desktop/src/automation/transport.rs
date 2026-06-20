@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule::common::paths::ato_path_or_workspace_tmp;
 use serde_json::Value;
 use tracing::{debug, error};
 

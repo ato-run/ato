@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-use capsule_core::CapsuleReporter;
-use capsule_core::types::identity::public_key_to_did;
+use capsule::CapsuleReporter;
+use capsule::types::identity::public_key_to_did;
 
 #[derive(Debug)]
 pub struct VerifyArgs {

@@ -36,16 +36,16 @@ use crate::reporters::CliReporter;
 use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 use crate::runtime::tree as runtime_tree;
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::error::AtoExecutionError;
 #[cfg(test)]
-use capsule_core::execution_plan::guard::ExecutorKind;
-use capsule_core::input_resolver::{
+use capsule::execution_plan::guard::ExecutorKind;
+use capsule::input_resolver::{
     ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
-use capsule_core::lifecycle::LifecycleEvent;
-use capsule_core::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
-use capsule_core::types::CapsuleManifest;
-use capsule_core::{CapsuleReporter, router};
+use capsule::lifecycle::LifecycleEvent;
+use capsule::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
+use capsule::types::CapsuleManifest;
+use capsule::{CapsuleReporter, router};
 
 mod background;
 pub(crate) mod preflight;
@@ -123,7 +123,7 @@ pub struct RunArgs {
     /// claims before the relaunch preflight resolves them — these are *inputs*
     /// (which grant/binding to try), never proof; the resolver still checks the
     /// DB registry before admission. Empty for `ato run` and `ato launch <ipk>`.
-    pub capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
+    pub capsule_launch_inputs: Vec<capsule::installed_state::LaunchConditionInput>,
     pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
 
@@ -163,7 +163,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 /// based on the `"ok"` field). Non-zero only on genuine collection failures.
 async fn execute_plan_only(args: RunArgs) -> Result<()> {
     use crate::application::preflight::collect_aggregate_requirements;
-    use capsule_core::router::ExecutionProfile;
+    use capsule::router::ExecutionProfile;
 
     if args.registry.is_some() {
         anyhow::bail!(
@@ -309,8 +309,8 @@ async fn prepare_capsule_target(
 
     debug!(extract_dir = %extract_dir.display(), "Capsule extracted");
 
-    let cas_provider = capsule_core::capsule::CasProvider::from_env();
-    capsule_core::capsule::unpack_payload_from_capsule_root_with_provider(
+    let cas_provider = capsule::capsule::CasProvider::from_env();
+    capsule::capsule::unpack_payload_from_capsule_root_with_provider(
         &extract_dir,
         &extract_dir,
         &cas_provider,
@@ -688,7 +688,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
     fn preflight_native_sandbox(
         &self,
         nacelle_override: Option<PathBuf>,
-        plan: &capsule_core::router::ManifestData,
+        plan: &capsule::router::ManifestData,
         prepared: &run_phase::PreparedRunContext,
         effective_cwd: Option<&Path>,
         reporter: &Arc<CliReporter>,
@@ -699,7 +699,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
     async fn complete_background_source_process(
         &self,
         process: crate::executors::source::CapsuleProcess,
-        plan: &capsule_core::router::ManifestData,
+        plan: &capsule::router::ManifestData,
         runtime: String,
         scoped_id: Option<String>,
         is_one_shot: bool,
@@ -759,7 +759,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
 
     async fn notify_web_endpoint(
         &self,
-        plan: &capsule_core::router::ManifestData,
+        plan: &capsule::router::ManifestData,
         reporter: &Arc<CliReporter>,
     ) -> Result<()> {
         notify_web_endpoint(plan, reporter).await
@@ -767,7 +767,7 @@ impl run_phase::ConsumerRunExecuteHooks for RunExecuteHooks {
 
     fn process_runtime_label(
         &self,
-        plan: &capsule_core::router::ManifestData,
+        plan: &capsule::router::ManifestData,
         dangerous_skip_permissions: bool,
         compatibility_host_mode: CompatibilityHostMode,
     ) -> String {
@@ -1462,14 +1462,14 @@ async fn run_execute_phase(
 
 #[cfg(test)]
 async fn reroute_auto_provisioned_execution(
-    decision: capsule_core::router::RuntimeDecision,
+    decision: capsule::router::RuntimeDecision,
     launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
     prepared: &run_phase::PreparedRunContext,
     reporter: Arc<CliReporter>,
     preview_mode: bool,
     shadow_manifest_path: &Path,
 ) -> Result<(
-    capsule_core::router::RuntimeDecision,
+    capsule::router::RuntimeDecision,
     crate::executors::launch_context::RuntimeLaunchContext,
     run_phase::PreparedRunContext,
 )> {
@@ -1551,7 +1551,7 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
     let normalized =
         futures::executor::block_on(normalize_run_target_after_install(&args, &resolved, None))?;
     let decision = if let Some(authoritative_input) = normalized.authoritative_input.as_ref() {
-        let mut decision = capsule_core::router::route_lock_with_state_overrides(
+        let mut decision = capsule::router::route_lock_with_state_overrides(
             &authoritative_input.lock_path,
             &authoritative_input.lock,
             &authoritative_input.materialization_root,
@@ -1566,9 +1566,9 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
         decision
     } else {
         let manifest = if preview_mode {
-            capsule_core::manifest::load_manifest_with_validation_mode(
+            capsule::manifest::load_manifest_with_validation_mode(
                 &manifest_path,
-                capsule_core::types::ValidationMode::Preview,
+                capsule::types::ValidationMode::Preview,
             )?
             .model
         } else {
@@ -1576,22 +1576,22 @@ fn execute_watch_mode(args: RunArgs) -> Result<()> {
         };
         let state_source_overrides =
             resolve_state_source_overrides(&manifest, &args.state_bindings)?;
-        capsule_core::router::route_manifest_with_state_overrides_and_validation_mode(
+        capsule::router::route_manifest_with_state_overrides_and_validation_mode(
             &manifest_path,
             router::ExecutionProfile::Dev,
             args.target_label.as_deref(),
             state_source_overrides,
             if preview_mode {
-                capsule_core::types::ValidationMode::Preview
+                capsule::types::ValidationMode::Preview
             } else {
-                capsule_core::types::ValidationMode::Strict
+                capsule::types::ValidationMode::Strict
             },
         )?
     };
     if decision.plan.is_orchestration_mode() {
         anyhow::bail!("--watch is not supported for orchestration mode");
     }
-    if matches!(decision.kind, capsule_core::router::RuntimeKind::Oci) {
+    if matches!(decision.kind, capsule::router::RuntimeKind::Oci) {
         anyhow::bail!("--watch is not supported for runtime=oci");
     }
 
@@ -1647,11 +1647,11 @@ mod tests {
     use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
     use crate::registry::store::RegistryStore;
     use crate::reporters::CliReporter;
-    use capsule_core::ato_lock::{self, AtoLock};
-    use capsule_core::execution_plan::guard::ExecutorKind;
-    use capsule_core::lifecycle::LifecycleEvent;
-    use capsule_core::router::{self, ExecutionProfile, ManifestData};
-    use capsule_core::types::CapsuleManifest;
+    use capsule::ato_lock::{self, AtoLock};
+    use capsule::execution_plan::guard::ExecutorKind;
+    use capsule::lifecycle::LifecycleEvent;
+    use capsule::router::{self, ExecutionProfile, ManifestData};
+    use capsule::types::CapsuleManifest;
     use serde_json::{Value, json};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1981,7 +1981,7 @@ run = "node server.js""#,
             ExecutionProfile::Dev,
             Some("app"),
             state_overrides.clone(),
-            capsule_core::types::ValidationMode::Strict,
+            capsule::types::ValidationMode::Strict,
         )
         .expect("route original manifest");
         let mount = InjectedMount {
@@ -1998,7 +1998,7 @@ run = "node server.js""#,
             bridge_manifest: crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
                 toml::Value::Table(toml::map::Map::new()),
             ),
-            validation_mode: capsule_core::types::ValidationMode::Strict,
+            validation_mode: capsule::types::ValidationMode::Strict,
             engine_override_declared: false,
             compatibility_legacy_lock: None,
             install_profile_key: None,
@@ -2343,11 +2343,11 @@ run = "main.py""#,
             .authoritative_input
             .as_ref()
             .expect("authoritative input");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &authoritative.lock_path,
             &authoritative.lock,
             &authoritative.workspace_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -2455,7 +2455,7 @@ run = "node index.js"
     #[test]
     fn process_runtime_label_preserves_runtime_under_host_fallback() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             toml::from_str(
                 r#"
                 schema_version = "0.3"
@@ -2707,7 +2707,7 @@ target = "/var/lib/app"
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             toml::Value::Table(manifest),
             manifest_dir.join("capsule.toml"),
             manifest_dir,

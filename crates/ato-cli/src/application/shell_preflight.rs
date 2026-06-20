@@ -14,7 +14,7 @@
 //! Unix shell.
 //!
 //! The shell-detection logic and the diagnostics marker live in
-//! [`capsule_core::shell_support`] so the smoke runner (capsule-core) and this
+//! [`capsule::shell_support`] so the smoke runner (capsule-core) and this
 //! run pipeline share one implementation; this module is the thin run-pipeline
 //! wrapper. See issue #377.
 
@@ -22,7 +22,7 @@ use anyhow::Result;
 
 /// Re-export of the shared marker so the diagnostics layer can match it via
 /// `crate::application::shell_preflight::SOURCE_BUILD_SHELL_UNAVAILABLE_MARKER`.
-pub(crate) use capsule_core::shell_support::SOURCE_BUILD_SHELL_UNAVAILABLE_MARKER;
+pub(crate) use capsule::shell_support::SOURCE_BUILD_SHELL_UNAVAILABLE_MARKER;
 
 /// Ensure a host POSIX shell is available before running a shell-script
 /// lifecycle hook. Returns a typed, actionable error when it is not.
@@ -31,7 +31,7 @@ pub(crate) use capsule_core::shell_support::SOURCE_BUILD_SHELL_UNAVAILABLE_MARKE
 /// existing behavior is preserved.
 pub(crate) fn ensure_host_posix_shell(command: &str) -> Result<()> {
     ensure_host_posix_shell_inner(
-        capsule_core::shell_support::host_posix_shell_available(),
+        capsule::shell_support::host_posix_shell_available(),
         command,
         std::env::consts::OS,
     )
@@ -53,7 +53,7 @@ fn ensure_host_posix_shell_inner(shell_available: bool, command: &str, os: &str)
 pub(crate) fn source_build_shell_unavailable_error(command: &str, os: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "{}",
-        capsule_core::shell_support::source_build_shell_unavailable_message(command, os)
+        capsule::shell_support::source_build_shell_unavailable_message(command, os)
     )
 }
 

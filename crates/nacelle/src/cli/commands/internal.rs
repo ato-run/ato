@@ -786,7 +786,7 @@ async fn readiness_http_ok(http_get: &str, port: u16) -> bool {
     let client = reqwest::Client::new();
     let fut = async {
         let resp = client.get(url).send().await.ok()?;
-        // Keep in sync with capsule_core::common::readiness::
+        // Keep in sync with capsule::common::readiness::
         // http_status_indicates_ready (nacelle does not depend on
         // capsule-core): ready iff 200 <= status < 400, Kubernetes
         // `httpGet` probe semantics.

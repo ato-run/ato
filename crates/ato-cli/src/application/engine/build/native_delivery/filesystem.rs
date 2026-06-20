@@ -452,13 +452,13 @@ pub(crate) fn append_tar_entry(
 }
 
 pub(crate) fn build_capsule_archive(
-    manifest: &capsule_core::types::CapsuleManifest,
+    manifest: &capsule::types::CapsuleManifest,
     payload_tar_zst: &[u8],
     payload_tar: &[u8],
     capsule_lock_json: Option<&str>,
 ) -> Result<Vec<u8>> {
     let (_distribution_manifest, manifest_toml_bytes) =
-        capsule_core::packers::payload::build_distribution_manifest(manifest, payload_tar)
+        capsule::packers::payload::build_distribution_manifest(manifest, payload_tar)
             .map_err(anyhow::Error::from)
             .context("Failed to build distribution metadata for native capsule")?;
     let mut out = Vec::new();
@@ -612,13 +612,11 @@ pub(crate) fn digest_dir_name(digest: &str) -> Result<String> {
 }
 
 pub(crate) fn fetches_root() -> Result<PathBuf> {
-    Ok(capsule_core::common::paths::ato_path_or_workspace_tmp(
-        "fetches",
-    ))
+    Ok(capsule::common::paths::ato_path_or_workspace_tmp("fetches"))
 }
 
 pub(crate) fn derived_apps_root(scoped_id: &str, parent_digest: &str) -> Result<PathBuf> {
-    let mut root = capsule_core::common::paths::ato_path_or_workspace_tmp("apps");
+    let mut root = capsule::common::paths::ato_path_or_workspace_tmp("apps");
     for segment in scoped_id.split('/') {
         root.push(segment.trim());
     }

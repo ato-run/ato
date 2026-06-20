@@ -7,10 +7,8 @@ use ato_protocol::placement::{
     PlacementProviderId, PlacementProviderKind,
 };
 use ato_session_core::{StoredSessionInfo, read_session_records, session_root};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{
-    InstallInstanceStore, derive_install_profile_key,
-};
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::install_lifecycle::{InstallInstanceStore, derive_install_profile_key};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct LaunchSessionRequest {
@@ -1082,7 +1080,7 @@ fn read_default_profile_for_ref(
     instances_root: &std::path::Path,
     capsule_ref: &str,
 ) -> Option<RuntimeInstallProfileResponse> {
-    use capsule_core::foundation::install_lifecycle::ids::{
+    use capsule::foundation::install_lifecycle::ids::{
         InstalledAppId, ProfileId, path_safe_app_id,
     };
 

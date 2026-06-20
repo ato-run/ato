@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::Result;
-use capsule_core::execution_plan::{
+use capsule::execution_plan::{
     derive::{self, PlatformSnapshot},
     guard::{self, RuntimeGuardMode},
 };
-use capsule_core::lock_runtime::LockCompilerOverlay;
+use capsule::lock_runtime::LockCompilerOverlay;
 use serde::Serialize;
 
 use crate::application::producer_input::{

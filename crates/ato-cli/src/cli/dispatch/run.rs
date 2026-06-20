@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::handle::normalize_capsule_handle;
+use capsule::CapsuleReporter;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::handle::normalize_capsule_handle;
 
 #[cfg(test)]
 pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as RunPhaseBoundary;
@@ -115,7 +115,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
                 crate::adapters::runtime::executors::oci_compose_runner::execute_compose_run(
                     &project_dir,
                     reporter,
-                    capsule_core::execution_plan::model::OciPolicyMode::Strict,
+                    capsule::execution_plan::model::OciPolicyMode::Strict,
                     &[],
                 ),
             )
@@ -135,7 +135,7 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
                 crate::adapters::runtime::executors::install_sh_runner::execute_install_sh_run(
                     &project_dir,
                     reporter,
-                    capsule_core::execution_plan::model::OciPolicyMode::Strict,
+                    capsule::execution_plan::model::OciPolicyMode::Strict,
                     &[],
                 ),
             )
@@ -387,7 +387,7 @@ fn fingerprint_target(raw_target: &str, target: Option<&str>) -> String {
 }
 
 fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
-    capsule_core::common::paths::ato_path(format!("env/targets/{fingerprint}.env"))
+    capsule::common::paths::ato_path(format!("env/targets/{fingerprint}.env"))
         .context("failed to resolve ato home for env cache")
 }
 
@@ -555,7 +555,7 @@ fn provider_shorthand_kind(target: &str) -> Option<&'static str> {
 mod tests {
     use std::path::PathBuf;
 
-    use capsule_core::ato_lock::{self, AtoLock};
+    use capsule::ato_lock::{self, AtoLock};
     use serde_json::json;
 
     use super::{

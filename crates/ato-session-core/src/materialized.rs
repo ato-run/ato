@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ato_protocol::handle::{ResolvedSnapshot, TrustState};
 use blake3::Hasher;
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 

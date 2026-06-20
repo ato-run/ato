@@ -1144,7 +1144,7 @@ pub(crate) fn describe_launch_error(err: &LaunchError) -> String {
             requirements,
             ..
         } => {
-            use capsule_core::interactive_resolution::InteractiveResolutionKind;
+            use capsule::interactive_resolution::InteractiveResolutionKind;
             let consent_count = requirements
                 .iter()
                 .filter(|e| matches!(e.kind, InteractiveResolutionKind::ConsentRequired { .. }))

@@ -21,7 +21,7 @@
 use std::fs;
 use std::path::Path;
 
-use capsule_core::ccp::{
+use capsule::ccp::{
     CcpCompat, CcpHeader, HasSchemaVersion, SCHEMA_VERSION, classify_schema_version,
     enforce_ccp_compat,
 };

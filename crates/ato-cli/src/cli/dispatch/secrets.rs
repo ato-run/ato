@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use capsule_core::common::paths::nacelle_home_dir;
+use capsule::common::paths::nacelle_home_dir;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 
 use age::secrecy::ExposeSecret;

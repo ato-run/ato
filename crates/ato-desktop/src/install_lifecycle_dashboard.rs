@@ -22,8 +22,8 @@
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::install_lifecycle::{
     self, InstallInstanceStore, InstalledAppId, ProfileId, ids::InstallRevisionId,
 };
 use serde::Serialize;
@@ -651,7 +651,7 @@ fn build_profile_item(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{
+    use capsule::foundation::install_lifecycle::{
         AppRecord, LaunchProfile, ids::InstallRevisionId,
     };
     use serial_test::serial;

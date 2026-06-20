@@ -187,7 +187,7 @@ pub(crate) fn path_is_within_outputs(path: &Path, outputs: &[OutputSpec]) -> boo
 
 pub(crate) fn dynamic_ignored_roots(working_dir: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir()
+    if let Ok(ato_home) = capsule::common::paths::nacelle_home_dir()
         && let Ok(relative) = ato_home.strip_prefix(working_dir)
         && !relative.as_os_str().is_empty()
     {

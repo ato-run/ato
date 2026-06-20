@@ -23,16 +23,16 @@ use crate::project::init::detect::{
 use crate::project::init::recipe::{ProjectInfo, project_info_from_detection};
 use crate::reporters::CliReporter;
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
-use capsule_core::ato_lock::{
+use capsule::CapsuleReporter;
+use capsule::ato_lock::{
     self, AtoLock, UnresolvedReason, UnresolvedValue, closure_info, normalize_lock_closure,
 };
-use capsule_core::common::paths::{ato_cache_dir, ato_runs_dir, path_contains_workspace_state_dir};
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::importer::{
+use capsule::common::paths::{ato_cache_dir, ato_runs_dir, path_contains_workspace_state_dir};
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::importer::{
     ImportedEvidence, probe_ecosystem_lockfile_evidence, probe_native_framework_evidence,
 };
-use capsule_core::input_resolver::{
+use capsule::input_resolver::{
     ATO_LOCK_FILE_NAME, ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript,
     ResolvedSourceOnly, SingleScriptLanguage,
 };
@@ -830,7 +830,7 @@ pub(crate) fn materialize_run_from_compatibility_manifest(
 /// that exercise this exact split.
 fn manifest_identity_matches_canonical_lock(
     manifest: &toml::Value,
-    lock: &capsule_core::ato_lock::AtoLock,
+    lock: &capsule::ato_lock::AtoLock,
 ) -> bool {
     use serde_json::Value as Json;
     let table = match manifest.as_table() {
@@ -1923,9 +1923,9 @@ fn maybe_promote_native_build_closure(result: &mut SourceInferenceResult) -> Res
 fn detect_promotable_native_build_plan(project_root: &Path) -> Result<Option<NativeBuildPlan>> {
     let manifest_path = project_root.join("capsule.toml");
     if manifest_path.is_file() {
-        let decision = capsule_core::router::route_manifest(
+        let decision = capsule::router::route_manifest(
             &manifest_path,
-            capsule_core::router::ExecutionProfile::Release,
+            capsule::router::ExecutionProfile::Release,
             None,
         )?;
         if let Some(plan) = detect_build_strategy_with_legacy_fallback(&decision.plan)? {
@@ -2185,19 +2185,19 @@ fn infer_source_native_delivery_plan(
 
 fn detect_framework_artifact_relative(
     project_root: &Path,
-    framework: capsule_core::importer::ImporterId,
+    framework: capsule::importer::ImporterId,
 ) -> Option<PathBuf> {
     let roots = match framework {
-        capsule_core::importer::ImporterId::Tauri => vec![
+        capsule::importer::ImporterId::Tauri => vec![
             project_root.join("src-tauri/target/release/bundle"),
             project_root.join("src-tauri/target/release"),
         ],
-        capsule_core::importer::ImporterId::Electron => vec![
+        capsule::importer::ImporterId::Electron => vec![
             project_root.join("dist"),
             project_root.join("out"),
             project_root.join("release"),
         ],
-        capsule_core::importer::ImporterId::Wails => {
+        capsule::importer::ImporterId::Wails => {
             vec![project_root.join("build/bin"), project_root.join("dist")]
         }
         _ => Vec::new(),
@@ -2243,7 +2243,7 @@ fn should_walk_source_entry(project_root: &Path, path: &Path) -> bool {
 fn default_framework_artifact_relative(
     project_root: &Path,
     detected: &DetectedProject,
-    framework: capsule_core::importer::ImporterId,
+    framework: capsule::importer::ImporterId,
 ) -> PathBuf {
     let file_name = match std::env::consts::OS {
         "windows" => format!("{}.exe", detected.name),
@@ -2252,7 +2252,7 @@ fn default_framework_artifact_relative(
     };
 
     match framework {
-        capsule_core::importer::ImporterId::Tauri => match std::env::consts::OS {
+        capsule::importer::ImporterId::Tauri => match std::env::consts::OS {
             "windows" => PathBuf::from(format!("src-tauri/target/release/{}", file_name)),
             "linux" => PathBuf::from(format!(
                 "src-tauri/target/release/bundle/appimage/{}",
@@ -2263,12 +2263,10 @@ fn default_framework_artifact_relative(
                 file_name
             )),
         },
-        capsule_core::importer::ImporterId::Electron => {
+        capsule::importer::ImporterId::Electron => {
             default_electron_artifact_relative(project_root, detected, &file_name)
         }
-        capsule_core::importer::ImporterId::Wails => {
-            PathBuf::from(format!("build/bin/{}", file_name))
-        }
+        capsule::importer::ImporterId::Wails => PathBuf::from(format!("build/bin/{}", file_name)),
         _ => PathBuf::from(file_name),
     }
 }
@@ -2391,15 +2389,14 @@ fn normalized_delivery_arch() -> &'static str {
 fn infer_source_native_build_command(
     project_root: &Path,
     detected: &DetectedProject,
-    framework: capsule_core::importer::ImporterId,
+    framework: capsule::importer::ImporterId,
 ) -> Option<NativeBuildCommand> {
     if let Some(node) = detected.node.as_ref() {
-        if matches!(framework, capsule_core::importer::ImporterId::Tauri) && node.scripts.has_tauri
-        {
+        if matches!(framework, capsule::importer::ImporterId::Tauri) && node.scripts.has_tauri {
             return Some(tauri_build_command(project_root, node.package_manager));
         }
 
-        if matches!(framework, capsule_core::importer::ImporterId::Electron)
+        if matches!(framework, capsule::importer::ImporterId::Electron)
             && let Some(script_name) = preferred_electron_packaged_build_script(project_root)
         {
             return Some(node_script_build_command(
@@ -2419,7 +2416,7 @@ fn infer_source_native_build_command(
     }
 
     match framework {
-        capsule_core::importer::ImporterId::Tauri
+        capsule::importer::ImporterId::Tauri
             if project_root.join("src-tauri/Cargo.toml").is_file() =>
         {
             Some(NativeBuildCommand {
@@ -2433,7 +2430,7 @@ fn infer_source_native_build_command(
                 working_dir: project_root.to_path_buf(),
             })
         }
-        capsule_core::importer::ImporterId::Wails if project_root.join("wails.json").is_file() => {
+        capsule::importer::ImporterId::Wails if project_root.join("wails.json").is_file() => {
             Some(NativeBuildCommand {
                 program: "wails".to_string(),
                 args: vec!["build".to_string()],
@@ -2554,7 +2551,7 @@ fn node_script_command(
 
 fn source_native_closure_complete(
     project_root: &Path,
-    framework: capsule_core::importer::ImporterId,
+    framework: capsule::importer::ImporterId,
     plan: &NativeBuildPlan,
 ) -> bool {
     if plan.build_command.is_none() {
@@ -2565,24 +2562,24 @@ fn source_native_closure_complete(
         .map(|evidence| evidence.importer_id)
         .collect::<Vec<_>>();
 
-    let has = |importer: capsule_core::importer::ImporterId| observed.contains(&importer);
+    let has = |importer: capsule::importer::ImporterId| observed.contains(&importer);
     let has_node_lock = [
-        capsule_core::importer::ImporterId::Npm,
-        capsule_core::importer::ImporterId::Pnpm,
-        capsule_core::importer::ImporterId::Yarn,
-        capsule_core::importer::ImporterId::Bun,
-        capsule_core::importer::ImporterId::Deno,
+        capsule::importer::ImporterId::Npm,
+        capsule::importer::ImporterId::Pnpm,
+        capsule::importer::ImporterId::Yarn,
+        capsule::importer::ImporterId::Bun,
+        capsule::importer::ImporterId::Deno,
     ]
     .into_iter()
     .any(has);
 
     match framework {
-        capsule_core::importer::ImporterId::Tauri => {
-            has(capsule_core::importer::ImporterId::Cargo) && has_node_lock
+        capsule::importer::ImporterId::Tauri => {
+            has(capsule::importer::ImporterId::Cargo) && has_node_lock
         }
-        capsule_core::importer::ImporterId::Electron => has_node_lock,
-        capsule_core::importer::ImporterId::Wails => {
-            has(capsule_core::importer::ImporterId::Go)
+        capsule::importer::ImporterId::Electron => has_node_lock,
+        capsule::importer::ImporterId::Wails => {
+            has(capsule::importer::ImporterId::Go)
                 && (!project_root.join("package.json").exists()
                     && !project_root.join("deno.json").exists()
                     && !project_root.join("deno.jsonc").exists()
@@ -4338,8 +4335,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    use capsule_core::ato_lock::{self, AtoLock};
-    use capsule_core::input_resolver::{
+    use capsule::ato_lock::{self, AtoLock};
+    use capsule::input_resolver::{
         ResolveInputOptions, ResolvedInput, ResolvedSingleScript, ResolvedSourceOnly,
         SingleScriptLanguage, resolve_authoritative_input,
     };
@@ -4834,11 +4831,11 @@ mod tests {
 
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -5006,11 +5003,11 @@ mod tests {
                 .expect("read deno json"),
         )
         .expect("parse deno json");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -5084,11 +5081,11 @@ mod tests {
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -5112,11 +5109,11 @@ mod tests {
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -5143,7 +5140,7 @@ mod tests {
 
         let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
             .expect("materialize workspace");
-        let lock = capsule_core::ato_lock::load_unvalidated_from_path(&materialized.lock_path)
+        let lock = capsule::ato_lock::load_unvalidated_from_path(&materialized.lock_path)
             .expect("read materialized lock");
 
         // LEIP picks index.js (conventional Node.js entry) — process is resolved.
@@ -5749,7 +5746,7 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         let command = infer_source_native_build_command(
             dir.path(),
             &detected,
-            capsule_core::importer::ImporterId::Tauri,
+            capsule::importer::ImporterId::Tauri,
         )
         .expect("build command");
 
@@ -5854,7 +5851,7 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         let command = infer_source_native_build_command(
             dir.path(),
             &detected,
-            capsule_core::importer::ImporterId::Electron,
+            capsule::importer::ImporterId::Electron,
         )
         .expect("build command");
 
@@ -6116,11 +6113,11 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -6159,11 +6156,11 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -6189,11 +6186,11 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -6218,11 +6215,11 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         };
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -6401,11 +6398,11 @@ print('ok')
 
         let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
             .expect("materialize run");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");
@@ -6418,7 +6415,7 @@ print('ok')
                 .typed_manifest()
                 .expect("typed manifest")
                 .capsule_type,
-            capsule_core::types::CapsuleType::Job
+            capsule::types::CapsuleType::Job
         );
         assert_eq!(
             routed.plan.execution_entrypoint().as_deref(),
@@ -6462,11 +6459,11 @@ print('ok')
                 .expect("read deno json"),
         )
         .expect("parse deno json");
-        let routed = capsule_core::router::route_lock(
+        let routed = capsule::router::route_lock(
             &materialized.lock_path,
             &materialized.lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Dev,
+            capsule::router::ExecutionProfile::Dev,
             None,
         )
         .expect("route lock");

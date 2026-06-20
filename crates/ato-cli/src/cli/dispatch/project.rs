@@ -492,7 +492,7 @@ fn toml_string_array(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::ato_lock::AtoLock;
+    use capsule::ato_lock::AtoLock;
     use serde_json::json;
 
     #[test]

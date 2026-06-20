@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 use serde::Serialize;
 
 use crate::reporters::CliReporter;
@@ -30,7 +30,7 @@ pub fn execute(
         .build()
         .context("failed to create ato lock runtime")?;
     let core_reporter: Arc<dyn CapsuleReporter + 'static> = reporter.clone();
-    let lockfile_path = runtime.block_on(capsule_core::lockfile::generate_and_write_lockfile(
+    let lockfile_path = runtime.block_on(capsule::lockfile::generate_and_write_lockfile(
         &manifest_path,
         &manifest_raw,
         &manifest_text,

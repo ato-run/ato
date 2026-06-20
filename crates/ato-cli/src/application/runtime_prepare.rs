@@ -20,8 +20,8 @@ use std::process::Command;
 
 use anyhow::{Result, anyhow};
 
-use capsule_core::podman::{self, ATO_PODMAN_MACHINE_NAME, PodmanResolveError, ResolvedPodman};
-use capsule_core::runtime_setup::{InstallPhase, InstallStrategy, ToolKind};
+use capsule::podman::{self, ATO_PODMAN_MACHINE_NAME, PodmanResolveError, ResolvedPodman};
+use capsule::runtime_setup::{InstallPhase, InstallStrategy, ToolKind};
 
 use crate::adapters::runtime::podman_machine::{PodmanMachine, parse_machine_entries};
 use crate::application::podman_install::{
@@ -378,11 +378,10 @@ impl PrepareEnv for SystemPrepareEnv {
     }
 
     fn install_ato_managed_podman(&self) -> Result<(), PodmanInstallError> {
-        let tools_dir = capsule_core::common::paths::ato_tools_dir().map_err(|err| {
-            PodmanInstallError::Extract {
+        let tools_dir =
+            capsule::common::paths::ato_tools_dir().map_err(|err| PodmanInstallError::Extract {
                 message: err.to_string(),
-            }
-        })?;
+            })?;
         std::fs::create_dir_all(&tools_dir).map_err(|err| PodmanInstallError::Extract {
             message: err.to_string(),
         })?;
@@ -993,7 +992,7 @@ fn machine_already_stopped(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::podman::PodmanBinarySource;
+    use capsule::podman::PodmanBinarySource;
     use std::cell::RefCell;
     use std::collections::HashMap;
 

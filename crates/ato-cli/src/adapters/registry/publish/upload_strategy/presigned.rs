@@ -4,8 +4,8 @@ use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use capsule_core::common::paths::nacelle_home_dir;
-use capsule_core::types::signing::StoredKey;
+use capsule::common::paths::nacelle_home_dir;
+use capsule::types::signing::StoredKey;
 
 use super::{
     FinalizeUploadRequest, StartUploadRequest, TransferArtifactRequest, TransferArtifactResponse,

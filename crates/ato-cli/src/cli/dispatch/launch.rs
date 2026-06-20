@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::install_lifecycle::{
     InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
 };
-use capsule_core::installed_state::{
+use capsule::installed_state::{
     InstalledStateDb, LaunchConditionInput, LaunchConditionInputValue, parse_capsule_launch_input,
 };
 
@@ -423,7 +423,7 @@ fn find_profile_by_key(
     InstalledAppId,
     ProfileId,
     String,
-    capsule_core::foundation::install_lifecycle::InstallRevisionId,
+    capsule::foundation::install_lifecycle::InstallRevisionId,
 )> {
     let apps = store.list_installed_apps().ok()?;
     for app_id in &apps {
@@ -499,7 +499,7 @@ fn canonical_scoped_handle(capsule_location: &str) -> String {
     } else {
         format!("capsule://{capsule_location}")
     };
-    match capsule_core::handle::normalize_capsule_handle(&with_scheme) {
+    match capsule::handle::normalize_capsule_handle(&with_scheme) {
         Ok(canonical) => canonical
             .to_cli_ref()
             .map(|cli_ref| {
@@ -564,7 +564,7 @@ fn read_profile_launch_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{
+    use capsule::foundation::install_lifecycle::{
         AppRecord, InstallInstanceStore, InstallRevisionId, InstalledAppId, LaunchProfile,
         ProfileId,
     };
@@ -718,7 +718,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn read_profile_launch_config_warns_for_env_refs() {
-        use capsule_core::foundation::install_lifecycle::LaunchProfile;
+        use capsule::foundation::install_lifecycle::LaunchProfile;
         let (_dir, store) = make_store();
         let app_id = InstalledAppId::new("app_envref_warning_test_12345678");
         let profile_id = ProfileId::new("default");

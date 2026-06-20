@@ -1,6 +1,6 @@
 //! Application-level glue for the A2 trust layer.
 //!
-//! Wraps `capsule_core::attestation` with the bits the CLI side needs:
+//! Wraps `capsule::attestation` with the bits the CLI side needs:
 //! key loading from the `ATO_ATTESTATION_KEY` env var, builder identity
 //! defaulting, and a one-call `issue_freeze_attestation` that the
 //! freeze-on-miss path can invoke without rebuilding the predicate.
@@ -9,12 +9,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use capsule_core::attestation::{
+use capsule::attestation::{
     AttestationEnvelope, AttestationKey, AttestationPredicate, AttestationStatement,
     AttestationSubject, FreezeMetadata, PolicySnapshot, StoredAttestationKey, sign_envelope,
     store_envelope,
 };
-use capsule_core::blob::TreeHash;
+use capsule::blob::TreeHash;
 
 const ENV_ATTESTATION_KEY: &str = "ATO_ATTESTATION_KEY";
 const ENV_BUILDER_ID: &str = "ATO_ATTESTATION_BUILDER_ID";
@@ -103,7 +103,7 @@ fn default_builder_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::attestation::{TrustRoot, generate_keypair, verify_envelope};
+    use capsule::attestation::{TrustRoot, generate_keypair, verify_envelope};
     use std::ffi::OsStr;
     use tempfile::TempDir;
 

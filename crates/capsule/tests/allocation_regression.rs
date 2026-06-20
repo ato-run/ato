@@ -1,8 +1,8 @@
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use capsule_core::lockfile::ensure_lockfile;
-use capsule_core::reporter::{CapsuleReporter, NoOpReporter};
+use capsule::lockfile::ensure_lockfile;
+use capsule::reporter::{CapsuleReporter, NoOpReporter};
 use tempfile::TempDir;
 
 #[global_allocator]

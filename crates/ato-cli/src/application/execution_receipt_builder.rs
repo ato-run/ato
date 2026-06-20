@@ -1,22 +1,22 @@
 use anyhow::{Context, Result};
 #[cfg(test)]
-use capsule_core::engine::execution_graph::ExecutionGraph;
-use capsule_core::engine::execution_graph::{
+use capsule::engine::execution_graph::ExecutionGraph;
+use capsule::engine::execution_graph::{
     ExecutionGraphBuilder, GraphHostInput, GraphMaterializationSeedInput, GraphPolicyInput,
     GraphPreflightInput, GraphReceiptSeedInput, LaunchGraphBundle, LaunchGraphBundleInput,
 };
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     ExecutionIdentityInput, ExecutionIdentityInputV2, ExecutionReceipt, ExecutionReceiptDocument,
     ExecutionReceiptV2, ExecutionRunnerIdentity, FilesystemIdentityBuilder, FilesystemIdentityV2,
     GraphCompleteness, GraphReceipt, LaunchIdentity, ObservationScope, OciProviderReceiptEvidence,
     PolicyIdentity, PolicyIdentityBuilder, PolicyIdentityV2, Tracked,
 };
-use capsule_core::execution_plan::model::ExecutionPlan;
-use capsule_core::launch_spec::derive_launch_spec;
-use capsule_core::lockfile::manifest_external_capsule_dependencies;
-use capsule_core::router::ManifestData;
-use capsule_core::runtime::oci::{OciContainerRequest, OciPortSpec};
-use capsule_core::types::{
+use capsule::execution_plan::model::ExecutionPlan;
+use capsule::launch_spec::derive_launch_spec;
+use capsule::lockfile::manifest_external_capsule_dependencies;
+use capsule::router::ManifestData;
+use capsule::runtime::oci::{OciContainerRequest, OciPortSpec};
+use capsule::types::{
     OciLaunchEnvelope, OciPolicyEnforcementLevel, OciPolicyEnforcementMode, OciPolicyEnvelope,
     OciProviderKind, OciProviderMode, OciProviderSemantics, OciProviderSubstrate,
 };
@@ -241,8 +241,8 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
     // wiring is what pins the entry point future waves will use to
     // source these facets from the graph instead of the V2 observer
     // pipeline.
-    let placeholder_reproducibility = capsule_core::execution_identity::ReproducibilityIdentity {
-        class: capsule_core::execution_identity::ReproducibilityClass::BestEffort,
+    let placeholder_reproducibility = capsule::execution_identity::ReproducibilityIdentity {
+        class: capsule::execution_identity::ReproducibilityClass::BestEffort,
         causes: Vec::new(),
     };
     let mut identity_input = ExecutionIdentityInputV2::new(
@@ -392,7 +392,7 @@ fn declared_oci_provider_projections(
 /// evidence with typed enforcement status. Split out so it can be tested without
 /// a full `ManifestData`/`ExecutionPlan` fixture.
 fn oci_provider_projection_evidence(
-    oci: &capsule_core::execution_plan::model::OciPolicyEnvelope,
+    oci: &capsule::execution_plan::model::OciPolicyEnvelope,
     cmd: Vec<String>,
     env: std::collections::HashMap<String, String>,
     working_dir: Option<String>,
@@ -569,7 +569,7 @@ fn extend_to_resolved_graph(
     filesystem_observed: &FilesystemIdentityV2,
     policy_observed: &PolicyIdentityV2,
 ) -> ExecutionGraph {
-    use capsule_core::engine::execution_graph::identity_labels;
+    use capsule::engine::execution_graph::identity_labels;
     let mut resolved = declared_graph.clone();
     for (key, value) in [
         (
@@ -718,7 +718,7 @@ fn mark_oci_launch_receipt_failed(
     receipt: ExecutionReceiptV2,
     error: &anyhow::Error,
 ) -> ExecutionReceiptV2 {
-    use capsule_core::execution_identity::{ReceiptFailureKind, ReceiptResultClass};
+    use capsule::execution_identity::{ReceiptFailureKind, ReceiptResultClass};
     match crate::application::receipt_boundary::build_failure_envelope(error) {
         Some(envelope) => {
             let class = match envelope.kind {
@@ -746,14 +746,12 @@ mod graph_identity_tests {
     //! that the receipt-builder helpers route the right facts into the
     //! right domain.
     use super::{build_declared_graph, extend_to_resolved_graph};
-    use capsule_core::engine::execution_graph::{
-        CanonicalGraphDomain, ExecutionGraph, identity_labels,
-    };
-    use capsule_core::execution_identity::{
+    use capsule::engine::execution_graph::{CanonicalGraphDomain, ExecutionGraph, identity_labels};
+    use capsule::execution_identity::{
         CaseSensitivity, FilesystemIdentityV2, FilesystemSemantics, PolicyIdentityV2,
         SymlinkPolicy, TmpPolicy, Tracked,
     };
-    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use capsule::router::{ExecutionProfile, ManifestData};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -761,7 +759,7 @@ mod graph_identity_tests {
         let parsed: toml::Value = toml::from_str(manifest_text).expect("parse manifest");
         let workspace_root = PathBuf::from("/tmp/synthetic-workspace");
         let manifest_path = workspace_root.join("capsule.toml");
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             parsed,
             manifest_path,
             workspace_root,
@@ -1095,7 +1093,7 @@ contract = "service@1"
         let session_metadata = crate::app_control::session::ExecutionReceiptSessionMetadata {
             execution_id: "blake3:fixture-execution".to_string(),
             schema_version:
-                capsule_core::execution_identity::EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
+                capsule::execution_identity::EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
             declared_execution_id: Some(declared.clone()),
             resolved_execution_id: Some(resolved.clone()),
             observed_execution_id: None,
@@ -1116,19 +1114,19 @@ contract = "service@1"
 }
 
 struct ClassificationInputsV2 {
-    dependencies: capsule_core::execution_identity::DependencyIdentity,
-    runtime: capsule_core::execution_identity::RuntimeIdentity,
-    environment: capsule_core::execution_identity::EnvironmentIdentity,
-    filesystem: capsule_core::execution_identity::FilesystemIdentity,
+    dependencies: capsule::execution_identity::DependencyIdentity,
+    runtime: capsule::execution_identity::RuntimeIdentity,
+    environment: capsule::execution_identity::EnvironmentIdentity,
+    filesystem: capsule::execution_identity::FilesystemIdentity,
 }
 
 fn classification_inputs_from_v2(
-    dependencies: &capsule_core::execution_identity::DependencyIdentityV2,
-    runtime: &capsule_core::execution_identity::RuntimeIdentityV2,
-    environment: &capsule_core::execution_identity::EnvironmentIdentityV2,
-    filesystem: &capsule_core::execution_identity::FilesystemIdentityV2,
+    dependencies: &capsule::execution_identity::DependencyIdentityV2,
+    runtime: &capsule::execution_identity::RuntimeIdentityV2,
+    environment: &capsule::execution_identity::EnvironmentIdentityV2,
+    filesystem: &capsule::execution_identity::FilesystemIdentityV2,
 ) -> ClassificationInputsV2 {
-    use capsule_core::execution_identity::{
+    use capsule::execution_identity::{
         DependencyIdentity, EnvironmentIdentity, FilesystemIdentity, RuntimeIdentity,
         TrackingStatus,
     };
@@ -1136,8 +1134,8 @@ fn classification_inputs_from_v2(
     let env_closure_status = if environment.entries.iter().all(|entry| {
         matches!(
             entry.normalization,
-            capsule_core::execution_identity::ValueNormalizationStatus::Normalized
-                | capsule_core::execution_identity::ValueNormalizationStatus::NoHostPath
+            capsule::execution_identity::ValueNormalizationStatus::Normalized
+                | capsule::execution_identity::ValueNormalizationStatus::NoHostPath
         )
     }) && !environment.entries.is_empty()
     {
@@ -1256,8 +1254,8 @@ fn classification_inputs_from_v2(
 #[cfg(test)]
 mod oci_provider_evidence_tests {
     use super::oci_provider_projection_evidence;
-    use capsule_core::execution_identity::{OciEnforcementStatus, OciImageDigestStatus};
-    use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
+    use capsule::execution_identity::{OciEnforcementStatus, OciImageDigestStatus};
+    use capsule::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
     use std::collections::HashMap;
 
     fn envelope(egress: Vec<String>) -> OciPolicyEnvelope {
@@ -1336,7 +1334,7 @@ mod oci_provider_evidence_tests {
 
 #[cfg(test)]
 mod oci_launch_receipt_tests {
-    use capsule_core::execution_identity::{
+    use capsule::execution_identity::{
         CaseSensitivity, DependencyIdentityV2, EnvironmentIdentityV2, EnvironmentMode,
         ExecutionIdentityInputV2, ExecutionReceiptDocument, ExecutionReceiptV2, FdLayoutIdentity,
         FilesystemIdentityV2, FilesystemSemantics, GraphCompleteness, GraphCompletenessReason,
@@ -1591,8 +1589,8 @@ mod oci_launch_receipt_tests {
     /// real atomic write/read-back path so the on-disk receipt is asserted too.
     #[test]
     fn strict_gate_failure_marks_provider_evidence_receipt_as_failed() {
-        use capsule_core::execution_identity::ReceiptResultClass;
-        use capsule_core::execution_plan::error::AtoExecutionError;
+        use capsule::execution_identity::ReceiptResultClass;
+        use capsule::execution_plan::error::AtoExecutionError;
 
         // A receipt shaped exactly like build_oci_launch_receipt's output: v2,
         // provider projections present, graph Partial, no observed id. The real
@@ -1680,7 +1678,7 @@ mod oci_launch_receipt_tests {
         use crate::application::execution_receipts::{
             mark_v2_receipt_observed_at, read_receipt_document_at, write_receipt_document_atomic_at,
         };
-        use capsule_core::execution_identity::{
+        use capsule::execution_identity::{
             ObservationScope, ObservedLaunchEnvelope, ObservedRuntimeEvidence, RuntimeObservation,
         };
 

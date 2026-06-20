@@ -183,7 +183,7 @@ async fn run_daemon(override_path: Option<PathBuf>) -> ExitCode {
 
     // Derive ATO_HOME from capsule-core's path resolver so that
     // `ato-netd` and every other ato binary agree on the root.
-    let ato_home = match capsule_core::common::paths::nacelle_home_dir() {
+    let ato_home = match capsule::common::paths::nacelle_home_dir() {
         Ok(p) => p,
         Err(err) => {
             eprintln!("ato-netd: cannot resolve ATO_HOME: {err}");

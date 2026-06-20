@@ -7,7 +7,7 @@
 //! session exits (normal or cleanup).
 //!
 //! `ATO_HOME` defaults to `~/.ato` when the environment variable is not set.
-//! All reads and writes use [`capsule_core::common::paths::ato_path_or_workspace_tmp`],
+//! All reads and writes use [`capsule::common::paths::ato_path_or_workspace_tmp`],
 //! so the path is always ATO_HOME-correct and never hardcoded to `~/.ato`.
 //!
 //! This lets `ato ps` show running OCI sessions and `ato stop --all` stop
@@ -132,7 +132,7 @@ pub struct OciSessionStore {
 
 impl OciSessionStore {
     pub fn new() -> Result<Self> {
-        let sessions_dir = capsule_core::common::paths::ato_path_or_workspace_tmp(OCI_SESSIONS_DIR);
+        let sessions_dir = capsule::common::paths::ato_path_or_workspace_tmp(OCI_SESSIONS_DIR);
         if !sessions_dir.exists() {
             fs::create_dir_all(&sessions_dir).with_context(|| {
                 format!(

@@ -6,11 +6,11 @@ use crate::proc_util::CommandNoWindowExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use capsule_core::capsule::manifest::blake3_digest;
-use capsule_core::common::paths::ato_path;
-use capsule_core::contract::manifest::load_manifest;
-use capsule_core::router::{ExecutionProfile, route_manifest};
-use capsule_core::types::{CapsuleManifest, ValidationMode};
+use capsule::capsule::manifest::blake3_digest;
+use capsule::common::paths::ato_path;
+use capsule::contract::manifest::load_manifest;
+use capsule::router::{ExecutionProfile, route_manifest};
+use capsule::types::{CapsuleManifest, ValidationMode};
 use serde::Serialize;
 
 use crate::state::{GuestRoute, LocalManifestRoute, ManifestSource};

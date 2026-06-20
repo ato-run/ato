@@ -13,8 +13,8 @@ use ato_cli::dependency_materializer::{
     PlatformTriple, RuntimeSelection, SessionDependencyMaterializer,
 };
 use ato_cli::projection::project_payload;
-use capsule_core::blob::hash_tree;
-use capsule_core::common::store::BlobAddress;
+use capsule::blob::hash_tree;
+use capsule::common::store::BlobAddress;
 use serial_test::serial;
 
 mod support;

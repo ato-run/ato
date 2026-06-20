@@ -100,7 +100,7 @@ pub mod config;
 // Schema/tolerance for the Capsule Control Protocol. Originally lived in
 // capsule-core (M4); extracted to `capsule-wire` (N2) so `ato-desktop` can
 // link the wire surface without pulling in capsule-core's runtime deps.
-// Re-exported here so existing `capsule_core::ccp::*` paths in the CLI
+// Re-exported here so existing `capsule::ccp::*` paths in the CLI
 // keep working unchanged. See `docs/monorepo-consolidation-plan.md` §N2.
 pub use ato_protocol::ccp;
 pub use config::bootstrap;

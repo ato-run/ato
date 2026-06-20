@@ -1,8 +1,8 @@
 //! Tests for strict OCI enforcement (#501).
 
 use super::*;
-use capsule_core::execution_identity::OciEnforcementStatus;
-use capsule_core::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
+use capsule::execution_identity::OciEnforcementStatus;
+use capsule::execution_plan::model::{OciPolicyEnvelope, OciPolicyMode};
 
 /// A stand-in graph-derived resolved execution id (value-free) for tests.
 const RID: Option<&str> = Some("graph-resolved-exec-id-test");
@@ -156,7 +156,7 @@ fn envelope(egress: Vec<String>, mode: OciPolicyMode) -> OciPolicyEnvelope {
 #[test]
 fn facts_derive_network_required_from_egress_allowlist() {
     use crate::application::provider_projection::oci::OciProjectionPlan;
-    use capsule_core::runtime::oci::OciContainerRequest;
+    use capsule::runtime::oci::OciContainerRequest;
     use std::collections::HashMap;
 
     let request = OciContainerRequest {
