@@ -307,12 +307,12 @@ fn gc_protects_active_session_revision() {
             continue;
         }
         let raw = std::fs::read_to_string(&path).unwrap();
-        let record: ato_session_core::record::StoredSessionInfo =
+        let record: capsule::state::session::record::StoredSessionInfo =
             serde_json::from_str(&raw).unwrap();
         if let Some(rev_id) = &record.install_revision_id
             && !rev_id.is_empty()
             && let Some(pid) = nix_pid_u32(record.pid)
-            && ato_session_core::process::pid_is_alive(pid)
+            && capsule::state::session::process::pid_is_alive(pid)
         {
             protected.insert(rev_id.clone());
         }

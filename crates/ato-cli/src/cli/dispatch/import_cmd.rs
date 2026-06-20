@@ -1161,11 +1161,10 @@ fn run_shadow_workspace_keep_alive(
         owner_process_start_time_unix_ms: owner_pid
             .try_into()
             .ok()
-            .and_then(ato_session_core::process::process_start_time_unix_ms),
+            .and_then(capsule::state::session::process::process_start_time_unix_ms),
         ato_run_pid: pid,
-        ato_run_process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
-            child.id(),
-        ),
+        ato_run_process_start_time_unix_ms:
+            capsule::state::session::process::process_start_time_unix_ms(child.id()),
         process_group_ids: observed_pgids.into_iter().collect(),
         workload_pids,
         primary_port: Some(actual_port),
@@ -1590,7 +1589,7 @@ fn probe_workload_pids(root_pid: i32, shadow_dir: &Path) -> Vec<ImportPreviewWor
             pid: row.pid,
             start_time_unix_ms: u32::try_from(row.pid)
                 .ok()
-                .and_then(ato_session_core::process::process_start_time_unix_ms),
+                .and_then(capsule::state::session::process::process_start_time_unix_ms),
         })
         .collect()
 }

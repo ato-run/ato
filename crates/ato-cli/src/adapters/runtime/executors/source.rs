@@ -1303,7 +1303,7 @@ fn nacelle_manifest_is_stale(metadata: &std::fs::Metadata, now: SystemTime, ttl:
 fn current_nacelle_manifest_owner() -> NacelleManifestOwner {
     NacelleManifestOwner {
         pid: std::process::id(),
-        start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+        start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
             std::process::id(),
         ),
     }
@@ -1339,7 +1339,7 @@ fn nacelle_manifest_owner_is_alive(path: &Path) -> bool {
     let Some(owner) = parse_nacelle_manifest_owner(path) else {
         return false;
     };
-    if owner.pid == 0 || !ato_session_core::process::pid_is_alive(owner.pid) {
+    if owner.pid == 0 || !capsule::state::session::process::pid_is_alive(owner.pid) {
         return false;
     }
 
@@ -1347,7 +1347,7 @@ fn nacelle_manifest_owner_is_alive(path: &Path) -> bool {
         return false;
     };
 
-    ato_session_core::process::process_start_time_unix_ms(owner.pid)
+    capsule::state::session::process::process_start_time_unix_ms(owner.pid)
         .is_some_and(|live_start_time| live_start_time == expected_start_time)
 }
 
@@ -1596,7 +1596,7 @@ pub(crate) fn spawn_host_lifecycle_events(
                 // probe covers Windows too — the previous unix-only check
                 // left this loop polling a dead pid's port for the full
                 // timeout there.
-                if !ato_session_core::process::pid_is_alive(pid) {
+                if !capsule::state::session::process::pid_is_alive(pid) {
                     break;
                 }
                 if std::net::TcpStream::connect_timeout(

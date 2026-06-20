@@ -53,7 +53,6 @@ gpui-inspector = ["gpui-component/inspector"]
 [dependencies]
 anyhow = "1.0"
 ato-net = { path = "../ato-net", version = "0.5.2" }
-ato-session-core = { path = "../ato-session-core", version = "0.1.0" }
 base64 = "0.22"
 blake3 = "1"
 include_dir = "0.7"

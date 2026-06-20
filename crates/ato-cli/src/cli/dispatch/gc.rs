@@ -165,7 +165,7 @@ pub(crate) fn execute_gc_command(args: GcArgs) -> Result<()> {
 ///   so the destructive operation must stop.
 ///
 /// We deliberately do **not** delegate to
-/// `ato_session_core::store::read_session_records`: that function is
+/// `capsule::state::session::store::read_session_records`: that function is
 /// tuned for the Desktop fast path, which tolerates a single corrupt
 /// record (warn-level log) so the rest of the session list can still
 /// render. GC has the opposite trade-off — a single unreadable record
@@ -173,7 +173,7 @@ pub(crate) fn execute_gc_command(args: GcArgs) -> Result<()> {
 fn collect_active_session_revisions(
     protected: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
-    let session_root = match ato_session_core::store::session_root() {
+    let session_root = match capsule::state::session::store::session_root() {
         Ok(p) => p,
         // Cannot resolve a path at all (no HOME, etc.). There is nothing
         // to read; treat as "no active sessions known to this host".
@@ -204,7 +204,7 @@ fn collect_active_session_revisions(
                 return Err(err).with_context(|| format!("read session record {}", path.display()));
             }
         };
-        let record: ato_session_core::record::StoredSessionInfo = serde_json::from_str(&raw)
+        let record: capsule::state::session::record::StoredSessionInfo = serde_json::from_str(&raw)
             .with_context(|| format!("parse session record {}", path.display()))?;
         let rev_id = match &record.install_revision_id {
             Some(id) if !id.is_empty() => id,
@@ -219,24 +219,24 @@ fn collect_active_session_revisions(
 
 /// Live-process check for an `ato gc` session record.
 ///
-/// On Unix this delegates to `ato_session_core::process::pid_is_alive`,
+/// On Unix this delegates to `capsule::state::session::process::pid_is_alive`,
 /// which treats `kill(pid, 0) == EPERM` as alive — the process exists, we
 /// just lack permission to signal it. Only `ESRCH` (no such process)
 /// counts as dead. On non-Unix targets we cannot reliably probe liveness
 /// from inside this binary, so we *fail safe*: a record with an
 /// `install_revision_id` is treated as live so its revision survives GC.
-fn session_record_is_alive(record: &ato_session_core::record::StoredSessionInfo) -> bool {
+fn session_record_is_alive(record: &capsule::state::session::record::StoredSessionInfo) -> bool {
     #[cfg(unix)]
     {
         if let Some(pid) = nix_pid(record.pid)
-            && ato_session_core::process::pid_is_alive(pid)
+            && capsule::state::session::process::pid_is_alive(pid)
         {
             return true;
         }
         if let Some(svcs) = &record.orchestration_services {
             for svc in &svcs.services {
                 if let Some(pid) = svc.local_pid.and_then(nix_pid)
-                    && ato_session_core::process::pid_is_alive(pid)
+                    && capsule::state::session::process::pid_is_alive(pid)
                 {
                     return true;
                 }

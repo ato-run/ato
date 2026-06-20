@@ -14,12 +14,6 @@ use anyhow::{Context, Result};
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
 use ato_protocol::placement::{PlacementFacets, PlacementProviderKind};
-pub(crate) use ato_session_core::{
-    GuestSessionDisplay, MaterializedLaunchRecord, ServiceBackgroundDisplay,
-    StoredDependencyContracts, StoredDependencyProvider, StoredOrchestrationService,
-    StoredOrchestrationServices, StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay,
-    launch_cache_root, write_materialized_launch_record_atomic, write_session_record_atomic,
-};
 use capsule::ato_lock;
 use capsule::handle::{
     CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
@@ -27,6 +21,12 @@ use capsule::handle::{
 };
 use capsule::launch_spec::derive_launch_spec;
 use capsule::routing::input_resolver::ATO_LOCK_FILE_NAME;
+pub(crate) use capsule::state::session::{
+    GuestSessionDisplay, MaterializedLaunchRecord, ServiceBackgroundDisplay,
+    StoredDependencyContracts, StoredDependencyProvider, StoredOrchestrationService,
+    StoredOrchestrationServices, StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay,
+    launch_cache_root, write_materialized_launch_record_atomic, write_session_record_atomic,
+};
 use serde::Serialize;
 
 use crate::ProviderToolchain;
@@ -394,7 +394,7 @@ impl SessionInfo {
             .map(|duration| duration.as_millis() as u64)
             .unwrap_or(0);
         MaterializedLaunchRecord {
-            schema_version: ato_session_core::MATERIALIZED_LAUNCH_RECORD_SCHEMA_VERSION,
+            schema_version: capsule::state::session::MATERIALIZED_LAUNCH_RECORD_SCHEMA_VERSION,
             launch_key: launch_key.to_string(),
             last_session_id: Some(self.session_id.clone()),
             handle: self.handle.clone(),
@@ -407,7 +407,7 @@ impl SessionInfo {
             target_label: self.target_label.clone(),
             manifest_path: self.manifest_path.clone(),
             app_root: app_root.display().to_string(),
-            platform: ato_session_core::current_platform_tag(),
+            platform: capsule::state::session::current_platform_tag(),
             launch_digest: launch_digest.to_string(),
             run_config_hash: run_config_hash.to_string(),
             created_at_unix_ms,
@@ -622,7 +622,7 @@ pub fn start_session(
         )
     } else if let Some(record_path) = from_materialized_record {
         let path = PathBuf::from(record_path);
-        let record = ato_session_core::read_materialized_launch_record(&path)?;
+        let record = capsule::state::session::read_materialized_launch_record(&path)?;
         if record.handle != handle && record.normalized_handle != handle {
             anyhow::bail!(
                 "materialized launch record {} belongs to '{}' not '{}'",
@@ -775,7 +775,9 @@ pub(super) fn start_guest_session(
         status: ProcessStatus::Starting,
         runtime: SESSION_RUNTIME.to_string(),
         start_time: SystemTime::now(),
-        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(child.id()),
+        os_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
+            child.id(),
+        ),
         workload_os_start_time_unix_ms: None,
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
@@ -1123,12 +1125,12 @@ pub(super) fn start_runtime_session(
             .clone()
             .unwrap_or_else(|| "source".to_string()),
         start_time: SystemTime::now(),
-        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+        os_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
             runtime_process.child.id(),
         ),
         workload_os_start_time_unix_ms: runtime_process
             .workload_pid
-            .and_then(ato_session_core::process::process_start_time_unix_ms),
+            .and_then(capsule::state::session::process::process_start_time_unix_ms),
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
         target_label: Some(plan.selected_target_label().to_string()),
@@ -1523,7 +1525,7 @@ pub(super) fn start_orchestration_session_in_process(
         start_time: SystemTime::now(),
         os_start_time_unix_ms: u32::try_from(leaf_local_pid)
             .ok()
-            .and_then(ato_session_core::process::process_start_time_unix_ms),
+            .and_then(capsule::state::session::process::process_start_time_unix_ms),
         workload_os_start_time_unix_ms: None,
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
@@ -1785,7 +1787,9 @@ pub(super) fn start_orchestration_session_supervisor(
             .clone()
             .unwrap_or_else(|| "source".to_string()),
         start_time: SystemTime::now(),
-        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(child.id()),
+        os_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
+            child.id(),
+        ),
         workload_os_start_time_unix_ms: None,
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
@@ -3008,7 +3012,7 @@ fn dependency_teardown_plan_from_graph(
 }
 
 fn graph_provider_aliases_in_reverse_topological_order(
-    graph: &ato_session_core::StoredExecutionGraph,
+    graph: &capsule::state::session::StoredExecutionGraph,
 ) -> Vec<String> {
     let provider_aliases = graph
         .nodes
@@ -3388,27 +3392,27 @@ fn clear_std_handle_inheritance() {
 }
 
 fn desktop_parent_process_matches(parent_pid: u32, expected_start_time: Option<u64>) -> bool {
-    if parent_pid == 0 || !ato_session_core::process::pid_is_alive(parent_pid) {
+    if parent_pid == 0 || !capsule::state::session::process::pid_is_alive(parent_pid) {
         return false;
     }
 
     match expected_start_time {
-        Some(expected) => ato_session_core::process::process_start_time_unix_ms(parent_pid)
+        Some(expected) => capsule::state::session::process::process_start_time_unix_ms(parent_pid)
             .map(|actual| actual == expected)
             .unwrap_or(false),
         None => true,
     }
 }
 
-/// Thin wrapper around `ato_session_core::session_root` so existing
+/// Thin wrapper around `capsule::state::session::session_root` so existing
 /// CLI call sites keep using the unprefixed name. The shared helper
 /// honors the same `ATO_DESKTOP_SESSION_ROOT` env override, which is
 /// what the Desktop fast-path tests rely on.
 pub(crate) fn session_root() -> Result<PathBuf> {
-    ato_session_core::session_root()
+    capsule::state::session::session_root()
 }
 
-/// Writes the record atomically (temp + rename) via `ato_session_core`
+/// Writes the record atomically (temp + rename) via `capsule::state::session`
 /// so the Desktop direct-read fast path can never observe a partial
 /// record. Replaces the legacy `fs::write` call (RFC v0.3 §9.4
 /// prerequisite for Phase 1).
@@ -4064,7 +4068,7 @@ mod tests {
             graph_completeness: None,
             reproducibility_class: None,
             orchestration_services: None,
-            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
             process_start_time_unix_ms: None,
             installed_app_id: None,
@@ -4111,7 +4115,7 @@ mod tests {
         let parsed_graph = parsed.graph.expect("graph present after round-trip");
         assert_eq!(
             parsed_graph.schema_version,
-            ato_session_core::StoredExecutionGraph::SCHEMA_VERSION
+            capsule::state::session::StoredExecutionGraph::SCHEMA_VERSION
         );
         assert_eq!(parsed_graph.nodes.len(), 2);
         assert_eq!(parsed_graph.edges.len(), 2);
@@ -4171,10 +4175,10 @@ mod tests {
                     },
                 ],
             }),
-            graph: Some(ato_session_core::StoredExecutionGraph {
-                schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+            graph: Some(capsule::state::session::StoredExecutionGraph {
+                schema_version: capsule::state::session::StoredExecutionGraph::SCHEMA_VERSION,
                 nodes: vec![
-                    ato_session_core::StoredGraphNode {
+                    capsule::state::session::StoredGraphNode {
                         kind: NODE_KIND_PROVIDER.to_string(),
                         identifier: "cache".to_string(),
                         pid: None,
@@ -4184,7 +4188,7 @@ mod tests {
                         capability: None,
                         metadata: std::collections::BTreeMap::new(),
                     },
-                    ato_session_core::StoredGraphNode {
+                    capsule::state::session::StoredGraphNode {
                         kind: NODE_KIND_PROVIDER.to_string(),
                         identifier: "db".to_string(),
                         pid: None,
@@ -4196,13 +4200,13 @@ mod tests {
                     },
                 ],
                 edges: vec![
-                    ato_session_core::StoredGraphEdge {
+                    capsule::state::session::StoredGraphEdge {
                         source: "cache".to_string(),
                         target: "output://cache".to_string(),
                         kind: EDGE_KIND_PROVIDES.to_string(),
                         metadata: std::collections::BTreeMap::new(),
                     },
-                    ato_session_core::StoredGraphEdge {
+                    capsule::state::session::StoredGraphEdge {
                         source: "db".to_string(),
                         target: "output://db".to_string(),
                         kind: EDGE_KIND_PROVIDES.to_string(),
@@ -4218,7 +4222,7 @@ mod tests {
             graph_completeness: None,
             reproducibility_class: None,
             orchestration_services: None,
-            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
             installed_app_id: None,
@@ -4301,7 +4305,7 @@ mod tests {
             graph_completeness: None,
             reproducibility_class: None,
             orchestration_services: None,
-            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
             installed_app_id: None,
@@ -4380,9 +4384,9 @@ mod tests {
                     runtime_export_keys: vec![],
                 }],
             }),
-            graph: Some(ato_session_core::StoredExecutionGraph {
-                schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
-                nodes: vec![ato_session_core::StoredGraphNode {
+            graph: Some(capsule::state::session::StoredExecutionGraph {
+                schema_version: capsule::state::session::StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![capsule::state::session::StoredGraphNode {
                     kind: NODE_KIND_PROVIDER.to_string(),
                     identifier: "db".to_string(),
                     pid: None,
@@ -4392,7 +4396,7 @@ mod tests {
                     capability: None,
                     metadata: std::collections::BTreeMap::new(),
                 }],
-                edges: vec![ato_session_core::StoredGraphEdge {
+                edges: vec![capsule::state::session::StoredGraphEdge {
                     source: "db".to_string(),
                     target: "output://db".to_string(),
                     kind: EDGE_KIND_PROVIDES.to_string(),
@@ -4407,7 +4411,7 @@ mod tests {
             graph_completeness: None,
             reproducibility_class: None,
             orchestration_services: None,
-            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
             installed_app_id: None,
@@ -4492,7 +4496,7 @@ mod tests {
             graph_completeness: None,
             reproducibility_class: None,
             orchestration_services: None,
-            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
             installed_app_id: None,
@@ -4835,7 +4839,7 @@ mod tests {
                 graph_completeness: None,
                 reproducibility_class: None,
                 orchestration_services: None,
-                schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+                schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
                 installed_app_id: None,
@@ -4951,7 +4955,7 @@ mod tests {
                 graph_completeness: None,
                 reproducibility_class: None,
                 orchestration_services: None,
-                schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+                schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
                 installed_app_id: None,
@@ -4995,7 +4999,7 @@ mod tests {
     #[test]
     fn desktop_parent_process_matcher_accepts_current_pid() {
         let pid = std::process::id();
-        let start_time = ato_session_core::process::process_start_time_unix_ms(pid);
+        let start_time = capsule::state::session::process::process_start_time_unix_ms(pid);
         assert!(desktop_parent_process_matches(pid, start_time));
     }
 
@@ -5090,7 +5094,7 @@ mod tests {
                 network_name: None,
                 ephemeral_volumes: Vec::new(),
             }),
-            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
             installed_app_id: None,
@@ -5263,7 +5267,7 @@ mod tests {
                     network_name: None,
                     ephemeral_volumes: Vec::new(),
                 }),
-                schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+                schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
                 installed_app_id: None,
@@ -5442,7 +5446,7 @@ mod tests {
                 network_name: None,
                 ephemeral_volumes: Vec::new(),
             }),
-            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
             installed_app_id: None,
@@ -5540,7 +5544,7 @@ mod tests {
         metadata.insert("target_label".to_string(), "web".to_string());
         metadata.insert("published_port".to_string(), port.to_string());
 
-        let service_node = ato_session_core::StoredGraphNode {
+        let service_node = capsule::state::session::StoredGraphNode {
             kind: NODE_KIND_SERVICE.to_string(),
             identifier: "web".to_string(),
             pid: Some(dead_recorded_pid),
@@ -5550,8 +5554,8 @@ mod tests {
             capability: None,
             metadata,
         };
-        let graph = ato_session_core::StoredExecutionGraph {
-            schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+        let graph = capsule::state::session::StoredExecutionGraph {
+            schema_version: capsule::state::session::StoredExecutionGraph::SCHEMA_VERSION,
             nodes: vec![service_node],
             edges: vec![],
         };
@@ -5721,7 +5725,7 @@ mod tests {
                 network_name: None,
                 ephemeral_volumes: Vec::new(),
             }),
-            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            schema_version: Some(capsule::state::session::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
             installed_app_id: None,

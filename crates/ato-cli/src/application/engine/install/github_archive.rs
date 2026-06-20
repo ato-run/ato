@@ -65,7 +65,7 @@ pub(crate) fn write_github_run_checkout_owner_marker(path: &Path) -> Result<()> 
     // live workspaces even when process records are briefly unavailable.
     let owner = GithubRunCheckoutOwner {
         owner_pid: std::process::id(),
-        owner_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+        owner_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
             std::process::id(),
         ),
     };
@@ -231,12 +231,12 @@ pub(crate) fn github_run_checkout_owner_is_alive(path: &Path) -> bool {
         return false;
     };
 
-    ato_session_core::process::process_start_time_unix_ms(owner.owner_pid)
+    capsule::state::session::process::process_start_time_unix_ms(owner.owner_pid)
         .is_some_and(|live_start_time| live_start_time == expected_start_time)
 }
 
 fn pid_is_alive(pid: u32) -> bool {
-    ato_session_core::process::pid_is_alive(pid)
+    capsule::state::session::process::pid_is_alive(pid)
 }
 
 /// Returns the GitHub API base URL for repository archive downloads.

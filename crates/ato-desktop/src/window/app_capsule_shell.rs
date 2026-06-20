@@ -1006,7 +1006,7 @@ pub(crate) fn wait_for_session_upstream_ready(
             tracing::debug!(probe_url = %probe_url, "upstream probe aborted");
             return ProbeOutcome::Aborted;
         }
-        if ato_session_core::healthcheck::http_is_responsive(&probe_url, Duration::from_millis(800))
+        if capsule::state::session::healthcheck::http_is_responsive(&probe_url, Duration::from_millis(800))
         {
             tracing::info!(probe_url = %probe_url, "upstream HTTP readiness probe passed");
             return ProbeOutcome::Ready;
