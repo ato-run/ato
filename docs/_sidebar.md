@@ -1,5 +1,11 @@
 - [Home](README.md)
 
+**Getting Started**
+
+- [Install](README.md?id=install)
+- [Quick start](README.md?id=quick-start)
+- [How it works](README.md?id=how-it-works)
+
 **Topics**
 
 - [Run](run.md)
