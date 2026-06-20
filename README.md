@@ -379,7 +379,7 @@ This repository contains the CLI, runtime libraries, desktop app, and supporting
 ```text
 ato/
 ├── crates/
-│   ├── ato-protocol/     # IPC/wire surface — pure message types, DAG root
+│   ├── protocol/     # IPC/wire surface — pure message types, DAG root
 │   ├── capsule/          # project detection, locking, packing, runtime logic + local session state
 │   ├── cli/              # command-line interface (orchestrator; ships the `ato` binary)
 │   ├── desktop/          # desktop app (shell; ships the `ato-desktop` binary)
@@ -402,20 +402,20 @@ Most users should use the installer. Contributors usually work in `crates/cli`, 
 The crates form a one-way dependency DAG, enforced in CI by
 `scripts/check-dep-direction.sh`:
 
-- **`ato-protocol`** is the DAG root: pure IPC/wire types with **no
+- **`protocol`** is the DAG root: pure IPC/wire types with **no
   workspace-crate dependencies**. Both `cli` and `desktop` link it to
   share the wire surface without dragging in heavy runtime deps.
 - **`capsule`** owns the domain logic (detection, locking, packing, runtime
-  graph) **and** local session state. It may depend on `ato-protocol`; it must
+  graph) **and** local session state. It may depend on `protocol`; it must
   not depend on `cli`, `desktop`, `netd`, or `nacelle`.
-- **`netd`** speaks the protocol: it may depend on `ato-protocol`; it must
+- **`netd`** speaks the protocol: it may depend on `protocol`; it must
   not depend on `capsule`, `cli`, `desktop`, or `nacelle`.
 - **`nacelle`** enforces the sandbox only. It stays a clean leaf — no workspace
-  dependencies beyond (optionally) `ato-protocol`.
-- **`cli`** orchestrates: it may depend on `capsule`, `ato-protocol`, and
+  dependencies beyond (optionally) `protocol`.
+- **`cli`** orchestrates: it may depend on `capsule`, `protocol`, and
   `nacelle`; it must not depend on `desktop` (the arrow points the other
   way — Desktop spawns the `ato` binary as a subprocess).
-- **`desktop`** is the shell: it speaks `ato-protocol` and reads a
+- **`desktop`** is the shell: it speaks `protocol` and reads a
   lightweight slice of `capsule` state, and **spawns the `ato` CLI** rather
   than linking it. It must not depend on `cli`, `netd`, or `nacelle`.
 

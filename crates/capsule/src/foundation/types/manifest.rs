@@ -9,13 +9,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::command_spec::CommandSpec;
 
-// `ConfigField` / `ConfigKind` were extracted to `ato-protocol` in N2 so
+// `ConfigField` / `ConfigKind` were extracted to `protocol` in N2 so
 // `ato-desktop` can consume them without linking capsule's heavy
 // runtime deps. They are re-exported here so existing
 // `capsule::types::{ConfigField, ConfigKind}` import paths
 // (`error.rs`, `manifest_tests.rs`, the CLI diagnostics tests) keep
 // compiling unchanged.
-pub use ato_protocol::config::{ConfigField, ConfigKind};
+pub use protocol::config::{ConfigField, ConfigKind};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;

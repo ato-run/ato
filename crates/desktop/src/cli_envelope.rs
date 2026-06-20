@@ -30,15 +30,15 @@
 //!
 //! As of M5, `ConfigField` / `ConfigKind` are the canonical wire shape
 //! for both the CLI emitter and the Desktop consumer. As of N3 they
-//! live in the dedicated [`ato_protocol`] crate so the Desktop links
+//! live in the dedicated [`protocol`] crate so the Desktop links
 //! only the IPC surface and not capsule's runtime stack. The
 //! contract test in `crates/cli/src/adapters/output/diagnostics/
 //! tests.rs::maps_missing_required_env_error_to_e103_with_schema`
 //! pins the JSON shape on the CLI side; the Desktop test suite below
 //! exercises the same shape against the same types.
 
-use ato_protocol::config::ConfigField;
-use ato_protocol::consent::{ConsentIdentity, ConsentRequiredDetails};
+use protocol::config::ConfigField;
+use protocol::consent::{ConsentIdentity, ConsentRequiredDetails};
 use serde::Deserialize;
 
 /// `details` payload for E103 (`missing_required_env`). The desktop
@@ -56,8 +56,8 @@ pub struct MissingEnvDetailsDto {
 }
 
 // The consent-required wire shape (`ConsentRequiredDetails`) and its routing
-// discriminator (`ato_protocol::consent::CONSENT_REQUIRED_REASON`) now live
-// in `ato-protocol`, single-sourced with the CLI producer and the runner's
+// discriminator (`protocol::consent::CONSENT_REQUIRED_REASON`) now live
+// in `protocol`, single-sourced with the CLI producer and the runner's
 // stdout consumer. The desktop deserializes into that shared type directly
 // (see `consent_required_details` below) instead of mirroring the tuple.
 
@@ -96,7 +96,7 @@ impl AtoCliErrorEventDto {
     /// validated [`ConsentIdentity`]. Returns `None` unless
     /// `details.reason == "execution_plan_consent_required"` AND every
     /// consent-key field is well-formed — both gates (applied by the
-    /// shared `ato-protocol` validation) protect the caller from routing
+    /// shared `protocol` validation) protect the caller from routing
     /// an unrelated or unsatisfiable E302 to the consent modal. Old E302
     /// envelopes (no `reason` field, or a generic `ExecutionContractInvalid`
     /// whose `details` lacks the identity tuple) yield `None` here — the
@@ -148,7 +148,7 @@ pub fn parse_cli_error_event(stderr: &str) -> Option<AtoCliErrorEventDto> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ato_protocol::config::ConfigKind;
+    use protocol::config::ConfigKind;
 
     fn fatal_e103_line() -> &'static str {
         r#"{"level":"fatal","code":"E103","name":"missing_required_env","phase":"inference","classification":"manifest","message":"missing required environment variables for target 'main': OPENAI_API_KEY","retryable":false,"interactive_resolution":true,"resource":"environment","target":"main","hint":"set the variable before retrying.","details":{"missing_keys":["OPENAI_API_KEY"],"missing_schema":[{"name":"OPENAI_API_KEY","label":"OpenAI API Key","kind":"secret","placeholder":"sk-..."}],"target":"main"}}"#

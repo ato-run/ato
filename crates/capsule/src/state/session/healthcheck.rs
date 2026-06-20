@@ -1,6 +1,6 @@
 //! Minimal HTTP healthcheck used by the fast path to validate that a
 //! stored session is still serving requests before reuse. Lives here
-//! (rather than in `ato-protocol`) because pure-DTO crates must not
+//! (rather than in `protocol`) because pure-DTO crates must not
 //! own network code (RFC §3.2 design boundary).
 
 use std::io::{Read, Write};

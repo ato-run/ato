@@ -84,13 +84,13 @@ pub(crate) enum IngressError {
 pub(crate) fn logical_key_for_route(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(
-            ato_protocol::net::stable_origin::logical_key_for_handle(handle),
+            protocol::net::stable_origin::logical_key_for_handle(handle),
         ),
         GuestRoute::LocalManifest(local) => Some(
-            ato_protocol::net::stable_origin::logical_key_for_handle(&local.source_handle),
+            protocol::net::stable_origin::logical_key_for_handle(&local.source_handle),
         ),
         GuestRoute::Capsule { session, .. } => Some(
-            ato_protocol::net::stable_origin::logical_key_for_session(session),
+            protocol::net::stable_origin::logical_key_for_session(session),
         ),
         GuestRoute::CapsuleUrl { .. }
         | GuestRoute::ExternalUrl(_)
