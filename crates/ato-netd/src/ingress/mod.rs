@@ -25,9 +25,9 @@ pub mod proxy;
 
 use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
+use crate::net::control::IngressInfo;
 use allocator::{AllocError, EphemeralAllocator, PortAllocator};
 use anyhow::Context as _;
-use ato_net::control::IngressInfo;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{
     net::TcpListener,
