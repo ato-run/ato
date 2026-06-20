@@ -15,7 +15,7 @@
 //! install.
 
 use anyhow::{Result as AnyhowResult, anyhow, bail};
-use capsule_core::runtime_setup::ToolKind;
+use capsule::runtime_setup::ToolKind;
 use gpui::App;
 
 use super::ensure_install_global;

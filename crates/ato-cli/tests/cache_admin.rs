@@ -148,7 +148,7 @@ fn clear_derivation_removes_only_the_named_entry() {
 #[serial]
 fn clear_derivation_keeps_blob_when_another_ref_still_points_at_it() {
     use ato_cli::dependency_materializer::StoreRefRecord;
-    use capsule_core::common::store::ato_store_dep_ref_path;
+    use capsule::common::store::ato_store_dep_ref_path;
 
     let env = IsolatedAto::new();
     let req = sample_request("shared");

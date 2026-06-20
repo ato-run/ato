@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 use serde_json::json;
 
 use super::Reporter;
@@ -13,14 +13,13 @@ pub(super) fn execute_engine_command(
 ) -> Result<()> {
     match command {
         crate::EngineCommands::Features => {
-            let nacelle =
-                capsule_core::engine::discover_nacelle(capsule_core::engine::EngineRequest {
-                    explicit_path: nacelle_override,
-                    manifest_path: None,
-                    compat_input: None,
-                })?;
+            let nacelle = capsule::engine::discover_nacelle(capsule::engine::EngineRequest {
+                explicit_path: nacelle_override,
+                manifest_path: None,
+                compat_input: None,
+            })?;
             let payload = json!({ "spec_version": "0.1.0" });
-            let resp = capsule_core::engine::run_internal(&nacelle, "features", &payload)?;
+            let resp = capsule::engine::run_internal(&nacelle, "features", &payload)?;
             let body = serde_json::to_string_pretty(&resp)?;
             futures::executor::block_on(reporter.notify(body))?;
             Ok(())
@@ -38,24 +37,23 @@ pub(super) fn execute_engine_command(
                 anyhow::bail!("Missing --path and NACELLE_PATH is not set");
             };
 
-            let validated =
-                capsule_core::engine::discover_nacelle(capsule_core::engine::EngineRequest {
-                    explicit_path: Some(resolved_path),
-                    manifest_path: None,
-                    compat_input: None,
-                })?;
+            let validated = capsule::engine::discover_nacelle(capsule::engine::EngineRequest {
+                explicit_path: Some(resolved_path),
+                manifest_path: None,
+                compat_input: None,
+            })?;
 
-            let mut cfg = capsule_core::config::load_config()?;
+            let mut cfg = capsule::config::load_config()?;
             cfg.engines.insert(
                 name.clone(),
-                capsule_core::config::EngineRegistration {
+                capsule::config::EngineRegistration {
                     path: validated.display().to_string(),
                 },
             );
             if default {
                 cfg.default_engine = Some(name.clone());
             }
-            capsule_core::config::save_config(&cfg)?;
+            capsule::config::save_config(&cfg)?;
 
             futures::executor::block_on(reporter.notify(format!(
                 "✅ Registered engine '{}' -> {}",

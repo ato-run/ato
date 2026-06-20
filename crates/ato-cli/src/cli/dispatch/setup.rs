@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use capsule_core::types::{
+use capsule::types::{
     CapsuleManifest, WorkspaceAppSpec, WorkspaceDependencySpec, WorkspaceServiceSpec,
     WorkspaceSetupSpec,
 };
@@ -308,14 +308,14 @@ fn detect_setup_plan(project_root: &Path) -> Result<SetupPlan> {
 }
 
 fn detect_lockfile_capsule_dependencies(project_root: &Path) -> Result<Vec<CapsuleDependencyPlan>> {
-    let lock_path = project_root.join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME);
+    let lock_path = project_root.join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME);
     if !lock_path.exists() {
         return Ok(Vec::new());
     }
 
     let raw = fs::read_to_string(&lock_path)
         .with_context(|| format!("failed to read {}", lock_path.display()))?;
-    let lock = serde_json::from_str::<capsule_core::lockfile::CapsuleLock>(&raw)
+    let lock = serde_json::from_str::<capsule::lockfile::CapsuleLock>(&raw)
         .with_context(|| format!("failed to parse {}", lock_path.display()))?;
 
     let mut plans = Vec::new();
@@ -446,7 +446,7 @@ fn append_workspace_service_plans(
 }
 
 fn normalize_capsule_dependency_ref(
-    dependency: &capsule_core::lockfile::LockedCapsuleDependency,
+    dependency: &capsule::lockfile::LockedCapsuleDependency,
 ) -> Option<String> {
     normalize_source_ref(dependency.source.as_str())
 }
@@ -601,14 +601,14 @@ mod tests {
     #[test]
     fn detects_capsule_dependencies_from_lockfile() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let lock = capsule_core::lockfile::CapsuleLock {
+        let lock = capsule::lockfile::CapsuleLock {
             version: "1".to_string(),
-            meta: capsule_core::lockfile::LockMeta {
+            meta: capsule::lockfile::LockMeta {
                 created_at: "2026-04-03T00:00:00Z".to_string(),
                 manifest_hash: "sha256:deadbeef".to_string(),
             },
             allowlist: None,
-            capsule_dependencies: vec![capsule_core::lockfile::LockedCapsuleDependency {
+            capsule_dependencies: vec![capsule::lockfile::LockedCapsuleDependency {
                 name: "auth".to_string(),
                 source: "capsule://store/acme/auth-svc".to_string(),
                 source_type: "store".to_string(),
@@ -629,8 +629,7 @@ mod tests {
             targets: HashMap::new(),
         };
         fs::write(
-            temp.path()
-                .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME),
+            temp.path().join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME),
             serde_json::to_vec_pretty(&lock).expect("serialize lock"),
         )
         .expect("write lock");
@@ -715,14 +714,14 @@ source = "ato/ato-desktop"
         )
         .expect("write manifest");
 
-        let lock = capsule_core::lockfile::CapsuleLock {
+        let lock = capsule::lockfile::CapsuleLock {
             version: "1".to_string(),
-            meta: capsule_core::lockfile::LockMeta {
+            meta: capsule::lockfile::LockMeta {
                 created_at: "2026-04-03T00:00:00Z".to_string(),
                 manifest_hash: "sha256:deadbeef".to_string(),
             },
             allowlist: None,
-            capsule_dependencies: vec![capsule_core::lockfile::LockedCapsuleDependency {
+            capsule_dependencies: vec![capsule::lockfile::LockedCapsuleDependency {
                 name: "auth".to_string(),
                 source: "capsule://store/acme/auth-svc".to_string(),
                 source_type: "store".to_string(),
@@ -743,8 +742,7 @@ source = "ato/ato-desktop"
             targets: HashMap::new(),
         };
         fs::write(
-            temp.path()
-                .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME),
+            temp.path().join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME),
             serde_json::to_vec_pretty(&lock).expect("serialize lock"),
         )
         .expect("write lock");

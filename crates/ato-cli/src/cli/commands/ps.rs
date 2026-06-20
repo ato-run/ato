@@ -7,7 +7,7 @@ use crate::adapters::runtime::oci_session_store::{
 use crate::binding;
 use crate::reporters::CliReporter;
 use crate::runtime::process::{ProcessManager, ProcessStatus, format_duration, get_process_uptime};
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 
 pub struct PsArgs {
     pub json: bool,

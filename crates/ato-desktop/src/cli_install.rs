@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path;
+use capsule::common::paths::ato_path;
 
 /// Outcome of [`try_install`] — surfaced to the UI as a toast.
 #[derive(Debug, Clone, PartialEq, Eq)]

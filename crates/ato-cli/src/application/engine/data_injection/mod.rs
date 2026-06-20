@@ -7,8 +7,8 @@ mod resolve;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use capsule_core::lockfile::LockedInjectedData;
-use capsule_core::router::ManifestData;
+use capsule::lockfile::LockedInjectedData;
+use capsule::router::ManifestData;
 
 use crate::executors::launch_context::InjectedMount;
 

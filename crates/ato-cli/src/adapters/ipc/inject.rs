@@ -180,7 +180,7 @@ impl IpcContext {
                         );
                     } else {
                         return Err(
-                            capsule_core::execution_plan::error::AtoExecutionError::policy_violation(
+                            capsule::execution_plan::error::AtoExecutionError::policy_violation(
                                 format!(
                                     "Required IPC import '{}' (from '{}') not found. {}",
                                     import_name, from, suggestion
@@ -278,7 +278,7 @@ fn default_socket_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ATO_SOCKET_DIR") {
         return PathBuf::from(dir);
     }
-    capsule_core::common::paths::ato_path_or_workspace_tmp("run/capsule-ipc")
+    capsule::common::paths::ato_path_or_workspace_tmp("run/capsule-ipc")
 }
 
 #[cfg(test)]

@@ -758,7 +758,7 @@ fn finalize_projection_status(
 }
 
 fn projections_root() -> Result<PathBuf> {
-    Ok(capsule_core::common::paths::ato_path_or_workspace_tmp(
+    Ok(capsule::common::paths::ato_path_or_workspace_tmp(
         "native-delivery/projections",
     ))
 }
@@ -1026,7 +1026,7 @@ fn create_projection_shortcut(target: &Path, destination: &Path) -> io::Result<(
     // with an empty TargetPath. Paths travel via env vars (with `-Command`,
     // further argv tokens are appended to the script text), and the target
     // is de-`\\?\`-prefixed so the stored TargetPath round-trips verbatim.
-    let target = capsule_core::common::paths::windows_child_compatible_path(target);
+    let target = capsule::common::paths::windows_child_compatible_path(target);
     let output = powershell_command()
         .args([
             "-NoProfile",

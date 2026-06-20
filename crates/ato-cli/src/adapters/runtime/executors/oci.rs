@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use capsule_core::CapsuleReporter;
-use capsule_core::router::ManifestData;
-use capsule_core::runtime::oci::{
+use capsule::CapsuleReporter;
+use capsule::router::ManifestData;
+use capsule::runtime::oci::{
     BollardOciRuntimeClient, OciContainerRequest, OciLogChunk, OciPortSpec, OciRuntimeClient,
 };
 
@@ -96,12 +96,12 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
             mounts: launch_ctx
                 .injected_mounts()
                 .iter()
-                .map(|mount| capsule_core::runtime::oci::OciMountSpec {
+                .map(|mount| capsule::runtime::oci::OciMountSpec {
                     source: mount.source.to_string_lossy().to_string(),
                     target: mount.target.clone(),
                     readonly: mount.readonly,
                     ownership: None,
-                    source_kind: capsule_core::runtime::oci::OciMountSourceKind::default(),
+                    source_kind: capsule::runtime::oci::OciMountSourceKind::default(),
                 })
                 .collect(),
             ports,

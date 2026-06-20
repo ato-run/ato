@@ -16,17 +16,17 @@
 //! derivation remains the source of truth; the graph is computed for
 //! shape-parity observation only.
 //!
-//! [builder]: capsule_core::engine::execution_graph::ExecutionGraphBuilder
+//! [builder]: capsule::engine::execution_graph::ExecutionGraphBuilder
 
 #[cfg(test)]
 use anyhow::Result;
 
-use capsule_core::engine::execution_graph::{
+use capsule::engine::execution_graph::{
     ExecutionGraphBuildInput, GraphDependencyInput, GraphSourceInput,
 };
 #[cfg(test)]
-use capsule_core::lockfile::manifest_external_capsule_dependencies;
-use capsule_core::types::ExternalCapsuleDependency;
+use capsule::lockfile::manifest_external_capsule_dependencies;
+use capsule::types::ExternalCapsuleDependency;
 
 /// Convention: provider node identifier for a top-level
 /// `[dependencies.<alias>]` entry. Kept stable so equivalence tests can
@@ -112,7 +112,7 @@ pub(crate) fn build_input_from_external_dependencies(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::engine::execution_graph::{ExecutionGraphBuilder, ExecutionGraphNode};
+    use capsule::engine::execution_graph::{ExecutionGraphBuilder, ExecutionGraphNode};
 
     fn manifest_with_two_dependencies() -> toml::Value {
         toml::from_str(

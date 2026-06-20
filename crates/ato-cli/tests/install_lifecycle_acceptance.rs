@@ -12,7 +12,7 @@
 
 mod support;
 
-use capsule_core::foundation::install_lifecycle::{
+use capsule::foundation::install_lifecycle::{
     self, AppRecord, InstallInstanceStore, LaunchProfile,
     ids::{InstallRevisionId, InstalledAppId, ProfileId},
 };

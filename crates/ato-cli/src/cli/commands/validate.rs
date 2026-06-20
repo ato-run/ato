@@ -1,10 +1,8 @@
 use anyhow::Result;
-use capsule_core::engine::execution_graph::{ExecutionGraphBuilder, ExecutionGraphNode};
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::input_resolver::{
-    ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
-};
-use capsule_core::lockfile::{
+use capsule::engine::execution_graph::{ExecutionGraphBuilder, ExecutionGraphNode};
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::input_resolver::{ResolveInputOptions, ResolvedInput, resolve_authoritative_input};
+use capsule::lockfile::{
     CAPSULE_LOCK_FILE_NAME, manifest_external_capsule_dependencies,
     verify_lockfile_external_dependencies,
 };
@@ -49,11 +47,11 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
             provenance,
             ..
         } => {
-            let decision = capsule_core::router::route_lock(
+            let decision = capsule::router::route_lock(
                 &canonical.path,
                 &canonical.lock,
                 &canonical.project_root,
-                capsule_core::router::ExecutionProfile::Release,
+                capsule::router::ExecutionProfile::Release,
                 None,
             )?;
 
@@ -75,23 +73,23 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
             let manifest_path = project.manifest.path.clone();
             let materialized =
                 materialize_run_from_compatibility(&project, None, reporter.clone(), true)?;
-            let decision = capsule_core::router::route_lock(
+            let decision = capsule::router::route_lock(
                 &materialized.lock_path,
                 &materialized.lock,
                 &project.project_root,
-                capsule_core::router::ExecutionProfile::Release,
+                capsule::router::ExecutionProfile::Release,
                 None,
             )?;
             let targets_to_validate = decision.plan.selected_target_package_order()?;
             for target_label in &targets_to_validate {
-                capsule_core::diagnostics::manifest::validate_manifest_for_build(
+                capsule::diagnostics::manifest::validate_manifest_for_build(
                     &manifest_path,
                     target_label,
                 )?;
             }
 
             let lockfile_checked = if let Some(legacy_lock) = project.legacy_lock.as_ref() {
-                capsule_core::lockfile::verify_lockfile_manifest(&manifest_path, &legacy_lock.path)
+                capsule::lockfile::verify_lockfile_manifest(&manifest_path, &legacy_lock.path)
                     .map_err(|err| {
                         if err.to_string().contains("manifest hash mismatch") {
                             AtoExecutionError::lockfile_tampered(
@@ -125,7 +123,7 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                 debug_assert_provider_aliases_match_lock(&external_dependencies, &legacy_lock.lock);
 
                 // PRIMARY: bundle-derived view → lockfile verifier.
-                capsule_core::lockfile::verify_lockfile_against_contracts(
+                capsule::lockfile::verify_lockfile_against_contracts(
                     &bundle.derived.dependency_contracts,
                     &legacy_lock.lock,
                 )?;
@@ -218,11 +216,11 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
         } => {
             let materialized =
                 materialize_run_from_source_only(&source, None, reporter.clone(), true)?;
-            let decision = capsule_core::router::route_lock(
+            let decision = capsule::router::route_lock(
                 &materialized.lock_path,
                 &materialized.lock,
                 &source.project_root,
-                capsule_core::router::ExecutionProfile::Release,
+                capsule::router::ExecutionProfile::Release,
                 None,
             )?;
 
@@ -279,7 +277,7 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
 /// the producer surface is exercised on every run).
 fn debug_assert_bundle_contracts_match_legacy(
     contracts: &crate::application::graph_views::DependencyContracts,
-    legacy: &[capsule_core::types::ExternalCapsuleDependency],
+    legacy: &[capsule::types::ExternalCapsuleDependency],
 ) {
     debug_assert_eq!(
         contracts.len(),
@@ -311,7 +309,7 @@ fn debug_assert_bundle_contracts_match_legacy(
 /// it in release surfaces real-world drift between the two derivations
 /// before a future wave promotes the graph to the source of truth.
 fn debug_assert_provider_node_parity(
-    external_dependencies: &[capsule_core::types::ExternalCapsuleDependency],
+    external_dependencies: &[capsule::types::ExternalCapsuleDependency],
 ) {
     let input = build_input_from_external_dependencies(external_dependencies, None);
     let graph = ExecutionGraphBuilder::build(input);
@@ -342,8 +340,8 @@ fn debug_assert_provider_node_parity(
 /// alias convention surfaces immediately, without duplicating the full
 /// consistency check.
 fn debug_assert_provider_aliases_match_lock(
-    external_dependencies: &[capsule_core::types::ExternalCapsuleDependency],
-    lock: &capsule_core::lockfile::CapsuleLock,
+    external_dependencies: &[capsule::types::ExternalCapsuleDependency],
+    lock: &capsule::lockfile::CapsuleLock,
 ) {
     let input = build_input_from_external_dependencies(external_dependencies, None);
     let graph = ExecutionGraphBuilder::build(input);
@@ -402,7 +400,7 @@ fn debug_assert_provider_aliases_match_lock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::types::ExternalCapsuleDependency;
+    use capsule::types::ExternalCapsuleDependency;
     use std::collections::BTreeMap;
 
     fn dependency(alias: &str) -> ExternalCapsuleDependency {
@@ -472,8 +470,8 @@ mod tests {
         );
     }
 
-    fn locked_dependency(alias: &str) -> capsule_core::lockfile::LockedCapsuleDependency {
-        capsule_core::lockfile::LockedCapsuleDependency {
+    fn locked_dependency(alias: &str) -> capsule::lockfile::LockedCapsuleDependency {
+        capsule::lockfile::LockedCapsuleDependency {
             name: alias.to_string(),
             source: format!("capsule://ato/{alias}"),
             source_type: "store".to_string(),
@@ -490,11 +488,11 @@ mod tests {
     }
 
     fn empty_lock_with(
-        capsule_dependencies: Vec<capsule_core::lockfile::LockedCapsuleDependency>,
-    ) -> capsule_core::lockfile::CapsuleLock {
-        capsule_core::lockfile::CapsuleLock {
+        capsule_dependencies: Vec<capsule::lockfile::LockedCapsuleDependency>,
+    ) -> capsule::lockfile::CapsuleLock {
+        capsule::lockfile::CapsuleLock {
             version: "1".to_string(),
-            meta: capsule_core::lockfile::LockMeta {
+            meta: capsule::lockfile::LockMeta {
                 created_at: "2026-05-09T00:00:00Z".to_string(),
                 manifest_hash: "sha256:test".to_string(),
             },

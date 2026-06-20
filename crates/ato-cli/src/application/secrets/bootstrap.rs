@@ -13,7 +13,7 @@
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::nacelle_home_dir;
+use capsule::common::paths::nacelle_home_dir;
 
 use crate::application::credential::AgeFileBackend;
 

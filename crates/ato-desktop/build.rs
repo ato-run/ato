@@ -103,7 +103,7 @@ fn rebuild_helpers(manifest_dir: &Path) {
     for dir in [
         "../ato-cli",
         "../nacelle",
-        "../capsule-core",
+        "../capsule",
         "../ato-protocol",
         "../ato-session-core",
     ] {

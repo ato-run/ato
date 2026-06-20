@@ -21,9 +21,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::blob::{BlobManifest, TreeHash, hash_tree};
-use capsule_core::common::paths::ato_store_meta_dir;
-use capsule_core::common::store::{
+use capsule::blob::{BlobManifest, TreeHash, hash_tree};
+use capsule::common::paths::ato_store_meta_dir;
+use capsule::common::store::{
     BlobAddress, ato_store_dep_ref_path, ato_store_derivation_lock_path, ato_store_locks_dir,
 };
 use fs2::FileExt;

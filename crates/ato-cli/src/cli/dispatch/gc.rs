@@ -11,8 +11,8 @@
 //! Default policy: keep last 2 revisions per profile, 14-day retention.
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::InstallInstanceStore;
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::install_lifecycle::InstallInstanceStore;
 use serde::Serialize;
 
 pub(crate) struct GcArgs {
@@ -266,7 +266,7 @@ fn nix_pid(raw: i32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{
+    use capsule::foundation::install_lifecycle::{
         AppRecord, InstallInstanceStore, LaunchProfile,
         ids::{InstallRevisionId, InstalledAppId, ProfileId},
     };

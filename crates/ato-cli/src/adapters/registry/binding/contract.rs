@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::net::IpAddr;
 
-use capsule_core::types::CapsuleManifest;
+use capsule::types::CapsuleManifest;
 
 pub const SERVICE_BINDING_KIND_INGRESS: &str = "ingress";
 pub const SERVICE_BINDING_KIND_SERVICE: &str = "service";

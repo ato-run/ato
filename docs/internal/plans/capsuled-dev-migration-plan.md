@@ -2,7 +2,7 @@
 
 **Status (2026-04-26):** round 1 (P1–P6a) landed. P6b + P7 deferred to round 2 (after v0.5.0 release verification).
 
-This document is the companion to [`monorepo-consolidation-plan.md`](monorepo-consolidation-plan.md). The N1–N4 work in that plan extracted `ato-protocol` from `capsule-core` *inside* the `ato` repo; this plan covers the **outer** migration of sibling apps from the `capsuled-dev/` parent superproject into the same monorepo.
+This document is the companion to [`monorepo-consolidation-plan.md`](monorepo-consolidation-plan.md). The N1–N4 work in that plan extracted `ato-protocol` from `capsule` *inside* the `ato` repo; this plan covers the **outer** migration of sibling apps from the `capsuled-dev/` parent superproject into the same monorepo.
 
 `capsuled-dev/` itself is **not a git repository** — each app under `apps/*` has its own `.git` and release cycle (see `capsuled-dev/AGENTS.md`). So "migration" here means **subtree-merging selected apps into the `ato` monorepo, preserving history**, then archiving the source repos.
 
@@ -58,7 +58,7 @@ These are now enforced by `.github/workflows/dep-direction.yml`:
 ```
 ato-protocol ──► (no deps on workspace crates; DAG root)
                        │
-                       ├─► capsule-core
+                       ├─► capsule
                        │       │
                        │       ├─► ato-cli  ──spawn──► nacelle
                        │       └─► ato-desktop ──spawn──► ato (binary)

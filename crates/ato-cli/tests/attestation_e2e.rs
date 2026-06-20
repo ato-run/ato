@@ -12,11 +12,11 @@ use ato_cli::dependency_materializer::{
     AttestationStrategy, CacheStrategy, DependencyMaterializationRequest, InstallPolicies,
     ManifestInputs, PlatformTriple, RuntimeSelection,
 };
-use capsule_core::attestation::{
+use capsule::attestation::{
     TrustRoot, blob_attestations_dir, generate_keypair, read_envelope, verify_envelope,
     write_trust_root_pubkey,
 };
-use capsule_core::common::paths::ato_trust_roots_dir;
+use capsule::common::paths::ato_trust_roots_dir;
 use serial_test::serial;
 
 mod support;

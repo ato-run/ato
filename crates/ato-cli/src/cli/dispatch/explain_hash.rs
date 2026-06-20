@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_runs_dir;
+use capsule::common::paths::ato_runs_dir;
 use serde::Serialize;
 
 #[derive(Serialize)]

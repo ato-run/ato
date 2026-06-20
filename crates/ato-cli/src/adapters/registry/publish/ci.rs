@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -358,7 +358,7 @@ fn normalize_source_repo(raw: &str) -> Result<String> {
 }
 
 fn semantic_publish_identity(
-    descriptor: &capsule_core::router::ExecutionDescriptor,
+    descriptor: &capsule::router::ExecutionDescriptor,
 ) -> Result<(String, String)> {
     let name = descriptor
         .runtime_model
@@ -395,7 +395,7 @@ pub(crate) fn build_capsule_artifact_with_output(
     let (decision, manifest_dir) = if let Some(authoritative_input) = authoritative_input {
         authoritative_input.validate_legacy_producer_bridge()?;
         (
-            capsule_core::router::RuntimeDecision {
+            capsule::router::RuntimeDecision {
                 kind: match authoritative_input
                     .descriptor
                     .execution_runtime()
@@ -405,10 +405,10 @@ pub(crate) fn build_capsule_artifact_with_output(
                     .next()
                     .unwrap_or_default()
                 {
-                    "source" | "native" => capsule_core::router::RuntimeKind::Source,
-                    "web" => capsule_core::router::RuntimeKind::Web,
-                    "wasm" => capsule_core::router::RuntimeKind::Wasm,
-                    "oci" | "docker" | "youki" | "runc" => capsule_core::router::RuntimeKind::Oci,
+                    "source" | "native" => capsule::router::RuntimeKind::Source,
+                    "web" => capsule::router::RuntimeKind::Web,
+                    "wasm" => capsule::router::RuntimeKind::Wasm,
+                    "oci" | "docker" | "youki" | "runc" => capsule::router::RuntimeKind::Oci,
                     other => anyhow::bail!("Unsupported runtime '{other}'"),
                 },
                 reason: format!(
@@ -427,16 +427,16 @@ pub(crate) fn build_capsule_artifact_with_output(
             anyhow::anyhow!("Manifest path has no parent: {}", manifest_path.display())
         })?;
         (
-            capsule_core::router::route_manifest(
+            capsule::router::route_manifest(
                 manifest_path,
-                capsule_core::router::ExecutionProfile::Release,
+                capsule::router::ExecutionProfile::Release,
                 None,
             )?,
             manifest_dir.to_path_buf(),
         )
     };
     let artifact_dir =
-        capsule_core::common::paths::workspace_tmp_dir(&manifest_dir).join("ato-ci-artifacts");
+        capsule::common::paths::workspace_tmp_dir(&manifest_dir).join("ato-ci-artifacts");
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("Failed to create {}", artifact_dir.display()))?;
     let artifact_path = artifact_dir.join(format!("{}-{}.capsule", name, version));
@@ -458,8 +458,8 @@ pub(crate) fn build_capsule_artifact_with_output(
         return Ok(result.artifact_path);
     }
 
-    let reporter = std::sync::Arc::new(capsule_core::reporter::NoOpReporter)
-        as std::sync::Arc<dyn capsule_core::reporter::CapsuleReporter + 'static>;
+    let reporter = std::sync::Arc::new(capsule::reporter::NoOpReporter)
+        as std::sync::Arc<dyn capsule::reporter::CapsuleReporter + 'static>;
     let compat_input = if let Some(authoritative_input) = authoritative_input {
         authoritative_input.packaging_compat_project_input()?
     } else {
@@ -467,16 +467,15 @@ pub(crate) fn build_capsule_artifact_with_output(
     };
 
     match decision.kind {
-        capsule_core::router::RuntimeKind::Source => {
-            let prepared_config =
-                capsule_core::packers::source::prepare_source_config_from_descriptor(
-                    &decision.plan,
-                    "strict".to_string(),
-                    false,
-                )?;
-            capsule_core::packers::source::pack(
+        capsule::router::RuntimeKind::Source => {
+            let prepared_config = capsule::packers::source::prepare_source_config_from_descriptor(
                 &decision.plan,
-                capsule_core::packers::source::SourcePackOptions {
+                "strict".to_string(),
+                false,
+            )?;
+            capsule::packers::source::pack(
+                &decision.plan,
+                capsule::packers::source::SourcePackOptions {
                     compat_input: compat_input.clone(),
                     workspace_root: decision.plan.workspace_root.clone(),
                     config_json: prepared_config.config_json.clone(),
@@ -489,21 +488,21 @@ pub(crate) fn build_capsule_artifact_with_output(
                     standalone: false,
                     strict_manifest: false,
                     timings: false,
-                    publish_profile: capsule_core::packers::pack_filter::PublishProfile::Source,
+                    publish_profile: capsule::packers::pack_filter::PublishProfile::Source,
                 },
                 reporter,
             )?;
         }
-        capsule_core::router::RuntimeKind::Web => {
+        capsule::router::RuntimeKind::Web => {
             let driver = decision
                 .plan
                 .execution_driver()
                 .map(|v| v.trim().to_ascii_lowercase())
                 .unwrap_or_default();
             if driver == "static" {
-                capsule_core::packers::web::pack(
+                capsule::packers::web::pack(
                     &decision.plan,
-                    capsule_core::packers::web::WebPackOptions {
+                    capsule::packers::web::WebPackOptions {
                         compat_input: compat_input.clone(),
                         workspace_root: decision.plan.workspace_root.clone(),
                         output: Some(artifact_path.clone()),
@@ -512,14 +511,14 @@ pub(crate) fn build_capsule_artifact_with_output(
                 )?;
             } else {
                 let prepared_config =
-                    capsule_core::packers::source::prepare_source_config_from_descriptor(
+                    capsule::packers::source::prepare_source_config_from_descriptor(
                         &decision.plan,
                         "strict".to_string(),
                         false,
                     )?;
-                capsule_core::packers::source::pack(
+                capsule::packers::source::pack(
                     &decision.plan,
-                    capsule_core::packers::source::SourcePackOptions {
+                    capsule::packers::source::SourcePackOptions {
                         compat_input: compat_input.clone(),
                         workspace_root: decision.plan.workspace_root.clone(),
                         config_json: prepared_config.config_json.clone(),
@@ -532,16 +531,16 @@ pub(crate) fn build_capsule_artifact_with_output(
                         standalone: false,
                         strict_manifest: false,
                         timings: false,
-                        publish_profile: capsule_core::packers::pack_filter::PublishProfile::Source,
+                        publish_profile: capsule::packers::pack_filter::PublishProfile::Source,
                     },
                     reporter,
                 )?;
             }
         }
-        capsule_core::router::RuntimeKind::Wasm => {
+        capsule::router::RuntimeKind::Wasm => {
             anyhow::bail!("--ci publish currently supports runtime=source/web only");
         }
-        capsule_core::router::RuntimeKind::Oci => {
+        capsule::router::RuntimeKind::Oci => {
             anyhow::bail!("--ci publish currently supports runtime=source/web only");
         }
     }
@@ -559,7 +558,7 @@ pub(crate) fn build_capsule_artifact_with_output(
 fn build_ephemeral_signature(content_hash: &str) -> DidSignaturePayload {
     let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
     let verify_key = signing_key.verifying_key();
-    let did = capsule_core::types::identity::public_key_to_did(&verify_key.to_bytes());
+    let did = capsule::types::identity::public_key_to_did(&verify_key.to_bytes());
     let signature = signing_key.sign(content_hash.as_bytes());
     DidSignaturePayload {
         algorithm: "Ed25519".to_string(),

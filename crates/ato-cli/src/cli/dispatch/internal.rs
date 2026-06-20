@@ -2,9 +2,9 @@
 
 use anyhow::{Result, anyhow};
 
-use capsule_core::router::ExecutionProfile;
+use capsule::router::ExecutionProfile;
 
-use capsule_core::runtime_setup::{ToolKind, WindowsSubstrateActionKind};
+use capsule::runtime_setup::{ToolKind, WindowsSubstrateActionKind};
 
 use crate::adapters::runtime::process::ProcessManager;
 use crate::application::auth::consent_store::approve_execution_plan_consent;

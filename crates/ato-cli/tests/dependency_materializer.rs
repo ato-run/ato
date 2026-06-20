@@ -7,8 +7,8 @@ use ato_cli::dependency_materializer::{
     PlatformTriple, RuntimeSelection, SessionDependencyMaterializer, SourceResolutionRecord,
     StoreRefRecord,
 };
-use capsule_core::blob::{BLOB_MANIFEST_SCHEMA_VERSION, BLOB_TREE_ALGORITHM, BlobManifest};
-use capsule_core::common::store::{BlobAddress, ato_store_dep_ref_path};
+use capsule::blob::{BLOB_MANIFEST_SCHEMA_VERSION, BLOB_TREE_ALGORITHM, BlobManifest};
+use capsule::common::store::{BlobAddress, ato_store_dep_ref_path};
 use serial_test::serial;
 
 mod support;

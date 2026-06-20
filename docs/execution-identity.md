@@ -94,10 +94,10 @@ completeness metadata.
 ## Graph-based execution identity (v0.6.0)
 
 The v0.6.0 core migration (ato-run/ato#74) introduces a typed `ExecutionGraph`
-in `capsule-core` (#97) and a canonical form over it (#98). The canonical form
+in `capsule` (#97) and a canonical form over it (#98). The canonical form
 is the authoritative input to graph-derived execution IDs. This section is the
 single source of truth for canonicalization; the executable counterpart is
-`crates/capsule-core/src/engine/execution_graph/canonical.rs`. **If you change
+`crates/capsule/src/engine/execution_graph/canonical.rs`. **If you change
 one, change the other in the same commit.**
 
 ### Three identity domains

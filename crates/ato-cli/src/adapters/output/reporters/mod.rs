@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use std::io::{IsTerminal, Write};
 
-use capsule_core::error::{CapsuleError, Result};
-use capsule_core::{CapsuleReporter, UnifiedMetrics, UsageReporter};
+use capsule::error::{CapsuleError, Result};
+use capsule::{CapsuleReporter, UnifiedMetrics, UsageReporter};
 
 use crate::application::ports::output::OutputPort;
 

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use capsule_core::ato_lock::AtoLock;
-use capsule_core::router::ManifestData;
+use capsule::ato_lock::AtoLock;
+use capsule::router::ManifestData;
 use sha2::Digest;
 
 use crate::application::dependency_materializer::{

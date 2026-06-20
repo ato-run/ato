@@ -26,7 +26,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use capsule_core::common::store::BlobAddress;
+use capsule::common::store::BlobAddress;
 
 use crate::application::dependency_materializer::freeze::{FreezeOutcome, freeze_dep_tree};
 use crate::application::dependency_materializer::{
@@ -273,7 +273,7 @@ fn maybe_issue_attestation(deps_path: &Path, derivation_hash: &str, outcome: &Fr
         }
     };
 
-    let tree = match capsule_core::blob::hash_tree(deps_path) {
+    let tree = match capsule::blob::hash_tree(deps_path) {
         Ok(tree) => tree,
         Err(err) => {
             tracing::warn!("attestation: failed to re-hash deps tree: {err}");
@@ -285,7 +285,7 @@ fn maybe_issue_attestation(deps_path: &Path, derivation_hash: &str, outcome: &Fr
         return;
     }
 
-    let policy = capsule_core::attestation::PolicySnapshot {
+    let policy = capsule::attestation::PolicySnapshot {
         lifecycle_script_policy: "sandbox".to_string(),
         registry_policy: "default".to_string(),
         network_policy: "default".to_string(),

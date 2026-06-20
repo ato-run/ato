@@ -143,7 +143,7 @@ user opens the browser and waits for the initialization progress to complete.
 
 ### Fix 1: OCI images with built-in CMD no longer require entrypoint
 
-**File:** `crates/capsule-core/src/routing/launch_spec.rs`
+**File:** `crates/capsule/src/routing/launch_spec.rs`
 **Problem:** `derive_launch_spec` required `entrypoint` or `run_command` even for OCI images
 that have a built-in `CMD`/`ENTRYPOINT`. All OCI recipes failed with "requires entrypoint or run_command".
 **Fix:** Added early return for `runtime == "oci"` with no explicit entrypoint — returns a stub
@@ -314,7 +314,7 @@ user opens the browser and waits for the initialization progress to complete.
 
 ### Bug 1: OCI entrypoint not required for `capsule.toml` recipes
 
-**File:** `crates/capsule-core/src/routing/launch_spec.rs`
+**File:** `crates/capsule/src/routing/launch_spec.rs`
 **Problem:** `derive_launch_spec` required `entrypoint` or `run_command` even for OCI images
 that have a built-in `CMD`/`ENTRYPOINT`. All OCI recipes failed with "requires entrypoint or run_command".
 **Fix:** Added early return for `runtime == "oci"` with no explicit entrypoint — returns a stub

@@ -32,7 +32,7 @@ path = "src/main.rs"
 ato-net = { path = "../ato-net", version = "0.5.2" }
 # Path resolution for the canonical control socket location under
 # ${ATO_HOME}/run/. Same resolver every other ato crate uses.
-capsule-core = { path = "../capsule-core", version = "0.11.0" }
+capsule = { path = "../capsule", version = "0.11.0" }
 
 clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }

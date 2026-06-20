@@ -4,13 +4,13 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     DependencyIdentity, EnvironmentIdentity, EnvironmentMode, FilesystemIdentity, PlatformIdentity,
     RuntimeIdentity, SourceIdentity, Tracked,
 };
-use capsule_core::execution_plan::model::ExecutionPlan;
-use capsule_core::launch_spec::LaunchSpec;
-use capsule_core::router::ManifestData;
+use capsule::execution_plan::model::ExecutionPlan;
+use capsule::launch_spec::LaunchSpec;
+use capsule::router::ManifestData;
 use serde::Serialize;
 use walkdir::WalkDir;
 
@@ -39,8 +39,7 @@ pub(crate) fn observe_dependencies(
         .map(|observation| Tracked::known(observation.input_digest.clone()))
         .unwrap_or_else(|| {
             if launch_spec.required_lockfile.is_none()
-                && output_hash.status
-                    == capsule_core::execution_identity::TrackingStatus::NotApplicable
+                && output_hash.status == capsule::execution_identity::TrackingStatus::NotApplicable
             {
                 Tracked::not_applicable()
             } else {
@@ -302,7 +301,7 @@ pub(crate) fn observe_filesystem(
 
     Ok(FilesystemIdentity {
         view_hash: Tracked {
-            status: capsule_core::execution_identity::TrackingStatus::Untracked,
+            status: capsule::execution_identity::TrackingStatus::Untracked,
             value: Some(view_hash),
             reason: Some(
                 "filesystem view hash is partial: mount source identities, case sensitivity, symlink policy, tmp policy, and state bindings are not fully observed".to_string(),
@@ -579,7 +578,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
 
-    use capsule_core::router::ExecutionProfile;
+    use capsule::router::ExecutionProfile;
     use tempfile::tempdir;
 
     use super::*;
@@ -607,7 +606,7 @@ run = "main.py"
             .expect("manifest table")
             .entry("type".to_string())
             .or_insert_with(|| toml::Value::String("app".to_string()));
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             parsed,
             manifest_path,
             dir.to_path_buf(),
@@ -652,7 +651,7 @@ run = "main.py"
 
         assert_eq!(
             observed.status,
-            capsule_core::execution_identity::TrackingStatus::Known
+            capsule::execution_identity::TrackingStatus::Known
         );
         assert!(observed.value.expect("hash").starts_with("blake3:"));
     }
@@ -666,7 +665,7 @@ run = "main.py"
 
         assert_eq!(
             observed.status,
-            capsule_core::execution_identity::TrackingStatus::NotApplicable
+            capsule::execution_identity::TrackingStatus::NotApplicable
         );
     }
 
@@ -687,7 +686,7 @@ run = "main.py"
     fn filesystem_observer_marks_view_hash_partial() {
         let temp = tempdir().expect("tempdir");
         let plan = test_plan(temp.path(), TEST_MANIFEST);
-        let launch_spec = capsule_core::launch_spec::LaunchSpec {
+        let launch_spec = capsule::launch_spec::LaunchSpec {
             working_dir: temp.path().to_path_buf(),
             command: "true".to_string(),
             args: Vec::new(),
@@ -697,7 +696,7 @@ run = "main.py"
             language: None,
             required_lockfile: None,
             port: None,
-            source: capsule_core::launch_spec::LaunchSpecSource::RunCommand,
+            source: capsule::launch_spec::LaunchSpecSource::RunCommand,
         };
 
         let observed =
@@ -705,7 +704,7 @@ run = "main.py"
 
         assert_eq!(
             observed.view_hash.status,
-            capsule_core::execution_identity::TrackingStatus::Untracked
+            capsule::execution_identity::TrackingStatus::Untracked
         );
         assert!(
             observed
@@ -722,7 +721,7 @@ run = "main.py"
         let mut plan = test_plan(temp.path(), TEST_MANIFEST);
         plan.state_source_overrides
             .insert("db".to_string(), "state-abc123".to_string());
-        let launch_spec = capsule_core::launch_spec::LaunchSpec {
+        let launch_spec = capsule::launch_spec::LaunchSpec {
             working_dir: temp.path().to_path_buf(),
             command: "true".to_string(),
             args: Vec::new(),
@@ -732,7 +731,7 @@ run = "main.py"
             language: None,
             required_lockfile: None,
             port: None,
-            source: capsule_core::launch_spec::LaunchSpecSource::RunCommand,
+            source: capsule::launch_spec::LaunchSpecSource::RunCommand,
         };
 
         let observed =

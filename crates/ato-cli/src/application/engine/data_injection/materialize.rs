@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use capsule_core::lockfile::LockedInjectedData;
-use capsule_core::router::ManifestData;
-use capsule_core::types::ExternalInjectionSpec;
+use capsule::lockfile::LockedInjectedData;
+use capsule::router::ManifestData;
+use capsule::types::ExternalInjectionSpec;
 use sha2::{Digest, Sha256};
 
 use crate::executors::launch_context::InjectedMount;

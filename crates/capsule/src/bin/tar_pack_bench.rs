@@ -67,18 +67,17 @@ manifest_hash = "sha256:dummy"
         .map_err(|e| format!("generate source tree: {e}"))?;
     let generate_elapsed = generate_started.elapsed();
 
-    let config_json = Arc::new(capsule_core::runtime_config::generate_config(
+    let config_json = Arc::new(capsule::runtime_config::generate_config(
         &manifest_path,
         Some("strict".to_string()),
         false,
     )?);
-    let config_path =
-        capsule_core::runtime_config::write_config(&manifest_path, config_json.as_ref())
-            .map_err(|e| format!("write config.json: {e}"))?;
+    let config_path = capsule::runtime_config::write_config(&manifest_path, config_json.as_ref())
+        .map_err(|e| format!("write config.json: {e}"))?;
 
-    let decision = capsule_core::router::route_manifest(
+    let decision = capsule::router::route_manifest(
         &manifest_path,
-        capsule_core::router::ExecutionProfile::Release,
+        capsule::router::ExecutionProfile::Release,
         None,
     )
     .map_err(|e| format!("route manifest: {e}"))?;
@@ -90,9 +89,9 @@ manifest_hash = "sha256:dummy"
         .build()
         .map_err(|e| format!("build tokio runtime: {e}"))?;
     let artifact_path = runtime
-        .block_on(capsule_core::packers::capsule::pack(
+        .block_on(capsule::packers::capsule::pack(
             &decision.plan,
-            capsule_core::packers::capsule::CapsulePackOptions {
+            capsule::packers::capsule::CapsulePackOptions {
                 compat_input: decision.plan.compat_project_input()?,
                 workspace_root: project_root.to_path_buf(),
                 output: Some(output),
@@ -100,9 +99,9 @@ manifest_hash = "sha256:dummy"
                 config_path,
                 lockfile_path,
                 signing_key: None,
-                publish_profile: capsule_core::packers::pack_filter::PublishProfile::Artifact,
+                publish_profile: capsule::packers::pack_filter::PublishProfile::Artifact,
             },
-            Arc::new(capsule_core::reporter::NoOpReporter),
+            Arc::new(capsule::reporter::NoOpReporter),
         ))
         .map_err(|e| format!("pack capsule: {e}"))?;
     let pack_elapsed = pack_started.elapsed();

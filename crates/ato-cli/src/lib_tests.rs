@@ -1,5 +1,5 @@
 use super::*;
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::error::AtoExecutionError;
 use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};

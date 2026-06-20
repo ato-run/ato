@@ -22,7 +22,7 @@
 //!
 //! Note: prior drafts spelled the code as `E103`. The on-the-wire form
 //! is now `ATO_ERR_MISSING_REQUIRED_ENV` (single-sourced from
-//! `capsule_core::execution_plan::error::AtoErrorCode`); consumers that
+//! `capsule::execution_plan::error::AtoErrorCode`); consumers that
 //! need to discriminate should match on the stable `name` field
 //! (`missing_required_env`) rather than `code`.
 //!
