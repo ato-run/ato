@@ -39,7 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # ato-desktop requires native GUI deps (webkit2gtk, etc.) not available
       # in the ubuntu-latest runner; excluded until M3 desktop CI bringup.
-      - run: cargo check --workspace --all-targets --exclude ato-desktop
+      - run: cargo check --workspace --all-targets --exclude desktop
 
   fmt:
     name: rustfmt
@@ -60,7 +60,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --exclude ato-desktop -- -D warnings
+      - run: cargo clippy --workspace --all-targets --exclude desktop -- -D warnings
 
   test:
     name: cargo test
@@ -123,7 +123,7 @@ jobs:
           echo "----- affected crates -----"; cat pkgs.txt
           count="$(grep -c . pkgs.txt || true)"; count="${count:-0}"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
-          if grep -qx ato-cli pkgs.txt; then
+          if grep -qx cli pkgs.txt; then
             echo "ato_cli=1" >> "$GITHUB_OUTPUT"
           else
             echo "ato_cli=0" >> "$GITHUB_OUTPUT"
@@ -139,7 +139,7 @@ jobs:
         if: steps.affected.outputs.ato_cli == '1'
         shell: bash
         run: |
-          cargo build -p ato-cli --bin ato
+          cargo build -p cli --bin ato
           cargo build -p nacelle --bin nacelle
           echo "$(pwd)/target/debug" >> $GITHUB_PATH
       # Test each selected crate in its own `cargo test -p` process, matching

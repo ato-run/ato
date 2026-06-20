@@ -8,21 +8,22 @@
 #
 #   ato-protocol  — DAG root: NO workspace-crate deps.
 #   capsule       — domain + local state: may dep ato-protocol; NOT
-#                   ato-cli / ato-desktop / ato-netd / nacelle.
-#   ato-netd      — speaks protocol: may dep ato-protocol; NOT
-#                   capsule / ato-cli / ato-desktop / nacelle.
+#                   cli / desktop / netd / nacelle.
+#   netd          — speaks protocol: may dep ato-protocol; NOT
+#                   capsule / cli / desktop / nacelle.
 #   nacelle       — sandbox only: may dep ato-protocol; NOT
-#                   capsule / ato-cli / ato-desktop / ato-netd.
-#   ato-cli       — orchestrator: may dep capsule / ato-protocol / nacelle;
-#                   NOT ato-desktop.
-#   ato-desktop   — shell: may dep ato-protocol / capsule; NOT
-#                   ato-cli / ato-netd / nacelle. Spawns the `ato` binary
-#                   as a subprocess instead of linking ato-cli.
+#                   capsule / cli / desktop / netd.
+#   cli           — orchestrator: may dep capsule / ato-protocol / nacelle;
+#                   NOT desktop.
+#   desktop       — shell: may dep ato-protocol / capsule; NOT
+#                   cli / netd / nacelle. Spawns the `ato` binary
+#                   as a subprocess instead of linking cli.
 #
 # It also fails if any of the pre-reorg package names are still present as a
-# crate anywhere (capsule-wire, capsule-core, ato-session-core, ato-net).
+# crate anywhere (capsule-wire, capsule-core, ato-session-core, ato-net,
+# ato-cli, ato-desktop, ato-netd).
 #
-# Note: `lock-draft-engine` (a shared helper under crates/ato-cli/) is an
+# Note: `lock-draft-engine` (a shared helper under crates/cli/) is an
 # allowed dependency for any crate — it is intentionally not part of the
 # forbidden lists.
 #
@@ -107,32 +108,32 @@ echo "Checking workspace dependency direction..."
 
 # ato-protocol: DAG root — no workspace-crate deps at all.
 check_forbidden "ato-protocol" "crates/ato-protocol/Cargo.toml" \
-  capsule ato-cli ato-desktop ato-netd nacelle lock-draft-engine
+  capsule cli desktop netd nacelle lock-draft-engine
 
 # capsule: may dep ato-protocol; not the rest.
 check_forbidden "capsule" "crates/capsule/Cargo.toml" \
-  ato-cli ato-desktop ato-netd nacelle
+  cli desktop netd nacelle
 
-# ato-netd: may dep ato-protocol; not the rest.
-check_forbidden "ato-netd" "crates/ato-netd/Cargo.toml" \
-  capsule ato-cli ato-desktop nacelle
+# netd: may dep ato-protocol; not the rest.
+check_forbidden "netd" "crates/netd/Cargo.toml" \
+  capsule cli desktop nacelle
 
 # nacelle: may dep ato-protocol; not the rest.
 check_forbidden "nacelle" "crates/nacelle/Cargo.toml" \
-  capsule ato-cli ato-desktop ato-netd
+  capsule cli desktop netd
 
-# ato-cli: may dep capsule / ato-protocol / nacelle; not ato-desktop.
-check_forbidden "ato-cli" "crates/ato-cli/Cargo.toml" \
-  ato-desktop
+# cli: may dep capsule / ato-protocol / nacelle; not desktop.
+check_forbidden "cli" "crates/cli/Cargo.toml" \
+  desktop
 
-# ato-desktop: may dep ato-protocol / capsule; not the rest.
-check_forbidden "ato-desktop" "crates/ato-desktop/Cargo.toml" \
-  ato-cli ato-netd nacelle
+# desktop: may dep ato-protocol / capsule; not the rest.
+check_forbidden "desktop" "crates/desktop/Cargo.toml" \
+  cli netd nacelle
 
 # Banned legacy package names: must not appear as a crate dependency or as a
 # crate directory anywhere in the workspace.
 echo "Checking for banned legacy crate names..."
-BANNED=(capsule-wire capsule-core ato-session-core ato-net)
+BANNED=(capsule-wire capsule-core ato-session-core ato-net ato-cli ato-desktop ato-netd)
 for name in "${BANNED[@]}"; do
   # As a crate directory.
   if [ -d "crates/$name" ]; then

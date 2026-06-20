@@ -45,10 +45,10 @@ cargo clippy --workspace --all-targets -- -D warnings \
 #   doc_lazy_continuation / doc_overindented_list_items
 #                                   — cosmetic rustdoc list formatting only.
 echo "==> [ato-desktop] cargo fmt --all -- --check"
-( cd crates/ato-desktop && cargo fmt --all -- --check )
+( cd crates/desktop && cargo fmt --all -- --check )
 
 echo "==> [ato-desktop] cargo clippy --bin ato-desktop -- -D warnings"
-( cd crates/ato-desktop && cargo clippy --bin ato-desktop -- -D warnings \
+( cd crates/desktop && cargo clippy --bin ato-desktop -- -D warnings \
     -A dead_code \
     -A clippy::await_holding_lock \
     -A clippy::collapsible_if \
