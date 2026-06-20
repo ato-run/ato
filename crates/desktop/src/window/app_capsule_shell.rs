@@ -31,7 +31,7 @@ use gpui::{
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{PageLoadEvent, Rect, WebView, WebViewBuilder};
 
-use ato_protocol::handle::CapsuleDisplayStrategy;
+use protocol::handle::CapsuleDisplayStrategy;
 
 use crate::automation::AutomationHost;
 use crate::automation::command::PendingAutomationRequest;
@@ -761,7 +761,7 @@ impl AppCapsuleShell {
                 // so the WebView URL is stable across backend restarts.
                 let effective_url = if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
                     let key =
-                        ato_protocol::net::stable_origin::logical_key_for_handle(&self.handle);
+                        protocol::net::stable_origin::logical_key_for_handle(&self.handle);
                     tracing::info!(
                         handle = %self.handle,
                         session_id = %session.session_id,

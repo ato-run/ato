@@ -9,10 +9,10 @@
 //! Materialization layer. Fast-path callers MUST gate reuse on
 //! `schema_version >= SCHEMA_VERSION_V2`.
 
-use ato_protocol::handle::{
+use protocol::handle::{
     CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot, TrustState,
 };
-use ato_protocol::placement::PlacementFacets;
+use protocol::placement::PlacementFacets;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;

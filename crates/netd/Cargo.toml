@@ -39,10 +39,10 @@ doh = ["hickory-resolver/dns-over-https-rustls"]
 
 [dependencies]
 # Shared wire types (control envelopes, resolver / receipt DTOs,
-# stable-origin derivation) live in ato-protocol; depending on it keeps
+# stable-origin derivation) live in protocol; depending on it keeps
 # client/server in lockstep on the wire protocol (Request / Response enums)
 # without pulling capsule or a separate network crate into the daemon.
-ato-protocol = { path = "../ato-protocol" }
+protocol = { path = "../protocol" }
 
 # Async trait support for the object-safe Resolver trait.
 async-trait = "0.1"

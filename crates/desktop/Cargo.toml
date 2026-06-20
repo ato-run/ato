@@ -56,7 +56,7 @@ base64 = "0.22"
 blake3 = "1"
 include_dir = "0.7"
 capsule = { path = "../capsule", version = "0.11.0" }
-ato-protocol = { path = "../ato-protocol", version = "0.1.0" }
+protocol = { path = "../protocol", version = "0.1.0" }
 cookie = "0.18"
 dirs = "5.0"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "15d86607" }

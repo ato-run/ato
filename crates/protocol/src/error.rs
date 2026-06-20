@@ -1,10 +1,10 @@
-//! Slim error type for ato-protocol's pure parsers.
+//! Slim error type for protocol's pure parsers.
 //!
 //! `capsule::CapsuleError` is rich (it carries variants for HTTP,
 //! container engines, sidecar IPC, crypto, etc.) and pulls in `reqwest`
 //! transitively. The handle parser only ever needs to say "the input was
 //! malformed" — there is no I/O, no network, no process. Defining a slim
-//! local [`WireError`] here keeps `ato-protocol`'s dependency surface
+//! local [`WireError`] here keeps `protocol`'s dependency surface
 //! minimal (`thiserror` only).
 //!
 //! Callers in `capsule` that propagate handle-parser errors into a

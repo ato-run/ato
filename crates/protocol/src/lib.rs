@@ -1,4 +1,4 @@
-//! `ato-protocol` — the **IPC surface** shared by `ato-cli` (the producer
+//! `protocol` — the **IPC surface** shared by `ato-cli` (the producer
 //! that emits JSON envelopes from `ato app {resolve,session start,…}`) and
 //! `ato-desktop` (the consumer that parses them).
 //!
@@ -15,7 +15,7 @@
 //! move at workspace scope: `capsule` carries heavy runtime deps
 //! (`bollard`, `tonic`, `rusqlite`, `reqwest`, `axum`, `prost`,
 //! tokio-`full`) that the Desktop has no business linking. By moving the
-//! pure types into `ato-protocol`, Desktop links only what it actually
+//! pure types into `protocol`, Desktop links only what it actually
 //! needs (`serde`, `tracing`, `thiserror`), and the dependency direction
 //! becomes a DAG that can be enforced at CI time (N4).
 //!
