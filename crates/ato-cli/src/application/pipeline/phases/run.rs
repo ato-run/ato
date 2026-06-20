@@ -4719,7 +4719,8 @@ struct ManagedStateRoot<'a> {
 /// session-local id MUST NOT appear in `root` — that would lose persistent data
 /// on every re-lease.
 fn managed_state_dir(root: &Path, target: &str, state_key: &str) -> PathBuf {
-    root.join(path_segment(target)).join(path_segment(state_key))
+    root.join(path_segment(target))
+        .join(path_segment(state_key))
 }
 
 /// A path-safe, collision-free single directory segment: `<sanitized>-<hash16>`.
@@ -6819,7 +6820,10 @@ target = "/var/lib/app"
 
         // The directory was created at the derived, stable location under root.
         let expected = super::managed_state_dir(root.as_path(), "app", "data");
-        assert!(expected.exists(), "managed state dir created at derived path");
+        assert!(
+            expected.exists(),
+            "managed state dir created at derived path"
+        );
         assert!(expected.starts_with(&root));
 
         // Stable across runs (re-lease reuse): identical returned binding.

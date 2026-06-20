@@ -31,7 +31,7 @@ use gpui::{
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{PageLoadEvent, Rect, WebView, WebViewBuilder};
 
-use capsule_wire::handle::CapsuleDisplayStrategy;
+use ato_protocol::handle::CapsuleDisplayStrategy;
 
 use crate::automation::AutomationHost;
 use crate::automation::command::PendingAutomationRequest;

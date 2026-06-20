@@ -2,7 +2,7 @@
 
 **Status (2026-04-26):** round 1 (P1–P6a) landed. P6b + P7 deferred to round 2 (after v0.5.0 release verification).
 
-This document is the companion to [`monorepo-consolidation-plan.md`](monorepo-consolidation-plan.md). The N1–N4 work in that plan extracted `capsule-wire` from `capsule-core` *inside* the `ato` repo; this plan covers the **outer** migration of sibling apps from the `capsuled-dev/` parent superproject into the same monorepo.
+This document is the companion to [`monorepo-consolidation-plan.md`](monorepo-consolidation-plan.md). The N1–N4 work in that plan extracted `ato-protocol` from `capsule-core` *inside* the `ato` repo; this plan covers the **outer** migration of sibling apps from the `capsuled-dev/` parent superproject into the same monorepo.
 
 `capsuled-dev/` itself is **not a git repository** — each app under `apps/*` has its own `.git` and release cycle (see `capsuled-dev/AGENTS.md`). So "migration" here means **subtree-merging selected apps into the `ato` monorepo, preserving history**, then archiving the source repos.
 
@@ -40,7 +40,7 @@ Author for all commits: `Koh0920 <gjiangshang55@gmail.com>` (sole). No `Co-Autho
 | **P1.3** | `cargo check --workspace` — clean. | (verification only) |
 | **P2** | Subtree merge of `nacelle.git` (history preserved, no `--squash`) → `crates/nacelle/`; workspace `members` updated; nested `Cargo.lock` removed; root `Cargo.lock` resolved for the merged graph; nacelle's local `v0.*` tags scrubbed from monorepo's tag namespace before push to avoid colliding with ato's own future versioning. | `c2c1b2c` (subtree), `9f66f68` (wire-in) |
 | **P3** | Extended `.github/workflows/dep-direction.yml` with R5 (ato-cli ⊄ nacelle) and R6 (nacelle ⊄ workspace crates), enforcing the process-spawn boundary in CI. | `f6d8047` |
-| **P4** | *Decided not to do.* Inspected ato-cli↔nacelle IPC: it's a JSON event stream over stdout, no Rust types are co-owned across the boundary. Hoisting non-shared types into `capsule-wire` would dilute the "wire = shared contract" invariant from N4. Recorded as an explicit non-action. | (this doc) |
+| **P4** | *Decided not to do.* Inspected ato-cli↔nacelle IPC: it's a JSON event stream over stdout, no Rust types are co-owned across the boundary. Hoisting non-shared types into `ato-protocol` would dilute the "wire = shared contract" invariant from N4. Recorded as an explicit non-action. | (this doc) |
 | **P5** | *Skipped for round 1.* `packages/lock-draft-wasm/` is actively imported by `ato-api` (out-of-scope) via `vitest.config.ts` alias and direct TS imports. Repointing or absorbing the shim now would couple this round to ato-api work. Deferred to P7. | — |
 | **P6a** | Removed dead workflow copies under `crates/nacelle/.github/workflows/` (Actions only reads root `.github/workflows/`; nested copies are unreachable). | `11798bc` |
 
@@ -56,7 +56,7 @@ Author for all commits: `Koh0920 <gjiangshang55@gmail.com>` (sole). No `Co-Autho
 These are now enforced by `.github/workflows/dep-direction.yml`:
 
 ```
-capsule-wire ──► (no deps on workspace crates; DAG root)
+ato-protocol ──► (no deps on workspace crates; DAG root)
                        │
                        ├─► capsule-core
                        │       │
@@ -68,7 +68,7 @@ capsule-wire ──► (no deps on workspace crates; DAG root)
 nacelle ──► (no deps on workspace crates; sandbox leaf)
 ```
 
-- `capsule-wire` stays a clean DAG root with no GUI / runtime / heavy-network dependencies (R1, R2)
+- `ato-protocol` stays a clean DAG root with no GUI / runtime / heavy-network dependencies (R1, R2)
 - `ato-desktop` does not link `ato-cli` (R3)
 - `ato-cli` does not link `ato-desktop` or any GPUI/Wry crate (R4)
 - `ato-cli` does not link `nacelle` (R5, **NEW in P3**)
@@ -79,7 +79,7 @@ nacelle ──► (no deps on workspace crates; sandbox leaf)
 ```bash
 # Local replay of the CI lint
 bash -c '
-  for p in capsule-wire ato-cli nacelle ato-desktop; do
+  for p in ato-protocol ato-cli nacelle ato-desktop; do
     echo "=== $p ==="
     cargo tree -p "$p" --prefix=none --edges=normal,build,dev | awk "{print \$1}" | sort -u | head -20
   done

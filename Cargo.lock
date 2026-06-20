@@ -400,6 +400,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "ato-net",
+ "ato-protocol",
  "ato-session-core",
  "axoupdater",
  "axum 0.7.9",
@@ -407,7 +408,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "capsule-core",
- "capsule-wire",
  "chrono",
  "clap",
  "cliclack",
@@ -526,13 +526,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-protocol"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "ato-session-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-protocol",
  "blake3",
  "capsule-core",
- "capsule-wire",
  "dirs 5.0.1",
  "libc",
  "serde",
@@ -1162,11 +1173,11 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ato-protocol",
  "axum 0.7.9",
  "base64 0.22.1",
  "blake3",
  "bollard",
- "capsule-wire",
  "chrono",
  "ctrlc",
  "dhat",
@@ -1213,17 +1224,6 @@ dependencies = [
  "windows-sys 0.59.0",
  "zip",
  "zstd 0.13.3",
-]
-
-[[package]]
-name = "capsule-wire"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

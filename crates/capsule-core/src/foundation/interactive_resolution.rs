@@ -111,7 +111,7 @@ pub struct ResolutionDisplay {
 mod tests {
     use super::*;
     use crate::error::AtoError;
-    use capsule_wire::config::{ConfigField, ConfigKind};
+    use ato_protocol::config::{ConfigField, ConfigKind};
 
     fn sample_config_field(name: &str) -> ConfigField {
         ConfigField {

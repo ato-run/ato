@@ -3,9 +3,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ato_protocol::handle::{ResolvedSnapshot, TrustState};
 use blake3::Hasher;
 use capsule_core::common::paths::ato_path;
-use capsule_wire::handle::{ResolvedSnapshot, TrustState};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -245,7 +245,7 @@ pub fn validate_materialized_launch_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_wire::handle::TrustState;
+    use ato_protocol::handle::TrustState;
     use tempfile::tempdir;
 
     fn sample_record(dir: &Path) -> MaterializedLaunchRecord {
