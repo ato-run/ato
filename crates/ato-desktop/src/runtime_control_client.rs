@@ -52,9 +52,7 @@ impl RuntimeControlClient {
             .map_err(|err| match err {
                 ureq::Error::Status(status, resp) => {
                     let body = resp.into_string().unwrap_or_default();
-                    anyhow::anyhow!(
-                        "POST /v1/runtime/sessions returned HTTP {status}: {body}"
-                    )
+                    anyhow::anyhow!("POST /v1/runtime/sessions returned HTTP {status}: {body}")
                 }
                 other => anyhow::Error::new(other).context("POST /v1/runtime/sessions"),
             })?;
@@ -64,8 +62,9 @@ impl RuntimeControlClient {
                 response.status()
             );
         }
-        let result: LaunchSessionResponse =
-            response.into_json().context("parse LaunchSessionResponse")?;
+        let result: LaunchSessionResponse = response
+            .into_json()
+            .context("parse LaunchSessionResponse")?;
         Ok(result)
     }
 

@@ -163,7 +163,7 @@ pub(crate) fn build_declared_only_bundle(
 /// `consent` comes from the caller's `ExecutionPlan.consent` — the
 /// only producer of `policy_segment_hash` /
 /// `provisioning_policy_hash` today is `compile_execution_plan` in
-/// capsule-core. Callers project the plan onto `GraphConsentInput`
+/// capsule. Callers project the plan onto `GraphConsentInput`
 /// before calling here.
 pub(crate) fn build_declared_only_bundle_with_consent(
     dependencies: &[ExternalCapsuleDependency],
@@ -314,7 +314,7 @@ impl LaunchMaterializationInput {
 /// (with the legacy plan-direct read kept as `debug_assert!` parity).
 ///
 /// Source of truth: `bundle.derived.consent` (a `DerivedConsentView`
-/// in capsule-core) when present; otherwise `None` fields and the
+/// in capsule) when present; otherwise `None` fields and the
 /// view degrades to its pre-PR-4b shape.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ExecutionConsentView {

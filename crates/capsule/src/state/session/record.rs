@@ -83,7 +83,7 @@ pub struct StoredSessionInfo {
     pub observed_execution_id: Option<String>,
 
     /// Coarse graph materialization/completeness marker written from
-    /// receipts. Kept as strings in `ato-session-core` so this storage
+    /// receipts. Kept as strings in `capsule` so this storage
     /// crate does not depend on the execution-identity crate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_completeness: Option<String>,

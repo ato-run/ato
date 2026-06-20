@@ -7,7 +7,7 @@
 //! `StatusEnvelope`/`BootstrapEnvelope`/`RepairEnvelope`) are still
 //! defined in their producer/consumer crates; they will consolidate here
 //! in a later monorepo phase once the manifest types also live in
-//! `capsule-core` (see `docs/monorepo-consolidation-plan.md` §M5).
+//! `capsule` (see `docs/monorepo-consolidation-plan.md` §M5).
 
 use serde::Deserialize;
 

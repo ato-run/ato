@@ -25,7 +25,7 @@ pub struct ProcessInfo {
     /// OS-reported start time of `pid` (ms since UNIX epoch), captured at
     /// registration. Distinct from `start_time` (which is registration
     /// wall-clock time and used for uptime / display) — this field is the
-    /// canonical comparator for `ato-session-core`'s startup orphan sweep
+    /// canonical comparator for `capsule`'s startup orphan sweep
     /// to defeat PID reuse. `None` on platforms without OS-query support
     /// or when the OS query fails.
     #[serde(default)]

@@ -2,7 +2,7 @@
 //!
 //! v1 implements the `tcp`, `probe`, and `postgres` variants. `http`
 //! and `unix_socket` are reserved-only and rejected at lock time
-//! (`capsule-core::foundation::dependency_contracts::verify_and_lock`),
+//! (`capsule::foundation::dependency_contracts::verify_and_lock`),
 //! so we do not need runtime support for them here.
 //!
 //! The `postgres` probe replaces a per-binary `pg_isready` dependency
