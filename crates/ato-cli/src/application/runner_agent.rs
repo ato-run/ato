@@ -828,6 +828,14 @@ pub struct RunCapsuleCommand {
     /// Owner/account id, confirmed server-side. Namespaces persistent state.
     /// Required: a runner must never key state off client-supplied input.
     pub owner_id: String,
+    /// Optional inline recipe `capsule.toml` content. Present for capsules that
+    /// have no installable release/manifest (community Store recipes are
+    /// published as a recipe TOML, not a built version) — `ato run <run_ref>`
+    /// would fail "no installable version". When set, the runner materializes
+    /// this TOML to a per-lease dir and runs THAT dir, while still keying
+    /// persistent state on `run_ref` (the immutable identity). When absent, the
+    /// runner installs `run_ref` directly (developer-published, versioned apps).
+    pub recipe_toml: Option<String>,
     /// Optional run id, for audit/logging only.
     pub run_id: Option<String>,
     /// Display-only. MUST NOT drive execution or state isolation.
@@ -875,6 +883,13 @@ pub fn parse_run_capsule_command(
     Ok(RunCapsuleCommand {
         run_ref: required("run_ref")?,
         owner_id: required("owner_id")?,
+        // Recipe TOML is file CONTENT, not an identifier — preserve it verbatim
+        // (do not trim, unlike the id/ref fields).
+        recipe_toml: command
+            .get("recipe_toml")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string()),
         run_id: optional("run_id"),
         capsule_slug: optional("capsule_slug"),
     })
@@ -1932,6 +1947,7 @@ fn validate_capsule_run_ref(run_ref: &str) -> std::result::Result<String, (Strin
 /// kinds are rejected without executing.
 fn resolve_lease_execution(
     command: &serde_json::Value,
+    recipe_dir: &Path,
 ) -> std::result::Result<LeaseExecution, (String, String)> {
     let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     match kind {
@@ -1944,8 +1960,15 @@ fn resolve_lease_execution(
         }
         RUN_CAPSULE_LEASE_KIND => {
             let c = parse_run_capsule_command(command)?;
-            let run_ref = validate_capsule_run_ref(&c.run_ref)?;
+            // Persistent state is ALWAYS keyed on the immutable `run_ref`
+            // identity — whether we execute that ref directly or a materialized
+            // inline recipe — so re-runs reuse the same state regardless of the
+            // ephemeral recipe dir.
             let root = run_capsule_state_root(&c);
+            let run_ref = match c.recipe_toml.as_deref() {
+                Some(toml) => materialize_inline_recipe(recipe_dir, toml)?,
+                None => validate_capsule_run_ref(&c.run_ref)?,
+            };
             Ok(LeaseExecution {
                 run_ref,
                 managed_state_root: Some(root),
@@ -1958,6 +1981,40 @@ fn resolve_lease_execution(
             ),
         )),
     }
+}
+
+/// Materialize an inline recipe `capsule.toml` into `recipe_dir` and return that
+/// dir as the `ato run` positional. Community Store recipes have no installable
+/// release (`ato run <run_ref>` → "no installable version"), so the control
+/// plane ships the recipe TOML inline; the runner runs the materialized dir
+/// while persistent state stays keyed on the lease's immutable `run_ref`.
+fn materialize_inline_recipe(
+    recipe_dir: &Path,
+    recipe_toml: &str,
+) -> std::result::Result<String, (String, String)> {
+    std::fs::create_dir_all(recipe_dir).map_err(|e| {
+        (
+            "inline_recipe_write_failed".to_string(),
+            format!("failed to create recipe dir {}: {e}", recipe_dir.display()),
+        )
+    })?;
+    let toml_path = recipe_dir.join("capsule.toml");
+    std::fs::write(&toml_path, recipe_toml).map_err(|e| {
+        (
+            "inline_recipe_write_failed".to_string(),
+            format!("failed to write {}: {e}", toml_path.display()),
+        )
+    })?;
+    Ok(recipe_dir.to_string_lossy().into_owned())
+}
+
+/// Per-lease directory for a materialized inline recipe. MUST live OUTSIDE
+/// `~/.ato/` — `ato run <dir>` rejects a run target inside Ato's internal state
+/// directory ("cannot be used as a run target"). Use a per-lease temp dir.
+fn inline_recipe_dir(lease_id: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("ato-runner-recipes")
+        .join(format!("{lease_id}-recipe"))
 }
 
 struct BoundedLog {
@@ -2172,7 +2229,7 @@ async fn handle_claimed_lease(
     proxy_listen: String,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
-    let execution = match resolve_lease_execution(&lease.command) {
+    let execution = match resolve_lease_execution(&lease.command, &inline_recipe_dir(&lease.id)) {
         Ok(execution) => execution,
         Err((code, message)) => {
             eprintln!("⚠️  lease {} rejected: {}", lease.id, message);
@@ -2845,7 +2902,7 @@ mod tests {
         let exec = resolve_lease_execution(&serde_json::json!({
             "kind": "run_source_sandbox",
             "source_url": "https://github.com/Koh0920/hello-capsule",
-        }))
+        }), std::path::Path::new("unused-recipe"))
         .expect("valid source lease");
         assert_eq!(exec.run_ref, "github.com/Koh0920/hello-capsule");
         assert!(
@@ -2863,7 +2920,7 @@ mod tests {
             "kind": "run_capsule",
             "run_ref": run_ref,
             "owner_id": "usr_01H",
-        }))
+        }), std::path::Path::new("unused-recipe"))
         .expect("valid capsule lease");
         // The runner executes exactly the ref it was given...
         assert_eq!(exec.run_ref, run_ref);
@@ -2886,17 +2943,54 @@ mod tests {
     fn resolve_lease_execution_distinct_run_refs_get_distinct_state() {
         let a = resolve_lease_execution(&serde_json::json!({
             "kind": "run_capsule", "run_ref": "community/x@rev1", "owner_id": "u",
-        }))
+        }), std::path::Path::new("unused-recipe"))
         .unwrap()
         .managed_state_root
         .unwrap();
         let b = resolve_lease_execution(&serde_json::json!({
             "kind": "run_capsule", "run_ref": "community/x@rev2", "owner_id": "u",
-        }))
+        }), std::path::Path::new("unused-recipe"))
         .unwrap()
         .managed_state_root
         .unwrap();
         assert_ne!(a, b, "a different (immutable) run_ref gets a distinct state dir");
+    }
+
+    #[test]
+    fn resolve_lease_execution_inline_recipe_runs_dir_keyed_on_run_ref() {
+        use crate::application::pipeline::phases::run::path_segment;
+        // Community recipes have no installable release, so the lease ships the
+        // recipe TOML inline. The runner materializes + runs the DIR, but state
+        // stays keyed on the immutable run_ref identity.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run_ref = "community/openlist-google-drive-crypt-openlist";
+        let recipe = "schema_version = \"0.3\"\n[targets.app]\nruntime = \"oci\"\n";
+        let exec = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule",
+                "run_ref": run_ref,
+                "owner_id": "usr_9",
+                "recipe_toml": recipe,
+            }),
+            dir.path(),
+        )
+        .expect("valid inline-recipe lease");
+        // Executes the materialized recipe dir, not the uninstallable run_ref.
+        assert_eq!(exec.run_ref, dir.path().to_string_lossy());
+        let written = std::fs::read_to_string(dir.path().join("capsule.toml"))
+            .expect("capsule.toml materialized");
+        assert_eq!(written, recipe);
+        // State is STILL keyed on the immutable run_ref identity, not the dir.
+        let s = exec
+            .managed_state_root
+            .expect("managed state root")
+            .to_string_lossy()
+            .into_owned();
+        assert!(s.contains(&path_segment("usr_9")), "owner segment present");
+        assert!(
+            s.ends_with(&path_segment(run_ref)),
+            "state keyed on the immutable run_ref, not the recipe dir"
+        );
     }
 
     #[test]
@@ -2906,13 +3000,13 @@ mod tests {
         for bad in ["--help", "-rf", "a b", "x\ty", ""] {
             let (code, _) = resolve_lease_execution(&serde_json::json!({
                 "kind": "run_capsule", "run_ref": bad, "owner_id": "u",
-            }))
+            }), std::path::Path::new("unused-recipe"))
             .unwrap_err();
             assert_eq!(code, "invalid_command", "must reject run_ref {bad:?}");
         }
         let (code, _) = resolve_lease_execution(&serde_json::json!({
             "kind": "shell", "command": "rm -rf /",
-        }))
+        }), std::path::Path::new("unused-recipe"))
         .unwrap_err();
         assert_eq!(code, "unsupported_command");
     }
