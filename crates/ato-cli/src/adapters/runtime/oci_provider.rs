@@ -1060,7 +1060,13 @@ where
         }
         for mount in &request.mounts {
             args.push("-v".into());
-            let opts = if mount.readonly { ":ro" } else { "" };
+            // Writable mounts get `:U` so podman chowns the volume source to the
+            // container's (userns-mapped) user. Without it, a persistent-state dir
+            // owned by the host runner user is unwritable by a remapped container
+            // uid under rootless podman — e.g. OpenList's uid 1001 maps to a host
+            // subuid, not host 1001, so it cannot write its data dir (ato#735).
+            // Read-only mounts never need re-owning.
+            let opts = if mount.readonly { ":ro" } else { ":U" };
             // Canonicalize the source path to resolve symlinks (e.g. /tmp → /private/tmp on macOS).
             let source = std::fs::canonicalize(&mount.source)
                 .map(|p| p.to_string_lossy().to_string())
