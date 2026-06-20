@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use super::*;
 
+use ato_protocol::placement::{
+    PlacedSessionSummary, PlacementCapabilities, PlacementFacets, PlacementIdentity,
+    PlacementProviderId, PlacementProviderKind,
+};
 use ato_session_core::{StoredSessionInfo, read_session_records, session_root};
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
     InstallInstanceStore, derive_install_profile_key,
-};
-use capsule_wire::placement::{
-    PlacedSessionSummary, PlacementCapabilities, PlacementFacets, PlacementIdentity,
-    PlacementProviderId, PlacementProviderKind,
 };
 
 #[derive(Debug, Deserialize)]

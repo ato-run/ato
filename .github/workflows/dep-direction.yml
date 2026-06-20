@@ -2,7 +2,7 @@ name: dep-direction
 
 # Enforces the workspace dependency DAG so the wire / runtime / shell
 # layering can't silently regress. The single biggest invariant is that
-# `capsule-wire` stays a DAG root (consumed by both `ato-cli` and
+# `ato-protocol` stays a DAG root (consumed by both `ato-cli` and
 # `ato-desktop`, depends on neither), since that's what lets the Desktop
 # link the IPC surface without dragging in capsule-core's runtime stack
 # (bollard / tonic / rusqlite / reqwest / axum / prost / tokio-`full`).
@@ -39,30 +39,30 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: capsule-wire is a DAG root (no ato-* / capsule-core deps)
+      - name: ato-protocol is a DAG root (no ato-* / capsule-core deps)
         run: |
           set -euo pipefail
           # `cargo tree --prefix=none` flattens the tree and de-dups
           # transitive entries with `(*)`, so a simple grep against the
           # crate-name column catches both direct and transitive
           # violations.
-          tree=$(cargo tree -p capsule-wire --prefix=none --edges=normal,build,dev)
+          tree=$(cargo tree -p ato-protocol --prefix=none --edges=normal,build,dev)
           violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
             grep -E '^(ato-cli|capsule-core|ato-desktop|ato-desktop-xtask|lock-draft-engine)$' || true)
           if [ -n "$violations" ]; then
-            echo "::error::capsule-wire pulled in a forbidden ato-/capsule-core/lock-draft dep:"
+            echo "::error::ato-protocol pulled in a forbidden ato-/capsule-core/lock-draft dep:"
             echo "$violations"
             echo "---"
             echo "Full tree:"
             echo "$tree"
             exit 1
           fi
-          echo "OK: capsule-wire is a clean DAG root."
+          echo "OK: ato-protocol is a clean DAG root."
 
-      - name: capsule-wire avoids GUI / runtime / clap / heavy-network deps
+      - name: ato-protocol avoids GUI / runtime / clap / heavy-network deps
         run: |
           set -euo pipefail
-          tree=$(cargo tree -p capsule-wire --prefix=none --edges=normal,build,dev)
+          tree=$(cargo tree -p ato-protocol --prefix=none --edges=normal,build,dev)
           # Anything in this list would defeat the whole point of the
           # split (the Desktop wanting a small wire surface). Add new
           # entries here when a new heavy dep tries to sneak in via a
@@ -71,15 +71,15 @@ jobs:
           violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
             grep -E "$forbidden_re" || true)
           if [ -n "$violations" ]; then
-            echo "::error::capsule-wire pulled in a forbidden runtime/GUI dep:"
+            echo "::error::ato-protocol pulled in a forbidden runtime/GUI dep:"
             echo "$violations"
             echo "---"
             echo "If this is intentional (a wire shape genuinely needs the dep), update"
             echo ".github/workflows/dep-direction.yml — but think hard first: the whole"
-            echo "point of capsule-wire is a small surface."
+            echo "point of ato-protocol is a small surface."
             exit 1
           fi
-          echo "OK: capsule-wire stays free of GUI / runtime deps."
+          echo "OK: ato-protocol stays free of GUI / runtime deps."
 
       - name: ato-desktop does not depend on the ato-cli crate (process-spawn boundary)
         run: |
@@ -119,7 +119,7 @@ jobs:
           # ato-cli invokes nacelle via subprocess (--nacelle <path>),
           # never as a Cargo dep. Same shape as ato-desktop → ato-cli.
           # If anyone tries to link nacelle into the CLI to "share types",
-          # they should hoist those types into capsule-wire instead — see
+          # they should hoist those types into ato-protocol instead — see
           # docs/monorepo-consolidation-plan.md §P3 for the rationale.
           tree=$(cargo tree -p ato-cli --prefix=none --edges=normal,build,dev)
           if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^nacelle$' > /dev/null; then
@@ -140,12 +140,12 @@ jobs:
           # version pin (release matrix, vendored cache, system PATH).
           tree=$(cargo tree -p nacelle --prefix=none --edges=normal,build,dev)
           violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
-            grep -E '^(ato-cli|ato-desktop|ato-desktop-xtask|capsule-core|capsule-wire|lock-draft-engine)$' || true)
+            grep -E '^(ato-cli|ato-desktop|ato-desktop-xtask|capsule-core|ato-protocol|lock-draft-engine)$' || true)
           if [ -n "$violations" ]; then
             echo "::error::nacelle pulled in a forbidden workspace dep:"
             echo "$violations"
             echo "---"
-            echo "If you genuinely need a shared type, hoist it into capsule-wire."
+            echo "If you genuinely need a shared type, hoist it into ato-protocol."
             exit 1
           fi
           echo "OK: nacelle stays a clean sandbox leaf."
