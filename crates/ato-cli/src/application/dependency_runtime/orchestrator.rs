@@ -480,6 +480,10 @@ fn start_one(
             alias: alias.to_string(),
             detail: format!("canonicalize {}: {}", state_dir.display(), err),
         })?;
+    // The state dir reaches provider processes as cwd/env/argv; strip the
+    // `\\?\` prefix canonicalize() adds on Windows so those tools see the
+    // normal spelling.
+    let state_dir = capsule_core::common::paths::windows_child_compatible_path(&state_dir);
 
     // §10.4 orphan detection (warn-only, with abort for AliveOtherSession).
     let orphan = detect_orphan_state(&state_dir, input.session_pid).map_err(|err| {
@@ -779,9 +783,21 @@ fn derive_state_dir(
     ato_home
         .join("state")
         .join(parent_pkg_id)
-        .join(instance_hash)
+        .join(host_state_path_component(instance_hash))
         .join(state_version)
         .join(state_name)
+}
+
+/// `instance_hash` is spelled `blake3:<hex>`, and NTFS forbids `:` inside a
+/// path component, so Windows encodes the separator as `-`. Unix keeps the
+/// RFC §7.7 spelling — existing state dirs must keep resolving. State dirs
+/// are host-local, so the per-platform encoding never crosses machines.
+fn host_state_path_component(value: &str) -> String {
+    if cfg!(windows) {
+        value.replace(':', "-")
+    } else {
+        value.to_string()
+    }
 }
 
 /// Wire the child's stdout/stderr through the redaction registry and into
@@ -1307,10 +1323,14 @@ mod tests {
             "16",
             "data",
         );
-        assert_eq!(
-            p,
-            PathBuf::from("/ato_home/state/wasedap2p-backend/blake3:7f4a/16/data")
-        );
+        // NTFS forbids `:` inside a path component, so Windows encodes the
+        // hash separator as `-`; Unix keeps the RFC §7.7 spelling.
+        let expected = if cfg!(windows) {
+            "/ato_home/state/wasedap2p-backend/blake3-7f4a/16/data"
+        } else {
+            "/ato_home/state/wasedap2p-backend/blake3:7f4a/16/data"
+        };
+        assert_eq!(p, PathBuf::from(expected));
     }
 
     // ---------- end-to-end mock-provider integration ----------
@@ -1347,12 +1367,33 @@ password = "{{env.MOCK_PASSWORD}}"
 name = "data"
 "#;
 
-    // Provider that uses /bin/sleep as its long-running entrypoint and
-    // /usr/bin/true as the ready probe. No template expansion needed —
-    // the provider does not consume credentials in its run line. The
+    // Provider built around a long-running entrypoint and an always-green
+    // ready probe. Both lines are argv-split by the orchestrator (no
+    // shell), so each platform needs its own spelling: /bin/sleep and
+    // /usr/bin/true on unix, `ping -n 61` (the classic ~60s sleeper) and
+    // `cmd /c exit 0` on Windows. No template expansion needed — the
+    // provider does not consume credentials in its run line. The
     // credential is still routed via Rule M1 TempFile materialization
     // because the lock declared one.
-    const MOCK_PROVIDER: &str = r#"
+    fn mock_provider_run_line() -> &'static str {
+        if cfg!(windows) {
+            "ping -n 61 127.0.0.1"
+        } else {
+            "/bin/sleep 60"
+        }
+    }
+
+    fn mock_provider_probe_line() -> &'static str {
+        if cfg!(windows) {
+            "cmd /c exit 0"
+        } else {
+            "/usr/bin/true"
+        }
+    }
+
+    fn mock_provider_toml() -> String {
+        format!(
+            r#"
 schema_version = "0.3"
 name = "mock"
 version = "1.0.0"
@@ -1362,34 +1403,39 @@ default_target = "server"
 [targets.server]
 runtime = "source"
 driver = "native"
-run = "/bin/sleep 60"
+run = "{run}"
 port = 0
 
 [contracts."service@1"]
 target = "server"
-ready = { type = "probe", run = "/usr/bin/true", timeout = "5s" }
+ready = {{ type = "probe", run = "{probe}", timeout = "5s" }}
 
 [contracts."service@1".parameters]
-mode = { type = "string", required = true }
+mode = {{ type = "string", required = true }}
 
 [contracts."service@1".credentials]
-password = { type = "string", required = true }
+password = {{ type = "string", required = true }}
 
 [contracts."service@1".identity_exports]
-mode = "{{params.mode}}"
+mode = "{{{{params.mode}}}}"
 
 [contracts."service@1".runtime_exports]
-MODE = "{{params.mode}}"
+MODE = "{{{{params.mode}}}}"
 
 [contracts."service@1".state]
 required = true
 version = "1"
-"#;
+"#,
+            run = mock_provider_run_line(),
+            probe = mock_provider_probe_line(),
+        )
+    }
 
     #[test]
     fn start_all_spawns_provider_runs_ready_probe_and_tears_down() {
         let consumer = CapsuleManifest::from_toml(MOCK_CONSUMER).expect("consumer");
-        let provider_manifest = CapsuleManifest::from_toml(MOCK_PROVIDER).expect("provider");
+        let provider_manifest =
+            CapsuleManifest::from_toml(&mock_provider_toml()).expect("provider");
 
         // Build a DependencyLock by running the real verifier so the test
         // exercises the full pipeline end to end.
@@ -1481,7 +1527,8 @@ version = "1"
     #[test]
     fn start_all_aborts_on_alive_other_session_orphan() {
         let consumer = CapsuleManifest::from_toml(MOCK_CONSUMER).expect("consumer");
-        let provider_manifest = CapsuleManifest::from_toml(MOCK_PROVIDER).expect("provider");
+        let provider_manifest =
+            CapsuleManifest::from_toml(&mock_provider_toml()).expect("provider");
 
         let mut providers_for_lock = BTreeMap::new();
         providers_for_lock.insert(
@@ -1498,8 +1545,10 @@ version = "1"
         })
         .expect("verify_and_lock");
 
-        // Pre-write a sentinel that points at pid=1 (init/launchd, alive
-        // but not us) so the orchestrator must abort.
+        // Pre-write a sentinel that points at a different live process (a
+        // child blocked on its held-open stdin — pid 1 only exists on unix
+        // hosts) so the orchestrator must abort.
+        let mut foreign_session = crate::tests::blocking_child();
         let ato_home = tempfile::tempdir().expect("ato_home");
         let entry = lock.entries.get("svc").expect("svc entry");
         let state_block = entry.state.as_ref().expect("state");
@@ -1514,7 +1563,7 @@ version = "1"
         write_session_sentinel(
             &state_dir,
             &SessionSentinel {
-                session_pid: 1,
+                session_pid: foreign_session.id() as i32,
                 provider_pid: None,
                 started_at: "2026-01-01T00:00:00Z".to_string(),
                 resolved: "capsule://ato/mock@sha256:e2e".to_string(),
@@ -1549,6 +1598,8 @@ version = "1"
         };
 
         let err = start_all(input).expect_err("must abort on alive other session");
+        foreign_session.kill().ok();
+        foreign_session.wait().ok();
         assert!(
             matches!(err, OrchestratorError::OrphanAliveOtherSession { .. }),
             "got {err:?}"
@@ -1900,8 +1951,8 @@ run = "npm run dev"
         let bogus_probe = tmp.path().join("nope").join("pg_isready");
         let probe_str = bogus_probe.to_string_lossy().into_owned();
 
-        // Same shape as MOCK_CONSUMER / MOCK_PROVIDER but the probe path
-        // is rewritten to a guaranteed-missing absolute path.
+        // Same shape as MOCK_CONSUMER / mock_provider_toml but the probe
+        // path is rewritten to a guaranteed-missing absolute path.
         let provider_toml = format!(
             r#"
 schema_version = "0.3"
@@ -1913,7 +1964,7 @@ default_target = "server"
 [targets.server]
 runtime = "source"
 driver = "native"
-run = "/bin/sleep 60"
+run = "{run}"
 port = 0
 
 [contracts."service@1"]
@@ -1936,7 +1987,11 @@ MODE = "{{{{params.mode}}}}"
 required = true
 version = "1"
 "#,
-            probe = probe_str,
+            run = mock_provider_run_line(),
+            // Forward slashes keep the embedded path valid inside a TOML
+            // basic string on Windows (backslashes parse as escapes); the
+            // drive-prefixed form stays absolute either way.
+            probe = probe_str.replace('\\', "/"),
         );
 
         let consumer = CapsuleManifest::from_toml(MOCK_CONSUMER).expect("consumer");

@@ -383,7 +383,9 @@ fn display_path(path: &Path, home: &Option<PathBuf>) -> String {
         if relative.as_os_str().is_empty() {
             return "~".to_string();
         }
-        return format!("~/{}", relative.display());
+        // The `~/…` shorthand is rendered with `/` on every platform — a
+        // mixed `~/.ato\keys` reads wrong and breaks copy/paste into docs.
+        return format!("~/{}", relative.display().to_string().replace('\\', "/"));
     }
     path.display().to_string()
 }
@@ -666,6 +668,8 @@ mod tests {
     #[test]
     #[serial]
     fn purge_plan_preserves_config_and_keys_by_default() {
+        // Crate convention: env-mutating tests hold the shared env lock.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let install_dir = temp.path().join("bin");
         fs::create_dir_all(&install_dir).expect("create install dir");
@@ -677,11 +681,12 @@ mod tests {
         fs::create_dir_all(ato_home.join("store")).expect("create store");
 
         let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
         let old_ato_home = std::env::var_os("ATO_HOME");
         unsafe {
             std::env::set_var("HOME", &home_dir);
-        }
-        unsafe {
+            // dirs::home_dir() reads USERPROFILE on Windows, not HOME.
+            std::env::set_var("USERPROFILE", &home_dir);
             std::env::set_var("ATO_HOME", &ato_home);
         }
 
@@ -689,22 +694,18 @@ mod tests {
         purge_options.purge = true;
         let plan = build_removal_plan(&install_dir, purge_options);
 
-        if let Some(old_home) = old_home {
-            unsafe {
-                std::env::set_var("HOME", old_home);
+        unsafe {
+            match old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
             }
-        } else {
-            unsafe {
-                std::env::remove_var("HOME");
+            match old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
             }
-        }
-        if let Some(old_ato_home) = old_ato_home {
-            unsafe {
-                std::env::set_var("ATO_HOME", old_ato_home);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("ATO_HOME");
+            match old_ato_home {
+                Some(value) => std::env::set_var("ATO_HOME", value),
+                None => std::env::remove_var("ATO_HOME"),
             }
         }
 
@@ -715,14 +716,23 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(planned.contains(&ato_home.join("store")));
         assert!(planned.contains(&ato_home.join("apps/ato-desktop/sessions")));
+        // The preserved label is `~/.ato/...` when ATO_HOME sits under the
+        // real home dir; on Windows `dirs::home_dir()` ignores env overrides
+        // (Known Folder API), so the temp ATO_HOME renders absolute there.
+        // Assert the preservation behavior, not the rendering.
         assert!(
             plan.preserved_targets
-                .contains(&"~/.ato/config.toml".to_string()),
-            "config.toml must be preserved unless explicitly included"
+                .iter()
+                .any(|target| target.replace('\\', "/").ends_with(".ato/config.toml")),
+            "config.toml must be preserved unless explicitly included: {:?}",
+            plan.preserved_targets
         );
         assert!(
-            plan.preserved_targets.contains(&"~/.ato/keys".to_string()),
-            "keys must be preserved unless explicitly included"
+            plan.preserved_targets
+                .iter()
+                .any(|target| target.replace('\\', "/").ends_with(".ato/keys")),
+            "keys must be preserved unless explicitly included: {:?}",
+            plan.preserved_targets
         );
     }
 

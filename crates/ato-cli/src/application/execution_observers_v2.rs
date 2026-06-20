@@ -769,7 +769,11 @@ fn lifecycle_for_writable_target(target: &str) -> WritableDirLifecycle {
 fn classify_state_binding(locator: &str) -> StateBindingKind {
     if locator.starts_with("state-") || locator.starts_with("blake3:") {
         StateBindingKind::AtoStateRef
-    } else if Path::new(locator).is_absolute() {
+    } else if locator.starts_with('/') || Path::new(locator).is_absolute() {
+        // Classification is by spelling, not host semantics: a `/`-rooted
+        // locator records as a host path on every platform (Windows'
+        // `is_absolute()` alone would reclassify it as a snapshot and make
+        // receipts diverge across OSes).
         StateBindingKind::HostPath
     } else {
         StateBindingKind::ContentSnapshot

@@ -136,50 +136,88 @@ pub fn parse_allowed_host_paths_csv(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
-
+    use std::fs;
+    // Only the unix-gated symlink-escape test below needs these.
     #[cfg(unix)]
     use std::os::unix::fs as unix_fs;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     use tempfile::tempdir;
 
     use super::{parse_allowed_host_paths_csv, validate_path};
 
+    /// Host-absolute spelling for a unix-style test path: `/opt/models`
+    /// stays as-is on unix and becomes `C:/opt/models` on Windows (drive-
+    /// prefixed forward slashes are absolute there and keep the `/`-based
+    /// normalization in `parse_allowed_host_paths_csv` exercised).
+    fn host_abs(unix: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{unix}")
+        } else {
+            unix.to_string()
+        }
+    }
+
     #[test]
     fn validate_path_allows_path_in_allowlist() {
+        // Anchor the allowlist at real directories so the existing-ancestor
+        // fallback in canonicalization plays no role in the outcome.
+        let temp = tempdir().expect("tempdir");
+        let models = temp.path().join("models");
+        let cache = temp.path().join("cache");
+        fs::create_dir_all(&models).expect("models dir");
+        fs::create_dir_all(&cache).expect("cache dir");
         let allowed_paths = vec![
-            "/opt/models".to_string(),
-            "/mnt/cache".to_string(),
-            "/tmp".to_string(),
+            models.to_string_lossy().to_string(),
+            cache.to_string_lossy().to_string(),
         ];
 
-        assert!(validate_path("/opt/models/llama-3.gguf", &allowed_paths).is_ok());
-        assert!(validate_path("/mnt/cache/output", &allowed_paths).is_ok());
+        assert!(
+            validate_path(
+                &models.join("llama-3.gguf").to_string_lossy(),
+                &allowed_paths
+            )
+            .is_ok()
+        );
+        assert!(validate_path(&cache.join("output").to_string_lossy(), &allowed_paths).is_ok());
     }
 
     #[test]
     fn parse_allowed_host_paths_csv_trims_normalizes_and_dedupes() {
-        let v = parse_allowed_host_paths_csv(" /var/lib/gumball/ ,/tmp,/var/lib/gumball");
-        assert_eq!(v, vec!["/tmp".to_string(), "/var/lib/gumball".to_string()]);
+        let gumball = host_abs("/var/lib/gumball");
+        let tmp = host_abs("/tmp");
+        let v = parse_allowed_host_paths_csv(&format!(" {gumball}/ ,{tmp},{gumball}"));
+        assert_eq!(v, vec![tmp, gumball]);
     }
 
     #[test]
     fn parse_allowed_host_paths_csv_drops_relative_and_traversal() {
-        let v = parse_allowed_host_paths_csv("relative/path,/opt/models/../etc,/opt/models");
-        assert_eq!(v, vec!["/opt/models".to_string()]);
+        let models = host_abs("/opt/models");
+        let traversal = host_abs("/opt/models/../etc");
+        let v = parse_allowed_host_paths_csv(&format!("relative/path,{traversal},{models}"));
+        assert_eq!(v, vec![models]);
     }
 
     #[test]
     fn validate_path_denies_path_not_in_allowlist() {
-        let allowed_paths = vec!["/opt/models".to_string()];
+        // Both roots exist so the deny verdict comes from the allowlist
+        // comparison, not from a canonicalization fallback.
+        let temp = tempdir().expect("tempdir");
+        let models = temp.path().join("models");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&models).expect("models dir");
+        fs::create_dir_all(&outside).expect("outside dir");
+        let allowed_paths = vec![models.to_string_lossy().to_string()];
 
-        let err = validate_path("/etc/shadow", &allowed_paths).unwrap_err();
+        let err =
+            validate_path(&outside.join("shadow").to_string_lossy(), &allowed_paths).unwrap_err();
         assert!(err.contains("not in the allowed paths"));
     }
 
     #[test]
     fn validate_path_denies_relative_paths() {
-        let allowed_paths = vec!["/opt/models".to_string()];
+        let allowed_paths = vec![host_abs("/opt/models")];
 
         let err = validate_path("relative/path", &allowed_paths).unwrap_err();
         assert!(err.contains("must be absolute"));
@@ -187,9 +225,10 @@ mod tests {
 
     #[test]
     fn validate_path_denies_traversal_components() {
-        let allowed_paths = vec!["/opt/models".to_string()];
+        let allowed_paths = vec![host_abs("/opt/models")];
 
-        let err = validate_path("/opt/models/../etc/passwd", &allowed_paths).unwrap_err();
+        let err =
+            validate_path(&host_abs("/opt/models/../etc/passwd"), &allowed_paths).unwrap_err();
         assert!(err.contains("Path traversal detected"));
     }
 

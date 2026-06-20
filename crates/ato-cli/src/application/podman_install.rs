@@ -2106,8 +2106,14 @@ mod tests {
     }
 
     // ── Archive-format installer tests (unchanged from prior PRs) ─────────────
+    //
+    // Unix-only: the fixtures stand in for the podman binary with a shell
+    // script, and the installer's verification step *executes* it. The
+    // ato-managed install path itself only has pinned artifacts for macOS
+    // today (`pinned_artifact` returns None elsewhere).
 
     #[test]
+    #[cfg(unix)]
     fn ato_managed_installer_extracts_verified_binary() {
         let bytes = tar_gz_with("usr/bin/podman", podman_stub_script());
         let artifact = test_artifact_for(&bytes);
@@ -2123,6 +2129,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn ato_managed_installer_promotes_and_leaves_no_temp_dir() {
         let bytes = tar_gz_with("usr/bin/podman", podman_stub_script());
         let artifact = test_artifact_for(&bytes);
@@ -2189,6 +2196,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn ato_managed_installer_records_version_digest_source() {
         let bytes = tar_gz_with("usr/bin/podman", podman_stub_script());
         let artifact = test_artifact_for(&bytes);
@@ -2302,6 +2310,7 @@ mod tests {
     // ── Helper bundle tests (archive format) ──────────────────────────────────
 
     #[test]
+    #[cfg(unix)]
     fn ato_managed_installer_bundles_helpers_and_writes_containers_conf() {
         let archive = tar_gz_with("usr/bin/podman", podman_stub_script());
         let (artifact, fetcher) =
@@ -2400,6 +2409,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn install_accepts_universal_helpers_on_both_arm64_and_x86_64() {
         for host in ["aarch64", "x86_64"] {
             let archive = tar_gz_with("usr/bin/podman", podman_stub_script());

@@ -1,4 +1,8 @@
 #![allow(deprecated)]
+// The guest runtime is wasmtime-backed, and wasmtime is a
+// `cfg(not(windows))` dependency of ato-cli — the capability these tests
+// exercise does not exist in Windows builds.
+#![cfg(not(windows))]
 
 //! Phase 13b.9 — JSON-RPC 2.0 E2E tests for `ato guest`.
 //!

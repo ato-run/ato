@@ -42,23 +42,37 @@ pub fn pid_is_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 pub fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
     if pid == 0 {
         return false;
     }
-    let filter = format!("PID eq {pid}");
-    let output = match std::process::Command::new("tasklist")
-        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
-        .output()
-    {
-        Ok(output) => output,
-        Err(_) => return true,
-    };
-    if !output.status.success() {
-        return true;
+    // SAFETY: OpenProcess with the query-limited right is read-only; the
+    // handle is closed before returning on every path. (This used to shell
+    // out to `tasklist`, which costs a subprocess per probe — sweeps run on
+    // every CLI invocation, so probes must stay in-process.)
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // Access denied means the process exists but is not ours —
+            // alive, mirroring the unix EPERM case. Any other failure
+            // (notably ERROR_INVALID_PARAMETER for unknown pids) is dead.
+            return std::io::Error::last_os_error().raw_os_error()
+                == Some(ERROR_ACCESS_DENIED as i32);
+        }
+        let mut exit_code: u32 = 0;
+        // A queryable handle can outlive process exit (something else may
+        // hold a handle to the object), so liveness is the exit code still
+        // reading STILL_ACTIVE — with the standard caveat that a process
+        // which exited with code 259 is indistinguishable.
+        let alive =
+            GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == STILL_ACTIVE as u32;
+        CloseHandle(handle);
+        alive
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pid_token = format!(",\"{pid}\",");
-    stdout.lines().any(|line| line.contains(&pid_token))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -264,13 +278,61 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+mod platform {
+    pub(super) fn process_start_time_unix_ms(pid: u32) -> Option<u64> {
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        if pid == 0 {
+            return None;
+        }
+        let empty = || FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut creation = empty();
+        let mut exit = empty();
+        let mut kernel = empty();
+        let mut user = empty();
+        // SAFETY: query-limited handle, read-only call, handle closed on
+        // every path.
+        let ok = unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return None;
+            }
+            let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0;
+            CloseHandle(handle);
+            ok
+        };
+        if !ok {
+            return None;
+        }
+        // FILETIME counts 100ns ticks since 1601-01-01; rebase to the unix
+        // epoch (11644473600 seconds later) and scale to milliseconds.
+        const UNIX_EPOCH_OFFSET_100NS: u64 = 116_444_736_000_000_000;
+        let ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        ticks
+            .checked_sub(UNIX_EPOCH_OFFSET_100NS)
+            .map(|unix_100ns| unix_100ns / 10_000)
+    }
+
+    pub(super) fn process_owner_uid(_pid: u32) -> Option<u32> {
+        // Numeric uids are a unix concept; callers treat None as
+        // "ownership unknown".
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     pub(super) fn process_start_time_unix_ms(_pid: u32) -> Option<u64> {
-        // Windows / other: not supported in v0. Returning None makes
-        // the reuse path treat any record as "PID-reuse-detected"
-        // which is the safe default — the caller falls through to
-        // spawn.
+        // Unsupported platforms: returning None makes the reuse path treat
+        // any record as "PID-reuse-detected", which is the safe default —
+        // the caller falls through to spawn.
         None
     }
 
@@ -325,17 +387,61 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     fn process_start_time_unix_ms_returns_some_for_self() {
         assert!(process_start_time_unix_ms(std::process::id()).is_some());
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     fn process_start_time_unix_ms_is_stable_within_a_process() {
         let a = process_start_time_unix_ms(std::process::id()).expect("a");
         let b = process_start_time_unix_ms(std::process::id()).expect("b");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pid_is_alive_returns_true_for_long_running_child() {
+        // `ping -n 60` / stdin-blocked `cat`: alive long enough to probe,
+        // with no stdin dependence on Windows (pipe inheritance is fragile
+        // under parallel test spawn load).
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("ping")
+                .args(["-n", "60", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn long-running child")
+        } else {
+            std::process::Command::new("cat")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn long-running child")
+        };
+        let pid = child.id();
+        let alive = pid_is_alive(pid);
+        child.kill().ok();
+        child.wait().ok();
+        assert!(alive, "long-running child pid {pid} must read alive");
+    }
+
+    #[test]
+    fn pid_is_alive_returns_false_for_exited_child() {
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/c", "exit", "0"])
+                .spawn()
+                .expect("spawn child")
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .expect("spawn child")
+        };
+        let pid = child.id();
+        child.wait().expect("child exits");
+        assert!(!pid_is_alive(pid), "exited child pid {pid} must read dead");
     }
 
     #[test]

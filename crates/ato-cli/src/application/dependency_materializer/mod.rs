@@ -400,8 +400,9 @@ fn node_run_materialization_request(
 }
 
 fn command_version(command: &str, version_arg: &str) -> Option<String> {
-    std::process::Command::new(command)
-        .arg(version_arg)
+    // npm is a `.cmd` shim on Windows; cmd_shim_command routes through
+    // cmd.exe there and spawns the program directly elsewhere.
+    crate::common::host_shell::cmd_shim_command(command, &[version_arg])
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -409,14 +410,13 @@ fn command_version(command: &str, version_arg: &str) -> Option<String> {
 }
 
 fn run_npm_ci(work_dir: &Path) -> Result<()> {
-    let output = std::process::Command::new("npm")
-        .arg("ci")
-        .arg("--ignore-scripts")
-        .arg("--no-audit")
-        .arg("--fund=false")
-        .current_dir(work_dir)
-        .output()
-        .context("failed to launch npm ci for dependency materialization")?;
+    let output = crate::common::host_shell::cmd_shim_command(
+        "npm",
+        &["ci", "--ignore-scripts", "--no-audit", "--fund=false"],
+    )
+    .current_dir(work_dir)
+    .output()
+    .context("failed to launch npm ci for dependency materialization")?;
     if !output.status.success() {
         anyhow::bail!(
             "npm ci dependency materialization failed: {}{}",

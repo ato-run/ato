@@ -79,10 +79,18 @@ pub(crate) fn observe_runtime(
             .map(|path| path.display().to_string())
             .or_else(|| launch_spec.runtime.clone()),
         binary_hash: match resolved_binary {
-            Some(path) => Tracked::known(
-                hash_file(&path)
-                    .with_context(|| format!("failed to hash runtime binary {}", path.display()))?,
-            ),
+            // An unreadable resolved binary degrades to untracked instead of
+            // failing the run: Windows app-execution aliases (the zero-byte
+            // reparse stubs under ...\Microsoft\WindowsApps, e.g.
+            // python3.exe) execute fine but refuse reads, so hashing them is
+            // impossible by design.
+            Some(path) => match hash_file(&path) {
+                Ok(hash) => Tracked::known(hash),
+                Err(err) => Tracked::untracked(format!(
+                    "runtime binary {} is not readable for hashing: {err}",
+                    path.display()
+                )),
+            },
             None => Tracked::unknown("runtime binary path not resolved"),
         },
         dynamic_linkage,

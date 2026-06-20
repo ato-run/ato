@@ -432,11 +432,15 @@ fn generate_node_lockfile(working_dir: &Path) -> Result<ShadowLockfileMaterializ
         });
     }
 
-    let status = Command::new("npm")
-        .args(["install", "--package-lock-only", "--ignore-scripts"])
-        .current_dir(working_dir)
-        .status()
-        .with_context(|| format!("Failed to run npm in {}", working_dir.display()))?;
+    // npm is a `.cmd` shim on Windows; cmd_shim_command routes through
+    // cmd.exe there and spawns npm directly elsewhere.
+    let status = crate::common::host_shell::cmd_shim_command(
+        "npm",
+        &["install", "--package-lock-only", "--ignore-scripts"],
+    )
+    .current_dir(working_dir)
+    .status()
+    .with_context(|| format!("Failed to run npm in {}", working_dir.display()))?;
     if status.success() {
         Ok(ShadowLockfileMaterialization::Applied {
             detail:

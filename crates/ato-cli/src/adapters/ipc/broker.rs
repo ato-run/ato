@@ -354,8 +354,8 @@ mod tests {
         let broker = test_broker();
         let path = broker.local_store_path("greeter-service");
         assert!(
-            path.to_str()
-                .unwrap()
+            path.to_string_lossy()
+                .replace('\\', "/")
                 .contains(".ato/store/greeter-service")
         );
     }
@@ -365,8 +365,8 @@ mod tests {
         let broker = test_broker();
         let path = broker.local_store_path("@ato/llm-service:1.0");
         assert!(
-            path.to_str()
-                .unwrap()
+            path.to_string_lossy()
+                .replace('\\', "/")
                 .contains(".ato/store/@ato/llm-service")
         );
     }

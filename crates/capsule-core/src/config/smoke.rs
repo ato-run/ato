@@ -701,7 +701,7 @@ fn prepare_smoke_working_directory(
     if service.executable.trim() == "uv" && cwd_path.join("uv.lock").exists() {
         let venv_dir = cwd_path.join(".venv");
         if !venv_dir.exists() {
-            let mut command = Command::new("uv");
+            let mut command = short_lived_subcommand("uv");
             command.args(["sync", "--frozen"]);
             if let Some(uv_cache_dir) = resolve_bundled_uv_cache_dir(root, service) {
                 command.args(["--cache-dir", &uv_cache_dir]);
@@ -1317,19 +1317,34 @@ startup_timeout_ms = 0
 
         let bin_dir = temp.path().join("bin");
         fs::create_dir_all(&bin_dir).expect("mkdir bin");
-        let pnpm_path = bin_dir.join("pnpm");
         let env_capture_path = temp.path().join("captured-env.txt");
-        fs::write(
-            &pnpm_path,
-            format!(
-                "#!/bin/sh\n{{\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'TMPDIR=%s\\n' \"$TMPDIR\"\nprintf 'npm_config_cache=%s\\n' \"$npm_config_cache\"\nprintf 'pnpm_config_store_dir=%s\\n' \"$pnpm_config_store_dir\"\nprintf 'PYTHON=%s\\n' \"$PYTHON\"\nprintf 'npm_config_python=%s\\n' \"$npm_config_python\"\nprintf 'SECRET_HOST_TOKEN=%s\\n' \"$SECRET_HOST_TOKEN\"\n}} > '{}'\nmkdir -p node_modules\nexit 0\n",
-                env_capture_path.display()
-            ),
-        )
-        .expect("write fake pnpm");
+        // The fake pnpm is spawned through `short_lived_subcommand`, which
+        // routes through cmd.exe on Windows — so the fake must be a batch
+        // launcher there and a shell script elsewhere.
+        #[cfg(windows)]
+        {
+            let pnpm_path = bin_dir.join("pnpm.cmd");
+            fs::write(
+                &pnpm_path,
+                format!(
+                    "@echo off\r\n(\r\necho HOME=%HOME%\r\necho TMPDIR=%TMPDIR%\r\necho npm_config_cache=%npm_config_cache%\r\necho pnpm_config_store_dir=%pnpm_config_store_dir%\r\necho PYTHON=%PYTHON%\r\necho npm_config_python=%npm_config_python%\r\necho SECRET_HOST_TOKEN=%SECRET_HOST_TOKEN%\r\n) > \"{}\"\r\nmkdir node_modules\r\nexit /b 0\r\n",
+                    env_capture_path.display()
+                ),
+            )
+            .expect("write fake pnpm");
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let pnpm_path = bin_dir.join("pnpm");
+            fs::write(
+                &pnpm_path,
+                format!(
+                    "#!/bin/sh\n{{\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'TMPDIR=%s\\n' \"$TMPDIR\"\nprintf 'npm_config_cache=%s\\n' \"$npm_config_cache\"\nprintf 'pnpm_config_store_dir=%s\\n' \"$pnpm_config_store_dir\"\nprintf 'PYTHON=%s\\n' \"$PYTHON\"\nprintf 'npm_config_python=%s\\n' \"$npm_config_python\"\nprintf 'SECRET_HOST_TOKEN=%s\\n' \"$SECRET_HOST_TOKEN\"\n}} > '{}'\nmkdir -p node_modules\nexit 0\n",
+                    env_capture_path.display()
+                ),
+            )
+            .expect("write fake pnpm");
             let mut perms = fs::metadata(&pnpm_path).expect("stat pnpm").permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&pnpm_path, perms).expect("chmod pnpm");
