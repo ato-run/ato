@@ -1,7 +1,7 @@
 //! DNS resolver backends — Slice D (#299).
 //!
 //! The transport-neutral DTOs ([`ResolveOptions`], [`ResolvedRecord`],
-//! [`ResolverError`]) live in `ato_protocol::net::resolver`; this module
+//! [`ResolverError`]) live in `protocol::net::resolver`; this module
 //! holds the runtime backends that pull in `hickory-resolver` and Tokio.
 //!
 //! # Design
@@ -18,13 +18,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use ato_protocol::net::resolver::{ResolveOptions, ResolvedRecord, ResolverError};
 use hickory_resolver::{
     TokioAsyncResolver,
     config::{ResolverConfig, ResolverOpts},
     error::{ResolveError, ResolveErrorKind},
     proto::rr::{RData, RecordType},
 };
+use protocol::net::resolver::{ResolveOptions, ResolvedRecord, ResolverError};
 use tokio::time::{Duration, timeout};
 
 // ── Resolver trait ────────────────────────────────────────────────────────────

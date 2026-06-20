@@ -511,7 +511,7 @@ mod tests {
 
         // Write a minimal session record referencing revs[0] with our own
         // pid (guaranteed alive). We craft the JSON directly so the test
-        // does not need to depend on `ato-protocol` for struct
+        // does not need to depend on `protocol` for struct
         // construction.
         let session_root = dir.path().join("desktop_sessions");
         std::fs::create_dir_all(&session_root).unwrap();

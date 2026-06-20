@@ -13,11 +13,11 @@ use crate::security::path::validate_path;
 /// Schema tag baked into the `consent_ref` hash input so a future change to the
 /// consent key structure cannot collide with or be misread as an older ref.
 ///
-/// Single-sourced from [`ato_protocol::consent::CONSENT_REQUIRED_SCHEMA`] so
+/// Single-sourced from [`protocol::consent::CONSENT_REQUIRED_SCHEMA`] so
 /// the hash input here, the runner's `CONSENT-REQUIRED:` validation, and the
 /// CLI's emitted line all agree on one literal — a divergence here would
 /// recompute a different `consent_ref` and silently break approval binding.
-pub const CONSENT_REF_SCHEMA: &str = ato_protocol::consent::CONSENT_REQUIRED_SCHEMA;
+pub const CONSENT_REF_SCHEMA: &str = protocol::consent::CONSENT_REQUIRED_SCHEMA;
 
 #[derive(Serialize)]
 struct ConsentRefInput<'a> {

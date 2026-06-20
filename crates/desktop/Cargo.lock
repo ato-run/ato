@@ -525,17 +525,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ato-protocol"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "atomic"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1027,7 +1016,6 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "ato-protocol",
  "base64 0.22.1",
  "blake3",
  "bollard",
@@ -1049,6 +1037,7 @@ dependencies = [
  "libc",
  "lock-draft-engine",
  "prost",
+ "protocol",
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
@@ -1874,7 +1863,6 @@ name = "desktop"
 version = "0.5.5"
 dependencies = [
  "anyhow",
- "ato-protocol",
  "base64 0.22.1",
  "blake3",
  "block2",
@@ -1899,6 +1887,7 @@ dependencies = [
  "objc2-web-kit",
  "percent-encoding",
  "portable-pty",
+ "protocol",
  "raw-window-handle",
  "resvg",
  "semver",
@@ -6305,6 +6294,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

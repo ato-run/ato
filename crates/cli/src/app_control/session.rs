@@ -13,7 +13,6 @@ use anyhow::{Context, Result};
 // so `ato-desktop` can read records without depending on `ato-cli`. We
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
-use ato_protocol::placement::{PlacementFacets, PlacementProviderKind};
 use capsule::ato_lock;
 use capsule::handle::{
     CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
@@ -27,6 +26,7 @@ pub(crate) use capsule::state::session::{
     StoredOrchestrationServices, StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay,
     launch_cache_root, write_materialized_launch_record_atomic, write_session_record_atomic,
 };
+use protocol::placement::{PlacementFacets, PlacementProviderKind};
 use serde::Serialize;
 
 use crate::ProviderToolchain;
