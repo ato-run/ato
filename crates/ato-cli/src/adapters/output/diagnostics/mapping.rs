@@ -133,6 +133,28 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
             causes,
         );
     }
+    // A lifecycle (provision/install/build) command exited non-zero. The
+    // runner emits a structured `lifecycle_command_failed:` report carrying
+    // phase, target, command, cwd, exit code, and stdout/stderr tails —
+    // surface it as the typed E203 (dependency_install_failed) instead of the
+    // generic E999 so cross-runner triage sees the real failure.
+    if let Some(report) = lifecycle_command_failure_report(err) {
+        return CliDiagnostic::new(
+            CliDiagnosticCode::E203,
+            report,
+            Some(
+                "アプリの provision/build コマンドが失敗しました。レポート内の command / cwd / \
+                 stderr_tail を確認してください。依存ツール (uv / npm / pnpm) のエラーであれば、\
+                 アプリ側の依存定義か実行環境を修正してから再実行してください。",
+            ),
+            None,
+            None,
+            None,
+            true,
+            false,
+            causes,
+        );
+    }
     // A container started but exited before passing its readiness probe. Both
     // the multi-service executor and the orchestration session path preserve a
     // typed `OciExitedBeforeReadyError` in the chain; classify it as the typed
@@ -438,6 +460,16 @@ pub(super) fn is_build_toolchain_git_missing(err: &AnyhowError) -> bool {
             || lower.contains("cannot find command 'git'")
             || (lower.contains("spawn git") && lower.contains("enoent"))
     })
+}
+
+/// Finds the structured `lifecycle_command_failed:` report emitted by
+/// `run_lifecycle_shell_command` anywhere in the error chain. The report text
+/// already carries phase, target, command, cwd, exit code, and output tails,
+/// so it is surfaced verbatim as the diagnostic message.
+fn lifecycle_command_failure_report(err: &AnyhowError) -> Option<String> {
+    err.chain()
+        .map(|cause| cause.to_string())
+        .find(|text| text.contains("lifecycle_command_failed:"))
 }
 
 /// Map an exited-before-ready failure (a container that started but died before

@@ -802,7 +802,11 @@ fn test_inspect_preview_surface_reports_durable_and_ephemeral_paths() {
         value
             .get("path")
             .and_then(|entry| entry.as_str())
-            .map(|entry| entry.contains(".ato/runs/source-inference/<attempt>/ato.lock.json"))
+            .map(|entry| {
+                entry
+                    .replace('\\', "/")
+                    .contains(".ato/runs/source-inference/<attempt>/ato.lock.json")
+            })
             .unwrap_or(false)
     }));
 }
@@ -1671,8 +1675,16 @@ args = ["--deep", "--force", "--sign", "-", "MyApp.app"]
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(!output.status.success(), "stderr:\n{stderr}");
+    // The renderer wraps long messages at a width-dependent column (the
+    // embedded path shifts it per platform), so collapse whitespace before
+    // matching the sentence.
+    let stderr_one_line = stderr
+        .replace(['│', '×', '╰', '├'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        stderr.contains("is no longer accepted in source") && stderr.contains("projects"),
+        stderr_one_line.contains("is no longer accepted in source projects"),
         "stderr:\n{stderr}"
     );
 }
@@ -2741,7 +2753,9 @@ fn test_inspect_preview_run_attempt_path_uses_home_not_cwd() {
     for entry in run_outputs {
         if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
             assert!(
-                !path.contains(".ato/tmp/source-inference"),
+                !path
+                    .replace('\\', "/")
+                    .contains(".ato/tmp/source-inference"),
                 "run-attempt path points to cwd (regression): {path}"
             );
         }
@@ -2752,7 +2766,7 @@ fn test_inspect_preview_run_attempt_path_uses_home_not_cwd() {
         run_outputs.iter().any(|v| v
             .get("path")
             .and_then(|p| p.as_str())
-            .map(|p| p.contains(".ato/runs/source-inference"))
+            .map(|p| p.replace('\\', "/").contains(".ato/runs/source-inference"))
             .unwrap_or(false)),
         "no run-attempt path under ~/.ato/runs/source-inference/ found"
     );

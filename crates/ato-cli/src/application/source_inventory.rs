@@ -75,10 +75,16 @@ pub(crate) fn normalize_outputs(raw_outputs: &[String]) -> Result<Vec<OutputSpec
         }
 
         let path = Path::new(normalized);
+        // RootDir is checked explicitly: on Windows `/etc/passwd` is rooted
+        // but not `is_absolute()`, yet `working_dir.join` would replace the
+        // base with it and escape the package root.
         if path.is_absolute()
-            || path
-                .components()
-                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                )
+            })
         {
             anyhow::bail!(
                 "outputs entry '{}' must stay inside the package root",

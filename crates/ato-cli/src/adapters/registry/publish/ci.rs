@@ -797,7 +797,13 @@ args = ["--deep", "--force", "--sign", "-", "dist/Desktop Demo.app"]
     #[serial_test::serial]
     fn authoritative_ci_build_preserves_exports_in_packaged_manifest() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let ato_home = tmp.path().join("ato-home");
+        // ATO_HOME must live OUTSIDE the project dir: the producer build packs
+        // `tmp.path()`, and a nested `ato-home/metadata-cache/` would be walked
+        // into the payload. On Windows the packer then opens those sha256 files
+        // while the resolver still holds them, tripping a byte-range lock
+        // violation (os error 33); a real `~/.ato` is never inside a project.
+        let home = tempfile::tempdir().expect("home tempdir");
+        let ato_home = home.path().join("ato-home");
         seed_metadata_cache(&ato_home, "runtime", "python", "3.12");
         seed_metadata_cache(&ato_home, "tool", "uv", "0.4.19");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);

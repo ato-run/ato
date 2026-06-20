@@ -834,24 +834,53 @@ mod tests {
     }
 
     struct TestHomeGuard {
-        prior: Option<std::ffi::OsString>,
+        // Held for the guard's lifetime: crate convention is that every
+        // env-mutating test serializes on the shared env lock.
+        _env_lock: std::sync::MutexGuard<'static, ()>,
+        prior_home: Option<std::ffi::OsString>,
+        prior_userprofile: Option<std::ffi::OsString>,
+        prior_ato_home: Option<std::ffi::OsString>,
     }
 
     impl TestHomeGuard {
         fn set(path: &Path) -> Self {
-            let prior = std::env::var_os("HOME");
+            let env_lock = crate::tests::env_lock().lock().expect("env lock");
+            let prior_home = std::env::var_os("HOME");
+            let prior_userprofile = std::env::var_os("USERPROFILE");
+            let prior_ato_home = std::env::var_os("ATO_HOME");
             unsafe {
                 std::env::set_var("HOME", path);
+                // dirs::home_dir() reads USERPROFILE on Windows, not HOME.
+                std::env::set_var("USERPROFILE", path);
+                // Pin ATO_HOME explicitly so the store these tests freeze
+                // blobs into can never resolve to the developer's real
+                // ~/.ato regardless of platform home-dir semantics.
+                std::env::set_var("ATO_HOME", path.join(".ato"));
             }
-            Self { prior }
+            Self {
+                _env_lock: env_lock,
+                prior_home,
+                prior_userprofile,
+                prior_ato_home,
+            }
         }
     }
 
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
-            match self.prior.take() {
-                Some(value) => unsafe { std::env::set_var("HOME", value) },
-                None => unsafe { std::env::remove_var("HOME") },
+            unsafe {
+                match self.prior_home.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.prior_userprofile.take() {
+                    Some(value) => std::env::set_var("USERPROFILE", value),
+                    None => std::env::remove_var("USERPROFILE"),
+                }
+                match self.prior_ato_home.take() {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
             }
         }
     }

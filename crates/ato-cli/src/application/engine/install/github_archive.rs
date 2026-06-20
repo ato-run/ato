@@ -235,25 +235,8 @@ pub(crate) fn github_run_checkout_owner_is_alive(path: &Path) -> bool {
         .is_some_and(|live_start_time| live_start_time == expected_start_time)
 }
 
-#[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if result == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .is_some_and(|errno| errno == libc::EPERM)
-}
-
-#[cfg(not(unix))]
-fn pid_is_alive(_pid: u32) -> bool {
-    // On unsupported platforms we fall back to TTL + active-process
-    // reverse lookup rather than preserving every marker forever.
-    false
+    ato_session_core::process::pid_is_alive(pid)
 }
 
 /// Returns the GitHub API base URL for repository archive downloads.
