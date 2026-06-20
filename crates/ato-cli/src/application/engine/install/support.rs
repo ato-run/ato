@@ -7,13 +7,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rand::Rng;
 
-use capsule_core::AtoError;
-use capsule_core::CapsuleReporter;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::input_resolver::{
+use capsule::AtoError;
+use capsule::CapsuleReporter;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::input_resolver::{
     ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
-use capsule_core::smoke::SmokeFailureClass;
+use capsule::smoke::SmokeFailureClass;
 use tracing::debug;
 
 use crate::application::ports::OutputPort;
@@ -40,7 +40,7 @@ pub(crate) async fn resolve_installed_capsule_archive(
     registry: Option<&str>,
     preferred_version: Option<&str>,
 ) -> Result<Option<PathBuf>> {
-    let store_root = capsule_core::common::paths::ato_path_or_workspace_tmp("store");
+    let store_root = capsule::common::paths::ato_path_or_workspace_tmp("store");
     if let Some(path) = resolve_installed_capsule_archive_in_store(
         &store_root.join(&scoped_ref.publisher),
         &scoped_ref.slug,
@@ -826,7 +826,7 @@ pub(crate) async fn resolve_run_target_or_install(
     // Guard: reject paths that point into the Ato home directory.  These are
     // Ato's own internal state (store, runs, tmp …) and running them directly
     // would fail with a confusing E999.  Emit a helpful typed error instead.
-    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir()
+    if let Ok(ato_home) = capsule::common::paths::nacelle_home_dir()
         && expanded_local.starts_with(&ato_home)
         && !is_import_preview_run_target(&expanded_local, &ato_home)
     {
@@ -1641,11 +1641,11 @@ fn split_runtime_driver(runtime: &str) -> (Option<String>, Option<String>) {
     (Some(normalized), None)
 }
 
-fn load_export_manifest(capsule_path: &Path) -> Result<capsule_core::types::CapsuleManifest> {
+fn load_export_manifest(capsule_path: &Path) -> Result<capsule::types::CapsuleManifest> {
     if let Some(manifest_path) = runtime_tree::prepare_store_runtime_for_capsule(capsule_path)? {
-        let manifest = capsule_core::manifest::load_manifest_with_validation_mode(
+        let manifest = capsule::manifest::load_manifest_with_validation_mode(
             &manifest_path,
-            capsule_core::types::ValidationMode::Strict,
+            capsule::types::ValidationMode::Strict,
         )?;
         return Ok(manifest.model);
     }
@@ -1673,13 +1673,13 @@ fn load_export_manifest(capsule_path: &Path) -> Result<capsule_core::types::Caps
         )
     })?;
 
-    let manifest = capsule_core::types::CapsuleManifest::from_toml_with_path(
+    let manifest = capsule::types::CapsuleManifest::from_toml_with_path(
         &manifest_text,
         Path::new("capsule.toml"),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     manifest
-        .validate_for_mode(capsule_core::types::ValidationMode::Strict)
+        .validate_for_mode(capsule::types::ValidationMode::Strict)
         .map_err(|errors| {
             anyhow::anyhow!(
                 errors
@@ -1716,7 +1716,7 @@ fn detect_desktop_open_path_for_installed_capsule(capsule_path: &Path) -> Option
         .to_string();
     let scoped_id = format!("{publisher}/{slug}");
 
-    let apps_root = capsule_core::common::paths::ato_path("apps")
+    let apps_root = capsule::common::paths::ato_path("apps")
         .ok()?
         .join(&publisher)
         .join(&slug);
@@ -1958,9 +1958,9 @@ pub(crate) fn inspect_local_run_manifest(manifest_path: &Path) -> Result<LocalRu
         return Ok(LocalRunManifestStatus::Missing);
     }
 
-    match capsule_core::manifest::load_manifest_with_validation_mode(
+    match capsule::manifest::load_manifest_with_validation_mode(
         manifest_path,
-        capsule_core::types::ValidationMode::Strict,
+        capsule::types::ValidationMode::Strict,
     ) {
         Ok(_) => Ok(LocalRunManifestStatus::Valid),
         Err(error) => Ok(LocalRunManifestStatus::Invalid {
@@ -2015,7 +2015,7 @@ pub(crate) fn backup_invalid_manifest(manifest_path: &Path) -> Result<PathBuf> {
         .unwrap_or_default()
         .as_millis();
     let backup_dir =
-        capsule_core::common::paths::workspace_tmp_dir(parent).join("run-invalid-manifests");
+        capsule::common::paths::workspace_tmp_dir(parent).join("run-invalid-manifests");
     std::fs::create_dir_all(&backup_dir).with_context(|| {
         format!(
             "failed to create invalid manifest backup directory {}",
@@ -2657,7 +2657,7 @@ pub(crate) fn execute_run_command(
     plan_only: bool,
     strict_realization: bool,
     install_lifecycle_context: Option<crate::cli::commands::run::InstallLifecycleContext>,
-    capsule_launch_inputs: Vec<capsule_core::installed_state::LaunchConditionInput>,
+    capsule_launch_inputs: Vec<capsule::installed_state::LaunchConditionInput>,
     pinned_revision_output_dir: Option<std::path::PathBuf>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
@@ -3024,7 +3024,7 @@ fn run_github_python_lock_repair(target: &GitHubPythonLockRepairTarget, json: bo
 
 fn should_retry_github_auto_fix_port(
     auto_fix_mode: Option<GitHubAutoFixMode>,
-    report: &capsule_core::smoke::SmokeFailureReport,
+    report: &capsule::smoke::SmokeFailureReport,
 ) -> bool {
     auto_fix_mode
         .map(GitHubAutoFixMode::fixes_generated_toml)
@@ -3698,7 +3698,7 @@ target = "app"
         // The hint with cp -r is stored in the AtoExecutionError hint field;
         // verify it via the typed downcast.
         let exe_err = err
-            .downcast_ref::<capsule_core::engine::execution_plan::error::AtoExecutionError>()
+            .downcast_ref::<capsule::engine::execution_plan::error::AtoExecutionError>()
             .expect("error should downcast to AtoExecutionError");
         assert!(
             exe_err.hint.as_deref().unwrap_or("").contains("cp -r"),

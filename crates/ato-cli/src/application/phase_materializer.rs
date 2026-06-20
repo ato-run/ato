@@ -12,9 +12,9 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use blake3::Hasher;
-use capsule_core::blob::{BlobManifest, hash_tree};
-use capsule_core::common::paths::{ato_cache_dir, workspace_tmp_dir};
-use capsule_core::common::store::BlobAddress;
+use capsule::blob::{BlobManifest, hash_tree};
+use capsule::common::paths::{ato_cache_dir, workspace_tmp_dir};
+use capsule::common::store::BlobAddress;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 

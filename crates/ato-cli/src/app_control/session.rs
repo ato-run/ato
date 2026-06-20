@@ -20,13 +20,13 @@ pub(crate) use ato_session_core::{
     StoredOrchestrationServices, StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay,
     launch_cache_root, write_materialized_launch_record_atomic, write_session_record_atomic,
 };
-use capsule_core::ato_lock;
-use capsule_core::handle::{
+use capsule::ato_lock;
+use capsule::handle::{
     CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
     TrustState, normalize_capsule_handle,
 };
-use capsule_core::launch_spec::derive_launch_spec;
-use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule::launch_spec::derive_launch_spec;
+use capsule::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
 use crate::ProviderToolchain;
@@ -154,7 +154,7 @@ fn apply_install_lifecycle(record: &mut StoredSessionInfo) {
             // Derive CIK from the session's real execution_id so the key
             // reflects the actual receipt/execution closure, not a random id.
             if let Some(exec_id_str) = &record.execution_id {
-                use capsule_core::foundation::install_lifecycle::{
+                use capsule::foundation::install_lifecycle::{
                     ExecutionId, InstallProfileKey, InstallRevisionId, derive_capsule_instance_key,
                 };
                 let ipk = InstallProfileKey::new(ctx.install_profile_key.clone());
@@ -223,7 +223,7 @@ fn make_orchestration_reporter() -> CliReporter {
 /// ignored the manifest field, which timed out heavy first-launch
 /// capsules (Argos/MiniSBD model downloads, build caches, etc.) on
 /// their own declared budget.
-fn session_ready_timeout(plan: &capsule_core::router::ManifestData) -> Duration {
+fn session_ready_timeout(plan: &capsule::router::ManifestData) -> Duration {
     Duration::from_secs(plan.execution_startup_timeout() as u64)
 }
 
@@ -332,7 +332,7 @@ pub struct SessionInfo {
     /// desktop session envelope (the receipt is the source of truth). The
     /// session runner consumes it to stamp the execution receipt.
     #[serde(skip)]
-    observed_runtime: Option<capsule_core::execution_identity::ObservedRuntimeEvidence>,
+    observed_runtime: Option<capsule::execution_identity::ObservedRuntimeEvidence>,
 }
 
 impl SessionInfo {
@@ -362,7 +362,7 @@ impl SessionInfo {
     /// Attach runtime observation v1 evidence (#490) captured post-spawn.
     pub(crate) fn set_observed_runtime(
         &mut self,
-        evidence: capsule_core::execution_identity::ObservedRuntimeEvidence,
+        evidence: capsule::execution_identity::ObservedRuntimeEvidence,
     ) {
         self.observed_runtime = Some(evidence);
     }
@@ -371,7 +371,7 @@ impl SessionInfo {
     /// stamp the execution receipt).
     pub(crate) fn take_observed_runtime(
         &mut self,
-    ) -> Option<capsule_core::execution_identity::ObservedRuntimeEvidence> {
+    ) -> Option<capsule::execution_identity::ObservedRuntimeEvidence> {
         self.observed_runtime.take()
     }
 
@@ -441,7 +441,7 @@ fn fetch_community_toml_to_cache(
                     community_toml_id, expected_handle
                 )
             })?;
-    let cache_dir = capsule_core::common::paths::ato_cache_dir().join("community-tomls");
+    let cache_dir = capsule::common::paths::ato_cache_dir().join("community-tomls");
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("failed to create {}", cache_dir.display()))?;
     let path = cache_dir.join(format!("{community_toml_id}.toml"));
@@ -467,13 +467,13 @@ fn auto_attach_state_args_for_community_toml_manifest(
     manifest_path: &Path,
     community_toml_id: &str,
 ) -> Result<Vec<String>> {
-    use capsule_core::types::StateDurability;
+    use capsule::types::StateDurability;
 
     let raw = fs::read_to_string(manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&raw)
+    let manifest = capsule::types::CapsuleManifest::from_toml(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-    let state_root = capsule_core::common::paths::ato_state_dir()
+    let state_root = capsule::common::paths::ato_state_dir()
         .join("community-tomls")
         .join(community_toml_id);
 
@@ -701,7 +701,7 @@ pub(super) fn start_guest_session(
     handle: &str,
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     guest: super::guest_contract::GuestContract,
     notes: Vec<String>,
 ) -> Result<SessionInfo> {
@@ -900,9 +900,9 @@ pub(super) fn start_runtime_session(
     handle: &str,
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     raw_manifest: &str,
-    launch: &capsule_core::launch_spec::LaunchSpec,
+    launch: &capsule::launch_spec::LaunchSpec,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
     let display_strategy = display_strategy_for_runtime(plan);
@@ -1297,7 +1297,7 @@ pub(super) fn start_orchestration_session_in_process(
     handle: &str,
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     raw_manifest: &str,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
@@ -1350,7 +1350,7 @@ pub(super) fn start_orchestration_session_in_process(
             toml::from_str(raw_manifest)
                 .with_context(|| format!("failed to parse {}", plan.manifest_path.display()))?,
         ),
-        validation_mode: capsule_core::types::ValidationMode::Strict,
+        validation_mode: capsule::types::ValidationMode::Strict,
         engine_override_declared: false,
         compatibility_legacy_lock: None,
         // Capture the install identity synchronously, on this (guard-bearing)
@@ -1661,7 +1661,7 @@ pub(super) fn start_orchestration_session_supervisor(
     handle: &str,
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
     use crate::application::pipeline::executor::PhaseStageTimer;
@@ -1871,8 +1871,8 @@ pub(super) fn start_orchestration_session_supervisor(
 /// `network.publish = true` (the public-facing service, auto-set for `main`
 /// when it has a port), then fall back to the alphabetically last name.
 fn pick_orchestration_leaf_service(
-    orchestration: &capsule_core::foundation::types::OrchestrationPlan,
-) -> Result<&capsule_core::foundation::types::ResolvedService> {
+    orchestration: &capsule::foundation::types::OrchestrationPlan,
+) -> Result<&capsule::foundation::types::ResolvedService> {
     use std::collections::HashSet;
 
     let mut depended: HashSet<&str> = HashSet::new();
@@ -1881,7 +1881,7 @@ fn pick_orchestration_leaf_service(
             depended.insert(dep.as_str());
         }
     }
-    let leaves: Vec<&capsule_core::foundation::types::ResolvedService> = orchestration
+    let leaves: Vec<&capsule::foundation::types::ResolvedService> = orchestration
         .services
         .iter()
         .filter(|service| !depended.contains(service.name.as_str()))
@@ -2137,8 +2137,8 @@ pub(super) fn resolve_session_launch_plan(
     attach_state: &[String],
 ) -> Result<(
     PathBuf,
-    capsule_core::router::ManifestData,
-    capsule_core::launch_spec::LaunchSpec,
+    capsule::router::ManifestData,
+    capsule::launch_spec::LaunchSpec,
     Vec<String>,
 )> {
     if community_toml_path.is_none()
@@ -2265,13 +2265,13 @@ pub(super) fn resolve_local_plan_for_session_start(
     sample_recipe_slug: Option<&str>,
     attach_state: &[String],
 ) -> Result<(
-    capsule_core::router::ManifestData,
+    capsule::router::ManifestData,
     Option<GuestContract>,
     Vec<String>,
 )> {
     let raw = fs::read_to_string(manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&raw)
+    let manifest = capsule::types::CapsuleManifest::from_toml(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
     let state_source_overrides = if !attach_state.is_empty() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -2309,13 +2309,13 @@ fn auto_state_bindings_for_sample_recipe_manifest(
     manifest_path: &Path,
     slug: &str,
 ) -> Result<std::collections::HashMap<String, String>> {
-    use capsule_core::types::StateDurability;
+    use capsule::types::StateDurability;
 
     let raw = fs::read_to_string(manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&raw)
+    let manifest = capsule::types::CapsuleManifest::from_toml(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-    let state_root = capsule_core::common::paths::ato_state_dir()
+    let state_root = capsule::common::paths::ato_state_dir()
         .join("sample-recipes")
         .join(slug);
     let mut bindings = std::collections::HashMap::new();
@@ -2337,7 +2337,7 @@ fn auto_state_bindings_for_sample_recipe_manifest(
         let canonical = path.canonicalize().unwrap_or(path);
         bindings.insert(
             state_name.clone(),
-            capsule_core::common::paths::windows_child_compatible_path(&canonical)
+            capsule::common::paths::windows_child_compatible_path(&canonical)
                 .to_string_lossy()
                 .to_string(),
         );
@@ -2381,7 +2381,7 @@ pub(super) struct PreparedSessionExecution {
 }
 
 fn prepare_session_execution(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     raw_manifest: &str,
 ) -> Result<PreparedSessionExecution> {
     let reporter = Arc::new(make_orchestration_reporter());
@@ -2396,7 +2396,7 @@ fn prepare_session_execution(
             toml::from_str(raw_manifest)
                 .with_context(|| format!("failed to parse {}", plan.manifest_path.display()))?,
         ),
-        validation_mode: capsule_core::types::ValidationMode::Strict,
+        validation_mode: capsule::types::ValidationMode::Strict,
         engine_override_declared: false,
         compatibility_legacy_lock: None,
         // Synchronous capture on the guard-bearing thread; threaded explicitly
@@ -2453,7 +2453,7 @@ fn prepare_session_execution(
 }
 
 fn spawn_runtime_process(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     prepared: &crate::executors::target_runner::PreparedTargetExecution,
     display_strategy: &CapsuleDisplayStrategy,
     log_path: &Path,
@@ -2523,7 +2523,7 @@ fn spawn_runtime_process(
     let _ = plan.is_orchestration_mode();
 
     match prepared.guard_result.executor_kind {
-        capsule_core::execution_plan::guard::ExecutorKind::Deno => Ok(CapsuleProcess {
+        capsule::execution_plan::guard::ExecutorKind::Deno => Ok(CapsuleProcess {
             child: crate::executors::deno::spawn(
                 plan,
                 None,
@@ -2537,7 +2537,7 @@ fn spawn_runtime_process(
             log_path: None,
             execution_cwd: None,
         }),
-        capsule_core::execution_plan::guard::ExecutorKind::NodeCompat => Ok(CapsuleProcess {
+        capsule::execution_plan::guard::ExecutorKind::NodeCompat => Ok(CapsuleProcess {
             child: crate::executors::node_compat::spawn(
                 plan,
                 None,
@@ -2551,7 +2551,7 @@ fn spawn_runtime_process(
             log_path: None,
             execution_cwd: None,
         }),
-        capsule_core::execution_plan::guard::ExecutorKind::WebStatic => Ok(CapsuleProcess {
+        capsule::execution_plan::guard::ExecutorKind::WebStatic => Ok(CapsuleProcess {
             child: crate::executors::open_web::spawn_background(plan)?,
             cleanup_paths: Vec::new(),
             event_rx: None,
@@ -2567,7 +2567,7 @@ fn spawn_runtime_process(
         // the toolchain Python with no site-packages, producing
         // `No module named uvicorn` for ato Desktop's session-start
         // flow.
-        capsule_core::execution_plan::guard::ExecutorKind::Native => {
+        capsule::execution_plan::guard::ExecutorKind::Native => {
             crate::executors::source::execute_host(
                 plan,
                 None,
@@ -2589,9 +2589,7 @@ fn spawn_runtime_process(
     }
 }
 
-fn display_strategy_for_runtime(
-    plan: &capsule_core::router::ManifestData,
-) -> CapsuleDisplayStrategy {
+fn display_strategy_for_runtime(plan: &capsule::router::ManifestData) -> CapsuleDisplayStrategy {
     // ato Desktop's "open this capsule" UX is single-target by design:
     // it launches `default_target` (or `--target`) and points a WebView
     // at it. The full multi-service orchestration that `[services]`
@@ -2643,7 +2641,7 @@ fn display_strategy_for_runtime(
 /// Returns `true` when the target's run command contains `$PORT` or `${PORT}`,
 /// indicating the server binds to the system-injected port variable even when
 /// `port` is not declared explicitly in `capsule.toml`.
-fn run_command_uses_port_var(plan: &capsule_core::router::ManifestData) -> bool {
+fn run_command_uses_port_var(plan: &capsule::router::ManifestData) -> bool {
     plan.execution_run_command()
         .map(|cmd| cmd.contains("$PORT") || cmd.contains("${PORT}"))
         .unwrap_or(false)
@@ -2653,7 +2651,7 @@ fn run_command_uses_port_var(plan: &capsule_core::router::ManifestData) -> bool 
 /// server — either directly (`uvicorn app:app`) or via the module flag
 /// (`python -m uvicorn app:app`).  These servers need an explicit `--port`
 /// argument; ato injects one at spawn time when none is declared.
-fn run_command_is_known_web_server(plan: &capsule_core::router::ManifestData) -> bool {
+fn run_command_is_known_web_server(plan: &capsule::router::ManifestData) -> bool {
     const KNOWN_SERVERS: &[&str] = &[
         "uvicorn",
         "gunicorn",
@@ -2680,7 +2678,7 @@ fn run_command_is_known_web_server(plan: &capsule_core::router::ManifestData) ->
     false
 }
 
-fn runtime_descriptor(plan: &capsule_core::router::ManifestData) -> CapsuleRuntimeDescriptor {
+fn runtime_descriptor(plan: &capsule::router::ManifestData) -> CapsuleRuntimeDescriptor {
     CapsuleRuntimeDescriptor {
         target_label: plan.selected_target_label().to_string(),
         runtime: plan.execution_runtime(),
@@ -2690,7 +2688,7 @@ fn runtime_descriptor(plan: &capsule_core::router::ManifestData) -> CapsuleRunti
     }
 }
 
-fn session_name(plan: &capsule_core::router::ManifestData, fallback: &str) -> String {
+fn session_name(plan: &capsule::router::ManifestData, fallback: &str) -> String {
     plan.manifest
         .get("name")
         .and_then(|value| value.as_str())
@@ -2698,7 +2696,7 @@ fn session_name(plan: &capsule_core::router::ManifestData, fallback: &str) -> St
         .to_string()
 }
 
-fn web_served_by(plan: &capsule_core::router::ManifestData) -> String {
+fn web_served_by(plan: &capsule::router::ManifestData) -> String {
     let driver = plan.execution_driver().unwrap_or_else(|| "web".to_string());
     match driver.to_ascii_lowercase().as_str() {
         "static" => "deno-static-server".to_string(),
@@ -3436,8 +3434,8 @@ struct SessionWebPort {
 fn resolve_session_web_port(
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
-    plan: &capsule_core::router::ManifestData,
-    launch: &capsule_core::launch_spec::LaunchSpec,
+    plan: &capsule::router::ManifestData,
+    launch: &capsule::launch_spec::LaunchSpec,
     notes: &mut Vec<String>,
 ) -> Result<SessionWebPort> {
     let requested_port = runtime_overrides::override_port(launch.port).ok_or_else(|| {
@@ -3751,7 +3749,7 @@ pub(super) fn restore_stdout(_saved: i32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::handle::normalize_capsule_handle;
+    use capsule::handle::normalize_capsule_handle;
     use serial_test::serial;
 
     /// Env guard for tests that mutate `HOME`/`ATO_HOME`/`ATO_DESKTOP_SESSION_ROOT`.
@@ -5808,7 +5806,7 @@ mod tests {
     /// thread-local context is active.
     #[test]
     fn apply_install_lifecycle_stamps_all_fields_and_derives_cik() {
-        use capsule_core::foundation::install_lifecycle::{
+        use capsule::foundation::install_lifecycle::{
             ExecutionId, InstallProfileKey, InstallRevisionId, derive_capsule_instance_key,
         };
 
@@ -5992,8 +5990,8 @@ mod tests {
         publish: bool,
         port: Option<u16>,
         depends_on: Vec<String>,
-    ) -> capsule_core::foundation::types::ResolvedService {
-        use capsule_core::foundation::types::{
+    ) -> capsule::foundation::types::ResolvedService {
+        use capsule::foundation::types::{
             ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
         };
         ResolvedService {
@@ -6033,7 +6031,7 @@ mod tests {
     /// Should pick `main`, not `worker` (alphabetically last).
     #[test]
     fn pick_leaf_prefers_published_over_alphabetically_last_for_dify_shape() {
-        use capsule_core::foundation::types::OrchestrationPlan;
+        use capsule::foundation::types::OrchestrationPlan;
 
         let db = make_leaf_service("db", false, Some(5432), vec![]);
         let redis = make_leaf_service("redis", false, Some(6379), vec![]);
@@ -6079,7 +6077,7 @@ mod tests {
     /// node/web runtime still wins over `network.publish`.
     #[test]
     fn pick_leaf_node_driver_beats_published_oci() {
-        use capsule_core::foundation::types::{
+        use capsule::foundation::types::{
             OrchestrationPlan, ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime,
             ResolvedTargetRuntime,
         };
@@ -6138,7 +6136,7 @@ mod tests {
     /// Single leaf — trivial case is unchanged.
     #[test]
     fn pick_leaf_single_leaf_is_returned_directly() {
-        use capsule_core::foundation::types::OrchestrationPlan;
+        use capsule::foundation::types::OrchestrationPlan;
 
         let db = make_leaf_service("db", false, Some(5432), vec![]);
         let main = make_leaf_service("main", true, Some(3000), vec!["db".to_string()]);

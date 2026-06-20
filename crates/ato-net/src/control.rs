@@ -46,7 +46,7 @@ type SyncTransport = std::fs::File;
 /// well-known local named-pipe path used by `ato-netd`.
 #[cfg(unix)]
 pub fn default_socket_path() -> Result<PathBuf, Error> {
-    capsule_core::common::paths::ato_path("run/netd.sock").map_err(|err| Error::PathResolve {
+    capsule::common::paths::ato_path("run/netd.sock").map_err(|err| Error::PathResolve {
         message: err.to_string(),
     })
 }

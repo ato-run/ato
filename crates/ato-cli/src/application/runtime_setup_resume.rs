@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::runtime_setup::{
+use capsule::runtime_setup::{
     RuntimeSetupResumeMarker, RuntimeSetupResumeStep, WindowsSubstrateActionKind,
 };
 
@@ -25,7 +25,7 @@ pub(crate) const RESUME_MARKER_TTL_MS: u64 = 24 * 60 * 60 * 1000; // 24h
 
 /// Default on-disk path for the resume marker. Never falls back to system tmp.
 pub(crate) fn resume_marker_path() -> PathBuf {
-    capsule_core::common::paths::ato_path_or_workspace_tmp("runtime-setup/resume.json")
+    capsule::common::paths::ato_path_or_workspace_tmp("runtime-setup/resume.json")
 }
 
 /// Write a resume marker to `path`, creating parent directories as needed.
@@ -120,7 +120,7 @@ pub(crate) fn resume_after_reboot(json: bool) -> Result<()> {
     let substrate_ready = status
         .windows_substrate
         .as_ref()
-        .map(|s| s.wsl == capsule_core::runtime_setup::WslStatus::Ready)
+        .map(|s| s.wsl == capsule::runtime_setup::WslStatus::Ready)
         .unwrap_or(true);
     let now_unix_ms = now_unix_ms();
     let outcome = decide_resume(marker.as_ref(), substrate_ready, now_unix_ms);
@@ -297,7 +297,7 @@ where
     // 2. Only after a successful (or absent) command, persist the reboot marker.
     let marker_written = if plan.writes_reboot_marker {
         let marker = RuntimeSetupResumeMarker {
-            schema_version: capsule_core::runtime_setup::RUNTIME_SETUP_RESUME_SCHEMA_VERSION,
+            schema_version: capsule::runtime_setup::RUNTIME_SETUP_RESUME_SCHEMA_VERSION,
             requested_action: kind,
             source_surface: source_surface.to_string(),
             created_at_unix_ms: now_ms,
@@ -340,7 +340,7 @@ pub(crate) fn prepare_windows_substrate(
         return crate::application::runtime_prepare::repair_host_runtime(json);
     }
 
-    let status_summary = capsule_core::runtime_setup::WindowsSubstrateAction::for_kind(kind).label;
+    let status_summary = capsule::runtime_setup::WindowsSubstrateAction::for_kind(kind).label;
     let result = run_substrate_remediation(
         kind,
         &source_surface,
@@ -399,11 +399,11 @@ pub(crate) fn prepare_windows_substrate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::runtime_setup::{RuntimeSetupResumeStep, WindowsSubstrateActionKind};
+    use capsule::runtime_setup::{RuntimeSetupResumeStep, WindowsSubstrateActionKind};
 
     fn sample_marker(created_at_unix_ms: u64) -> RuntimeSetupResumeMarker {
         RuntimeSetupResumeMarker {
-            schema_version: capsule_core::runtime_setup::RUNTIME_SETUP_RESUME_SCHEMA_VERSION,
+            schema_version: capsule::runtime_setup::RUNTIME_SETUP_RESUME_SCHEMA_VERSION,
             requested_action: WindowsSubstrateActionKind::InstallWsl,
             source_surface: "onboarding".to_string(),
             created_at_unix_ms,

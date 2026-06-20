@@ -1,5 +1,5 @@
-use capsule_core::schema_registry::SchemaRegistry;
-use capsule_core::types::{CapsuleManifest, PolymorphismConfig};
+use capsule::schema_registry::SchemaRegistry;
+use capsule::types::{CapsuleManifest, PolymorphismConfig};
 use serde_json::json;
 
 #[test]

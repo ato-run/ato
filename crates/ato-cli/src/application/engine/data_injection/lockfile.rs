@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
-use capsule_core::lockfile::{
+use capsule::lockfile::{
     LockedInjectedData, parse_lockfile_text, resolve_existing_lockfile_path,
     verify_lockfile_manifest,
 };

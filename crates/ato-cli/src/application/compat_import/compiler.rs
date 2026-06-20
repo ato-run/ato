@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use anyhow::Result;
-use capsule_core::ato_lock::{ATO_LOCK_SCHEMA_VERSION, AtoLock, UnresolvedReason, UnresolvedValue};
-use capsule_core::input_resolver::ResolvedCompatibilityProject;
-use capsule_core::lockfile::CapsuleLock;
-use capsule_core::manifest::LoadedManifest;
+use capsule::ato_lock::{ATO_LOCK_SCHEMA_VERSION, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule::input_resolver::ResolvedCompatibilityProject;
+use capsule::lockfile::CapsuleLock;
+use capsule::manifest::LoadedManifest;
 use serde::Serialize;
 
 use super::diagnostics::{
@@ -177,7 +177,7 @@ fn summarize_unresolved(lock: &AtoLock) -> UnresolvedSummary {
 mod tests {
     use std::fs;
 
-    use capsule_core::input_resolver::{
+    use capsule::input_resolver::{
         ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
     };
     use serde_json::Value;

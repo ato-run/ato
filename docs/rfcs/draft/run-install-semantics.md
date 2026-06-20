@@ -6,7 +6,7 @@ author: "@egamikohsuke"
 ssot:
   - "crates/ato-cli/src/cli/root.rs"
   - "crates/ato-cli/src/cli/commands/run.rs"
-  - "crates/capsule-core/src/foundation/install_lifecycle/"
+  - "crates/capsule/src/foundation/install_lifecycle/"
 related:
   - "../accepted/ATO_CLI_SPEC.md"
   - "../accepted/RUNTIME_AND_BUILD_MODEL.md"
@@ -393,7 +393,7 @@ anything" looks for any of the following under `ATO_HOME`:
 - `revisions/<install_revision_id>/…` — immutable revision tree
 
 Paths are produced by
-[`capsule_core::foundation::install_lifecycle::store::InstallInstanceStore`][store].
+[`capsule::foundation::install_lifecycle::store::InstallInstanceStore`][store].
 The exact directory names may move in a later layout refactor; the file-shape
 predicates in the guardrail test are deliberately structural rather than
 hard-coded to a single path.
@@ -443,7 +443,7 @@ These remain documented but unverified by the current guardrails:
 - "App card" surfaces in Desktop (UI-level, covered by Desktop tests)
 
 [guardrails]: ../../../crates/ato-cli/tests/run_install_semantics.rs
-[store]: ../../../crates/capsule-core/src/foundation/install_lifecycle/store.rs
+[store]: ../../../crates/capsule/src/foundation/install_lifecycle/store.rs
 
 ## References
 
@@ -452,6 +452,6 @@ These remain documented but unverified by the current guardrails:
 - `docs/rfcs/draft/APP_SESSION_MATERIALIZATION.md`
 - `docs/rfcs/draft/BUILD_MATERIALIZATION.md`
 - `docs/execution-identity.md`
-- `crates/capsule-core/src/foundation/install_lifecycle/ids.rs`
-- `crates/capsule-core/src/foundation/install_lifecycle/store.rs`
+- `crates/capsule/src/foundation/install_lifecycle/ids.rs`
+- `crates/capsule/src/foundation/install_lifecycle/store.rs`
 - `crates/ato-cli/tests/run_install_semantics.rs`

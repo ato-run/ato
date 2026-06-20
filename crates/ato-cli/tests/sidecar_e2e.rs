@@ -1,7 +1,7 @@
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use capsule_core::{
+use capsule::{
     TsnetClient, TsnetConfig, TsnetEndpoint, TsnetHandle, TsnetState, TsnetWaitConfig,
     wait_for_ready,
 };

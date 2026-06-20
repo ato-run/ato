@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use capsule_core::bootstrap::{BootstrapAuthorityKind, BootstrapClosureRole};
+use capsule::bootstrap::{BootstrapAuthorityKind, BootstrapClosureRole};
 use tempfile::tempdir;
 
 #[cfg(unix)]

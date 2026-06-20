@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use std::process::{Command, Stdio};
 use tracing::warn;
 
-use capsule_core::router::ManifestData;
+use capsule::router::ManifestData;
 
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 
 use crate::common::proxy;
 

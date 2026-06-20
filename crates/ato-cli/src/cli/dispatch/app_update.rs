@@ -6,8 +6,8 @@
 //! revision is kept and a "already up to date" message is printed.
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::install_lifecycle::{
     InstallInstanceStore, InstalledAppId, ProfileId, derive_install_profile_key,
 };
 
@@ -96,7 +96,7 @@ fn find_app_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{
+    use capsule::foundation::install_lifecycle::{
         AppRecord, InstallInstanceStore, LaunchProfile, derive_install_profile_key,
     };
     use serial_test::serial;
@@ -107,9 +107,8 @@ mod tests {
     fn update_non_default_profile_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = InstallInstanceStore::new(dir.path().join("instances")).unwrap();
-        let app_id =
-            capsule_core::foundation::install_lifecycle::InstalledAppId::new("app_test_upd_nd");
-        let profile_id = capsule_core::foundation::install_lifecycle::ProfileId::new("staging");
+        let app_id = capsule::foundation::install_lifecycle::InstalledAppId::new("app_test_upd_nd");
+        let profile_id = capsule::foundation::install_lifecycle::ProfileId::new("staging");
         store
             .write_app_record(&AppRecord {
                 installed_app_id: app_id.clone(),

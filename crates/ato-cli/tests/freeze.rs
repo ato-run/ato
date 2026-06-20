@@ -12,8 +12,8 @@ use ato_cli::dependency_materializer::{
     DependencyMaterializationRequest, DependencyMaterializer, InstallPolicies, ManifestInputs,
     PlatformTriple, RuntimeSelection, SessionDependencyMaterializer, StoreRefRecord,
 };
-use capsule_core::blob::BlobManifest;
-use capsule_core::common::store::{BlobAddress, ato_store_dep_ref_path};
+use capsule::blob::BlobManifest;
+use capsule::common::store::{BlobAddress, ato_store_dep_ref_path};
 use serial_test::serial;
 
 mod support;

@@ -26,7 +26,7 @@
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, Registry, fmt, prelude::*};
 
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule::common::paths::ato_path_or_workspace_tmp;
 
 /// `target:` value for icon / favicon plumbing.
 pub const TARGET_FAVICON: &str = "favicon";

@@ -5,8 +5,8 @@ mod policy;
 mod release;
 
 use anyhow::{Context, Result};
-use capsule_core::bootstrap::{BootstrapBoundary, NetworkBootstrapPolicy};
-use capsule_core::common::paths::engine_cache_dir;
+use capsule::bootstrap::{BootstrapBoundary, NetworkBootstrapPolicy};
+use capsule::common::paths::engine_cache_dir;
 use std::path::PathBuf;
 
 #[allow(unused_imports)]

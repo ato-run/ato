@@ -24,7 +24,7 @@ use std::backtrace::Backtrace;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule::common::paths::ato_path_or_workspace_tmp;
 
 /// Re-entrancy guard: a panic *inside* the hook (e.g. while formatting the
 /// report or showing the dialog) must fall straight through to the default

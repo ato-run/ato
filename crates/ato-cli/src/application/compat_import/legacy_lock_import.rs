@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use capsule_core::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
-use capsule_core::lockfile::{CapsuleLock, LockedCapsuleDependency};
+use capsule::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule::lockfile::{CapsuleLock, LockedCapsuleDependency};
 use serde_json::Value;
 
 use super::compiler::CompatibilityCompilerInput;
@@ -132,7 +132,7 @@ pub(super) fn import_legacy_lock(
 fn compare_runtime_hints(
     input: &CompatibilityCompilerInput<'_>,
     manifest_draft: &AtoLock,
-    runtimes: &capsule_core::lockfile::RuntimeSection,
+    runtimes: &capsule::lockfile::RuntimeSection,
     unresolved: &mut Vec<UnresolvedValue>,
     diagnostics: &mut Vec<CompatibilityDiagnostic>,
 ) {

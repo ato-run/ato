@@ -150,7 +150,7 @@ Resolved 23 packages in 1.52s ...
 → **`working_dir` を切ると lockfile probe が working_dir 内のみを見るため、shadow lockfile auto-generation がスキップされる**バグの疑い。
 コード上の関連箇所:
 - `crates/ato-cli/src/adapters/runtime/provisioning/diagnose.rs:63` (`working_dir.join("uv.lock")` のみ candidate に)
-- `crates/capsule-core/src/routing/importer/mod.rs:223` (`probe_required_python_lockfile` は `project_root` を見る)
+- `crates/capsule/src/routing/importer/mod.rs:223` (`probe_required_python_lockfile` は `project_root` を見る)
 - `crates/ato-cli/src/adapters/runtime/provisioning/shadow.rs:459` (shadow generation も working_dir 基準)
 
 #### 1.3.6 `python -m uvicorn ...` 形式の `run` で「lost child handle」発生
@@ -172,7 +172,7 @@ Error: Internal exec lost child handle for PID 89354
 
 → **`-m` 引数を付けると nacelle supervisor が child handle を register 完了する前に exec が完了して報告される race condition、もしくは command spawning に欠陥がある**。
 コード上の関連箇所:
-- `crates/capsule-core/src/routing/launch_spec.rs:125-170` (python branch で first token が `python`/`python3`/`uv` の場合、`tokens.get(1)` を entrypoint として抜き出す。`-m` も entrypoint 扱いされる)
+- `crates/capsule/src/routing/launch_spec.rs:125-170` (python branch で first token が `python`/`python3`/`uv` の場合、`tokens.get(1)` を entrypoint として抜き出す。`-m` も entrypoint 扱いされる)
 - `crates/ato-cli/src/adapters/runtime/executors/source.rs:140-162` (resulting `Command::new(python_bin).arg("-m")` を spawn → nacelle に sandbox 化を頼む直前で何かが壊れる)
 - `crates/ato-cli/src/adapters/runtime/executors/source.rs:680-708` (nacelle path で uv run --with-requirements ... python3 -m uvicorn ... を組み立てるロジック)
 
@@ -279,8 +279,8 @@ repro:
 
 ato 0.4.x は **「source/python target requires uv.lock for fail-closed provisioning」** をエラーコード `E104 / ATO_ERR_PROVISIONING_LOCK_INCOMPLETE` で出す。
 コード:
-- `crates/capsule-core/src/routing/importer/mod.rs:223-228` (`probe_required_python_lockfile`)
-- `crates/capsule-core/src/engine/execution_plan/derive.rs:717` (test asserts the error code)
+- `crates/capsule/src/routing/importer/mod.rs:223-228` (`probe_required_python_lockfile`)
+- `crates/capsule/src/engine/execution_plan/derive.rs:717` (test asserts the error code)
 
 #### 2.2.2 ただし shadow lockfile auto-generation で救済できる
 
@@ -451,14 +451,14 @@ WasedaP2P (https://github.com/itsukison/wasedap2p) を ato で Docker なしで�
 
 | パス | 役割 |
 |---|---|
-| `crates/capsule-core/src/routing/launch_spec.rs:85-194` | `run` 文字列を python/node/その他に分岐して entrypoint と args を切り出す中核 |
+| `crates/capsule/src/routing/launch_spec.rs:85-194` | `run` 文字列を python/node/その他に分岐して entrypoint と args を切り出す中核 |
 | `crates/ato-cli/src/adapters/runtime/executors/source.rs:115-220` | host process spawn 経路（dangerous モード） |
 | `crates/ato-cli/src/adapters/runtime/executors/source.rs:550-740` | nacelle exec adapter（`uv run --with-requirements ... python3 ...` を組み立てる） |
-| `crates/capsule-core/src/routing/importer/mod.rs:223-228` | `uv.lock` 必須要件の出所 |
+| `crates/capsule/src/routing/importer/mod.rs:223-228` | `uv.lock` 必須要件の出所 |
 | `crates/ato-cli/src/adapters/runtime/provisioning/shadow.rs:459-528` | shadow lockfile auto-generation |
 | `crates/ato-cli/src/adapters/runtime/provisioning/diagnose.rs:63` | `working_dir.join("uv.lock")` のみ probe する箇所（バグ疑い） |
-| `crates/capsule-core/src/foundation/types/manifest.rs:1150-1260` | `NamedTarget`（`[targets.X]` table の field 一覧） |
-| `crates/capsule-core/src/foundation/types/manifest.rs:346-403` | `ServiceSpec` / `ServiceNetworkSpec` |
+| `crates/capsule/src/foundation/types/manifest.rs:1150-1260` | `NamedTarget`（`[targets.X]` table の field 一覧） |
+| `crates/capsule/src/foundation/types/manifest.rs:346-403` | `ServiceSpec` / `ServiceNetworkSpec` |
 | `crates/ato-cli/samples/python-fastapi/` | source/python の正準サンプル |
 | `crates/ato-cli/tests/fixtures/oci-multi-component/capsule.toml` | services + targets を使ったマルチサービスサンプル |
 

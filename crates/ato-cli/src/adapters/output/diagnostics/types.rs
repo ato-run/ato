@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use capsule_core::execution_plan::error::{
+use capsule::execution_plan::error::{
     AtoErrorClassification, CleanupActionRecord, CleanupStatus, ManifestSuggestion,
 };
 

@@ -65,7 +65,7 @@ pub(crate) struct LaunchSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaunchIdentity {
     /// Remote handle / store scoped id form. The contained string is
-    /// already normalized via `capsule_core::handle::normalize_capsule_handle`
+    /// already normalized via `capsule::handle::normalize_capsule_handle`
     /// when possible, otherwise the raw handle as the user typed it.
     Handle(String),
     /// Local-path start. Stores the canonicalized manifest path so the same
@@ -731,8 +731,8 @@ mod platform {
 pub(crate) fn canonicalize_launch_spec(
     handle_input: &str,
     target_label: &str,
-    plan: &capsule_core::router::ManifestData,
-    derived: &capsule_core::launch_spec::LaunchSpec,
+    plan: &capsule::router::ManifestData,
+    derived: &capsule::launch_spec::LaunchSpec,
     manifest_path: &Path,
     logical_cwd: Option<String>,
 ) -> Result<LaunchSpec> {
@@ -784,7 +784,7 @@ pub(crate) fn canonicalize_launch_spec(
 }
 
 fn canonicalize_identity(handle_input: &str, manifest_path: &Path) -> Result<LaunchIdentity> {
-    use capsule_core::handle::normalize_capsule_handle;
+    use capsule::handle::normalize_capsule_handle;
 
     // Try the handle normaliser first; it understands store / GitHub /
     // canonical capsule:// forms. If it accepts the input, the result is

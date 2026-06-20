@@ -4,8 +4,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_cache_dir;
-use capsule_core::router::ManifestData;
+use capsule::common::paths::ato_cache_dir;
+use capsule::router::ManifestData;
 use toml::Value;
 use walkdir::WalkDir;
 
@@ -629,7 +629,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
 
-    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use capsule::router::{ExecutionProfile, ManifestData};
 
     use crate::runtime::provisioning::types::{
         ProvisioningAction, ProvisioningAudit, ProvisioningMaterializationStatus, ProvisioningPlan,
@@ -651,7 +651,7 @@ mod tests {
             .expect("manifest table")
             .entry("type".to_string())
             .or_insert_with(|| toml::Value::String("app".to_string()));
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             manifest,
             manifest_path,
             dir.to_path_buf(),
@@ -709,7 +709,7 @@ run = "node server.js""#,
 
         let manifest: toml::Value =
             toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read")).expect("parse");
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             manifest,
             manifest_path.clone(),
             dir.path().to_path_buf(),
@@ -843,7 +843,7 @@ build = "npm run build"
         }
         let _ato_home_restore = AtoHomeRestore(previous_ato_home);
 
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             toml::from_str(
                 r#"
 name = "demo"
@@ -928,7 +928,7 @@ run_command = "node server.js"
     fn synthetic_env_file_has_secure_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
-        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+        let plan = capsule::router::execution_descriptor_from_manifest_parts(
             toml::from_str(
                 r#"
 name = "demo"

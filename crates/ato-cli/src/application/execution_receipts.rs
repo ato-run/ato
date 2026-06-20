@@ -3,8 +3,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_executions_dir;
-use capsule_core::execution_identity::{
+use capsule::common::paths::ato_executions_dir;
+use capsule::execution_identity::{
     EXECUTION_IDENTITY_SCHEMA_VERSION, EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
     ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2, GraphReceipt,
     ObservedRuntimeEvidence,
@@ -242,7 +242,7 @@ fn execution_dir_name(execution_id: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use capsule_core::execution_identity::{
+    use capsule::execution_identity::{
         DependencyIdentity, EnvironmentIdentity, EnvironmentMode, ExecutionIdentityInput,
         ExecutionReceipt, FilesystemIdentity, LaunchIdentity, PlatformIdentity, PolicyIdentity,
         ReproducibilityCause, ReproducibilityClass, ReproducibilityIdentity, RuntimeIdentity,

@@ -3,8 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::registry::store::PersistentStateRecord;
-use capsule_core::schema_registry::SchemaRegistry;
-use capsule_core::types::{CapsuleManifest, StateDurability, StateKind};
+use capsule::schema_registry::SchemaRegistry;
+use capsule::types::{CapsuleManifest, StateDurability, StateKind};
 
 use super::{PERSISTENT_STATE_BACKEND_KIND_HOST_PATH, PERSISTENT_STATE_KIND_FILESYSTEM};
 

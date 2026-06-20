@@ -353,7 +353,7 @@ fn read_launch_conditions(ato_home: &Path, ipk: &str) -> Vec<StoredCondition> {
     unsafe {
         std::env::set_var("ATO_HOME", ato_home);
     }
-    let db = capsule_core::installed_state::InstalledStateDb::open_default()
+    let db = capsule::installed_state::InstalledStateDb::open_default()
         .expect("open hermetic installed-state DB");
     let claims = db
         .list_launch_condition_claims(ipk)

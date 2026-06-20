@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use capsule_core::common::paths::{ato_path_or_workspace_tmp, nacelle_home_dir};
+use capsule::common::paths::{ato_path_or_workspace_tmp, nacelle_home_dir};
 
 use crate::cli::session::IdentitySessionCommands as SessionCommands;
 

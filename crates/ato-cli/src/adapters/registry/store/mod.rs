@@ -13,9 +13,9 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use capsule_core::packers::payload as manifest_payload;
-use capsule_core::types::identity::public_key_to_did;
-use capsule_core::types::{CapsuleManifest, EpochPointer};
+use capsule::packers::payload as manifest_payload;
+use capsule::types::identity::public_key_to_did;
+use capsule::types::{CapsuleManifest, EpochPointer};
 
 use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
 
@@ -48,9 +48,7 @@ const SCHEMA_MIGRATION_0009: &str = "2026-03-10-0009-service-binding-allowed-cal
 const SCHEMA_MIGRATION_0010: &str = "2026-03-25-0010-registry-release-lock-metadata";
 const SCHEMA_MIGRATION_0011: &str = "2026-03-28-0011-registry-release-publish-metadata";
 
-fn manifest_distribution(
-    manifest: &CapsuleManifest,
-) -> Result<&capsule_core::types::DistributionInfo> {
+fn manifest_distribution(manifest: &CapsuleManifest) -> Result<&capsule::types::DistributionInfo> {
     manifest.distribution.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "{}: distribution metadata is missing from capsule.toml",

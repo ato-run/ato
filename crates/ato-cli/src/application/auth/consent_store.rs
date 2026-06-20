@@ -8,10 +8,10 @@ use chrono::Utc;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use capsule_core::AtoError;
-use capsule_core::common::paths::ato_path;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::model::{ConsentKey, ExecutionPlan};
+use capsule::AtoError;
+use capsule::common::paths::ato_path;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::model::{ConsentKey, ExecutionPlan};
 
 use crate::application::graph_views::ExecutionConsentView;
 
@@ -106,7 +106,7 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
         // Emit the machine line ONLY when consent_ref computes and the payload
         // serializes — never a malformed/empty-ref signal. On any failure we
         // skip the line and still return the unchanged E302 below (fail closed).
-        if let Ok(consent_ref) = capsule_core::execution_plan::canonical::consent_ref(&plan.consent)
+        if let Ok(consent_ref) = capsule::execution_plan::canonical::consent_ref(&plan.consent)
             && let Ok(machine_line) =
                 serde_json::to_string(&ato_protocol::consent::ConsentRequiredLine {
                     schema: ato_protocol::consent::CONSENT_REQUIRED_SCHEMA.to_string(),
@@ -527,45 +527,45 @@ mod tests {
     fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
             schema_version: "1".to_string(),
-            capsule: capsule_core::execution_plan::model::CapsuleRef {
+            capsule: capsule::execution_plan::model::CapsuleRef {
                 scoped_id: "local/test".to_string(),
                 version: "1.0.0".to_string(),
             },
-            target: capsule_core::execution_plan::model::TargetRef {
+            target: capsule::execution_plan::model::TargetRef {
                 label: "cli".to_string(),
-                runtime: capsule_core::execution_plan::model::ExecutionRuntime::Source,
-                driver: capsule_core::execution_plan::model::ExecutionDriver::Deno,
+                runtime: capsule::execution_plan::model::ExecutionRuntime::Source,
+                driver: capsule::execution_plan::model::ExecutionDriver::Deno,
                 language: None,
             },
-            provisioning: capsule_core::execution_plan::model::Provisioning {
-                network: capsule_core::execution_plan::model::ProvisioningNetwork {
+            provisioning: capsule::execution_plan::model::Provisioning {
+                network: capsule::execution_plan::model::ProvisioningNetwork {
                     allow_registry_hosts: Vec::new(),
                 },
                 lock_required: true,
                 integrity_required: true,
                 allowed_registries: Vec::new(),
             },
-            runtime: capsule_core::execution_plan::model::Runtime {
-                policy: capsule_core::execution_plan::model::RuntimePolicy {
-                    network: capsule_core::execution_plan::model::RuntimeNetworkPolicy {
+            runtime: capsule::execution_plan::model::Runtime {
+                policy: capsule::execution_plan::model::RuntimePolicy {
+                    network: capsule::execution_plan::model::RuntimeNetworkPolicy {
                         allow_hosts: Vec::new(),
                     },
-                    filesystem: capsule_core::execution_plan::model::RuntimeFilesystemPolicy {
+                    filesystem: capsule::execution_plan::model::RuntimeFilesystemPolicy {
                         read_only: Vec::new(),
                         read_write: Vec::new(),
                     },
-                    secrets: capsule_core::execution_plan::model::RuntimeSecretsPolicy {
+                    secrets: capsule::execution_plan::model::RuntimeSecretsPolicy {
                         allow_secret_ids: Vec::new(),
-                        delivery: capsule_core::execution_plan::model::SecretDelivery::Fd,
+                        delivery: capsule::execution_plan::model::SecretDelivery::Fd,
                     },
                     args: Vec::new(),
                 },
                 fail_closed: true,
                 non_interactive_behavior:
-                    capsule_core::execution_plan::model::NonInteractiveBehavior::DenyIfUnconsented,
+                    capsule::execution_plan::model::NonInteractiveBehavior::DenyIfUnconsented,
             },
-            consent: capsule_core::execution_plan::model::Consent {
-                key: capsule_core::execution_plan::model::ConsentKey {
+            consent: capsule::execution_plan::model::Consent {
+                key: capsule::execution_plan::model::ConsentKey {
                     scoped_id: "local/test".to_string(),
                     version: "1.0.0".to_string(),
                     target_label: "cli".to_string(),
@@ -575,8 +575,8 @@ mod tests {
                 mount_set_algo_id: "lockfile_mountset_v1".to_string(),
                 mount_set_algo_version: 1,
             },
-            reproducibility: capsule_core::execution_plan::model::Reproducibility {
-                platform: capsule_core::execution_plan::model::Platform {
+            reproducibility: capsule::execution_plan::model::Reproducibility {
+                platform: capsule::execution_plan::model::Platform {
                     os: "darwin".to_string(),
                     arch: "arm64".to_string(),
                     libc: "unknown".to_string(),

@@ -6,10 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use adk_core::Llm;
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::isolation::HostIsolationContext;
-use capsule_core::router::ManifestData;
+use capsule::CapsuleReporter;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::isolation::HostIsolationContext;
+use capsule::router::ManifestData;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -493,7 +493,7 @@ impl AgentToolExecutor {
 
     pub(crate) fn run_shadow_command(&self, command: &str, working_dir: &str) -> Result<String> {
         let parsed = parse_safe_command(command)?;
-        let current_dir = capsule_core::common::paths::windows_child_compatible_path(
+        let current_dir = capsule::common::paths::windows_child_compatible_path(
             &self.resolve_workspace_path(Path::new(working_dir))?,
         );
         if !current_dir.exists() {
@@ -1454,7 +1454,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
         // On Windows canonicalize() yields `\\?\C:\…`; strip it back to the
         // normal spelling so the path stays usable as a child-process cwd
         // (cmd.exe rejects extended-length working directories).
-        Ok(canonical) => Ok(capsule_core::common::paths::windows_child_compatible_path(
+        Ok(canonical) => Ok(capsule::common::paths::windows_child_compatible_path(
             &canonical,
         )),
         Err(_) => Ok(absolute),
@@ -1520,12 +1520,12 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use capsule_core::router::ExecutionProfile;
+    use capsule::router::ExecutionProfile;
 
     fn test_plan(dir: &Path, manifest: &str) -> ManifestData {
         let manifest_path = dir.join("capsule.toml");
         std::fs::write(&manifest_path, manifest).expect("manifest");
-        capsule_core::router::execution_descriptor_from_manifest_parts(
+        capsule::router::execution_descriptor_from_manifest_parts(
             toml::from_str(&std::fs::read_to_string(&manifest_path).expect("read")).expect("parse"),
             manifest_path,
             dir.to_path_buf(),

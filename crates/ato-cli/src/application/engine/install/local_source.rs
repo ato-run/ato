@@ -27,12 +27,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use capsule_core::AtoError;
-use capsule_core::common::fs::{SymlinkPolicy, copy_dir_recursive};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::installed_state::InstalledStateDb;
-use capsule_core::types::CapsuleManifest;
+use capsule::AtoError;
+use capsule::common::fs::{SymlinkPolicy, copy_dir_recursive};
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::installed_state::InstalledStateDb;
+use capsule::types::CapsuleManifest;
 
 use crate::reporters;
 

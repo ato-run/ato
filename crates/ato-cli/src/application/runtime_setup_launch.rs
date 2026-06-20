@@ -13,14 +13,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule_core::runtime_setup::RuntimeSetupLaunchIntent;
+use capsule::runtime_setup::RuntimeSetupLaunchIntent;
 
 /// Launch intents older than this are ignored (the user likely moved on).
 pub(crate) const LAUNCH_INTENT_TTL_MS: u64 = 24 * 60 * 60 * 1000; // 24h
 
 /// Default on-disk path for the launch-intent marker. Never falls back to /tmp.
 pub(crate) fn launch_intent_path() -> PathBuf {
-    capsule_core::common::paths::ato_path_or_workspace_tmp("runtime-setup/launch-intent.json")
+    capsule::common::paths::ato_path_or_workspace_tmp("runtime-setup/launch-intent.json")
 }
 
 /// Write a launch intent to `path`, creating parent directories as needed.
@@ -128,11 +128,11 @@ pub(crate) fn consume_launch_intent(now_unix_ms: u64) -> Option<RuntimeSetupLaun
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::runtime_setup::{LaunchIntentKind, LaunchIntentNextStep};
+    use capsule::runtime_setup::{LaunchIntentKind, LaunchIntentNextStep};
 
     fn sample_intent(created_at_unix_ms: u64) -> RuntimeSetupLaunchIntent {
         RuntimeSetupLaunchIntent {
-            schema_version: capsule_core::runtime_setup::RUNTIME_SETUP_LAUNCH_INTENT_SCHEMA_VERSION,
+            schema_version: capsule::runtime_setup::RUNTIME_SETUP_LAUNCH_INTENT_SCHEMA_VERSION,
             created_at_unix_ms,
             source_surface: "launch_flow".to_string(),
             intent_kind: LaunchIntentKind::CapsuleUrl,

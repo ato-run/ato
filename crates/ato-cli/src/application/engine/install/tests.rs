@@ -964,7 +964,7 @@ include = ["package.json", "app/**", "shared/**", "bun.lock", "README.md", "tsco
 
 #[test]
 fn github_checkout_root_is_outside_workspace_internal_subtree() {
-    use capsule_core::common::paths::path_contains_workspace_internal_subtree;
+    use capsule::common::paths::path_contains_workspace_internal_subtree;
     let root = super::github_checkout_root().expect("checkout root");
     assert!(
         !path_contains_workspace_internal_subtree(&root),
@@ -1591,7 +1591,7 @@ fn build_mock_fixture(scoped_id: &str, version: &str, chunks: Vec<Vec<u8>>) -> M
         let chunk_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
         chunk_hashes.push(chunk_hash.clone());
         chunk_bytes.insert(chunk_hash.clone(), bytes.clone());
-        chunk_list.push(capsule_core::types::ChunkDescriptor {
+        chunk_list.push(capsule::types::ChunkDescriptor {
             chunk_hash,
             offset,
             length: bytes.len() as u64,
@@ -1613,7 +1613,7 @@ runtime = "source"
 run = "main.py""#,
     )
     .expect("manifest");
-    manifest.distribution = Some(capsule_core::types::DistributionInfo {
+    manifest.distribution = Some(capsule::types::DistributionInfo {
         manifest_hash: String::new(),
         merkle_root,
         chunk_list,
@@ -2549,10 +2549,10 @@ runtime = "source"
 run = "main.py""#,
     )
     .expect("manifest");
-    manifest.distribution = Some(capsule_core::types::DistributionInfo {
+    manifest.distribution = Some(capsule::types::DistributionInfo {
         manifest_hash: String::new(),
         merkle_root: chunk_hash.clone(),
-        chunk_list: vec![capsule_core::types::ChunkDescriptor {
+        chunk_list: vec![capsule::types::ChunkDescriptor {
             chunk_hash: chunk_hash.clone(),
             offset: 0,
             length: 7,
@@ -2572,7 +2572,7 @@ run = "main.py""#,
         .as_mut()
         .expect("distribution")
         .signatures
-        .push(capsule_core::types::SignatureEntry {
+        .push(capsule::types::SignatureEntry {
             signer_did: "did:key:zabc".to_string(),
             key_id: "k1".to_string(),
             algorithm: "ed25519".to_string(),
@@ -2598,10 +2598,10 @@ runtime = "source"
 run = "main.py""#,
     )
     .expect("manifest");
-    manifest.distribution = Some(capsule_core::types::DistributionInfo {
+    manifest.distribution = Some(capsule::types::DistributionInfo {
         manifest_hash: "blake3:dummy".to_string(),
         merkle_root: chunk_hash.clone(),
-        chunk_list: vec![capsule_core::types::ChunkDescriptor {
+        chunk_list: vec![capsule::types::ChunkDescriptor {
             chunk_hash,
             offset: 0,
             length: payload.len() as u64,
@@ -2705,18 +2705,18 @@ runtime = "source"
 run = "main.py""#,
     )
     .expect("manifest");
-    manifest.distribution = Some(capsule_core::types::DistributionInfo {
+    manifest.distribution = Some(capsule::types::DistributionInfo {
         manifest_hash: "blake3:dummy".to_string(),
         merkle_root: "blake3:dummy".to_string(),
         chunk_list: vec![
-            capsule_core::types::ChunkDescriptor {
+            capsule::types::ChunkDescriptor {
                 chunk_hash: first_hash.clone(),
                 offset: 0,
                 length: first.len() as u64,
                 codec: "fastcdc".to_string(),
                 compression: "none".to_string(),
             },
-            capsule_core::types::ChunkDescriptor {
+            capsule::types::ChunkDescriptor {
                 chunk_hash: second_hash.clone(),
                 offset: first.len() as u64,
                 length: second.len() as u64,
@@ -3527,7 +3527,7 @@ fn install_launch_ledger_records_storage_condition_in_db_sot() {
     // exercises the install-side `install_launch_conditions` builder + the
     // strict `record_installed_launch_ledger` write without constructing a full
     // InstallResult.
-    use capsule_core::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
+    use capsule::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
     let (_dir, db) = admission_db();
     let claims = install_launch_conditions("ipk_app", "rev1", Some(21_474_836_480), None);
     db.record_installed_launch_ledger("ipk_app", Some("rev1"), None, &claims)
@@ -3553,7 +3553,7 @@ fn install_launch_ledger_records_storage_condition_in_db_sot() {
 fn install_launch_ledger_records_baseline_even_without_disk_requirement() {
     // An installed app with no declared disk requirement (storage admission
     // skipped) still gets a ledger: only the baseline marker, never empty (#508).
-    use capsule_core::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
+    use capsule::installed_state::{LEDGER_EXTRACTION_STATUS_KEY, LaunchConditionKind};
     let (_dir, db) = admission_db();
     let claims = install_launch_conditions("ipk_app", "rev1", None, None);
     assert_eq!(
@@ -3581,9 +3581,9 @@ fn manifest_fixture(toml: &str) -> CapsuleManifest {
 }
 
 fn extraction_status_detail(
-    claims: &[capsule_core::installed_state::LaunchConditionClaim],
+    claims: &[capsule::installed_state::LaunchConditionClaim],
 ) -> serde_json::Value {
-    use capsule_core::installed_state::LEDGER_EXTRACTION_STATUS_KEY;
+    use capsule::installed_state::LEDGER_EXTRACTION_STATUS_KEY;
     let marker = claims
         .iter()
         .find(|c| c.condition_key == LEDGER_EXTRACTION_STATUS_KEY)
@@ -3593,7 +3593,7 @@ fn extraction_status_detail(
 
 #[test]
 fn install_launch_conditions_records_env_condition_when_manifest_declares_env_projection() {
-    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    use capsule::installed_state::{LaunchConditionKind, LaunchConditionStatus};
     let manifest = manifest_fixture(
         r#"
 schema_version = "0.3"
@@ -3630,7 +3630,7 @@ LOG_LEVEL = "info"
 
 #[test]
 fn install_launch_conditions_records_secret_condition_when_manifest_declares_secret_requirement() {
-    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    use capsule::installed_state::{LaunchConditionKind, LaunchConditionStatus};
     let manifest = manifest_fixture(
         r#"
 schema_version = "0.3"
@@ -3665,7 +3665,7 @@ password = "{{env.PG_PASSWORD}}"
 
 #[test]
 fn install_launch_conditions_records_state_condition_when_manifest_declares_state_binding() {
-    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    use capsule::installed_state::{LaunchConditionKind, LaunchConditionStatus};
     let manifest = manifest_fixture(
         r#"
 schema_version = "0.3"
@@ -3696,7 +3696,7 @@ attach = "explicit"
 
 #[test]
 fn install_launch_conditions_records_state_mount_target_from_service_binding() {
-    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionStatus};
+    use capsule::installed_state::{LaunchConditionKind, LaunchConditionStatus};
     // When the manifest declares `services.main.state_bindings`, the guest mount
     // target is recorded in the state claim detail so runtime materialization
     // (#508) can place the bound directory without re-reading the manifest. The
@@ -3812,7 +3812,7 @@ fn no_supported_schema_keeps_kind_in_missing_extractors() {
 
 #[test]
 fn install_launch_conditions_records_port_condition_when_target_declares_port() {
-    use capsule_core::installed_state::{LaunchConditionKind, LaunchConditionSource};
+    use capsule::installed_state::{LaunchConditionKind, LaunchConditionSource};
     // `[execution]` is rejected in schema 0.3, so the listening port is declared
     // on the target; the extractor resolves it like `execution_port()`.
     let manifest = manifest_fixture(
@@ -3842,7 +3842,7 @@ port = 3000
 
 #[test]
 fn install_launch_conditions_records_service_port_condition_when_service_declares_expose() {
-    use capsule_core::installed_state::LaunchConditionKind;
+    use capsule::installed_state::LaunchConditionKind;
     let manifest = manifest_fixture(
         r#"
 schema_version = "0.3"
@@ -3871,7 +3871,7 @@ expose = ["http"]
 
 #[test]
 fn install_launch_conditions_marks_port_extracted_even_when_manifest_has_no_port() {
-    use capsule_core::installed_state::LaunchConditionKind;
+    use capsule::installed_state::LaunchConditionKind;
     // No port declared anywhere, but the manifest *was* examined → Port is
     // extracted (zero port conditions), not left in missing_extractors.
     let manifest = manifest_fixture(
@@ -3953,7 +3953,7 @@ port = 3000
 
 #[test]
 fn port_condition_uses_same_logical_endpoint_as_launch_port_admission() {
-    use capsule_core::installed_state::LaunchConditionKind;
+    use capsule::installed_state::LaunchConditionKind;
     // The install-time declaration and #523's launch-time admission must address
     // the same logical endpoint, so they converge on one ledger condition_key.
     let manifest = manifest_fixture(
@@ -3989,7 +3989,7 @@ fn storage_admission_rejects_when_existing_claims_exhaust_the_volume() {
     let (dir, db) = admission_db();
     // Reserve more than the free space (wide margin so the result is stable),
     // so even a modest declared requirement no longer fits.
-    let free = capsule_core::installed_state::available_space_for_target(dir.path()).unwrap();
+    let free = capsule::installed_state::available_space_for_target(dir.path()).unwrap();
     db.record_storage_claim(&StorageClaim {
         install_profile_key: "hog".to_string(),
         reserved_bytes: free.saturating_add(100 * 1024 * 1024 * 1024),

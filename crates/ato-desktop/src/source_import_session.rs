@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use capsule_core::capsule::manifest::blake3_digest;
+use capsule::capsule::manifest::blake3_digest;
 use serde::{Deserialize, Serialize};
 use url::Url;
 

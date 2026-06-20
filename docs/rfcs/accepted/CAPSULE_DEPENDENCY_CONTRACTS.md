@@ -1190,9 +1190,9 @@ provision の credential 経路について (§7.3.2 適用結果):
 
 仕様確定後の実装段取りメモ。RFC 本体には含めないが参考のため:
 
-1. `capsule-core` に `[dependencies.*]` parser と lock 出力を実装 (既存 `manifest_v03.rs` 拡張)。`parameters` と `credentials` を別 block として parse、credentials は template form のまま AST に保持。
+1. `capsule` に `[dependencies.*]` parser と lock 出力を実装 (既存 `manifest_v03.rs` 拡張)。`parameters` と `credentials` を別 block として parse、credentials は template form のまま AST に保持。
 2. `unix_socket = "auto"` / `ready.type = "http" | "unix_socket"` は parser で AST に受理しつつ、lock phase で **fail-closed reject** (§9.1 verification 13)。
-3. `capsule-core` に `[contracts.*]` parser を実装 (provider 側)。`parameters` と `credentials` を別 block として parse。`state.version` を必須 field として扱う (`state.required = true` の時)。
+3. `capsule` に `[contracts.*]` parser を実装 (provider 側)。`parameters` と `credentials` を別 block として parse。`state.version` を必須 field として扱う (`state.required = true` の時)。
 4. lock 時 contract verification (§9) を `routing/router.rs` 系で実装:
    - parameter / credential type & required check
    - credentials の literal 禁止 (`{{env.X}}` テンプレ必須)
@@ -1211,7 +1211,7 @@ provision の credential 経路について (§7.3.2 適用結果):
 13. 検証 capsule として `ato/postgres` を 1 個書く。WasedaP2P を新 grammar に移行して E2E。
 14. **Identity invariant test**: `PG_PASSWORD` を rotate して再 `ato run` した時に (a) lock が変わらない、(b) instance_hash が変わらない、(c) state.dir が同じ、(d) `dependency_derivation_hash` が変わらない、を検証する自動テストを 1 本入れる。これは v1.3 の最重要 invariant を守るレグレッション防止。
 
-実装は `capsule-core` parser / lock → `ato-cli` runtime + env model 改修 + credential resolution → 検証 capsule の 3 層を順番に通す。
+実装は `capsule` parser / lock → `ato-cli` runtime + env model 改修 + credential resolution → 検証 capsule の 3 層を順番に通す。
 
 ## 15. Implementation Plan
 

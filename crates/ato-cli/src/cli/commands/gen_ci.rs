@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 
 const ATO_RELEASE_BASE_URL: &str = "https://dl.ato.run";
 const ENV_RELEASE_BASE_URL: &str = "ATO_RELEASE_BASE_URL";

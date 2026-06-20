@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Error;
-use capsule_core::execution_plan::error::{
-    CleanupActionRecord, CleanupActionStatus, CleanupStatus,
-};
+use capsule::execution_plan::error::{CleanupActionRecord, CleanupActionStatus, CleanupStatus};
 
 use crate::application::pipeline::hourglass::HourglassPhase;
 
@@ -498,9 +496,7 @@ impl StdError for PipelineAttemptError {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use capsule_core::execution_plan::error::{
-        CleanupActionRecord, CleanupActionStatus, CleanupStatus,
-    };
+    use capsule::execution_plan::error::{CleanupActionRecord, CleanupActionStatus, CleanupStatus};
     use tempfile::tempdir;
 
     use super::{CleanupJournal, CleanupReport, PipelineAttemptContext, run_sigint_cleanup};

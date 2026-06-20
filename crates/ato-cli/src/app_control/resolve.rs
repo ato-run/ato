@@ -4,17 +4,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use capsule_core::handle::{
+use capsule::handle::{
     CanonicalHandle, HandleInput, InputSurface, LaunchPlan, LocalTrustDecisionRecord,
     PermissionRequestPolicy, ResolvedMetadataCacheEntry, ResolvedSnapshot, SurfaceInput,
     TrustState, classify_surface_input,
 };
-use capsule_core::handle_store::{
+use capsule::handle_store::{
     load_metadata_cache, metadata_cache_is_fresh, metadata_cache_ttl_seconds, resolve_trust_state,
     store_local_trust_decision, store_metadata_cache,
 };
-use capsule_core::launch_spec::{LaunchSpecSource, derive_launch_spec};
-use capsule_core::router::{
+use capsule::launch_spec::{LaunchSpecSource, derive_launch_spec};
+use capsule::router::{
     ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts,
     route_manifest_with_state_overrides,
 };
@@ -371,7 +371,7 @@ fn resolve_local_plan_from_store(
     let slug = registry_manifest.get("name")?.as_str()?;
     let version = registry_manifest.get("version").and_then(|v| v.as_str());
 
-    let store_root = capsule_core::common::paths::ato_path_or_workspace_tmp("store");
+    let store_root = capsule::common::paths::ato_path_or_workspace_tmp("store");
 
     let capsule_path = crate::install::support::resolve_installed_capsule_archive_in_store(
         &store_root.join(publisher),
@@ -667,7 +667,7 @@ fn build_target_summary(
     }
 }
 
-fn build_launch_preview(spec: capsule_core::launch_spec::LaunchSpec) -> LaunchPreview {
+fn build_launch_preview(spec: capsule::launch_spec::LaunchSpec) -> LaunchPreview {
     LaunchPreview {
         working_dir: spec.working_dir.display().to_string(),
         command: spec.command,
@@ -886,7 +886,7 @@ fn normalize_handle_with_options(raw: &str, use_sample_recipes: bool) -> Result<
         }),
         SurfaceInput::SearchQuery { .. } => {
             let normalized_handle = normalize_curated_store_alias(&input);
-            let canonical = capsule_core::handle::normalize_capsule_handle(&normalized_handle)?;
+            let canonical = capsule::handle::normalize_capsule_handle(&normalized_handle)?;
             let _ = parse_capsule_request(&normalized_handle)
                 .with_context(|| format!("unsupported handle '{input}'"))?;
             Ok(NormalizedHandle {
@@ -950,7 +950,7 @@ fn default_launch_plan(
         }),
         snapshot,
         trust_state,
-        initial_isolation: capsule_core::handle::InitialIsolationPolicy::fail_closed(),
+        initial_isolation: capsule::handle::InitialIsolationPolicy::fail_closed(),
         permission_requests: PermissionRequestPolicy::jit_default(),
     }
 }

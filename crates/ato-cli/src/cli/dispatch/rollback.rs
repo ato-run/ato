@@ -1,8 +1,8 @@
 //! `ato rollback <install_profile_key> [<install_revision_id>]` — rollback to a previous revision.
 
 use anyhow::{Context, Result};
-use capsule_core::common::paths::ato_path_or_workspace_tmp;
-use capsule_core::foundation::install_lifecycle::{
+use capsule::common::paths::ato_path_or_workspace_tmp;
+use capsule::foundation::install_lifecycle::{
     InstallInstanceStore, InstallRevisionId, InstalledAppId, ProfileId, derive_install_profile_key,
 };
 
@@ -107,7 +107,7 @@ fn find_profile_by_key_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{
+    use capsule::foundation::install_lifecycle::{
         AppRecord, LaunchProfile, derive_install_profile_key,
     };
     use serial_test::serial;
@@ -123,7 +123,7 @@ mod tests {
         InstallRevisionId,
         InstallRevisionId,
         InstallRevisionId,
-        capsule_core::foundation::install_lifecycle::InstallProfileKey,
+        capsule::foundation::install_lifecycle::InstallProfileKey,
     ) {
         let dir = tempfile::tempdir().unwrap();
         let store = InstallInstanceStore::new(dir.path().join("instances")).unwrap();

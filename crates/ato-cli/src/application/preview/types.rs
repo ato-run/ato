@@ -214,7 +214,7 @@ impl PreviewSession {
         self.update_from_install_draft(draft);
     }
 
-    pub fn record_smoke_failure(&mut self, report: &capsule_core::smoke::SmokeFailureReport) {
+    pub fn record_smoke_failure(&mut self, report: &capsule::smoke::SmokeFailureReport) {
         self.last_failure_reason = Some(report.message.clone());
         self.last_smoke_error_class = Some(report.class.as_str().to_string());
         self.last_smoke_error_excerpt = Some(report.stderr_tail.clone());
@@ -241,7 +241,7 @@ fn preview_root() -> Result<PathBuf> {
         }
     }
 
-    capsule_core::common::paths::ato_path("previews").context("Failed to determine ato home")
+    capsule::common::paths::ato_path("previews").context("Failed to determine ato home")
 }
 
 fn generate_preview_id() -> String {

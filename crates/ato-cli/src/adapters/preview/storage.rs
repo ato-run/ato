@@ -19,7 +19,7 @@ pub fn preview_root() -> Result<PathBuf> {
         }
     }
 
-    capsule_core::common::paths::ato_path("previews").context("Failed to determine ato home")
+    capsule::common::paths::ato_path("previews").context("Failed to determine ato home")
 }
 
 pub fn load_preview_session_for_manifest(manifest_path: &Path) -> Result<Option<PreviewSession>> {

@@ -4,7 +4,7 @@ status: accepted
 date: "2026-02-03"
 author: "@egamikohsuke"
 ssot:
-  - "packages/capsule-core/"
+  - "packages/capsule/"
 ---
 
 # Ato AppSync Signature Specification v1.0

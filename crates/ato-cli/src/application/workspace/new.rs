@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::application::ports::OutputPort;
 
 use super::init::{detect, recipe};
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 
 pub struct NewArgs {
     pub name: String,

@@ -7,7 +7,7 @@ use crate::adapters::runtime::oci_session_store::{
 };
 use crate::reporters::CliReporter;
 use crate::runtime::process::{ImportPreviewStopResult, ImportPreviewStopStatus, ProcessManager};
-use capsule_core::CapsuleReporter;
+use capsule::CapsuleReporter;
 
 pub struct CloseArgs {
     pub id: Option<String>,

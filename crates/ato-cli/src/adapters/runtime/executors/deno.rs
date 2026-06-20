@@ -14,12 +14,12 @@ use std::{
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use capsule_core::execution_plan::canonical::{
+use capsule::execution_plan::canonical::{
     compute_policy_segment_hash, compute_provisioning_policy_hash,
 };
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::model::{ExecutionPlan, ExecutionRuntime};
-use capsule_core::router::ManifestData;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::model::{ExecutionPlan, ExecutionRuntime};
+use capsule::router::ManifestData;
 
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::common::proxy;
@@ -54,7 +54,7 @@ struct PreparedCommand {
 
 pub fn execute(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -122,7 +122,7 @@ pub fn execute(
 
 pub fn spawn(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -249,7 +249,7 @@ fn run_provisioning(
 fn build_runtime_command(
     deno_bin: &Path,
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,

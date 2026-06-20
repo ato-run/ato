@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use capsule_core::common::readiness::http_status_indicates_ready;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::installed_state::{InstalledStateDb, os_port_is_free};
-use capsule_core::router::ManifestData;
-use capsule_core::types::ServiceSpec;
+use capsule::common::readiness::http_status_indicates_ready;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::installed_state::{InstalledStateDb, os_port_is_free};
+use capsule::router::ManifestData;
+use capsule::types::ServiceSpec;
 
 use crate::adapters::runtime::port_admission::{
     self, DEFAULT_PORT_CONFLICT_POLICY, PortAdmissionPlan,
@@ -701,15 +701,15 @@ fn wait_until_ready_in_state(
     }
 }
 
-fn readiness_initial_delay(probe: &capsule_core::types::ReadinessProbe) -> Duration {
+fn readiness_initial_delay(probe: &capsule::types::ReadinessProbe) -> Duration {
     Duration::from_secs(probe.initial_delay_seconds as u64)
 }
 
-fn readiness_timeout(probe: &capsule_core::types::ReadinessProbe) -> Duration {
+fn readiness_timeout(probe: &capsule::types::ReadinessProbe) -> Duration {
     Duration::from_secs(probe.timeout_seconds.max(1) as u64)
 }
 
-fn readiness_interval(probe: &capsule_core::types::ReadinessProbe) -> Duration {
+fn readiness_interval(probe: &capsule::types::ReadinessProbe) -> Duration {
     if probe.interval_seconds == 0 {
         return READINESS_INTERVAL;
     }
@@ -718,7 +718,7 @@ fn readiness_interval(probe: &capsule_core::types::ReadinessProbe) -> Duration {
 
 fn resolve_probe_port(
     env: &HashMap<String, String>,
-    probe: &capsule_core::types::ReadinessProbe,
+    probe: &capsule::types::ReadinessProbe,
     service_name: &str,
 ) -> Result<Option<u16>> {
     // Exec probes do not use a port; only HTTP/TCP probes require one.
@@ -763,10 +763,7 @@ fn resolve_probe_port(
     Ok(Some(port))
 }
 
-fn readiness_probe_ok(
-    probe: &capsule_core::types::ReadinessProbe,
-    port: Option<u16>,
-) -> Result<bool> {
+fn readiness_probe_ok(probe: &capsule::types::ReadinessProbe, port: Option<u16>) -> Result<bool> {
     if let Some(path) = probe
         .http_get
         .as_ref()
@@ -972,9 +969,9 @@ mod tests {
         resolve_probe_port, service_startup_order,
     };
     use crate::adapters::runtime::port_admission::{logical_endpoint, record_port_admission_plan};
-    use capsule_core::installed_state::{ConflictPolicy, InstalledStateDb, PortClaim};
-    use capsule_core::types::ReadinessProbe;
-    use capsule_core::types::ServiceSpec;
+    use capsule::installed_state::{ConflictPolicy, InstalledStateDb, PortClaim};
+    use capsule::types::ReadinessProbe;
+    use capsule::types::ServiceSpec;
     use std::collections::HashMap;
     use std::time::Duration;
 

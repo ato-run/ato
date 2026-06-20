@@ -18,14 +18,14 @@
 //! already-installed app re-showed review on every relaunch.
 //!
 //! The durable identity of an installed entry is its
-//! [`install_profile_key`](capsule_core::foundation::install_lifecycle::derive_install_profile_key)
+//! [`install_profile_key`](capsule::foundation::install_lifecycle::derive_install_profile_key)
 //! and the derived stable
-//! [`app_url`](capsule_core::foundation::install_lifecycle::derive_app_url) —
+//! [`app_url`](capsule::foundation::install_lifecycle::derive_app_url) —
 //! never the capsule `handle`, a `.capsule` path, a revision id, or a session's
 //! ephemeral `local_url`.
 
 use anyhow::Result;
-use capsule_core::foundation::install_lifecycle::{
+use capsule::foundation::install_lifecycle::{
     AppRecord, InstallInstanceStore, InstalledAppId, ProfileId, derive_app_url,
     derive_install_profile_key,
 };
@@ -232,7 +232,7 @@ pub fn installed_target_for_app_url(app_url: &str) -> Result<Option<InstalledLau
     if ipk.is_empty() {
         return Ok(None);
     }
-    let root = capsule_core::common::paths::ato_path_or_workspace_tmp("instances");
+    let root = capsule::common::paths::ato_path_or_workspace_tmp("instances");
     let store = InstallInstanceStore::new(&root)?;
     installed_target_for_ipk(&store, ipk)
 }
@@ -281,7 +281,7 @@ fn normalize_handle(handle: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{InstallRevisionId, LaunchProfile};
+    use capsule::foundation::install_lifecycle::{InstallRevisionId, LaunchProfile};
 
     fn inputs(handle: &str) -> IntentInputs {
         IntentInputs {

@@ -4,7 +4,7 @@ name: dep-direction
 # layering can't silently regress. The single biggest invariant is that
 # `ato-protocol` stays a DAG root (consumed by both `ato-cli` and
 # `ato-desktop`, depends on neither), since that's what lets the Desktop
-# link the IPC surface without dragging in capsule-core's runtime stack
+# link the IPC surface without dragging in capsule's runtime stack
 # (bollard / tonic / rusqlite / reqwest / axum / prost / tokio-`full`).
 #
 # See `docs/monorepo-consolidation-plan.md` §N4 for the full rationale.
@@ -39,7 +39,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: ato-protocol is a DAG root (no ato-* / capsule-core deps)
+      - name: ato-protocol is a DAG root (no ato-* / capsule deps)
         run: |
           set -euo pipefail
           # `cargo tree --prefix=none` flattens the tree and de-dups
@@ -48,9 +48,9 @@ jobs:
           # violations.
           tree=$(cargo tree -p ato-protocol --prefix=none --edges=normal,build,dev)
           violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
-            grep -E '^(ato-cli|capsule-core|ato-desktop|ato-desktop-xtask|lock-draft-engine)$' || true)
+            grep -E '^(ato-cli|capsule|ato-desktop|ato-desktop-xtask|lock-draft-engine)$' || true)
           if [ -n "$violations" ]; then
-            echo "::error::ato-protocol pulled in a forbidden ato-/capsule-core/lock-draft dep:"
+            echo "::error::ato-protocol pulled in a forbidden ato-/capsule/lock-draft dep:"
             echo "$violations"
             echo "---"
             echo "Full tree:"
@@ -134,13 +134,13 @@ jobs:
           set -euo pipefail
           # nacelle is the sandbox runtime; it must not pull in any
           # workspace crate. A reverse arrow (nacelle → ato-cli or
-          # nacelle → capsule-core) would create a dependency cycle the
+          # nacelle → capsule) would create a dependency cycle the
           # moment ato-cli starts wanting types from nacelle. Keep the
           # sandbox a clean DAG leaf so the CLI can spawn it from any
           # version pin (release matrix, vendored cache, system PATH).
           tree=$(cargo tree -p nacelle --prefix=none --edges=normal,build,dev)
           violations=$(echo "$tree" | awk '{print $1}' | sort -u | \
-            grep -E '^(ato-cli|ato-desktop|ato-desktop-xtask|capsule-core|ato-protocol|lock-draft-engine)$' || true)
+            grep -E '^(ato-cli|ato-desktop|ato-desktop-xtask|capsule|ato-protocol|lock-draft-engine)$' || true)
           if [ -n "$violations" ]; then
             echo "::error::nacelle pulled in a forbidden workspace dep:"
             echo "$violations"

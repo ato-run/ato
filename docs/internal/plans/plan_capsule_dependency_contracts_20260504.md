@@ -10,7 +10,7 @@ related:
 
 > **Status (2026-05-05)**: P0–P7 all closed. RFC v1.6 implemented end-to-end.
 > ato-cli 1210 passing / 0 failing / 1 ignored (P7 host-bound real-Postgres E2E
-> behind `--ignored`). capsule-core 530 / 0. All 9 RFC §3 v1 invariants
+> behind `--ignored`). capsule 530 / 0. All 9 RFC §3 v1 invariants
 > enforced fail-closed at lock time and verified at run time against a
 > real `/opt/homebrew/bin/postgres` provider.
 >
@@ -39,9 +39,9 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 | Phase | 概要 | 予定 PR 数 | 主要 crate |
 | --- | --- | --- | --- |
 | **P0** | spec closure: template grammar / parser boundary の実装前確定 | 0–1 (docs only) | RFC / plan |
-| **P1** | parser: `[dependencies.*]` / `[contracts.*]` の AST | 1 | `capsule-core` |
-| **P2** | env capture model 拡張 (`EnvOrigin`) | 1 | `capsule-core` + `ato-cli` |
-| **P3** | lock-time verification (§9.1 13 項目) | 1 | `capsule-core` |
+| **P1** | parser: `[dependencies.*]` / `[contracts.*]` の AST | 1 | `capsule` |
+| **P2** | env capture model 拡張 (`EnvOrigin`) | 1 | `capsule` + `ato-cli` |
+| **P3** | lock-time verification (§9.1 13 項目) | 1 | `capsule` |
 | **P4** | credential resolver + materialization channels (Rule M1–M5) | 1 | `ato-cli` |
 | **P5** | runtime orchestration (existing `managed_services` を deps graph 駆動に置換) | 1–2 | `ato-cli` |
 | **P6** | identity 畳み込み: receipt の `dependency_derivation_hash` に `(parameters, identity_exports)` を入れる | 1 | `ato-cli` |
@@ -66,12 +66,12 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 - P1 parser (既に landed) の round-trip test が「v1 subset 以外を reject / reserved」を実装している
 - v0.3 legacy 互換 fix が `manifest_v03.rs` および `lockfile.rs::semantic_manifest_hash_from_text` 双方に入り、`ensure_lockfile_accepts_existing_uv_lock` test が緑復帰
 
-### P1: Parser (`capsule-core`)
+### P1: Parser (`capsule`)
 
 **目的**: TOML から AST (`DependenciesSpec`, `ContractsSpec`) を構築。lock 検証は P3 で別実装。
 
 **変更**:
-- `crates/capsule-core/src/foundation/types/manifest.rs`
+- `crates/capsule/src/foundation/types/manifest.rs`
   - 新規 struct `DependencySpec { capsule: CapsuleUrl, contract: ContractRef, parameters: BTreeMap<String, ParamValue>, credentials: BTreeMap<String, CredentialTemplate>, state: Option<DepStateSpec> }`
   - 新規 struct `ContractSpec { name: String, major: u32, target: TargetLabel, ready: ReadyProbe, parameters: BTreeMap<String, ParamSchema>, credentials: BTreeMap<String, CredentialSchema>, identity_exports: BTreeMap<String, String>, runtime_exports: BTreeMap<String, RuntimeExportSpec>, state: Option<ContractStateSpec> }`
   - 新規 enum `ReadyProbe { Tcp{...}, Probe{...}, Http{...} /* reserved */, UnixSocket{...} /* reserved */ }`
@@ -79,16 +79,16 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
   - `Manifest` に `pub dependencies: BTreeMap<String, DependencySpec>` 追加 (top-level)
   - `Manifest` に `pub contracts: BTreeMap<ContractId, ContractSpec>` 追加 (provider 側)
   - **テンプレ文字列の解析**: `{{params.X}}`, `{{credentials.X}}`, `{{env.X}}`, `{{host}}`, `{{port}}`, `{{state.dir}}`, `{{deps.<name>.runtime_exports.X}}`, `{{deps.<name>.identity_exports.X}}` を AST に分解した `TemplatedString` 型を導入
-- `crates/capsule-core/src/foundation/types/manifest_v03.rs`
+- `crates/capsule/src/foundation/types/manifest_v03.rs`
   - normalization で `dependencies` / `contracts` を passthrough
-- 新規 `crates/capsule-core/src/foundation/types/dependency_grammar.rs` (大きくなるので分離)
+- 新規 `crates/capsule/src/foundation/types/dependency_grammar.rs` (大きくなるので分離)
 
 **Out of scope for P1**:
 - 値の妥当性検証 (型一致 / required / cycle 等は P3)
 - 値の materialization (P4)
 
 **Acceptance**:
-- `cargo test -p capsule-core` で AST round-trip テスト追加 (TOML → AST → JSON serialize → 再 parse 一致)
+- `cargo test -p capsule` で AST round-trip テスト追加 (TOML → AST → JSON serialize → 再 parse 一致)
 - 既存の v0.3 manifest が壊れない (compat regression)
 - P0 で固定した v1 template subset 以外は parser error または reserved token として AST 化され、実装者が runtime で独自解釈できない
 
@@ -97,7 +97,7 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 **目的**: RFC §7.4.1 の `EnvOrigin` enum を導入。`runtime_exports` 由来 entry を `intrinsic_keys` から無条件除外する path を作る。
 
 **変更**:
-- 新規 `crates/capsule-core/src/execution_identity/env_origin.rs`
+- 新規 `crates/capsule/src/execution_identity/env_origin.rs`
   ```rust
   pub enum EnvOrigin {
       Host,
@@ -126,11 +126,11 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 
 **Brick boundary**:
 - `ato-cli` が authority resolution / provider fetch / cache lookup を担当する。
-- `capsule-core` は **pure verifier** のみを担当する。network / filesystem fetch / registry policy を持たない。
-- `capsule-core` の verifier は、consumer manifest と、ato-cli が既に materialize した provider manifests / resolved refs を入力として受け取る。
+- `capsule` は **pure verifier** のみを担当する。network / filesystem fetch / registry policy を持たない。
+- `capsule` の verifier は、consumer manifest と、ato-cli が既に materialize した provider manifests / resolved refs を入力として受け取る。
 
 **変更**:
-- 新規 `crates/capsule-core/src/foundation/dependency_contracts/lock.rs`
+- 新規 `crates/capsule/src/foundation/dependency_contracts/lock.rs`
   - `pub fn verify_and_lock(input: DependencyLockInput) -> Result<DependencyLock, LockError>`
   - `DependencyLockInput` は `consumer: Manifest` と `providers: BTreeMap<DepLocalName, ResolvedProviderManifest>` を持つ
   - `ResolvedProviderManifest` は `requested`, `resolved`, `manifest` を含む pure data。provider fetch は含まない
@@ -145,12 +145,12 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 - `crates/ato-cli` 側の lock path:
   - dependency URL を authority に問い合わせて immutable `resolved` に固定
   - provider capsule を fetch/materialize
-  - `DependencyLockInput` を組み立てて capsule-core の pure verifier を呼ぶ
+  - `DependencyLockInput` を組み立てて capsule の pure verifier を呼ぶ
 
 **Acceptance**:
 - 13 verification それぞれに対する failure テスト + happy path テスト
 - `LockError` variants が Display で v1 invariant 番号を含む
-- capsule-core unit tests は fake `ResolvedProviderManifest` のみで完結し、network / registry / filesystem provider fetch を必要としない
+- capsule unit tests は fake `ResolvedProviderManifest` のみで完結し、network / registry / filesystem provider fetch を必要としない
 
 ### P4: Credential Resolver + Materialization (Rule M1–M5)
 
@@ -212,7 +212,7 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 **目的**: v2 receipt の `dependency_derivation_hash` に直接依存先を畳み込む。
 
 **変更**:
-- `crates/capsule-core/src/execution_identity.rs`
+- `crates/capsule/src/execution_identity.rs`
   - `dependency_derivation_hash` 計算時に `(resolved, contract, parameters, identity_exports)` JCS canonical を blake3-256
   - credentials は **絶対に入力に入れない** (テストで invariant)
 - `crates/ato-cli/src/application/execution_receipt_builder.rs`
@@ -259,7 +259,7 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 
 CI gate と manual gate を分け、実 Postgres なしでも core invariant が落ちる構成にする:
 
-**Layer A — Property tests (capsule-core)**: AST round-trip、invariant 不変性。値域全域での regression 防止。
+**Layer A — Property tests (capsule)**: AST round-trip、invariant 不変性。値域全域での regression 防止。
 
 **Layer B — Unit tests (ato-cli)**: 各 verification rule の failure path、credential channel の sandbox 動作、redaction filter。
 
@@ -282,9 +282,9 @@ CI gate: A + B + C1 が緑。C2 は手動 trigger。
 | 順 | PR title | 依存 | 規模 |
 | --- | --- | --- | --- |
 | 0 | `docs: close v1 template grammar for dependency contracts` | — | 小 (docs only) |
-| 1 | `feat(capsule-core): add [dependencies.*] / [contracts.*] AST` | 0 | 中 (parser + AST + tests) |
-| 2 | `feat(capsule-core): add EnvOrigin and runtime_exports identity exclusion` | 1 | 小 |
-| 3 | `feat(capsule-core): add pure lock verification for dependency contracts` | 1, 2 | 中 |
+| 1 | `feat(capsule): add [dependencies.*] / [contracts.*] AST` | 0 | 中 (parser + AST + tests) |
+| 2 | `feat(capsule): add EnvOrigin and runtime_exports identity exclusion` | 1 | 小 |
+| 3 | `feat(capsule): add pure lock verification for dependency contracts` | 1, 2 | 中 |
 | 4 | `feat(ato-cli): credential resolver and materialization channels` | 1, 2 | 中 |
 | 5a | `refactor(ato-cli): rename managed_service internals to dependency_graph` | — (独立) | 小 (rename only) |
 | 5b | `feat(ato-cli): runtime orchestration for service@1 contracts` | 3, 4, 5a | 大 |
@@ -319,4 +319,4 @@ CI gate: A + B + C1 が緑。C2 は手動 trigger。
 
 ---
 
-**次のアクション**: P0 から着手。template grammar の v1 subset / reserved token / undefined-key handling を accepted RFC または本 plan に固定してから、P1 の `capsule-core` parser PR に進む。最初の code PR は `[dependencies.*]` / `[contracts.*]` parser のみで AST round-trip テスト含めて出す。orchestration / credential / lock 検証はその上に乗せる。
+**次のアクション**: P0 から着手。template grammar の v1 subset / reserved token / undefined-key handling を accepted RFC または本 plan に固定してから、P1 の `capsule` parser PR に進む。最初の code PR は `[dependencies.*]` / `[contracts.*]` parser のみで AST round-trip テスト含めて出す。orchestration / credential / lock 検証はその上に乗せる。

@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use capsule_core::execution_plan::guard::ExecutorKind;
+use capsule::execution_plan::guard::ExecutorKind;
 use cliclack::{ProgressBar, confirm, intro, log, note, outro, outro_cancel, spinner};
 use console::style;
 use crossterm::{cursor, terminal};

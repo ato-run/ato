@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use capsule_core::installed_state::{
+use capsule::installed_state::{
     InstalledStateDb, LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
     plan_launch_condition_prompts,
 };
@@ -517,7 +517,7 @@ pub(crate) fn resolve_prompt_launch_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::installed_state::{
+    use capsule::installed_state::{
         LaunchConditionClaim, LaunchConditionKind, LaunchConditionSource, LaunchConditionStatus,
     };
     use std::cell::RefCell;

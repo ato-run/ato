@@ -129,7 +129,7 @@ fn main() {
     #[cfg(target_os = "windows")]
     if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
         let data_folder =
-            capsule_core::common::paths::ato_path_or_workspace_tmp("desktop/webview2");
+            capsule::common::paths::ato_path_or_workspace_tmp("desktop/webview2");
         // Best-effort: WebView2 will create the folder itself, but creating it
         // up front surfaces any permission problem in the log rather than as a
         // later WebView2 failure.

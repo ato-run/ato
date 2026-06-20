@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     DriftClass, ReceiptDriftChange, ReceiptDriftReport, diff_receipt_documents,
 };
 use serde_json::Value;

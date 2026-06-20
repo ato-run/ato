@@ -3,12 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id};
-use capsule_core::input_resolver::{
-    ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
-};
-use capsule_core::lock_runtime::resolve_lock_runtime_model;
-use capsule_core::router::{CompatManifestBridge, CompatProjectInput, ExecutionDescriptor};
+use capsule::ato_lock::{compute_closure_digest, compute_lock_id};
+use capsule::input_resolver::{ResolveInputOptions, ResolvedInput, resolve_authoritative_input};
+use capsule::lock_runtime::resolve_lock_runtime_model;
+use capsule::router::{CompatManifestBridge, CompatProjectInput, ExecutionDescriptor};
 use serde_json::Value;
 
 use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
@@ -455,18 +453,18 @@ impl ProducerAuthoritativeInput {
         advisories: Vec<String>,
     ) -> Result<Self> {
         let sanitized_lock = state::sanitize_lock_for_distribution(&materialized.lock);
-        capsule_core::ato_lock::write_pretty_to_path(&sanitized_lock, &materialized.lock_path)
+        capsule::ato_lock::write_pretty_to_path(&sanitized_lock, &materialized.lock_path)
             .with_context(|| {
                 format!(
                     "Failed to rewrite sanitized lock for distribution at {}",
                     materialized.lock_path.display()
                 )
             })?;
-        let lock_decision = capsule_core::router::route_lock(
+        let lock_decision = capsule::router::route_lock(
             &materialized.lock_path,
             &sanitized_lock,
             &materialized.project_root,
-            capsule_core::router::ExecutionProfile::Release,
+            capsule::router::ExecutionProfile::Release,
             None,
         )?;
         let legacy_producer_bridge = Some(
@@ -549,7 +547,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn publish_metadata_from_lock(
-    lock: &capsule_core::ato_lock::AtoLock,
+    lock: &capsule::ato_lock::AtoLock,
 ) -> Option<PublishArtifactMetadata> {
     let delivery = lock.contract.entries.get("delivery")?.as_object()?;
     let mode = delivery
@@ -583,7 +581,7 @@ pub(crate) fn publish_metadata_from_lock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::ato_lock::AtoLock;
+    use capsule::ato_lock::AtoLock;
     use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -648,7 +646,7 @@ run = "main.ts"
         lock.resolution
             .entries
             .insert("closure".to_string(), json!({"kind": "metadata_only"}));
-        capsule_core::ato_lock::write_pretty_to_path(&lock, &dir.path().join("ato.lock.json"))
+        capsule::ato_lock::write_pretty_to_path(&lock, &dir.path().join("ato.lock.json"))
             .expect("write canonical lock");
 
         // assume_yes=false to prove that no prompt fires either
@@ -673,7 +671,7 @@ run = "main.ts"
         // The lock file on disk must be untouched: no regen, no rewrite
         // of metadata.version to track the manifest.
         let post_resolve_lock =
-            capsule_core::ato_lock::load_unvalidated_from_path(&dir.path().join("ato.lock.json"))
+            capsule::ato_lock::load_unvalidated_from_path(&dir.path().join("ato.lock.json"))
                 .expect("canonical lock must remain readable");
         let metadata = post_resolve_lock
             .contract
@@ -797,11 +795,11 @@ run = "main.ts""#
             &toml::from_str(&manifest_raw).expect("raw manifest"),
         )
         .expect("compat bridge");
-        let descriptor = capsule_core::router::route_lock(
+        let descriptor = capsule::router::route_lock(
             &manifest_path,
             &lock,
             dir.path(),
-            capsule_core::router::ExecutionProfile::Release,
+            capsule::router::ExecutionProfile::Release,
             None,
         )
         .expect("route lock")
@@ -856,7 +854,7 @@ run = "main.ts""#
         assert!(input.descriptor.lock.attestations.entries.is_empty());
         assert!(input.descriptor.lock.attestations.unresolved.is_empty());
 
-        let generated_lock = capsule_core::ato_lock::load_unvalidated_from_path(
+        let generated_lock = capsule::ato_lock::load_unvalidated_from_path(
             &input._cleanup.run_state_dir.join("ato.lock.json"),
         )
         .expect("read generated lock");
@@ -982,11 +980,11 @@ playground = true
         lock.resolution
             .entries
             .insert("closure".to_string(), json!({"kind": "metadata_only"}));
-        let descriptor = capsule_core::router::route_lock(
+        let descriptor = capsule::router::route_lock(
             &manifest_path,
             &lock,
             dir.path(),
-            capsule_core::router::ExecutionProfile::Release,
+            capsule::router::ExecutionProfile::Release,
             None,
         )
         .expect("route lock")

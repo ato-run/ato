@@ -38,7 +38,7 @@ impl EngineManager {
 }
 
 pub(super) fn acquire_config_lock() -> Result<ConfigUpdateLock> {
-    let config_dir = capsule_core::config::config_dir()?;
+    let config_dir = capsule::config::config_dir()?;
     fs::create_dir_all(&config_dir)
         .with_context(|| format!("Failed to create config dir: {}", config_dir.display()))?;
 

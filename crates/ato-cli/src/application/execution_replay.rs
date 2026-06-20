@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use capsule_core::execution_identity::{
+use capsule::execution_identity::{
     ExecutionReceipt, ExecutionReceiptDocument, ReproducibilityClass, TrackingStatus,
 };
 
@@ -66,7 +66,7 @@ fn plan_replay_v1(receipt: ExecutionReceipt, mode: ReplayMode) -> Result<ReplayP
 }
 
 fn plan_replay_v2(
-    receipt: capsule_core::execution_identity::ExecutionReceiptV2,
+    receipt: capsule::execution_identity::ExecutionReceiptV2,
     mode: ReplayMode,
 ) -> Result<ReplayPlan> {
     let local = receipt.local.as_ref().ok_or_else(|| {
@@ -148,9 +148,7 @@ fn plan_replay_v2(
     })
 }
 
-fn v2_replay_warnings(
-    receipt: &capsule_core::execution_identity::ExecutionReceiptV2,
-) -> Vec<String> {
+fn v2_replay_warnings(receipt: &capsule::execution_identity::ExecutionReceiptV2) -> Vec<String> {
     let mut warnings = Vec::new();
     if receipt.source.source_tree_hash.status != TrackingStatus::Known {
         warnings.push("source tree hash was not known in the original receipt".to_string());
@@ -176,10 +174,10 @@ fn v2_replay_warnings(
 }
 
 fn synthesize_v1_view(
-    receipt: &capsule_core::execution_identity::ExecutionReceiptV2,
-    local: &capsule_core::execution_identity::LocalExecutionLocator,
+    receipt: &capsule::execution_identity::ExecutionReceiptV2,
+    local: &capsule::execution_identity::LocalExecutionLocator,
 ) -> ExecutionReceipt {
-    use capsule_core::execution_identity::{
+    use capsule::execution_identity::{
         DependencyIdentity, EnvironmentIdentity, EnvironmentMode, ExecutionIdentityMetadata,
         FilesystemIdentity, LaunchIdentity, PolicyIdentity, RuntimeIdentity, SourceIdentity,
         Tracked,
@@ -385,7 +383,7 @@ fn replay_warnings(receipt: &ExecutionReceipt) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use capsule_core::execution_identity::{
+    use capsule::execution_identity::{
         DependencyIdentity, EnvironmentIdentity, EnvironmentMode, ExecutionIdentityInput,
         FilesystemIdentity, LaunchIdentity, PlatformIdentity, PolicyIdentity, ReproducibilityCause,
         ReproducibilityIdentity, RuntimeIdentity, SourceIdentity, Tracked,

@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 use std::{env, ffi::OsString};
 
 use anyhow::{Context, Result, bail};
-use capsule_core::bootstrap::{BootstrapBoundary, BootstrapSubjectKind};
-use capsule_core::common::paths::runtime_cache_dir;
-use capsule_core::lockfile::{
+use capsule::bootstrap::{BootstrapBoundary, BootstrapSubjectKind};
+use capsule::common::paths::runtime_cache_dir;
+use capsule::lockfile::{
     CAPSULE_LOCK_FILE_NAME, CapsuleLock, RuntimeArtifact, RuntimeEntry, ToolArtifact,
     parse_lockfile_text, resolve_existing_lockfile_path,
 };
-use capsule_core::packers::runtime_fetcher::RuntimeFetcher;
-use capsule_core::router::ManifestData;
+use capsule::packers::runtime_fetcher::RuntimeFetcher;
+use capsule::router::ManifestData;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
@@ -270,7 +270,7 @@ pub fn ensure_deno_binary_for_file_server(plan: &ManifestData) -> Result<PathBuf
         Ok(manager) => manager.ensure_deno_binary_for_plan(plan),
         Err(e) => {
             if e.to_string().contains(CAPSULE_LOCK_FILE_NAME) {
-                let version = capsule_core::packers::lockfile::DEFAULT_DENO_VERSION;
+                let version = capsule::packers::lockfile::DEFAULT_DENO_VERSION;
                 block_on_runtime_fetch(
                     async move { RuntimeFetcher::new()?.ensure_deno(version).await },
                 )
@@ -283,15 +283,15 @@ pub fn ensure_deno_binary_for_file_server(plan: &ManifestData) -> Result<PathBuf
 
 pub fn ensure_deno_binary_with_authority(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
     let version = required_runtime_tool_version(plan, "deno")?;
     if authoritative_lock.is_some() {
         // For source runs (authoritative AtoLock present), use RuntimeFetcher directly
         // since there is no capsule.lock.json. Deno is used as the Node.js compat runtime,
         // so no explicit version is required — fall back to the well-known default.
-        let version_str = version
-            .unwrap_or_else(|| capsule_core::packers::lockfile::DEFAULT_DENO_VERSION.to_string());
+        let version_str =
+            version.unwrap_or_else(|| capsule::packers::lockfile::DEFAULT_DENO_VERSION.to_string());
         return block_on_runtime_fetch(async move {
             RuntimeFetcher::new()?.ensure_deno(&version_str).await
         });
@@ -310,7 +310,7 @@ pub fn ensure_python_binary(plan: &ManifestData) -> Result<PathBuf> {
 
 pub fn ensure_python_binary_with_authority(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
     let version = required_runtime_tool_version(plan, "python")?
         .or(required_runtime_version(plan, &["python"])?);
@@ -341,7 +341,7 @@ pub fn ensure_node_binary(plan: &ManifestData) -> Result<PathBuf> {
 
 pub fn ensure_node_binary_with_authority(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
     let version =
         required_runtime_tool_version(plan, "node")?.or(required_runtime_version(plan, &["node"])?);
@@ -372,7 +372,7 @@ pub fn ensure_uv_binary(plan: &ManifestData) -> Result<PathBuf> {
 
 pub fn ensure_uv_binary_with_authority(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
 ) -> Result<PathBuf> {
     if authoritative_lock.is_some() {
         let version = required_runtime_tool_version(plan, "uv")?;
@@ -385,7 +385,7 @@ pub fn ensure_uv_binary_with_authority(
 
 fn block_on_runtime_fetch<F>(future: F) -> Result<PathBuf>
 where
-    F: std::future::Future<Output = capsule_core::Result<PathBuf>> + Send + 'static,
+    F: std::future::Future<Output = capsule::Result<PathBuf>> + Send + 'static,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         // We're already inside a Tokio runtime. The actual async work
@@ -734,7 +734,7 @@ fn find_binary_recursive(root: &Path, candidates: &[&str]) -> Result<Option<Path
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::bootstrap::{BootstrapAuthorityKind, BootstrapClosureRole};
+    use capsule::bootstrap::{BootstrapAuthorityKind, BootstrapClosureRole};
     use std::collections::HashMap;
 
     #[test]
@@ -870,9 +870,9 @@ mod tests {
             // `block_in_place` because the flavor is CurrentThread.
             tokio::task::spawn_blocking(|| {
                 block_on_runtime_fetch(async {
-                    capsule_core::Result::<std::path::PathBuf>::Err(
-                        capsule_core::CapsuleError::Runtime("stub".to_string()),
-                    )
+                    capsule::Result::<std::path::PathBuf>::Err(capsule::CapsuleError::Runtime(
+                        "stub".to_string(),
+                    ))
                 })
             })
             .await

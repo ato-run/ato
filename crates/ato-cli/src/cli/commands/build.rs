@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use capsule_core::CapsuleReporter;
-use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::router::{
+use capsule::CapsuleReporter;
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::router::{
     CompatManifestBridge, CompatProjectInput, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
 };
-use capsule_core::types::{CapsuleManifest, ValidationMode};
+use capsule::types::{CapsuleManifest, ValidationMode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -48,7 +48,7 @@ pub struct BuildResult {
 #[derive(Debug, thiserror::Error)]
 #[error("Smoke test failed: {report}")]
 pub struct InferredManifestSmokeFailure {
-    pub report: capsule_core::smoke::SmokeFailureReport,
+    pub report: capsule::smoke::SmokeFailureReport,
 }
 
 fn runtime_kind_from_plan(plan: &ExecutionDescriptor) -> Result<RuntimeKind> {
@@ -99,11 +99,11 @@ fn build_decision_from_manifest_text(
     let raw = bridge
         .toml_value()
         .context("Failed to parse raw manifest bridge TOML")?;
-    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+    let plan = capsule::router::execution_descriptor_from_manifest_parts(
         raw,
         workspace_root.join("capsule.toml"),
         workspace_root.to_path_buf(),
-        capsule_core::router::ExecutionProfile::Release,
+        capsule::router::ExecutionProfile::Release,
         None,
         std::collections::HashMap::new(),
     )?;
@@ -236,63 +236,62 @@ pub fn execute_pack_command_with_injected_manifest(
     };
 
     let validation_started = Instant::now();
-    let (decision, raw_manifest, capsule_name, capsule_version) = if let Some(authoritative_input) =
-        authoritative_input.as_ref()
-    {
-        authoritative_input.validate_legacy_producer_bridge()?;
-        let kind = runtime_kind_from_plan(&authoritative_input.descriptor)?;
-        let capsule_name = authoritative_input.semantic_package_name()?;
-        let capsule_version = authoritative_input.semantic_package_version();
-        let raw_manifest = authoritative_input
-            .legacy_producer_manifest_value()
-            .unwrap_or_else(|| authoritative_input.descriptor.manifest.clone());
-        (
-            RuntimeDecision {
-                kind,
-                reason: format!(
-                    "lock target {}",
-                    authoritative_input.descriptor.selected_target_label()
-                ),
-                plan: authoritative_input.descriptor.clone(),
-            },
-            raw_manifest,
-            capsule_name,
-            capsule_version,
-        )
-    } else if let Some(manifest_text) = fallback_manifest_text.as_deref() {
-        let (decision, bridge) =
-            build_decision_from_manifest_text(&dir, manifest_text, validation_mode)?;
-        (
-            decision,
-            bridge
-                .toml_value()
-                .context("Failed to parse fallback manifest bridge")?,
-            bridge.package_name().to_string(),
-            bridge.package_version().to_string(),
-        )
-    } else {
-        let decision = capsule_core::router::route_manifest_with_validation_mode(
-            &manifest,
-            capsule_core::router::ExecutionProfile::Release,
-            None,
-            validation_mode,
-        )?;
-        let loaded_manifest =
-            capsule_core::manifest::load_manifest_with_validation_mode(&manifest, validation_mode)?;
-        let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
-            .context("Failed to parse manifest TOML for IPC validation")?;
-        capsule_core::diagnostics::manifest::validate_manifest_for_build_with_mode(
-            &manifest,
-            decision.plan.selected_target_label(),
-            validation_mode,
-        )?;
-        (
-            decision,
-            raw_manifest,
-            loaded_manifest.model.name.clone(),
-            loaded_manifest.model.version.clone(),
-        )
-    };
+    let (decision, raw_manifest, capsule_name, capsule_version) =
+        if let Some(authoritative_input) = authoritative_input.as_ref() {
+            authoritative_input.validate_legacy_producer_bridge()?;
+            let kind = runtime_kind_from_plan(&authoritative_input.descriptor)?;
+            let capsule_name = authoritative_input.semantic_package_name()?;
+            let capsule_version = authoritative_input.semantic_package_version();
+            let raw_manifest = authoritative_input
+                .legacy_producer_manifest_value()
+                .unwrap_or_else(|| authoritative_input.descriptor.manifest.clone());
+            (
+                RuntimeDecision {
+                    kind,
+                    reason: format!(
+                        "lock target {}",
+                        authoritative_input.descriptor.selected_target_label()
+                    ),
+                    plan: authoritative_input.descriptor.clone(),
+                },
+                raw_manifest,
+                capsule_name,
+                capsule_version,
+            )
+        } else if let Some(manifest_text) = fallback_manifest_text.as_deref() {
+            let (decision, bridge) =
+                build_decision_from_manifest_text(&dir, manifest_text, validation_mode)?;
+            (
+                decision,
+                bridge
+                    .toml_value()
+                    .context("Failed to parse fallback manifest bridge")?,
+                bridge.package_name().to_string(),
+                bridge.package_version().to_string(),
+            )
+        } else {
+            let decision = capsule::router::route_manifest_with_validation_mode(
+                &manifest,
+                capsule::router::ExecutionProfile::Release,
+                None,
+                validation_mode,
+            )?;
+            let loaded_manifest =
+                capsule::manifest::load_manifest_with_validation_mode(&manifest, validation_mode)?;
+            let raw_manifest: toml::Value = toml::from_str(&loaded_manifest.raw_text)
+                .context("Failed to parse manifest TOML for IPC validation")?;
+            capsule::diagnostics::manifest::validate_manifest_for_build_with_mode(
+                &manifest,
+                decision.plan.selected_target_label(),
+                validation_mode,
+            )?;
+            (
+                decision,
+                raw_manifest,
+                loaded_manifest.model.name.clone(),
+                loaded_manifest.model.version.clone(),
+            )
+        };
     let ipc_diagnostics =
         crate::ipc::validate::validate_manifest(&raw_manifest, &dir).map_err(|err| {
             AtoExecutionError::execution_contract_invalid(
@@ -380,7 +379,7 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let result = match decision.kind {
-        capsule_core::router::RuntimeKind::Source => {
+        capsule::router::RuntimeKind::Source => {
             let compat_input = if let Some(authoritative_input) = authoritative_input.as_ref() {
                 authoritative_input.packaging_compat_project_input()?
             } else {
@@ -412,7 +411,7 @@ pub fn execute_pack_command_with_injected_manifest(
                     reporter.progress_start("🧪 [build] Running smoke test...".to_string(), None),
                 )?;
                 let smoke_started = Instant::now();
-                match capsule_core::smoke::run_capsule_smoke(
+                match capsule::smoke::run_capsule_smoke(
                     &artifact_path,
                     decision.plan.selected_target_label(),
                 ) {
@@ -461,8 +460,8 @@ pub fn execute_pack_command_with_injected_manifest(
                 derived_from: None,
             }
         }
-        capsule_core::router::RuntimeKind::Oci => {
-            let result = capsule_core::packers::oci::pack(&decision.plan, None, reporter.as_ref())?;
+        capsule::router::RuntimeKind::Oci => {
+            let result = capsule::packers::oci::pack(&decision.plan, None, reporter.as_ref())?;
             let archive = result.archive.clone();
             if let Some(path) = &archive {
                 crate::payload_guard::ensure_payload_size(
@@ -504,9 +503,9 @@ pub fn execute_pack_command_with_injected_manifest(
                 derived_from: None,
             }
         }
-        capsule_core::router::RuntimeKind::Wasm => {
+        capsule::router::RuntimeKind::Wasm => {
             let result =
-                capsule_core::packers::wasm::pack(&decision.plan, None, None, reporter.as_ref())?;
+                capsule::packers::wasm::pack(&decision.plan, None, None, reporter.as_ref())?;
             crate::payload_guard::ensure_payload_size(
                 &result.artifact,
                 force_large_payload,
@@ -531,7 +530,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 derived_from: None,
             }
         }
-        capsule_core::router::RuntimeKind::Web => {
+        capsule::router::RuntimeKind::Web => {
             let compat_input = if let Some(authoritative_input) = authoritative_input.as_ref() {
                 authoritative_input.packaging_compat_project_input()?
             } else {
@@ -547,9 +546,9 @@ pub fn execute_pack_command_with_injected_manifest(
                 if standalone {
                     anyhow::bail!("--standalone is not supported for runtime=web driver=static");
                 }
-                capsule_core::packers::web::pack(
+                capsule::packers::web::pack(
                     &decision.plan,
-                    capsule_core::packers::web::WebPackOptions {
+                    capsule::packers::web::WebPackOptions {
                         compat_input: compat_input.clone(),
                         workspace_root: decision.plan.workspace_root.clone(),
                         output: None,
@@ -631,7 +630,7 @@ fn emit_timings(
 
 #[allow(clippy::too_many_arguments)]
 fn pack_source_bundle(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     compat_input: Option<CompatProjectInput>,
     enforcement: &str,
     standalone: bool,
@@ -643,7 +642,7 @@ fn pack_source_bundle(
     progress_label: &str,
 ) -> Result<PathBuf> {
     let prepare_started = Instant::now();
-    let prepared_config = capsule_core::packers::source::prepare_source_config_from_descriptor(
+    let prepared_config = capsule::packers::source::prepare_source_config_from_descriptor(
         plan,
         enforcement.to_string(),
         standalone,
@@ -655,9 +654,9 @@ fn pack_source_bundle(
     );
     futures::executor::block_on(reporter.progress_start(progress_label.to_string(), None))?;
     let pack_started = Instant::now();
-    let artifact = capsule_core::packers::source::pack(
+    let artifact = capsule::packers::source::pack(
         plan,
-        capsule_core::packers::source::SourcePackOptions {
+        capsule::packers::source::SourcePackOptions {
             compat_input,
             workspace_root: plan.workspace_root.clone(),
             config_json: prepared_config.config_json.clone(),
@@ -670,7 +669,7 @@ fn pack_source_bundle(
             standalone,
             strict_manifest,
             timings,
-            publish_profile: capsule_core::packers::pack_filter::PublishProfile::Artifact,
+            publish_profile: capsule::packers::pack_filter::PublishProfile::Artifact,
         },
         reporter.clone(),
     );
@@ -802,7 +801,7 @@ fn cleanup_failed_artifact(
 }
 
 fn run_v03_build_lifecycle_steps(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     reporter: &std::sync::Arc<reporters::CliReporter>,
     strict_lockfile: bool,
 ) -> Result<()> {
@@ -905,7 +904,7 @@ struct BuildRootInstallCommand {
 }
 
 fn build_lifecycle_targets(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     target_labels: &[String],
 ) -> Result<Vec<BuildLifecycleTarget>> {
     target_labels
@@ -970,7 +969,7 @@ fn build_root_install_plan(
 }
 
 fn plan_v03_build_provision_command(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     strict_lockfile: bool,
 ) -> Result<Option<String>> {
     let runtime = plan.execution_runtime().unwrap_or_default();
@@ -1211,7 +1210,7 @@ impl V03BuildCache {
 }
 
 fn prepare_v03_build_cache(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     build_command: &str,
     reporter: &std::sync::Arc<reporters::CliReporter>,
 ) -> Result<Option<V03BuildCache>> {
@@ -1233,7 +1232,7 @@ fn prepare_v03_build_cache(
     };
 
     let cache_key = compute_v03_build_cache_key(plan, &output_specs, build_command)?;
-    let cache_dir = capsule_core::common::paths::nacelle_home_dir()?
+    let cache_dir = capsule::common::paths::nacelle_home_dir()?
         .join("build-cache")
         .join("chml")
         .join(cache_key);
@@ -1246,7 +1245,7 @@ fn prepare_v03_build_cache(
 }
 
 fn compute_v03_build_cache_key(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     outputs: &[OutputSpec],
     build_command: &str,
 ) -> Result<String> {
@@ -1326,7 +1325,7 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 }
 
 fn run_build_lifecycle_shell_command(
-    plan: &capsule_core::router::ManifestData,
+    plan: &capsule::router::ManifestData,
     command: &str,
     phase: &str,
 ) -> Result<()> {
@@ -1377,7 +1376,7 @@ fn run_build_lifecycle_shell_command(
         cmd
     };
 
-    cmd.current_dir(capsule_core::common::paths::windows_child_compatible_path(
+    cmd.current_dir(capsule::common::paths::windows_child_compatible_path(
         &plan.execution_working_directory(),
     ))
     .stdin(std::process::Stdio::null())
@@ -1424,7 +1423,7 @@ fn sign_if_requested(
         futures::executor::block_on(
             reporter.notify("🔐 Generating detached signature...".to_string()),
         )?;
-        let sig_path = capsule_core::signing::sign_artifact(target, key_path, "ato-cli", None)?;
+        let sig_path = capsule::signing::sign_artifact(target, key_path, "ato-cli", None)?;
         futures::executor::block_on(
             reporter.notify(format!("✅ Signature: {}", sig_path.display())),
         )?;
@@ -1440,8 +1439,8 @@ mod tests {
         execute_pack_command_with_injected_manifest, plan_v03_build_provision_command,
         run_v03_build_lifecycle_steps,
     };
-    use capsule_core::router::{ExecutionProfile, ManifestData};
-    use capsule_core::types::ValidationMode;
+    use capsule::router::{ExecutionProfile, ManifestData};
+    use capsule::types::ValidationMode;
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -1972,7 +1971,7 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        let mut lock = capsule_core::ato_lock::AtoLock::default();
+        let mut lock = capsule::ato_lock::AtoLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             serde_json::json!({
@@ -2013,12 +2012,12 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         );
         let lock_path = manifest_dir.join("ato.lock.json");
         let workspace_root = manifest_dir.clone();
-        let runtime_model = capsule_core::lock_runtime::resolve_lock_runtime_model(&lock, None)
+        let runtime_model = capsule::lock_runtime::resolve_lock_runtime_model(&lock, None)
             .expect("resolve test runtime model");
 
         let manifest_value = toml::Value::Table(manifest);
         let compat_manifest =
-            capsule_core::router::CompatManifestBridge::from_manifest_value(&manifest_value)
+            capsule::router::CompatManifestBridge::from_manifest_value(&manifest_value)
                 .expect("compat manifest bridge");
 
         ManifestData {

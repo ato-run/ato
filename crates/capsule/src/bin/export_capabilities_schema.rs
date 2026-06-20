@@ -4,7 +4,7 @@
 //! resulting `schema/capabilities.schema.json`. CI enforces that the
 //! checked-in file matches this generator's output.
 
-use capsule_core::schema::capabilities::{Capabilities, SCHEMA_VERSION};
+use capsule::schema::capabilities::{Capabilities, SCHEMA_VERSION};
 
 fn main() {
     let mut root = serde_json::to_value(schemars::schema_for!(Capabilities))

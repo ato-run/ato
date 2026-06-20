@@ -44,8 +44,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use capsule_core::dependency_contracts::{DependencyLock, LockedDependencyEntry};
-use capsule_core::types::{CapsuleManifest, ParamValue};
+use capsule::dependency_contracts::{DependencyLock, LockedDependencyEntry};
+use capsule::types::{CapsuleManifest, ParamValue};
 use thiserror::Error;
 
 use super::endpoint::{EndpointAllocator, EndpointError};
@@ -483,7 +483,7 @@ fn start_one(
     // The state dir reaches provider processes as cwd/env/argv; strip the
     // `\\?\` prefix canonicalize() adds on Windows so those tools see the
     // normal spelling.
-    let state_dir = capsule_core::common::paths::windows_child_compatible_path(&state_dir);
+    let state_dir = capsule::common::paths::windows_child_compatible_path(&state_dir);
 
     // §10.4 orphan detection (warn-only, with abort for AliveOtherSession).
     let orphan = detect_orphan_state(&state_dir, input.session_pid).map_err(|err| {
@@ -561,13 +561,12 @@ fn start_one(
     let mut credential_refs: Vec<MaterializedRef> = Vec::new();
     let mut credential_paths: BTreeMap<String, String> = BTreeMap::new();
     for (cred_key, template_str) in &entry.credentials {
-        let template =
-            capsule_core::types::TemplatedString::parse(template_str).map_err(|err| {
-                OrchestratorError::TemplateExpansion {
-                    alias: alias.to_string(),
-                    detail: format!("credential '{cred_key}' template parse: {err}"),
-                }
-            })?;
+        let template = capsule::types::TemplatedString::parse(template_str).map_err(|err| {
+            OrchestratorError::TemplateExpansion {
+                alias: alias.to_string(),
+                detail: format!("credential '{cred_key}' template parse: {err}"),
+            }
+        })?;
         let resolved =
             resolve_credential_template(&template, env_scope, input.host_env).map_err(|err| {
                 OrchestratorError::Credential {
@@ -752,7 +751,7 @@ fn start_one(
         if let Some(spec) = contract.runtime_exports.get(key)
             && matches!(
                 spec,
-                capsule_core::types::RuntimeExportSpec::Detailed(d) if d.secret
+                capsule::types::RuntimeExportSpec::Detailed(d) if d.secret
             )
         {
             input.redaction.register(value);
@@ -893,13 +892,12 @@ fn credential_paths_for_runtime(
 ) -> Result<BTreeMap<String, String>, OrchestratorError> {
     let mut out = BTreeMap::new();
     for (key, template_str) in &entry.credentials {
-        let template =
-            capsule_core::types::TemplatedString::parse(template_str).map_err(|err| {
-                OrchestratorError::TemplateExpansion {
-                    alias: "<runtime_exports>".to_string(),
-                    detail: format!("credential '{key}' parse: {err}"),
-                }
-            })?;
+        let template = capsule::types::TemplatedString::parse(template_str).map_err(|err| {
+            OrchestratorError::TemplateExpansion {
+                alias: "<runtime_exports>".to_string(),
+                detail: format!("credential '{key}' parse: {err}"),
+            }
+        })?;
         let resolved =
             resolve_credential_template(&template, env_scope, host_env).map_err(|err| {
                 OrchestratorError::Credential {
@@ -913,11 +911,11 @@ fn credential_paths_for_runtime(
 }
 
 fn ready_probe_kind(
-    contract: &capsule_core::types::ContractSpec,
+    contract: &capsule::types::ContractSpec,
     port: u16,
     state_dir: &Path,
 ) -> Result<ReadyProbeKind, OrchestratorError> {
-    use capsule_core::types::ReadyProbe;
+    use capsule::types::ReadyProbe;
     match &contract.ready {
         ReadyProbe::Tcp { target, .. } => {
             // Render the `target` template against host/port. v1 supports
@@ -1084,11 +1082,8 @@ fn preflight_probe_host_tools(
     })
 }
 
-fn ready_probe_timeout(
-    contract: &capsule_core::types::ContractSpec,
-    default: Duration,
-) -> Duration {
-    use capsule_core::types::ReadyProbe;
+fn ready_probe_timeout(contract: &capsule::types::ContractSpec, default: Duration) -> Duration {
+    use capsule::types::ReadyProbe;
     let raw = match &contract.ready {
         ReadyProbe::Tcp { timeout, .. }
         | ReadyProbe::Probe { timeout, .. }
@@ -1114,13 +1109,13 @@ fn parse_duration_human(raw: &str) -> Option<Duration> {
 
 fn resolve_runtime_exports(
     alias: &str,
-    contract: &capsule_core::types::ContractSpec,
+    contract: &capsule::types::ContractSpec,
     parameters: &BTreeMap<String, ParamValue>,
     credential_values: &BTreeMap<String, String>,
     state_dir: &Path,
     port: u16,
 ) -> Result<BTreeMap<String, String>, OrchestratorError> {
-    use capsule_core::types::RuntimeExportSpec;
+    use capsule::types::RuntimeExportSpec;
     let mut out = BTreeMap::new();
     for (key, spec) in &contract.runtime_exports {
         let template = match spec {
@@ -1151,13 +1146,13 @@ fn resolve_runtime_exports(
 /// because those are scoped to consumer-side templates.
 fn render_runtime_template(
     location: &str,
-    template: &capsule_core::types::TemplatedString,
+    template: &capsule::types::TemplatedString,
     parameters: &BTreeMap<String, ParamValue>,
     credential_values: &BTreeMap<String, String>,
     state_dir: &Path,
     port: u16,
 ) -> Result<String, OrchestratorError> {
-    use capsule_core::types::{TemplateExpr, TemplateSegment};
+    use capsule::types::{TemplateExpr, TemplateSegment};
     let mut out = String::new();
     for segment in &template.segments {
         match segment {
@@ -1214,7 +1209,7 @@ fn expand_template(
     parameters: &BTreeMap<String, ParamValue>,
     credential_paths: &BTreeMap<String, String>,
 ) -> Result<String, OrchestratorError> {
-    let template = capsule_core::types::TemplatedString::parse(run_command).map_err(|err| {
+    let template = capsule::types::TemplatedString::parse(run_command).map_err(|err| {
         OrchestratorError::TemplateExpansion {
             alias: alias.to_string(),
             detail: format!("run_command parse: {err}"),
@@ -1336,7 +1331,7 @@ mod tests {
     // ---------- end-to-end mock-provider integration ----------
 
     use crate::application::dependency_credentials::MapHostEnv;
-    use capsule_core::dependency_contracts::{DependencyLockInput, verify_and_lock};
+    use capsule::dependency_contracts::{DependencyLockInput, verify_and_lock};
 
     const MOCK_CONSUMER: &str = r#"
 schema_version = "0.3"
@@ -1442,7 +1437,7 @@ version = "1"
         let mut providers_for_lock = BTreeMap::new();
         providers_for_lock.insert(
             "svc".to_string(),
-            capsule_core::dependency_contracts::ResolvedProviderManifest {
+            capsule::dependency_contracts::ResolvedProviderManifest {
                 requested: "capsule://ato/mock@1".to_string(),
                 resolved: "capsule://ato/mock@sha256:e2e".to_string(),
                 manifest: provider_manifest.clone(),
@@ -1533,7 +1528,7 @@ version = "1"
         let mut providers_for_lock = BTreeMap::new();
         providers_for_lock.insert(
             "svc".to_string(),
-            capsule_core::dependency_contracts::ResolvedProviderManifest {
+            capsule::dependency_contracts::ResolvedProviderManifest {
                 requested: "capsule://ato/mock@1".to_string(),
                 resolved: "capsule://ato/mock@sha256:e2e".to_string(),
                 manifest: provider_manifest.clone(),
@@ -1670,14 +1665,14 @@ version = "1"
         let mut providers_for_lock = BTreeMap::new();
         providers_for_lock.insert(
             "db".to_string(),
-            capsule_core::dependency_contracts::ResolvedProviderManifest {
+            capsule::dependency_contracts::ResolvedProviderManifest {
                 requested: "capsule://ato/postgres@16".to_string(),
                 resolved: "capsule://ato/postgres@sha256:p7-fixture".to_string(),
                 manifest: provider_manifest.clone(),
             },
         );
-        let lock = capsule_core::dependency_contracts::verify_and_lock(
-            capsule_core::dependency_contracts::DependencyLockInput {
+        let lock = capsule::dependency_contracts::verify_and_lock(
+            capsule::dependency_contracts::DependencyLockInput {
                 consumer: &consumer,
                 providers: providers_for_lock,
             },
@@ -1804,14 +1799,14 @@ version = "1"
         let mut providers2 = BTreeMap::new();
         providers2.insert(
             "db".to_string(),
-            capsule_core::dependency_contracts::ResolvedProviderManifest {
+            capsule::dependency_contracts::ResolvedProviderManifest {
                 requested: "capsule://ato/postgres@16".to_string(),
                 resolved: "capsule://ato/postgres@sha256:p7-fixture".to_string(),
                 manifest: provider2,
             },
         );
-        let lock2 = capsule_core::dependency_contracts::verify_and_lock(
-            capsule_core::dependency_contracts::DependencyLockInput {
+        let lock2 = capsule::dependency_contracts::verify_and_lock(
+            capsule::dependency_contracts::DependencyLockInput {
                 consumer: &consumer2,
                 providers: providers2,
             },
@@ -2000,7 +1995,7 @@ version = "1"
         let mut providers_for_lock = BTreeMap::new();
         providers_for_lock.insert(
             "svc".to_string(),
-            capsule_core::dependency_contracts::ResolvedProviderManifest {
+            capsule::dependency_contracts::ResolvedProviderManifest {
                 requested: "capsule://ato/mock@1".to_string(),
                 resolved: "capsule://ato/mock@sha256:e2e".to_string(),
                 manifest: provider_manifest.clone(),

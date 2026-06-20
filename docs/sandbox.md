@@ -5,14 +5,14 @@
 The sandbox is the execution boundary that separates **what is allowed** from
 **how isolation is applied**. The host decides policy, and nacelle applies the
 engine path and OS-native isolation. In the current implementation, the CLI,
-capsule-core, and nacelle each own a different part of that boundary.
+capsule, and nacelle each own a different part of that boundary.
 
 ## How it works
 
 The responsibility split is explicit:
 
 - `ato-cli` / `ato-desktop`: verification, permission checks, policy decisions
-- `capsule-core`: isolation context shaping and nacelle discovery
+- `capsule`: isolation context shaping and nacelle discovery
 - `nacelle`: sandbox application, launch, and supervision via mechanisms like Landlock and Seatbelt
 
 At runtime:
@@ -41,7 +41,7 @@ At runtime:
 - sandbox grants that traverse symlinks MUST be rejected.
 - execution MUST allow only explicitly approved env, filesystem, and network surfaces.
 - nacelle MUST act as sandbox enforcer, not as the policy decision layer.
-- `discover_nacelle()` in `capsule-core` intentionally disables PATH fallback for security; however `resolve_nacelle_binary()` (executor path) and `find_nacelle_binary()` (bundle path) MAY fall back to PATH search as a last resort.
+- `discover_nacelle()` in `capsule` intentionally disables PATH fallback for security; however `resolve_nacelle_binary()` (executor path) and `find_nacelle_binary()` (bundle path) MAY fall back to PATH search as a last resort.
 
 References:
 

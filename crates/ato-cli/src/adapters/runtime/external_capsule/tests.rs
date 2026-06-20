@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use capsule_core::router::ExecutionProfile;
+use capsule::router::ExecutionProfile;
 
 use super::bindings::{connection_env_vars, merged_dependency_bindings, sanitize_alias};
 
@@ -58,7 +58,7 @@ fn cli_bindings_override_locked_dependency_bindings() {
             )])),
         ),
     ]));
-    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+    let plan = capsule::router::execution_descriptor_from_manifest_parts(
         manifest,
         PathBuf::from("capsule.toml"),
         PathBuf::from("."),
@@ -67,7 +67,7 @@ fn cli_bindings_override_locked_dependency_bindings() {
         HashMap::new(),
     )
     .expect("execution descriptor");
-    let locked = capsule_core::lockfile::LockedCapsuleDependency {
+    let locked = capsule::lockfile::LockedCapsuleDependency {
         name: "worker".to_string(),
         source: "capsule://store/acme/worker".to_string(),
         source_type: "store".to_string(),

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use blake3::Hasher;
-use capsule_core::handle::{CanonicalHandle, normalize_capsule_handle};
+use capsule::handle::{CanonicalHandle, normalize_capsule_handle};
 use fs2::FileExt;
 
 use crate::app_control::{StoredSessionInfo, resolve_local_plan_for_session};
@@ -150,7 +150,7 @@ pub(crate) fn try_registry_live_reuse_fast_path(
         return Ok(None);
     };
 
-    let runtime_cache = match capsule_core::common::paths::runtime_cache_dir() {
+    let runtime_cache = match capsule::common::paths::runtime_cache_dir() {
         Ok(path) => path,
         Err(_) => return Ok(None),
     };
@@ -173,7 +173,7 @@ pub(crate) fn try_registry_live_reuse_fast_path(
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    let launch = match capsule_core::launch_spec::derive_launch_spec(&plan) {
+    let launch = match capsule::launch_spec::derive_launch_spec(&plan) {
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
@@ -242,7 +242,7 @@ pub(crate) fn resolve_identity_projection(
     key: &ProjectionKey,
     install_workspace: &Path,
 ) -> Result<ProjectionResolution> {
-    let projections_dir = capsule_core::common::paths::ato_projections_dir();
+    let projections_dir = capsule::common::paths::ato_projections_dir();
     let version_dir = projections_dir.join("v1");
     fs::create_dir_all(&version_dir)
         .with_context(|| format!("failed to create projections dir {}", version_dir.display()))?;

@@ -59,11 +59,11 @@ async fn resolves_string_injection_from_cli_binding() {
             )])),
         ),
     ]));
-    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+    let plan = capsule::router::execution_descriptor_from_manifest_parts(
         manifest,
         PathBuf::from("capsule.toml"),
         PathBuf::from("."),
-        capsule_core::router::ExecutionProfile::Dev,
+        capsule::router::ExecutionProfile::Dev,
         Some("default"),
         HashMap::new(),
     )
@@ -125,11 +125,11 @@ async fn resolves_directory_injection_from_file_uri() {
             )])),
         ),
     ]));
-    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+    let plan = capsule::router::execution_descriptor_from_manifest_parts(
         manifest,
         cache_dir.join("capsule.toml"),
         cache_dir.clone(),
-        capsule_core::router::ExecutionProfile::Dev,
+        capsule::router::ExecutionProfile::Dev,
         Some("default"),
         HashMap::new(),
     )
@@ -193,11 +193,11 @@ async fn resolves_oci_file_injection_as_mount() {
             )])),
         ),
     ]));
-    let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+    let plan = capsule::router::execution_descriptor_from_manifest_parts(
         manifest,
         cache_dir.join("capsule.toml"),
         cache_dir.clone(),
-        capsule_core::router::ExecutionProfile::Dev,
+        capsule::router::ExecutionProfile::Dev,
         Some("default"),
         HashMap::new(),
     )

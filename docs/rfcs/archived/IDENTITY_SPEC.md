@@ -4,7 +4,7 @@ status: accepted
 date: "2026-02-02"
 author: "@egamikohsuke"
 ssot:
-  - "packages/capsule-core/src/identity.rs"
+  - "packages/capsule/src/identity.rs"
 related:
   - "TRUST_AND_KEYS.md"
   - "LICENSE_SPEC.md"
@@ -66,7 +66,7 @@ did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK
 
 ### 3.2 内部表現: `ed25519:base64`
 
-既存の `capsule-core` との互換性のため、内部ストレージでは以下のフォーマットを維持する。
+既存の `capsule` との互換性のため、内部ストレージでは以下のフォーマットを維持する。
 
 ```
 ed25519:<base64-encoded-public-key>
@@ -79,10 +79,10 @@ ed25519:dGVzdC4uLg==
 
 ### 3.3 変換ロジック
 
-`capsule-core` に以下の変換ユーティリティを実装する。
+`capsule` に以下の変換ユーティリティを実装する。
 
 ```rust
-// capsule-core/src/identity.rs
+// capsule/src/identity.rs
 
 /// ed25519:base64 → did:key 変換
 pub fn to_did_key(internal: &str) -> Result<String>;
@@ -367,7 +367,7 @@ sequenceDiagram
 
 ## 7. 実装チェックリスト
 
-### 7.1 Phase A-1: capsule-core 拡張
+### 7.1 Phase A-1: capsule 拡張
 
 - [ ] `src/identity.rs` モジュール作成
 - [ ] `to_did_key()` / `from_did_key()` 実装

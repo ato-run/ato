@@ -19,8 +19,8 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use capsule_core::capsule::manifest::validate_blake3_digest;
-use capsule_core::capsule::{CasStore, verify_artifact_hash};
+use capsule::capsule::manifest::validate_blake3_digest;
+use capsule::capsule::{CasStore, verify_artifact_hash};
 use chrono::Utc;
 #[cfg(feature = "webui")]
 use rust_embed::RustEmbed;
@@ -355,7 +355,7 @@ struct RollbackResponsePayload {
     target_manifest_hash: String,
     manifest_hash: String,
     to_epoch: u64,
-    pointer: capsule_core::types::EpochPointer,
+    pointer: capsule::types::EpochPointer,
     public_key: String,
 }
 
