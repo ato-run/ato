@@ -1,7 +1,7 @@
 //! Consumer-side golden test for the CCP envelopes that `ato-cli` emits.
 //!
 //! These fixtures are the *only* place the wire shape is recorded. The
-//! producer (`crates/ato-cli/src/app_control`) compares its serialized
+//! producer (`crates/cli/src/app_control`) compares its serialized
 //! output against the same JSON bytes via `assert_snapshot`, and this
 //! test verifies the consumer-facing invariants the Desktop relies on:
 //!

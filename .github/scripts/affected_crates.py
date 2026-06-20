@@ -30,10 +30,10 @@ import sys
 #     change runs ato-cli's tests because ato-cli depends, via ato-protocol,
 #     on the same wire surface).
 EXCLUDE = {
-    "ato-desktop",
+    "desktop",
     "ato-desktop-xtask",
     "nacelle",
-    "ato-netd",
+    "netd",
 }
 
 # A change touching any of these forces the full testable set, because it can

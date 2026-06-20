@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLI_DIR="${ROOT_DIR}/apps/ato-cli"
+CLI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ ! -f "${CLI_DIR}/Cargo.toml" ]]; then
-  echo "[ERROR] apps/ato-cli/Cargo.toml が見つかりません: ${CLI_DIR}" >&2
+  echo "[ERROR] Cargo.toml が見つかりません: ${CLI_DIR}" >&2
   exit 1
 fi
 
@@ -25,8 +24,8 @@ SCENARIOS=(
   "test_3_native_python_uv_lock_missing_fail_closed"
 )
 
-echo "[INFO] fail-closed 4シナリオを実行します"
-echo "[INFO] root=${ROOT_DIR}"
+echo "[INFO] fail-closed ${#SCENARIOS[@]}シナリオを実行します"
+echo "[INFO] repo=${CLI_DIR}"
 
 declare -a passed=()
 declare -a failed=()

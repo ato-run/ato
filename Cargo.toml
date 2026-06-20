@@ -1,26 +1,26 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ato-cli",
+    "crates/cli",
     "crates/capsule",
     "crates/ato-protocol",
-    "crates/ato-cli/lock-draft-engine",
+    "crates/cli/lock-draft-engine",
     "crates/nacelle",
-    "crates/ato-netd",
+    "crates/netd",
 ]
 
-# `ato-desktop` (and its xtask) are kept OUT of the workspace because their
+# `desktop` (and its xtask) are kept OUT of the workspace because their
 # git-only deps (`gpui`, `gpui-component`, `wry`, ...) lack crates.io versions
 # and cause `cargo package --workspace` to fail. release-plz invokes
 # `cargo package` to compute version diffs even for crates marked
 # `release = false`, so excluding them entirely is the only reliable fix.
-# Builds inside `crates/ato-desktop/` still work — the directory just has its
+# Builds inside `crates/desktop/` still work — the directory just has its
 # own Cargo.lock instead of sharing the workspace lockfile.
 exclude = [
-    "crates/ato-desktop",
-    "crates/ato-desktop/xtask",
-    "crates/ato-desktop/.tmp",
-    "crates/ato-desktop/vendor",
+    "crates/desktop",
+    "crates/desktop/xtask",
+    "crates/desktop/.tmp",
+    "crates/desktop/vendor",
     "sidecars/ato-tsnetd",
 ]
 
@@ -35,7 +35,7 @@ authors = ["ato-run"]
 # is verified in the new monorepo (per the reordered M2→verify→bump plan).
 
 # The `dist` profile drives cargo-dist's CLI release builds. Mirrors what
-# `crates/ato-cli/Cargo.toml` declared as a single-crate workspace before
+# `crates/cli/Cargo.toml` declared as a single-crate workspace before
 # the merge. Lifted to the root so cargo-dist sees one canonical profile.
 [profile.dist]
 inherits = "release"
