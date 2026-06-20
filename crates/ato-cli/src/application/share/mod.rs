@@ -531,7 +531,7 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         entry.run, next_command, loaded.spec.root
     ));
 
-    // Delegate to capsule-core ShareExecutor (nacelle-sandboxed execution)
+    // Delegate to capsule ShareExecutor (nacelle-sandboxed execution)
     let result = capsule::share::execute_share(capsule::share::ShareRunRequest {
         input: args.input.clone(),
         entry: Some(entry.id.clone()),
@@ -695,7 +695,7 @@ fn materialize_loaded_share(
     write_share_state(into, &state)?;
 
     // Persist spec and lock alongside state.json so downstream consumers
-    // (e.g. capsule-core ShareExecutor) can read them from the workspace
+    // (e.g. capsule ShareExecutor) can read them from the workspace
     // without needing a separate API fetch.
     let share_dir = into.join(SHARE_DIR);
     fs::write(

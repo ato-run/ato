@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
-// Session record schema and atomic writer now live in `ato-session-core`
+// Session record schema and atomic writer now live in `capsule`
 // so `ato-desktop` can read records without depending on `ato-cli`. We
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
@@ -491,7 +491,7 @@ fn auto_attach_state_args_for_community_toml_manifest(
         .collect())
 }
 
-// On-disk session record schema lives in `ato-session-core` (see top-of-
+// On-disk session record schema lives in `capsule` (see top-of-
 // file `pub(crate) use`). Keep this comment as a back-pointer because
 // `git blame` for this file should still surface the design rationale:
 // schema is forward-compatible, schema_version < 2 records are
@@ -4106,7 +4106,7 @@ mod tests {
         assert_eq!(graph_providers, contract_providers);
 
         // Round-trip through serde unchanged: the populated graph survives
-        // ato-session-core's atomic-writer JSON serialization.
+        // capsule's atomic-writer JSON serialization.
         let first = serde_json::to_string(&record).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
         let second = serde_json::to_string(&parsed).expect("reserialize");

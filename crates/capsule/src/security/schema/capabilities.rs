@@ -8,7 +8,7 @@
 //!
 //! The JSON Schema equivalent lives at
 //! `apps/ato-cli/core/schema/capabilities.schema.json` (regenerated from this
-//! module by `cargo run -p capsule-core --bin export_capabilities_schema`).
+//! module by `cargo run -p capsule --bin export_capabilities_schema`).
 //!
 //! Reconciliation with the older `health.toml` `network_mode` field is
 //! documented in `apps/ato-cli/core/src/schema/README.md`.

@@ -176,6 +176,6 @@ fn parse_args() -> Result<Args> {
 
 fn print_help() {
     println!(
-        "tar_pack_bench\n\nUsage:\n  cargo run -p capsule-core --bin tar_pack_bench -- [--files N] [--size-bytes N]\n\nOptions:\n  --files N        Number of files to generate (default: 10000)\n  --size-bytes N   Bytes per file (default: 1024)"
+        "tar_pack_bench\n\nUsage:\n  cargo run -p capsule --bin tar_pack_bench -- [--files N] [--size-bytes N]\n\nOptions:\n  --files N        Number of files to generate (default: 10000)\n  --size-bytes N   Bytes per file (default: 1024)"
     );
 }

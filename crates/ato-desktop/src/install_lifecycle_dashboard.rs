@@ -452,16 +452,17 @@ pub fn attach_running_sessions(items: &mut [InstalledAppDashboardItem]) -> Resul
                 continue;
             }
         };
-        let record: capsule::state::session::record::StoredSessionInfo = match serde_json::from_str(&raw) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    "dashboard: skip corrupt session record {}: {e}",
-                    path.display()
-                );
-                continue;
-            }
-        };
+        let record: capsule::state::session::record::StoredSessionInfo =
+            match serde_json::from_str(&raw) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        "dashboard: skip corrupt session record {}: {e}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
         let installed_app_id = match &record.installed_app_id {
             Some(id) if !id.is_empty() => id,
             _ => continue,

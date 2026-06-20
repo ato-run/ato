@@ -4,7 +4,7 @@
 //! The desktop never inspects the host directly; it shells out to
 //! `ato internal runtime setup-status --json` and `ato internal runtime
 //! install --json` and renders these structs. Keeping the wire model in
-//! `capsule-core` (which both `ato-cli` and `ato-desktop` already depend on)
+//! `capsule` (which both `ato-cli` and `ato-desktop` already depend on)
 //! means the two sides cannot drift out of sync.
 //!
 //! Scope (issue #420 revision): this replaces the earlier "host device

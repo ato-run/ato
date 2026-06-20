@@ -2,7 +2,7 @@
 //! Runtime orchestration for dependency contracts (RFC §10).
 //!
 //! This module is the runtime counterpart to the lock-time verifier in
-//! `capsule-core::foundation::dependency_contracts`. It implements:
+//! `capsule::foundation::dependency_contracts`. It implements:
 //!
 //! - §7.5 Dynamic endpoint allocation (`port = "auto"`)
 //! - §7.6 Ready probe runtime (`tcp` and `probe` variants)
