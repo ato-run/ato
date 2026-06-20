@@ -20,10 +20,10 @@ Ato 0.7.0 extends the existing `ato-net` direction into a Runtime Connectivity L
 - Runtime providers own materialize/build/launch/supervise/stop.
 - Runtime Control API owns launch/stop/log/status semantics.
 - PlacementGraph owns provider selection and placement identity.
-- `capsule-wire` only contains stable DTOs shared across process/API boundaries.
+- `ato-protocol` only contains stable DTOs shared across process/API boundaries.
 - `ato-netd` must not gain launch/session orchestration verbs.
 
-HTTP Runtime Control API routes may reuse `capsule-wire` DTOs where stable, but HTTP routes remain an API layer and must not force route-specific transport concerns into `capsule-wire`.
+HTTP Runtime Control API routes may reuse `ato-protocol` DTOs where stable, but HTTP routes remain an API layer and must not force route-specific transport concerns into `ato-protocol`.
 
 ## Session Identity
 
@@ -49,7 +49,7 @@ The semantics are intentionally separated:
 ## PR Breakdown
 
 1. ADR only.
-2. `capsule-wire` placement and runtime-control event DTO stubs.
+2. `ato-protocol` placement and runtime-control event DTO stubs.
 3. Additive session record fields in `ato-session-core`.
 4. Local registry Runtime Control read APIs.
 5. Local registry Runtime Control write APIs with token, Origin/Host, and CSRF guards.

@@ -102,7 +102,7 @@ pub mod config;
 // link the wire surface without pulling in capsule-core's runtime deps.
 // Re-exported here so existing `capsule_core::ccp::*` paths in the CLI
 // keep working unchanged. See `docs/monorepo-consolidation-plan.md` §N2.
-pub use capsule_wire::ccp;
+pub use ato_protocol::ccp;
 pub use config::bootstrap;
 pub use config::diagnostics;
 pub use config::python_runtime;
