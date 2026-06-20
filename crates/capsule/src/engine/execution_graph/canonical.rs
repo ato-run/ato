@@ -552,7 +552,7 @@ mod tests {
     ///
     /// The receipt builder enforces this layering via
     /// `extend_to_resolved_graph` in
-    /// `crates/ato-cli/src/application/execution_receipt_builder.rs`.
+    /// `crates/cli/src/application/execution_receipt_builder.rs`.
     /// This test pins the canonical-form side of the contract.
     #[test]
     fn resolved_id_reacts_to_host_resolution_while_declared_id_stays_stable() {
