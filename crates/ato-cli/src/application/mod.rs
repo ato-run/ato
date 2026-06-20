@@ -18,6 +18,7 @@ pub(crate) mod execution_receipt_builder;
 pub(crate) mod execution_receipts;
 pub(crate) mod execution_replay;
 pub(crate) mod execution_reproducibility;
+pub(crate) mod gpu_provision;
 pub(crate) mod graph_views;
 pub(crate) mod launch_materialization;
 pub(crate) mod managed_service_receipt;

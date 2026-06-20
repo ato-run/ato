@@ -1340,6 +1340,12 @@ where
         // `podman create` argv is *derived* from that plan rather than built ad
         // hoc here. The plan carries no runtime evidence (container id, pid, log
         // path); those are produced below and are not part of plan identity.
+        //
+        // The ato#735 writable-mount re-ownership fix lives in the projection:
+        // mounts carrying `ownership: Some(..)` (set from service bindings via
+        // `mount_ownership_from_binding`) render with `:U` so podman chowns the
+        // volume to the userns-mapped container uid, and sources are
+        // symlink-canonicalized in `render_podman_mount_value`.
         let plan = OciProjectionPlan::from_container_request(request);
         let args = plan
             .render_podman_create_argv(&auto_select_platform())
