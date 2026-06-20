@@ -371,8 +371,12 @@ mod tests {
             let err =
                 ensure_safe_relative(Path::new(case)).expect_err(&format!("must reject {case}"));
             let msg = format!("{err:#}");
+            // `/etc/passwd` is rejected as "absolute" on unix but as a
+            // "root component" on Windows (rooted, not absolute, there).
             assert!(
-                msg.contains("..") || msg.to_lowercase().contains("absolute"),
+                msg.contains("..")
+                    || msg.to_lowercase().contains("absolute")
+                    || msg.to_lowercase().contains("root component"),
                 "case={case}, got: {msg}"
             );
         }

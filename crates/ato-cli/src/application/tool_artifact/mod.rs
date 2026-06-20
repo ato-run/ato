@@ -385,6 +385,7 @@ mod tests {
             resolved
                 .root
                 .to_string_lossy()
+                .replace('\\', "/")
                 .contains("store/tools/demo-"),
             "root = {}",
             resolved.root.display()

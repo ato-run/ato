@@ -94,6 +94,17 @@ impl AgentFailureClassifier {
 
 fn classify_message(message: &str) -> SetupFailureKind {
     let lowered = message.to_ascii_lowercase();
+    // The structured report from run_lifecycle_shell_command names its phase
+    // authoritatively; check it before the keyword heuristics, which could
+    // otherwise mis-trigger on app output quoted in the report's tails.
+    if lowered.contains("lifecycle_command_failed: phase=install")
+        || lowered.contains("lifecycle_command_failed: phase=provision")
+    {
+        return SetupFailureKind::DependencyInstall;
+    }
+    if lowered.contains("lifecycle_command_failed:") {
+        return SetupFailureKind::BuildLifecycle;
+    }
     if lowered.contains("working directory")
         || lowered.contains("no such file or directory")
         || lowered.contains("cannot find module")
@@ -482,7 +493,9 @@ impl AgentToolExecutor {
 
     pub(crate) fn run_shadow_command(&self, command: &str, working_dir: &str) -> Result<String> {
         let parsed = parse_safe_command(command)?;
-        let current_dir = self.resolve_workspace_path(Path::new(working_dir))?;
+        let current_dir = capsule_core::common::paths::windows_child_compatible_path(
+            &self.resolve_workspace_path(Path::new(working_dir))?,
+        );
         if !current_dir.exists() {
             anyhow::bail!(
                 "agent working directory does not exist: {}",
@@ -490,9 +503,23 @@ impl AgentToolExecutor {
             );
         }
 
-        let mut cmd = Command::new(&parsed[0]);
-        cmd.args(parsed.iter().skip(1))
-            .current_dir(&current_dir)
+        #[cfg(windows)]
+        let mut cmd = {
+            // The allowlist/operator validation above applies to the same raw
+            // string handed to cmd.exe; the parsed argv is only needed for
+            // direct spawning on Unix. Routing through cmd.exe matters here:
+            // npm/pnpm/yarn are `.cmd` shims on Windows, which CreateProcess
+            // cannot start directly (PATH lookup only appends `.exe`).
+            let _ = &parsed;
+            crate::common::host_shell::windows_cmd_shell_command(command.trim())
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut cmd = Command::new(&parsed[0]);
+            cmd.args(parsed.iter().skip(1));
+            cmd
+        };
+        cmd.current_dir(&current_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -1424,7 +1451,12 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
     };
 
     match absolute.canonicalize() {
-        Ok(canonical) => Ok(canonical),
+        // On Windows canonicalize() yields `\\?\C:\…`; strip it back to the
+        // normal spelling so the path stays usable as a child-process cwd
+        // (cmd.exe rejects extended-length working directories).
+        Ok(canonical) => Ok(capsule_core::common::paths::windows_child_compatible_path(
+            &canonical,
+        )),
         Err(_) => Ok(absolute),
     }
 }
@@ -1548,6 +1580,7 @@ mod tests {
             store
                 .artifact_dir()
                 .to_string_lossy()
+                .replace('\\', "/")
                 .contains(".ato/tmp/agent/runs/run-")
         );
         assert!(store.workspace_dir().join("package.json").exists());

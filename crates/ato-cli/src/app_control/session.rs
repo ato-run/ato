@@ -2331,10 +2331,13 @@ fn auto_state_bindings_for_sample_recipe_manifest(
                 path.display()
             )
         })?;
+        // The binding becomes a mount source for the service; strip the
+        // `\\?\` prefix canonicalize() adds on Windows so downstream tools
+        // see the normal spelling.
+        let canonical = path.canonicalize().unwrap_or(path);
         bindings.insert(
             state_name.clone(),
-            path.canonicalize()
-                .unwrap_or(path)
+            capsule_core::common::paths::windows_child_compatible_path(&canonical)
                 .to_string_lossy()
                 .to_string(),
         );
@@ -4558,7 +4561,9 @@ mod tests {
             .get("data")
             .expect("data state override");
         assert!(
-            state_path.ends_with("/state/sample-recipes/memos/data"),
+            state_path
+                .replace('\\', "/")
+                .ends_with("/state/sample-recipes/memos/data"),
             "unexpected state path: {state_path}"
         );
         assert!(std::path::Path::new(state_path).exists());

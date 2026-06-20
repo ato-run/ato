@@ -19,8 +19,6 @@ use crate::registry::http;
 
 mod filesystem;
 
-#[cfg(windows)]
-use mslnk::ShellLink;
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 #[cfg(windows)]
@@ -405,7 +403,10 @@ pub(crate) fn detect_build_strategy(manifest_dir: &Path) -> Result<Option<Native
     if delivery_config_path.exists() {
         bail!(
             "{} is no longer accepted in source projects. Move native delivery metadata into capsule.toml [artifact] and [finalize].",
-            delivery_config_path.display()
+            // Strip the `\\?\` prefix a canonicalized workspace root drags
+            // in on Windows — this path is user-facing.
+            capsule_core::common::paths::windows_child_compatible_path(&delivery_config_path)
+                .display()
         );
     }
 
@@ -474,7 +475,10 @@ pub(crate) fn detect_build_strategy_from_descriptor(
     if delivery_config_path.exists() {
         bail!(
             "{} is no longer accepted in source projects. Move native delivery metadata into capsule.toml [artifact] and [finalize].",
-            delivery_config_path.display()
+            // Strip the `\\?\` prefix a canonicalized workspace root drags
+            // in on Windows — this path is user-facing.
+            capsule_core::common::paths::windows_child_compatible_path(&delivery_config_path)
+                .display()
         );
     }
 

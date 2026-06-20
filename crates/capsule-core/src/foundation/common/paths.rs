@@ -328,11 +328,55 @@ pub fn path_contains_workspace_internal_subtree(path: &Path) -> bool {
     })
 }
 
+/// Presentation form of a path for Windows child processes (cwd, PATH
+/// entries, argv). Ato may canonicalize paths internally, which on Windows
+/// yields extended-length `\\?\C:\…` / `\\?\UNC\…` forms; many child tools
+/// (cmd.exe, npm, uv, pnpm) mis-handle those. This strips the prefix back to
+/// the normal drive / UNC spelling when the path stays representable, and
+/// returns the input unchanged otherwise (non-Windows, non-UTF-8, or a path
+/// long enough to actually need the extended-length form).
+pub fn windows_child_compatible_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        strip_extended_length_prefix(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Maximum path length representable without the `\\?\` prefix (MAX_PATH
+/// minus the trailing NUL).
+const WINDOWS_MAX_NON_EXTENDED_PATH: usize = 259;
+
+fn strip_extended_length_prefix(path: &Path) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let stripped = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        // Only drive-letter paths (`C:\…`) are safe to de-prefix; other
+        // namespaces (`\\?\Volume{…}`, device paths) have no normal spelling.
+        let mut chars = rest.chars();
+        let is_drive =
+            chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.next() == Some(':');
+        if !is_drive {
+            return path.to_path_buf();
+        }
+        rest.to_string()
+    } else {
+        return path.to_path_buf();
+    };
+    if stripped.len() > WINDOWS_MAX_NON_EXTENDED_PATH {
+        return path.to_path_buf();
+    }
+    PathBuf::from(stripped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         WORKSPACE_FALLBACK_HOME_DIR, ato_path, path_contains_workspace_internal_subtree,
-        path_contains_workspace_state_dir,
+        path_contains_workspace_state_dir, strip_extended_length_prefix,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -436,6 +480,47 @@ mod tests {
                 "{rendered} must stay out of system tmp"
             );
         }
+    }
+
+    #[test]
+    fn strips_extended_length_prefix_from_drive_paths() {
+        assert_eq!(
+            strip_extended_length_prefix(Path::new(r"\\?\C:\Users\koh\.ato\runs\workspace")),
+            PathBuf::from(r"C:\Users\koh\.ato\runs\workspace")
+        );
+    }
+
+    #[test]
+    fn rewrites_extended_length_unc_paths_to_normal_unc() {
+        assert_eq!(
+            strip_extended_length_prefix(Path::new(r"\\?\UNC\server\share\dir")),
+            PathBuf::from(r"\\server\share\dir")
+        );
+    }
+
+    #[test]
+    fn leaves_normal_and_non_drive_paths_unchanged() {
+        for raw in [
+            r"C:\Users\koh\project",
+            r"\\server\share\dir",
+            r"\\?\Volume{1234}\dir",
+            "relative/dir",
+        ] {
+            assert_eq!(
+                strip_extended_length_prefix(Path::new(raw)),
+                PathBuf::from(raw),
+                "{raw} must pass through unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_extended_length_prefix_when_path_is_too_long_to_deprefix() {
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        assert_eq!(
+            strip_extended_length_prefix(Path::new(&long)),
+            PathBuf::from(&long)
+        );
     }
 
     #[test]

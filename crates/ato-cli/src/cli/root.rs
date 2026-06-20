@@ -25,6 +25,9 @@ use super::workspace::WorkspaceCommands;
 
 #[derive(Parser)]
 #[command(name = "ato")]
+// Pin the usage-line spelling: clap otherwise renders argv[0], which is
+// `ato.exe` on Windows and would diverge from every doc and error hint.
+#[command(bin_name = "ato")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(styles = cli_styles())]
 #[command(help_template = "\

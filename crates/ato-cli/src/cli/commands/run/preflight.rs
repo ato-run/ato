@@ -786,41 +786,22 @@ fn run_lifecycle_shell_command(
     working_dir: &Path,
     path_plan: &LifecyclePathPlan,
 ) -> Result<()> {
-    #[cfg(windows)]
-    let mut cmd = {
-        use std::os::windows::process::CommandExt as _;
-        let mut cmd = std::process::Command::new("cmd");
-        // `/D` disables AutoRun so a broken/foreign \Command Processor\AutoRun script
-        // cannot pollute output or leak a non-zero exit code into the lifecycle command.
-        //
-        // `/S` + a single outer-quoted payload, passed via `raw_arg`, is required for
-        // commands carrying their own double-quoted arguments (issue #629). The
-        // generated Python provision command quotes its version constraint as
-        // `"setuptools<72"` so the `<` is not parsed by cmd as input redirection.
-        // Passing the command through the normal `args(["/C", command])` path lets
-        // Rust's argument quoter wrap the whole string and escape the inner `"` as
-        // `\"`, which cmd then mis-tokenises — exposing the `<` and failing with
-        // "Access is denied." / "The system cannot find the file specified.".
-        // `raw_arg` hands cmd an exact command line: `/D /S /C "<command>"`. With
-        // `/S`, cmd strips only the first and last quote of the payload and leaves
-        // every inner quote intact for its own tokeniser, so `"setuptools<72"`
-        // reaches uv as a single, redirection-safe argument. Build the whole
-        // payload in one `raw_arg` so spacing/quoting is exactly what cmd sees.
-        cmd.raw_arg(windows_cmd_lifecycle_raw_args(command));
-        cmd
-    };
+    // `cmd.exe /D /S /C "<command>"` on Windows, `sh -c <command>` elsewhere;
+    // never whitespace-split, so `&&` chains and quoting survive intact. The
+    // Windows path uses `/S` + a single outer-quoted payload via `raw_arg` so a
+    // command carrying its own double quotes (the Python provision command
+    // quotes `"setuptools<72"` to protect the `<` from cmd input-redirection,
+    // issue #629) reaches the tool verbatim instead of being re-escaped by
+    // Rust's argument quoter. See `host_shell::windows_cmd_shell_command`.
+    let mut cmd = crate::common::host_shell::lifecycle_shell_command(command);
 
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", command]);
-        cmd
-    };
+    // Ato canonicalizes workspace paths internally, which on Windows yields
+    // `\\?\C:\…` extended-length forms that cmd.exe/uv/npm/pnpm mis-handle.
+    // Children always get the normal spelling.
+    let child_cwd = capsule_core::common::paths::windows_child_compatible_path(working_dir);
 
-    cmd.current_dir(working_dir)
+    cmd.current_dir(&child_cwd)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
         .env("COREPACK_ENABLE_STRICT", "0")
         // Disable pnpm 10's auto-manage-package-manager-versions to prevent it from
         // attempting to download the pinned pnpm version in offline/CI environments.
@@ -837,40 +818,31 @@ fn run_lifecycle_shell_command(
     }
     launch_ctx.apply_allowlisted_env(&mut cmd)?;
 
-    let status = cmd
-        .status()
-        .with_context(|| format!("Failed to execute {} command", phase));
-
-    let status = status?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "{} command failed with exit code {}: {}",
-            phase,
-            status.code().unwrap_or(1),
-            command
-        ))
+    let output = crate::common::host_shell::run_streaming_with_tails(&mut cmd)
+        .with_context(|| format!("Failed to execute {} command", phase))?;
+    if output.status.success() {
+        return Ok(());
     }
-}
 
-/// Build the raw command line tail handed to `cmd.exe` for a Windows lifecycle
-/// command (the `<args>` in `cmd <args>`).
-///
-/// Lifecycle commands may carry their own double-quoted arguments — e.g. the
-/// Python provision command quotes its version constraint as `"setuptools<72"`
-/// so cmd does not parse the `<` as input redirection (issue #629). The whole
-/// payload is wrapped in one outer pair of quotes and run with `/S`, which makes
-/// cmd strip only that first/last quote and leave every inner quote untouched
-/// for its own tokeniser. This string is passed verbatim via
-/// `CommandExt::raw_arg`, bypassing Rust's argument quoter (which would escape
-/// the inner `"` as `\"` and corrupt cmd's parse).
-///
-/// Defined cross-platform (pure string formatting) so the quoting contract can
-/// be unit-tested on every CI host, not only Windows.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn windows_cmd_lifecycle_raw_args(command: &str) -> String {
-    format!("/D /S /C \"{command}\"")
+    let render_tail = |tail: &str| {
+        if tail.trim().is_empty() {
+            "(empty)".to_string()
+        } else {
+            tail.to_string()
+        }
+    };
+    Err(anyhow::anyhow!(
+        "lifecycle_command_failed: phase={phase} target={target} exit_code={exit_code}\n\
+         command: {command}\n\
+         cwd: {cwd}\n\
+         stderr_tail:\n{stderr_tail}\n\
+         stdout_tail:\n{stdout_tail}",
+        target = plan.selected_target_label(),
+        exit_code = output.status.code().unwrap_or(1),
+        cwd = child_cwd.display(),
+        stderr_tail = render_tail(&output.stderr_tail),
+        stdout_tail = render_tail(&output.stdout_tail),
+    ))
 }
 
 fn preflight_macos_compat(plan: &capsule_core::router::ManifestData) -> Result<()> {
@@ -1453,7 +1425,7 @@ mod tests {
     use super::{
         build_lifecycle_targets, build_root_install_plan, detect_required_glibc_from_lock,
         install_command_from_scope, plan_v03_provision_command, preflight_glibc_compat,
-        preflight_single_script_effective_cwd_compat, windows_cmd_lifecycle_raw_args,
+        preflight_single_script_effective_cwd_compat,
     };
     use crate::application::pipeline::phases::run::DerivedBridgeManifest;
     use crate::application::pipeline::phases::run::PreparedRunContext;
@@ -1742,29 +1714,9 @@ run_command = "main.py"
         );
     }
 
-    #[test]
-    fn windows_cmd_lifecycle_raw_args_preserves_inner_quotes_with_single_outer_pair() {
-        // Regression for issue #629: the windows lifecycle runner must hand cmd a
-        // `/D /S /C "<command>"` payload via `raw_arg`. `/S` makes cmd strip only
-        // the first/last quote and keep every inner quote for its own tokeniser,
-        // so a command carrying `"setuptools<72"` reaches uv with the `<`
-        // protected. Building this string ourselves bypasses Rust's argument
-        // quoter, which would escape the inner `"` as `\"` and corrupt the parse.
-        let command =
-            "uv venv --seed --clear && uv pip install -r requirements.txt \"setuptools<72\"";
-        let raw = windows_cmd_lifecycle_raw_args(command);
-
-        assert_eq!(
-            raw,
-            "/D /S /C \"uv venv --seed --clear && uv pip install -r requirements.txt \"setuptools<72\"\""
-        );
-        // Exactly one outer quote opens the payload right after `/C `.
-        assert!(raw.starts_with("/D /S /C \""));
-        assert!(raw.ends_with('"'));
-        // The inner constraint quotes survive verbatim (not backslash-escaped).
-        assert!(raw.contains("\"setuptools<72\""));
-        assert!(!raw.contains("\\\""));
-    }
+    // The `/D /S /C "<command>"` raw-arg quoting contract (issue #629) is owned
+    // and unit-tested by `host_shell::windows_cmd_shell_command`, which this
+    // module's lifecycle runner calls via `lifecycle_shell_command`.
 
     #[test]
     fn provision_command_clears_existing_python_venv_before_install() {

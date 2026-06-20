@@ -69,7 +69,7 @@ fn test_engine_path() {
         }
     }
     let path = result.expect("engine_path must not panic");
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_string_lossy().replace('\\', "/");
     assert!(path_str.contains("nacelle-v1.2.3"));
     assert!(path_str.contains(".ato/engines"));
 }

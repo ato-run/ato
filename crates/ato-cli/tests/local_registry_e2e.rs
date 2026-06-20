@@ -274,6 +274,10 @@ fn run_ato_with_home(
         .args(args)
         .current_dir(cwd)
         .env("HOME", home_dir)
+        // HOME alone does not isolate on Windows (home resolution uses the
+        // Known Folder API, not env), so pin ATO_HOME or durable state such
+        // as the epoch trust store leaks into — and persists across — runs.
+        .env("ATO_HOME", home_dir.join(".ato"))
         .env("PATH", path)
         .output()
         .with_context(|| format!("failed to run ato {:?}", args))
@@ -290,6 +294,7 @@ fn run_ato_with_home_allow_unsafe(
         .args(args)
         .current_dir(cwd)
         .env("HOME", home_dir)
+        .env("ATO_HOME", home_dir.join(".ato"))
         .env("PATH", path)
         .env("CAPSULE_ALLOW_UNSAFE", "1")
         .output()
@@ -357,7 +362,8 @@ fn build_publish_install(
     )?;
     assert!(
         publish.status.success(),
-        "publish failed: {}",
+        "publish failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&publish.stdout),
         String::from_utf8_lossy(&publish.stderr)
     );
 
@@ -369,7 +375,8 @@ fn build_publish_install(
     )?;
     assert!(
         install.status.success(),
-        "install failed: {}",
+        "install failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&install.stdout),
         String::from_utf8_lossy(&install.stderr)
     );
 

@@ -341,29 +341,11 @@ pub fn kill_orphan_provider(_sentinel: &SessionSentinel) -> OrphanProviderKillOu
     OrphanProviderKillOutcome::NotPresent
 }
 
-#[cfg(unix)]
 fn pid_is_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
-    // SAFETY: kill(pid, 0) is non-destructive — it only checks whether
-    // the kernel can deliver a signal to the target. errno=ESRCH means
-    // the pid does not exist; errno=EPERM means the pid exists but we
-    // cannot signal it (still alive, just not ours). Anything else: we
-    // conservatively report dead.
-    let res = unsafe { libc::kill(pid, 0) };
-    if res == 0 {
-        return true;
-    }
-    let err = std::io::Error::last_os_error();
-    err.raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(not(unix))]
-fn pid_is_alive(_pid: i32) -> bool {
-    // Non-unix platforms are not supported by Ato in v1. Fall back to
-    // "dead" so the caller treats the sentinel as stale and proceeds.
-    false
+    ato_session_core::process::pid_is_alive(pid as u32)
 }
 
 #[cfg(test)]
@@ -417,10 +399,14 @@ mod tests {
     #[test]
     fn alive_other_session_when_pid_is_a_different_live_process() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Use pid 1 (init/launchd) — virtually guaranteed to be alive on
-        // any unix system this test runs on.
-        write_sentinel(dir.path(), 1);
+        // A child blocked on its held-open stdin: a different process that
+        // is deterministically alive on every platform (pid 1 only exists
+        // on unix hosts).
+        let mut child = crate::tests::blocking_child();
+        write_sentinel(dir.path(), child.id() as i32);
         let outcome = detect_orphan_state(dir.path(), std::process::id() as i32).expect("detect");
+        child.kill().ok();
+        child.wait().ok();
         assert!(
             matches!(outcome, OrphanCheckOutcome::AliveOtherSession { .. }),
             "got {outcome:?}"
