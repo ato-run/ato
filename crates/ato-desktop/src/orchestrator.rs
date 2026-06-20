@@ -8,7 +8,7 @@ use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use ato_session_core::{
+use capsule::state::session::{
     RecordValidationOutcome, RecordValidationParams, StoredSessionInfo, compute_run_config_hash,
     materialized_launch_record_path, read_materialized_launch_record, read_session_records,
     session_record_path, session_root as shared_session_root,
@@ -869,7 +869,7 @@ fn desktop_run_config_hash(secrets: &[SecretEntry], plain_configs: &[(String, St
     compute_run_config_hash(
         plain_configs,
         &secret_keys,
-        &ato_session_core::current_platform_tag(),
+        &capsule::state::session::current_platform_tag(),
     )
 }
 
@@ -883,7 +883,7 @@ pub fn materialized_record_path_for_session(session_id: &str) -> Result<PathBuf>
     let launch_key = record
         .launch_key
         .ok_or_else(|| anyhow!("session record {} is missing launch_key", session_id))?;
-    let cache_root = ato_session_core::launch_cache_root()?;
+    let cache_root = capsule::state::session::launch_cache_root()?;
     let path = materialized_launch_record_path(&cache_root, &launch_key);
     let _ = read_materialized_launch_record(&path).with_context(|| {
         format!(
@@ -910,11 +910,11 @@ pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Resul
 
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if !ato_session_core::process::pid_is_alive(pid) {
+        if !capsule::state::session::process::pid_is_alive(pid) {
             return Ok(());
         }
         if let Some(expected) = expected_start_time
-            && ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected)
+            && capsule::state::session::process::process_start_time_unix_ms(pid) != Some(expected)
         {
             return Ok(());
         }
@@ -1557,7 +1557,7 @@ fn start_capsule(
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
-    if let Some(start_time) = ato_session_core::process::process_start_time_unix_ms(desktop_pid) {
+    if let Some(start_time) = capsule::state::session::process::process_start_time_unix_ms(desktop_pid) {
         cmd.env(
             "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
             start_time.to_string(),
@@ -1620,7 +1620,7 @@ fn start_capsule_from_materialized_record(
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
-    if let Some(start_time) = ato_session_core::process::process_start_time_unix_ms(desktop_pid) {
+    if let Some(start_time) = capsule::state::session::process::process_start_time_unix_ms(desktop_pid) {
         cmd.env(
             "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
             start_time.to_string(),
@@ -2588,7 +2588,7 @@ pub(crate) fn try_reuse_live_session_for_click(
 pub(crate) fn try_reuse_live_session_for_install_profile_key(
     install_profile_key: &str,
 ) -> Result<Option<CapsuleLaunchSession>> {
-    let root = ato_session_core::session_root()?;
+    let root = capsule::state::session::session_root()?;
     match try_session_record_fast_path_for_ipk_inner(
         install_profile_key,
         &root,
@@ -2650,7 +2650,7 @@ fn try_session_record_fast_path_for_ipk_inner(
 /// fast-path-miss (both stages still emitted, then the subprocess
 /// stages follow on fallback).
 fn try_session_record_fast_path(handle: &str) -> Result<Option<CapsuleLaunchSession>> {
-    let root = ato_session_core::session_root()?;
+    let root = capsule::state::session::session_root()?;
     try_session_record_fast_path_inner(handle, &root, FAST_PATH_HEALTHCHECK_TIMEOUT)
 }
 
@@ -5647,8 +5647,8 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
 #[cfg(test)]
 mod fast_path_tests {
     use super::*;
-    use ato_session_core::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
-    use ato_session_core::write_session_record_atomic;
+    use capsule::state::session::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
+    use capsule::state::session::write_session_record_atomic;
     use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use serial_test::serial;
     use tempfile::TempDir;
@@ -5712,7 +5712,7 @@ mod fast_path_tests {
             orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
-            process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            process_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
                 std::process::id(),
             ),
             installed_app_id: None,
@@ -5856,7 +5856,7 @@ mod fast_path_tests {
     /// suite threads). The pure-function call here verifies the
     /// production assembly without TCP — and the healthcheck branch
     /// is already tested independently in
-    /// `ato_session_core::healthcheck::tests`.
+    /// `capsule::state::session::healthcheck::tests`.
     #[test]
     fn build_launch_session_from_stored_maps_fields_correctly() {
         let stored = base_record(TEST_HANDLE);

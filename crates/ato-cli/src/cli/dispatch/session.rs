@@ -279,5 +279,5 @@ fn pid_is_alive(pid: u32) -> bool {
     // Shared liveness probe (kill(pid, 0) on unix, OpenProcess on Windows).
     // The previous non-unix stub returned a constant `true`, which meant a
     // session watcher on Windows never observed its parent exiting.
-    ato_session_core::process::pid_is_alive(pid)
+    capsule::state::session::process::pid_is_alive(pid)
 }

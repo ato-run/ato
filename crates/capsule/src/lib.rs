@@ -95,6 +95,13 @@ pub use adapters::tsnet;
 // ── Layer 8: Config ───────────────────────────────────────────────────────
 pub mod config;
 
+// ── Layer 8b: State ───────────────────────────────────────────────────────
+//
+// Runtime state schemas + validation helpers. `state::session` was formerly
+// the standalone `ato-session-core` crate; absorbed here (N-series
+// consolidation) so the session record schema lives beside the wire surface.
+pub mod state;
+
 // ── Layer 9: Wire protocols (cross-crate) ─────────────────────────────────
 //
 // Schema/tolerance for the Capsule Control Protocol. Originally lived in
