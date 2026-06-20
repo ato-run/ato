@@ -22,13 +22,13 @@ elif /usr/bin/time -l true >/dev/null 2>&1; then
 fi
 
 if [[ "${#time_cmd[@]}" -gt 0 ]]; then
-  "${time_cmd[@]}" cargo run -p capsule-core --bin tar_pack_bench -- \
+  "${time_cmd[@]}" cargo run -p capsule --bin tar_pack_bench -- \
     --files "${FILES}" \
     --size-bytes "${SIZE_BYTES}" \
     >"${JSON_PATH}" \
     2>"${TIME_PATH}"
 else
-  cargo run -p capsule-core --bin tar_pack_bench -- \
+  cargo run -p capsule --bin tar_pack_bench -- \
     --files "${FILES}" \
     --size-bytes "${SIZE_BYTES}" \
     >"${JSON_PATH}"

@@ -8,7 +8,7 @@
 //! unresolved condition into a real `binding:<id>` the relaunch resolver admits.
 //!
 //! Both ato-cli and ato-desktop can call it: ato-desktop depends on
-//! capsule-core but **not** on ato-cli, so the resolve seam must live here, not
+//! capsule but **not** on ato-cli, so the resolve seam must live here, not
 //! in the CLI.
 //!
 //! ## Prompt/selection is not proof — write order is load-bearing

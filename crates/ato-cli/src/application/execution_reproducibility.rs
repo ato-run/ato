@@ -76,7 +76,7 @@ fn classify_observations(
     causes.sort();
     causes.dedup();
 
-    // The class-from-causes precedence lives in capsule-core so the OCI provider
+    // The class-from-causes precedence lives in capsule so the OCI provider
     // assessment (#501) recomputes the class identically when it merges its causes.
     let class = ReproducibilityClass::from_causes(&causes);
 

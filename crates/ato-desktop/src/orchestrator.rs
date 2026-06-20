@@ -8,17 +8,17 @@ use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use ato_protocol::handle::{
+    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
+    normalize_capsule_handle,
+};
+use base64::Engine as _;
+use capsule::common::paths::ato_path;
 use capsule::state::session::{
     RecordValidationOutcome, RecordValidationParams, StoredSessionInfo, compute_run_config_hash,
     materialized_launch_record_path, read_materialized_launch_record, read_session_records,
     session_record_path, session_root as shared_session_root,
     validate_record_for_install_profile_key, validate_record_only,
-};
-use base64::Engine as _;
-use capsule::common::paths::ato_path;
-use ato_protocol::handle::{
-    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
-    normalize_capsule_handle,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -1557,7 +1557,9 @@ fn start_capsule(
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
-    if let Some(start_time) = capsule::state::session::process::process_start_time_unix_ms(desktop_pid) {
+    if let Some(start_time) =
+        capsule::state::session::process::process_start_time_unix_ms(desktop_pid)
+    {
         cmd.env(
             "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
             start_time.to_string(),
@@ -1620,7 +1622,9 @@ fn start_capsule_from_materialized_record(
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
-    if let Some(start_time) = capsule::state::session::process::process_start_time_unix_ms(desktop_pid) {
+    if let Some(start_time) =
+        capsule::state::session::process::process_start_time_unix_ms(desktop_pid)
+    {
         cmd.env(
             "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
             start_time.to_string(),
@@ -1669,7 +1673,7 @@ fn run_session_start_command(
         //
         // Match on `name == "missing_required_env"` rather than
         // `code`: the wire code was renamed from `E103` to
-        // `ATO_ERR_MISSING_REQUIRED_ENV` (capsule-core's
+        // `ATO_ERR_MISSING_REQUIRED_ENV` (capsule's
         // `AtoErrorCode`), so binding to the stable `name` field
         // avoids re-breaking on future renumbering.
         let event = crate::cli_envelope::parse_cli_error_event(&stderr)
@@ -2514,7 +2518,7 @@ fn snapshot_label(snapshot: &serde_json::Value) -> String {
 }
 
 /// Typed mirror of `snapshot_label` for the fast path where the
-/// snapshot comes back from `ato-session-core` already deserialized
+/// snapshot comes back from `capsule` already deserialized
 /// into `ResolvedSnapshot`. Kept separate so the legacy subprocess
 /// path can keep operating on raw `serde_json::Value` without forcing
 /// the schema migration on every CLI envelope.
@@ -5647,9 +5651,9 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
 #[cfg(test)]
 mod fast_path_tests {
     use super::*;
+    use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use capsule::state::session::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use capsule::state::session::write_session_record_atomic;
-    use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use serial_test::serial;
     use tempfile::TempDir;
 
@@ -5712,9 +5716,8 @@ mod fast_path_tests {
             orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
-            process_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
-                std::process::id(),
-            ),
+            process_start_time_unix_ms:
+                capsule::state::session::process::process_start_time_unix_ms(std::process::id()),
             installed_app_id: None,
             install_profile_id: None,
             install_profile_key: None,

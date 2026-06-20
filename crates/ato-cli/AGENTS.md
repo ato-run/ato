@@ -36,7 +36,7 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 ## Repository Layout
 
 - `src/` contains the CLI binary (`ato`).
-- `core/` is the `capsule-core` library crate.
+- `core/` is the `capsule` library crate.
 - `core/src/` holds packers, router, runtime, and resource logic.
 - `core/src/resource/` contains artifact/cas/storage logic.
 - `tests/` contains Rust integration and E2E coverage for CLI/runtime flows.
@@ -47,9 +47,9 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 
 - `cargo build` builds the workspace.
 - `cargo build -p ato-cli` builds the CLI only.
-- `cargo build -p capsule-core` builds the core library.
+- `cargo build -p capsule` builds the core library.
 - `cargo build --features manifest-signing` enables legacy Cap'n Proto signing (deprecated; JCS is canonical for `.capsule` v2).
-- `cargo build -p capsule-core --features manifest-signing` builds core with legacy signing enabled.
+- `cargo build -p capsule --features manifest-signing` builds core with legacy signing enabled.
 
 ## Run / Usage
 
@@ -67,7 +67,7 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 
 - `cargo test` runs default tests in the workspace.
 - `cargo test -p ato-cli` runs CLI tests only.
-- `cargo test -p capsule-core` runs core tests only.
+- `cargo test -p capsule` runs core tests only.
 - `cargo test --workspace --all-features` runs all tests with features.
 
 ## E2E / Regression Test Commands
@@ -83,10 +83,10 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 
 ## Single Test Examples
 
-- `cargo test -p capsule-core test_registry_parsing`
-- `cargo test -p capsule-core --features provisioning-tests test_registry_parsing`
+- `cargo test -p capsule test_registry_parsing`
+- `cargo test -p capsule --features provisioning-tests test_registry_parsing`
 - `cargo test -p ato-cli <test_name>`
-- `cargo test -p capsule-core --test <integration_test>` (if added)
+- `cargo test -p capsule --test <integration_test>` (if added)
 
 ## Feature Flags
 
@@ -181,7 +181,7 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 
 - `core/` should avoid direct stdout/stderr writes.
 - Keep packers/executors pure and return data + errors.
-- Use `capsule_core::engine` for nacelle discovery.
+- Use `capsule::engine` for nacelle discovery.
 
 ## Testing Notes
 
@@ -227,7 +227,7 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 ## CI / Workflow Map
 
 - `Build (Multi OS)` runs on pushes to `dev` and `main`, plus `workflow_dispatch`. It enforces `Cargo.lock`, runs clippy, builds release binaries for Linux/macOS/Windows, and runs smoke checks.
-- `Security Audit` runs `cargo-audit`, `cargo-deny`, and `cargo-semver-checks (capsule-core)`. The semver check runs on pull requests, `workflow_dispatch`, and pushes to `main`.
+- `Security Audit` runs `cargo-audit`, `cargo-deny`, and `cargo-semver-checks (capsule)`. The semver check runs on pull requests, `workflow_dispatch`, and pushes to `main`.
 - `V3 Parity Matrix` covers parity checks that should stay green across release bumps.
 - `Release / Release PR` is `release-plz` on `workflow_dispatch` and weekly schedule. With command `release-pr` it opens a version-bump PR; with command `release` it pushes the version tag that triggers the cargo-dist pipeline.
 - `Release` in pull request mode validates cargo-dist plans. `Release` in tag mode publishes release artifacts and the GitHub Release.
@@ -236,7 +236,7 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 ## Release Process
 
 - Dispatch the `Release / Release PR` workflow with command `release-pr` (or wait for the Monday schedule). release-plz opens a `release-plz-*` branch PR with version bumps and updated CHANGELOGs for `ato-cli` and any changed libraries.
-- Treat `capsule-core` as semver-sensitive public API. In `0.x`, adding public struct fields or other breaking API changes requires a minor bump, not a patch bump.
+- Treat `capsule` as semver-sensitive public API. In `0.x`, adding public struct fields or other breaking API changes requires a minor bump, not a patch bump.
 - Review and merge the Release PR into `main`.
 - Wait for `main` push workflows (`Build (Multi OS)`, `Security Audit`, `V3 Parity Matrix`, secret scan) to finish green.
 - Once all checks are green, dispatch the `Release / Release PR` workflow with command `release`. This requires `RELEASE_PLZ_TOKEN` (PAT) to be set; release-plz pushes the version tag (e.g., `v0.4.25`).
@@ -250,7 +250,7 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 - `gh run list --branch main --limit 10 --json databaseId,headSha,status,conclusion,workflowName,displayTitle,url` monitors post-merge `main` runs before tagging.
 - `gh run list --commit <sha> --json databaseId,status,conclusion,workflowName,url` is the cleanest way to track one pushed release candidate commit.
 - `gh run view <run-id> --json status,conclusion,url,jobs` shows whether a long-running workflow is blocked in `build-local-artifacts`, `build-global-artifacts`, or `host`.
-- `gh run view <run-id> --job <job-id> --log | tail -n 200` is the quickest way to inspect a failing CI job, especially `cargo-semver-checks (capsule-core)`.
+- `gh run view <run-id> --job <job-id> --log | tail -n 200` is the quickest way to inspect a failing CI job, especially `cargo-semver-checks (capsule)`.
 - `gh release view v<version> --json name,tagName,isDraft,isPrerelease,url,assets` confirms the final published release and asset set.
 - A practical release sequence is: dispatch `release-pr`, merge the resulting PR, check `main` runs green, then dispatch `release` and watch the `Release` workflow and `gh release view` until assets appear.
 
@@ -267,7 +267,7 @@ Ato は、あらゆるソフトウェアを capsule として宣言し、同じ�
 
 - NEVER write to `/tmp` or `/var/tmp`.
 - NEVER create a `.tmp/` folder anywhere — all workspace-local scratch must live
-  under `.ato/`. Use `capsule_core::common::paths::workspace_tmp_dir(root)` for
+  under `.ato/`. Use `capsule::common::paths::workspace_tmp_dir(root)` for
   runtime temp state (resolves to `<root>/.ato/tmp`) and prefer nested
   subdirectories like `.ato/test-scratch/` for test fixtures.
 - Clean up temp files when no longer needed.

@@ -1,4 +1,4 @@
-# capsule-core / schema
+# capsule / schema
 
 Canonical JSON Schema sources for ato capsules. These are the definitions that
 external consumers (the registry web-api, `SKILL.md`, future `ato encap` /
@@ -18,7 +18,7 @@ The authoritative JSON Schema lives at
 `capabilities.rs` by:
 
 ```bash
-cargo run -p capsule-core --bin export_capabilities_schema \
+cargo run -p capsule --bin export_capabilities_schema \
     > apps/ato-cli/core/schema/capabilities.schema.json
 ```
 

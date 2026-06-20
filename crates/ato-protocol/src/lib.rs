@@ -1,4 +1,4 @@
-//! `capsule-wire` — the **IPC surface** shared by `ato-cli` (the producer
+//! `ato-protocol` — the **IPC surface** shared by `ato-cli` (the producer
 //! that emits JSON envelopes from `ato app {resolve,session start,…}`) and
 //! `ato-desktop` (the consumer that parses them).
 //!
@@ -11,11 +11,11 @@
 //! both sides onto one crate (M4 for `ccp`, M5 for `ConfigField`) made
 //! drift physically impossible.
 //!
-//! Splitting that shared surface out of `capsule-core` (N2) is the same
-//! move at workspace scope: `capsule-core` carries heavy runtime deps
+//! Splitting that shared surface out of `capsule` (N2) is the same
+//! move at workspace scope: `capsule` carries heavy runtime deps
 //! (`bollard`, `tonic`, `rusqlite`, `reqwest`, `axum`, `prost`,
 //! tokio-`full`) that the Desktop has no business linking. By moving the
-//! pure types into `capsule-wire`, Desktop links only what it actually
+//! pure types into `ato-protocol`, Desktop links only what it actually
 //! needs (`serde`, `tracing`, `thiserror`), and the dependency direction
 //! becomes a DAG that can be enforced at CI time (N4).
 //!
@@ -23,7 +23,7 @@
 //!
 //! - [`error`] — [`WireError`], the slim parser error returned by the
 //!   handle classifier. Convertible into `capsule::CapsuleError` via
-//!   a `From` impl living in capsule-core, so existing `?` paths in the
+//!   a `From` impl living in capsule, so existing `?` paths in the
 //!   CLI keep working unchanged.
 //! - [`ccp`] — Capsule Control Protocol envelope header + tolerance rules.
 //!   Single-sourced from M4.

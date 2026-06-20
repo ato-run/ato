@@ -9,7 +9,7 @@
 //! - the tolerance rules a consumer applies when the wire version differs
 //!   from its compile-time expectation ([`tolerance`]).
 //!
-//! Living in `capsule-core` makes the contract single-sourced: a producer
+//! Living in `capsule` makes the contract single-sourced: a producer
 //! change that breaks the consumer fails to compile against the same crate
 //! version, instead of silently drifting across two repositories.
 //!

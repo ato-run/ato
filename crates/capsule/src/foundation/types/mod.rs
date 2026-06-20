@@ -1,4 +1,4 @@
-// Capsule type definitions (extracted from capsule-core to eliminate external dependency)
+// Capsule type definitions (extracted from capsule to eliminate external dependency)
 // This module provides UARC V1.1.0 compliant types used by both nacelle and CLI.
 
 pub mod bridge;

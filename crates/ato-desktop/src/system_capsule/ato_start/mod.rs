@@ -867,9 +867,8 @@ pub fn dispatch(
                 .unwrap_or_else(crate::config::default_local_registry_port);
 
             be.spawn(async move {
-                let result =
-                    crate::runtime_control_client::RuntimeControlClient::new(port)
-                        .stop_session(&session_id);
+                let result = crate::runtime_control_client::RuntimeControlClient::new(port)
+                    .stop_session(&session_id);
                 match result {
                     Ok(()) => tracing::info!(
                         session_id = %session_id,
@@ -885,24 +884,22 @@ pub fn dispatch(
             .detach();
         }
 
-        AtoStartCommand::RuntimeOpenSessionUrl { url } => {
-            match url::Url::parse(&url) {
-                Ok(parsed) => {
-                    let route = GuestRoute::ExternalUrl(parsed);
-                    crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
-                        if let Err(err) = crate::window::open_app_window(cx, route) {
-                            tracing::error!(
-                                error = %err,
-                                "ato_start: runtime_open_session_url failed"
-                            );
-                        }
-                    });
-                }
-                Err(err) => {
-                    tracing::warn!(url = %url, error = %err, "ato_start: runtime_open_session_url — invalid URL");
-                }
+        AtoStartCommand::RuntimeOpenSessionUrl { url } => match url::Url::parse(&url) {
+            Ok(parsed) => {
+                let route = GuestRoute::ExternalUrl(parsed);
+                crate::system_capsule::ipc::defer_after_dispatch(cx, move |cx| {
+                    if let Err(err) = crate::window::open_app_window(cx, route) {
+                        tracing::error!(
+                            error = %err,
+                            "ato_start: runtime_open_session_url failed"
+                        );
+                    }
+                });
             }
-        }
+            Err(err) => {
+                tracing::warn!(url = %url, error = %err, "ato_start: runtime_open_session_url — invalid URL");
+            }
+        },
     }
     Ok(())
 }

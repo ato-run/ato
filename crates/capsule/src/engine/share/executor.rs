@@ -299,7 +299,7 @@ fn resolve_nacelle_binary(override_path: Option<&Path>) -> Result<PathBuf> {
     {
         return Ok(path);
     }
-    // Try capsule-core engine discovery
+    // Try capsule engine discovery
     match crate::engine::discover_nacelle(crate::engine::EngineRequest {
         explicit_path: None,
         manifest_path: None,
