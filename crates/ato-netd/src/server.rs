@@ -1,5 +1,5 @@
 //! Control transport server. Binds the configured local control endpoint,
-//! accepts connections, and dispatches `ato_net::control::Request` verbs.
+//! accepts connections, and dispatches `crate::net::control::Request` verbs.
 //!
 //! The wire layer mirrors `Client`: newline-delimited JSON, one
 //! request-response per line.
@@ -7,10 +7,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ato_net::control::{
+use crate::net::control::{
     BootstrapTokenInfo, ErrorPayload, ListenerInfo, Request, Response, ResponseResult, StatusReport,
 };
-use ato_net::resolver::SystemResolver;
+use crate::net::resolver::SystemResolver;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, split};
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -202,7 +202,9 @@ impl Daemon {
 /// stale or unreachable. Used during `start` to choose between
 /// `AlreadyRunning` and rebind.
 async fn probe_existing_daemon(socket_path: &Path) -> Option<u32> {
-    let mut client = ato_net::control::Client::connect(socket_path).await.ok()?;
+    let mut client = crate::net::control::Client::connect(socket_path)
+        .await
+        .ok()?;
     let report = client.status().await.ok()?;
     Some(report.pid)
 }

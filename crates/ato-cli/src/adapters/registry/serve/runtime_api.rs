@@ -708,7 +708,7 @@ pub(super) async fn handle_runtime_stop_session_post(
     }
 
     // Best-effort: deregister the ephemeral ingress route if ato-netd is up.
-    if let Ok(mut client) = ato_net::control::Client::connect_default().await {
+    if let Ok(mut client) = crate::net_client::Client::connect_default().await {
         let session_key = format!("ephemeral:{session_id}");
         let _ = client.deregister_ephemeral_ingress(&session_key).await;
     }
@@ -753,7 +753,7 @@ pub(super) async fn handle_runtime_stop_session(
     }
 
     // Best-effort: deregister the ephemeral ingress route if ato-netd is up.
-    if let Ok(mut client) = ato_net::control::Client::connect_default().await {
+    if let Ok(mut client) = crate::net_client::Client::connect_default().await {
         let session_key = format!("ephemeral:{id}");
         // Ignore errors — not running or already deregistered are both fine.
         let _ = client.deregister_ephemeral_ingress(&session_key).await;
@@ -791,7 +791,7 @@ async fn try_register_ephemeral_ingress_with_url(
     upstream_url: &str,
 ) -> Option<String> {
     let session_key = format!("ephemeral:{session_id}");
-    let mut client = ato_net::control::Client::connect_default().await.ok()?;
+    let mut client = crate::net_client::Client::connect_default().await.ok()?;
     let info = client
         .register_ephemeral_ingress(&session_key, upstream_url)
         .await
