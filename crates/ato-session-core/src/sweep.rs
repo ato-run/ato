@@ -603,7 +603,7 @@ fn path_is_older_than(path: &Path, now: SystemTime, duration: Duration) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+    use ato_protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use tempfile::tempdir;
 
     fn options(root: &Path) -> StartupSweepOptions {

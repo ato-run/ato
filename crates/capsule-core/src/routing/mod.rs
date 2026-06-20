@@ -4,7 +4,7 @@ pub mod discovery;
 /// can consume it without linking capsule-core's runtime deps; re-exported
 /// here so internal callers keep using `crate::routing::handle::*`.
 pub mod handle {
-    pub use capsule_wire::handle::*;
+    pub use ato_protocol::handle::*;
 }
 pub mod handle_store;
 pub mod importer;

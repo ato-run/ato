@@ -15,7 +15,7 @@ use super::command_spec::CommandSpec;
 // `capsule_core::types::{ConfigField, ConfigKind}` import paths
 // (`error.rs`, `manifest_tests.rs`, the CLI diagnostics tests) keep
 // compiling unchanged.
-pub use capsule_wire::config::{ConfigField, ConfigKind};
+pub use ato_protocol::config::{ConfigField, ConfigKind};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;

@@ -1474,20 +1474,20 @@ fn scrub_runner_tokens(text: &str) -> String {
 
 /// Parsed payload of a `CONSENT-REQUIRED: <json>` line from `ato run` (P4-A).
 ///
-/// This is the shared wire type [`capsule_wire::consent::ConsentRequiredLine`]:
-/// the full identity 5-tuple (under [`identity`](capsule_wire::consent::ConsentRequiredLine::identity))
+/// This is the shared wire type [`ato_protocol::consent::ConsentRequiredLine`]:
+/// the full identity 5-tuple (under [`identity`](ato_protocol::consent::ConsentRequiredLine::identity))
 /// is the decision contract; `consent_ref` is its hash
 /// (blake3(JCS(schema + 5-tuple))). The runner reports this as needs_consent
 /// and, only after the owner approves this exact `consent_ref`, calls the
 /// local `approve-execution-plan` primitive and retries.
 ///
 /// All fields are required (no serde defaults) and the line is honored only
-/// when [`is_valid`](capsule_wire::consent::ConsentRequiredLine::is_valid)
+/// when [`is_valid`](ato_protocol::consent::ConsentRequiredLine::is_valid)
 /// holds — an incomplete or ill-formed signal must never reach the control
 /// plane. Validation lives in `capsule-wire` so the producer
 /// (`consent_store`), this consumer, and the desktop stderr consumer can
 /// never drift.
-pub use capsule_wire::consent::ConsentRequiredLine as ConsentRequest;
+pub use ato_protocol::consent::ConsentRequiredLine as ConsentRequest;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChildSignal {
@@ -2627,9 +2627,7 @@ fn run_capsule_state_root(cmd: &RunCapsuleCommand) -> PathBuf {
 /// control plane's contract — see `RunCapsuleCommand::run_ref`.)
 fn validate_capsule_run_ref(run_ref: &str) -> std::result::Result<String, (String, String)> {
     let r = run_ref.trim();
-    if r.is_empty()
-        || r.starts_with('-')
-        || r.chars().any(|c| c.is_whitespace() || c.is_control())
+    if r.is_empty() || r.starts_with('-') || r.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return Err((
             "invalid_command".to_string(),
@@ -3734,10 +3732,13 @@ mod tests {
 
     #[test]
     fn resolve_lease_execution_source_sandbox_has_no_managed_state() {
-        let exec = resolve_lease_execution(&serde_json::json!({
-            "kind": "run_source_sandbox",
-            "source_url": "https://github.com/Koh0920/hello-capsule",
-        }), std::path::Path::new("unused-recipe"))
+        let exec = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_source_sandbox",
+                "source_url": "https://github.com/Koh0920/hello-capsule",
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
         .expect("valid source lease");
         assert_eq!(exec.run_ref, "github.com/Koh0920/hello-capsule");
         assert!(
@@ -3751,11 +3752,14 @@ mod tests {
         use crate::application::pipeline::phases::run::path_segment;
         // An immutable, point-in-time ref (revision-pinned).
         let run_ref = "community/openlist@7f3ac2b";
-        let exec = resolve_lease_execution(&serde_json::json!({
-            "kind": "run_capsule",
-            "run_ref": run_ref,
-            "owner_id": "usr_01H",
-        }), std::path::Path::new("unused-recipe"))
+        let exec = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule",
+                "run_ref": run_ref,
+                "owner_id": "usr_01H",
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
         .expect("valid capsule lease");
         // The runner executes exactly the ref it was given...
         assert_eq!(exec.run_ref, run_ref);
@@ -3765,7 +3769,10 @@ mod tests {
         let s = root.to_string_lossy();
         // ...and keys state on the SAME ref, so execution and state can never
         // diverge — namespaced by owner, both path-safe via the shared scheme.
-        assert!(s.contains(&path_segment("usr_01H")), "owner segment present");
+        assert!(
+            s.contains(&path_segment("usr_01H")),
+            "owner segment present"
+        );
         assert!(
             s.ends_with(&path_segment(run_ref)),
             "state identity is the executed run_ref"
@@ -3776,19 +3783,28 @@ mod tests {
 
     #[test]
     fn resolve_lease_execution_distinct_run_refs_get_distinct_state() {
-        let a = resolve_lease_execution(&serde_json::json!({
-            "kind": "run_capsule", "run_ref": "community/x@rev1", "owner_id": "u",
-        }), std::path::Path::new("unused-recipe"))
+        let a = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule", "run_ref": "community/x@rev1", "owner_id": "u",
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
         .unwrap()
         .managed_state_root
         .unwrap();
-        let b = resolve_lease_execution(&serde_json::json!({
-            "kind": "run_capsule", "run_ref": "community/x@rev2", "owner_id": "u",
-        }), std::path::Path::new("unused-recipe"))
+        let b = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule", "run_ref": "community/x@rev2", "owner_id": "u",
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
         .unwrap()
         .managed_state_root
         .unwrap();
-        assert_ne!(a, b, "a different (immutable) run_ref gets a distinct state dir");
+        assert_ne!(
+            a, b,
+            "a different (immutable) run_ref gets a distinct state dir"
+        );
     }
 
     #[test]
@@ -3833,15 +3849,21 @@ mod tests {
         // Note: leading/trailing whitespace is trimmed before validation, so the
         // bad cases use a flag prefix, an internal space/tab, or an empty ref.
         for bad in ["--help", "-rf", "a b", "x\ty", ""] {
-            let (code, _) = resolve_lease_execution(&serde_json::json!({
-                "kind": "run_capsule", "run_ref": bad, "owner_id": "u",
-            }), std::path::Path::new("unused-recipe"))
+            let (code, _) = resolve_lease_execution(
+                &serde_json::json!({
+                    "kind": "run_capsule", "run_ref": bad, "owner_id": "u",
+                }),
+                std::path::Path::new("unused-recipe"),
+            )
             .unwrap_err();
             assert_eq!(code, "invalid_command", "must reject run_ref {bad:?}");
         }
-        let (code, _) = resolve_lease_execution(&serde_json::json!({
-            "kind": "shell", "command": "rm -rf /",
-        }), std::path::Path::new("unused-recipe"))
+        let (code, _) = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "shell", "command": "rm -rf /",
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
         .unwrap_err();
         assert_eq!(code, "unsupported_command");
     }
@@ -3976,7 +3998,7 @@ mod tests {
 
     /// Regression (#661): the `CONSENT-REQUIRED:` line is the SHARED
     /// `capsule-wire` type, so a payload serialized from
-    /// `capsule_wire::consent::ConsentRequiredLine` — exactly what the CLI
+    /// `ato_protocol::consent::ConsentRequiredLine` — exactly what the CLI
     /// producer emits — round-trips through the runner's `parse_child_line`.
     /// This binds producer and consumer to one type + one validation: a
     /// schema bump or field rename can no longer compile on both sides while
@@ -3985,10 +4007,10 @@ mod tests {
     /// validator checks, so the two cannot disagree.
     #[test]
     fn consent_required_line_uses_shared_wire_type_end_to_end() {
-        let payload = capsule_wire::consent::ConsentRequiredLine {
+        let payload = ato_protocol::consent::ConsentRequiredLine {
             schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:bind".to_string(),
-            identity: capsule_wire::consent::ConsentIdentity {
+            identity: ato_protocol::consent::ConsentIdentity {
                 scoped_id: "community/hello-capsule".to_string(),
                 version: "0.3.0".to_string(),
                 target_label: "main".to_string(),
@@ -4811,7 +4833,7 @@ mod tests {
         ConsentRequest {
             schema: capsule_core::execution_plan::canonical::CONSENT_REF_SCHEMA.to_string(),
             consent_ref: "blake3:ref".to_string(),
-            identity: capsule_wire::consent::ConsentIdentity {
+            identity: ato_protocol::consent::ConsentIdentity {
                 scoped_id: "community/hello-capsule".to_string(),
                 version: "0.3.0".to_string(),
                 target_label: "main".to_string(),

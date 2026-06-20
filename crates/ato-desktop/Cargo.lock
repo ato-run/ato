@@ -530,12 +530,12 @@ version = "0.5.5"
 dependencies = [
  "anyhow",
  "ato-net",
+ "ato-protocol",
  "ato-session-core",
  "base64 0.22.1",
  "blake3",
  "block2",
  "capsule-core",
- "capsule-wire",
  "chrono",
  "cookie",
  "dirs 5.0.1",
@@ -595,19 +595,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-protocol"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "ato-session-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ato-protocol",
  "blake3",
  "capsule-core",
- "capsule-wire",
  "dirs 5.0.1",
  "libc",
  "serde",
  "serde_json",
  "toml 0.8.23",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1102,10 +1113,10 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ato-protocol",
  "base64 0.22.1",
  "blake3",
  "bollard",
- "capsule-wire",
  "chrono",
  "ctrlc",
  "dirs 5.0.1",
@@ -1147,18 +1158,9 @@ dependencies = [
  "url",
  "walkdir",
  "which",
+ "windows-sys 0.59.0",
  "zip",
  "zstd",
-]
-
-[[package]]
-name = "capsule-wire"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "serde",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
