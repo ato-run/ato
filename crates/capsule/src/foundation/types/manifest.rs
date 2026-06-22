@@ -1630,7 +1630,7 @@ pub struct NamedTarget {
     pub model: Option<String>,
 
     /// native-inference: direct download URL for a managed model file. Resolved
-    /// + verified against `model_sha256` and cached content-addressed. Used when
+    /// and verified against `model_sha256` and cached content-addressed. Used when
     /// `model` (a local path) is not set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_url: Option<String>,
