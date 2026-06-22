@@ -201,20 +201,58 @@ fn diagnose(profile: &HostGpuProfile) -> Vec<CheckResult> {
         }),
     }
 
-    // Vulkan loader (Dockerless GPU path).
+    // Vulkan loader library (Dockerless GPU path).
     if profile.vulkan_loader_present() {
         results.push(CheckResult {
             name: "vulkan_loader",
             status: CheckStatus::Ok,
-            detail: "Vulkan loader present".to_string(),
+            detail: "Vulkan loader (libvulkan) present".to_string(),
             recommendation: None,
         });
     } else {
         results.push(CheckResult {
             name: "vulkan_loader",
             status: CheckStatus::Fail,
-            detail: "Vulkan loader not found".to_string(),
+            detail: "Vulkan loader (libvulkan) not found".to_string(),
             recommendation: Some("Run: sudo ato runner provision --profile nvidia-ubuntu"),
+        });
+    }
+
+    // `vulkaninfo` tool (from vulkan-tools) — the readiness/smoke probe. Tracked
+    // separately from the loader: a present loader does NOT imply the tool.
+    if profile.vulkaninfo_available() {
+        results.push(CheckResult {
+            name: "vulkaninfo",
+            status: CheckStatus::Ok,
+            detail: "vulkaninfo tool available".to_string(),
+            recommendation: None,
+        });
+    } else {
+        results.push(CheckResult {
+            name: "vulkaninfo",
+            status: CheckStatus::Fail,
+            detail: "vulkaninfo not found (install vulkan-tools)".to_string(),
+            recommendation: Some("Run: sudo ato runner provision --profile nvidia-ubuntu"),
+        });
+    }
+
+    // NVIDIA Vulkan ICD manifest presence (necessary, not sufficient).
+    if profile.nvidia_vulkan_icd_present() {
+        results.push(CheckResult {
+            name: "nvidia_vulkan_icd",
+            status: CheckStatus::Ok,
+            detail: "NVIDIA Vulkan ICD manifest present".to_string(),
+            recommendation: None,
+        });
+    } else {
+        results.push(CheckResult {
+            name: "nvidia_vulkan_icd",
+            status: CheckStatus::Fail,
+            detail: "No NVIDIA Vulkan ICD manifest (nvidia_icd.json) found".to_string(),
+            recommendation: Some(
+                "Install the NVIDIA driver's Vulkan userspace (e.g. libnvidia-gl-<branch>) on \
+                 a bare-metal host, or use a Vulkan-capable image",
+            ),
         });
     }
 
@@ -249,9 +287,9 @@ fn diagnose(profile: &HostGpuProfile) -> Vec<CheckResult> {
         results.push(CheckResult {
             name: "native_inference_vulkan_ready",
             status: CheckStatus::Fail,
-            detail:
-                "Host not ready for Vulkan native-inference (needs GPU + driver + Vulkan device)"
-                    .to_string(),
+            detail: "Host not ready for Vulkan native-inference (needs GPU + driver + Vulkan \
+                     loader + vulkaninfo + NVIDIA device)"
+                .to_string(),
             recommendation: Some("Run: sudo ato runner provision --profile nvidia-ubuntu"),
         });
     }
@@ -534,19 +572,31 @@ pub async fn run_provision(
     }
 
     // ── Phase C: Vulkan runtime (Dockerless GPU path) ──
-    // No Docker, no nvidia-container-toolkit. The NVIDIA driver ships the Vulkan
-    // ICD; we add the Vulkan loader + tools so native-inference can run a
-    // GPU-accelerated (Vulkan) llama.cpp build directly as a host process.
-    let skip_vulkan = post_driver.vulkan_loader_present() && !force;
+    // No Docker, no nvidia-container-toolkit. We need BOTH the loader library
+    // (`libvulkan1`) AND the `vulkaninfo` tool (`vulkan-tools`, used by the smoke).
+    // Skipping purely on loader presence previously left `vulkaninfo` missing, so
+    // the smoke failed with "No such file or directory". Skip only when both the
+    // loader and the tool are already present.
+    let skip_vulkan =
+        post_driver.vulkan_loader_present() && post_driver.vulkaninfo_available() && !force;
     if skip_vulkan {
         emit_event(
             json,
             &ProvisionEvent::Vulkan {
                 action: ProvisionAction::Skip,
-                detail: "Vulkan loader already present".to_string(),
+                detail: "Vulkan loader + vulkaninfo already present".to_string(),
             },
         );
     } else {
+        // Install only what is missing. `vulkan-tools` provides `vulkaninfo`;
+        // `libvulkan1` provides the loader.
+        let mut pkgs: Vec<&str> = Vec::new();
+        if force || !post_driver.vulkaninfo_available() {
+            pkgs.push("vulkan-tools");
+        }
+        if force || !post_driver.vulkan_loader_present() {
+            pkgs.push("libvulkan1");
+        }
         emit_event(
             json,
             &ProvisionEvent::Vulkan {
@@ -555,18 +605,19 @@ pub async fn run_provision(
                 } else {
                     ProvisionAction::Install
                 },
-                detail: "apt-get install -y vulkan-tools libvulkan1".to_string(),
+                detail: format!("apt-get install -y {}", pkgs.join(" ")),
             },
         );
         if !dry_run {
             run_apt(&["update"]).context("apt-get update failed before Vulkan install")?;
-            run_apt(&["install", "-y", "vulkan-tools", "libvulkan1"])
-                .context("Failed to install the Vulkan loader/tools")?;
+            let mut args = vec!["install", "-y"];
+            args.extend_from_slice(&pkgs);
+            run_apt(&args).context("Failed to install the Vulkan loader/tools")?;
             emit_event(
                 json,
                 &ProvisionEvent::Vulkan {
                     action: ProvisionAction::Verify,
-                    detail: "vulkan-tools + libvulkan1 installed".to_string(),
+                    detail: format!("{} installed", pkgs.join(" + ")),
                 },
             );
         }
@@ -601,6 +652,26 @@ pub async fn run_provision(
     } else {
         None
     };
+
+    // If the smoke did not pass and the host has a GPU + driver but no NVIDIA
+    // Vulkan ICD manifest, surface a specific, actionable warning. We do NOT
+    // mutate the driver here: the NVIDIA userspace libs are commonly bind-mounted
+    // read-only (containers), so a full host driver install / Vulkan-capable image
+    // is the correct fix rather than blind driver surgery.
+    if !dry_run && smoke_result != SmokeResult::Pass {
+        if let Some(p) = capsule::foundation::host_gpu::detect_host_gpu_profile().ok() {
+            if p.has_gpu() && p.driver_installed() && !p.nvidia_vulkan_icd_present() {
+                warnings.push(
+                    "NVIDIA Vulkan ICD manifest (nvidia_icd.json) not found: GPU + driver are \
+                     present but the Vulkan ICD is missing. Install the NVIDIA driver's Vulkan \
+                     userspace (e.g. libnvidia-gl-<branch>) on a bare-metal host, or use a \
+                     Vulkan-capable image. Provision does not mutate driver libs (often \
+                     bind-mounted read-only in containers)."
+                        .to_string(),
+                );
+            }
+        }
+    }
 
     // ── Dry-run: stop here without writing any state ──
     if dry_run {
@@ -640,6 +711,8 @@ pub async fn run_provision(
             .map(GpuDeviceSummary::from)
             .collect(),
         vulkan_loader_present: final_profile.vulkan_loader_present(),
+        vulkaninfo_available: final_profile.vulkaninfo_available(),
+        nvidia_vulkan_icd_present: final_profile.nvidia_vulkan_icd_present(),
         vulkan_nvidia_device_visible: final_profile.vulkan_nvidia_device_visible(),
         gpu_smoke_result: smoke_result,
         smoke_gpu_count_detected: smoke_gpu_count,
@@ -739,8 +812,18 @@ fn print_provision_summary(receipt: &ProvisionReceipt) {
         println!("               - {} ({} GB)", gpu.name, gb);
     }
     println!(
-        "  Vulkan:      loader {}, NVIDIA device {}",
+        "  Vulkan:      loader {}, vulkaninfo {}, NVIDIA ICD {}, device {}",
         if receipt.vulkan_loader_present {
+            "present"
+        } else {
+            "missing"
+        },
+        if receipt.vulkaninfo_available {
+            "present"
+        } else {
+            "missing"
+        },
+        if receipt.nvidia_vulkan_icd_present {
             "present"
         } else {
             "missing"
@@ -972,6 +1055,8 @@ mod tests {
             cuda: None,
             vulkan: Some(VulkanInfo {
                 loader_present: true,
+                vulkaninfo_available: true,
+                nvidia_icd_present: true,
                 nvidia_device_visible: true,
             }),
         }
@@ -1038,6 +1123,8 @@ mod tests {
         let mut profile = test_profile();
         profile.vulkan = Some(VulkanInfo {
             loader_present: true,
+            vulkaninfo_available: true,
+            nvidia_icd_present: true,
             nvidia_device_visible: false,
         });
         let checks = diagnose(&profile);
@@ -1046,6 +1133,55 @@ mod tests {
             .find(|c| c.name == "vulkan_nvidia_device")
             .unwrap();
         assert_eq!(dev.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn diagnose_emits_vulkaninfo_and_icd_checks() {
+        let checks = diagnose(&test_profile());
+        for name in ["vulkaninfo", "nvidia_vulkan_icd"] {
+            assert!(
+                checks.iter().any(|c| c.name == name),
+                "doctor must emit the `{name}` check"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnose_loader_present_but_vulkaninfo_missing_is_not_ready() {
+        // The original bug: libvulkan present (loader ok) but `vulkaninfo` (the
+        // smoke tool) missing must NOT report ready.
+        let mut profile = test_profile();
+        profile.vulkan = Some(VulkanInfo {
+            loader_present: true,
+            vulkaninfo_available: false,
+            nvidia_icd_present: true,
+            nvidia_device_visible: false,
+        });
+        let checks = diagnose(&profile);
+        let vi = checks.iter().find(|c| c.name == "vulkaninfo").unwrap();
+        assert_eq!(vi.status, CheckStatus::Fail);
+        let ready = checks
+            .iter()
+            .find(|c| c.name == "native_inference_vulkan_ready")
+            .unwrap();
+        assert_eq!(ready.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn diagnose_fails_when_nvidia_icd_missing() {
+        let mut profile = test_profile();
+        profile.vulkan = Some(VulkanInfo {
+            loader_present: true,
+            vulkaninfo_available: true,
+            nvidia_icd_present: false,
+            nvidia_device_visible: false,
+        });
+        let checks = diagnose(&profile);
+        let icd = checks
+            .iter()
+            .find(|c| c.name == "nvidia_vulkan_icd")
+            .unwrap();
+        assert_eq!(icd.status, CheckStatus::Fail);
     }
 
     #[test]
