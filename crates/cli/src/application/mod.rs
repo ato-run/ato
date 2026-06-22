@@ -22,6 +22,7 @@ pub(crate) mod gpu_provision;
 pub(crate) mod graph_views;
 pub(crate) mod launch_materialization;
 pub(crate) mod managed_service_receipt;
+pub(crate) mod native_inference_doctor;
 pub(crate) mod orchestration_teardown;
 pub(crate) mod phase_materializer;
 pub(crate) mod phase_materializer_remote;
