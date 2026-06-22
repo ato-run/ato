@@ -240,9 +240,13 @@ pub fn execute_host(
         // `derive_launch_spec` for `python -m uvicorn app:main` produces:
         //   command = "-m", args = ["uvicorn", "app:main", ...]
         // so "-m" is the *command*, not in args — check both forms.
+        // native-inference (llama-server) takes `--port <N>`; inject the resolved
+        // port so the readiness probe and app_url agree with the running server.
+        let is_native_inference = launch_spec.runtime.as_deref() == Some("native-inference");
         let needs_port_injection = injected_port.is_some()
             && !has_explicit_port_flag(&launch_spec.args)
             && (force_python_server_tool
+                || is_native_inference
                 || is_python_module_server_invocation(&launch_spec.args)
                 || is_module_command_server_invocation(&launch_spec.command, &launch_spec.args));
 

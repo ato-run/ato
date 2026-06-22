@@ -837,6 +837,38 @@ mod tests {
     }
 
     #[test]
+    fn process_runtime_label_reflects_host_execution_not_just_flags() {
+        // Regression guard for the native-inference ps/stop defect: a host
+        // background run (native-inference, host-fallback, dangerously-skip) must
+        // record runtime="host" so process_info_is_alive() skips the nacelle
+        // cmdline-identity check. Recording "nacelle" for a bare host process made
+        // `ato ps` omit it and `ato stop` treat the live session as dead. The run
+        // dispatch now passes `host_execution` (not just the permission flags).
+        use capsule::router::{ExecutionProfile, execution_descriptor_from_manifest_parts};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = "schema_version = \"0.3\"\nname = \"x\"\nversion = \"0.1.0\"\ntype = \"app\"\n[targets.app]\nruntime = \"native-inference\"\nengine_path = \"./llama-server\"\nmodel = \"./m.gguf\"\n";
+        let parsed: toml::Value = toml::from_str(manifest).expect("parse manifest");
+        let plan = execution_descriptor_from_manifest_parts(
+            parsed,
+            tmp.path().join("capsule.toml"),
+            tmp.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor");
+
+        assert_eq!(
+            process_runtime_label(&plan, true, CompatibilityHostMode::Disabled),
+            "host"
+        );
+        assert_eq!(
+            process_runtime_label(&plan, false, CompatibilityHostMode::Disabled),
+            "nacelle"
+        );
+    }
+
+    #[test]
     fn lifecycle_ready_line_is_stable_and_machine_readable() {
         assert_eq!(
             lifecycle_ready_line(Some(8000)),

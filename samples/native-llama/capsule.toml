@@ -1,0 +1,21 @@
+schema_version = "0.3"
+name = "native-llama"
+version = "0.1.0"
+type = "app"
+description = "Host-native llama.cpp inference server (Dockerless). Inc1: a local llama-server binary + a local GGUF model, launched as an Ato-managed host process."
+homepage = "https://github.com/ato-run/ato"
+
+default_target = "llama"
+
+[targets.llama]
+runtime = "native-inference"
+engine = "llama.cpp"
+# Local path to the llama-server binary. Relative paths resolve against this
+# capsule directory; absolute paths are used as-is. See README.md.
+engine_path = "./llama-server"
+# Local path to a GGUF model file (relative to this dir, or absolute).
+model = "./model.gguf"
+model_format = "gguf"
+# llama-server listens here; Ato injects `--port <N>` (allocated) and waits for
+# readiness on it, then reports the app_url.
+port = 8080

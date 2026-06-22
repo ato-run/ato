@@ -13,6 +13,12 @@ pub enum ExecutionRuntime {
     Source,
     Wasm,
     Oci,
+    /// Host-native inference engine (e.g. llama.cpp's llama-server). Runs as a
+    /// host process like `Source`, but is launched from `engine`/`model` fields
+    /// rather than a source tree, and is host-native by design (no source
+    /// sandbox opt-in). See the native-inference lowering in `launch_spec`.
+    #[serde(rename = "native-inference")]
+    NativeInference,
 }
 
 impl ExecutionRuntime {
@@ -22,6 +28,7 @@ impl ExecutionRuntime {
             Self::Source => "source",
             Self::Wasm => "wasm",
             Self::Oci => "oci",
+            Self::NativeInference => "native-inference",
         }
     }
 
@@ -33,6 +40,7 @@ impl ExecutionRuntime {
             "source" => Some(Self::Source),
             "wasm" => Some(Self::Wasm),
             "oci" | "docker" | "youki" | "runc" => Some(Self::Oci),
+            "native-inference" => Some(Self::NativeInference),
             _ => None,
         }
     }
