@@ -16,15 +16,15 @@ use super::host_gpu::{GpuDevice, OsInfo};
 // Receipt
 // ─────────────────────────────────────────────
 
-/// Outcome of a GPU smoke test (`docker run --gpus all ... nvidia-smi`).
+/// Outcome of the Dockerless GPU smoke test (`vulkaninfo --summary`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SmokeResult {
-    /// Smoke test passed; GPUs were visible inside the container.
+    /// Smoke passed; an NVIDIA Vulkan device was visible.
     Pass,
-    /// Smoke test failed; GPUs were not visible or the container failed.
+    /// Smoke failed; no NVIDIA Vulkan device or the probe failed.
     Fail,
-    /// Smoke test was skipped (e.g. `--dry-run` or post-reboot resume).
+    /// Smoke was skipped (e.g. `--dry-run` or post-reboot resume).
     Skipped,
 }
 
@@ -64,11 +64,13 @@ pub struct ProvisionReceipt {
     pub cuda_driver_api_version: Option<String>,
     pub gpu_count: usize,
     pub gpu_devices: Vec<GpuDeviceSummary>,
-    pub docker_version: Option<String>,
-    pub nvidia_container_toolkit_version: Option<String>,
-    pub docker_gpu_smoke_result: SmokeResult,
-    /// Number of GPUs detected inside the smoke-test container, when
-    /// the smoke test passed.
+    /// Whether a Vulkan loader was present after provisioning (Dockerless GPU).
+    pub vulkan_loader_present: bool,
+    /// Whether `vulkaninfo` reported a usable NVIDIA Vulkan device.
+    pub vulkan_nvidia_device_visible: bool,
+    /// Result of the Dockerless GPU smoke (`vulkaninfo --summary`).
+    pub gpu_smoke_result: SmokeResult,
+    /// Number of GPUs detected (nvidia-smi) when the smoke passed.
     pub smoke_gpu_count_detected: Option<usize>,
     /// `true` when a reboot was needed and the user was told to
     /// `--resume`. The receipt is only final when this is `false`.
@@ -164,9 +166,9 @@ mod tests {
                     vram_bytes: 12 * 1024 * 1024 * 1024,
                 },
             ],
-            docker_version: Some("27.5.1".to_string()),
-            nvidia_container_toolkit_version: Some("1.17.5".to_string()),
-            docker_gpu_smoke_result: SmokeResult::Pass,
+            vulkan_loader_present: true,
+            vulkan_nvidia_device_visible: true,
+            gpu_smoke_result: SmokeResult::Pass,
             smoke_gpu_count_detected: Some(2),
             reboot_required: false,
             warnings: vec![],
@@ -176,7 +178,7 @@ mod tests {
         let decoded: ProvisionReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, receipt);
         assert_eq!(decoded.gpu_count, 2);
-        assert_eq!(decoded.docker_gpu_smoke_result, SmokeResult::Pass);
+        assert_eq!(decoded.gpu_smoke_result, SmokeResult::Pass);
     }
 
     #[test]
