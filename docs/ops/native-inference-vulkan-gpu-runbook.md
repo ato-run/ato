@@ -47,8 +47,15 @@ ON, the MOK/reboot flow is surfaced — it is never auto-disabled; `--resume` af
 
 ## 3. Run a Vulkan native-inference capsule
 
-Use the managed engine **Vulkan** variant + a managed model (Inc3). Either add
-`engine_variant = "vulkan"` to `samples/native-llama/capsule.toml`, or make a copy:
+The canonical local-LLM capsule ships a ready-made Vulkan target — no hand-editing:
+
+```sh
+ato run samples/local-llm-chat --target chat-vulkan   # add --background to detach
+```
+
+`chat-vulkan` carries `engine_variant = "vulkan"` (fail-closed — no silent CPU
+fallback) over the managed Qwen2.5-1.5B model. Alternatively, add the variant to the
+tiny smoke fixture `samples/native-llama/capsule.toml` (or a copy):
 
 ```toml
 [targets.llama]
