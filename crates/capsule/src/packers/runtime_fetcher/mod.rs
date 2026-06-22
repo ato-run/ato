@@ -23,6 +23,7 @@ struct RuntimeInstallLock {
 mod fetcher;
 mod verifier;
 
+pub(crate) use fetcher::llamacpp_cache_key;
 pub use verifier::{ArtifactVerifier, ChecksumVerifier};
 
 pub struct RuntimeFetcher {
@@ -247,31 +248,35 @@ impl RuntimeFetcher {
     }
 
     /// Download (if needed) the `llama-server` binary for a pinned llama.cpp
-    /// release (`version` = the build tag, e.g. `"b4231"`) and return its
-    /// canonical path `<cache>/llamacpp-<version>/llama-server[.exe]` — the exact
-    /// path the launcher resolves. Used by the native-inference engine
-    /// ensure-step before launch.
-    pub async fn ensure_llamacpp(&self, version: &str) -> Result<PathBuf> {
+    /// release (`version` = build tag, e.g. `"b4231"`) and build `variant`
+    /// (`None` = default CPU/Metal; `Some("vulkan")` = GPU). Returns its canonical
+    /// path `<cache>/llamacpp-<key>/llama-server[.exe]` — the exact path the
+    /// launcher resolves. Used by the native-inference engine ensure-step.
+    pub async fn ensure_llamacpp(&self, version: &str, variant: Option<&str>) -> Result<PathBuf> {
+        // The cache KEY embeds the variant so GPU/CPU builds of the same tag never
+        // share a directory; the fetcher reverses it to the build tag + asset slug.
+        let key = fetcher::llamacpp_cache_key(version, variant);
+
         // Pre-discard an incomplete/corrupt cache BEFORE the dispatch's
         // exists-only short-circuit can reuse it (the dispatch can't tell a
         // partial dir from a complete one; the fetcher's validity check only
         // runs once download_runtime is reached).
-        let runtime_dir = self.get_runtime_path("llamacpp", version);
+        let runtime_dir = self.get_runtime_path("llamacpp", &key);
         if runtime_dir.exists() && !fetcher::llamacpp_cache_is_valid(&runtime_dir) {
             let _ = fs::remove_dir_all(&runtime_dir);
         }
 
         let runtime_dir = self
-            .download_runtime_with_progress("llamacpp", version, true)
+            .download_runtime_with_progress("llamacpp", &key, true)
             .await?;
         // download_runtime guarantees the canonical binary as a post-condition.
         let server_bin = runtime_dir.join(fetcher::llamacpp_server_filename());
         if !server_bin.exists() {
             return Err(CapsuleError::Pack(format!(
-                "llama.cpp {version}: canonical llama-server missing after fetch at {server_bin:?}"
+                "llama.cpp {key}: canonical llama-server missing after fetch at {server_bin:?}"
             )));
         }
-        info!("llama.cpp {} ready at {:?}", version, server_bin);
+        info!("llama.cpp {} ready at {:?}", key, server_bin);
         Ok(server_bin)
     }
 

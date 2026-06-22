@@ -378,6 +378,18 @@ impl CapsuleManifest {
                          (alphanumeric, `.`/`_`/`-`; no path separators or `..`)"
                     )));
                 }
+                // `engine_variant` is part of the cache key (`<tag>@<variant>`),
+                // so it must be a safe slug. Platform support (e.g. vulkan = Linux
+                // only, cuda = no prebuilt) is enforced at fetch time, not here.
+                if let Some(variant) = target.engine_variant.as_deref()
+                    && !variant.trim().is_empty()
+                    && !crate::foundation::types::manifest::is_safe_engine_version(variant)
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{label}': `engine_variant` must be a simple slug \
+                         (alphanumeric, `.`/`_`/`-`)"
+                    )));
+                }
                 // Model is either a local `model` path OR a managed model
                 // (`model_url` + `model_sha256`, content-addressed cache).
                 let has_local_model = nonempty(&target.model);

@@ -1022,6 +1022,12 @@ impl ExecutionDescriptor {
         self.compat_str(&["targets", &self.selected_target, "engine_version"])
     }
 
+    /// native-inference: managed engine build variant (e.g. `"vulkan"`). Unset =
+    /// the default CPU/Metal build.
+    pub fn target_engine_variant(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "engine_variant"])
+    }
+
     /// native-inference: local filesystem path to the model file (e.g. a GGUF).
     /// When set, overrides managed model fetching.
     pub fn target_model(&self) -> Option<String> {
