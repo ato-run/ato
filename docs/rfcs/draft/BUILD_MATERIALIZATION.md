@@ -123,7 +123,7 @@ artifact 状態は持ち込まない、§7）。
 
 ### 3.0 Schema バージョン方針
 
-**実装上の制約 (v0 actual):** capsule-core の既存 `BuildConfig` schema は
+**実装上の制約 (v0 actual):** capsule の既存 `BuildConfig` schema は
 v0.3 manifest で `[build]` を予約済みであり、`[build].lifecycle.build`,
 `[build].inputs` (`{ lockfiles, toolchain, ... }` の typed table),
 `[build].outputs` (`{ capsule, sha256, ... }`) という別構造を持つ。本 RFC の
@@ -133,7 +133,7 @@ v0.3 manifest で `[build]` を予約済みであり、`[build].lifecycle.build`
 
 v0 の materialization は **framework heuristic 経由のみ**で動作する
 （§3.3）。declared spec を canonical にするには manifest schema を 0.4 に
-bump し、capsule-core BuildConfig を再設計する別 RFC が必要。これは v1 で
+bump し、capsule BuildConfig を再設計する別 RFC が必要。これは v1 で
 扱う。
 
 v0 の TOML では `build = "npm run build"` の従来形式を維持する。
@@ -142,7 +142,7 @@ materialization は plan の `build_lifecycle_build()` をそのまま command
 
 ### 3.1 `[build]` セクション (v1+ で導入予定 — v0 では非対応)
 
-> **v0 では受け付けない**。capsule-core の既存 `BuildConfig` schema と TOML
+> **v0 では受け付けない**。capsule の既存 `BuildConfig` schema と TOML
 > レベルで衝突するため、parser は `[build]` table を読まない。下記は v1 で
 > 目指す形を残しておくための参考スキーマ。
 
@@ -356,7 +356,7 @@ node:v20.11.0|pnpm:10.15.0|darwin-arm64|chml-mat-v1
 ### 4.4 Atomicity / Concurrency
 
 - write 時は `materializations.json.tmp` に書いて rename
-- 書き込みは file lock で排他（既存 `capsule_core` の `persist_noclobber` 相当）
+- 書き込みは file lock で排他（既存 `capsule` の `persist_noclobber` 相当）
 - parse 失敗時は warn を出し record 不在として扱う（再 build に倒れる）
 
 ## 5. 実行フロー

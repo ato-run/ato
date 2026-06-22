@@ -1,25 +1,25 @@
 # Launch Preparation Bridge Contract (#581 ↔ #593)
 
-Status: draft · Date: 2026-06-09 · SSOT: `crates/capsule-core/src/engine/launch_preparation_bridge.rs`
+Status: draft · Date: 2026-06-09 · SSOT: `crates/capsule/src/engine/launch_preparation_bridge.rs`
 
 ## Purpose
 
 [#581](https://github.com/ato-run/ato/issues/581) composes a **launch preparation
-plan** inside `capsule-core` (`engine::launch_preparation::prepare_launch`). The
+plan** inside `capsule` (`engine::launch_preparation::prepare_launch`). The
 [#593](https://github.com/ato-run/ato-api/issues) managed-runner control plane
 (ato-api) cannot import Rust and does not need the full plan. This document
 defines the **stable JSON boundary** between the two: `LaunchPreparationBridgeResult`.
 
-It is a *bridge contract*, not a transport. capsule-core does not call ato-api,
+It is a *bridge contract*, not a transport. capsule does not call ato-api,
 and ato-api does not (yet) invoke `prepare_launch` directly — until a real core
 service / worker / CLI integration exists, ato-api uses a dev/test provider that
 emits this exact shape. See `ato-api/src/services/launch_preparation.ts`.
 
 - Schema: [`launch-preparation-plan.schema.json`](./launch-preparation-plan.schema.json)
-- Golden fixtures: `crates/capsule-core/tests/fixtures/launch_preparation/`
+- Golden fixtures: `crates/capsule/tests/fixtures/launch_preparation/`
   - `prepared_managed_runner.json`
   - `not_prepared_standard_install.json`
-- Contract tests: `crates/capsule-core/tests/launch_preparation_bridge_fixtures.rs`
+- Contract tests: `crates/capsule/tests/launch_preparation_bridge_fixtures.rs`
   and the `launch_preparation_bridge_*` lib tests.
 
 ## Shape
@@ -77,22 +77,22 @@ A discriminated union tagged on `status`.
 
 ## Blocker vocabulary
 
-`code` is a closed set. capsule-core maps its typed
+`code` is a closed set. capsule maps its typed
 `LaunchPreparationBlocker` variants to these codes
 (`engine::launch_preparation_bridge::bridge_blocker_code`):
 
-| capsule-core blocker variant        | bridge `code`                    |
+| capsule blocker variant        | bridge `code`                    |
 | ----------------------------------- | -------------------------------- |
 | `ReusableInputsInvalid`             | `reusable_inputs_invalid`        |
 | `LaunchTemplateNotReusable`         | `launch_template_not_reusable`   |
 | `LaunchMaterializationFailed`       | `launch_materialization_failed`  |
 | `MaterializationPersistFailed`      | `launch_materialization_failed`  |
 | `PrepareSessionCommandFailed`       | `prepare_session_command_failed` |
-| _(caller cannot reach capsule-core)_| `launch_preparation_unavailable` |
+| _(caller cannot reach capsule)_| `launch_preparation_unavailable` |
 
 `launch_preparation_unavailable` is reserved for the *consumer* side: a control
 plane whose launch-preparation provider is disabled or unreachable emits it
-without capsule-core having run at all.
+without capsule having run at all.
 
 ### How ato-api maps bridge codes → Run blockers (#593)
 
@@ -114,5 +114,5 @@ The plan is internal to #581 today (Serialize/Deserialize only). Future changes:
 - Keep `prepare_command` a tagged object; never flatten to an untyped blob.
 - Add new optional fields with defaults; never add required fields.
 - Regenerate the golden fixtures with
-  `cargo test -p capsule-core --lib regenerate_launch_preparation_bridge_golden_fixtures -- --ignored`
+  `cargo test -p capsule --lib regenerate_launch_preparation_bridge_golden_fixtures -- --ignored`
   and review the diff when the shape changes intentionally.

@@ -539,7 +539,7 @@ PR 3 (Phase 0) で **両方の subprocess を別々に計測** し、どちら�
 #### 第一候補: Shared validation helper crate
 
 CLI 側 `application/launch_materialization.rs::prepare_reuse_decision` を
-**新 crate `ato-session-core`** （または既存 `capsule-wire` への追加）に
+**新 crate `ato-session-core`** （または既存 `ato-protocol` への追加）に
 切り出し、CLI と Desktop の両方から呼ぶ。これが筋として一番きれい:
 
 - validation logic が CLI / Desktop で一致する保証
@@ -547,7 +547,7 @@ CLI 側 `application/launch_materialization.rs::prepare_reuse_decision` を
 - digest 計算が drift しない
 - 将来 CLI v1 で reuse path が拡張されても Desktop に自動反映
 
-cost: capsule-wire か新 crate のスコープ拡大、依存整理。1–2 日。
+cost: ato-protocol か新 crate のスコープ拡大、依存整理。1–2 日。
 
 #### 第二候補: Record-only validation in Desktop
 

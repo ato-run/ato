@@ -4,8 +4,8 @@
 
 ```bash
 # 1. CLI / Desktop をビルド
-cd apps/ato-cli  && cargo build -p ato-cli
-cd apps/ato-desktop && cargo build
+cd apps/ato  && cargo build -p cli
+cd apps/ato && cargo build -p desktop
 
 # 2. レジストリのデータディレクトリを初期化
 #    (既存の ~/.ato/registry があれば流用可)
@@ -38,7 +38,7 @@ OBS / QuickTime で画面録画をスタート。
 lsof -nP -iTCP:8787 -sTCP:LISTEN
 
 # デスクトップを起動
-cd apps/ato-desktop && cargo run
+cd apps/ato && cargo run -p desktop
 ```
 
 **画面:** ストアが開き、2つのカプセルカードが表示される。

@@ -3,12 +3,12 @@ name: pollution-lint
 on:
   pull_request:
     paths:
-      - "crates/ato-cli/src/**"
+      - "crates/cli/src/**"
       - ".github/workflows/pollution-lint.yml"
   push:
     branches: [main, dev]
     paths:
-      - "crates/ato-cli/src/**"
+      - "crates/cli/src/**"
       - ".github/workflows/pollution-lint.yml"
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
           )
           violations=""
           for pattern in "${patterns[@]}"; do
-            matches="$(rg -n --pcre2 "$pattern" crates/ato-cli/src || true)"
+            matches="$(rg -n --pcre2 "$pattern" crates/cli/src || true)"
             if [ -n "$matches" ]; then
               disallowed="$(printf '%s\n' "$matches" | grep -v 'pollution-lint: allow' || true)"
               if [ -n "$disallowed" ]; then

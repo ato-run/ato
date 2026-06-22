@@ -1,0 +1,584 @@
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::error::{CapsuleError, Result};
+
+/// Returns the directory containing `manifest_path`.
+///
+/// Falls back to `"."` when the path has no parent (bare filename).
+pub(crate) fn manifest_dir(manifest_path: &Path) -> PathBuf {
+    manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+const ENV_ATO_HOME: &str = "ATO_HOME";
+const WORKSPACE_STATE_DIR: &str = ".ato";
+const WORKSPACE_TMP_DIR: &str = ".ato/tmp";
+const WORKSPACE_ARTIFACTS_DIR: &str = ".ato/artifacts";
+const WORKSPACE_DERIVED_DIR: &str = ".ato/derived";
+const WORKSPACE_FALLBACK_HOME_DIR: &str = ".ato/fallback-home";
+const WORKSPACE_INTERNAL_SUBDIRS: &[&str] = &[
+    "tmp",
+    "artifacts",
+    "derived",
+    "source-inference",
+    "binding",
+    "policy",
+    "attestations",
+    "run",
+    "previews",
+    "fallback-home",
+    "publish",
+];
+
+/// Returns the best-effort user home directory without ever falling back to `/tmp`.
+///
+/// When `dirs::home_dir()` cannot determine the real user home, use a
+/// workspace-local `.ato/fallback-home` path so any downstream state stays
+/// under the ato-managed `.ato/` tree instead of leaking a `.tmp/` sibling.
+pub fn home_dir_or_workspace_tmp() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".").join(WORKSPACE_FALLBACK_HOME_DIR))
+}
+
+/// Returns the root directory used by nacelle/capsule for per-user state.
+///
+/// We intentionally standardize on `~/.ato` for runtime caches.
+pub fn nacelle_home_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(ENV_ATO_HOME) {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return absolutize_ato_home(path);
+        }
+    }
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| CapsuleError::Config("Failed to determine home directory".to_string()))?;
+    Ok(home.join(".ato"))
+}
+
+fn absolutize_ato_home(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let cwd = std::env::current_dir().map_err(|err| {
+        CapsuleError::Config(format!(
+            "Failed to resolve relative ATO_HOME against current directory: {err}"
+        ))
+    })?;
+    Ok(cwd.join(path))
+}
+
+/// Returns the best-effort ato home directory without ever falling back to `/tmp`.
+///
+/// When the real home directory cannot be determined, use a workspace-local
+/// `.ato/fallback-home/.ato` path so CLI and core fallbacks remain strictly
+/// inside the workspace `.ato/` tree.
+pub fn nacelle_home_dir_or_workspace_tmp() -> PathBuf {
+    nacelle_home_dir().unwrap_or_else(|_| home_dir_or_workspace_tmp().join(".ato"))
+}
+
+/// Returns a path inside the canonical ato home directory.
+///
+/// `relative` must be a path relative to the ato root, for example `run` or
+/// `desktop/webcontext`.
+pub fn ato_path(relative: impl AsRef<Path>) -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join(relative.as_ref()))
+}
+
+/// Returns a best-effort path inside the canonical ato home directory without
+/// ever falling back to `/tmp`.
+pub fn ato_path_or_workspace_tmp(relative: impl AsRef<Path>) -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join(relative.as_ref())
+}
+
+/// Returns the toolchain cache directory.
+///
+/// Layout: `~/.ato/toolchains`
+pub fn toolchain_cache_dir() -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join("toolchains"))
+}
+
+/// Returns the runtime cache directory.
+///
+/// Layout: `~/.ato/runtimes`
+pub fn runtime_cache_dir() -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join("runtimes"))
+}
+
+/// Returns the durable engine cache directory.
+///
+/// Layout: `~/.ato/engines`
+pub fn engine_cache_dir() -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join("engines"))
+}
+
+/// Returns the host-runtime tools cache directory.
+///
+/// Layout: `~/.ato/tools`
+///
+/// This is where Ato-managed *host runtimes* (e.g. a Podman binary installed
+/// without Homebrew) are extracted. It is distinct from
+/// [`toolchain_cache_dir`] (`~/.ato/toolchains`, language runtimes fetched via
+/// `RuntimeFetcher`): host runtimes never go through the toolchain cache.
+pub fn ato_tools_dir() -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join("tools"))
+}
+
+/// Best-effort [`ato_tools_dir`] that never falls back to `/tmp`.
+pub fn ato_tools_dir_or_workspace_tmp() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("tools")
+}
+
+/// Returns the shared cache directory for ephemeral CLI-managed artifacts.
+///
+/// Layout: `~/.ato/cache`
+pub fn ato_cache_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("cache")
+}
+
+/// Returns the shared run state directory for ephemeral CLI-managed artifacts.
+///
+/// Layout: `~/.ato/runs`
+pub fn ato_runs_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("runs")
+}
+
+/// Returns the durable execution receipt directory.
+///
+/// Layout: `~/.ato/executions`
+pub fn ato_executions_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("executions")
+}
+
+/// Returns the durable local user state directory.
+///
+/// Layout: `~/.ato/state`
+pub fn ato_state_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("state")
+}
+
+/// Returns the content-addressed projection root.
+///
+/// Layout: `~/.ato/projections`
+pub fn ato_projections_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("projections")
+}
+
+/// Returns the immutable artifact store root.
+///
+/// Layout: `~/.ato/store`
+pub fn ato_store_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("store")
+}
+
+/// Returns the local trust metadata root.
+///
+/// Layout: `~/.ato/trust`
+pub fn ato_trust_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("trust")
+}
+
+pub fn ato_store_blobs_dir() -> PathBuf {
+    ato_store_dir().join("blobs")
+}
+
+pub fn ato_store_refs_dir() -> PathBuf {
+    ato_store_dir().join("refs")
+}
+
+pub fn ato_store_meta_dir() -> PathBuf {
+    ato_store_dir().join("meta")
+}
+
+pub fn ato_store_attestations_dir() -> PathBuf {
+    ato_store_dir().join("attestations")
+}
+
+pub fn ato_trust_roots_dir() -> PathBuf {
+    ato_trust_dir().join("roots")
+}
+
+pub fn ato_trust_policies_dir() -> PathBuf {
+    ato_trust_dir().join("policies")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtoRunLayout {
+    pub root: PathBuf,
+    pub session_json: PathBuf,
+    pub workspace: PathBuf,
+    pub workspace_source: PathBuf,
+    pub workspace_build: PathBuf,
+    pub deps: PathBuf,
+    pub cache: PathBuf,
+    pub tmp: PathBuf,
+    pub log: PathBuf,
+    /// Per-run tool-capsule projection root (#71). Each `[tool_dependencies.<alias>]`
+    /// gets a subdirectory `<tools>/<alias>` projected from the immutable store
+    /// blob and exposed inside the provider sandbox.
+    pub tools: PathBuf,
+}
+
+impl AtoRunLayout {
+    pub fn for_root(root: PathBuf) -> Self {
+        let workspace = root.join("workspace");
+        Self {
+            session_json: root.join("session.json"),
+            workspace_source: workspace.join("source"),
+            workspace_build: workspace.join("build"),
+            workspace,
+            deps: root.join("deps"),
+            cache: root.join("cache"),
+            tmp: root.join("tmp"),
+            log: root.join("log"),
+            tools: root.join("tools"),
+            root,
+        }
+    }
+
+    /// Returns the projection directory for a given tool-capsule alias.
+    pub fn tool_dir(&self, alias: &str) -> PathBuf {
+        self.tools.join(alias)
+    }
+}
+
+/// Returns the path layout for one isolated A0 run session.
+///
+/// The token is for filesystem uniqueness only and does not participate in
+/// artifact identity.
+pub fn ato_run_layout(kind: &str) -> AtoRunLayout {
+    let kind = sanitize_run_kind(kind);
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let random = rand::random::<u64>();
+    AtoRunLayout::for_root(ato_runs_dir().join(format!("{kind}-{millis:x}-{random:x}")))
+}
+
+fn sanitize_run_kind(kind: &str) -> String {
+    let sanitized = kind
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches('-');
+    if sanitized.is_empty() {
+        "run".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+/// Returns the workspace-local directory for generated compatibility artifacts.
+pub(crate) fn workspace_derived_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WORKSPACE_DERIVED_DIR)
+}
+
+/// Returns the workspace-local root for mutable ato state.
+pub fn workspace_state_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WORKSPACE_STATE_DIR)
+}
+
+/// Returns the workspace-local root for temporary ato state.
+pub fn workspace_tmp_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WORKSPACE_TMP_DIR)
+}
+
+/// Returns the workspace-local root for generated runtime artifacts.
+pub fn workspace_artifacts_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(WORKSPACE_ARTIFACTS_DIR)
+}
+
+pub fn path_contains_workspace_state_dir(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(value) => value == WORKSPACE_STATE_DIR,
+        _ => false,
+    })
+}
+
+pub fn path_contains_workspace_internal_subtree(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if components
+        .iter()
+        .any(|component| component == WORKSPACE_STATE_DIR)
+        && components
+            .last()
+            .is_some_and(|component| component == WORKSPACE_STATE_DIR)
+    {
+        return true;
+    }
+
+    components.windows(2).any(|window| {
+        window[0] == WORKSPACE_STATE_DIR && WORKSPACE_INTERNAL_SUBDIRS.contains(&window[1].as_str())
+    })
+}
+
+/// Presentation form of a path for Windows child processes (cwd, PATH
+/// entries, argv). Ato may canonicalize paths internally, which on Windows
+/// yields extended-length `\\?\C:\…` / `\\?\UNC\…` forms; many child tools
+/// (cmd.exe, npm, uv, pnpm) mis-handle those. This strips the prefix back to
+/// the normal drive / UNC spelling when the path stays representable, and
+/// returns the input unchanged otherwise (non-Windows, non-UTF-8, or a path
+/// long enough to actually need the extended-length form).
+pub fn windows_child_compatible_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        strip_extended_length_prefix(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Maximum path length representable without the `\\?\` prefix (MAX_PATH
+/// minus the trailing NUL).
+const WINDOWS_MAX_NON_EXTENDED_PATH: usize = 259;
+
+fn strip_extended_length_prefix(path: &Path) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let stripped = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        // Only drive-letter paths (`C:\…`) are safe to de-prefix; other
+        // namespaces (`\\?\Volume{…}`, device paths) have no normal spelling.
+        let mut chars = rest.chars();
+        let is_drive =
+            chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.next() == Some(':');
+        if !is_drive {
+            return path.to_path_buf();
+        }
+        rest.to_string()
+    } else {
+        return path.to_path_buf();
+    };
+    if stripped.len() > WINDOWS_MAX_NON_EXTENDED_PATH {
+        return path.to_path_buf();
+    }
+    PathBuf::from(stripped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        WORKSPACE_FALLBACK_HOME_DIR, ato_path, path_contains_workspace_internal_subtree,
+        path_contains_workspace_state_dir, strip_extended_length_prefix,
+    };
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detects_workspace_state_dir_components() {
+        assert!(path_contains_workspace_state_dir(Path::new(
+            "project/.ato/tmp/run"
+        )));
+        assert!(path_contains_workspace_state_dir(Path::new(
+            ".ato/source-inference"
+        )));
+        assert!(!path_contains_workspace_state_dir(Path::new(
+            "project/source"
+        )));
+    }
+
+    #[test]
+    fn detects_internal_workspace_subtrees_without_matching_store_paths() {
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato/tmp/run"
+        )));
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato"
+        )));
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato/artifacts"
+        )));
+        assert!(!path_contains_workspace_internal_subtree(Path::new(
+            "/Users/test/.ato/store/pkg"
+        )));
+    }
+
+    #[test]
+    fn fallback_home_lives_under_workspace_ato_dir() {
+        // Regression guard: the home-dir fallback must never leak a `.tmp/`
+        // sibling in the workspace. Every fallback path must stay inside
+        // `.ato/fallback-home/...`.
+        assert_eq!(WORKSPACE_FALLBACK_HOME_DIR, ".ato/fallback-home");
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato/fallback-home"
+        )));
+        assert!(path_contains_workspace_internal_subtree(Path::new(
+            "project/.ato/fallback-home/.ato/cache"
+        )));
+    }
+
+    #[test]
+    fn ato_layout_helpers_never_use_system_tmp_fallbacks() {
+        for path in [
+            super::ato_runs_dir(),
+            super::ato_state_dir(),
+            super::ato_store_dir(),
+            super::ato_trust_dir(),
+            super::ato_store_blobs_dir(),
+            super::ato_store_refs_dir(),
+            super::ato_store_attestations_dir(),
+            super::ato_trust_roots_dir(),
+            super::ato_trust_policies_dir(),
+        ] {
+            let rendered = path.to_string_lossy();
+            assert!(
+                !rendered.starts_with("/tmp") && !rendered.starts_with("/var/tmp"),
+                "{rendered} must stay out of system tmp"
+            );
+        }
+    }
+
+    #[test]
+    fn strips_extended_length_prefix_from_drive_paths() {
+        assert_eq!(
+            strip_extended_length_prefix(Path::new(r"\\?\C:\Users\koh\.ato\runs\workspace")),
+            PathBuf::from(r"C:\Users\koh\.ato\runs\workspace")
+        );
+    }
+
+    #[test]
+    fn rewrites_extended_length_unc_paths_to_normal_unc() {
+        assert_eq!(
+            strip_extended_length_prefix(Path::new(r"\\?\UNC\server\share\dir")),
+            PathBuf::from(r"\\server\share\dir")
+        );
+    }
+
+    #[test]
+    fn leaves_normal_and_non_drive_paths_unchanged() {
+        for raw in [
+            r"C:\Users\koh\project",
+            r"\\server\share\dir",
+            r"\\?\Volume{1234}\dir",
+            "relative/dir",
+        ] {
+            assert_eq!(
+                strip_extended_length_prefix(Path::new(raw)),
+                PathBuf::from(raw),
+                "{raw} must pass through unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_extended_length_prefix_when_path_is_too_long_to_deprefix() {
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        assert_eq!(
+            strip_extended_length_prefix(Path::new(&long)),
+            PathBuf::from(&long)
+        );
+    }
+
+    #[test]
+    fn run_layout_uses_kind_prefixed_root() {
+        let layout = super::ato_run_layout("provider/npm");
+        let file_name = layout
+            .root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        assert!(file_name.starts_with("provider-npm-"));
+        assert_eq!(
+            layout.workspace_source,
+            layout.root.join("workspace/source")
+        );
+        assert_eq!(layout.deps, layout.root.join("deps"));
+    }
+
+    #[test]
+    fn run_layout_exposes_tools_subtree() {
+        let layout = super::AtoRunLayout::for_root(PathBuf::from("/runs/run-1"));
+        assert_eq!(layout.tools, PathBuf::from("/runs/run-1/tools"));
+        assert_eq!(
+            layout.tool_dir("postgres"),
+            PathBuf::from("/runs/run-1/tools/postgres")
+        );
+    }
+
+    #[test]
+    fn ato_path_respects_ato_home_override() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ato_home = temp.path().join("isolated-ato-home");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+
+        assert_eq!(
+            ato_path("run/ato-desktop-current.json").expect("ato path"),
+            PathBuf::from(&ato_home).join("run/ato-desktop-current.json")
+        );
+    }
+
+    #[test]
+    fn ato_path_absolutizes_relative_ato_home_override() {
+        let _lock = env_lock();
+        let current_dir = std::env::current_dir().expect("cwd");
+        let temp = tempfile::tempdir_in(&current_dir).expect("tempdir in cwd");
+        let ato_home = temp.path().join("isolated-ato-home");
+        std::fs::create_dir_all(&ato_home).expect("mkdir ato_home");
+        let relative = ato_home
+            .strip_prefix(&current_dir)
+            .expect("ato_home under cwd");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", relative);
+
+        assert_eq!(
+            ato_path("run/ato-desktop-current.json").expect("ato path"),
+            current_dir
+                .join(relative)
+                .join("run/ato-desktop-current.json")
+        );
+    }
+}

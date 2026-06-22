@@ -70,7 +70,7 @@ Issue: #369
 
 ### Blocker 1: State binding Unix path validation on Windows
 **Scope**: ALL recipes with `[[state_bindings]]` (10/16)
-**File**: `capsule_core::manifest` validator
+**File**: `capsule::manifest` validator
 **Message**: `"Invalid state binding for service 'main': target '...' must be an absolute path"`
 **Mechanism**: The validator checks if the target path starts with `/` for absolute-pathness. On Windows, Unix paths like `/var/opt/memos` are syntactically valid but semantically wrong. The validator should accept Windows-style absolute paths (`C:\...`) OR the state binding system should provide a platform-agnostic mount mechanism.
 **Fix difficulty**: Medium — requires manifest schema + validator change to support platform-specific path formats.
