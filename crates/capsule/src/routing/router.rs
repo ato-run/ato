@@ -24,6 +24,10 @@ pub enum RuntimeKind {
     Wasm,
     Source,
     Web,
+    /// Host-native inference engine (e.g. llama.cpp's llama-server). Lowers to
+    /// the host process launcher (like `Source`), but is launched from
+    /// `engine`/`model` target fields rather than a source tree.
+    NativeInference,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1000,6 +1004,22 @@ impl ExecutionDescriptor {
         self.target_image(&self.selected_target)
     }
 
+    /// native-inference: the inference engine identifier (e.g. `"llama.cpp"`).
+    pub fn target_engine(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "engine"])
+    }
+
+    /// native-inference: local filesystem path to the engine server binary
+    /// (e.g. `llama-server`). Inc1 requires this to be set explicitly.
+    pub fn target_engine_path(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "engine_path"])
+    }
+
+    /// native-inference: local filesystem path to the model file (e.g. a GGUF).
+    pub fn target_model(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "model"])
+    }
+
     pub fn targets_oci_cmd(&self) -> Vec<String> {
         let cmd = self.target_cmd(&self.selected_target);
         if !cmd.is_empty() {
@@ -1393,6 +1413,7 @@ fn parse_runtime_kind(value: &str) -> Option<RuntimeKind> {
         "wasm" => Some(RuntimeKind::Wasm),
         "source" | "native" => Some(RuntimeKind::Source),
         "web" => Some(RuntimeKind::Web),
+        "native-inference" => Some(RuntimeKind::NativeInference),
         _ => None,
     }
 }
@@ -1421,6 +1442,24 @@ mod tests {
     use crate::types::Mount;
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn parse_runtime_kind_recognizes_native_inference() {
+        assert_eq!(
+            super::parse_runtime_kind("native-inference"),
+            Some(super::RuntimeKind::NativeInference)
+        );
+        // Existing kinds remain unchanged.
+        assert_eq!(
+            super::parse_runtime_kind("source"),
+            Some(super::RuntimeKind::Source)
+        );
+        assert_eq!(
+            super::parse_runtime_kind("oci"),
+            Some(super::RuntimeKind::Oci)
+        );
+        assert_eq!(super::parse_runtime_kind("nope"), None);
+    }
 
     fn write_manifest(contents: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");

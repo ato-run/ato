@@ -164,7 +164,7 @@ impl ManifestData {
                         name, target_label
                     )));
                 }
-                RuntimeKind::Source | RuntimeKind::Web => {
+                RuntimeKind::Source | RuntimeKind::Web | RuntimeKind::NativeInference => {
                     ResolvedServiceRuntime::Managed(target_runtime)
                 }
             };
