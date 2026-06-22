@@ -8,8 +8,8 @@ use capsule::engine::execution_graph::{
 use capsule::execution_identity::{
     ExecutionIdentityInput, ExecutionIdentityInputV2, ExecutionReceipt, ExecutionReceiptDocument,
     ExecutionReceiptV2, ExecutionRunnerIdentity, FilesystemIdentityBuilder, FilesystemIdentityV2,
-    GraphCompleteness, GraphReceipt, LaunchIdentity, ObservationScope, OciProviderReceiptEvidence,
-    PolicyIdentity, PolicyIdentityBuilder, PolicyIdentityV2, Tracked,
+    GraphCompleteness, GraphReceipt, LaunchIdentity, NativeInferenceContext, ObservationScope,
+    OciProviderReceiptEvidence, PolicyIdentity, PolicyIdentityBuilder, PolicyIdentityV2, Tracked,
 };
 use capsule::execution_plan::model::ExecutionPlan;
 use capsule::launch_spec::derive_launch_spec;
@@ -199,7 +199,11 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
     let ctx = ObserverContextV2::for_plan(plan);
     let source = observe_source_v2(plan, &ctx)?;
     let provenance = observe_source_provenance(plan);
-    let runtime = observe_runtime_v2(execution_plan, &launch_spec, &ctx)?;
+    let mut runtime = observe_runtime_v2(execution_plan, &launch_spec, &ctx)?;
+    // native-inference: attach the declared/resolved engine + model context from
+    // the manifest (`plan` is already in scope — no extra threading). `None` for
+    // every other runtime.
+    runtime.native_inference = build_native_inference_context(plan);
     let dependencies =
         observe_dependencies_v2(plan, &launch_spec, launch_ctx, build_observation, &runtime)?;
     let environment = observe_environment_v2(plan, launch_ctx, &ctx)?;
@@ -355,6 +359,72 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
         ));
 
     Ok((receipt, launch_graph_bundle))
+}
+
+/// Build the declared/resolved native-inference context for the receipt from the
+/// manifest. Returns `None` for any non-native-inference runtime. Reads only
+/// declared target fields (`plan.target_*()`) — no probes, no GPU, no log
+/// parsing. Records what was *selected* (managed engine tag/variant, managed
+/// model CAS hash), NOT the backend that actually ran (deferred to #490).
+fn build_native_inference_context(plan: &ManifestData) -> Option<NativeInferenceContext> {
+    if plan.execution_runtime().as_deref() != Some("native-inference") {
+        return None;
+    }
+
+    let nonempty = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+
+    let engine = nonempty(plan.target_engine());
+    let engine_version = nonempty(plan.target_engine_version());
+    let engine_variant_declared = nonempty(plan.target_engine_variant());
+    let has_engine_path = nonempty(plan.target_engine_path()).is_some();
+    // Managed engine = Ato resolves/fetches it (no explicit local `engine_path`).
+    let engine_managed = !has_engine_path && engine.is_some();
+    // Resolved variant is meaningful only for a managed engine; a local
+    // `engine_path` binary's backend is not inspected.
+    let engine_variant_resolved = engine_managed.then(|| {
+        resolve_engine_variant_label(engine_variant_declared.as_deref(), std::env::consts::OS)
+    });
+
+    let model_url = nonempty(plan.target_model_url());
+    let model_sha256_raw = nonempty(plan.target_model_sha256());
+    // Managed model = fetched into CAS from `model_url` + `model_sha256`.
+    let model_managed = model_url.is_some() && model_sha256_raw.is_some();
+    let model_sha256 = if model_managed {
+        // Reuse the canonical normalizer (lowercase, strip `sha256:`/`sha256-`,
+        // require 64 hex) — no duplication of model-cache logic.
+        model_sha256_raw
+            .as_deref()
+            .and_then(capsule::foundation::types::manifest::normalize_model_sha256)
+    } else {
+        None
+    };
+
+    Some(NativeInferenceContext {
+        engine,
+        engine_version,
+        engine_variant_declared,
+        engine_variant_resolved,
+        engine_managed,
+        model_managed,
+        model_sha256,
+    })
+}
+
+/// Platform-resolved variant *label* for a managed llama.cpp engine — the
+/// declared/resolved domain, NOT the observed backend. An explicit variant
+/// (e.g. `"vulkan"`) passes through normalized; the default build resolves to
+/// `"metal"` on macOS (the macOS artifact is Metal-accelerated), else `"cpu"`.
+fn resolve_engine_variant_label(declared: Option<&str>, target_os: &str) -> String {
+    let normalized = declared
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty());
+    match normalized.as_deref() {
+        None | Some("default") | Some("cpu") | Some("metal") => match target_os {
+            "macos" => "metal".to_string(),
+            _ => "cpu".to_string(),
+        },
+        Some(other) => other.to_string(),
+    }
 }
 
 /// Derive receipt-safe OCI provider evidence for the launch, if it targets an
@@ -1395,6 +1465,7 @@ mod oci_launch_receipt_tests {
                 binary_hash: Tracked::not_applicable(),
                 dynamic_linkage: Tracked::not_applicable(),
                 completeness: RuntimeCompleteness::DeclaredOnly,
+                native_inference: None,
                 platform: PlatformIdentity {
                     os: "linux".to_string(),
                     arch: "amd64".to_string(),
@@ -1747,5 +1818,179 @@ mod oci_launch_receipt_tests {
         );
         assert!(after.observed_runtime.is_some());
         assert_ne!(after.graph_completeness, Some(GraphCompleteness::Complete));
+    }
+}
+
+#[cfg(test)]
+mod native_inference_context_tests {
+    use super::{build_native_inference_context, resolve_engine_variant_label};
+    use capsule::execution_identity::{
+        NativeInferenceContext, PlatformIdentity, RuntimeCompleteness, RuntimeIdentityV2, Tracked,
+    };
+    use capsule::router::{
+        ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts,
+    };
+
+    const HEADER: &str =
+        "schema_version = \"0.3\"\nname = \"ni-test\"\nversion = \"0.1.0\"\ntype = \"app\"\n";
+
+    fn plan_from(body: &str) -> (tempfile::TempDir, ManifestData) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = format!("{HEADER}{body}");
+        let manifest_path = tmp.path().join("capsule.toml");
+        std::fs::write(&manifest_path, &manifest).expect("write manifest");
+        let parsed: toml::Value = toml::from_str(&manifest).expect("parse manifest");
+        let plan = execution_descriptor_from_manifest_parts(
+            parsed,
+            manifest_path,
+            tmp.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor");
+        (tmp, plan)
+    }
+
+    // (1) absent for non-native-inference runtimes.
+    #[test]
+    fn context_absent_for_non_native_inference() {
+        let (_t, plan) =
+            plan_from("[targets.app]\nruntime = \"source\"\nentrypoint = \"app.py\"\n");
+        assert!(build_native_inference_context(&plan).is_none());
+    }
+
+    // (2)+(3) present for native-inference; managed engine + vulkan + managed model.
+    #[test]
+    fn managed_engine_variant_and_model() {
+        let (_t, plan) = plan_from(
+            "[targets.app]\nruntime = \"native-inference\"\nengine = \"llama.cpp\"\n\
+             engine_version = \"b9754\"\nengine_variant = \"vulkan\"\n\
+             model_url = \"https://example.com/m.gguf\"\n\
+             model_sha256 = \"66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739\"\n",
+        );
+        let ctx = build_native_inference_context(&plan).expect("native-inference present");
+        assert_eq!(ctx.engine.as_deref(), Some("llama.cpp"));
+        assert_eq!(ctx.engine_version.as_deref(), Some("b9754"));
+        assert_eq!(ctx.engine_variant_declared.as_deref(), Some("vulkan"));
+        assert_eq!(ctx.engine_variant_resolved.as_deref(), Some("vulkan"));
+        assert!(ctx.engine_managed);
+        assert!(ctx.model_managed);
+        assert_eq!(
+            ctx.model_sha256.as_deref(),
+            Some("66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739")
+        );
+    }
+
+    // (4) default variant: declared None; resolved is platform-specific + deterministic.
+    #[test]
+    fn default_variant_resolves_per_platform() {
+        // Pure label mapping is deterministic regardless of host.
+        assert_eq!(resolve_engine_variant_label(None, "linux"), "cpu");
+        assert_eq!(resolve_engine_variant_label(None, "macos"), "metal");
+        assert_eq!(resolve_engine_variant_label(Some("cpu"), "macos"), "metal");
+        assert_eq!(resolve_engine_variant_label(Some("metal"), "linux"), "cpu");
+        assert_eq!(
+            resolve_engine_variant_label(Some("vulkan"), "linux"),
+            "vulkan"
+        );
+
+        let (_t, plan) = plan_from(
+            "[targets.app]\nruntime = \"native-inference\"\nengine = \"llama.cpp\"\n\
+             engine_version = \"b9754\"\nmodel = \"./m.gguf\"\n",
+        );
+        let ctx = build_native_inference_context(&plan).expect("present");
+        assert!(ctx.engine_variant_declared.is_none());
+        // For a managed engine, resolved matches the host default label.
+        assert_eq!(
+            ctx.engine_variant_resolved,
+            Some(resolve_engine_variant_label(None, std::env::consts::OS))
+        );
+        assert!(ctx.engine_managed);
+    }
+
+    // (5) local engine_path: not managed; no invented version; resolved None.
+    #[test]
+    fn local_engine_path_is_not_managed() {
+        let (_t, plan) = plan_from(
+            "[targets.app]\nruntime = \"native-inference\"\n\
+             engine_path = \"/usr/local/bin/llama-server\"\nmodel = \"./m.gguf\"\n",
+        );
+        let ctx = build_native_inference_context(&plan).expect("present");
+        assert!(!ctx.engine_managed);
+        assert!(
+            ctx.engine_version.is_none(),
+            "must not invent an engine_version"
+        );
+        assert!(ctx.engine_variant_resolved.is_none());
+    }
+
+    // (6) managed model: model_managed + normalized sha256 (uppercase + prefix stripped).
+    #[test]
+    fn managed_model_sha_is_normalized() {
+        let (_t, plan) = plan_from(
+            "[targets.app]\nruntime = \"native-inference\"\nengine = \"llama.cpp\"\n\
+             engine_version = \"b9754\"\nmodel_url = \"https://example.com/m.gguf\"\n\
+             model_sha256 = \"SHA256:66967FBECE6DBE97886593FDBB73589584927E29119EC31F08090732D1861739\"\n",
+        );
+        let ctx = build_native_inference_context(&plan).expect("present");
+        assert!(ctx.model_managed);
+        assert_eq!(
+            ctx.model_sha256.as_deref(),
+            Some("66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739")
+        );
+    }
+
+    // (7) local model: not managed; sha None.
+    #[test]
+    fn local_model_is_not_managed() {
+        let (_t, plan) = plan_from(
+            "[targets.app]\nruntime = \"native-inference\"\nengine = \"llama.cpp\"\n\
+             engine_version = \"b9754\"\nmodel = \"./m.gguf\"\n",
+        );
+        let ctx = build_native_inference_context(&plan).expect("present");
+        assert!(!ctx.model_managed);
+        assert!(ctx.model_sha256.is_none());
+    }
+
+    // (8) JSON round-trip + backward compatibility (field optional/omitted).
+    #[test]
+    fn json_round_trip_and_backward_compat() {
+        let base = RuntimeIdentityV2 {
+            declared: Some("native-inference".to_string()),
+            resolved_ref: Tracked::known("native-inference".to_string()),
+            binary_hash: Tracked::known("sha256:x".to_string()),
+            dynamic_linkage: Tracked::known("blake3:y".to_string()),
+            completeness: RuntimeCompleteness::DeclaredOnly,
+            platform: PlatformIdentity {
+                os: "linux".to_string(),
+                arch: "x86_64".to_string(),
+                libc: "gnu".to_string(),
+            },
+            native_inference: None,
+        };
+        // None → key omitted (skip_serializing_if).
+        let json_none = serde_json::to_string(&base).unwrap();
+        assert!(!json_none.contains("native_inference"), "{json_none}");
+        // Old JSON without the field deserializes to None (serde default).
+        let decoded: RuntimeIdentityV2 = serde_json::from_str(&json_none).unwrap();
+        assert!(decoded.native_inference.is_none());
+        // Some → present and round-trips.
+        let with_ctx = RuntimeIdentityV2 {
+            native_inference: Some(NativeInferenceContext {
+                engine: Some("llama.cpp".to_string()),
+                engine_version: Some("b9754".to_string()),
+                engine_variant_declared: Some("vulkan".to_string()),
+                engine_variant_resolved: Some("vulkan".to_string()),
+                engine_managed: true,
+                model_managed: true,
+                model_sha256: Some("a".repeat(64)),
+            }),
+            ..base
+        };
+        let json_some = serde_json::to_string(&with_ctx).unwrap();
+        assert!(json_some.contains("native_inference"));
+        let round: RuntimeIdentityV2 = serde_json::from_str(&json_some).unwrap();
+        assert_eq!(round, with_ctx);
     }
 }
