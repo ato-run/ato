@@ -55,7 +55,7 @@ pub(crate) use project::{ProjectCommands, ScaffoldCommands};
 pub(crate) use receipts::ReceiptsCommands;
 #[allow(unused_imports)]
 pub(crate) use registry::RegistryCommands;
-pub(crate) use root::{Cli, Commands};
+pub(crate) use root::{Cli, Commands, DoctorTarget};
 #[allow(unused_imports)]
 pub(crate) use runner::RunnerCommands;
 pub(crate) use secrets::SecretsCommands;
