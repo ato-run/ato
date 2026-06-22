@@ -4033,9 +4033,16 @@ where
             if request.background {
                 let process_id = format!("capsule-{}", process.child.id());
                 let consumer_pid = process.child.id() as i32;
+                // Label the recorded runtime from the actual execution mode, not
+                // just the permission flags: native-inference (and host-fallback)
+                // run as bare host processes, so they must record runtime="host".
+                // Recording "nacelle" for a non-nacelle host process makes
+                // process_info_is_alive() fail the nacelle-cmdline identity check,
+                // so `ato ps`/`ato stop` treat the live session as dead. `host_execution`
+                // already folds in is_native_inference / dangerously_skip / host_fallback.
                 let runtime = hooks.process_runtime_label(
                     &decision.plan,
-                    request.dangerously_skip_permissions || desktop_native_open_only,
+                    host_execution,
                     compatibility_host_mode,
                 );
                 let ready_without_events = host_execution && process.event_rx.is_none();
