@@ -1002,6 +1002,7 @@ mod tests {
                 binary_hash: Tracked::known("sha256:uvbinary".to_string()),
                 dynamic_linkage: Tracked::known("blake3:dyn".to_string()),
                 completeness: RuntimeCompleteness::BinaryWithDynamicClosure,
+                native_inference: None,
                 platform: PlatformIdentity {
                     os: "macos".to_string(),
                     arch: "aarch64".to_string(),
