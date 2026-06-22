@@ -3990,6 +3990,12 @@ where
                 || host_fallback_requested
                 || desktop_native_open_only
                 || is_native_inference;
+            // Ensure a managed native-inference engine (e.g. llama.cpp's
+            // llama-server) is fetched into the toolchain cache BEFORE the host
+            // launcher resolves it. A local `engine_path` skips this.
+            if is_native_inference {
+                ensure_native_inference_engine(&decision.plan).await?;
+            }
             let process = if host_execution {
                 if let Some(app_path) = request.desktop_open_path.as_ref() {
                     crate::executors::source::execute_open_path(app_path, mode)?
@@ -4390,6 +4396,42 @@ where
     );
 
     Ok(())
+}
+
+/// Fetch a managed native-inference engine binary into the toolchain cache
+/// before the host launcher resolves it. A local `engine_path` overrides this
+/// (nothing to fetch). Inc2 supports `engine = "llama.cpp"` + `engine_version`.
+async fn ensure_native_inference_engine(plan: &capsule::router::ManifestData) -> Result<()> {
+    let has_engine_path = plan
+        .target_engine_path()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if has_engine_path {
+        return Ok(());
+    }
+
+    let engine = plan
+        .target_engine()
+        .map(|value| value.trim().to_ascii_lowercase());
+    match engine.as_deref() {
+        Some("llama.cpp") | Some("llamacpp") | Some("llama-cpp") => {
+            let version = plan
+                .target_engine_version()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "engine=\"llama.cpp\" requires `engine_version` (a build tag, e.g. \"b4231\")"
+                    )
+                })?;
+            capsule::packers::runtime_fetcher::RuntimeFetcher::new()?
+                .ensure_llamacpp(&version)
+                .await?;
+            Ok(())
+        }
+        // Unspecified/unknown managed engine: let the launcher's
+        // resolve_native_inference_engine_command produce the precise error.
+        _ => Ok(()),
+    }
 }
 
 pub(crate) async fn reroute_auto_provisioned_execution(

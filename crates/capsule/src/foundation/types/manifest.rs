@@ -1607,8 +1607,14 @@ pub struct NamedTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
 
+    /// native-inference: pinned engine version (e.g. llama.cpp build tag
+    /// `"b4231"`). Used to fetch/locate a managed engine when `engine_path` is
+    /// not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
+
     /// native-inference: local filesystem path to the engine server binary
-    /// (e.g. `llama-server`). Inc1 requires this to be set explicitly.
+    /// (e.g. `llama-server`). When set, it overrides managed engine fetching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_path: Option<String>,
 
@@ -2135,6 +2141,43 @@ component = "hello.wasm"
         let app_target = targets.named.get("app").unwrap();
         eprintln!("component field: {:?}", app_target.component);
         assert_eq!(app_target.component.as_deref(), Some("hello.wasm"));
+    }
+}
+
+/// A native-inference `engine_version` is interpolated into download URLs,
+/// archive filenames, and toolchain cache paths, so it must be tightly
+/// constrained. Allow build tags (`b9754`) and semver-ish ids; reject anything
+/// that could traverse paths or alter URLs (`/`, `\`, `..`, `%`, whitespace, …).
+pub fn is_safe_engine_version(version: &str) -> bool {
+    let v = version.trim();
+    !v.is_empty()
+        && !v.contains("..")
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+#[cfg(test)]
+mod engine_version_tests {
+    use super::is_safe_engine_version;
+
+    #[test]
+    fn accepts_build_tags_and_semverish() {
+        assert!(is_safe_engine_version("b9754"));
+        assert!(is_safe_engine_version("b4231"));
+        assert!(is_safe_engine_version("1.2.3"));
+        assert!(is_safe_engine_version("v0.1.0-rc1"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_url_unsafe() {
+        assert!(!is_safe_engine_version(""));
+        assert!(!is_safe_engine_version("../evil"));
+        assert!(!is_safe_engine_version("b9754/../../x"));
+        assert!(!is_safe_engine_version("..")); // pure traversal
+        assert!(!is_safe_engine_version("a/b"));
+        assert!(!is_safe_engine_version("a\\b"));
+        assert!(!is_safe_engine_version("b97 54")); // whitespace
+        assert!(!is_safe_engine_version("b9754%2f")); // url-encoded slash
     }
 }
 

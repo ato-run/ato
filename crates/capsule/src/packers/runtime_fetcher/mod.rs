@@ -71,6 +71,7 @@ impl RuntimeFetcher {
             "node" | "nodejs" => Some("node"),
             "deno" => Some("deno"),
             "bun" => Some("bun"),
+            "llamacpp" | "llama.cpp" | "llama-cpp" => Some("llamacpp"),
             _ => None,
         }
     }
@@ -243,6 +244,35 @@ impl RuntimeFetcher {
         let bun_bin = Self::find_binary_recursive(&runtime_dir, &["bun", "bun.exe"])?;
         info!("Bun {} ready at {:?}", version, bun_bin);
         Ok(bun_bin)
+    }
+
+    /// Download (if needed) the `llama-server` binary for a pinned llama.cpp
+    /// release (`version` = the build tag, e.g. `"b4231"`) and return its
+    /// canonical path `<cache>/llamacpp-<version>/llama-server[.exe]` — the exact
+    /// path the launcher resolves. Used by the native-inference engine
+    /// ensure-step before launch.
+    pub async fn ensure_llamacpp(&self, version: &str) -> Result<PathBuf> {
+        // Pre-discard an incomplete/corrupt cache BEFORE the dispatch's
+        // exists-only short-circuit can reuse it (the dispatch can't tell a
+        // partial dir from a complete one; the fetcher's validity check only
+        // runs once download_runtime is reached).
+        let runtime_dir = self.get_runtime_path("llamacpp", version);
+        if runtime_dir.exists() && !fetcher::llamacpp_cache_is_valid(&runtime_dir) {
+            let _ = fs::remove_dir_all(&runtime_dir);
+        }
+
+        let runtime_dir = self
+            .download_runtime_with_progress("llamacpp", version, true)
+            .await?;
+        // download_runtime guarantees the canonical binary as a post-condition.
+        let server_bin = runtime_dir.join(fetcher::llamacpp_server_filename());
+        if !server_bin.exists() {
+            return Err(CapsuleError::Pack(format!(
+                "llama.cpp {version}: canonical llama-server missing after fetch at {server_bin:?}"
+            )));
+        }
+        info!("llama.cpp {} ready at {:?}", version, server_bin);
+        Ok(server_bin)
     }
 
     pub async fn ensure_uv(&self, version: Option<&str>) -> Result<PathBuf> {
