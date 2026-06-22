@@ -26,6 +26,39 @@ mod verifier;
 pub(crate) use fetcher::llamacpp_cache_key;
 pub use verifier::{ArtifactVerifier, ChecksumVerifier};
 
+/// Whether this host has managed llama.cpp prebuilts for the native-inference
+/// runtime, and which acceleration the default build provides. Powers
+/// `ato doctor native-inference`: it reuses the exact platform → artifact
+/// mapping the fetcher applies on a real run, so the doctor can never disagree
+/// with what would actually download.
+#[derive(Debug, Clone)]
+pub struct LlamaCppPlatformSupport {
+    /// Normalized OS (`macos` | `linux` | `windows`).
+    pub os: String,
+    /// Normalized arch (`x86_64` | `aarch64`).
+    pub arch: String,
+    /// The default build (CPU on Linux/Windows, Metal on macOS) is available.
+    pub default_available: bool,
+    /// The `engine_variant = "vulkan"` Linux NVIDIA build is available here.
+    pub vulkan_available: bool,
+}
+
+/// Probe managed llama.cpp engine availability for `version` (e.g. `"b9754"`)
+/// on this host. `Err` only when the OS/arch itself is unsupported (the fetcher
+/// cannot even name a platform).
+pub fn llama_cpp_platform_support(version: &str) -> Result<LlamaCppPlatformSupport> {
+    let (os, arch) = RuntimeFetcher::detect_platform()?;
+    let default_available = fetcher::llama_cpp_artifact_filename(version, &os, &arch, None).is_ok();
+    let vulkan_available =
+        fetcher::llama_cpp_artifact_filename(version, &os, &arch, Some("vulkan")).is_ok();
+    Ok(LlamaCppPlatformSupport {
+        os,
+        arch,
+        default_available,
+        vulkan_available,
+    })
+}
+
 pub struct RuntimeFetcher {
     cache_dir: PathBuf,
     verifier: Arc<dyn ArtifactVerifier>,
@@ -922,11 +955,27 @@ pub fn locate_runtime_binary(runtime_dir: &Path, candidates: &[&str]) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::RuntimeFetcher;
+    use super::{RuntimeFetcher, llama_cpp_platform_support};
 
     #[test]
     fn test_normalize_semverish() {
         assert_eq!(RuntimeFetcher::normalize_semverish("v1.2.3"), "1.2.3");
         assert_eq!(RuntimeFetcher::normalize_semverish("^3.11"), "3.11");
+    }
+
+    // CI/dev hosts are macOS or Linux on x64/arm64 — all have a managed
+    // llama.cpp default prebuilt — so the native-inference probe must report
+    // platform-supported, and Vulkan must be Linux-only.
+    #[test]
+    fn llama_cpp_platform_support_reports_current_host() {
+        let s = llama_cpp_platform_support("b9754").expect("host platform is supported");
+        assert!(
+            s.default_available,
+            "{}-{} should have a managed default build",
+            s.os, s.arch
+        );
+        if s.os == "macos" {
+            assert!(!s.vulkan_available, "macOS has no Vulkan prebuilt");
+        }
     }
 }
