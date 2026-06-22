@@ -1607,8 +1607,14 @@ pub struct NamedTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
 
+    /// native-inference: pinned engine version (e.g. llama.cpp build tag
+    /// `"b4231"`). Used to fetch/locate a managed engine when `engine_path` is
+    /// not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
+
     /// native-inference: local filesystem path to the engine server binary
-    /// (e.g. `llama-server`). Inc1 requires this to be set explicitly.
+    /// (e.g. `llama-server`). When set, it overrides managed engine fetching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_path: Option<String>,
 

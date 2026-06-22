@@ -350,23 +350,21 @@ impl CapsuleManifest {
             }
 
             if runtime == "native-inference" {
-                // Inc1: engine_path + model are required local paths.
-                if target
-                    .engine_path
-                    .as_deref()
-                    .map(|v| v.trim().is_empty())
-                    .unwrap_or(true)
-                {
+                let nonempty = |v: &Option<String>| {
+                    v.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+                };
+                let has_engine_path = nonempty(&target.engine_path);
+                // Engine is either a local `engine_path` OR a managed engine
+                // (`engine` + `engine_version`, e.g. llama.cpp build tag).
+                let has_managed_engine =
+                    nonempty(&target.engine) && nonempty(&target.engine_version);
+                if !has_engine_path && !has_managed_engine {
                     errors.push(ValidationError::InvalidTarget(format!(
-                        "target '{label}': runtime=native-inference requires `engine_path`"
+                        "target '{label}': runtime=native-inference requires either `engine_path` \
+                         (a local engine binary) or `engine` + `engine_version` (managed)"
                     )));
                 }
-                if target
-                    .model
-                    .as_deref()
-                    .map(|v| v.trim().is_empty())
-                    .unwrap_or(true)
-                {
+                if !nonempty(&target.model) {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "target '{label}': runtime=native-inference requires `model`"
                     )));

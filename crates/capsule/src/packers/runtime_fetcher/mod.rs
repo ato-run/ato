@@ -71,6 +71,7 @@ impl RuntimeFetcher {
             "node" | "nodejs" => Some("node"),
             "deno" => Some("deno"),
             "bun" => Some("bun"),
+            "llamacpp" | "llama.cpp" | "llama-cpp" => Some("llamacpp"),
             _ => None,
         }
     }
@@ -243,6 +244,30 @@ impl RuntimeFetcher {
         let bun_bin = Self::find_binary_recursive(&runtime_dir, &["bun", "bun.exe"])?;
         info!("Bun {} ready at {:?}", version, bun_bin);
         Ok(bun_bin)
+    }
+
+    /// Download (if needed) and locate the `llama-server` binary for a pinned
+    /// llama.cpp release (`version` = the build tag, e.g. `"b4231"`). Used by the
+    /// native-inference engine ensure-step before launch.
+    pub async fn ensure_llamacpp(&self, version: &str) -> Result<PathBuf> {
+        let runtime_dir = self
+            .download_runtime_with_progress("llamacpp", version, true)
+            .await?;
+        let server_bin =
+            Self::find_binary_recursive(&runtime_dir, &["llama-server", "llama-server.exe"])?;
+        info!("llama.cpp {} ready at {:?}", version, server_bin);
+        Ok(server_bin)
+    }
+
+    /// Synchronously locate the cached `llama-server` for a pinned version,
+    /// WITHOUT downloading. Returns `None` when not yet fetched. The launcher
+    /// uses this after the async ensure-step has populated the cache.
+    pub fn llamacpp_server_path(&self, version: &str) -> Option<PathBuf> {
+        let runtime_dir = self.get_runtime_path("llamacpp", version);
+        if !runtime_dir.exists() {
+            return None;
+        }
+        Self::find_binary_recursive(&runtime_dir, &["llama-server", "llama-server.exe"]).ok()
     }
 
     pub async fn ensure_uv(&self, version: Option<&str>) -> Result<PathBuf> {
