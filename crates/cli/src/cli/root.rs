@@ -61,6 +61,10 @@ pub(crate) struct Cli {
     pub(crate) command: Commands,
 }
 
+// The CLI command surface is intentionally wide; some subcommands carry large
+// inline arg structs. Boxing variants would fight the clap derive for no user
+// benefit, so accept the size spread.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     #[command(
