@@ -77,6 +77,17 @@ pub enum ExecuteMode {
     Logged(PathBuf),
 }
 
+/// The log file a launch captures to, if any. Only `ExecuteMode::Logged` writes
+/// the child's stdout/stderr to a file; the executor returns this as the
+/// process's `log_path` so the session record and the "process exited before
+/// readiness" error can surface it. #747.
+fn logged_log_path(mode: &ExecuteMode) -> Option<PathBuf> {
+    match mode {
+        ExecuteMode::Logged(path) => Some(path.clone()),
+        ExecuteMode::Foreground | ExecuteMode::Background | ExecuteMode::Piped => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     plan: &ManifestData,
@@ -273,6 +284,9 @@ pub fn execute_host(
         }
     }
 
+    // Capture the Logged path before the by-value match below consumes `mode`.
+    let logged_log_path = logged_log_path(&mode);
+
     match mode {
         ExecuteMode::Foreground => {
             cmd.stdin(Stdio::inherit());
@@ -332,7 +346,7 @@ pub fn execute_host(
         cleanup_paths: Vec::new(),
         event_rx,
         workload_pid: None,
-        log_path: None,
+        log_path: logged_log_path,
         // #490: report the realized host execution cwd (the same value passed to
         // `cmd.current_dir` above) so observation records the actual cwd, not the
         // caller's ambient cwd.
@@ -342,6 +356,9 @@ pub fn execute_host(
 
 pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsuleProcess> {
     let mut cmd = build_desktop_open_command(app_path, &[]);
+
+    // Capture the Logged path before the by-value match below consumes `mode`.
+    let logged_log_path = logged_log_path(&mode);
 
     match mode {
         ExecuteMode::Foreground => {
@@ -373,7 +390,7 @@ pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsulePr
         cleanup_paths: Vec::new(),
         event_rx: None,
         workload_pid: None,
-        log_path: None,
+        log_path: logged_log_path,
         // Desktop "open path" launch: no source execution cwd to observe.
         execution_cwd: None,
     })
@@ -1665,6 +1682,19 @@ mod tests {
     use super::*;
     use crate::ipc::inject::{IpcContext, SessionActivationMode};
     use filetime::{FileTime, set_file_mtime};
+
+    // #747: only Logged captures to a file; that path becomes the session log_path.
+    #[test]
+    fn logged_log_path_only_for_logged_mode() {
+        let p = PathBuf::from("/x/engine.log");
+        assert_eq!(
+            logged_log_path(&ExecuteMode::Logged(p.clone())),
+            Some(p.clone())
+        );
+        assert_eq!(logged_log_path(&ExecuteMode::Background), None);
+        assert_eq!(logged_log_path(&ExecuteMode::Foreground), None);
+        assert_eq!(logged_log_path(&ExecuteMode::Piped), None);
+    }
     use std::collections::HashMap;
     use tempfile::tempdir;
 
