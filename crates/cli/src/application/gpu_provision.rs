@@ -1,10 +1,10 @@
-//! GPU host provisioning and health checking.
+//! GPU host provisioning and health checking (Dockerless).
 //!
 //! Implements `ato runner doctor` (read-only diagnostics) and
-//! `ato runner provision` (Ubuntu + NVIDIA driver / Docker / toolkit
-//! installation). Detection logic lives in
-//! `capsule::foundation::host_gpu`; receipt and marker types live
-//! in `capsule::foundation::provision_receipt`.
+//! `ato runner provision` (Ubuntu + NVIDIA driver / Vulkan runtime
+//! installation — no Docker / Podman / nvidia-container-toolkit). Detection
+//! logic lives in `capsule::foundation::host_gpu`; receipt and marker types
+//! live in `capsule::foundation::provision_receipt`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -23,8 +23,6 @@ const PROVISION_MARKER_RELATIVE: &str = "runner/provision-marker.json";
 /// NVIDIA driver branch installed by `provision`. Ubuntu's
 /// `nvidia-driver-575` metapackage tracks the current LTS branch.
 const NVIDIA_DRIVER_PACKAGE: &str = "nvidia-driver-575";
-
-/// CUDA base image used for the GPU smoke test.
 
 // ─────────────────────────────────────────────
 // Paths
@@ -358,11 +356,12 @@ enum ProvisionAction {
     DryRun,
 }
 
-/// Run `ato runner provision`: install driver, Docker, toolkit, smoke test.
+/// Run `ato runner provision`: install the NVIDIA driver + Vulkan runtime, then
+/// a `vulkaninfo` smoke test (Dockerless — no Docker/Podman/toolkit).
 ///
 /// Async because the optional `--enroll` path delegates to
 /// [`runner_agent::run_login`](crate::application::runner_agent::run_login),
-/// which is async. All blocking work (apt, docker, modprobe) uses
+/// which is async. All blocking work (apt, modprobe) uses
 /// `std::process::Command` directly — the caller drives this via
 /// `tokio::runtime::Runtime::block_on` from the dispatch layer.
 pub async fn run_provision(

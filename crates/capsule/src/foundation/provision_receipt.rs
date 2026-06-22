@@ -92,14 +92,8 @@ pub enum ProvisionPhase {
     /// the module can load (especially with Secure Boot / MOK).
     PostDriverInstall,
     /// A reboot was required for the driver to load; `--resume` should
-    /// re-check the driver and continue to Docker + toolkit.
+    /// re-check the driver and continue to the Vulkan runtime + smoke test.
     RebootRequired,
-    /// Docker Engine was installed; next step is the NVIDIA Container
-    /// Toolkit.
-    PostDockerInstall,
-    /// NVIDIA Container Toolkit was installed and configured; next
-    /// step is the GPU smoke test and receipt finalization.
-    PostToolkitInstall,
 }
 
 /// Intermediate provisioning state, written to
