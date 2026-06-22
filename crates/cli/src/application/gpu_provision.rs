@@ -1,10 +1,10 @@
-//! GPU host provisioning and health checking.
+//! GPU host provisioning and health checking (Dockerless).
 //!
 //! Implements `ato runner doctor` (read-only diagnostics) and
-//! `ato runner provision` (Ubuntu + NVIDIA driver / Docker / toolkit
-//! installation). Detection logic lives in
-//! `capsule::foundation::host_gpu`; receipt and marker types live
-//! in `capsule::foundation::provision_receipt`.
+//! `ato runner provision` (Ubuntu + NVIDIA driver / Vulkan runtime
+//! installation — no Docker / Podman / nvidia-container-toolkit). Detection
+//! logic lives in `capsule::foundation::host_gpu`; receipt and marker types
+//! live in `capsule::foundation::provision_receipt`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -23,9 +23,6 @@ const PROVISION_MARKER_RELATIVE: &str = "runner/provision-marker.json";
 /// NVIDIA driver branch installed by `provision`. Ubuntu's
 /// `nvidia-driver-575` metapackage tracks the current LTS branch.
 const NVIDIA_DRIVER_PACKAGE: &str = "nvidia-driver-575";
-
-/// CUDA base image used for the GPU smoke test.
-const SMOKE_TEST_IMAGE: &str = "nvidia/cuda:12.4.1-base-ubuntu22.04";
 
 // ─────────────────────────────────────────────
 // Paths
@@ -186,61 +183,76 @@ fn diagnose(profile: &HostGpuProfile) -> Vec<CheckResult> {
         });
     }
 
-    // Docker
-    if profile.docker_ready() {
-        let ver = profile
-            .docker
-            .as_ref()
-            .map(|d| d.version.as_str())
-            .unwrap_or("unknown");
-        results.push(CheckResult {
-            name: "docker",
+    // CUDA driver API — informational only (kept for a future CUDA source-build
+    // path; the Vulkan native-inference path does not require it).
+    match profile.cuda.as_ref() {
+        Some(cuda) => results.push(CheckResult {
+            name: "cuda_driver_api",
             status: CheckStatus::Ok,
-            detail: format!("Docker {ver} healthy"),
+            detail: format!("CUDA driver API {} detected", cuda.driver_api_version),
             recommendation: None,
-        });
-    } else if profile.docker.is_some() {
+        }),
+        None => results.push(CheckResult {
+            name: "cuda_driver_api",
+            // Informational only — not required for the Vulkan engine path.
+            status: CheckStatus::Na,
+            detail: "CUDA driver API not detected (not required for the Vulkan engine)".to_string(),
+            recommendation: None,
+        }),
+    }
+
+    // Vulkan loader (Dockerless GPU path).
+    if profile.vulkan_loader_present() {
         results.push(CheckResult {
-            name: "docker",
-            status: CheckStatus::Warn,
-            detail: "Docker installed but daemon not reachable".to_string(),
-            recommendation: Some("Run: sudo systemctl start docker"),
+            name: "vulkan_loader",
+            status: CheckStatus::Ok,
+            detail: "Vulkan loader present".to_string(),
+            recommendation: None,
         });
     } else {
         results.push(CheckResult {
-            name: "docker",
+            name: "vulkan_loader",
             status: CheckStatus::Fail,
-            detail: "Docker not installed".to_string(),
-            recommendation: Some("Run: sudo ato runner provision"),
+            detail: "Vulkan loader not found".to_string(),
+            recommendation: Some("Run: sudo ato runner provision --profile nvidia-ubuntu"),
         });
     }
 
-    // NVIDIA Container Toolkit
-    if profile.toolkit_configured() {
-        let ver = profile
-            .nvidia_container_toolkit
-            .as_ref()
-            .map(|t| t.version.as_str())
-            .unwrap_or("unknown");
+    // Vulkan NVIDIA device visibility (via vulkaninfo).
+    if profile.vulkan_nvidia_device_visible() {
         results.push(CheckResult {
-            name: "nvidia_container_toolkit",
+            name: "vulkan_nvidia_device",
             status: CheckStatus::Ok,
-            detail: format!("nvidia-ctk {ver} installed, nvidia runtime registered"),
+            detail: "vulkaninfo reports an NVIDIA Vulkan device".to_string(),
             recommendation: None,
-        });
-    } else if profile.nvidia_container_toolkit.is_some() {
-        results.push(CheckResult {
-            name: "nvidia_container_toolkit",
-            status: CheckStatus::Warn,
-            detail: "nvidia-ctk installed but nvidia runtime not registered in Docker".to_string(),
-            recommendation: Some("Run: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"),
         });
     } else {
         results.push(CheckResult {
-            name: "nvidia_container_toolkit",
+            name: "vulkan_nvidia_device",
             status: CheckStatus::Fail,
-            detail: "NVIDIA Container Toolkit not installed".to_string(),
-            recommendation: Some("Run: sudo ato runner provision"),
+            detail: "No NVIDIA Vulkan device visible".to_string(),
+            recommendation: Some(
+                "Verify the NVIDIA driver + Vulkan ICD, then `vulkaninfo --summary`",
+            ),
+        });
+    }
+
+    // Overall native-inference (Vulkan) readiness.
+    if profile.native_inference_vulkan_ready() {
+        results.push(CheckResult {
+            name: "native_inference_vulkan_ready",
+            status: CheckStatus::Ok,
+            detail: "Host can run a Vulkan-accelerated native-inference engine".to_string(),
+            recommendation: None,
+        });
+    } else {
+        results.push(CheckResult {
+            name: "native_inference_vulkan_ready",
+            status: CheckStatus::Fail,
+            detail:
+                "Host not ready for Vulkan native-inference (needs GPU + driver + Vulkan device)"
+                    .to_string(),
+            recommendation: Some("Run: sudo ato runner provision --profile nvidia-ubuntu"),
         });
     }
 
@@ -312,11 +324,7 @@ enum ProvisionEvent {
         action: ProvisionAction,
         detail: String,
     },
-    Docker {
-        action: ProvisionAction,
-        detail: String,
-    },
-    Toolkit {
+    Vulkan {
         action: ProvisionAction,
         detail: String,
     },
@@ -348,11 +356,12 @@ enum ProvisionAction {
     DryRun,
 }
 
-/// Run `ato runner provision`: install driver, Docker, toolkit, smoke test.
+/// Run `ato runner provision`: install the NVIDIA driver + Vulkan runtime, then
+/// a `vulkaninfo` smoke test (Dockerless — no Docker/Podman/toolkit).
 ///
 /// Async because the optional `--enroll` path delegates to
 /// [`runner_agent::run_login`](crate::application::runner_agent::run_login),
-/// which is async. All blocking work (apt, docker, modprobe) uses
+/// which is async. All blocking work (apt, modprobe) uses
 /// `std::process::Command` directly — the caller drives this via
 /// `tokio::runtime::Runtime::block_on` from the dispatch layer.
 pub async fn run_provision(
@@ -524,116 +533,52 @@ pub async fn run_provision(
         );
     }
 
-    // ── Phase C: Docker Engine ──
-    let skip_docker = post_driver.docker_ready() && !force;
-    if skip_docker {
+    // ── Phase C: Vulkan runtime (Dockerless GPU path) ──
+    // No Docker, no nvidia-container-toolkit. The NVIDIA driver ships the Vulkan
+    // ICD; we add the Vulkan loader + tools so native-inference can run a
+    // GPU-accelerated (Vulkan) llama.cpp build directly as a host process.
+    let skip_vulkan = post_driver.vulkan_loader_present() && !force;
+    if skip_vulkan {
         emit_event(
             json,
-            &ProvisionEvent::Docker {
+            &ProvisionEvent::Vulkan {
                 action: ProvisionAction::Skip,
-                detail: "Docker already installed and healthy".to_string(),
+                detail: "Vulkan loader already present".to_string(),
             },
         );
     } else {
         emit_event(
             json,
-            &ProvisionEvent::Docker {
+            &ProvisionEvent::Vulkan {
                 action: if dry_run {
                     ProvisionAction::DryRun
                 } else {
                     ProvisionAction::Install
                 },
-                detail: "apt-get install -y docker.io".to_string(),
+                detail: "apt-get install -y vulkan-tools libvulkan1".to_string(),
             },
         );
         if !dry_run {
-            run_apt(&["update"]).context("apt-get update failed before docker install")?;
-            run_apt(&["install", "-y", "docker.io"]).context("Failed to install Docker")?;
-            // Enable and start — fail hard if systemctl fails.
-            let status = Command::new("systemctl")
-                .args(["enable", "--now", "docker"])
-                .status()
-                .context("Failed to run systemctl enable --now docker")?;
-            if !status.success() {
-                bail!("systemctl enable --now docker exited with status {status}");
-            }
+            run_apt(&["update"]).context("apt-get update failed before Vulkan install")?;
+            run_apt(&["install", "-y", "vulkan-tools", "libvulkan1"])
+                .context("Failed to install the Vulkan loader/tools")?;
             emit_event(
                 json,
-                &ProvisionEvent::Docker {
+                &ProvisionEvent::Vulkan {
                     action: ProvisionAction::Verify,
-                    detail: "systemctl enable --now docker".to_string(),
+                    detail: "vulkan-tools + libvulkan1 installed".to_string(),
                 },
             );
         }
     }
 
-    // ── Phase D: NVIDIA Container Toolkit ──
-    let skip_toolkit = post_driver.toolkit_configured() && !force;
-    if skip_toolkit {
-        emit_event(
-            json,
-            &ProvisionEvent::Toolkit {
-                action: ProvisionAction::Skip,
-                detail: "nvidia-container-toolkit already configured".to_string(),
-            },
-        );
-    } else {
-        // Add NVIDIA toolkit apt repository
-        emit_event(
-            json,
-            &ProvisionEvent::Toolkit {
-                action: if dry_run {
-                    ProvisionAction::DryRun
-                } else {
-                    ProvisionAction::Install
-                },
-                detail:
-                    "Adding NVIDIA toolkit apt repository and installing nvidia-container-toolkit"
-                        .to_string(),
-            },
-        );
-        if !dry_run {
-            install_nvidia_container_toolkit()?;
-            emit_event(
-                json,
-                &ProvisionEvent::Toolkit {
-                    action: ProvisionAction::Configure,
-                    detail: "nvidia-ctk runtime configure --runtime=docker".to_string(),
-                },
-            );
-            let ctk_status = Command::new("nvidia-ctk")
-                .args(["runtime", "configure", "--runtime=docker"])
-                .status()
-                .context("Failed to run nvidia-ctk runtime configure")?;
-            if !ctk_status.success() {
-                bail!(
-                    "nvidia-ctk runtime configure --runtime=docker exited with status {ctk_status}"
-                );
-            }
-            let restart_status = Command::new("systemctl")
-                .args(["restart", "docker"])
-                .status()
-                .context("Failed to run systemctl restart docker")?;
-            if !restart_status.success() {
-                bail!("systemctl restart docker exited with status {restart_status}");
-            }
-            emit_event(
-                json,
-                &ProvisionEvent::Toolkit {
-                    action: ProvisionAction::Verify,
-                    detail: "docker restarted with nvidia runtime".to_string(),
-                },
-            );
-        }
-    }
-
-    // ── Phase E: GPU Smoke Test ──
+    // ── Phase D: GPU smoke (Dockerless: vulkaninfo must see an NVIDIA device) ──
     let smoke_result = if dry_run {
         emit_event(
             json,
             &ProvisionEvent::SmokeTest {
                 action: ProvisionAction::DryRun,
-                detail: format!("docker run --rm --gpus all {SMOKE_TEST_IMAGE} nvidia-smi"),
+                detail: "vulkaninfo --summary (expect an NVIDIA device)".to_string(),
             },
         );
         SmokeResult::Skipped
@@ -642,14 +587,17 @@ pub async fn run_provision(
             json,
             &ProvisionEvent::SmokeTest {
                 action: ProvisionAction::Verify,
-                detail: format!("docker run --rm --gpus all {SMOKE_TEST_IMAGE} nvidia-smi"),
+                detail: "vulkaninfo --summary".to_string(),
             },
         );
-        run_gpu_smoke_test(&mut warnings)
+        run_vulkan_smoke_test(&mut warnings)
     };
 
     let smoke_gpu_count = if smoke_result == SmokeResult::Pass {
-        count_gpus_in_smoke_output()
+        // Re-probe the device count from nvidia-smi (the GPUs the engine will see).
+        capsule::foundation::host_gpu::detect_host_gpu_profile()
+            .ok()
+            .map(|p| p.gpus.len())
     } else {
         None
     };
@@ -691,12 +639,9 @@ pub async fn run_provision(
             .iter()
             .map(GpuDeviceSummary::from)
             .collect(),
-        docker_version: final_profile.docker.as_ref().map(|d| d.version.clone()),
-        nvidia_container_toolkit_version: final_profile
-            .nvidia_container_toolkit
-            .as_ref()
-            .map(|t| t.version.clone()),
-        docker_gpu_smoke_result: smoke_result,
+        vulkan_loader_present: final_profile.vulkan_loader_present(),
+        vulkan_nvidia_device_visible: final_profile.vulkan_nvidia_device_visible(),
+        gpu_smoke_result: smoke_result,
         smoke_gpu_count_detected: smoke_gpu_count,
         reboot_required: false,
         warnings: warnings.clone(),
@@ -794,19 +739,21 @@ fn print_provision_summary(receipt: &ProvisionReceipt) {
         println!("               - {} ({} GB)", gpu.name, gb);
     }
     println!(
-        "  Docker:      {}",
-        receipt.docker_version.as_deref().unwrap_or("not detected")
+        "  Vulkan:      loader {}, NVIDIA device {}",
+        if receipt.vulkan_loader_present {
+            "present"
+        } else {
+            "missing"
+        },
+        if receipt.vulkan_nvidia_device_visible {
+            "visible"
+        } else {
+            "not visible"
+        }
     );
-    println!(
-        "  Toolkit:     {}",
-        receipt
-            .nvidia_container_toolkit_version
-            .as_deref()
-            .unwrap_or("not detected")
-    );
-    let smoke = match receipt.docker_gpu_smoke_result {
+    let smoke = match receipt.gpu_smoke_result {
         SmokeResult::Pass => format!(
-            "PASS ({} GPUs in container)",
+            "PASS ({} GPUs via vulkaninfo/nvidia-smi)",
             receipt.smoke_gpu_count_detected.unwrap_or(0)
         ),
         SmokeResult::Fail => "FAIL".to_string(),
@@ -865,122 +812,29 @@ fn run_apt(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn install_nvidia_container_toolkit() -> Result<()> {
-    // Add NVIDIA's toolkit apt repository for Ubuntu.
-    //
-    // Prerequisites: a bare Ubuntu image may not have curl, gnupg, or
-    // ca-certificates installed. Install them first so the GPG key
-    // download and dearmor can succeed.
-    //
-    // curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-toolkit-keyring.gpg
-    // curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-toolkit-keyring.gpg] https://#g' > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    // apt-get update && apt-get install -y nvidia-container-toolkit
-
-    // Install prerequisites first.
-    run_apt(&["update"])?;
-    run_apt(&["install", "-y", "ca-certificates", "curl", "gnupg"])?;
-
-    let keyring_path = "/usr/share/keyrings/nvidia-toolkit-keyring.gpg";
-    let list_path = "/etc/apt/sources.list.d/nvidia-container-toolkit.list";
-
-    // Use an absolute temp path under /tmp rather than a CWD-relative
-    // .ato/tmp/ — root's CWD is unpredictable and we must not pollute it.
-    let tmp_key = "/tmp/ato-nvidia-gpgkey.asc";
-
-    // Download GPG key and dearmor it
-    let curl_gpg = Command::new("curl")
-        .args([
-            "-fsSL",
-            "https://nvidia.github.io/libnvidia-container/gpgkey",
-        ])
-        .output()
-        .context("Failed to download NVIDIA GPG key")?;
-    if !curl_gpg.status.success() {
-        bail!("Failed to download NVIDIA GPG key");
-    }
-
-    std::fs::write(tmp_key, &curl_gpg.stdout)
-        .with_context(|| format!("Failed to write {tmp_key}"))?;
-
-    let gpg_status = Command::new("gpg")
-        .args(["--dearmor", "-o", keyring_path, tmp_key])
-        .status()
-        .context("Failed to dearmor NVIDIA GPG key")?;
-    if !gpg_status.success() {
-        bail!("gpg --dearmor failed");
-    }
-    std::fs::remove_file(tmp_key).ok();
-
-    // Download and install apt list
-    let curl_list = Command::new("curl")
-        .args([
-            "-fsSL",
-            "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list",
-        ])
-        .output()
-        .context("Failed to download NVIDIA toolkit apt list")?;
-    if !curl_list.status.success() {
-        bail!("Failed to download NVIDIA toolkit apt list");
-    }
-
-    let list_content = String::from_utf8_lossy(&curl_list.stdout);
-    let modified: String = list_content
-        .lines()
-        .map(|line| {
-            if line.starts_with("deb https://") {
-                line.replacen(
-                    "deb https://",
-                    &format!("deb [signed-by={keyring_path}] https://"),
-                    1,
-                )
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    std::fs::write(list_path, modified).with_context(|| format!("Failed to write {list_path}"))?;
-
-    run_apt(&["update"])?;
-    run_apt(&["install", "-y", "nvidia-container-toolkit"])?;
-    Ok(())
-}
-
-fn run_gpu_smoke_test(warnings: &mut Vec<String>) -> SmokeResult {
-    let output = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "--gpus",
-            "all",
-            SMOKE_TEST_IMAGE,
-            "nvidia-smi",
-        ])
-        .output();
-
+fn run_vulkan_smoke_test(warnings: &mut Vec<String>) -> SmokeResult {
+    let output = Command::new("vulkaninfo").arg("--summary").output();
     match output {
-        Ok(o) if o.status.success() => SmokeResult::Pass,
+        Ok(o)
+            if o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .to_lowercase()
+                    .contains("nvidia") =>
+        {
+            SmokeResult::Pass
+        }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            warnings.push(format!("GPU smoke test failed: {}", stderr.trim()));
+            warnings.push(format!(
+                "Vulkan smoke test found no NVIDIA device: {}",
+                stderr.trim()
+            ));
             SmokeResult::Fail
         }
         Err(e) => {
-            warnings.push(format!("Failed to run GPU smoke test: {e}"));
+            warnings.push(format!("Failed to run vulkaninfo: {e}"));
             SmokeResult::Fail
         }
-    }
-}
-
-fn count_gpus_in_smoke_output() -> Option<usize> {
-    // Re-run the smoke test and count GPUs (or read from the receipt path)
-    // For simplicity, re-detect from host profile.
-    let profile = capsule::foundation::host_gpu::detect_host_gpu_profile().ok()?;
-    if profile.gpus.is_empty() {
-        None
-    } else {
-        Some(profile.gpus.len())
     }
 }
 
@@ -998,11 +852,8 @@ fn emit_event(json: bool, event: &ProvisionEvent) {
             ProvisionEvent::Driver { action, detail } => {
                 ("driver", action_str(*action), detail.clone())
             }
-            ProvisionEvent::Docker { action, detail } => {
-                ("docker", action_str(*action), detail.clone())
-            }
-            ProvisionEvent::Toolkit { action, detail } => {
-                ("toolkit", action_str(*action), detail.clone())
+            ProvisionEvent::Vulkan { action, detail } => {
+                ("vulkan", action_str(*action), detail.clone())
             }
             ProvisionEvent::SmokeTest { action, detail } => {
                 ("smoke", action_str(*action), detail.clone())
@@ -1097,7 +948,7 @@ fn clear_marker() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule::foundation::host_gpu::{DockerInfo, DriverInfo, GpuDevice, OsInfo, ToolkitInfo};
+    use capsule::foundation::host_gpu::{DriverInfo, GpuDevice, OsInfo, VulkanInfo};
 
     fn test_profile() -> HostGpuProfile {
         HostGpuProfile {
@@ -1119,13 +970,9 @@ mod tests {
                 nvidia_smi_available: true,
             }),
             cuda: None,
-            docker: Some(DockerInfo {
-                version: "27.5.1".to_string(),
-                healthy: true,
-            }),
-            nvidia_container_toolkit: Some(ToolkitInfo {
-                version: "1.17.5".to_string(),
-                configured: true,
+            vulkan: Some(VulkanInfo {
+                loader_present: true,
+                nvidia_device_visible: true,
             }),
         }
     }
@@ -1172,24 +1019,44 @@ mod tests {
     }
 
     #[test]
-    fn diagnose_fails_when_no_docker() {
+    fn diagnose_fails_when_no_vulkan_loader() {
         let mut profile = test_profile();
-        profile.docker = None;
+        profile.vulkan = None;
         let checks = diagnose(&profile);
-        let docker_check = checks.iter().find(|c| c.name == "docker").unwrap();
-        assert_eq!(docker_check.status, CheckStatus::Fail);
+        let vk = checks.iter().find(|c| c.name == "vulkan_loader").unwrap();
+        assert_eq!(vk.status, CheckStatus::Fail);
+        // And the overall readiness gate fails closed.
+        let ready = checks
+            .iter()
+            .find(|c| c.name == "native_inference_vulkan_ready")
+            .unwrap();
+        assert_eq!(ready.status, CheckStatus::Fail);
     }
 
     #[test]
-    fn diagnose_fails_when_no_toolkit() {
+    fn diagnose_fails_when_no_vulkan_device() {
         let mut profile = test_profile();
-        profile.nvidia_container_toolkit = None;
+        profile.vulkan = Some(VulkanInfo {
+            loader_present: true,
+            nvidia_device_visible: false,
+        });
         let checks = diagnose(&profile);
-        let tk_check = checks
+        let dev = checks
             .iter()
-            .find(|c| c.name == "nvidia_container_toolkit")
+            .find(|c| c.name == "vulkan_nvidia_device")
             .unwrap();
-        assert_eq!(tk_check.status, CheckStatus::Fail);
+        assert_eq!(dev.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn diagnose_has_no_docker_or_toolkit_checks() {
+        let checks = diagnose(&test_profile());
+        assert!(
+            !checks
+                .iter()
+                .any(|c| c.name == "docker" || c.name == "nvidia_container_toolkit"),
+            "Dockerless doctor must not emit docker/toolkit checks"
+        );
     }
 
     #[test]
@@ -1203,15 +1070,13 @@ mod tests {
     }
 
     #[test]
-    fn diagnose_warns_when_docker_unhealthy() {
-        let mut profile = test_profile();
-        profile.docker = Some(DockerInfo {
-            version: "27.5.1".to_string(),
-            healthy: false,
-        });
-        let checks = diagnose(&profile);
-        let docker_check = checks.iter().find(|c| c.name == "docker").unwrap();
-        assert_eq!(docker_check.status, CheckStatus::Warn);
+    fn diagnose_ready_when_gpu_driver_and_vulkan_device_present() {
+        let checks = diagnose(&test_profile());
+        let ready = checks
+            .iter()
+            .find(|c| c.name == "native_inference_vulkan_ready")
+            .unwrap();
+        assert_eq!(ready.status, CheckStatus::Ok);
     }
 
     #[test]
