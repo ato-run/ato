@@ -65,12 +65,20 @@ pub struct CudaInfo {
 }
 
 /// Vulkan runtime state — the Dockerless GPU path for native-inference. On
-/// NVIDIA hosts the Vulkan ICD ships with the driver; `vulkaninfo` confirms a
-/// usable device.
+/// NVIDIA hosts the Vulkan ICD ships with the driver's userspace (`nvidia_icd.json`
+/// + `libGLX_nvidia`); `vulkaninfo` confirms a usable device. These four signals
+/// are tracked separately so provisioning/doctor can pinpoint the exact gap (a
+/// present loader does NOT imply the `vulkaninfo` tool, and a present `vulkaninfo`
+/// does NOT imply a working NVIDIA ICD).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulkanInfo {
-    /// Whether a Vulkan loader (`vulkaninfo`/`libvulkan`) is present.
+    /// Whether the Vulkan loader library (`libvulkan.so.1`) is present.
     pub loader_present: bool,
+    /// Whether the `vulkaninfo` tool (from `vulkan-tools`) is on PATH.
+    pub vulkaninfo_available: bool,
+    /// Whether an NVIDIA Vulkan ICD manifest (`nvidia_icd.json`) is installed
+    /// in a standard search dir.
+    pub nvidia_icd_present: bool,
     /// Whether `vulkaninfo` reports at least one NVIDIA physical device.
     pub nvidia_device_visible: bool,
 }
@@ -106,11 +114,27 @@ impl HostGpuProfile {
             .unwrap_or(false)
     }
 
-    /// `true` when a Vulkan loader is present on the host.
+    /// `true` when the Vulkan loader library is present on the host.
     pub fn vulkan_loader_present(&self) -> bool {
         self.vulkan
             .as_ref()
             .map(|v| v.loader_present)
+            .unwrap_or(false)
+    }
+
+    /// `true` when the `vulkaninfo` tool (the smoke tool) is available.
+    pub fn vulkaninfo_available(&self) -> bool {
+        self.vulkan
+            .as_ref()
+            .map(|v| v.vulkaninfo_available)
+            .unwrap_or(false)
+    }
+
+    /// `true` when an NVIDIA Vulkan ICD manifest is installed.
+    pub fn nvidia_vulkan_icd_present(&self) -> bool {
+        self.vulkan
+            .as_ref()
+            .map(|v| v.nvidia_icd_present)
             .unwrap_or(false)
     }
 
@@ -123,9 +147,16 @@ impl HostGpuProfile {
     }
 
     /// `true` when the host can run a Vulkan-accelerated native-inference engine
-    /// Dockerlessly: an NVIDIA GPU + working driver + a Vulkan device.
+    /// Dockerlessly: an NVIDIA GPU + working driver + the Vulkan loader + the
+    /// `vulkaninfo` tool + a visible NVIDIA Vulkan device. (Device visibility
+    /// implies a working ICD; loader + tool are required so doctor/provision
+    /// never report "ready" with the smoke tool missing.)
     pub fn native_inference_vulkan_ready(&self) -> bool {
-        self.has_gpu() && self.driver_installed() && self.vulkan_nvidia_device_visible()
+        self.has_gpu()
+            && self.driver_installed()
+            && self.vulkan_loader_present()
+            && self.vulkaninfo_available()
+            && self.vulkan_nvidia_device_visible()
     }
 
     /// `true` when the OS is Ubuntu 22.04 or 24.04 (the v0 supported set).
@@ -357,35 +388,68 @@ fn detect_cuda_info() -> Option<CudaInfo> {
     })
 }
 
-/// Detect the Vulkan runtime: whether a loader is present and whether
-/// `vulkaninfo` reports an NVIDIA physical device. This is the Dockerless GPU
-/// readiness signal for the native-inference Vulkan engine variant.
-fn detect_vulkan_info() -> Option<VulkanInfo> {
-    let loader_present = which::which("vulkaninfo").is_ok()
-        || std::path::Path::new("/usr/lib/x86_64-linux-gnu/libvulkan.so.1").exists()
-        || std::path::Path::new("/usr/lib/aarch64-linux-gnu/libvulkan.so.1").exists();
-    if !loader_present {
-        return Some(VulkanInfo {
-            loader_present: false,
-            nvidia_device_visible: false,
-        });
+/// Standard search dirs for Vulkan ICD manifests (loader convention).
+const VULKAN_ICD_DIRS: &[&str] = &["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"];
+
+/// `true` when the Vulkan loader library (`libvulkan.so.1`) is on disk. This is
+/// independent of the `vulkaninfo` tool (which ships separately in `vulkan-tools`).
+fn vulkan_loader_lib_present() -> bool {
+    [
+        "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+        "/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
+        "/lib/x86_64-linux-gnu/libvulkan.so.1",
+        "/usr/lib64/libvulkan.so.1",
+    ]
+    .iter()
+    .any(|p| std::path::Path::new(p).exists())
+}
+
+/// `true` when an NVIDIA Vulkan ICD manifest (`*nvidia*icd*.json`) is installed
+/// in a standard search dir. A present manifest is necessary (not sufficient —
+/// device visibility is the real proof) for NVIDIA Vulkan.
+fn nvidia_vulkan_icd_on_disk() -> bool {
+    for dir in VULKAN_ICD_DIRS {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.contains("nvidia") && name.ends_with(".json") {
+                return true;
+            }
+        }
     }
+    false
+}
+
+/// Detect the Vulkan runtime as four independent signals: the loader library,
+/// the `vulkaninfo` tool, an NVIDIA ICD manifest, and a visible NVIDIA device.
+/// This is the Dockerless GPU readiness signal for the native-inference Vulkan
+/// engine variant.
+fn detect_vulkan_info() -> Option<VulkanInfo> {
+    let loader_present = vulkan_loader_lib_present();
+    let vulkaninfo_available = which::which("vulkaninfo").is_ok();
+    let nvidia_icd_present = nvidia_vulkan_icd_on_disk();
 
     // `vulkaninfo --summary` lists deviceName lines; an NVIDIA device confirms
-    // the driver's Vulkan ICD is usable.
-    let nvidia_device_visible = Command::new("vulkaninfo")
-        .arg("--summary")
-        .output()
-        .map(|o| {
-            o.status.success()
-                && String::from_utf8_lossy(&o.stdout)
-                    .to_lowercase()
-                    .contains("nvidia")
-        })
-        .unwrap_or(false);
+    // the driver's Vulkan ICD is actually usable. Only meaningful when the tool
+    // exists.
+    let nvidia_device_visible = vulkaninfo_available
+        && Command::new("vulkaninfo")
+            .arg("--summary")
+            .output()
+            .map(|o| {
+                o.status.success()
+                    && String::from_utf8_lossy(&o.stdout)
+                        .to_lowercase()
+                        .contains("nvidia")
+            })
+            .unwrap_or(false);
 
     Some(VulkanInfo {
         loader_present,
+        vulkaninfo_available,
+        nvidia_icd_present,
         nvidia_device_visible,
     })
 }
@@ -538,25 +602,30 @@ mod tests {
     }
 
     #[test]
-    fn vulkan_ready_requires_gpu_driver_and_device() {
-        let mk = |gpus: Vec<GpuDevice>, driver_ok: bool, vk_device: bool| HostGpuProfile {
-            os: OsInfo {
-                distro: "ubuntu".to_string(),
-                version: "22.04".to_string(),
-                kernel: "5.15.0".to_string(),
-            },
-            secure_boot_enabled: None,
-            gpus,
-            driver: driver_ok.then(|| DriverInfo {
-                version: "575.57.08".to_string(),
-                nvidia_smi_available: true,
-            }),
-            cuda: None,
-            vulkan: Some(VulkanInfo {
-                loader_present: true,
-                nvidia_device_visible: vk_device,
-            }),
-        };
+    fn vulkan_ready_requires_gpu_driver_loader_tool_and_device() {
+        let mk =
+            |gpus: Vec<GpuDevice>, driver_ok: bool, loader: bool, tool: bool, vk_device: bool| {
+                HostGpuProfile {
+                    os: OsInfo {
+                        distro: "ubuntu".to_string(),
+                        version: "22.04".to_string(),
+                        kernel: "5.15.0".to_string(),
+                    },
+                    secure_boot_enabled: None,
+                    gpus,
+                    driver: driver_ok.then(|| DriverInfo {
+                        version: "575.57.08".to_string(),
+                        nvidia_smi_available: true,
+                    }),
+                    cuda: None,
+                    vulkan: Some(VulkanInfo {
+                        loader_present: loader,
+                        vulkaninfo_available: tool,
+                        nvidia_icd_present: vk_device,
+                        nvidia_device_visible: vk_device,
+                    }),
+                }
+            };
         let gpu = GpuDevice {
             index: 0,
             name: "NVIDIA".to_string(),
@@ -564,11 +633,14 @@ mod tests {
             vram_bytes: 0,
             pcie_bus_id: None,
         };
-        assert!(mk(vec![gpu.clone()], true, true).native_inference_vulkan_ready());
-        // Missing any of GPU / driver / vulkan device → not ready (fail closed).
-        assert!(!mk(vec![], true, true).native_inference_vulkan_ready());
-        assert!(!mk(vec![gpu.clone()], false, true).native_inference_vulkan_ready());
-        assert!(!mk(vec![gpu], true, false).native_inference_vulkan_ready());
+        assert!(mk(vec![gpu.clone()], true, true, true, true).native_inference_vulkan_ready());
+        // Missing ANY of GPU / driver / loader / vulkaninfo tool / device → not ready.
+        assert!(!mk(vec![], true, true, true, true).native_inference_vulkan_ready());
+        assert!(!mk(vec![gpu.clone()], false, true, true, true).native_inference_vulkan_ready());
+        assert!(!mk(vec![gpu.clone()], true, false, true, true).native_inference_vulkan_ready());
+        // libvulkan present but vulkaninfo tool missing → NOT ready (was the bug).
+        assert!(!mk(vec![gpu.clone()], true, true, false, true).native_inference_vulkan_ready());
+        assert!(!mk(vec![gpu], true, true, true, false).native_inference_vulkan_ready());
     }
 
     #[test]
@@ -585,10 +657,14 @@ mod tests {
             cuda: None,
             vulkan: Some(VulkanInfo {
                 loader_present: true,
+                vulkaninfo_available: false,
+                nvidia_icd_present: false,
                 nvidia_device_visible: false,
             }),
         };
         assert!(profile.vulkan_loader_present());
+        assert!(!profile.vulkaninfo_available());
+        assert!(!profile.nvidia_vulkan_icd_present());
         assert!(!profile.vulkan_nvidia_device_visible());
     }
 
