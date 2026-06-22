@@ -1023,8 +1023,19 @@ impl ExecutionDescriptor {
     }
 
     /// native-inference: local filesystem path to the model file (e.g. a GGUF).
+    /// When set, overrides managed model fetching.
     pub fn target_model(&self) -> Option<String> {
         self.compat_str(&["targets", &self.selected_target, "model"])
+    }
+
+    /// native-inference: managed model download URL (used when `model` is unset).
+    pub fn target_model_url(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "model_url"])
+    }
+
+    /// native-inference: required SHA-256 of the managed model (cache key + check).
+    pub fn target_model_sha256(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "model_sha256"])
     }
 
     pub fn targets_oci_cmd(&self) -> Vec<String> {
