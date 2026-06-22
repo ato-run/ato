@@ -2196,11 +2196,45 @@ pub fn normalize_model_sha256(value: &str) -> Option<String> {
     }
 }
 
-/// A managed `model_url` must be a plain `http(s)://` URL (Inc3 does direct
-/// download only — no `hf://`, auth, or scheme-specific resolution).
-pub fn is_safe_model_url(value: &str) -> bool {
+/// Resolve a capsule `model_url` to a plain download URL.
+///
+/// `hf://<org>/<repo>/<path-to-file>` (a **public** Hugging Face model file) expands
+/// to the canonical resolve URL on the `main` revision — a convenience layer over
+/// the existing `model_url` + `model_sha256` path: `model_sha256` (required
+/// separately) still pins the exact bytes, and the rest of the download/verify/CAS
+/// pipeline is unchanged. `http(s)://` URLs pass through verbatim. No auth, no
+/// gated/private repos, no revision/quantization auto-selection (use a full
+/// `https://…/resolve/<rev>/…` URL for those).
+pub fn resolve_model_url(value: &str) -> Result<String, String> {
     let v = value.trim();
-    (v.starts_with("https://") || v.starts_with("http://")) && !v.contains(char::is_whitespace)
+    if v.contains(char::is_whitespace) {
+        return Err(format!("model_url must not contain whitespace: {value:?}"));
+    }
+    if let Some(rest) = v.strip_prefix("hf://") {
+        // rest = <org>/<repo>/<path/to/file.gguf>
+        let parts: Vec<&str> = rest.splitn(3, '/').collect();
+        if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
+            return Err(format!(
+                "invalid hf:// model ref {value:?}; expected hf://<org>/<repo>/<path-to-file>"
+            ));
+        }
+        let (org, repo, path) = (parts[0], parts[1], parts[2]);
+        return Ok(format!(
+            "https://huggingface.co/{org}/{repo}/resolve/main/{path}"
+        ));
+    }
+    if v.starts_with("https://") || v.starts_with("http://") {
+        return Ok(v.to_string());
+    }
+    Err(format!(
+        "unsupported model_url {value:?}; use https:// or hf://<org>/<repo>/<path-to-file>"
+    ))
+}
+
+/// A managed `model_url` must be a plain `http(s)://` URL or a public
+/// `hf://<org>/<repo>/<path>` ref (resolved by [`resolve_model_url`]).
+pub fn is_safe_model_url(value: &str) -> bool {
+    resolve_model_url(value).is_ok()
 }
 
 #[cfg(test)]
@@ -2230,7 +2264,7 @@ mod engine_version_tests {
 
 #[cfg(test)]
 mod model_ref_tests {
-    use super::{is_safe_model_url, normalize_model_sha256};
+    use super::{is_safe_model_url, normalize_model_sha256, resolve_model_url};
 
     #[test]
     fn normalizes_valid_sha256_and_strips_prefix() {
@@ -2256,14 +2290,44 @@ mod model_ref_tests {
     }
 
     #[test]
-    fn model_url_must_be_http_s() {
+    fn model_url_accepts_http_s_and_wellformed_hf() {
         assert!(is_safe_model_url("https://example.com/m.gguf"));
         assert!(is_safe_model_url("http://example.com/m.gguf"));
-        assert!(!is_safe_model_url("hf://repo/model"));
+        // Well-formed public hf:// ref (org/repo/path) is accepted (#7).
+        assert!(is_safe_model_url("hf://org/repo/model.gguf"));
+        assert!(is_safe_model_url("hf://org/repo/sub/dir/model.gguf"));
+        // Malformed / unsupported.
+        assert!(!is_safe_model_url("hf://repo/model")); // missing <path> segment
+        assert!(!is_safe_model_url("hf://org/repo/")); // empty path
         assert!(!is_safe_model_url("file:///etc/passwd"));
         assert!(!is_safe_model_url("ftp://x/y"));
         assert!(!is_safe_model_url("https://e.com/a b")); // whitespace
         assert!(!is_safe_model_url(""));
+    }
+
+    #[test]
+    fn resolve_model_url_expands_hf_and_passes_http_through() {
+        // hf:// → canonical Hugging Face resolve URL on `main`; sub-paths preserved.
+        assert_eq!(
+            resolve_model_url(
+                "hf://Qwen/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+            )
+            .unwrap(),
+            "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        );
+        assert_eq!(
+            resolve_model_url("hf://org/repo/a/b/c.gguf").unwrap(),
+            "https://huggingface.co/org/repo/resolve/main/a/b/c.gguf"
+        );
+        // http(s) passes through verbatim.
+        assert_eq!(
+            resolve_model_url("https://example.com/m.gguf").unwrap(),
+            "https://example.com/m.gguf"
+        );
+        // Malformed hf:// and unsupported schemes error.
+        assert!(resolve_model_url("hf://org/repo").is_err());
+        assert!(resolve_model_url("hf://org//file.gguf").is_err());
+        assert!(resolve_model_url("s3://bucket/k").is_err());
     }
 }
 
