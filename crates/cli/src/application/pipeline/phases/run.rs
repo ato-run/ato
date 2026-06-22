@@ -3590,8 +3590,19 @@ where
         let mut scope = (*attempt).cleanup_scope();
         sidecar_cleanup.register_attempt_cleanup(&mut scope);
     }
+    // #747: capture the background engine's stdout/stderr to a log file (under the
+    // ato run dir, next to the pid file) instead of discarding it to /dev/null.
+    // execute_host returns this as the session's log_path, so `ato ps`/`ato logs`
+    // and the "process exited before readiness" error can show WHY a process that
+    // exits before readiness failed — rather than an opaque E999. `apply_logged_stdio`
+    // creates the dir and the redirect survives the parent's exit (detach-safe).
     let mode = if request.background {
-        ExecuteMode::Background
+        let run_dir = capsule::common::paths::ato_path_or_workspace_tmp("run");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        ExecuteMode::Logged(run_dir.join(format!("engine-{}-{}.log", std::process::id(), stamp)))
     } else {
         ExecuteMode::Foreground
     };

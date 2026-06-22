@@ -317,6 +317,22 @@ pub(super) async fn complete_background_source_process(
                 }
                 if let Some(log_path) = state.log_path {
                     message.push_str(&format!(". See logs at {}", log_path.display()));
+                    // Inline the last few non-empty log lines so the failure reason
+                    // is visible immediately rather than opaque. #747.
+                    if let Ok(contents) = std::fs::read_to_string(&log_path) {
+                        let tail: Vec<&str> = contents
+                            .lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .rev()
+                            .take(8)
+                            .collect();
+                        if !tail.is_empty() {
+                            message.push_str("\n  last log lines:");
+                            for line in tail.into_iter().rev() {
+                                message.push_str(&format!("\n    {line}"));
+                            }
+                        }
+                    }
                 }
             }
             anyhow::bail!(message);
