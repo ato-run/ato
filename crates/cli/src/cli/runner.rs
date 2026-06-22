@@ -89,10 +89,10 @@ pub(crate) enum RunnerCommands {
         public_url_template: Option<String>,
     },
 
-    /// Check GPU host readiness for LLM workloads. Read-only — never
-    /// mutates host state. Probes OS, NVIDIA driver, Docker, and the
-    /// NVIDIA Container Toolkit, then prints a diagnostic table with
-    /// recommended next steps.
+    /// Check GPU host readiness for Dockerless native-inference. Read-only —
+    /// never mutates host state. Probes OS, Secure Boot, NVIDIA driver, CUDA
+    /// driver API, and the Vulkan runtime (loader, vulkaninfo, NVIDIA ICD,
+    /// device), then prints a diagnostic table with recommended next steps.
     #[command(name = "doctor", about = "Check GPU host readiness for LLM workloads")]
     Doctor {
         /// Emit machine-readable JSON on stdout instead of a human table.
@@ -100,13 +100,13 @@ pub(crate) enum RunnerCommands {
         json: bool,
     },
 
-    /// Install the NVIDIA driver, Docker Engine, and NVIDIA Container
-    /// Toolkit on this Ubuntu host so it can run GPU LLM capsules.
-    /// Requires root (sudo). Idempotent: skips components already
-    /// installed unless `--force` is given.
+    /// Provision this Ubuntu host for Dockerless native-inference: the NVIDIA
+    /// driver + the Vulkan runtime (loader + vulkaninfo), then a `vulkaninfo`
+    /// GPU smoke — no container runtime. Requires root (sudo). Idempotent:
+    /// skips components already present unless `--force`.
     #[command(
         name = "provision",
-        about = "Install NVIDIA driver + Docker + nvidia-container-toolkit (Ubuntu)"
+        about = "Dockerless NVIDIA/Vulkan native-inference provisioning (Ubuntu)"
     )]
     Provision {
         /// GPU provisioning profile (v0: `nvidia-ubuntu` only).
@@ -137,4 +137,41 @@ pub(crate) enum RunnerCommands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunnerCommands;
+    use clap::{Command, Subcommand};
+
+    /// Bug 3: the Dockerless rework must not leave Docker/toolkit wording in the
+    /// `provision`/`doctor` clap help (it would contradict the implementation).
+    #[test]
+    fn runner_help_has_no_docker_or_toolkit_wording() {
+        let cmd = RunnerCommands::augment_subcommands(Command::new("runner"));
+        for name in ["provision", "doctor"] {
+            let sub = cmd.find_subcommand(name).expect("subcommand exists");
+            let about = sub.get_about().map(|s| s.to_string()).unwrap_or_default();
+            let long = sub
+                .get_long_about()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            // "Dockerless" is the intended description; strip it before the
+            // substring ban so it doesn't trip on "docker".
+            let text = format!("{about}\n{long}")
+                .to_lowercase()
+                .replace("dockerless", "");
+            for banned in [
+                "docker",
+                "podman",
+                "nvidia-container-toolkit",
+                "container toolkit",
+            ] {
+                assert!(
+                    !text.contains(banned),
+                    "`{name}` help must not mention `{banned}`: {text}"
+                );
+            }
+        }
+    }
 }

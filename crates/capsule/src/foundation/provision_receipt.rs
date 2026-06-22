@@ -64,8 +64,12 @@ pub struct ProvisionReceipt {
     pub cuda_driver_api_version: Option<String>,
     pub gpu_count: usize,
     pub gpu_devices: Vec<GpuDeviceSummary>,
-    /// Whether a Vulkan loader was present after provisioning (Dockerless GPU).
+    /// Whether the Vulkan loader library was present after provisioning.
     pub vulkan_loader_present: bool,
+    /// Whether the `vulkaninfo` tool was available after provisioning.
+    pub vulkaninfo_available: bool,
+    /// Whether an NVIDIA Vulkan ICD manifest was present after provisioning.
+    pub nvidia_vulkan_icd_present: bool,
     /// Whether `vulkaninfo` reported a usable NVIDIA Vulkan device.
     pub vulkan_nvidia_device_visible: bool,
     /// Result of the Dockerless GPU smoke (`vulkaninfo --summary`).
@@ -161,6 +165,8 @@ mod tests {
                 },
             ],
             vulkan_loader_present: true,
+            vulkaninfo_available: true,
+            nvidia_vulkan_icd_present: true,
             vulkan_nvidia_device_visible: true,
             gpu_smoke_result: SmokeResult::Pass,
             smoke_gpu_count_detected: Some(2),
