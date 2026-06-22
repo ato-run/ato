@@ -48,6 +48,7 @@ fn base_v2() -> ExecutionReceiptV2 {
                 arch: "aarch64".to_string(),
                 libc: "unknown".to_string(),
             },
+            native_inference: None,
         },
         EnvironmentIdentityV2 {
             entries: vec![EnvironmentEntry {
