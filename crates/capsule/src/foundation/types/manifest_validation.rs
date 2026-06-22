@@ -5,11 +5,14 @@ use super::*;
 
 impl CapsuleManifest {
     /// Validate the manifest
-    pub fn validate(&self) -> Result<(), Vec<ValidationError>> {
+    pub fn validate(&self) -> Result<(), Vec<super::ValidationError>> {
         self.validate_for_mode(ValidationMode::Strict)
     }
 
-    pub fn validate_for_mode(&self, mode: ValidationMode) -> Result<(), Vec<ValidationError>> {
+    pub fn validate_for_mode(
+        &self,
+        mode: ValidationMode,
+    ) -> Result<(), Vec<super::ValidationError>> {
         let mut errors = Vec::new();
 
         if self
@@ -375,9 +378,39 @@ impl CapsuleManifest {
                          (alphanumeric, `.`/`_`/`-`; no path separators or `..`)"
                     )));
                 }
-                if !nonempty(&target.model) {
+                // Model is either a local `model` path OR a managed model
+                // (`model_url` + `model_sha256`, content-addressed cache).
+                let has_local_model = nonempty(&target.model);
+                let has_managed_model =
+                    nonempty(&target.model_url) && nonempty(&target.model_sha256);
+                if !has_local_model && !has_managed_model {
                     errors.push(ValidationError::InvalidTarget(format!(
-                        "target '{label}': runtime=native-inference requires `model`"
+                        "target '{label}': runtime=native-inference requires either `model` \
+                         (a local file) or `model_url` + `model_sha256` (managed)"
+                    )));
+                }
+                if let Some(url) = target.model_url.as_deref()
+                    && !url.trim().is_empty()
+                    && !crate::foundation::types::manifest::is_safe_model_url(url)
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{label}': `model_url` must be a plain http(s):// URL"
+                    )));
+                }
+                // The sha256 is the cache key + integrity check — it must be exact.
+                if let Some(sha) = target.model_sha256.as_deref()
+                    && !sha.trim().is_empty()
+                    && crate::foundation::types::manifest::normalize_model_sha256(sha).is_none()
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{label}': `model_sha256` must be a 64-char hex SHA-256 \
+                         (optionally `sha256:`-prefixed)"
+                    )));
+                }
+                // A managed model needs its integrity hash.
+                if nonempty(&target.model_url) && !nonempty(&target.model_sha256) {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{label}': `model_url` requires `model_sha256`"
                     )));
                 }
                 continue;
@@ -1929,6 +1962,57 @@ mod tests {
     #[test]
     fn native_inference_accepts_safe_engine_version() {
         assert!(!engine_version_error("b9754"));
+    }
+
+    fn validate_native_model(model_block: &str) -> Result<(), Vec<super::ValidationError>> {
+        let toml = format!(
+            "schema_version = \"0.3\"\nname = \"native-llama\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+             default_target = \"app\"\n\
+             [targets.app]\nruntime = \"native-inference\"\nengine_path = \"./llama-server\"\n\
+             {model_block}"
+        );
+        let manifest: crate::foundation::types::manifest::CapsuleManifest =
+            toml::from_str(&toml).expect("parse manifest");
+        manifest.validate()
+    }
+
+    fn has_err(result: &Result<(), Vec<super::ValidationError>>, needle: &str) -> bool {
+        matches!(result, Err(errs) if errs.iter().any(|e| e.to_string().contains(needle)))
+    }
+
+    #[test]
+    fn native_inference_accepts_managed_model() {
+        let hex = "a".repeat(64);
+        let r = validate_native_model(&format!(
+            "model_url = \"https://example.com/m.gguf\"\nmodel_sha256 = \"{hex}\"\n"
+        ));
+        assert!(r.is_ok(), "managed model should validate: {r:?}");
+    }
+
+    #[test]
+    fn native_inference_rejects_bad_model_url_and_sha() {
+        let hex = "a".repeat(64);
+        // non-http(s) url
+        assert!(has_err(
+            &validate_native_model(&format!(
+                "model_url = \"hf://repo/m\"\nmodel_sha256 = \"{hex}\"\n"
+            )),
+            "model_url"
+        ));
+        // bad sha256
+        assert!(has_err(
+            &validate_native_model(
+                "model_url = \"https://e.com/m.gguf\"\nmodel_sha256 = \"deadbeef\"\n"
+            ),
+            "model_sha256"
+        ));
+        // model_url without sha256
+        assert!(has_err(
+            &validate_native_model("model_url = \"https://e.com/m.gguf\"\n"),
+            "model_sha256"
+        ));
+        // neither model nor model_url
+        assert!(has_err(&validate_native_model(""), "model"));
     }
 }
 

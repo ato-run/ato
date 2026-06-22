@@ -131,16 +131,7 @@ fn derive_native_inference_launch_spec(
     let target = plan.selected_target_label().to_string();
 
     let engine_command = resolve_native_inference_engine_command(plan, &target)?;
-
-    let model = plan
-        .target_model()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            CapsuleError::Config(format!(
-                "target '{target}': runtime=native-inference requires `model` \
-                 (local path to the model file, e.g. a .gguf)"
-            ))
-        })?;
+    let model = resolve_native_inference_model(plan, &target)?;
 
     // `--host 127.0.0.1` is fixed; `--port <N>` is injected by the host launcher
     // from the resolved/allocated port so the readiness probe and app_url agree.
@@ -223,6 +214,53 @@ fn resolve_native_inference_engine_command(plan: &ManifestData, target: &str) ->
             "target '{target}': runtime=native-inference requires either `engine_path` (a local \
              engine binary) or `engine` + `engine_version` (managed, e.g. engine=\"llama.cpp\", \
              engine_version=\"b4231\")"
+        ))),
+    }
+}
+
+/// Resolve the `-m <model>` value for a native-inference target:
+///  1. an explicit local `model` path always wins (override), or
+///  2. a managed model: `model_url` + `model_sha256` → the deterministic
+///     content-addressed cache path (`~/.ato/store/blobs/sha256-<hash>`), which
+///     the async ensure-step downloads + verifies before spawn.
+fn resolve_native_inference_model(plan: &ManifestData, target: &str) -> Result<String> {
+    if let Some(model) = plan.target_model().filter(|value| !value.trim().is_empty()) {
+        return Ok(model);
+    }
+
+    match plan
+        .target_model_url()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(url) => {
+            if !crate::foundation::types::manifest::is_safe_model_url(&url) {
+                return Err(CapsuleError::Config(format!(
+                    "target '{target}': `model_url` must be a plain http(s):// URL"
+                )));
+            }
+            let sha_raw = plan
+                .target_model_sha256()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    CapsuleError::Config(format!(
+                        "target '{target}': `model_url` requires `model_sha256`"
+                    ))
+                })?;
+            let sha = crate::foundation::types::manifest::normalize_model_sha256(&sha_raw)
+                .ok_or_else(|| {
+                    CapsuleError::Config(format!(
+                        "target '{target}': `model_sha256` must be a 64-char hex SHA-256"
+                    ))
+                })?;
+            // Deterministic content-addressed path — known from the sha256 alone,
+            // so preflight/receipt builders resolve it before the ensure-step
+            // downloads + verifies it (which guarantees it by spawn time).
+            let blob = crate::resource::model_cache::model_blob_path(&sha);
+            Ok(blob.to_string_lossy().to_string())
+        }
+        None => Err(CapsuleError::Config(format!(
+            "target '{target}': runtime=native-inference requires either `model` (a local file) \
+             or `model_url` + `model_sha256` (managed)"
         ))),
     }
 }
@@ -700,6 +738,70 @@ model = "./model.gguf"
         let msg = err.to_string();
         assert!(
             msg.contains("engine_path") && msg.contains("engine_version"),
+            "got: {msg}"
+        );
+    }
+
+    // Managed-model resolution (engine_path set to isolate the model path).
+    fn native_inference_model_plan(
+        tmp: &tempfile::TempDir,
+        model_block: &str,
+    ) -> super::ManifestData {
+        plan_from_manifest(
+            tmp,
+            &format!(
+                "{NATIVE_HEADER}[targets.app]\nruntime = \"native-inference\"\n\
+                 engine_path = \"./llama-server\"\n{model_block}"
+            ),
+        )
+    }
+
+    #[test]
+    fn native_inference_managed_model_resolves_blob_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hex = "a".repeat(64);
+        let plan = native_inference_model_plan(
+            &tmp,
+            &format!("model_url = \"https://example.com/m.gguf\"\nmodel_sha256 = \"{hex}\"\n"),
+        );
+        let spec = derive_launch_spec(&plan).expect("managed model resolves");
+        // args = ["-m", <blob path>, "--host", "127.0.0.1"]
+        assert_eq!(spec.args[0], "-m");
+        assert!(
+            spec.args[1].ends_with(&format!("sha256-{hex}")),
+            "model resolves to the content-addressed blob path: {}",
+            spec.args[1]
+        );
+    }
+
+    #[test]
+    fn native_inference_model_url_requires_sha256() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan =
+            native_inference_model_plan(&tmp, "model_url = \"https://example.com/m.gguf\"\n");
+        let err = derive_launch_spec(&plan).expect_err("model_url needs sha256");
+        assert!(err.to_string().contains("model_sha256"), "got: {err}");
+    }
+
+    #[test]
+    fn native_inference_invalid_model_sha256_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = native_inference_model_plan(
+            &tmp,
+            "model_url = \"https://example.com/m.gguf\"\nmodel_sha256 = \"not-a-real-hash\"\n",
+        );
+        let err = derive_launch_spec(&plan).expect_err("invalid sha must error");
+        assert!(err.to_string().contains("SHA-256"), "got: {err}");
+    }
+
+    #[test]
+    fn native_inference_requires_model_or_managed_model() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = native_inference_model_plan(&tmp, "");
+        let err = derive_launch_spec(&plan).expect_err("needs model or model_url");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("model") && msg.contains("model_url"),
             "got: {msg}"
         );
     }
