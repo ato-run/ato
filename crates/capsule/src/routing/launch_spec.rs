@@ -191,7 +191,17 @@ fn resolve_native_inference_engine_command(plan: &ManifestData, target: &str) ->
                      (alphanumeric / `.`/`_`/`-` only; no path separators or `..`)"
                 )));
             }
-            // Deterministic cached path: `<cache>/llamacpp-<ver>/llama-server`.
+            let variant = plan
+                .target_engine_variant()
+                .filter(|value| !value.trim().is_empty());
+            // The platform-specific fail-closed for an unsupported variant
+            // (e.g. `cuda` on Linux, `vulkan` on macOS) is enforced by the
+            // fetcher at the ensure-step; here we only need the variant-aware
+            // cache KEY so this deterministic path matches what the fetcher
+            // populates (GPU and CPU builds of a tag never share a directory).
+            let key =
+                crate::packers::runtime_fetcher::llamacpp_cache_key(&version, variant.as_deref());
+            // Deterministic cached path: `<cache>/llamacpp-<key>/llama-server`.
             // The fetcher GUARANTEES this canonical path as a post-condition, so
             // we build it WITHOUT an existence check — the receipt/preflight
             // builders call this before the async ensure-step has downloaded the
@@ -205,9 +215,7 @@ fn resolve_native_inference_engine_command(plan: &ManifestData, target: &str) ->
             } else {
                 "llama-server"
             };
-            let binary = fetcher
-                .get_runtime_path("llamacpp", &version)
-                .join(binary_name);
+            let binary = fetcher.get_runtime_path("llamacpp", &key).join(binary_name);
             Ok(binary.to_string_lossy().to_string())
         }
         _ => Err(CapsuleError::Config(format!(
@@ -716,6 +724,38 @@ model = "./model.gguf"
         assert!(
             spec.command.ends_with(suffix),
             "command should resolve to the cached llama-server: {}",
+            spec.command
+        );
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_engine_variant_separates_cache() {
+        // A GPU `engine_variant` resolves to a variant-keyed cache dir
+        // (`llamacpp-<ver>@<variant>/`) so it never collides with the CPU build.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine = "llama.cpp"
+engine_version = "b9754"
+engine_variant = "vulkan"
+model = "./model.gguf"
+"#
+            ),
+        );
+        let spec = derive_launch_spec(&plan).expect("variant engine resolves");
+        let suffix = if cfg!(target_os = "windows") {
+            "llamacpp-b9754@vulkan\\llama-server.exe"
+        } else {
+            "llamacpp-b9754@vulkan/llama-server"
+        };
+        assert!(
+            spec.command.ends_with(suffix),
+            "variant must be keyed into the cache path: {}",
             spec.command
         );
     }

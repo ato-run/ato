@@ -4425,8 +4425,33 @@ async fn ensure_native_inference_engine(plan: &capsule::router::ManifestData) ->
                         "engine=\"llama.cpp\" requires `engine_version` (a build tag, e.g. \"b4231\")"
                     )
                 })?;
+            let variant = plan
+                .target_engine_variant()
+                .filter(|value| !value.trim().is_empty());
+            let variant_norm = variant.as_deref().map(|v| v.trim().to_ascii_lowercase());
+            let is_gpu_variant = !matches!(
+                variant_norm.as_deref(),
+                None | Some("") | Some("default") | Some("cpu") | Some("metal")
+            );
+            // Fail closed: a GPU engine variant (e.g. vulkan) must NOT silently
+            // fall back to a CPU build. Require a detected NVIDIA GPU before
+            // fetching the GPU build; otherwise direct the user to provisioning.
+            if is_gpu_variant
+                && capsule::hardware::detect_nvidia_gpus()
+                    .ok()
+                    .flatten()
+                    .map(|r| r.count == 0)
+                    .unwrap_or(true)
+            {
+                return Err(anyhow::anyhow!(
+                    "engine_variant={:?} requires an NVIDIA GPU, but none was detected \
+                     (nvidia-smi). Run `ato runner doctor --profile nvidia-ubuntu` / \
+                     `ato runner provision --profile nvidia-ubuntu`, or set an explicit engine_path.",
+                    variant.as_deref().unwrap_or("")
+                ));
+            }
             capsule::packers::runtime_fetcher::RuntimeFetcher::new()?
-                .ensure_llamacpp(&version)
+                .ensure_llamacpp(&version, variant.as_deref())
                 .await?;
             Ok(())
         }
