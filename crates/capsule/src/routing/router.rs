@@ -1035,8 +1035,14 @@ impl ExecutionDescriptor {
     }
 
     /// native-inference: managed model download URL (used when `model` is unset).
+    ///
+    /// `hf://<org>/<repo>/<path>` refs are resolved to their canonical Hugging Face
+    /// https download URL here, so the whole download/verify/CAS path consumes a
+    /// plain URL unchanged (#7). A malformed `hf://` ref is left verbatim — manifest
+    /// validation rejects it before a run reaches this point.
     pub fn target_model_url(&self) -> Option<String> {
         self.compat_str(&["targets", &self.selected_target, "model_url"])
+            .map(|raw| crate::foundation::types::manifest::resolve_model_url(&raw).unwrap_or(raw))
     }
 
     /// native-inference: required SHA-256 of the managed model (cache key + check).
