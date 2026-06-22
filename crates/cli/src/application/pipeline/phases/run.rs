@@ -3278,11 +3278,12 @@ where
     // preflight for native-inference, mirroring the dispatch.
     let is_native_inference =
         state.decision.plan.execution_runtime().as_deref() == Some("native-inference");
-    if matches!(guard_result.executor_kind, ExecutorKind::Native)
-        && !request.dangerously_skip_permissions
-        && !host_fallback_requested
-        && !is_native_inference
-    {
+    if should_run_native_sandbox_preflight(
+        guard_result.executor_kind,
+        request.dangerously_skip_permissions,
+        host_fallback_requested,
+        is_native_inference,
+    ) {
         state.native_nacelle = Some(crate::commands::run::preflight_native_sandbox(
             request.nacelle.clone(),
             &state.decision.plan,
@@ -3296,6 +3297,26 @@ where
     progress.ok(HourglassPhase::DryRun, "runtime preflight completed");
 
     Ok(state)
+}
+
+/// Whether the Tier2 nacelle **sandbox** preflight should run for this launch.
+///
+/// It applies only to sandboxed `ExecutorKind::Native` (source/python) runs.
+/// Host-execution launches never use the nacelle sandbox, so they must skip it
+/// (otherwise a host with no sandbox backend fails E304 even though none is
+/// needed): `--dangerously-skip-permissions`, the compatibility host fallback,
+/// and — crucially — `native-inference` (which is `ExecutorKind::Native` but is
+/// host-native by design and always takes the host launcher). See #748.
+fn should_run_native_sandbox_preflight(
+    executor_kind: ExecutorKind,
+    dangerously_skip_permissions: bool,
+    host_fallback_requested: bool,
+    is_native_inference: bool,
+) -> bool {
+    matches!(executor_kind, ExecutorKind::Native)
+        && !dangerously_skip_permissions
+        && !host_fallback_requested
+        && !is_native_inference
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5490,6 +5511,40 @@ mod tests {
     use std::sync::Arc;
 
     use crate::reporters::CliReporter;
+
+    // ── #748: native-inference (host execution) skips the nacelle sandbox preflight ──
+    #[test]
+    fn native_inference_skips_sandbox_preflight() {
+        use super::should_run_native_sandbox_preflight;
+        use capsule::execution_plan::guard::ExecutorKind;
+        // Sandboxed Tier2 (source/python): runs the preflight.
+        assert!(should_run_native_sandbox_preflight(
+            ExecutorKind::Native,
+            false,
+            false,
+            false
+        ));
+        // native-inference is ExecutorKind::Native but host-native → MUST skip (the #748 fix).
+        assert!(!should_run_native_sandbox_preflight(
+            ExecutorKind::Native,
+            false,
+            false,
+            true
+        ));
+        // dangerously-skip / host-fallback also skip (host execution).
+        assert!(!should_run_native_sandbox_preflight(
+            ExecutorKind::Native,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_run_native_sandbox_preflight(
+            ExecutorKind::Native,
+            false,
+            true,
+            false
+        ));
+    }
 
     // ── native-inference engine_variant fail-closed ordering (Inc4) ──
     // A panicking probe asserts the GPU readiness check is NOT consulted.
