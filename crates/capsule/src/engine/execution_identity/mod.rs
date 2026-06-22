@@ -734,6 +734,7 @@ impl ExecutionReceiptV2 {
                 binary_hash: untracked_string(),
                 dynamic_linkage: untracked_string(),
                 completeness: RuntimeCompleteness::DeclaredOnly,
+                native_inference: None,
                 platform: PlatformIdentity {
                     os: std::env::consts::OS.to_string(),
                     arch: std::env::consts::ARCH.to_string(),
@@ -1650,6 +1651,44 @@ pub struct RuntimeIdentityV2 {
     pub dynamic_linkage: Tracked<String>,
     pub completeness: RuntimeCompleteness,
     pub platform: PlatformIdentity,
+    /// native-inference only: the declared/resolved engine + model context.
+    /// Absent (`None`) for every other runtime and omitted from JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_inference: Option<NativeInferenceContext>,
+}
+
+/// Declared/resolved evidence for a `runtime = "native-inference"` run — the
+/// managed engine + model selection as known at preflight. This is identity
+/// (declared/resolved domain), NOT observed execution: it records what was
+/// selected, not which backend actually ran (cpu/metal/vulkan at runtime). The
+/// actually-used backend is deferred to observed-runtime evidence (#490 family).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeInferenceContext {
+    /// Declared engine, e.g. `"llama.cpp"`. `None` if only a local `engine_path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Declared engine build tag, e.g. `"b9754"`. `None` for purely local engines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
+    /// Raw declared variant, e.g. `"vulkan"`. `None` when omitted (default build).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_variant_declared: Option<String>,
+    /// Platform-resolved variant label for a managed engine (declared/resolved
+    /// domain, NOT the observed backend): an explicit variant (e.g. `"vulkan"`)
+    /// passes through; the default resolves to `"metal"` on macOS, else `"cpu"`.
+    /// `None` for a local `engine_path` (no managed resolution; the local
+    /// binary's backend is not inspected).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_variant_resolved: Option<String>,
+    /// `true` when Ato resolves/fetches the managed engine (no local `engine_path`).
+    pub engine_managed: bool,
+    /// `true` when Ato resolves/fetches the model into the CAS from
+    /// `model_url` + `model_sha256`.
+    pub model_managed: bool,
+    /// Normalized declared CAS hash for a managed model. `None` for a local model
+    /// (local model hashes are not computed in this slice).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2629,6 +2668,7 @@ pub(in crate::engine::execution_identity) mod tests {
                 binary_hash: Tracked::known("blake3:runtime".to_string()),
                 dynamic_linkage: Tracked::known("blake3:dyn".to_string()),
                 completeness: RuntimeCompleteness::BinaryWithDynamicClosure,
+                native_inference: None,
                 platform: PlatformIdentity {
                     os: "macos".to_string(),
                     arch: "aarch64".to_string(),
