@@ -169,7 +169,7 @@ launch_digest = blake3(
 
 ### 3.1 `[run]` セクション (v1+ で正式採用)
 
-> **v0 の制約**: BUILD_MATERIALIZATION §3.0 と同じ理由で、capsule-core の
+> **v0 の制約**: BUILD_MATERIALIZATION §3.0 と同じ理由で、capsule の
 > 既存 schema との衝突回避のため `[run]` の正式採用は v1。v0 は既存の
 > `run = "..."` / `port = N` / `readiness_probe` を canonical source として読む。
 >

@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Repo-wide guidance for Claude Code (and humans). Crate-specific notes live in
-each crate's own `CLAUDE.md` (currently: `crates/ato-desktop/CLAUDE.md`).
+each crate's own `CLAUDE.md` (currently: `crates/desktop/CLAUDE.md`).
 
 ## Branching model
 
@@ -99,8 +99,8 @@ git worktree add -b feat/0.7-issue-NNN-slug .worktrees/issue-NNN origin/nightly
 #### Patch release from `release/0.6` (or `release/0.5`)
 
 1. Verify the maintenance branch end-to-end.
-2. Bump versions in the four release crates: `ato-cli`, `ato-desktop`,
-   `nacelle`, `ato-desktop-xtask` (xtask must track ato-desktop because
+2. Bump versions in the four release crates: `cli`, `desktop`,
+   `nacelle`, `ato-desktop-xtask` (xtask must track desktop because
    `env!("CARGO_PKG_VERSION")` is embedded into bundle filenames).
 3. `cargo update -p <crate> --offline` for each (refreshes Cargo.lock files).
 4. Commit `chore(release): bump to X.Y.Z` on the maintenance branch.
@@ -202,15 +202,15 @@ git push --delete origin fix/issue-NNN-slug        # remote
 ## Release artifacts
 
 `v*` tags fire two workflows in parallel: `release.yml` (cargo-dist, builds
-ato-cli + nacelle) and `desktop-release.yml` (xtask, builds ato-desktop
+cli + nacelle) and `desktop-release.yml` (xtask, builds ato-desktop
 bundles). Both upload to the same GitHub release. The desktop workflow
 waits up to 15 min for cargo-dist's `host` job to create the release object,
 then falls through to creating it itself — so the order of the two
 workflows finishing doesn't matter.
 
 Desktop bundle filenames embed `env!("CARGO_PKG_VERSION")` from the
-`ato-desktop-xtask` crate. **Always bump xtask's version together with
-ato-desktop's** or the bundle filenames will lag the actual release version.
+`ato-desktop-xtask` crate. **Always bump xtask's version together with the
+ato-desktop bundle's** or the bundle filenames will lag the actual release version.
 
 ## Memory and skills
 

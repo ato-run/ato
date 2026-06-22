@@ -234,7 +234,7 @@ CLI の front-door は `run`, `decap`, `encap` の 3 つに固定する。物語
 - `capsule://<publisher>/<slug>` は invalid。
 - `capsule://local/...` は invalid。
 - `ato://...` は host route 専用であり、registry shorthand には使わない。
-- `ato app resolve` / `ato app session start` は desktop control-plane 用に維持するが、内部実装は `capsule-core` の shared resolver を正本とする。
+- `ato app resolve` / `ato app session start` は desktop control-plane 用に維持するが、内部実装は `capsule` の shared resolver を正本とする。
 
 ### 3.7 Desktop Session Contract
 
@@ -387,5 +387,5 @@ ato-cli は **IPC Broker** として以下の責務を担う（CAPSULE_IPC_SPEC 
 
 ## 9. 依存
 
-- capsule-core / nacelle (engine)
+- capsule / nacelle (engine)
 - clap / anyhow / serde

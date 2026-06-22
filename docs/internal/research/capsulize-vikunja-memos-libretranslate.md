@@ -14,7 +14,7 @@
 ┌───────────────────────────────────────────────────────────────┐
 │  ato-desktop (GPUI shell, 親プロセス)                          │
 │   └─ pane 起動 → ato run <capsule-dir>                         │
-│        └─ capsule-core engine (OCI driver, bollard)            │
+│        └─ capsule engine (OCI driver, bollard)            │
 │             └─ docker container (vikunja / memos / libretranslate)│
 │                  ├─ port 3456 / 5230 / 5000 を host に publish │
 │                  └─ named volume を ~/.ato/state 配下にマウント│
@@ -24,9 +24,9 @@
 
 **OCI を選ぶ根拠（実コードで確認）:**
 
-- Vikunja は Go 単体バイナリだが、フロント (Vue) は **配布形態が Docker image / 個別 zip** で、ato 側の `runtime = "source/native"` は **UARC V1 で deprecated** ([crates/capsule-core/src/foundation/types/manifest.rs:91-94](../crates/capsule-core/src/foundation/types/manifest.rs))。同じ理由で Memos も OCI。
+- Vikunja は Go 単体バイナリだが、フロント (Vue) は **配布形態が Docker image / 個別 zip** で、ato 側の `runtime = "source/native"` は **UARC V1 で deprecated** ([crates/capsule/src/foundation/types/manifest.rs:91-94](../crates/capsule/src/foundation/types/manifest.rs))。同じ理由で Memos も OCI。
 - LibreTranslate は Python 製なので `runtime = "source/python"` も可能だが、**RuntimeGuard が `--unsafe` と `--enforcement strict` を要求** ([ATO_CLI_SPEC §3](../crates/ato-cli/docs/rfcs/accepted/ATO_CLI_SPEC.md))。OCI なら不要。
-- 永続化は **`[storage.volumes]`** で `mount_path` を指定すれば bollard が PortBinding と Volume を同時に張る ([oci.rs](../crates/capsule-core/src/engine/runtime/oci.rs))。
+- 永続化は **`[storage.volumes]`** で `mount_path` を指定すれば bollard が PortBinding と Volume を同時に張る ([oci.rs](../crates/capsule/src/engine/runtime/oci.rs))。
 
 ---
 
@@ -43,7 +43,7 @@
 
 ## 2. ato capsule.toml の必要最小スキーマ（v0.3 確定版）
 
-実装で確認済みの OCI capsule のフィールド ([manifest.rs:1150-1260](../crates/capsule-core/src/foundation/types/manifest.rs)):
+実装で確認済みの OCI capsule のフィールド ([manifest.rs:1150-1260](../crates/capsule/src/foundation/types/manifest.rs)):
 
 ```toml
 schema_version = "0.3"
@@ -362,7 +362,7 @@ Argos の JP-EN BLEU は **11.36** と低め。技術文書の大意把握には
 
 ### 9.1 ato は **必ず image を pull する**（local image が見えない）
 
-`crates/capsule-core/src/engine/runtime/oci.rs` の `pull_image()` が無条件に呼ばれる。`local/vikunja-ato:2.3.0` のように locally-built image を `image` に書くと:
+`crates/capsule/src/engine/runtime/oci.rs` の `pull_image()` が無条件に呼ばれる。`local/vikunja-ato:2.3.0` のように locally-built image を `image` に書くと:
 
 ```
 × Runtime error: Docker responded with status code 404: pull access denied
@@ -396,7 +396,7 @@ ato が作る Docker named volume は **空 + root 所有**。Docker は「mount
 
 ### 9.3 manifest に `user` field が無い
 
-`crates/capsule-core/src/foundation/types/manifest.rs::NamedTarget` には `cmd` / `env` / `working_dir` / `port` / `image` / `run_command` はあるが **`user` field が無い**。よって 9.2 の wrapper image 戦略が現状唯一の解決策。
+`crates/capsule/src/foundation/types/manifest.rs::NamedTarget` には `cmd` / `env` / `working_dir` / `port` / `image` / `run_command` はあるが **`user` field が無い**。よって 9.2 の wrapper image 戦略が現状唯一の解決策。
 
 **ato 側の改善案**:
 ```toml
@@ -427,7 +427,7 @@ user    = "0"     # ← この field を追加すれば wrapper image 不要に
 
 ## 11. 後追いタスク
 
-- [ ] **ato に `[targets.<label>] user` field を追加** — Vikunja wrapper を不要に。`crates/capsule-core/src/foundation/types/manifest.rs::NamedTarget` に 1 行追加 → `crates/capsule-core/src/engine/runtime/oci.rs::create_container` で `Config.user` に渡す
+- [ ] **ato に `[targets.<label>] user` field を追加** — Vikunja wrapper を不要に。`crates/capsule/src/foundation/types/manifest.rs::NamedTarget` に 1 行追加 → `crates/capsule/src/engine/runtime/oci.rs::create_container` で `Config.user` に渡す
 - [ ] **ato OCI runtime に "skip pull if local exists" optimization** — local 開発・wrapper image 用途を改善
 - [ ] **`ato run --port-bind <CONTAINER>=<HOST>` の追加** — 複数 capsule の port 衝突解消・Vikunja の `VIKUNJA_SERVICE_PUBLICURL` 固定化
 - [ ] **OCI runtime の egress_allow 強制** — nacelle 並みの fail-closed network policy を OCI でも担保（現状 LibreTranslate がモデル DL に成功しているのが実証）

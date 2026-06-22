@@ -1,0 +1,1567 @@
+#![allow(dead_code)]
+
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::process::CommandExt,
+    },
+};
+
+use anyhow::{Context, Result};
+
+use capsule::execution_plan::canonical::{
+    compute_policy_segment_hash, compute_provisioning_policy_hash,
+};
+use capsule::execution_plan::error::AtoExecutionError;
+use capsule::execution_plan::model::{ExecutionPlan, ExecutionRuntime};
+use capsule::launch_spec::derive_launch_spec;
+use capsule::router::ManifestData;
+
+use crate::common::proxy;
+use crate::runtime::manager as runtime_manager;
+use crate::runtime::overrides as runtime_overrides;
+use crate::runtime::provider_workspace;
+
+use super::launch_context::RuntimeLaunchContext;
+
+struct PreparedCommand {
+    cmd: Command,
+    #[cfg(unix)]
+    _secret_fd_guard: Option<std::fs::File>,
+}
+
+/// Variant of [`spawn`] that pins the runtime port to `selected_port`
+/// when `Some`. Used by the warm-launch fast path in
+/// `app_control::session` so the child runtime exposes the same port the
+/// desktop has already locked. The port is wired through the same env
+/// channel cold-launch uses (`ATO_UI_OVERRIDE_PORT`), so executors that
+/// honour `override_port` pick it up without further changes.
+///
+/// `None` falls through to [`spawn`] without installing the override.
+pub fn spawn_with_selected_port(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+    selected_port: Option<u16>,
+) -> Result<Child> {
+    let _port_guard = selected_port.map(runtime_overrides::scoped_override_port);
+    spawn(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        launch_ctx,
+        dangerously_skip_permissions,
+    )
+}
+
+pub fn spawn(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+) -> Result<Child> {
+    verify_execution_plan_hashes(execution_plan)?;
+
+    let launch_spec = derive_launch_spec(plan)?;
+
+    // Package manager entrypoints (npm, yarn, pnpm, bun) run scripts directly — no lockfile needed.
+    if is_package_manager_entrypoint(&launch_spec.command) {
+        let PreparedCommand {
+            mut cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        } = build_package_manager_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            &launch_spec.working_dir,
+            &launch_spec.command,
+            &launch_spec.args,
+            launch_ctx,
+        )?;
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        return cmd
+            .spawn()
+            .context("Failed to spawn package manager for node compat orchestration");
+    }
+
+    let Some(_) = launch_spec.required_lockfile.as_ref() else {
+        return Err(AtoExecutionError::lock_incomplete(
+            "source/node Tier1 execution requires a Node lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, bun.lock, or bun.lockb)",
+            Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
+        )
+        .into());
+    };
+
+    if let Some(PreparedCommand {
+        mut cmd,
+        #[cfg(unix)]
+        _secret_fd_guard,
+    }) = maybe_build_direct_node_command(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        &launch_spec.args,
+        launch_ctx,
+    )? {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        return cmd
+            .spawn()
+            .context("Failed to spawn direct node runtime for orchestration");
+    }
+
+    let deno_bin = runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
+
+    let use_compat_flag = deno_supports_compat_flag(&deno_bin)?;
+
+    run_provisioning(
+        &deno_bin,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        launch_ctx,
+    )?;
+    let PreparedCommand {
+        mut cmd,
+        #[cfg(unix)]
+        _secret_fd_guard,
+    } = build_runtime_command(
+        &deno_bin,
+        plan,
+        authoritative_lock,
+        execution_plan,
+        &launch_spec.working_dir,
+        &launch_spec.command,
+        &launch_spec.args,
+        launch_ctx,
+        use_compat_flag,
+        dangerously_skip_permissions,
+    )?;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.spawn()
+        .context("Failed to spawn node compat runtime for orchestration")
+}
+
+/// Assemble the fully-prepared NodeCompat orchestration command together with
+/// the readiness port to probe. Shared by [`spawn_background`] and
+/// [`spawn_foreground`] so both daemon and foreground (Connected Runner
+/// dispatch) executions wire identical port-based readiness detection — only
+/// the stdio wiring differs between callers. Returns the `PreparedCommand`
+/// (whose `_secret_fd_guard`, on unix, must stay alive until `spawn`) so the
+/// caller controls stdio and spawn timing.
+fn build_orchestration_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+) -> Result<(PreparedCommand, Option<u16>)> {
+    verify_execution_plan_hashes(execution_plan)?;
+
+    let launch_spec = derive_launch_spec(plan)?;
+    let readiness_port = resolve_readiness_port(&launch_spec);
+
+    let prepared = if is_package_manager_entrypoint(&launch_spec.command) {
+        build_package_manager_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            &launch_spec.working_dir,
+            &launch_spec.command,
+            &launch_spec.args,
+            launch_ctx,
+        )?
+    } else {
+        let Some(_) = launch_spec.required_lockfile.as_ref() else {
+            return Err(AtoExecutionError::lock_incomplete(
+                "source/node Tier1 execution requires a Node lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock, bun.lock, or bun.lockb)",
+                Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
+            )
+            .into());
+        };
+
+        if let Some(prepared) = maybe_build_direct_node_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            &launch_spec.working_dir,
+            &launch_spec.command,
+            &launch_spec.args,
+            launch_ctx,
+        )? {
+            prepared
+        } else {
+            let deno_bin =
+                runtime_manager::ensure_deno_binary_with_authority(plan, authoritative_lock)?;
+            let use_compat_flag = deno_supports_compat_flag(&deno_bin)?;
+            run_provisioning(
+                &deno_bin,
+                &launch_spec.working_dir,
+                &launch_spec.command,
+                launch_ctx,
+            )?;
+            build_runtime_command(
+                &deno_bin,
+                plan,
+                authoritative_lock,
+                execution_plan,
+                &launch_spec.working_dir,
+                &launch_spec.command,
+                &launch_spec.args,
+                launch_ctx,
+                use_compat_flag,
+                dangerously_skip_permissions,
+            )?
+        }
+    };
+
+    Ok((prepared, readiness_port))
+}
+
+/// Resolve the readiness port the lifecycle pump TCP-probes for a NodeCompat
+/// run from the capsule's launch spec.
+///
+/// This is the exact value `build_orchestration_command` hands to
+/// [`spawn_host_lifecycle_events`] for both [`spawn_background`] and
+/// [`spawn_foreground`]: the manifest's declared `port`, with a live
+/// `ATO_UI_OVERRIDE_PORT` session override taking precedence
+/// (`override_port`). It is NOT the raw `launch_spec.port` — when the desktop
+/// remaps an occupied declared port the override is the value the server binds
+/// and the pump must probe.
+///
+/// A capsule with neither a declared port nor an override resolves to `None`,
+/// which `spawn_host_lifecycle_events` maps to an honest `Started` (never a
+/// fake `Ready`), preserving `StartedWithoutReadiness` (#623).
+fn resolve_readiness_port(launch_spec: &capsule::launch_spec::LaunchSpec) -> Option<u16> {
+    runtime_overrides::override_port(launch_spec.port)
+}
+
+/// Spawn a NodeCompat process for background (daemon) execution.
+/// Returns a `CapsuleProcess` with port-based readiness detection.
+pub fn spawn_background(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+) -> Result<super::source::CapsuleProcess> {
+    let (
+        PreparedCommand {
+            mut cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        },
+        readiness_port,
+    ) = build_orchestration_command(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        launch_ctx,
+        dangerously_skip_permissions,
+    )?;
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = cmd
+        .spawn()
+        .context("Failed to spawn supervised node compat process")?;
+    let event_rx = super::source::spawn_host_lifecycle_events(child.id(), readiness_port);
+
+    Ok(super::source::CapsuleProcess {
+        child,
+        cleanup_paths: Vec::new(),
+        event_rx: Some(event_rx),
+        workload_pid: None,
+        log_path: None,
+        execution_cwd: None,
+    })
+}
+
+/// Spawn a NodeCompat process for foreground execution (the path the Connected
+/// Runner dispatch and `ato run … --sandbox -y` take). Mirrors
+/// [`spawn_background`]'s readiness wiring — a `CapsuleProcess` whose `event_rx`
+/// is fed by [`spawn_host_lifecycle_events`] so the foreground event pump can
+/// TCP-probe the declared port, print the canonical `LIFECYCLE: ready port=N`
+/// line, and re-stamp the V2 receipt — but inherits stdio (like the blocking
+/// [`execute`] path) so the guest's output still reaches the user's terminal.
+///
+/// Capsules with neither a declared port nor a readiness probe resolve
+/// `readiness_port` to `None` and keep the honest `StartedWithoutReadiness`
+/// behavior (no fake ready), matching the host source executor (#623).
+pub fn spawn_foreground(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+) -> Result<super::source::CapsuleProcess> {
+    let (
+        PreparedCommand {
+            mut cmd,
+            #[cfg(unix)]
+            _secret_fd_guard,
+        },
+        readiness_port,
+    ) = build_orchestration_command(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        launch_ctx,
+        dangerously_skip_permissions,
+    )?;
+
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let child = cmd
+        .spawn()
+        .context("Failed to spawn node compat process in foreground")?;
+    let event_rx = super::source::spawn_host_lifecycle_events(child.id(), readiness_port);
+
+    Ok(super::source::CapsuleProcess {
+        child,
+        cleanup_paths: Vec::new(),
+        event_rx: Some(event_rx),
+        workload_pid: None,
+        log_path: None,
+        execution_cwd: None,
+    })
+}
+
+fn run_provisioning(
+    deno_bin: &Path,
+    runtime_dir: &Path,
+    entrypoint: &str,
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<()> {
+    let mut cmd = Command::new(deno_bin);
+    cmd.current_dir(runtime_dir)
+        .arg("cache")
+        .arg("--node-modules-dir")
+        .arg(entrypoint)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+    if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
+        proxy::apply_proxy_env(&mut cmd, &proxy_env);
+    }
+
+    let status = cmd
+        .status()
+        .context("Failed to execute deno cache for node compat")?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AtoExecutionError::lock_incomplete(
+            format!(
+                "deno cache for source/node Tier1 failed with exit code {}",
+                status.code().unwrap_or(1)
+            ),
+            Some("package-lock.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb"),
+        )
+        .into())
+    }
+}
+
+fn maybe_build_direct_node_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    runtime_dir: &Path,
+    entrypoint: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<Option<PreparedCommand>> {
+    if let Some(package_bin) = entrypoint.strip_prefix("npm:") {
+        return build_host_node_package_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            runtime_dir,
+            package_bin,
+            explicit_script_args,
+            launch_ctx,
+        )
+        .map(Some);
+    }
+
+    if is_provider_backed_node_workspace(runtime_dir) {
+        return build_host_node_entrypoint_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            runtime_dir,
+            entrypoint,
+            explicit_script_args,
+            launch_ctx,
+        )
+        .map(Some);
+    }
+
+    Ok(None)
+}
+
+/// Mirror each `host:<declared>` entry in `allow_hosts` onto `<resolved>` so a
+/// remapped session port (chosen by `start_runtime_session` when the declared
+/// port is occupied) is permitted by the deno sandbox alongside the originally
+/// declared port. Returns `allow_hosts` unchanged when there is no remap
+/// (`resolved == declared`) or when either port is absent. (#565)
+fn allow_net_hosts_for_resolved_port(
+    allow_hosts: &[String],
+    declared: Option<u16>,
+    resolved: Option<u16>,
+) -> Vec<String> {
+    let mut out = allow_hosts.to_vec();
+    let (Some(declared), Some(resolved)) = (declared, resolved) else {
+        return out;
+    };
+    if resolved == declared {
+        return out;
+    }
+    let declared_suffix = format!(":{declared}");
+    for entry in allow_hosts {
+        if let Some(host) = entry.strip_suffix(&declared_suffix) {
+            let rebased = format!("{host}:{resolved}");
+            if !out.contains(&rebased) {
+                out.push(rebased);
+            }
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_runtime_command(
+    deno_bin: &Path,
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    runtime_dir: &Path,
+    entrypoint: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+    use_compat_flag: bool,
+    dangerously_skip_permissions: bool,
+) -> Result<PreparedCommand> {
+    if let Some(package_bin) = entrypoint.strip_prefix("npm:") {
+        return build_host_node_package_command(
+            plan,
+            authoritative_lock,
+            execution_plan,
+            runtime_dir,
+            package_bin,
+            explicit_script_args,
+            launch_ctx,
+        );
+    }
+
+    let mut cmd = Command::new(deno_bin);
+    cmd.current_dir(runtime_dir)
+        .arg("run")
+        .arg("--node-modules-dir")
+        .arg("--no-prompt");
+    if !dangerously_skip_permissions {
+        cmd.arg("--cached-only");
+    }
+    if use_compat_flag {
+        cmd.arg("--compat");
+    }
+
+    let runtime_dir_allow = runtime_dir.to_string_lossy().to_string();
+
+    if dangerously_skip_permissions {
+        cmd.arg("-A");
+    } else {
+        cmd.arg("--allow-env");
+        cmd.arg("--allow-sys");
+
+        // When start_runtime_session remaps an occupied declared port, the
+        // server binds the resolved port (injected via $PORT below). Mirror each
+        // `host:<declared>` allow-net entry onto the resolved port so the deno
+        // sandbox permits the listen instead of denying it and crashing the
+        // server before readiness (#565). No-op when not remapped.
+        let allow_net = allow_net_hosts_for_resolved_port(
+            &execution_plan.runtime.policy.network.allow_hosts,
+            plan.execution_port(),
+            runtime_overrides::override_port(plan.execution_port()),
+        );
+        if !allow_net.is_empty() {
+            cmd.arg(format!("--allow-net={}", allow_net.join(",")));
+        }
+
+        let mut allow_read = execution_plan.runtime.policy.filesystem.read_only.clone();
+        allow_read.extend(execution_plan.runtime.policy.filesystem.read_write.clone());
+        if !allow_read.iter().any(|path| path == &runtime_dir_allow) {
+            allow_read.push(runtime_dir_allow.clone());
+        }
+        if !allow_read.is_empty() {
+            cmd.arg(format!("--allow-read={}", allow_read.join(",")));
+        }
+
+        let mut allow_write = execution_plan.runtime.policy.filesystem.read_write.clone();
+        // Auto-grant write to the capsule's own runtime_dir for both Web
+        // (build outputs) and Source (capsule's source/ tree where the
+        // start.js may scribble state — e.g. tiddlywiki creates
+        // `workspace/mywiki`). Mirrors the read auto-grant a few lines up
+        // so the capsule has symmetric access to its own files. Without
+        // this, source/node capsules that write any relative path get
+        // `NotCapable: Requires write access` from Deno even though the
+        // path is inside their own unpacked directory.
+        if matches!(
+            execution_plan.target.runtime,
+            ExecutionRuntime::Web | ExecutionRuntime::Source
+        ) && !allow_write.iter().any(|path| path == &runtime_dir_allow)
+        {
+            allow_write.push(runtime_dir_allow.clone());
+        }
+        if !allow_write.is_empty() {
+            cmd.arg(format!("--allow-write={}", allow_write.join(",")));
+        }
+
+        // Tier1 source/node capsules legitimately spawn child processes
+        // via Node's child_process API (e.g. tiddlywiki shells out to
+        // `node` for --init and --listen). Without --allow-run Deno
+        // refuses every spawn() with NotCapable. Scope to source/node
+        // only — the Web executor doesn't need this and doesn't get it.
+        if execution_plan.target.runtime == ExecutionRuntime::Source {
+            cmd.arg("--allow-run");
+        }
+    }
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    // Inject the resolved web port. `Web` runtimes always do; `Source` runtimes
+    // (e.g. a Node HTTP server reading `process.env.PORT`) do too whenever a port
+    // was declared or a session override is active, so a remapped session port
+    // actually reaches the server instead of it binding its hardcoded default and
+    // colliding on the occupied declared port (#565). Apps without a port resolve
+    // `override_port` to `None` and are unaffected.
+    if matches!(
+        execution_plan.target.runtime,
+        ExecutionRuntime::Web | ExecutionRuntime::Source
+    ) && let Some(port) = runtime_overrides::override_port(plan.execution_port())
+    {
+        cmd.env("PORT", port.to_string());
+    }
+    if execution_plan.target.runtime == ExecutionRuntime::Web {
+        if !dangerously_skip_permissions {
+            cmd.arg("--allow-env");
+            cmd.arg("--allow-sys");
+            cmd.arg(format!("--allow-ffi={runtime_dir_allow}"));
+        }
+    } else if !dangerously_skip_permissions {
+        cmd.arg(format!("--allow-ffi={runtime_dir_allow}"));
+    }
+
+    #[cfg(unix)]
+    let mut secret_fd_guard: Option<std::fs::File> = None;
+
+    #[cfg(unix)]
+    {
+        let secrets = collect_runtime_secrets(execution_plan);
+        if !secrets.is_empty() {
+            secret_fd_guard = Some(inject_secrets_via_fd3(&mut cmd, &secrets)?);
+        }
+    }
+
+    append_allow_env_permission(&mut cmd, plan, launch_ctx);
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+
+    if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
+        proxy::apply_proxy_env(&mut cmd, &proxy_env);
+    }
+
+    cmd.arg(entrypoint);
+    let args = direct_node_args(plan, execution_plan, explicit_script_args, launch_ctx);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
+
+    log_runtime_cmd(&cmd, runtime_dir, entrypoint);
+
+    Ok(PreparedCommand {
+        cmd,
+        #[cfg(unix)]
+        _secret_fd_guard: secret_fd_guard,
+    })
+}
+
+/// Trace the fully-assembled Deno command line that will run a node-compat
+/// guest. Diagnoses permission denials whose stderr reports only the
+/// offending path (e.g. tiddlywiki's `mkdirSync("workspace")` failing) by
+/// letting the user opt in to the full argv via `ATO_CLI_LOG=node-compat`.
+/// Default filter (`node-compat=warn`) keeps this silent so happy-path
+/// runs don't dump a 30-arg Deno line per session.
+fn log_runtime_cmd(cmd: &Command, runtime_dir: &Path, entrypoint: &str) {
+    let program = cmd.get_program().to_string_lossy().to_string();
+    let args = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    tracing::info!(
+        target: crate::logging::TARGET_NODE_COMPAT,
+        program,
+        cwd = %runtime_dir.display(),
+        entrypoint,
+        args = ?args,
+        "node-compat Deno command assembled"
+    );
+}
+
+fn build_host_node_package_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    runtime_dir: &Path,
+    package_bin: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<PreparedCommand> {
+    let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
+    let bin_path = resolve_node_package_bin(runtime_dir, package_bin)?;
+    let command_cwd = launch_ctx
+        .effective_cwd()
+        .map_or(runtime_dir, |value| value);
+
+    let mut cmd = Command::new(&node_bin);
+    cmd.current_dir(command_cwd).arg(&bin_path);
+
+    prepend_managed_node_to_path(&mut cmd, &node_bin);
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+        cmd.env("PORT", port.to_string());
+    }
+
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+    if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
+        proxy::apply_proxy_env(&mut cmd, &proxy_env);
+    }
+
+    let args = direct_node_args(plan, execution_plan, explicit_script_args, launch_ctx);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
+
+    Ok(PreparedCommand {
+        cmd,
+        #[cfg(unix)]
+        _secret_fd_guard: None,
+    })
+}
+
+fn build_host_node_entrypoint_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    runtime_dir: &Path,
+    entrypoint: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<PreparedCommand> {
+    provider_workspace::ensure_provider_node_execution_inputs(plan, authoritative_lock)?;
+
+    let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
+    let command_cwd = launch_ctx
+        .effective_cwd()
+        .map_or(runtime_dir, |value| value);
+    let entrypoint_path = if Path::new(entrypoint).is_absolute() {
+        Path::new(entrypoint).to_path_buf()
+    } else {
+        runtime_dir.join(entrypoint)
+    };
+
+    let mut cmd = Command::new(&node_bin);
+    cmd.current_dir(command_cwd).arg(entrypoint_path);
+
+    prepend_managed_node_to_path(&mut cmd, &node_bin);
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+        cmd.env("PORT", port.to_string());
+    }
+
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+    if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
+        proxy::apply_proxy_env(&mut cmd, &proxy_env);
+    }
+
+    let args = direct_node_args(plan, execution_plan, explicit_script_args, launch_ctx);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
+
+    Ok(PreparedCommand {
+        cmd,
+        #[cfg(unix)]
+        _secret_fd_guard: None,
+    })
+}
+
+/// Prepend the managed Node binary's directory to the child process `PATH`.
+///
+/// Fix for #294 (v0.5 pinpoint): without this, scripts spawned by the managed
+/// Node (e.g. `execSync('node ...')`, `child_process.spawn('npm', ...)`) pick up
+/// the host `node`/`npm` if one is installed, causing ato-managed runs to leak
+/// to host tooling. We prepend unconditionally so the managed bin dir wins.
+///
+/// This helper intentionally does not abstract `ManagedRuntimePath`; that
+/// abstraction lands in v0.5.x minor 1 (see RFC UNIFIED_EXECUTION_MODEL §4.2).
+fn prepend_managed_node_to_path(cmd: &mut Command, node_bin: &Path) {
+    if let Some(node_dir) = node_bin.parent() {
+        prepend_dirs_to_path(cmd, &[node_dir]);
+    }
+}
+
+/// Prepend `dirs` (highest priority first) to the spawned command's `PATH`,
+/// ahead of the inherited environment. A single call so multiple prepends do
+/// not clobber each other (each derives from the *inherited* `PATH`, not the
+/// value a prior call set on `cmd`).
+fn prepend_dirs_to_path(cmd: &mut Command, dirs: &[&Path]) {
+    #[cfg(windows)]
+    let separator = ";";
+    #[cfg(not(windows))]
+    let separator = ":";
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let mut prefix = dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(separator);
+    if !current_path.is_empty() {
+        prefix.push_str(separator);
+        prefix.push_str(&current_path);
+    }
+    cmd.env("PATH", prefix);
+}
+
+fn is_package_manager_entrypoint(entrypoint: &str) -> bool {
+    matches!(entrypoint, "npm" | "npx" | "yarn" | "pnpm" | "bun" | "deno")
+}
+
+/// When the run entrypoint is an Ato-managed runtime tool (`bun`, `pnpm`,
+/// `yarn`) declared in the manifest's `runtime_tools`, resolve its managed shim
+/// from the toolchain cache. Returns `(shim_dir, shim_path)` once the shim is
+/// present — materialized by the build/preflight lifecycle phase, which shares
+/// `runtime_tools` resolution with this path.
+///
+/// This is what puts a declared `runtime_tools.bun` on the **run** PATH, the
+/// same way the build phase does. Without it, `run = "bun run …"` resolves
+/// `bun` only next to managed node or via the host `PATH`, so a manifest-pinned
+/// Bun is silently ignored at run time (and a host without Bun fails to spawn).
+/// See ato#723.
+fn resolve_managed_runtime_tool_shim(
+    plan: &ManifestData,
+    entrypoint: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let spec = capsule::tools::lookup(entrypoint)?;
+    let version = capsule::tools::read_tool_version(
+        &plan.manifest,
+        plan.selected_target_label(),
+        entrypoint,
+    )?;
+    let shim_dir = capsule::tools::managed_tool_shim_dir(spec, &version).ok()?;
+    let shim_path = shim_dir.join(capsule::tools::tool_shim_filename(spec));
+    shim_path.is_file().then_some((shim_dir, shim_path))
+}
+
+fn resolve_package_manager_bin(node_bin: &Path, pm: &str) -> std::path::PathBuf {
+    // npm, npx, etc. are bundled alongside node — try sibling first.
+    if let Some(dir) = node_bin.parent() {
+        let candidate = dir.join(pm);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    std::path::PathBuf::from(pm)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_package_manager_command(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    runtime_dir: &Path,
+    entrypoint: &str,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<PreparedCommand> {
+    let node_bin = runtime_manager::ensure_node_binary_with_authority(plan, authoritative_lock)?;
+
+    // Prefer a manifest-pinned managed runtime tool (e.g. `runtime_tools.bun`)
+    // over a node-sibling / host-`PATH` binary, so the *run* command uses the
+    // same Bun the build phase did. Falls back to the legacy resolution when the
+    // entrypoint is not a managed/declared tool. See ato#723.
+    let managed_tool = resolve_managed_runtime_tool_shim(plan, entrypoint);
+    let pm_bin = match &managed_tool {
+        Some((_, shim_path)) => shim_path.clone(),
+        None => resolve_package_manager_bin(&node_bin, entrypoint),
+    };
+
+    let mut cmd = Command::new(&pm_bin);
+    // Package managers must run in the project root (manifest_dir), not the caller's CWD.
+    cmd.current_dir(runtime_dir);
+
+    // Ensure the managed node binary directory is on PATH so the tool can invoke
+    // node; when a managed runtime-tool shim resolved, prepend its dir *ahead*
+    // of node so any re-invocation of the tool name also hits the managed shim.
+    match (managed_tool.as_ref(), node_bin.parent()) {
+        (Some((shim_dir, _)), Some(node_dir)) => {
+            prepend_dirs_to_path(&mut cmd, &[shim_dir.as_path(), node_dir]);
+        }
+        _ => prepend_managed_node_to_path(&mut cmd, &node_bin),
+    }
+
+    for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
+        cmd.env(key, value);
+    }
+    if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
+        cmd.env("PORT", port.to_string());
+    }
+
+    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+    if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
+        proxy::apply_proxy_env(&mut cmd, &proxy_env);
+    }
+
+    let args = direct_node_args(plan, execution_plan, explicit_script_args, launch_ctx);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
+
+    Ok(PreparedCommand {
+        cmd,
+        #[cfg(unix)]
+        _secret_fd_guard: None,
+    })
+}
+
+fn is_provider_backed_node_workspace(runtime_dir: &Path) -> bool {
+    provider_workspace::is_provider_workspace(runtime_dir)
+}
+
+fn provider_resolution_metadata_path(runtime_dir: &Path) -> Option<std::path::PathBuf> {
+    provider_workspace::provider_resolution_metadata_path(runtime_dir)
+}
+
+fn direct_node_args(
+    plan: &ManifestData,
+    execution_plan: &ExecutionPlan,
+    explicit_script_args: &[String],
+    launch_ctx: &RuntimeLaunchContext,
+) -> Vec<String> {
+    if !execution_plan.runtime.policy.args.is_empty() {
+        execution_plan.runtime.policy.args.clone()
+    } else if explicit_script_args.is_empty() {
+        let mut args = plan.targets_oci_cmd();
+        args.extend(launch_ctx.command_args().iter().cloned());
+        args
+    } else {
+        let mut args = explicit_script_args.to_vec();
+        args.extend(launch_ctx.command_args().iter().cloned());
+        args
+    }
+}
+
+fn resolve_node_package_bin(runtime_dir: &Path, package_bin: &str) -> Result<std::path::PathBuf> {
+    let candidates = [
+        runtime_dir
+            .join("node_modules")
+            .join(".bin")
+            .join(package_bin),
+        runtime_dir
+            .join("node_modules")
+            .join(".bin")
+            .join(format!("{package_bin}.cmd")),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| {
+            AtoExecutionError::lock_incomplete(
+                format!(
+                    "node package binary '{}' was not materialized under node_modules/.bin",
+                    package_bin
+                ),
+                Some("node_modules/.bin"),
+            )
+            .into()
+        })
+}
+
+fn deno_supports_compat_flag(deno_bin: &Path) -> Result<bool> {
+    let output = Command::new(deno_bin)
+        .arg("run")
+        .arg("--help")
+        .stdin(Stdio::null())
+        .output()
+        .context("Failed to inspect deno run --help for compat support")?;
+    if !output.status.success() {
+        return Err(AtoExecutionError::policy_violation(
+            "unable to detect deno runtime capabilities for node compat execution",
+        )
+        .into());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.contains("--compat"))
+}
+
+fn append_allow_env_permission(
+    cmd: &mut Command,
+    plan: &ManifestData,
+    launch_ctx: &RuntimeLaunchContext,
+) {
+    let has_allow_env = cmd
+        .get_args()
+        .any(|arg| arg.to_string_lossy().starts_with("--allow-env"));
+    if has_allow_env {
+        return;
+    }
+
+    let mut keys = BTreeSet::new();
+    keys.extend(runtime_overrides::merged_env(plan.execution_env()).into_keys());
+    keys.extend(manifest_allow_env_keys(plan));
+    keys.extend(launch_ctx.env_permission_keys());
+    if keys.is_empty() {
+        return;
+    }
+
+    cmd.arg(format!(
+        "--allow-env={}",
+        keys.into_iter().collect::<Vec<_>>().join(",")
+    ));
+}
+
+fn manifest_allow_env_keys(plan: &ManifestData) -> Vec<String> {
+    plan.manifest
+        .get("isolation")
+        .and_then(|value| value.get("allow_env"))
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn map_deno_permission_error(stderr: &[u8]) -> Option<AtoExecutionError> {
+    let text = String::from_utf8_lossy(stderr);
+    let lower = text.to_ascii_lowercase();
+
+    if !lower.contains("notcapable") && !lower.contains("requires net access") {
+        return None;
+    }
+
+    let target = extract_deno_net_target(&text);
+    let message = if let Some(host) = &target {
+        format!("network policy violation: blocked egress to {}", host)
+    } else {
+        "network policy violation: blocked egress".to_string()
+    };
+
+    Some(AtoExecutionError::policy_violation(message))
+}
+
+#[cfg(test)]
+fn map_node_compat_error(stderr: &[u8]) -> Option<AtoExecutionError> {
+    let text = String::from_utf8_lossy(stderr);
+    let lower = text.to_ascii_lowercase();
+
+    let unsupported = lower.contains("not implemented")
+        || lower.contains("not yet implemented")
+        || lower.contains("unsupported")
+        || lower.contains("n-api modules are currently not supported");
+
+    if !unsupported {
+        return None;
+    }
+
+    Some(AtoExecutionError::policy_violation(
+        "node compat runtime rejected an unsupported node feature (fail-closed)",
+    ))
+}
+
+#[cfg(test)]
+fn extract_deno_net_target(stderr: &str) -> Option<String> {
+    let marker = "Requires net access to \"";
+    let start = stderr.find(marker)? + marker.len();
+    let tail = &stderr[start..];
+    let end = tail.find('"')?;
+    let host_port = &tail[..end];
+    let host = host_port.split(':').next().unwrap_or(host_port).trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+#[cfg(unix)]
+fn collect_runtime_secrets(execution_plan: &ExecutionPlan) -> BTreeMap<String, String> {
+    let mut keys = BTreeSet::new();
+
+    for key in &execution_plan.runtime.policy.secrets.allow_secret_ids {
+        if !key.trim().is_empty() {
+            keys.insert(key.trim().to_string());
+        }
+    }
+
+    if std::env::var_os("OPENAI_API_KEY").is_some() {
+        keys.insert("OPENAI_API_KEY".to_string());
+    }
+
+    let mut secrets = BTreeMap::new();
+    for key in keys {
+        if let Ok(value) = std::env::var(&key)
+            && !value.is_empty()
+        {
+            secrets.insert(key, value);
+        }
+    }
+
+    secrets
+}
+
+#[cfg(unix)]
+fn inject_secrets_via_fd3(
+    cmd: &mut Command,
+    secrets: &BTreeMap<String, String>,
+) -> Result<std::fs::File> {
+    let mut fds = [0; 2];
+    let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if pipe_result != 0 {
+        return Err(anyhow::anyhow!("failed to create secret pipe"));
+    }
+
+    let read_fd = fds[0];
+    let write_fd = fds[1];
+
+    let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
+    let payload = serde_json::to_vec(secrets)
+        .context("failed to serialize secret payload for fd injection")?;
+    writer
+        .write_all(&payload)
+        .context("failed to write secret payload into fd pipe")?;
+    drop(writer);
+
+    let reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    let dup_from_fd = reader.as_raw_fd();
+
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(dup_from_fd, 3) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if dup_from_fd != 3 {
+                libc::close(dup_from_fd);
+            }
+            Ok(())
+        });
+    }
+
+    cmd.env("ATO_SECRET_FD", "3");
+    for key in secrets.keys() {
+        cmd.env(format!("ATO_SECRET_FD_{key}"), "3");
+        cmd.env_remove(key);
+    }
+
+    Ok(reader)
+}
+
+fn verify_execution_plan_hashes(execution_plan: &ExecutionPlan) -> Result<()> {
+    let expected_policy_hash = compute_policy_segment_hash(
+        &execution_plan.runtime,
+        &execution_plan.consent.mount_set_algo_id,
+        execution_plan.consent.mount_set_algo_version,
+    )?;
+    if expected_policy_hash != execution_plan.consent.policy_segment_hash {
+        return Err(AtoExecutionError::lockfile_tampered(
+            "policy_segment_hash mismatch detected before node compat runtime",
+            Some("policy_segment_hash"),
+        )
+        .into());
+    }
+
+    let expected_provisioning_hash =
+        compute_provisioning_policy_hash(&execution_plan.provisioning)?;
+    if expected_provisioning_hash != execution_plan.consent.provisioning_policy_hash {
+        return Err(AtoExecutionError::lockfile_tampered(
+            "provisioning_policy_hash mismatch detected before node compat runtime",
+            Some("provisioning_policy_hash"),
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        allow_net_hosts_for_resolved_port, is_provider_backed_node_workspace,
+        map_deno_permission_error, map_node_compat_error, prepend_managed_node_to_path,
+        provider_resolution_metadata_path, resolve_managed_runtime_tool_shim,
+        resolve_readiness_port,
+    };
+
+    use capsule::launch_spec::{LaunchSpecSource, derive_launch_spec};
+    use capsule::router::{
+        ExecutionProfile, ManifestData, execution_descriptor_from_manifest_parts,
+    };
+    use std::collections::HashMap;
+
+    fn plan_from_manifest(tmp: &tempfile::TempDir, manifest_fragment: &str) -> ManifestData {
+        let manifest_path = tmp.path().join("capsule.toml");
+        let manifest = format!(
+            r#"
+schema_version = "0.3"
+name = "app"
+version = "0.1.0"
+type = "app"
+{manifest_fragment}
+"#
+        );
+        std::fs::write(&manifest_path, &manifest).expect("write manifest");
+        let parsed: toml::Value = toml::from_str(&manifest).expect("parse manifest");
+        execution_descriptor_from_manifest_parts(
+            parsed,
+            manifest_path,
+            tmp.path().to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
+    }
+
+    // #565: when start_runtime_session remaps an occupied declared port, the
+    // deno `--allow-net` allowlist must also permit the resolved port on every
+    // host that the declared port was permitted on, or the sandbox denies the
+    // server's listen and it crashes before readiness.
+    #[test]
+    fn allow_net_mirrors_declared_port_onto_resolved_on_remap() {
+        let declared = vec![
+            "0.0.0.0:18890".to_string(),
+            "127.0.0.1:18890".to_string(),
+            "localhost:18890".to_string(),
+        ];
+        let out = allow_net_hosts_for_resolved_port(&declared, Some(18890), Some(14126));
+        // Declared entries are preserved...
+        for entry in &declared {
+            assert!(
+                out.contains(entry),
+                "declared {entry} must be kept: {out:?}"
+            );
+        }
+        // ...and each is mirrored onto the resolved port.
+        for host in ["0.0.0.0", "127.0.0.1", "localhost"] {
+            assert!(
+                out.contains(&format!("{host}:14126")),
+                "resolved {host}:14126 must be permitted: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_net_unchanged_when_port_not_remapped() {
+        let declared = vec!["127.0.0.1:18890".to_string()];
+        // resolved == declared: no extra entries.
+        assert_eq!(
+            allow_net_hosts_for_resolved_port(&declared, Some(18890), Some(18890)),
+            declared
+        );
+        // missing override: unchanged.
+        assert_eq!(
+            allow_net_hosts_for_resolved_port(&declared, Some(18890), None),
+            declared
+        );
+    }
+
+    #[test]
+    fn allow_net_only_mirrors_entries_matching_declared_port() {
+        // An egress host on a different port must not be rebased.
+        let declared = vec![
+            "127.0.0.1:18890".to_string(),
+            "api.example.com:443".to_string(),
+        ];
+        let out = allow_net_hosts_for_resolved_port(&declared, Some(18890), Some(14126));
+        assert!(out.contains(&"127.0.0.1:14126".to_string()), "{out:?}");
+        assert!(
+            !out.iter().any(|h| h == "api.example.com:14126"),
+            "unrelated egress host must not be rebased: {out:?}"
+        );
+    }
+
+    #[test]
+    fn node_lock_path_falls_back_to_source_dir() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("create source dir");
+        std::fs::write(
+            tmp.path().join("source").join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'",
+        )
+        .expect("write source pnpm-lock");
+
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node main.js"
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(
+            spec.required_lockfile,
+            Some(tmp.path().join("source").join("pnpm-lock.yaml"))
+        );
+    }
+
+    #[test]
+    fn provider_workspace_detection_accepts_manifest_root() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let resolution = tmp.path().join("resolution.json");
+        std::fs::write(&resolution, "{}\n").expect("write provider metadata");
+
+        assert!(is_provider_backed_node_workspace(tmp.path()));
+        assert_eq!(
+            provider_resolution_metadata_path(tmp.path()),
+            Some(resolution.clone())
+        );
+    }
+
+    #[test]
+    fn provider_workspace_detection_accepts_source_subdir() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source = tmp.path().join("source");
+        let resolution = tmp.path().join("resolution.json");
+        std::fs::create_dir_all(&source).expect("create source directory");
+        std::fs::write(&resolution, "{}\n").expect("write provider metadata");
+
+        assert!(is_provider_backed_node_workspace(&source));
+        assert_eq!(
+            provider_resolution_metadata_path(&source),
+            Some(resolution.clone())
+        );
+    }
+
+    #[test]
+    fn node_lock_path_accepts_yarn_lock_in_source_dir() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("create source dir");
+        std::fs::write(
+            tmp.path().join("source").join("yarn.lock"),
+            "# yarn lockfile v1\n",
+        )
+        .expect("write source yarn lock");
+
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node main.js"
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(
+            spec.required_lockfile,
+            Some(tmp.path().join("source").join("yarn.lock"))
+        );
+    }
+
+    /// RAII guard mutating `ATO_UI_OVERRIDE_PORT` for one test and restoring it
+    /// on drop. `override_port` (which `resolve_readiness_port` calls) reads this
+    /// env var, so the session-override precedence path can only be exercised by
+    /// setting it. Restore-on-drop keeps the mutation from leaking into sibling
+    /// tests in the same process.
+    struct OverridePortGuard {
+        previous: Option<String>,
+    }
+
+    impl OverridePortGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var("ATO_UI_OVERRIDE_PORT").ok();
+            // SAFETY: mutated only through this guard within the test; restored
+            // on drop. Matches the env-mutation pattern already used by
+            // `prepend_managed_node_to_path_places_managed_bin_first`.
+            unsafe {
+                std::env::set_var("ATO_UI_OVERRIDE_PORT", value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for OverridePortGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("ATO_UI_OVERRIDE_PORT", value) },
+                None => unsafe { std::env::remove_var("ATO_UI_OVERRIDE_PORT") },
+            }
+        }
+    }
+
+    // #623: foreground NodeCompat readiness wiring. `build_orchestration_command`
+    // (shared by `spawn_foreground` and `spawn_background`) derives the readiness
+    // port the lifecycle pump TCP-probes via `resolve_readiness_port`, replacing
+    // the old blocking `execute()` which probed nothing. This drives that exact
+    // derivation (not the untouched `derive_launch_spec(&plan).port`): a declared
+    // manifest port must surface as the readiness port so dispatched node
+    // capsules emit `LIFECYCLE: ready` and reach `ready` instead of timing out at
+    // the runner's 600s ready deadline.
+    #[test]
+    fn declared_port_becomes_readiness_port_for_node_capsule() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node main.js"
+port = 8000
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+        assert_eq!(
+            resolve_readiness_port(&spec),
+            Some(8000),
+            "declared manifest port must become the readiness port the foreground \
+             lifecycle pump probes"
+        );
+    }
+
+    // #623: capsules with neither a declared port nor a session override must
+    // keep the honest `StartedWithoutReadiness` behavior — `resolve_readiness_port`
+    // yields `None`, which `spawn_host_lifecycle_events` maps to `Started` (never
+    // a fake `Ready`).
+    #[test]
+    fn missing_port_yields_no_readiness_port_for_node_capsule() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node main.js"
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+        assert_eq!(
+            resolve_readiness_port(&spec),
+            None,
+            "a node capsule with no declared port and no override must not \
+             synthesize a readiness port (no fake ready)"
+        );
+    }
+
+    // #623 / #565: when the desktop remaps an occupied declared port it installs
+    // `ATO_UI_OVERRIDE_PORT`; the server binds the override and the lifecycle pump
+    // must probe THAT port, not the raw declared one. `resolve_readiness_port`
+    // (via `override_port`) is the seam that picks the override — a property the
+    // raw `launch_spec.port` the old test asserted cannot express.
+    #[test]
+    fn session_override_takes_precedence_over_declared_readiness_port() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node main.js"
+port = 8000
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+        assert_eq!(spec.port, Some(8000), "manifest declares port 8000");
+
+        let _guard = OverridePortGuard::set("14126");
+        assert_eq!(
+            resolve_readiness_port(&spec),
+            Some(14126),
+            "a live ATO_UI_OVERRIDE_PORT must override the declared port as the \
+             readiness port the pump probes (#565 remap)"
+        );
+    }
+
+    #[test]
+    fn run_command_spec_resolves_node_entrypoint_and_args() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir_all(tmp.path().join("source")).expect("create source dir");
+        std::fs::write(
+            tmp.path().join("source").join("lib.js"),
+            "console.log('ok');",
+        )
+        .expect("write source script");
+        // resolve_launch_working_dir promotes source/ to working_dir only
+        // when source/package.json exists (Node project marker). Drop a
+        // marker so the test exercises the source-layout path.
+        std::fs::write(
+            tmp.path().join("source").join("package.json"),
+            "{\"name\":\"app\"}",
+        )
+        .expect("write package.json");
+
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+run = "node lib.js fixtures/db.json --port 3000"
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(spec.working_dir, tmp.path().join("source"));
+        assert_eq!(spec.command, "lib.js");
+        assert_eq!(spec.args, vec!["fixtures/db.json", "--port", "3000"]);
+        assert_eq!(spec.source, LaunchSpecSource::RunCommand);
+    }
+
+    #[test]
+    fn map_permission_error_returns_policy_violation() {
+        let stderr = b"error: Uncaught (in promise) PermissionDenied: Requires net access to \"api.example.com:443\"";
+        let err = map_deno_permission_error(stderr).expect("must map");
+        assert_eq!(err.code, "ATO_ERR_POLICY_VIOLATION");
+        assert!(err.message.contains("blocked egress"));
+    }
+
+    #[test]
+    fn map_node_compat_error_returns_policy_violation() {
+        let stderr = b"error: This API is not implemented in Deno";
+        let err = map_node_compat_error(stderr).expect("must map");
+        assert_eq!(err.code, "ATO_ERR_POLICY_VIOLATION");
+    }
+
+    /// #294 pinpoint regression test: the managed Node `bin` directory must be
+    /// prepended to `PATH` before the command is spawned, so child processes
+    /// (`execSync('node ...')`, `spawn('npm', ...)`) resolve to the managed
+    /// binary rather than any host-installed version.
+    #[test]
+    fn prepend_managed_node_to_path_places_managed_bin_first() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let node_bin = tmp.path().join("bin").join("node");
+        std::fs::create_dir_all(node_bin.parent().unwrap()).expect("create bin dir");
+        // No need to touch the file — prepend_managed_node_to_path just uses the
+        // parent directory; it does not check the binary exists.
+
+        // Force a deterministic baseline PATH for this test.
+        let original_path = std::env::var_os("PATH");
+        // SAFETY: tests are currently single-threaded per integration runner for
+        // this crate; if that ever changes we'll need a test fixture instead of
+        // mutating process env. For a pinpoint regression this is acceptable.
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin");
+        }
+
+        let mut cmd = std::process::Command::new(&node_bin);
+        prepend_managed_node_to_path(&mut cmd, &node_bin);
+
+        let applied_path = cmd
+            .get_envs()
+            .find_map(|(key, value)| {
+                if key == "PATH" {
+                    value.map(|v| v.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
+            })
+            .expect("PATH must be set on the command");
+
+        // restore before asserting so a panic doesn't poison env
+        match original_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+
+        let managed_dir = node_bin.parent().unwrap().display().to_string();
+        let separator = if cfg!(windows) { ";" } else { ":" };
+        let expected = format!("{}{}{}", managed_dir, separator, "/usr/bin:/bin");
+        assert_eq!(
+            applied_path, expected,
+            "managed Node bin dir must be first entry of PATH (#294)"
+        );
+    }
+
+    /// ato#723: a `source/node` capsule that declares `runtime_tools.bun` and
+    /// runs `bun run …` must resolve the **managed** Bun shim (the one the build
+    /// phase materialized), not a node-sibling or host `bun`. This is the seam
+    /// that was missing — `run = "bun run …"` previously fell through to bare
+    /// `bun` on `PATH`, which fails to spawn on a host without Bun.
+    #[test]
+    fn resolve_managed_runtime_tool_shim_finds_declared_bun() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let ato_home = tempfile::tempdir().expect("ato home");
+        let original = std::env::var_os("ATO_HOME");
+        // SAFETY: serialized by env_lock; restored below before any assertion.
+        unsafe { std::env::set_var("ATO_HOME", ato_home.path()) };
+
+        // Seed the managed Bun shim the build/preflight phase would have created.
+        let shim_dir = ato_home.path().join("toolchains/tools/bun/1.1.38/shim");
+        std::fs::create_dir_all(&shim_dir).expect("shim dir");
+        let shim_name = if cfg!(windows) { "bun.cmd" } else { "bun" };
+        std::fs::write(shim_dir.join(shim_name), "#!/bin/sh\nexec bun \"$@\"\n").expect("shim");
+
+        let tmp = tempfile::tempdir().expect("workspace");
+        // Top-level inline-table form: the descriptor folds it into the target,
+        // exercising both the fold and the run-side resolution.
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+runtime = "source/node"
+runtime_tools = { bun = "1.1.38" }
+run = "bun run server.ts"
+port = 3000
+"#,
+        );
+
+        let resolved = resolve_managed_runtime_tool_shim(&plan, "bun");
+
+        // Restore env before asserting so a failure doesn't poison other tests.
+        match original {
+            Some(v) => unsafe { std::env::set_var("ATO_HOME", v) },
+            None => unsafe { std::env::remove_var("ATO_HOME") },
+        }
+
+        let (resolved_dir, resolved_path) =
+            resolved.expect("declared managed bun shim must resolve");
+        assert_eq!(
+            resolved_dir, shim_dir,
+            "shim dir must be the managed cache dir"
+        );
+        assert_eq!(resolved_path, shim_dir.join(shim_name));
+
+        // A tool that is not declared in runtime_tools must not resolve.
+        assert!(
+            resolve_managed_runtime_tool_shim(&plan, "pnpm").is_none(),
+            "an undeclared tool must not resolve to a managed shim"
+        );
+        // A non-managed entrypoint (plain node) is never a managed runtime tool.
+        assert!(resolve_managed_runtime_tool_shim(&plan, "node").is_none());
+    }
+}
