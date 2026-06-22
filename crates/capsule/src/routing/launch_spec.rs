@@ -120,7 +120,9 @@ pub fn derive_launch_spec(plan: &ManifestData) -> Result<LaunchSpec> {
 /// Lower a `runtime = "native-inference"` target into a host-process
 /// [`LaunchSpec`]: the engine server binary is the command and the model is
 /// passed as `-m <model>`. The shared host launcher injects `--port <N>` and
-/// runs readiness/stop. Inc1: `engine_path` and `model` must be local paths.
+/// runs readiness/stop. The engine binary is either an explicit local
+/// `engine_path` or a managed `engine` + `engine_version` (Inc2); `model` is a
+/// local path. Managed engines must be fetched (ensure-step) before this runs.
 fn derive_native_inference_launch_spec(
     plan: &ManifestData,
     env_vars: HashMap<String, String>,
@@ -128,15 +130,7 @@ fn derive_native_inference_launch_spec(
 ) -> Result<LaunchSpec> {
     let target = plan.selected_target_label().to_string();
 
-    let engine_path = plan
-        .target_engine_path()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            CapsuleError::Config(format!(
-                "target '{target}': runtime=native-inference requires `engine_path` \
-                 (local path to the engine server binary, e.g. llama-server)"
-            ))
-        })?;
+    let engine_command = resolve_native_inference_engine_command(plan, &target)?;
 
     let model = plan
         .target_model()
@@ -159,7 +153,7 @@ fn derive_native_inference_launch_spec(
 
     Ok(LaunchSpec {
         working_dir: plan.compat_manifest_dir().to_path_buf(),
-        command: engine_path,
+        command: engine_command,
         args,
         env_vars,
         required_lockfile: None,
@@ -171,6 +165,66 @@ fn derive_native_inference_launch_spec(
         port: port.or(Some(8080)),
         source: LaunchSpecSource::Entrypoint,
     })
+}
+
+/// Resolve the engine server command for a native-inference target:
+///  1. an explicit local `engine_path` always wins (override), or
+///  2. a managed engine: `engine = "llama.cpp"` + `engine_version` → the cached
+///     `llama-server` binary (must already be fetched by the ensure-step).
+fn resolve_native_inference_engine_command(plan: &ManifestData, target: &str) -> Result<String> {
+    if let Some(engine_path) = plan
+        .target_engine_path()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(engine_path);
+    }
+
+    let engine = plan
+        .target_engine()
+        .map(|value| value.trim().to_ascii_lowercase());
+    match engine.as_deref() {
+        Some("llama.cpp") | Some("llamacpp") | Some("llama-cpp") => {
+            let version = plan
+                .target_engine_version()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    CapsuleError::Config(format!(
+                        "target '{target}': engine=\"llama.cpp\" requires `engine_version` \
+                         (a build tag, e.g. \"b4231\") — or set an explicit `engine_path`"
+                    ))
+                })?;
+            // Defense-in-depth: the version is interpolated into the cache path.
+            if !crate::foundation::types::manifest::is_safe_engine_version(&version) {
+                return Err(CapsuleError::Config(format!(
+                    "target '{target}': unsafe `engine_version` {version:?} \
+                     (alphanumeric / `.`/`_`/`-` only; no path separators or `..`)"
+                )));
+            }
+            // Deterministic cached path: `<cache>/llamacpp-<ver>/llama-server`.
+            // The fetcher GUARANTEES this canonical path as a post-condition, so
+            // we build it WITHOUT an existence check — the receipt/preflight
+            // builders call this before the async ensure-step has downloaded the
+            // binary, which the ensure-step then guarantees by spawn time.
+            let fetcher =
+                crate::packers::runtime_fetcher::RuntimeFetcher::new().map_err(|err| {
+                    CapsuleError::Config(format!("failed to init toolchain cache: {err}"))
+                })?;
+            let binary_name = if cfg!(target_os = "windows") {
+                "llama-server.exe"
+            } else {
+                "llama-server"
+            };
+            let binary = fetcher
+                .get_runtime_path("llamacpp", &version)
+                .join(binary_name);
+            Ok(binary.to_string_lossy().to_string())
+        }
+        _ => Err(CapsuleError::Config(format!(
+            "target '{target}': runtime=native-inference requires either `engine_path` (a local \
+             engine binary) or `engine` + `engine_version` (managed, e.g. engine=\"llama.cpp\", \
+             engine_version=\"b4231\")"
+        ))),
+    }
 }
 
 fn derive_run_command_launch_spec(
@@ -575,6 +629,79 @@ engine_path = "./llama-server"
         );
         let err = derive_launch_spec(&plan).expect_err("must require model");
         assert!(err.to_string().contains("model"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_managed_engine_requires_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine = "llama.cpp"
+model = "./model.gguf"
+"#
+            ),
+        );
+        let err = derive_launch_spec(&plan).expect_err("managed engine needs engine_version");
+        assert!(err.to_string().contains("engine_version"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_managed_engine_resolves_cached_path() {
+        // engine + engine_version resolves to the deterministic cached binary
+        // path (`<cache>/llamacpp-<ver>/llama-server`) without an existence
+        // check — the async ensure-step fetches it before spawn.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine = "llama.cpp"
+engine_version = "b4231"
+model = "./model.gguf"
+"#
+            ),
+        );
+        let spec = derive_launch_spec(&plan).expect("managed engine resolves");
+        let suffix = if cfg!(target_os = "windows") {
+            "llamacpp-b4231\\llama-server.exe"
+        } else {
+            "llamacpp-b4231/llama-server"
+        };
+        assert!(
+            spec.command.ends_with(suffix),
+            "command should resolve to the cached llama-server: {}",
+            spec.command
+        );
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_requires_engine_path_or_managed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+model = "./model.gguf"
+"#
+            ),
+        );
+        let err = derive_launch_spec(&plan).expect_err("needs engine_path or managed engine");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("engine_path") && msg.contains("engine_version"),
+            "got: {msg}"
+        );
     }
 
     #[test]

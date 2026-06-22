@@ -1,28 +1,13 @@
-# native-llama — Dockerless host-native inference (Inc1)
+# native-llama — Dockerless host-native inference
 
 Runs a [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` as an
-Ato-managed **host process** — no Docker, no container, no VM. This is the first
-slice of the native-inference runtime: `engine_path` and `model` are **local
-paths** (engine fetching and model download come in later increments).
+Ato-managed **host process** — no Docker, no container, no VM. The engine binary
+is **auto-fetched** by pinned build tag; you only provide a GGUF model.
 
-## Prerequisites (provide these two local files)
+## Provide a model
 
-Inc1 does not fetch anything. Put a llama-server binary and a GGUF model where
-the manifest points (the paths are relative to this directory):
-
-1. **Engine** — build or download `llama-server` from llama.cpp and place it at
-   `./llama-server` (or edit `engine_path` to an absolute path). On macOS it is
-   Metal-accelerated; on Linux+NVIDIA, use a CUDA build.
-2. **Model** — any GGUF file at `./model.gguf` (or edit `model`). A small one is
-   fine for a smoke, e.g. a Qwen2.5-0.5B-Instruct Q4 GGUF.
-
-```sh
-# example layout
-samples/native-llama/
-  capsule.toml
-  llama-server      # your local binary (chmod +x)
-  model.gguf        # your local GGUF
-```
+Put any GGUF file at `./model.gguf` (or edit `model`). A small one is fine for a
+smoke, e.g. a TinyLlama / Qwen2.5-0.5B Q4 GGUF.
 
 ## Run
 
@@ -30,18 +15,32 @@ samples/native-llama/
 ato run samples/native-llama
 ```
 
-Ato lowers this to: `./llama-server -m ./model.gguf --host 127.0.0.1 --port <N>`,
-waits for readiness on the allocated port, and prints the **app_url**
-(`http://127.0.0.1:<N>` — llama.cpp's web UI + OpenAI-compatible API at `/v1`).
-
-Stop it with:
+Ato will:
+1. fetch the pinned llama.cpp release (`engine_version`, e.g. `b9754`) into
+   `~/.ato/toolchains/llamacpp-<tag>/` (macOS = Metal, Linux = CPU build),
+2. launch `llama-server -m ./model.gguf --host 127.0.0.1 --port <N>` as a host
+   process and wait for readiness,
+3. print the **app_url** — llama.cpp's web UI + OpenAI-compatible API at `/v1`:
 
 ```sh
-ato stop <session-id>
+curl http://127.0.0.1:<N>/health
+curl -X POST http://127.0.0.1:<N>/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":16}'
 ```
 
-## Notes
+Stop it with `ato stop <session-id>` (it appears in `ato ps` as `runtime=host`).
 
-- Missing `engine_path` or `model` fails fast with an explicit error.
-- This path is host-native (Tier2): the engine binary and any GPU/driver are
-  host-bound, so the run is honestly recorded as not fully hermetic.
+## Engine resolution
+
+- **Managed (default here):** `engine = "llama.cpp"` + `engine_version = "<tag>"`
+  → Ato fetches + caches `llama-server` (re-runs reuse the cache).
+- **Local override:** set `engine_path = "./llama-server"` (drop `engine_version`)
+  to use a binary you provide. `engine_path` always wins.
+
+## Increment notes
+
+- Inc1: host launcher lowering (`engine_path` + `model`, local paths).
+- Inc2 (this): managed engine auto-fetch (`engine` + `engine_version`).
+- Inc3 (next): model download/cache (so `model` can be an `hf://`/URL ref).
+- GPU provisioning + CUDA engine variants: Inc4.
