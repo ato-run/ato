@@ -458,10 +458,28 @@ impl ToolchainFetcher for LlamaCppFetcher {
         version: &str,
         show_progress: bool,
     ) -> Result<PathBuf> {
+        // Defense-in-depth: the version is interpolated into the download URL,
+        // archive name, and cache path. Manifest validation enforces this, but
+        // reject unsafe values here too (this runs under the install lock).
+        if !crate::foundation::types::manifest::is_safe_engine_version(version) {
+            return Err(CapsuleError::Pack(format!(
+                "unsafe llama.cpp engine_version {version:?} \
+                 (expected a build tag / version id)"
+            )));
+        }
+
         let runtime_dir = provider.get_runtime_path("llamacpp", version);
-        if runtime_dir.exists() {
+        // Reuse the cache only when it is COMPLETE (the canonical server binary
+        // is present + executable). A partial/corrupt dir — e.g. an earlier
+        // interrupted extract that left an empty or half-written directory — is
+        // discarded and rebuilt rather than failing forever.
+        if llamacpp_cache_is_valid(&runtime_dir) {
             info!("✓ llama.cpp {} already cached", version);
             return Ok(runtime_dir);
+        }
+        if runtime_dir.exists() {
+            info!("llama.cpp {} cache is incomplete; rebuilding", version);
+            std::fs::remove_dir_all(&runtime_dir)?;
         }
 
         provider
@@ -492,11 +510,9 @@ impl ToolchainFetcher for LlamaCppFetcher {
             .download_with_progress(&download_url, &archive_path, show_progress)
             .await?;
 
-        // llama.cpp releases ship no per-asset checksum sidecar, so pin integrity
-        // on the immutable release tag (`version`) + HTTPS and record a TOFU hash.
-        let expected_sha256 = sha256_of_file(&archive_path)?;
-        provider.verify_sha256_of_file(&archive_path, &expected_sha256)?;
-
+        // llama.cpp ships no per-asset checksum sidecar; integrity rests on the
+        // immutable, official release tag (`version`) fetched over HTTPS. (No
+        // upstream checksum is available to verify against, so none is claimed.)
         let temp_dir = provider
             .cache_dir()
             .join(format!("tmp-llamacpp-{}", version));
@@ -518,10 +534,12 @@ impl ToolchainFetcher for LlamaCppFetcher {
         }
 
         // llama.cpp archives nest everything under a single `llama-<tag>/` dir.
-        // Flatten it so `llama-server` sits at a deterministic path
-        // (`<runtime_dir>/llama-server`) next to its sibling shared libs, which
-        // lets the launcher resolve the engine path without a filesystem search.
+        // Flatten it, then GUARANTEE the canonical server binary at
+        // `<dir>/llama-server[.exe]` — the exact path the launcher resolves —
+        // regardless of the archive's internal layout. This makes the
+        // deterministic launch path a structural post-condition of the fetch.
         flatten_single_subdir(&temp_dir)?;
+        ensure_canonical_llama_server(&temp_dir)?;
 
         if runtime_dir.exists() {
             std::fs::remove_dir_all(&runtime_dir)?;
@@ -570,6 +588,78 @@ fn flatten_single_subdir(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// The canonical server-binary filename the launcher resolves at
+/// `<runtime_dir>/<this>`. Platform-specific (`.exe` on Windows).
+pub(crate) fn llamacpp_server_filename() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    }
+}
+
+/// A llama.cpp toolchain cache is valid only when the canonical server binary
+/// exists and (on Unix) carries an executable bit. Empty/partial dirs are
+/// invalid → callers discard and re-fetch.
+pub(crate) fn llamacpp_cache_is_valid(runtime_dir: &std::path::Path) -> bool {
+    let bin = runtime_dir.join(llamacpp_server_filename());
+    let Ok(meta) = std::fs::metadata(&bin) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Guarantee `<dir>/llama-server[.exe]` exists. When the binary is nested (a
+/// layout `flatten_single_subdir` didn't fully normalize), link (Unix) / copy
+/// (Windows) it to the canonical root. A symlink preserves `$ORIGIN`/
+/// `@loader_path` so the real binary still finds its sibling shared libs.
+fn ensure_canonical_llama_server(dir: &std::path::Path) -> Result<()> {
+    let name = llamacpp_server_filename();
+    let canonical = dir.join(name);
+    if canonical.exists() {
+        return Ok(());
+    }
+    let real = find_file_recursive(dir, name).ok_or_else(|| {
+        CapsuleError::Pack(format!("llama.cpp archive did not contain a {name} binary"))
+    })?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&real, &canonical)
+            .map_err(|e| CapsuleError::Pack(format!("link canonical {name}: {e}")))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(&real, &canonical)
+            .map_err(|e| CapsuleError::Pack(format!("copy canonical {name}: {e}")))?;
+    }
+    Ok(())
+}
+
+fn find_file_recursive(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file_recursive(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Map host platform → llama.cpp release asset (name, is_zip). Inc2 selects the
 /// default CPU/Metal build; GPU (CUDA/ROCm/Vulkan) variant selection is Inc4.
 fn llama_cpp_artifact_filename(version: &str, os: &str, arch: &str) -> Result<(String, bool)> {
@@ -593,7 +683,66 @@ fn llama_cpp_artifact_filename(version: &str, os: &str, arch: &str) -> Result<(S
 
 #[cfg(test)]
 mod tests {
-    use super::{deno_artifact_filename, llama_cpp_artifact_filename};
+    use super::{
+        deno_artifact_filename, ensure_canonical_llama_server, llama_cpp_artifact_filename,
+        llamacpp_cache_is_valid, llamacpp_server_filename,
+    };
+
+    #[cfg(unix)]
+    fn write_exec(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn cache_is_invalid_when_binary_missing_and_valid_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        // Empty dir → invalid.
+        assert!(!llamacpp_cache_is_valid(dir.path()));
+
+        let bin = dir.path().join(llamacpp_server_filename());
+        #[cfg(unix)]
+        {
+            // Non-executable file → still invalid.
+            std::fs::write(&bin, b"x").unwrap();
+            assert!(!llamacpp_cache_is_valid(dir.path()));
+            // Executable → valid.
+            write_exec(&bin);
+            assert!(llamacpp_cache_is_valid(dir.path()));
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&bin, b"x").unwrap();
+            assert!(llamacpp_cache_is_valid(dir.path()));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_canonical_links_nested_binary_to_root() {
+        let dir = tempfile::tempdir().unwrap();
+        // A non-standard layout the single-subdir flatten didn't normalize:
+        // the binary is nested under a sub-directory alongside its libs.
+        let nested = dir.path().join("inner");
+        std::fs::create_dir_all(&nested).unwrap();
+        write_exec(&nested.join("llama-server"));
+
+        assert!(
+            !llamacpp_cache_is_valid(dir.path()),
+            "precondition: not at root"
+        );
+        ensure_canonical_llama_server(dir.path()).unwrap();
+
+        let canonical = dir.path().join("llama-server");
+        assert!(canonical.exists(), "canonical root binary must exist");
+        assert!(
+            llamacpp_cache_is_valid(dir.path()),
+            "cache must be valid via the canonical path"
+        );
+    }
 
     #[test]
     fn llama_cpp_artifact_filename_maps_platforms() {

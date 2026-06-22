@@ -193,10 +193,18 @@ fn resolve_native_inference_engine_command(plan: &ManifestData, target: &str) ->
                          (a build tag, e.g. \"b4231\") — or set an explicit `engine_path`"
                     ))
                 })?;
-            // Deterministic cached path (post-flatten): `<cache>/llamacpp-<ver>/
-            // llama-server`. Resolved WITHOUT an existence check because the
-            // receipt/preflight builders call this before the async ensure-step
-            // downloads the binary; the ensure-step guarantees it by spawn time.
+            // Defense-in-depth: the version is interpolated into the cache path.
+            if !crate::foundation::types::manifest::is_safe_engine_version(&version) {
+                return Err(CapsuleError::Config(format!(
+                    "target '{target}': unsafe `engine_version` {version:?} \
+                     (alphanumeric / `.`/`_`/`-` only; no path separators or `..`)"
+                )));
+            }
+            // Deterministic cached path: `<cache>/llamacpp-<ver>/llama-server`.
+            // The fetcher GUARANTEES this canonical path as a post-condition, so
+            // we build it WITHOUT an existence check — the receipt/preflight
+            // builders call this before the async ensure-step has downloaded the
+            // binary, which the ensure-step then guarantees by spawn time.
             let fetcher =
                 crate::packers::runtime_fetcher::RuntimeFetcher::new().map_err(|err| {
                     CapsuleError::Config(format!("failed to init toolchain cache: {err}"))

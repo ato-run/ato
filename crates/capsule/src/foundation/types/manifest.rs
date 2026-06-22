@@ -2144,6 +2144,43 @@ component = "hello.wasm"
     }
 }
 
+/// A native-inference `engine_version` is interpolated into download URLs,
+/// archive filenames, and toolchain cache paths, so it must be tightly
+/// constrained. Allow build tags (`b9754`) and semver-ish ids; reject anything
+/// that could traverse paths or alter URLs (`/`, `\`, `..`, `%`, whitespace, …).
+pub fn is_safe_engine_version(version: &str) -> bool {
+    let v = version.trim();
+    !v.is_empty()
+        && !v.contains("..")
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+#[cfg(test)]
+mod engine_version_tests {
+    use super::is_safe_engine_version;
+
+    #[test]
+    fn accepts_build_tags_and_semverish() {
+        assert!(is_safe_engine_version("b9754"));
+        assert!(is_safe_engine_version("b4231"));
+        assert!(is_safe_engine_version("1.2.3"));
+        assert!(is_safe_engine_version("v0.1.0-rc1"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_url_unsafe() {
+        assert!(!is_safe_engine_version(""));
+        assert!(!is_safe_engine_version("../evil"));
+        assert!(!is_safe_engine_version("b9754/../../x"));
+        assert!(!is_safe_engine_version("..")); // pure traversal
+        assert!(!is_safe_engine_version("a/b"));
+        assert!(!is_safe_engine_version("a\\b"));
+        assert!(!is_safe_engine_version("b97 54")); // whitespace
+        assert!(!is_safe_engine_version("b9754%2f")); // url-encoded slash
+    }
+}
+
 #[cfg(test)]
 mod host_capability_tests {
     use super::*;

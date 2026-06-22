@@ -246,28 +246,33 @@ impl RuntimeFetcher {
         Ok(bun_bin)
     }
 
-    /// Download (if needed) and locate the `llama-server` binary for a pinned
-    /// llama.cpp release (`version` = the build tag, e.g. `"b4231"`). Used by the
-    /// native-inference engine ensure-step before launch.
+    /// Download (if needed) the `llama-server` binary for a pinned llama.cpp
+    /// release (`version` = the build tag, e.g. `"b4231"`) and return its
+    /// canonical path `<cache>/llamacpp-<version>/llama-server[.exe]` — the exact
+    /// path the launcher resolves. Used by the native-inference engine
+    /// ensure-step before launch.
     pub async fn ensure_llamacpp(&self, version: &str) -> Result<PathBuf> {
+        // Pre-discard an incomplete/corrupt cache BEFORE the dispatch's
+        // exists-only short-circuit can reuse it (the dispatch can't tell a
+        // partial dir from a complete one; the fetcher's validity check only
+        // runs once download_runtime is reached).
+        let runtime_dir = self.get_runtime_path("llamacpp", version);
+        if runtime_dir.exists() && !fetcher::llamacpp_cache_is_valid(&runtime_dir) {
+            let _ = fs::remove_dir_all(&runtime_dir);
+        }
+
         let runtime_dir = self
             .download_runtime_with_progress("llamacpp", version, true)
             .await?;
-        let server_bin =
-            Self::find_binary_recursive(&runtime_dir, &["llama-server", "llama-server.exe"])?;
+        // download_runtime guarantees the canonical binary as a post-condition.
+        let server_bin = runtime_dir.join(fetcher::llamacpp_server_filename());
+        if !server_bin.exists() {
+            return Err(CapsuleError::Pack(format!(
+                "llama.cpp {version}: canonical llama-server missing after fetch at {server_bin:?}"
+            )));
+        }
         info!("llama.cpp {} ready at {:?}", version, server_bin);
         Ok(server_bin)
-    }
-
-    /// Synchronously locate the cached `llama-server` for a pinned version,
-    /// WITHOUT downloading. Returns `None` when not yet fetched. The launcher
-    /// uses this after the async ensure-step has populated the cache.
-    pub fn llamacpp_server_path(&self, version: &str) -> Option<PathBuf> {
-        let runtime_dir = self.get_runtime_path("llamacpp", version);
-        if !runtime_dir.exists() {
-            return None;
-        }
-        Self::find_binary_recursive(&runtime_dir, &["llama-server", "llama-server.exe"]).ok()
     }
 
     pub async fn ensure_uv(&self, version: Option<&str>) -> Result<PathBuf> {

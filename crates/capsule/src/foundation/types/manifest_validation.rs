@@ -364,6 +364,17 @@ impl CapsuleManifest {
                          (a local engine binary) or `engine` + `engine_version` (managed)"
                     )));
                 }
+                // A managed `engine_version` flows into download URLs + cache
+                // paths, so it must be path/URL-safe (no traversal/separators).
+                if let Some(version) = target.engine_version.as_deref()
+                    && !version.trim().is_empty()
+                    && !crate::foundation::types::manifest::is_safe_engine_version(version)
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{label}': `engine_version` must be a build tag / version id \
+                         (alphanumeric, `.`/`_`/`-`; no path separators or `..`)"
+                    )));
+                }
                 if !nonempty(&target.model) {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "target '{label}': runtime=native-inference requires `model`"
@@ -1886,6 +1897,38 @@ mod tests {
         assert!(!is_valid_mount_path("data"));
         assert!(!is_valid_mount_path("relative/path"));
         assert!(!is_valid_mount_path("./data"));
+    }
+
+    fn native_inference_manifest(engine_version: &str) -> String {
+        format!(
+            "schema_version = \"0.3\"\nname = \"x\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+             [targets.app]\nruntime = \"native-inference\"\nengine = \"llama.cpp\"\n\
+             engine_version = \"{engine_version}\"\nmodel = \"./m.gguf\"\n"
+        )
+    }
+
+    fn engine_version_error(engine_version: &str) -> bool {
+        let toml = native_inference_manifest(engine_version);
+        let manifest: crate::foundation::types::manifest::CapsuleManifest =
+            toml::from_str(&toml).expect("parse manifest");
+        match manifest.validate() {
+            Ok(()) => false,
+            Err(errs) => errs
+                .iter()
+                .any(|e| e.to_string().contains("engine_version")),
+        }
+    }
+
+    #[test]
+    fn native_inference_rejects_unsafe_engine_version() {
+        assert!(engine_version_error("../evil"));
+        assert!(engine_version_error("b9754/../../x"));
+        assert!(engine_version_error("a/b"));
+    }
+
+    #[test]
+    fn native_inference_accepts_safe_engine_version() {
+        assert!(!engine_version_error("b9754"));
     }
 }
 
