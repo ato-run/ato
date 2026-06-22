@@ -922,6 +922,12 @@ pub(crate) enum Commands {
         command: crate::cli::RunnerCommands,
     },
 
+    #[command(about = "Diagnose this host's readiness for a runtime/feature")]
+    Doctor {
+        #[command(subcommand)]
+        target: DoctorTarget,
+    },
+
     #[command(hide = true, about = "Login to Ato registry")]
     Login {
         #[arg(long)]
@@ -1183,5 +1189,21 @@ pub(crate) enum Commands {
     Console {
         #[command(subcommand)]
         command: ConsoleCommands,
+    },
+}
+
+/// Targets for `ato doctor <target>` — host-readiness diagnostics per
+/// runtime/feature. (For GPU *host provisioning* readiness, see
+/// `ato runner doctor`.)
+#[derive(Subcommand)]
+pub(crate) enum DoctorTarget {
+    /// Check this host's readiness to run local-LLM (native-inference) capsules:
+    /// platform/engine support, model-cache writability, and acceleration
+    /// (Metal on macOS, Vulkan on Linux NVIDIA).
+    #[command(name = "native-inference")]
+    NativeInference {
+        /// Emit machine-readable JSON on stdout instead of a human table.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
