@@ -515,6 +515,11 @@ fn resolve_driver(
             // OCI runtime always uses the Oci driver; explicit driver override is not supported.
             return Ok(ExecutionDriver::Oci);
         }
+        ExecutionRuntime::NativeInference => {
+            // native-inference always lowers to a host-native process (the engine
+            // binary); explicit driver override is not supported.
+            return Ok(ExecutionDriver::Native);
+        }
     };
 
     let chosen = parsed.unwrap_or(inferred);
@@ -558,7 +563,10 @@ pub fn derive_tier(
         | (ExecutionRuntime::Wasm, ExecutionDriver::Wasmtime) => Ok(ExecutionTier::Tier1),
         (ExecutionRuntime::Web, ExecutionDriver::Python)
         | (ExecutionRuntime::Source, ExecutionDriver::Python)
-        | (ExecutionRuntime::Source, ExecutionDriver::Native) => Ok(ExecutionTier::Tier2),
+        | (ExecutionRuntime::Source, ExecutionDriver::Native)
+        // native-inference is host-bound (GPU/driver/engine live on the host),
+        // so it is Tier2 like source/native — honestly not fully hermetic.
+        | (ExecutionRuntime::NativeInference, _) => Ok(ExecutionTier::Tier2),
         (ExecutionRuntime::Oci, ExecutionDriver::Oci) => Ok(ExecutionTier::Tier3),
         _ => Err(AtoExecutionError::policy_violation(format!(
             "unable to derive tier from runtime='{}' driver='{}'",

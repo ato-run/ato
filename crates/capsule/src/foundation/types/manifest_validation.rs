@@ -340,9 +340,37 @@ impl CapsuleManifest {
 
             if label.trim().is_empty()
                 || runtime.is_empty()
-                || !matches!(runtime.as_str(), "source" | "wasm" | "oci" | "web")
+                || !matches!(
+                    runtime.as_str(),
+                    "source" | "wasm" | "oci" | "web" | "native-inference"
+                )
             {
                 errors.push(ValidationError::InvalidTarget(label.clone()));
+                continue;
+            }
+
+            if runtime == "native-inference" {
+                // Inc1: engine_path + model are required local paths.
+                if target
+                    .engine_path
+                    .as_deref()
+                    .map(|v| v.trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{label}': runtime=native-inference requires `engine_path`"
+                    )));
+                }
+                if target
+                    .model
+                    .as_deref()
+                    .map(|v| v.trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{label}': runtime=native-inference requires `model`"
+                    )));
+                }
                 continue;
             }
 

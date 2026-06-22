@@ -3981,9 +3981,15 @@ where
 
     match guard_result.executor_kind {
         ExecutorKind::Native => {
+            // native-inference is host-native by design (the engine binary is a
+            // host process, like OCI runs host containers) — always take the host
+            // launcher path, never the source nacelle sandbox.
+            let is_native_inference =
+                matches!(decision.kind, capsule::router::RuntimeKind::NativeInference);
             let host_execution = request.dangerously_skip_permissions
                 || host_fallback_requested
-                || desktop_native_open_only;
+                || desktop_native_open_only
+                || is_native_inference;
             let process = if host_execution {
                 if let Some(app_path) = request.desktop_open_path.as_ref() {
                     crate::executors::source::execute_open_path(app_path, mode)?
