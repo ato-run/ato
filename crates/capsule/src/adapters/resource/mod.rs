@@ -9,6 +9,7 @@
 pub mod artifact;
 pub mod cas;
 pub mod ingest;
+pub mod model_cache;
 pub mod storage;
 
 // Re-export commonly used types
