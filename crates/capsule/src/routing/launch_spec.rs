@@ -67,6 +67,14 @@ pub fn derive_launch_spec(plan: &ManifestData) -> Result<LaunchSpec> {
         });
     }
 
+    // native-inference: lower to a host-native process launch. The engine
+    // binary (`engine_path`) becomes the command and the model is passed as
+    // `-m <model>`; port/readiness/stop are handled by the shared host launcher.
+    // Inc1 requires both `engine_path` and `model` to be local paths.
+    if runtime.as_deref() == Some("native-inference") {
+        return derive_native_inference_launch_spec(plan, env_vars, port);
+    }
+
     // OCI containers with no explicit entrypoint/run_command use the image's
     // built-in CMD/ENTRYPOINT. Return a stub LaunchSpec so receipt builders
     // and diagnostics can proceed without treating this as a config error.
@@ -107,6 +115,62 @@ pub fn derive_launch_spec(plan: &ManifestData) -> Result<LaunchSpec> {
         env_vars,
         port,
     )
+}
+
+/// Lower a `runtime = "native-inference"` target into a host-process
+/// [`LaunchSpec`]: the engine server binary is the command and the model is
+/// passed as `-m <model>`. The shared host launcher injects `--port <N>` and
+/// runs readiness/stop. Inc1: `engine_path` and `model` must be local paths.
+fn derive_native_inference_launch_spec(
+    plan: &ManifestData,
+    env_vars: HashMap<String, String>,
+    port: Option<u16>,
+) -> Result<LaunchSpec> {
+    let target = plan.selected_target_label().to_string();
+
+    let engine_path = plan
+        .target_engine_path()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CapsuleError::Config(format!(
+                "target '{target}': runtime=native-inference requires `engine_path` \
+                 (local path to the engine server binary, e.g. llama-server)"
+            ))
+        })?;
+
+    let model = plan
+        .target_model()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CapsuleError::Config(format!(
+                "target '{target}': runtime=native-inference requires `model` \
+                 (local path to the model file, e.g. a .gguf)"
+            ))
+        })?;
+
+    // `--host 127.0.0.1` is fixed; `--port <N>` is injected by the host launcher
+    // from the resolved/allocated port so the readiness probe and app_url agree.
+    let args = vec![
+        "-m".to_string(),
+        model,
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+    ];
+
+    Ok(LaunchSpec {
+        working_dir: plan.compat_manifest_dir().to_path_buf(),
+        command: engine_path,
+        args,
+        env_vars,
+        required_lockfile: None,
+        runtime: Some("native-inference".to_string()),
+        driver: Some("native".to_string()),
+        language: None,
+        // Default to llama.cpp's conventional 8080 when the manifest omits a port
+        // so the launcher has a readiness target and can form an app_url.
+        port: port.or(Some(8080)),
+        source: LaunchSpecSource::Entrypoint,
+    })
 }
 
 fn derive_run_command_launch_spec(
@@ -423,6 +487,94 @@ mod tests {
             HashMap::new(),
         )
         .expect("execution descriptor")
+    }
+
+    const NATIVE_HEADER: &str =
+        "schema_version = \"0.3\"\nname = \"native-llama\"\nversion = \"0.1.0\"\ntype = \"app\"\n";
+
+    #[test]
+    fn derive_launch_spec_native_inference_builds_engine_argv() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine = "llama.cpp"
+engine_path = "./llama-server"
+model = "./model.gguf"
+port = 9001
+"#
+            ),
+        );
+
+        let spec = derive_launch_spec(&plan).expect("derive native-inference launch spec");
+
+        assert_eq!(spec.command, "./llama-server");
+        assert_eq!(spec.args, vec!["-m", "./model.gguf", "--host", "127.0.0.1"]);
+        assert_eq!(spec.port, Some(9001));
+        assert_eq!(spec.runtime.as_deref(), Some("native-inference"));
+        assert_eq!(spec.driver.as_deref(), Some("native"));
+        // `--port` is intentionally NOT in args: the host launcher injects the
+        // resolved port so readiness and app_url agree.
+        assert!(!spec.args.iter().any(|a| a == "--port"));
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_defaults_port_8080() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine_path = "./llama-server"
+model = "./model.gguf"
+"#
+            ),
+        );
+        let spec = derive_launch_spec(&plan).expect("derive spec");
+        assert_eq!(spec.port, Some(8080));
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_missing_engine_path_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+model = "./model.gguf"
+"#
+            ),
+        );
+        let err = derive_launch_spec(&plan).expect_err("must require engine_path");
+        assert!(err.to_string().contains("engine_path"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_missing_model_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine_path = "./llama-server"
+"#
+            ),
+        );
+        let err = derive_launch_spec(&plan).expect_err("must require model");
+        assert!(err.to_string().contains("model"), "got: {err}");
     }
 
     #[test]

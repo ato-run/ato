@@ -1603,6 +1603,23 @@ pub struct NamedTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
+    /// native-inference: inference engine identifier (e.g. `"llama.cpp"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+
+    /// native-inference: local filesystem path to the engine server binary
+    /// (e.g. `llama-server`). Inc1 requires this to be set explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_path: Option<String>,
+
+    /// native-inference: local filesystem path to the model file (e.g. a GGUF).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// native-inference: model format hint (e.g. `"gguf"`). Informational in Inc1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_format: Option<String>,
+
     /// Required environment variable names.
     #[serde(default)]
     pub required_env: Vec<String>,
