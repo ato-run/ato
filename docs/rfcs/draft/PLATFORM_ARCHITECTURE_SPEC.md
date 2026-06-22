@@ -299,7 +299,7 @@ process. Readable by the capsule at runtime, stored in
 The entire state layer is **GPUI-free**:
 
 ```
-capsule-core     (0 GPUI imports)  — manifest, routing, lockfile, error types
+capsule     (0 GPUI imports)  — manifest, routing, lockfile, error types
 state/mod.rs     (0 GPUI imports)  — AppState, Workspace, Pane, GuestRoute
 orchestrator.rs  (0 GPUI imports)  — subprocess lifecycle
 bridge.rs        (0 GPUI imports)  — JSON-RPC dispatch
@@ -408,7 +408,7 @@ reads the manifest (via CCP) and renders the appropriate UI.
 - `apps/ato-desktop/src/ui/mod.rs` — DesktopShell (GPUI rendering layer)
 - `apps/ato-desktop/src/ui/modals/config_form.rs` — ConfigModal (E103 response UI)
 - `apps/ato-cli/src/app_control/session.rs` — Session start/stop (CCP producer)
-- `apps/ato-cli/core/src/` — capsule-core (0 GPUI imports, fully portable)
+- `apps/ato-cli/core/src/` — capsule (0 GPUI imports, fully portable)
 
 ### External References
 - [VS Code Architecture](https://code.visualstudio.com/api/advanced-topics/extension-host)

@@ -23,17 +23,17 @@ import sys
 
 # Crates that are cargo-workspace members but must never be tested in CI.
 #   - ato-desktop / xtask: outside the cargo workspace (GUI git deps).
-#   - nacelle / ato-net / ato-netd: their integration tests (e.g. nacelle's
+#   - nacelle / ato-netd: their integration tests (e.g. nacelle's
 #     terminal_e2e PTY tests) are not stable on headless CI runners and were
 #     deliberately never in the CI test list; keep that policy. A change to one
-#     of these still tests any *dependent* in the proven set (e.g. an ato-net
-#     change runs ato-cli's tests because ato-cli depends on ato-net).
+#     of these still tests any *dependent* in the proven set (e.g. an ato-netd
+#     change runs ato-cli's tests because ato-cli depends, via protocol,
+#     on the same wire surface).
 EXCLUDE = {
-    "ato-desktop",
+    "desktop",
     "ato-desktop-xtask",
     "nacelle",
-    "ato-net",
-    "ato-netd",
+    "netd",
 }
 
 # A change touching any of these forces the full testable set, because it can

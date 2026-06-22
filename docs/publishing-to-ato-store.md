@@ -17,7 +17,7 @@
 This is not a `capsule.toml` reference. It is a procedure for converting an
 existing codebase into a Capsule that the Store can distribute and that
 actually starts on someone else's machine. The full schema reference lives in
-the `ato` repo (`crates/capsule-core/src/foundation/types/manifest.rs` is the
+the `ato` repo (`crates/capsule/src/foundation/types/manifest.rs` is the
 source of truth); §14 lists pointers.
 
 ---
@@ -426,8 +426,8 @@ approve/publish steps remain operator-side.
 
 | Topic | Source of truth |
 |-------|-----------------|
-| `capsule.toml` schema | `crates/capsule-core/src/foundation/types/manifest.rs` (+ `manifest_validation.rs`) |
-| Lockfile (`capsule.lock.json`) | `crates/capsule-core/src/contract/lockfile.rs` |
+| `capsule.toml` schema | `crates/capsule/src/foundation/types/manifest.rs` (+ `manifest_validation.rs`) |
+| Lockfile (`capsule.lock.json`) | `crates/capsule/src/contract/lockfile.rs` |
 | CLI commands | `ato --help`; clap definitions in `crates/ato-cli/.../root.rs` (`run`, `validate`, `lock`, `encap`, `install`, `launch`, `rollback`, `logs`, `receipts`, `secrets`, …) |
 | Store apply API | `ato-api: src/routes/store_apply.ts` |
 | Discovery / capsule API | `ato-api: src/routes/capsule_tomls.ts`, `capsules.ts`, `runs.ts` |

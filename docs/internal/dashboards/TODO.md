@@ -52,9 +52,9 @@
 **RFC:** `docs/rfcs/draft/CROSS_PLATFORM_DISTRIBUTION_SPEC.md` Section 4.3
 
 - [ ] `HostShell` trait 設計・抽出 (DesktopShell から共通インターフェースを分離)
-- [ ] capsule-core UniFFI バインディング生成
-- [ ] iOS: SwiftUI shell PoC (Wry guest WebView + capsule-core FFI)
-- [ ] Android: Jetpack Compose shell PoC (Wry guest WebView + capsule-core FFI)
+- [ ] capsule UniFFI バインディング生成
+- [ ] iOS: SwiftUI shell PoC (Wry guest WebView + capsule FFI)
+- [ ] Android: Jetpack Compose shell PoC (Wry guest WebView + capsule FFI)
 
 ---
 
@@ -316,7 +316,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 **仕様:** [IDENTITY_SPEC.md](docs/specs/IDENTITY_SPEC.md)
 
-### 8.1 capsule-core `did:key` サポート
+### 8.1 capsule `did:key` サポート
 
 - [x] `identity.rs` モジュール作成
 - [x] `to_did_key()` / `from_did_key()` 変換関数
@@ -346,7 +346,7 @@ pnpm -C apps/ato-store-web exec astro check
 ### 8.4 Profile Capsule
 
 - [x] `profile.sync` スキーマ定義 (JSON Schema)
-- [x] `ProfileManifest` 型定義 (capsule-core)
+- [x] `ProfileManifest` 型定義 (capsule)
 - [x] `ato profile create` コマンド
 - [x] `ato profile show` コマンド
 - [ ] Desktop での Profile 表示
@@ -362,7 +362,7 @@ pnpm -C apps/ato-store-web exec astro check
 ### 9.1 license.sync フォーマット
 
 - [x] manifest.toml スキーマ定義 (JSON Schema)
-- [x] `capsule-core` に License 型追加
+- [x] `capsule` に License 型追加
 - [x] `LicenseVerificationResult` 型定義
 - [ ] license.json パーサー
 - [ ] sync.wasm テンプレート (renewal)
@@ -680,7 +680,7 @@ pnpm -C apps/ato-store-web exec astro check
 #### 13b.5 DAG 統合
 
 - [x] `capsule.toml` パーサーに `[ipc.exports]` / `[ipc.imports]` セクション追加
-  - `capsule-core` の manifest 型に `IpcExports` / `IpcImports` 追加
+  - `capsule` の manifest 型に `IpcExports` / `IpcImports` 追加
 - [x] `src/ipc/dag.rs`: IPC 依存の DAG 統合
   - `build_ipc_dag(imports, existing_dag)` → eager 依存を `_ipc_*` ノードとして追加
   - 予約プレフィックス (`_ipc_`, `_setup`, `_main`) 衝突検出

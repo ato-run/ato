@@ -65,7 +65,7 @@ ato run https://ato.run/s/demo # open a shared Ato recipe
 
 Ato is useful when you want to try a repository without reading its setup instructions first, share a runnable project with someone else, run a project with a repeatable setup, or keep the project's runtime separate from your machine as much as possible.
 
-> Ato is still pre-1.0. Some sandboxing and network controls are still being completed. See [Known limitations](crates/ato-cli/docs/known-limitations.md) before using Ato with untrusted code.
+> Ato is still pre-1.0. Some sandboxing and network controls are still being completed. See [Known limitations](crates/cli/docs/known-limitations.md) before using Ato with untrusted code.
 
 ## Supported ecosystems
 
@@ -150,7 +150,7 @@ Homebrew installs the CLI, not Ato Desktop.
 ### From source
 
 ```bash
-cargo build -p ato-cli --release
+cargo build -p cli --release
 ```
 
 ### Verify installation
@@ -346,7 +346,7 @@ Known gaps in the current version:
 Read the full list here:
 
 ```text
-crates/ato-cli/docs/known-limitations.md
+crates/cli/docs/known-limitations.md
 ```
 
 When running code you do not trust, prefer:
@@ -379,11 +379,11 @@ This repository contains the CLI, runtime libraries, desktop app, and supporting
 ```text
 ato/
 ├── crates/
-│   ├── ato-cli/          # command-line interface
-│   ├── capsule-core/     # project detection, locking, packing, runtime logic
-│   ├── capsule-wire/     # small shared message types
-│   ├── ato-session-core/ # session process and state helpers
-│   ├── ato-desktop/      # desktop app
+│   ├── protocol/     # IPC/wire surface — pure message types, DAG root
+│   ├── capsule/          # project detection, locking, packing, runtime logic + local session state
+│   ├── cli/              # command-line interface (orchestrator; ships the `ato` binary)
+│   ├── desktop/          # desktop app (shell; ships the `ato-desktop` binary)
+│   ├── netd/             # networking daemon (pairing, reachability, transport; ships the `ato-netd` binary)
 │   └── nacelle/          # source runtime sandbox
 ├── sidecars/
 │   └── ato-tsnetd/       # optional network sidecar
@@ -392,21 +392,46 @@ ato/
 └── .github/workflows/    # CI
 ```
 
-Most users should use the installer. Contributors usually work in `crates/ato-cli`, `crates/ato-desktop`, `capsule-core`, and the runtime sidecars.
+Most users should use the installer. Contributors usually work in `crates/cli`, `crates/desktop`, `crates/capsule`, and the runtime sidecars.
+
+> Crate names dropped the `ato-` prefix (`cli`/`desktop`/`netd`); the produced
+> binaries keep their stable names (`ato`, `ato-desktop`, `ato-netd`).
+
+### Dependency invariants
+
+The crates form a one-way dependency DAG, enforced in CI by
+`scripts/check-dep-direction.sh`:
+
+- **`protocol`** is the DAG root: pure IPC/wire types with **no
+  workspace-crate dependencies**. Both `cli` and `desktop` link it to
+  share the wire surface without dragging in heavy runtime deps.
+- **`capsule`** owns the domain logic (detection, locking, packing, runtime
+  graph) **and** local session state. It may depend on `protocol`; it must
+  not depend on `cli`, `desktop`, `netd`, or `nacelle`.
+- **`netd`** speaks the protocol: it may depend on `protocol`; it must
+  not depend on `capsule`, `cli`, `desktop`, or `nacelle`.
+- **`nacelle`** enforces the sandbox only. It stays a clean leaf — no workspace
+  dependencies beyond (optionally) `protocol`.
+- **`cli`** orchestrates: it may depend on `capsule`, `protocol`, and
+  `nacelle`; it must not depend on `desktop` (the arrow points the other
+  way — Desktop spawns the `ato` binary as a subprocess).
+- **`desktop`** is the shell: it speaks `protocol` and reads a
+  lightweight slice of `capsule` state, and **spawns the `ato` CLI** rather
+  than linking it. It must not depend on `cli`, `netd`, or `nacelle`.
 
 ## Develop
 
 ```bash
 cargo check --workspace --all-targets
-cargo test -p ato-cli
-cargo test -p capsule-core
-cargo run -p ato-cli -- --help
+cargo test -p cli
+cargo test -p capsule
+cargo run -p cli -- --help
 ```
 
 Desktop bundle examples:
 
 ```bash
-cd crates/ato-desktop
+cd crates/desktop
 cargo xtask bundle darwin-arm64
 cargo xtask bundle windows-x86_64
 cargo xtask bundle linux-x86_64

@@ -32,7 +32,7 @@ See `environment.txt`. Summary:
 - `ato` built from this worktree (`target/debug/ato`, v0.5.5)
 - Desktop GUI launch (Finder/Dock) PATH does not include `/opt/homebrew/bin`;
   this run was from a shell that does. The GUI-PATH podman resolver itself is
-  covered by `capsule_core::podman` (PR #440); not re-tested here.
+  covered by `capsule::podman` (PR #440); not re-tested here.
 
 ## Machine state before / after
 

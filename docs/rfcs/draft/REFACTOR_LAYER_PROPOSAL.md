@@ -181,7 +181,7 @@ src/lockfile/
 ```
 
 - [ ] 修正案A/Bのどちらにするかを決定（`pub mod lockfile_runtime` が外部から参照されているか確認）
-- [ ] 案B採用の場合: `grep -rn "use capsule_core::lockfile_runtime\|use capsule_core::lockfile_support"` で外部利用を確認
+- [ ] 案B採用の場合: `grep -rn "use capsule::lockfile_runtime\|use capsule::lockfile_support"` で外部利用を確認
 
 ### Step 4 — `schema/` の Layer 6 への帰属明示
 

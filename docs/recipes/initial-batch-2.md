@@ -89,9 +89,9 @@ Rootless podman containers (the default on macOS/Linux) cannot bind port 80 insi
 
 ```
 cargo fmt --all            — pass
-cargo check -p capsule-core -p ato-cli  — pass
+cargo check -p capsule -p ato-cli  — pass
 cargo test -p ato-cli oci_multi_service --lib  — pass
 cargo test -p ato-cli oci_session --lib  — pass
-cargo test -p capsule-core oci_compose_lock --lib  — pass
+cargo test -p capsule oci_compose_lock --lib  — pass
 git diff --check  — pass
 ```

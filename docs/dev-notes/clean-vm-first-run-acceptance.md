@@ -153,7 +153,7 @@ Automated per-property gates that DO pass today:
   MacosPkg format, `find_binary_in_tree` recursive search, stale remote-zip detection, `containers.conf`
   with `rosetta = false`, incomplete-bundle rejected before promotion, native-arch Mach-O validation)
 - `cargo test -p ato-cli --lib runtime_prepare` (helper preflight → typed `RuntimeProviderIncomplete`)
-- `cargo test -p capsule-core --lib podman` (Ato-managed `containers.conf` resolved → `CONTAINERS_CONF`)
+- `cargo test -p capsule --lib podman` (Ato-managed `containers.conf` resolved → `CONTAINERS_CONF`)
 - `cargo test -p ato-cli --lib -- --ignored real_pkg_install` (macOS arm64 + network: real download +
   digest-verify of pkg, pkgutil expand, helpers found, arch-validated, `podman --version` runs,
   `containers.conf` written) — SHA256s are pinned; needs macOS arm64 + network to run

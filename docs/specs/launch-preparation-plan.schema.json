@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ato.run/specs/launch-preparation-plan.schema.json",
   "title": "LaunchPreparationBridgeResult",
-  "description": "Control-plane-facing projection of a capsule-core launch-preparation decision (#581 ↔ #593). Produced by engine::launch_preparation_bridge. Carries only flat identity refs, content hashes, a stable blocker vocabulary, and the reference-only PrepareSession command — never raw secrets or observed/runtime diagnostics.",
+  "description": "Control-plane-facing projection of a capsule launch-preparation decision (#581 ↔ #593). Produced by engine::launch_preparation_bridge. Carries only flat identity refs, content hashes, a stable blocker vocabulary, and the reference-only PrepareSession command — never raw secrets or observed/runtime diagnostics.",
   "oneOf": [
     { "$ref": "#/$defs/Prepared" },
     { "$ref": "#/$defs/NotPrepared" }
@@ -117,7 +117,7 @@
       "properties": {
         "code": {
           "type": "string",
-          "description": "Stable blocker vocabulary. launch_preparation_unavailable is reserved for callers that cannot reach capsule-core at all.",
+          "description": "Stable blocker vocabulary. launch_preparation_unavailable is reserved for callers that cannot reach capsule at all.",
           "enum": [
             "reusable_inputs_invalid",
             "launch_template_not_reusable",

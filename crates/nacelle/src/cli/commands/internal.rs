@@ -786,9 +786,9 @@ async fn readiness_http_ok(http_get: &str, port: u16) -> bool {
     let client = reqwest::Client::new();
     let fut = async {
         let resp = client.get(url).send().await.ok()?;
-        // Keep in sync with capsule_core::common::readiness::
+        // Keep in sync with capsule::common::readiness::
         // http_status_indicates_ready (nacelle does not depend on
-        // capsule-core): ready iff 200 <= status < 400, Kubernetes
+        // capsule): ready iff 200 <= status < 400, Kubernetes
         // `httpGet` probe semantics.
         Some((200..400).contains(&resp.status().as_u16()))
     };
@@ -1191,7 +1191,7 @@ async fn handle_exec_v1(envelope: ExecEnvelope) -> Result<()> {
 
 /// Launch an interactive shell session without a capsule manifest.
 ///
-/// Used when ato-desktop or capsule-core requests a shell session via:
+/// Used when ato-desktop or capsule requests a shell session via:
 /// `{ "workload": { "type": "shell" }, "interactive": true, "terminal": { ... } }`
 ///
 /// Also supports non-interactive command execution with an explicit `cmd`:

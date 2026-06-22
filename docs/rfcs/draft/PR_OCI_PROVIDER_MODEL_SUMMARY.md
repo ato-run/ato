@@ -137,10 +137,10 @@ See `OCI_PROVIDER_LOCK_IDENTITY_SPEC.md §15.2` for the migration plan.
 
 | Suite | Filter | Count | Notes |
 |-------|--------|-------|-------|
-| `capsule-core` | `docker_run_script` | 18 | Pure importer unit tests |
-| `capsule-core` | `oci_compose_lock` | 18+ | Lock persistence tests |
-| `capsule-core` | `compose_import` | 20+ | Compose importer tests |
-| `capsule-core` | `derive` | 32 | ExecutionPlan identity tests |
+| `capsule` | `docker_run_script` | 18 | Pure importer unit tests |
+| `capsule` | `oci_compose_lock` | 18+ | Lock persistence tests |
+| `capsule` | `compose_import` | 20+ | Compose importer tests |
+| `capsule` | `derive` | 32 | ExecutionPlan identity tests |
 | `ato-cli` | `oci_single_target` | 14 | Single container lifecycle |
 | `ato-cli` | `oci_multi_service` | 18 | Service DAG execution |
 | `ato-cli` | `oci_compose` | 23 | Compose runner + lock |
@@ -156,7 +156,7 @@ All tests pass. Real Podman tests are `#[ignore]` unless `ATO_TEST_REAL_PODMAN=1
 
 1. `cargo test --workspace` triggers an interactive consent prompt in the
    `cli::commands::run::preflight` test. Always test with `-p ato-cli` or
-   `-p capsule-core` with module filters.
+   `-p capsule` with module filters.
 
 2. `install_aliases_in_same_scope_are_rejected` test in
    `cli::commands::run::preflight::tests` fails pre-existing (unrelated to OCI).
@@ -170,13 +170,13 @@ All tests pass. Real Podman tests are `#[ignore]` unless `ATO_TEST_REAL_PODMAN=1
 cargo fmt --all
 
 # Type-check
-cargo check -p capsule-core -p ato-cli
+cargo check -p capsule -p ato-cli
 
 # Unit tests
-cargo test -p capsule-core docker_run_script --lib
-cargo test -p capsule-core compose_import --lib
-cargo test -p capsule-core oci_compose_lock --lib
-cargo test -p capsule-core derive --lib
+cargo test -p capsule docker_run_script --lib
+cargo test -p capsule compose_import --lib
+cargo test -p capsule oci_compose_lock --lib
+cargo test -p capsule derive --lib
 cargo test -p ato-cli install_sh --lib
 cargo test -p ato-cli oci_compose --lib
 cargo test -p ato-cli oci_multi_service --lib

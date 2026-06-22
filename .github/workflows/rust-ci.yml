@@ -20,6 +20,16 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  dep-direction:
+    name: dependency direction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pure-bash Cargo.toml parse — no toolchain/build needed. Enforces the
+      # protocol/capsule/netd/cli/desktop/nacelle layering DAG and bans the
+      # pre-reorg crate names. See scripts/check-dep-direction.sh.
+      - run: bash scripts/check-dep-direction.sh
+
   check:
     name: cargo check (workspace)
     runs-on: ubuntu-latest
@@ -29,7 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # ato-desktop requires native GUI deps (webkit2gtk, etc.) not available
       # in the ubuntu-latest runner; excluded until M3 desktop CI bringup.
-      - run: cargo check --workspace --all-targets --exclude ato-desktop
+      - run: cargo check --workspace --all-targets --exclude desktop
 
   fmt:
     name: rustfmt
@@ -50,7 +60,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --exclude ato-desktop -- -D warnings
+      - run: cargo clippy --workspace --all-targets --exclude desktop -- -D warnings
 
   test:
     name: cargo test
@@ -59,12 +69,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    # The Windows leg is informational for now: the ato-cli test suite had
-    # never compiled (let alone run) on Windows before this leg existed, and
-    # carries ~112 pre-existing failures (path separators, snapshots, unix
-    # assumptions). It must not block dev integration while that parity debt
-    # is paid down; see the Windows test-parity tracking issue.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     env:
       # The full workspace debug build with default debuginfo overflows the
       # ubuntu runner's disk ("No space left on device" at link time).
@@ -110,11 +114,16 @@ jobs:
             echo "<FULL>" > changed.txt
           fi
           echo "----- changed files -----"; cat changed.txt
-          "$PY" .github/scripts/affected_crates.py < changed.txt > pkgs.txt
+          # Strip CR: on the Windows runner Python's text-mode stdout writes
+          # CRLF, so a bare redirect leaves each crate name as `name\r`. That
+          # makes `cargo test -p "name\r"` fail ("invalid character in package
+          # name") and `grep -qx ato-cli` mis-match. Normalise to LF here so
+          # every consumer (the read loop, grep -c, grep -qx) sees clean names.
+          "$PY" .github/scripts/affected_crates.py < changed.txt | tr -d '\r' > pkgs.txt
           echo "----- affected crates -----"; cat pkgs.txt
           count="$(grep -c . pkgs.txt || true)"; count="${count:-0}"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
-          if grep -qx ato-cli pkgs.txt; then
+          if grep -qx cli pkgs.txt; then
             echo "ato_cli=1" >> "$GITHUB_OUTPUT"
           else
             echo "ato_cli=0" >> "$GITHUB_OUTPUT"
@@ -130,7 +139,7 @@ jobs:
         if: steps.affected.outputs.ato_cli == '1'
         shell: bash
         run: |
-          cargo build -p ato-cli --bin ato
+          cargo build -p cli --bin ato
           cargo build -p nacelle --bin nacelle
           echo "$(pwd)/target/debug" >> $GITHUB_PATH
       # Test each selected crate in its own `cargo test -p` process, matching
