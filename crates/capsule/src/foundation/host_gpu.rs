@@ -1,10 +1,10 @@
 //! Host GPU profile detection for runner provisioning.
 //!
 //! Read-only probes that collect a complete picture of the host's GPU,
-//! driver, Docker, and NVIDIA Container Toolkit state. Used by
-//! `ato runner doctor` (health check) and `ato runner provision`
-//! (install flow) to decide what needs to be installed and to generate
-//! a provision receipt after successful provisioning.
+//! driver, CUDA driver API, and Vulkan state. Used by `ato runner doctor`
+//! (health check) and `ato runner provision` (Dockerless install flow) to
+//! decide what needs to be installed and to generate a provision receipt.
+//! This is the Dockerless GPU path — no Docker / Podman / nvidia-container-toolkit.
 //!
 //! This module is **detection only** — it never mutates host state.
 //! The companion [`hardware`](super::hardware) module remains the
@@ -64,22 +64,15 @@ pub struct CudaInfo {
     pub toolkit_version: Option<String>,
 }
 
-/// Docker Engine installation state.
+/// Vulkan runtime state — the Dockerless GPU path for native-inference. On
+/// NVIDIA hosts the Vulkan ICD ships with the driver; `vulkaninfo` confirms a
+/// usable device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DockerInfo {
-    /// Docker version string, e.g. `"27.5.1"`.
-    pub version: String,
-    /// Whether `docker info` succeeds (daemon reachable).
-    pub healthy: bool,
-}
-
-/// NVIDIA Container Toolkit installation state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolkitInfo {
-    /// `nvidia-ctk --version` output, e.g. `"1.17.5"`.
-    pub version: String,
-    /// Whether the `nvidia` runtime is registered in Docker.
-    pub configured: bool,
+pub struct VulkanInfo {
+    /// Whether a Vulkan loader (`vulkaninfo`/`libvulkan`) is present.
+    pub loader_present: bool,
+    /// Whether `vulkaninfo` reports at least one NVIDIA physical device.
+    pub nvidia_device_visible: bool,
 }
 
 /// Complete host GPU profile — the result of all detection probes.
@@ -93,9 +86,10 @@ pub struct HostGpuProfile {
     pub secure_boot_enabled: Option<bool>,
     pub gpus: Vec<GpuDevice>,
     pub driver: Option<DriverInfo>,
+    /// CUDA driver-API info — informational only (kept for a future CUDA
+    /// source-build path); not required for the Vulkan native-inference path.
     pub cuda: Option<CudaInfo>,
-    pub docker: Option<DockerInfo>,
-    pub nvidia_container_toolkit: Option<ToolkitInfo>,
+    pub vulkan: Option<VulkanInfo>,
 }
 
 impl HostGpuProfile {
@@ -112,18 +106,26 @@ impl HostGpuProfile {
             .unwrap_or(false)
     }
 
-    /// `true` when Docker is installed and the daemon is reachable.
-    pub fn docker_ready(&self) -> bool {
-        self.docker.as_ref().map(|d| d.healthy).unwrap_or(false)
+    /// `true` when a Vulkan loader is present on the host.
+    pub fn vulkan_loader_present(&self) -> bool {
+        self.vulkan
+            .as_ref()
+            .map(|v| v.loader_present)
+            .unwrap_or(false)
     }
 
-    /// `true` when nvidia-container-toolkit is installed and the `nvidia`
-    /// runtime is registered in Docker.
-    pub fn toolkit_configured(&self) -> bool {
-        self.nvidia_container_toolkit
+    /// `true` when `vulkaninfo` reports a usable NVIDIA Vulkan device.
+    pub fn vulkan_nvidia_device_visible(&self) -> bool {
+        self.vulkan
             .as_ref()
-            .map(|t| t.configured)
+            .map(|v| v.nvidia_device_visible)
             .unwrap_or(false)
+    }
+
+    /// `true` when the host can run a Vulkan-accelerated native-inference engine
+    /// Dockerlessly: an NVIDIA GPU + working driver + a Vulkan device.
+    pub fn native_inference_vulkan_ready(&self) -> bool {
+        self.has_gpu() && self.driver_installed() && self.vulkan_nvidia_device_visible()
     }
 
     /// `true` when the OS is Ubuntu 22.04 or 24.04 (the v0 supported set).
@@ -147,8 +149,7 @@ pub fn detect_host_gpu_profile() -> Result<HostGpuProfile> {
     let gpus = detect_gpu_devices().unwrap_or_default();
     let driver = detect_driver_info();
     let cuda = detect_cuda_info();
-    let docker = detect_docker();
-    let nvidia_container_toolkit = detect_nvidia_container_toolkit();
+    let vulkan = detect_vulkan_info();
 
     Ok(HostGpuProfile {
         os,
@@ -156,8 +157,7 @@ pub fn detect_host_gpu_profile() -> Result<HostGpuProfile> {
         gpus,
         driver,
         cuda,
-        docker,
-        nvidia_container_toolkit,
+        vulkan,
     })
 }
 
@@ -357,63 +357,36 @@ fn detect_cuda_info() -> Option<CudaInfo> {
     })
 }
 
-/// Detect Docker Engine: version string and daemon health.
-fn detect_docker() -> Option<DockerInfo> {
-    if which::which("docker").is_err() {
-        return None;
+/// Detect the Vulkan runtime: whether a loader is present and whether
+/// `vulkaninfo` reports an NVIDIA physical device. This is the Dockerless GPU
+/// readiness signal for the native-inference Vulkan engine variant.
+fn detect_vulkan_info() -> Option<VulkanInfo> {
+    let loader_present = which::which("vulkaninfo").is_ok()
+        || std::path::Path::new("/usr/lib/x86_64-linux-gnu/libvulkan.so.1").exists()
+        || std::path::Path::new("/usr/lib/aarch64-linux-gnu/libvulkan.so.1").exists();
+    if !loader_present {
+        return Some(VulkanInfo {
+            loader_present: false,
+            nvidia_device_visible: false,
+        });
     }
 
-    let version = Command::new("docker")
-        .args(["--version"])
+    // `vulkaninfo --summary` lists deviceName lines; an NVIDIA device confirms
+    // the driver's Vulkan ICD is usable.
+    let nvidia_device_visible = Command::new("vulkaninfo")
+        .arg("--summary")
         .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .to_lowercase()
+                    .contains("nvidia")
         })
-        .unwrap_or_default();
-
-    let healthy = Command::new("docker")
-        .args(["info", "--format", "ok"])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "ok")
         .unwrap_or(false);
 
-    Some(DockerInfo { version, healthy })
-}
-
-/// Detect NVIDIA Container Toolkit: version and whether the `nvidia`
-/// runtime is registered in Docker.
-fn detect_nvidia_container_toolkit() -> Option<ToolkitInfo> {
-    if which::which("nvidia-ctk").is_err() {
-        return None;
-    }
-
-    let version = Command::new("nvidia-ctk")
-        .args(["--version"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-
-    let configured = Command::new("docker")
-        .args(["info", "--format", "{{json .Runtimes}}"])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("nvidia"))
-        .unwrap_or(false);
-
-    Some(ToolkitInfo {
-        version,
-        configured,
+    Some(VulkanInfo {
+        loader_present,
+        nvidia_device_visible,
     })
 }
 
@@ -438,8 +411,7 @@ mod tests {
             gpus: vec![],
             driver: None,
             cuda: None,
-            docker: None,
-            nvidia_container_toolkit: None,
+            vulkan: None,
         };
         assert!(profile.os_supported());
         assert_eq!(os.distro, "ubuntu");
@@ -459,8 +431,7 @@ mod tests {
                 gpus: vec![],
                 driver: None,
                 cuda: None,
-                docker: None,
-                nvidia_container_toolkit: None,
+                vulkan: None,
             }
             .os_supported()
         );
@@ -480,8 +451,7 @@ mod tests {
                 gpus: vec![],
                 driver: None,
                 cuda: None,
-                docker: None,
-                nvidia_container_toolkit: None,
+                vulkan: None,
             }
             .os_supported()
         );
@@ -501,8 +471,7 @@ mod tests {
                 gpus: vec![],
                 driver: None,
                 cuda: None,
-                docker: None,
-                nvidia_container_toolkit: None,
+                vulkan: None,
             }
             .os_supported()
         );
@@ -526,8 +495,7 @@ mod tests {
             }],
             driver: None,
             cuda: None,
-            docker: None,
-            nvidia_container_toolkit: None,
+            vulkan: None,
         };
         assert!(profile.has_gpu());
     }
@@ -544,8 +512,7 @@ mod tests {
             gpus: vec![],
             driver: None,
             cuda: None,
-            docker: None,
-            nvidia_container_toolkit: None,
+            vulkan: None,
         };
         assert!(!profile.has_gpu());
     }
@@ -565,35 +532,47 @@ mod tests {
                 nvidia_smi_available: true,
             }),
             cuda: None,
-            docker: None,
-            nvidia_container_toolkit: None,
+            vulkan: None,
         };
         assert!(profile.driver_installed());
     }
 
     #[test]
-    fn docker_ready_true_when_healthy() {
-        let profile = HostGpuProfile {
+    fn vulkan_ready_requires_gpu_driver_and_device() {
+        let mk = |gpus: Vec<GpuDevice>, driver_ok: bool, vk_device: bool| HostGpuProfile {
             os: OsInfo {
                 distro: "ubuntu".to_string(),
                 version: "22.04".to_string(),
                 kernel: "5.15.0".to_string(),
             },
             secure_boot_enabled: None,
-            gpus: vec![],
-            driver: None,
-            cuda: None,
-            docker: Some(DockerInfo {
-                version: "27.5.1".to_string(),
-                healthy: true,
+            gpus,
+            driver: driver_ok.then(|| DriverInfo {
+                version: "575.57.08".to_string(),
+                nvidia_smi_available: true,
             }),
-            nvidia_container_toolkit: None,
+            cuda: None,
+            vulkan: Some(VulkanInfo {
+                loader_present: true,
+                nvidia_device_visible: vk_device,
+            }),
         };
-        assert!(profile.docker_ready());
+        let gpu = GpuDevice {
+            index: 0,
+            name: "NVIDIA".to_string(),
+            uuid: None,
+            vram_bytes: 0,
+            pcie_bus_id: None,
+        };
+        assert!(mk(vec![gpu.clone()], true, true).native_inference_vulkan_ready());
+        // Missing any of GPU / driver / vulkan device → not ready (fail closed).
+        assert!(!mk(vec![], true, true).native_inference_vulkan_ready());
+        assert!(!mk(vec![gpu.clone()], false, true).native_inference_vulkan_ready());
+        assert!(!mk(vec![gpu], true, false).native_inference_vulkan_ready());
     }
 
     #[test]
-    fn toolkit_configured_true_when_nvidia_runtime_registered() {
+    fn vulkan_helpers_reflect_profile() {
         let profile = HostGpuProfile {
             os: OsInfo {
                 distro: "ubuntu".to_string(),
@@ -604,13 +583,13 @@ mod tests {
             gpus: vec![],
             driver: None,
             cuda: None,
-            docker: None,
-            nvidia_container_toolkit: Some(ToolkitInfo {
-                version: "1.17.5".to_string(),
-                configured: true,
+            vulkan: Some(VulkanInfo {
+                loader_present: true,
+                nvidia_device_visible: false,
             }),
         };
-        assert!(profile.toolkit_configured());
+        assert!(profile.vulkan_loader_present());
+        assert!(!profile.vulkan_nvidia_device_visible());
     }
 
     #[test]

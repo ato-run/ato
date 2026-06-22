@@ -458,12 +458,18 @@ impl ToolchainFetcher for LlamaCppFetcher {
         version: &str,
         show_progress: bool,
     ) -> Result<PathBuf> {
-        // Defense-in-depth: the version is interpolated into the download URL,
+        // The dispatch `version` is the cache KEY: `<build-tag>` for the default
+        // build or `<build-tag>@<variant>` (e.g. `b9754@vulkan`). The cache dir
+        // uses the full key (so variants never collide); the download URL uses
+        // the real build tag + the variant's asset slug.
+        let (build_tag, variant) = parse_llamacpp_key(version);
+
+        // Defense-in-depth: the build tag is interpolated into the download URL,
         // archive name, and cache path. Manifest validation enforces this, but
         // reject unsafe values here too (this runs under the install lock).
-        if !crate::foundation::types::manifest::is_safe_engine_version(version) {
+        if !crate::foundation::types::manifest::is_safe_engine_version(build_tag) {
             return Err(CapsuleError::Pack(format!(
-                "unsafe llama.cpp engine_version {version:?} \
+                "unsafe llama.cpp engine_version {build_tag:?} \
                  (expected a build tag / version id)"
             )));
         }
@@ -491,11 +497,11 @@ impl ToolchainFetcher for LlamaCppFetcher {
             .await?;
 
         let (os, arch) = RuntimeFetcher::detect_platform()?;
-        let (filename, is_zip) = llama_cpp_artifact_filename(version, &os, &arch)?;
-        // The release tag IS the version (e.g. "b4231") — no "v" prefix.
+        let (filename, is_zip) = llama_cpp_artifact_filename(build_tag, &os, &arch, variant)?;
+        // The release tag IS the build tag (e.g. "b4231") — no "v" prefix.
         let download_url = format!(
             "https://github.com/ggml-org/llama.cpp/releases/download/{}/{}",
-            version, filename
+            build_tag, filename
         );
 
         debug!("Fetching from: {}", download_url);
@@ -660,32 +666,102 @@ fn find_file_recursive(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Map host platform → llama.cpp release asset (name, is_zip). Inc2 selects the
-/// default CPU/Metal build; GPU (CUDA/ROCm/Vulkan) variant selection is Inc4.
-fn llama_cpp_artifact_filename(version: &str, os: &str, arch: &str) -> Result<(String, bool)> {
-    let (slug, is_zip) = match (os, arch) {
-        ("macos", "aarch64") => ("macos-arm64", false),
-        ("macos", "x86_64") => ("macos-x64", false),
-        ("linux", "x86_64") => ("ubuntu-x64", false),
-        ("linux", "aarch64") => ("ubuntu-arm64", false),
-        ("windows", "x86_64") => ("win-cpu-x64", true),
-        ("windows", "aarch64") => ("win-cpu-arm64", true),
-        _ => {
+/// Toolchain cache key for a llama.cpp engine: `<build-tag>` for the default
+/// CPU/Metal build, or `<build-tag>@<variant>` for a GPU build (so variants
+/// never share a cache directory). Used by both the fetcher and the launcher's
+/// deterministic path so they always agree.
+pub(crate) fn llamacpp_cache_key(version: &str, variant: Option<&str>) -> String {
+    match normalize_engine_variant(variant) {
+        Some(v) => format!("{version}@{v}"),
+        None => version.to_string(),
+    }
+}
+
+/// Split a cache key back into its build tag and optional variant.
+fn parse_llamacpp_key(key: &str) -> (&str, Option<&str>) {
+    match key.split_once('@') {
+        Some((tag, variant)) => (tag, Some(variant)),
+        None => (key, None),
+    }
+}
+
+/// Normalize a manifest `engine_variant` to its canonical slug, treating the
+/// default CPU/Metal build (`None` / `""` / `default` / `cpu` / `metal`) as `None`.
+fn normalize_engine_variant(variant: Option<&str>) -> Option<String> {
+    let v = variant?.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "" | "default" | "cpu" | "metal" => None,
+        other => Some(other.to_string()),
+    }
+}
+
+/// Map (build tag, host platform, variant) → llama.cpp release asset
+/// (name, is_zip), failing closed for unsupported combinations.
+///
+/// * default (None): the CPU/Metal build (macOS = Metal).
+/// * `vulkan`: GPU-accelerated, Linux only (NVIDIA via the driver's Vulkan ICD).
+/// * `cuda`: no Linux prebuilt exists → fail closed (use `engine_path`).
+fn llama_cpp_artifact_filename(
+    version: &str,
+    os: &str,
+    arch: &str,
+    variant: Option<&str>,
+) -> Result<(String, bool)> {
+    let variant = normalize_engine_variant(variant);
+    let (slug, is_zip) = match variant.as_deref() {
+        None => match (os, arch) {
+            ("macos", "aarch64") => ("macos-arm64", false),
+            ("macos", "x86_64") => ("macos-x64", false),
+            ("linux", "x86_64") => ("ubuntu-x64", false),
+            ("linux", "aarch64") => ("ubuntu-arm64", false),
+            ("windows", "x86_64") => ("win-cpu-x64", true),
+            ("windows", "aarch64") => ("win-cpu-arm64", true),
+            _ => {
+                return Err(CapsuleError::Pack(format!(
+                    "Unsupported llama.cpp platform: {os} {arch}"
+                )));
+            }
+        },
+        Some("vulkan") => match (os, arch) {
+            ("linux", "x86_64") => ("ubuntu-vulkan-x64", false),
+            ("linux", "aarch64") => ("ubuntu-vulkan-arm64", false),
+            ("macos", _) => {
+                return Err(CapsuleError::Pack(
+                    "engine_variant=\"vulkan\" is not supported on macOS — use the default \
+                     (Metal-accelerated) build by omitting engine_variant"
+                        .to_string(),
+                ));
+            }
+            _ => {
+                return Err(CapsuleError::Pack(format!(
+                    "engine_variant=\"vulkan\" has no llama.cpp prebuilt for {os} {arch} \
+                     (Linux x64/arm64 only)"
+                )));
+            }
+        },
+        Some("cuda") => {
+            return Err(CapsuleError::Pack(
+                "engine_variant=\"cuda\" has no llama.cpp Linux prebuilt for this release; \
+                 set an explicit `engine_path`, or use engine_variant=\"vulkan\" for managed \
+                 GPU acceleration"
+                    .to_string(),
+            ));
+        }
+        Some(other) => {
             return Err(CapsuleError::Pack(format!(
-                "Unsupported llama.cpp platform: {} {}",
-                os, arch
+                "unknown engine_variant {other:?} (supported: vulkan; default = CPU/Metal)"
             )));
         }
     };
     let ext = if is_zip { "zip" } else { "tar.gz" };
-    Ok((format!("llama-{}-bin-{}.{}", version, slug, ext), is_zip))
+    Ok((format!("llama-{version}-bin-{slug}.{ext}"), is_zip))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         deno_artifact_filename, ensure_canonical_llama_server, llama_cpp_artifact_filename,
-        llamacpp_cache_is_valid, llamacpp_server_filename,
+        llamacpp_cache_is_valid, llamacpp_cache_key, llamacpp_server_filename,
     };
 
     #[cfg(unix)]
@@ -746,19 +822,63 @@ mod tests {
 
     #[test]
     fn llama_cpp_artifact_filename_maps_platforms() {
+        // Default (CPU/Metal) build — unchanged from Inc2.
         assert_eq!(
-            llama_cpp_artifact_filename("b4231", "macos", "aarch64").unwrap(),
+            llama_cpp_artifact_filename("b4231", "macos", "aarch64", None).unwrap(),
             ("llama-b4231-bin-macos-arm64.tar.gz".to_string(), false)
         );
         assert_eq!(
-            llama_cpp_artifact_filename("b4231", "linux", "x86_64").unwrap(),
+            llama_cpp_artifact_filename("b4231", "linux", "x86_64", None).unwrap(),
             ("llama-b4231-bin-ubuntu-x64.tar.gz".to_string(), false)
         );
         assert_eq!(
-            llama_cpp_artifact_filename("b4231", "windows", "x86_64").unwrap(),
+            llama_cpp_artifact_filename("b4231", "windows", "x86_64", None).unwrap(),
             ("llama-b4231-bin-win-cpu-x64.zip".to_string(), true)
         );
-        assert!(llama_cpp_artifact_filename("b4231", "plan9", "x86_64").is_err());
+        assert!(llama_cpp_artifact_filename("b4231", "plan9", "x86_64", None).is_err());
+        // "cpu"/"metal"/"default" normalize to the default build.
+        assert_eq!(
+            llama_cpp_artifact_filename("b4231", "macos", "aarch64", Some("metal")).unwrap(),
+            ("llama-b4231-bin-macos-arm64.tar.gz".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn llama_cpp_vulkan_variant_linux_only() {
+        assert_eq!(
+            llama_cpp_artifact_filename("b9754", "linux", "x86_64", Some("vulkan")).unwrap(),
+            (
+                "llama-b9754-bin-ubuntu-vulkan-x64.tar.gz".to_string(),
+                false
+            )
+        );
+        assert_eq!(
+            llama_cpp_artifact_filename("b9754", "linux", "aarch64", Some("vulkan")).unwrap(),
+            (
+                "llama-b9754-bin-ubuntu-vulkan-arm64.tar.gz".to_string(),
+                false
+            )
+        );
+        // macOS vulkan → explicit error (use the Metal default).
+        let mac = llama_cpp_artifact_filename("b9754", "macos", "aarch64", Some("vulkan"));
+        assert!(mac.is_err() && mac.unwrap_err().to_string().contains("macOS"));
+    }
+
+    #[test]
+    fn llama_cpp_cuda_variant_fails_closed() {
+        let err = llama_cpp_artifact_filename("b9754", "linux", "x86_64", Some("cuda"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cuda") && err.contains("no llama.cpp Linux prebuilt"));
+        // Never silently falls back to a CPU build.
+        assert!(!err.contains("ubuntu-x64"));
+    }
+
+    #[test]
+    fn llamacpp_cache_key_separates_variants() {
+        assert_eq!(llamacpp_cache_key("b9754", None), "b9754");
+        assert_eq!(llamacpp_cache_key("b9754", Some("cpu")), "b9754");
+        assert_eq!(llamacpp_cache_key("b9754", Some("vulkan")), "b9754@vulkan");
     }
 
     #[test]
