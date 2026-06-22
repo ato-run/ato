@@ -190,6 +190,9 @@ pub fn prepare_target_execution(
                 capsule::execution_plan::model::ExecutionRuntime::Source => {
                     capsule::router::RuntimeKind::Source
                 }
+                capsule::execution_plan::model::ExecutionRuntime::NativeInference => {
+                    capsule::router::RuntimeKind::NativeInference
+                }
             };
             (
                 execution_plan,
