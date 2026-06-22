@@ -409,7 +409,7 @@ if (hasEntitlement('export_pdf')) {
 ### 8.1 Phase B-1: license.sync フォーマット
 
 - [ ] manifest.toml スキーマ定義
-- [ ] `capsule-core` に License 型追加
+- [ ] `capsule` に License 型追加
 - [ ] license.json パーサー
 - [ ] sync.wasm テンプレート (renewal)
 

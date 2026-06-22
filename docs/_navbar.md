@@ -1,0 +1,2 @@
+- [![GitHub](https://img.shields.io/github/stars/ato-run/ato?style=social)](https://github.com/ato-run/ato)
+- [![Community](https://img.shields.io/badge/community-Discussions-5865f2)](https://github.com/ato-run/ato/discussions)

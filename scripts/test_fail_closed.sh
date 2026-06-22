@@ -9,7 +9,7 @@ if [[ ! -f "${CLI_DIR}/Cargo.toml" ]]; then
   exit 1
 fi
 
-TEST_BIN=(cargo test -p ato-cli --test fail_closed_test)
+TEST_BIN=(cargo test -p cli --test fail_closed_test)
 TEST_FLAGS=(-- --ignored --nocapture)
 
 SCENARIOS=(

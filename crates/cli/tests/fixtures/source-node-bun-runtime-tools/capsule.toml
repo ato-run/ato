@@ -1,0 +1,17 @@
+schema_version = "0.3"
+name = "source-node-bun-runtime-tools-fixture"
+version = "0.1.0"
+type = "app"
+default_target = "main"
+
+# ato#723: the canonical App Builder shape — a Node runtime with Bun supplied as
+# an auxiliary `runtime_tools` entry. Bun drives both the build (`bun install`)
+# and the run (`bun run server.ts`) lifecycle phases.
+[targets.main]
+runtime = "source"
+driver = "node"
+runtime_version = "20"
+runtime_tools = { bun = "1.1.38" }
+build = "bun install"
+run = "bun run server.ts"
+port = 19877

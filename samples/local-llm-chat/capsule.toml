@@ -1,0 +1,41 @@
+schema_version = "0.3"
+name = "local-llm-chat"
+version = "0.1.0"
+type = "app"
+description = "Run a local LLM (Qwen2.5-1.5B-Instruct) with one command — Dockerless, host-native, OpenAI-compatible. Ato fetches a pinned llama.cpp engine AND the GGUF model and runs `llama-server` as a host process. Nothing local is required."
+homepage = "https://github.com/ato-run/ato"
+
+# Default = CPU on Linux, Metal-accelerated on macOS (the managed macOS build is a
+# Metal build). Runs anywhere with no GPU setup. For NVIDIA GPUs on Linux, use the
+# `chat-vulkan` target (see README) after `ato runner provision --profile nvidia-ubuntu`.
+default_target = "chat"
+
+[targets.chat]
+runtime = "native-inference"
+# Managed engine: Ato downloads the pinned llama.cpp release into its toolchain
+# cache and runs `llama-server`. (Local override: `engine_path`.)
+engine = "llama.cpp"
+engine_version = "b9754"
+# Managed model: downloaded, sha256-verified, and content-addressed in the Ato
+# store (~/.ato/store/blobs); re-runs reuse it offline. Qwen2.5-1.5B-Instruct,
+# Q4_K_M quantization (~1.1 GB), Apache-2.0. (Local override: `model`.)
+model_url = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+model_sha256 = "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
+model_format = "gguf"
+# llama-server listens here; Ato injects `--port <N>` (allocated) and waits for
+# readiness on it, then reports the OpenAI-compatible app_url.
+port = 8080
+
+# Linux + NVIDIA GPU: GPU-accelerated via Vulkan (no Docker / CUDA toolkit). Run
+# `ato run local-llm-chat --target chat-vulkan` on a Vulkan-ready host. Fails
+# closed (never silently falls back to CPU) if Vulkan isn't ready — run
+# `ato runner doctor --profile nvidia-ubuntu` / `ato runner provision …` first.
+[targets.chat-vulkan]
+runtime = "native-inference"
+engine = "llama.cpp"
+engine_version = "b9754"
+engine_variant = "vulkan"
+model_url = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+model_sha256 = "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
+model_format = "gguf"
+port = 8080
