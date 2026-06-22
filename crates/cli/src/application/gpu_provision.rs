@@ -40,22 +40,41 @@ fn provision_marker_path() -> PathBuf {
 // Doctor
 // ─────────────────────────────────────────────
 
-/// A single diagnostic check result.
+/// A single diagnostic check result. Shared by the GPU host doctor and
+/// `ato doctor native-inference`.
 #[derive(Debug, Clone, Serialize)]
-struct CheckResult {
-    name: &'static str,
-    status: CheckStatus,
-    detail: String,
-    recommendation: Option<&'static str>,
+pub(crate) struct CheckResult {
+    pub(crate) name: &'static str,
+    pub(crate) status: CheckStatus,
+    pub(crate) detail: String,
+    pub(crate) recommendation: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum CheckStatus {
+pub(crate) enum CheckStatus {
     Ok,
     Warn,
     Fail,
     Na,
+}
+
+/// Render the `[OK]/[WARN]/[FAIL]/[N/A] name → detail/recommendation` rows shared
+/// by every doctor's human-readable table.
+pub(crate) fn print_check_rows(checks: &[CheckResult]) {
+    for check in checks {
+        let label = match check.status {
+            CheckStatus::Ok => "OK  ",
+            CheckStatus::Warn => "WARN",
+            CheckStatus::Fail => "FAIL",
+            CheckStatus::Na => "N/A ",
+        };
+        println!("  [{label}] {}", check.name);
+        println!("         {}", check.detail);
+        if let Some(rec) = check.recommendation {
+            println!("         → {rec}");
+        }
+    }
 }
 
 /// JSON envelope for `ato runner doctor --json`.
@@ -321,19 +340,7 @@ fn print_doctor_table(profile: &HostGpuProfile, checks: &[CheckResult], ready: b
     }
     println!();
 
-    for check in checks {
-        let label = match check.status {
-            CheckStatus::Ok => "OK  ",
-            CheckStatus::Warn => "WARN",
-            CheckStatus::Fail => "FAIL",
-            CheckStatus::Na => "N/A ",
-        };
-        println!("  [{label}] {}", check.name);
-        println!("         {}", check.detail);
-        if let Some(rec) = check.recommendation {
-            println!("         → {rec}");
-        }
-    }
+    print_check_rows(checks);
 
     println!();
     if ready {

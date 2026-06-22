@@ -793,6 +793,12 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             }
         }
 
+        Commands::Doctor { target } => match target {
+            crate::cli::DoctorTarget::NativeInference { json } => {
+                crate::application::native_inference_doctor::run(json)
+            }
+        },
+
         Commands::Login {
             token,
             headless,
