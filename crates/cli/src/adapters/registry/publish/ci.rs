@@ -493,6 +493,14 @@ pub(crate) fn build_capsule_artifact_with_output(
                 reporter,
             )?;
         }
+        capsule::router::RuntimeKind::NativeInference => {
+            // Inc1 is run-only: there is no source/image bundle to publish for a
+            // native-inference target (engine/model are resolved locally).
+            anyhow::bail!(
+                "publishing runtime=native-inference capsules is not supported yet \
+                 (Inc1 is run-only)"
+            );
+        }
         capsule::router::RuntimeKind::Web => {
             let driver = decision
                 .plan

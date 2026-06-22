@@ -200,6 +200,9 @@ fn resolve_executor_kind(
         (ExecutionRuntime::Source, ExecutionDriver::Node) => Ok(ExecutorKind::NodeCompat),
         (ExecutionRuntime::Source, ExecutionDriver::Native)
         | (ExecutionRuntime::Source, ExecutionDriver::Python) => Ok(ExecutorKind::Native),
+        // native-inference lowers to the host-native process launcher (Native),
+        // regardless of inferred driver. See launch_spec native-inference branch.
+        (ExecutionRuntime::NativeInference, _) => Ok(ExecutorKind::Native),
         _ => Err(AtoExecutionError::policy_violation(format!(
             "unsupported runtime/driver pair for guard: runtime='{}' driver='{}'",
             runtime.as_str(),
@@ -226,6 +229,9 @@ fn resolve_required_lock(
         | (ExecutionRuntime::Source, ExecutionDriver::Python) => Ok(Some(RequiredLock::UvLock)),
         (ExecutionRuntime::Wasm, ExecutionDriver::Wasmtime) => Ok(Some(RequiredLock::CapsuleLock)),
         (ExecutionRuntime::Source, ExecutionDriver::Native) => Ok(None),
+        // native-inference resolves its engine binary + model from local paths;
+        // there is no source dependency lock to require.
+        (ExecutionRuntime::NativeInference, _) => Ok(None),
         _ => Err(AtoExecutionError::policy_violation(format!(
             "unsupported runtime/driver pair for lock policy: runtime='{}' driver='{}'",
             runtime.as_str(),
@@ -277,6 +283,9 @@ fn requires_capsule_lock(runtime: ExecutionRuntime, driver: ExecutionDriver) -> 
     !matches!(
         (runtime, driver),
         (ExecutionRuntime::Web, ExecutionDriver::Static)
+            // native-inference has no source tree to lock — engine/model are
+            // resolved from local paths, so no capsule.lock is required.
+            | (ExecutionRuntime::NativeInference, _)
     )
 }
 
