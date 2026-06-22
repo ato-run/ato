@@ -364,6 +364,7 @@ pub(crate) fn observe_runtime_v2(
         binary_hash: v1.binary_hash,
         dynamic_linkage: v1.dynamic_linkage,
         completeness,
+        native_inference: None,
         platform: v1.platform,
     })
 }
@@ -1470,6 +1471,7 @@ run = "main.py"
             binary_hash: Tracked::unknown("not needed for dependency tests"),
             dynamic_linkage: Tracked::unknown("not needed for dependency tests"),
             completeness: RuntimeCompleteness::DeclaredOnly,
+            native_inference: None,
             platform: capsule::execution_identity::PlatformIdentity {
                 os: std::env::consts::OS.to_string(),
                 arch: std::env::consts::ARCH.to_string(),

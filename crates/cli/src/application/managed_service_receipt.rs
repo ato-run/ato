@@ -92,6 +92,7 @@ pub(crate) fn synthesize_managed_service_receipt(
             "dynamic linkage observer not implemented for managed services",
         ),
         completeness: RuntimeCompleteness::DeclaredOnly,
+        native_inference: None,
         platform: PlatformIdentity {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
