@@ -1619,10 +1619,27 @@ pub struct NamedTarget {
     pub engine_path: Option<String>,
 
     /// native-inference: local filesystem path to the model file (e.g. a GGUF).
+    /// When set, it overrides managed model fetching (`model_url`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// native-inference: model format hint (e.g. `"gguf"`). Informational in Inc1.
+    /// native-inference: direct download URL for a managed model file. Resolved
+    /// + verified against `model_sha256` and cached content-addressed. Used when
+    /// `model` (a local path) is not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_url: Option<String>,
+
+    /// native-inference: required SHA-256 (hex, optional `sha256:` prefix) of the
+    /// managed model. Both the cache key and the post-download integrity check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_sha256: Option<String>,
+
+    /// native-inference: optional display/cache filename for a managed model
+    /// (e.g. `"model.gguf"`). Informational; the cache is keyed by sha256.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_filename: Option<String>,
+
+    /// native-inference: model format hint (e.g. `"gguf"`). Informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_format: Option<String>,
 
@@ -2156,6 +2173,30 @@ pub fn is_safe_engine_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Normalize a managed-model `model_sha256` to its canonical 64-char lowercase
+/// hex form (accepting an optional `sha256:`/`sha256-` prefix). Returns `None`
+/// for anything that is not a valid SHA-256 — it is the content-addressed cache
+/// key, so it must be exact.
+pub fn normalize_model_sha256(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    let hex = lower
+        .strip_prefix("sha256:")
+        .or_else(|| lower.strip_prefix("sha256-"))
+        .unwrap_or(&lower);
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(hex.to_string())
+    } else {
+        None
+    }
+}
+
+/// A managed `model_url` must be a plain `http(s)://` URL (Inc3 does direct
+/// download only — no `hf://`, auth, or scheme-specific resolution).
+pub fn is_safe_model_url(value: &str) -> bool {
+    let v = value.trim();
+    (v.starts_with("https://") || v.starts_with("http://")) && !v.contains(char::is_whitespace)
+}
+
 #[cfg(test)]
 mod engine_version_tests {
     use super::is_safe_engine_version;
@@ -2178,6 +2219,45 @@ mod engine_version_tests {
         assert!(!is_safe_engine_version("a\\b"));
         assert!(!is_safe_engine_version("b97 54")); // whitespace
         assert!(!is_safe_engine_version("b9754%2f")); // url-encoded slash
+    }
+}
+
+#[cfg(test)]
+mod model_ref_tests {
+    use super::{is_safe_model_url, normalize_model_sha256};
+
+    #[test]
+    fn normalizes_valid_sha256_and_strips_prefix() {
+        let hex = "a".repeat(64);
+        assert_eq!(normalize_model_sha256(&hex), Some(hex.clone()));
+        assert_eq!(
+            normalize_model_sha256(&format!("sha256:{hex}")),
+            Some(hex.clone())
+        );
+        assert_eq!(
+            normalize_model_sha256(&format!("  SHA256-{}  ", "A".repeat(64))),
+            Some(hex)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_sha256() {
+        assert_eq!(normalize_model_sha256(""), None);
+        assert_eq!(normalize_model_sha256("abc"), None); // too short
+        assert_eq!(normalize_model_sha256(&"z".repeat(64)), None); // non-hex
+        assert_eq!(normalize_model_sha256(&"a".repeat(63)), None); // off-by-one
+        assert_eq!(normalize_model_sha256(&"a".repeat(65)), None);
+    }
+
+    #[test]
+    fn model_url_must_be_http_s() {
+        assert!(is_safe_model_url("https://example.com/m.gguf"));
+        assert!(is_safe_model_url("http://example.com/m.gguf"));
+        assert!(!is_safe_model_url("hf://repo/model"));
+        assert!(!is_safe_model_url("file:///etc/passwd"));
+        assert!(!is_safe_model_url("ftp://x/y"));
+        assert!(!is_safe_model_url("https://e.com/a b")); // whitespace
+        assert!(!is_safe_model_url(""));
     }
 }
 
