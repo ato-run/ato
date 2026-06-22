@@ -1010,9 +1010,16 @@ impl ExecutionDescriptor {
     }
 
     /// native-inference: local filesystem path to the engine server binary
-    /// (e.g. `llama-server`). Inc1 requires this to be set explicitly.
+    /// (e.g. `llama-server`). When set, it overrides managed engine fetching.
     pub fn target_engine_path(&self) -> Option<String> {
         self.compat_str(&["targets", &self.selected_target, "engine_path"])
+    }
+
+    /// native-inference: pinned engine version (e.g. llama.cpp build tag
+    /// `"b4231"`). Used to fetch/locate a managed engine binary when
+    /// `engine_path` is not set.
+    pub fn target_engine_version(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "engine_version"])
     }
 
     /// native-inference: local filesystem path to the model file (e.g. a GGUF).
