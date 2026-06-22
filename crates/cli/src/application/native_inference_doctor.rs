@@ -100,6 +100,15 @@ fn diagnose() -> Vec<CheckResult> {
         }),
     }
 
+    // Probe the host GPU once — both the acceleration check and the recommended
+    // target need it, and on Linux the probe shells out (nvidia-smi/vulkaninfo).
+    // macOS never needs it (no Vulkan prebuilt) so skip the probe there.
+    let gpu_profile = if os == "linux" {
+        detect_host_gpu_profile().ok()
+    } else {
+        None
+    };
+
     // 3. Acceleration: Metal on macOS (default build), Vulkan on Linux NVIDIA.
     if os == "macos" {
         results.push(CheckResult {
@@ -110,24 +119,24 @@ fn diagnose() -> Vec<CheckResult> {
             recommendation: None,
         });
     } else if os == "linux" {
-        match detect_host_gpu_profile() {
-            Ok(profile) if profile.native_inference_vulkan_ready() => results.push(CheckResult {
+        match &gpu_profile {
+            Some(profile) if profile.native_inference_vulkan_ready() => results.push(CheckResult {
                 name: "acceleration",
                 status: CheckStatus::Ok,
                 detail: "Vulkan GPU ready — the chat-vulkan target can offload to the NVIDIA GPU"
                     .to_string(),
                 recommendation: None,
             }),
-            Ok(profile) if profile.has_gpu() => results.push(CheckResult {
+            Some(profile) if profile.has_gpu() => results.push(CheckResult {
                 name: "acceleration",
                 status: CheckStatus::Warn,
                 detail: "NVIDIA GPU present but Vulkan is not ready — CPU (chat) works; GPU (chat-vulkan) does not yet"
                     .to_string(),
                 recommendation: Some(
-                    "Run `ato runner doctor --profile nvidia-ubuntu`, then `sudo ato runner provision`, to enable the chat-vulkan target.",
+                    "Run `ato runner doctor --profile nvidia-ubuntu`, then `sudo ato runner provision --profile nvidia-ubuntu`, to enable the chat-vulkan target.",
                 ),
             }),
-            Ok(_) => results.push(CheckResult {
+            Some(_) => results.push(CheckResult {
                 name: "acceleration",
                 status: CheckStatus::Warn,
                 detail: "No NVIDIA GPU detected — the default chat target runs on CPU".to_string(),
@@ -135,7 +144,7 @@ fn diagnose() -> Vec<CheckResult> {
                     "CPU is fine for small models; for GPU use a Linux NVIDIA host with the chat-vulkan target.",
                 ),
             }),
-            Err(_) => results.push(CheckResult {
+            None => results.push(CheckResult {
                 name: "acceleration",
                 status: CheckStatus::Warn,
                 detail: "Could not probe the GPU — the default chat target runs on CPU".to_string(),
@@ -156,7 +165,8 @@ fn diagnose() -> Vec<CheckResult> {
         .as_ref()
         .map(|s| s.vulkan_available)
         .unwrap_or(false)
-        && detect_host_gpu_profile()
+        && gpu_profile
+            .as_ref()
             .map(|p| p.native_inference_vulkan_ready())
             .unwrap_or(false);
     let detail = if vulkan_target {
