@@ -3990,11 +3990,13 @@ where
                 || host_fallback_requested
                 || desktop_native_open_only
                 || is_native_inference;
-            // Ensure a managed native-inference engine (e.g. llama.cpp's
-            // llama-server) is fetched into the toolchain cache BEFORE the host
-            // launcher resolves it. A local `engine_path` skips this.
+            // Ensure managed native-inference assets (the llama.cpp engine and/or
+            // a downloaded model) are present in their caches BEFORE the host
+            // launcher resolves their deterministic paths. Local `engine_path` /
+            // `model` skip the corresponding fetch.
             if is_native_inference {
                 ensure_native_inference_engine(&decision.plan).await?;
+                ensure_native_inference_model(&decision.plan).await?;
             }
             let process = if host_execution {
                 if let Some(app_path) = request.desktop_open_path.as_ref() {
@@ -4432,6 +4434,38 @@ async fn ensure_native_inference_engine(plan: &capsule::router::ManifestData) ->
         // resolve_native_inference_engine_command produce the precise error.
         _ => Ok(()),
     }
+}
+
+/// Download + verify a managed native-inference model (`model_url` +
+/// `model_sha256`) into the content-addressed cache before the host launcher
+/// resolves its deterministic blob path. A local `model` overrides this.
+async fn ensure_native_inference_model(plan: &capsule::router::ManifestData) -> Result<()> {
+    let has_local_model = plan
+        .target_model()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if has_local_model {
+        return Ok(());
+    }
+
+    let url = match plan
+        .target_model_url()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(url) => url,
+        // No managed model declared: the launcher's resolve_native_inference_model
+        // produces the precise "requires model or model_url" error.
+        None => return Ok(()),
+    };
+    let sha_raw = plan
+        .target_model_sha256()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("`model_url` requires `model_sha256`"))?;
+    let sha = capsule::foundation::types::manifest::normalize_model_sha256(&sha_raw)
+        .ok_or_else(|| anyhow::anyhow!("`model_sha256` must be a 64-char hex SHA-256"))?;
+
+    capsule::resource::model_cache::ensure_model(&url, &sha).await?;
+    Ok(())
 }
 
 pub(crate) async fn reroute_auto_provisioned_execution(
