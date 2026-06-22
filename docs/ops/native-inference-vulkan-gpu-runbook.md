@@ -97,11 +97,17 @@ ato stop <session-id>  # process exits; GPU memory is released
 
 ## Fail-closed checks (no silent CPU fallback)
 
-- `engine_variant = "vulkan"` with **no NVIDIA GPU detected** → the run fails
-  with a clear error pointing at `ato runner doctor/provision` (the GPU build is
-  fetched, never a CPU build — there is no silent fallback).
-- `engine_variant = "vulkan"` on **macOS** → explicit error (use the Metal default).
-- `engine_variant = "cuda"` on **Linux** → fail closed (no prebuilt).
+The ensure-step dispatches on **variant/platform first**, so each case fails with
+its precise reason (never masked behind a generic "needs an NVIDIA GPU"):
+
+- `engine_variant = "vulkan"` on **Linux without full Vulkan readiness**
+  (`native_inference_vulkan_ready` = GPU + driver + Vulkan device) → fail closed,
+  pointing at `ato runner doctor/provision`. The Vulkan build is fetched, never a
+  CPU build — there is no silent fallback.
+- `engine_variant = "vulkan"` on **macOS** → explicit error (omit it to use Metal).
+- `engine_variant = "cuda"` → fail closed (no managed prebuilt; use `engine_path`).
+- `engine_variant = "<unknown>"` → explicit unknown-variant error.
+- default / `cpu` / `metal` → no GPU readiness probe at all.
 
 ## Status
 
