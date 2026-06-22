@@ -20,7 +20,7 @@ and recorded under `runtimes.<name>` in the lockfile (`RuntimeSection` /
 
 Auxiliary tools prepare or launch the execution world (dependency resolution,
 materialization, script running). They live in the
-`RuntimeToolSpec` registry (`crates/capsule-core/src/contract/tools.rs`,
+`RuntimeToolSpec` registry (`crates/capsule/src/contract/tools.rs`,
 `REGISTRY`) and are recorded under `tools.<name>` in the lockfile
 (`ToolSection`).
 

@@ -1,0 +1,23 @@
+schema_version = "0.3"
+name = "native-llama"
+version = "0.1.0"
+type = "app"
+description = "Host-native llama.cpp inference server (Dockerless). The llama.cpp engine AND the model are fetched + cached by Ato — nothing local is required."
+homepage = "https://github.com/ato-run/ato"
+
+default_target = "llama"
+
+[targets.llama]
+runtime = "native-inference"
+# Managed engine: Ato fetches the pinned llama.cpp release into its toolchain
+# cache and runs `llama-server` as a host process. (Local override: `engine_path`.)
+engine = "llama.cpp"
+engine_version = "b9754"
+# Managed model: downloaded, sha256-verified, and content-addressed in the Ato
+# store (~/.ato/store/blobs); re-runs reuse it offline. (Local override: `model`.)
+model_url = "https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf"
+model_sha256 = "66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739"
+model_format = "gguf"
+# llama-server listens here; Ato injects `--port <N>` (allocated) and waits for
+# readiness on it, then reports the app_url.
+port = 8080

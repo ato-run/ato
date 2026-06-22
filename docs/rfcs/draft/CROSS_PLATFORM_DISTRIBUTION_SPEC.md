@@ -37,8 +37,8 @@ packaging is a UX optimisation.**
 - V1.1: Windows installer with PATH registration
 - V1.1: Linux AppImage / deb / Homebrew-on-Linux
 - V2+: Platform abstraction layer (HostShell trait) for mobile
-- V2+: iOS shell (SwiftUI + Wry + capsule-core via UniFFI)
-- V2+: Android shell (Jetpack Compose + Wry + capsule-core via UniFFI)
+- V2+: iOS shell (SwiftUI + Wry + capsule via UniFFI)
+- V2+: Android shell (Jetpack Compose + Wry + capsule via UniFFI)
 
 ### Out of Scope
 
@@ -178,7 +178,7 @@ pub trait HostShell {
 #### 4.3.2 Platform Implementations
 
 ```
-capsule-core          (Pure Rust, all platforms)
+capsule          (Pure Rust, all platforms)
 ato-state             (Pure Rust, all platforms)
 ato-orchestrator      (Pure Rust, subprocess IPC)
 ato-bridge            (Pure Rust, JSON-RPC)
@@ -190,7 +190,7 @@ ato-bridge            (Pure Rust, JSON-RPC)
 
 #### 4.3.3 Mobile: Shared Rust Core via UniFFI
 
-The Rust business logic (capsule-core, state, orchestrator, bridge) is
+The Rust business logic (capsule, state, orchestrator, bridge) is
 exposed to Swift/Kotlin via Mozilla's UniFFI. The mobile shell calls
 the same `resolve_and_start_capsule()` function as the desktop, but
 through FFI instead of subprocess IPC.
@@ -268,14 +268,14 @@ VS Code's Monaco Editor is browser-native, decoupled from Node.js. This
 enabled `vscode.dev` (Web VS Code) with minimal effort. ato-desktop
 follows the same pattern:
 
-- `capsule-core` has **zero** GPUI imports (verified: `grep "use gpui"
+- `capsule` has **zero** GPUI imports (verified: `grep "use gpui"
   core/src/` returns 0 matches). It is pure platform-independent Rust.
 - `AppState`, `Workspace`, `Pane`, `GuestRoute` are plain Rust structs
   with no rendering logic.
 - The rendering layer (`ui/mod.rs`, `DesktopShell`) reads state and
   maps it to GPUI elements — a one-directional data flow.
 
-**Constraint:** `capsule-core`, `state/mod.rs`, `orchestrator.rs`,
+**Constraint:** `capsule`, `state/mod.rs`, `orchestrator.rs`,
 `bridge.rs`, and `config.rs` MUST NEVER import GPUI, Wry, or any
 platform-specific crate. If a future contributor adds `use gpui::` to
 any of these files, it is a build-breaking architectural violation.
@@ -324,9 +324,9 @@ feasible: the entire business logic layer is already portable.
 | **V1.0** | macOS only. GPUI + Wry. Manual CLI install. | Launch demo |
 | **V1.1** | macOS/Windows/Linux. App Bundle + symlink (B). Homebrew Cask (G). | Public release |
 | **V1.2** | Windows MSI installer. Linux AppImage. | Platform parity |
-| **V2.0** | `HostShell` trait extraction. capsule-core UniFFI bindings. | Architecture pivot |
-| **V2.1** | iOS: SwiftUI shell + Wry guests + capsule-core FFI. | iOS beta |
-| **V2.2** | Android: Compose shell + Wry guests + capsule-core FFI. | Android beta |
+| **V2.0** | `HostShell` trait extraction. capsule UniFFI bindings. | Architecture pivot |
+| **V2.1** | iOS: SwiftUI shell + Wry guests + capsule FFI. | iOS beta |
+| **V2.2** | Android: Compose shell + Wry guests + capsule FFI. | Android beta |
 | **V3.0** | Web target (if GPUI/Wasm or Dioxus matures). | Evaluation only |
 
 ## References

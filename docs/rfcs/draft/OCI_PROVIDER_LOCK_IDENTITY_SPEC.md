@@ -4,9 +4,9 @@ status: draft
 date: 2026-05-22
 author: "@Koh0920"
 ssot:
-  - "crates/capsule-core/src/foundation/types/oci.rs"
-  - "crates/capsule-core/src/contract/lock_runtime.rs"
-  - "crates/capsule-core/src/engine/execution_identity/mod.rs"
+  - "crates/capsule/src/foundation/types/oci.rs"
+  - "crates/capsule/src/contract/lock_runtime.rs"
+  - "crates/capsule/src/engine/execution_identity/mod.rs"
   - "crates/ato-cli/src/adapters/runtime/oci_provider.rs"
 related:
   - "accepted/CAPSULE_SPEC.md"
@@ -386,9 +386,9 @@ PR 11: install.sh / docker-run intent extractor (future)
 ## 7. References
 
 - `docs/rfcs/accepted/CAPSULE_SPEC.md` - existing `runtime = "oci"` surface.
-- `crates/capsule-core/src/routing/router/services.rs` - service graph already
+- `crates/capsule/src/routing/router/services.rs` - service graph already
   supports OCI service constraints.
-- `crates/capsule-core/src/engine/runtime/oci.rs` - current Docker-compatible
+- `crates/capsule/src/engine/runtime/oci.rs` - current Docker-compatible
   implementation, to be isolated behind provider boundaries.
 - `crates/ato-session-core/src/record.rs` - session records already store OCI
   container ids and host port mappings.
@@ -628,7 +628,7 @@ deferred to PR 9.
 ### 10.1 Overview
 
 PR 9 adds a **pure Docker Compose subset importer** in
-`capsule-core::routing::importer::compose`. The importer converts a
+`capsule::routing::importer::compose`. The importer converts a
 `docker-compose.yml` / `compose.yml` into an Ato OCI service graph projection
 without executing Docker Compose, shelling out, or performing any host I/O
 beyond reading the file text supplied through `ComposeImportInput`.
@@ -701,7 +701,7 @@ passed through to `ResolvedTargetRuntime.required_env`.
 
 ### 10.7 Cycle detection
 
-`import_compose` reuses `capsule_core::engine::orchestration::startup_order_from_dependencies`
+`import_compose` reuses `capsule::engine::orchestration::startup_order_from_dependencies`
 for DFS topological sort and cycle detection. The same function is used in
 `to_orchestration_plan()` to produce `OrchestrationPlan.startup_order`.
 
@@ -887,7 +887,7 @@ per-crate filters:
 
 ```sh
 cargo test -p ato-cli oci_compose --lib
-cargo test -p capsule-core compose_import --lib
+cargo test -p capsule compose_import --lib
 ```
 
 ### 12.8 Next: PR 11 (deferred)
@@ -989,7 +989,7 @@ re-resolve or mark drift; currently drift forces re-resolve.
 
 ### 13.8 New module
 
-`crates/capsule-core/src/contract/oci_compose_lock.rs` — `OciComposeLock`,
+`crates/capsule/src/contract/oci_compose_lock.rs` — `OciComposeLock`,
 `OciImageLockEntry`, `OciImportMeta`, `OciLockError` (6 typed variants),
 `load_from_dir`, `write_to_dir`, `compute_compose_source_hash`,
 `parse_platform_str`, `OciComposeLock::execution_identity_hash`,
@@ -1010,7 +1010,7 @@ require lock replay.
 
 ### 13.10 Tests
 
-**`capsule-core` (18 tests in `oci_compose_lock.rs`)**:
+**`capsule` (18 tests in `oci_compose_lock.rs`)**:
 
 - `lock_serializes_and_deserializes`
 - `lock_roundtrips_via_dir`
@@ -1059,8 +1059,8 @@ require lock replay.
 
 ```sh
 cargo test -p ato-cli oci_compose --lib
-cargo test -p capsule-core oci_compose_lock --lib
-cargo test -p capsule-core compose_import --lib
+cargo test -p capsule oci_compose_lock --lib
+cargo test -p capsule compose_import --lib
 ```
 
 ---
@@ -1275,7 +1275,7 @@ Postgres port remains internal.
 
 ### 14.10 Tests added (PR 11)
 
-**`capsule-core` (18 tests in `docker_run_script.rs`):**
+**`capsule` (18 tests in `docker_run_script.rs`):**
 
 - `parses_simple_docker_run_single_service`
 - `parses_blinko_install_sh_two_services`

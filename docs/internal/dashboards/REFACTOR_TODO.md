@@ -60,8 +60,8 @@
 
 - [x] `core/Cargo.toml` から `anyhow` 依存を削除（`bin/tar_pack_bench.rs` も `Box<dyn Error>` に移行）
 - [x] bin クレート (`ato-cli/src/`) では anyhow を引き続き使用して OK
-- [x] `cargo clippy -p capsule-core --all-targets -- -D warnings` green 化
-- [x] `cargo test -p capsule-core` green 化
+- [x] `cargo clippy -p capsule --all-targets -- -D warnings` green 化
+- [x] `cargo test -p capsule` green 化
 
 ### 非ゴール
 

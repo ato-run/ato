@@ -48,7 +48,7 @@ metadata and map it to `~/.ato/executions/<execution_id>/receipt.json`.
 References:
 
 - [`rfcs/draft/beyond-reproducible-build.ja.md`](rfcs/draft/beyond-reproducible-build.ja.md)
-- [`crates/ato-desktop/src/orchestrator.rs`](https://github.com/ato-run/ato/blob/main/crates/ato-desktop/src/orchestrator.rs)
+- [`crates/desktop/src/orchestrator.rs`](https://github.com/ato-run/ato/blob/main/crates/desktop/src/orchestrator.rs)
 
 ## Same source is not same execution
 
@@ -94,10 +94,10 @@ completeness metadata.
 ## Graph-based execution identity (v0.6.0)
 
 The v0.6.0 core migration (ato-run/ato#74) introduces a typed `ExecutionGraph`
-in `capsule-core` (#97) and a canonical form over it (#98). The canonical form
+in `capsule` (#97) and a canonical form over it (#98). The canonical form
 is the authoritative input to graph-derived execution IDs. This section is the
 single source of truth for canonicalization; the executable counterpart is
-`crates/capsule-core/src/engine/execution_graph/canonical.rs`. **If you change
+`crates/capsule/src/engine/execution_graph/canonical.rs`. **If you change
 one, change the other in the same commit.**
 
 ### Three identity domains
