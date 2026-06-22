@@ -105,6 +105,9 @@ impl std::fmt::Debug for Client {
     }
 }
 
+// Client exposes the full netd control surface; some methods are kept as API
+// for callers/tests that don't exist yet in this build.
+#[allow(dead_code)]
 impl Client {
     /// Connect to the default control socket ([`default_socket_path`]).
     pub async fn connect_default() -> Result<Self, Error> {
@@ -248,6 +251,9 @@ impl std::fmt::Debug for SyncClient {
     }
 }
 
+// SyncClient mirrors Client's control surface; some methods are kept as API
+// for callers/tests that don't exist yet in this build.
+#[allow(dead_code)]
 impl SyncClient {
     /// Connect to the default control socket ([`default_socket_path`]).
     pub fn connect_default() -> Result<Self, Error> {
