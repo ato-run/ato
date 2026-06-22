@@ -3981,9 +3981,15 @@ where
 
     match guard_result.executor_kind {
         ExecutorKind::Native => {
+            // native-inference is host-native by design (the engine binary is a
+            // host process, like OCI runs host containers) — always take the host
+            // launcher path, never the source nacelle sandbox.
+            let is_native_inference =
+                matches!(decision.kind, capsule::router::RuntimeKind::NativeInference);
             let host_execution = request.dangerously_skip_permissions
                 || host_fallback_requested
-                || desktop_native_open_only;
+                || desktop_native_open_only
+                || is_native_inference;
             let process = if host_execution {
                 if let Some(app_path) = request.desktop_open_path.as_ref() {
                     crate::executors::source::execute_open_path(app_path, mode)?
@@ -4027,9 +4033,16 @@ where
             if request.background {
                 let process_id = format!("capsule-{}", process.child.id());
                 let consumer_pid = process.child.id() as i32;
+                // Label the recorded runtime from the actual execution mode, not
+                // just the permission flags: native-inference (and host-fallback)
+                // run as bare host processes, so they must record runtime="host".
+                // Recording "nacelle" for a non-nacelle host process makes
+                // process_info_is_alive() fail the nacelle-cmdline identity check,
+                // so `ato ps`/`ato stop` treat the live session as dead. `host_execution`
+                // already folds in is_native_inference / dangerously_skip / host_fallback.
                 let runtime = hooks.process_runtime_label(
                     &decision.plan,
-                    request.dangerously_skip_permissions || desktop_native_open_only,
+                    host_execution,
                     compatibility_host_mode,
                 );
                 let ready_without_events = host_execution && process.event_rx.is_none();

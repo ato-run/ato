@@ -460,6 +460,14 @@ pub fn execute_pack_command_with_injected_manifest(
                 derived_from: None,
             }
         }
+        capsule::router::RuntimeKind::NativeInference => {
+            // Inc1 is run-only: native-inference resolves a local engine binary
+            // and model at launch, so there is no source/image bundle to pack.
+            anyhow::bail!(
+                "`ato build` does not support runtime=native-inference yet \
+                 (Inc1 is run-only; engine/model are resolved locally at `ato run`)"
+            );
+        }
         capsule::router::RuntimeKind::Oci => {
             let result = capsule::packers::oci::pack(&decision.plan, None, reporter.as_ref())?;
             let archive = result.archive.clone();
