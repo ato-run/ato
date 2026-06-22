@@ -391,7 +391,10 @@ fn build_native_inference_context(plan: &ManifestData) -> Option<NativeInference
     let model_managed = model_url.is_some() && model_sha256_raw.is_some();
     let model_sha256 = if model_managed {
         // Reuse the canonical normalizer (lowercase, strip `sha256:`/`sha256-`,
-        // require 64 hex) — no duplication of model-cache logic.
+        // require 64 hex) — no duplication of model-cache logic. For a managed
+        // model, manifest validation has already rejected a malformed sha256, so
+        // normalization here always succeeds; the `and_then` is defense-in-depth,
+        // not an expected `None` path.
         model_sha256_raw
             .as_deref()
             .and_then(capsule::foundation::types::manifest::normalize_model_sha256)
