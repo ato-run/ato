@@ -3268,9 +3268,20 @@ where
         request.compatibility_fallback.as_deref(),
     )?;
     let host_fallback_requested = matches!(compatibility_host_mode, CompatibilityHostMode::Enabled);
+    // native-inference is host-native by design: the engine binary runs as a host
+    // process and the executor dispatch ALWAYS takes the host launcher, never the
+    // source nacelle sandbox (see the `ExecutorKind::Native` arm's host_execution).
+    // It is also `ExecutorKind::Native`, so without this guard a normal `ato run`
+    // of a native-inference capsule would run the nacelle sandbox preflight and
+    // fail E304 on a host with no sandbox backend — even though it never uses one
+    // — forcing users onto `--dangerously-skip-permissions`. Skip the sandbox
+    // preflight for native-inference, mirroring the dispatch.
+    let is_native_inference =
+        state.decision.plan.execution_runtime().as_deref() == Some("native-inference");
     if matches!(guard_result.executor_kind, ExecutorKind::Native)
         && !request.dangerously_skip_permissions
         && !host_fallback_requested
+        && !is_native_inference
     {
         state.native_nacelle = Some(crate::commands::run::preflight_native_sandbox(
             request.nacelle.clone(),
