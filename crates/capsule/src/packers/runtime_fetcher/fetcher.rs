@@ -701,7 +701,7 @@ fn normalize_engine_variant(variant: Option<&str>) -> Option<String> {
 /// * default (None): the CPU/Metal build (macOS = Metal).
 /// * `vulkan`: GPU-accelerated, Linux only (NVIDIA via the driver's Vulkan ICD).
 /// * `cuda`: no Linux prebuilt exists → fail closed (use `engine_path`).
-fn llama_cpp_artifact_filename(
+pub(crate) fn llama_cpp_artifact_filename(
     version: &str,
     os: &str,
     arch: &str,
