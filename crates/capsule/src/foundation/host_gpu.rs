@@ -66,7 +66,7 @@ pub struct CudaInfo {
 
 /// Vulkan runtime state — the Dockerless GPU path for native-inference. On
 /// NVIDIA hosts the Vulkan ICD ships with the driver's userspace (`nvidia_icd.json`
-/// + `libGLX_nvidia`); `vulkaninfo` confirms a usable device. These four signals
+/// and `libGLX_nvidia`); `vulkaninfo` confirms a usable device. These four signals
 /// are tracked separately so provisioning/doctor can pinpoint the exact gap (a
 /// present loader does NOT imply the `vulkaninfo` tool, and a present `vulkaninfo`
 /// does NOT imply a working NVIDIA ICD).
