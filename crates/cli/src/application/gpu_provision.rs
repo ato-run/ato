@@ -394,6 +394,7 @@ enum ProvisionEvent {
 enum ProvisionAction {
     Skip,
     Install,
+    #[allow(dead_code)]
     Configure,
     Verify,
     #[allow(dead_code)]
@@ -665,19 +666,21 @@ pub async fn run_provision(
     // mutate the driver here: the NVIDIA userspace libs are commonly bind-mounted
     // read-only (containers), so a full host driver install / Vulkan-capable image
     // is the correct fix rather than blind driver surgery.
-    if !dry_run && smoke_result != SmokeResult::Pass {
-        if let Some(p) = capsule::foundation::host_gpu::detect_host_gpu_profile().ok() {
-            if p.has_gpu() && p.driver_installed() && !p.nvidia_vulkan_icd_present() {
-                warnings.push(
-                    "NVIDIA Vulkan ICD manifest (nvidia_icd.json) not found: GPU + driver are \
+    if !dry_run
+        && smoke_result != SmokeResult::Pass
+        && let Ok(p) = capsule::foundation::host_gpu::detect_host_gpu_profile()
+        && p.has_gpu()
+        && p.driver_installed()
+        && !p.nvidia_vulkan_icd_present()
+    {
+        warnings.push(
+            "NVIDIA Vulkan ICD manifest (nvidia_icd.json) not found: GPU + driver are \
                      present but the Vulkan ICD is missing. Install the NVIDIA driver's Vulkan \
                      userspace (e.g. libnvidia-gl-<branch>) on a bare-metal host, or use a \
                      Vulkan-capable image. Provision does not mutate driver libs (often \
                      bind-mounted read-only in containers)."
-                        .to_string(),
-                );
-            }
-        }
+                .to_string(),
+        );
     }
 
     // ── Dry-run: stop here without writing any state ──
