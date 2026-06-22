@@ -406,7 +406,7 @@ impl CapsuleManifest {
                     && !crate::foundation::types::manifest::is_safe_model_url(url)
                 {
                     errors.push(ValidationError::InvalidTarget(format!(
-                        "target '{label}': `model_url` must be a plain http(s):// URL"
+                        "target '{label}': `model_url` must be a plain http(s):// URL or a public hf://<org>/<repo>/<path> ref"
                     )));
                 }
                 // The sha256 is the cache key + integrity check — it must be exact.
