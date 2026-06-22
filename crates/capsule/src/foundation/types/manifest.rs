@@ -1613,6 +1613,12 @@ pub struct NamedTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
 
+    /// native-inference: managed engine build variant (e.g. `"vulkan"` for a
+    /// GPU-accelerated llama.cpp build). Unset = the default CPU/Metal build.
+    /// `"cuda"` is not a fetchable Linux prebuilt and fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_variant: Option<String>,
+
     /// native-inference: local filesystem path to the engine server binary
     /// (e.g. `llama-server`). When set, it overrides managed engine fetching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
