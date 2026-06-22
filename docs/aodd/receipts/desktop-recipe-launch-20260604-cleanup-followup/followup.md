@@ -16,7 +16,7 @@ matrix.
 
 | Issue | Topic | Fixed by | Status | Verification |
 |-------|-------|----------|--------|--------------|
-| #444 | Windows + Podman: stateful recipes can't write bind-mounted state | #456 | **code merged** | Unit-tested (engine-volume strategy, capsule-core + ato-cli). **App-level Desktop GUI verification still pending.** |
+| #444 | Windows + Podman: stateful recipes can't write bind-mounted state | #456 | **code merged** | Unit-tested (engine-volume strategy, capsule + ato-cli). **App-level Desktop GUI verification still pending.** |
 | #445 | multi-service `exited-before-ready` collapsed to a generic error | #453 | **code merged** | `blinko`-style exit-before-ready now preserves the typed `oci_container_exited_before_ready` diagnostic instead of collapsing to E999. |
 | #450 | session stop leaves orphaned `ato-*` Podman networks | #458 | **resolved / verified** | Real Podman 5.8.2 / WSL rootless, via `ato app session start/stop` (the same `stop_session` path the Desktop uses). See below. |
 | #460 | Runtime Setup not fully Desktop-driven (WSL/Podman substrate) | — | **open** | UX gap; WSL/virtualization/health-error detection + remediation still to do. |

@@ -2,7 +2,7 @@
 
 **Status**: Draft  
 **Issue**: ato-run/ato#71  
-**Related**: #74 (v0.6.0 umbrella), tools registry (capsule-core)
+**Related**: #74 (v0.6.0 umbrella), tools registry (capsule)
 
 ---
 
@@ -10,7 +10,7 @@
 
 Provider host tools — pnpm, yarn, bun, uv, and similar language-ecosystem
 tools that Ato downloads and manages — are currently fetched and installed
-by ad-hoc logic inside `capsule-core` (`contract/tools.rs`,
+by ad-hoc logic inside `capsule` (`contract/tools.rs`,
 `contract/lockfile_support.rs`).
 
 This approach has several drawbacks:

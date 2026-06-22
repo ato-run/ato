@@ -274,7 +274,7 @@ If a collision exists, the correct next step is a patch bump and a fresh release
 - `Cargo.toml`
 - `Cargo.lock`
 - `CHANGELOG.md`
-- `core/Cargo.toml` and `core/CHANGELOG.md` only if `capsule-core` public API changed
+- `core/Cargo.toml` and `core/CHANGELOG.md` only if `capsule` public API changed
 
 3. Commit the bump with a release-focused message.
 4. Push the bump branch.

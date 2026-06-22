@@ -21,14 +21,14 @@ The accepted RFC `docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md` (v1.6) def
 | P1 | ✅ existing | `7f663453` | `[dependencies.*]` / `[contracts.*]` parser + AST |
 | P1.5 | ✅ existing | `0a794d23` | manifest validation (target binding, credentials.default ban, etc.) |
 | P2 | ✅ existing | `8bc51634` | `EnvOrigin` enum + `runtime_exports` excluded from `intrinsic_keys` |
-| P3 verifier | ✅ | `5c9eb67d` | pure verifier in `capsule-core::dependency_contracts` (13 §9.1 rules) |
+| P3 verifier | ✅ | `5c9eb67d` | pure verifier in `capsule::dependency_contracts` (13 §9.1 rules) |
 | P3 bridge | ✅ | `7509a0cf` | `verify_consumer_only` wired into lockfile generation |
 | P4 | ✅ | `5433a740` | credential resolver + 3 channels + `RedactionRegistry` |
 | P5 phase 1 | ✅ | `22ef0c68` | `endpoint` / `ready` / `orphan` / `teardown` building blocks |
 | **P5 phase 2** | ✅ | `e4836ea5` | **orchestrator** with end-to-end mock-provider test |
 | P6 | ✅ | `62d61a0c` + `f42cb948` | `dependency_derivation_hash` includes direct deps + `identity_exports` |
 
-**Test status**: capsule-core 530/0、ato-cli 1208/0 — fully green across +64 new tests this session.
+**Test status**: capsule 530/0、ato-cli 1208/0 — fully green across +64 new tests this session.
 
 **v1 invariants enforced** (all 9 from RFC §3 end):
 
@@ -53,9 +53,9 @@ The orchestrator from P5 phase 2 (`crates/ato-cli/src/application/dependency_run
    - The function loads the consumer manifest and lockfile, prepares the runtime, and launches the consumer target. Phase 3 hooks between lockfile load and consumer launch.
 
 2. **Read the lockfile** (already happens) and **detect dependency-contract entries**.
-   - Existing reader: `manifest_external_capsule_dependencies` in `capsule-core::lockfile`
+   - Existing reader: `manifest_external_capsule_dependencies` in `capsule::lockfile`
    - The lockfile field is `capsule_dependencies: Vec<LockedCapsuleDependency>`. Entries with `contract: Some(...)` and the new `identity_exports` field populated are dep-contract entries; entries without `contract` are the old `external_capsule` adapter's responsibility (kept untouched).
-   - Build a `capsule_core::dependency_contracts::DependencyLock` from these entries (or, alternatively, expose a conversion helper in capsule-core).
+   - Build a `capsule::dependency_contracts::DependencyLock` from these entries (or, alternatively, expose a conversion helper in capsule).
 
 3. **Materialize provider capsules** so we can hand each one's parsed manifest + a local filesystem root to the orchestrator.
    - The existing path that already does this for the old adapter: `crates/ato-cli/src/adapters/runtime/external_capsule/cache.rs` extracts artifacts to a cache dir.
@@ -95,7 +95,7 @@ The orchestrator from P5 phase 2 (`crates/ato-cli/src/application/dependency_run
 These remain deferred regardless of phase 3:
 - `[provision]` block execution (provider self-bootstraps; or pre-existing state)
 - Stdin / EnvVar materialization channels (TempFile is the v1 default)
-- HTTP / unix_socket ready probes (lock-fail-closed in capsule-core)
+- HTTP / unix_socket ready probes (lock-fail-closed in capsule)
 - Real Postgres E2E with WasedaP2P — that's phase 7
 
 ## 3. Key code references
@@ -137,7 +137,7 @@ The end-to-end test in the same file (`start_all_spawns_provider_runs_ready_prob
 
 ### 3.2 The verifier
 
-`crates/capsule-core/src/foundation/dependency_contracts/lock.rs`
+`crates/capsule/src/foundation/dependency_contracts/lock.rs`
 
 ```rust
 pub fn verify_and_lock(input: DependencyLockInput<'_>) -> Result<DependencyLock, LockError>;
@@ -183,9 +183,9 @@ Phase 3 does **not** delete this adapter — it handles the legacy `[external_de
 Decide before coding (or document the choice in the PR):
 
 1. **Lockfile → DependencyLock conversion.**
-   - Option A: add `pub fn dependency_lock_from_capsule_lock(lock: &CapsuleLock, providers: &...) -> DependencyLock` to `capsule-core`
+   - Option A: add `pub fn dependency_lock_from_capsule_lock(lock: &CapsuleLock, providers: &...) -> DependencyLock` to `capsule`
    - Option B: have ato-cli construct it manually (it already has both `LockedCapsuleDependency` and `LockedDependencyEntry` shapes)
-   - Recommend Option A — keeps capsule-core as the source of truth on the schema, ato-cli stays a thin caller.
+   - Recommend Option A — keeps capsule as the source of truth on the schema, ato-cli stays a thin caller.
 
 2. **Provider manifest fetch strategy.**
    - Option A: fully artifact-based — pull the `.capsule` artifact, extract `capsule.toml`, parse. The existing `external_capsule::cache` does this. Reuse.
@@ -226,7 +226,7 @@ C: **Real Postgres E2E** (= phase 7, separate session): WasedaP2P + `ato/postgre
 
 PR 8: `feat(ato-cli): integrate dep-contract orchestrator into ato run`
 
-- Add `dependency_lock_from_capsule_lock` helper to capsule-core (if Option A in §4.1)
+- Add `dependency_lock_from_capsule_lock` helper to capsule (if Option A in §4.1)
 - New `dispatch::run::launch_dep_contracts` (or similar) that:
   - reads lockfile
   - filters dep-contract entries
@@ -244,18 +244,18 @@ Estimated scope: 800–1200 LOC + 6–10 tests. Should fit in one PR.
 
 ```bash
 # Full test suite
-cargo test -p capsule-core --lib
+cargo test -p capsule --lib
 cargo test -p ato-cli --lib
 
 # Just the dep-contract subsystem
-cargo test -p capsule-core --lib foundation::dependency_contracts
+cargo test -p capsule --lib foundation::dependency_contracts
 cargo test -p ato-cli --lib dependency_contracts dependency_credentials dependency_runtime
 
 # Format (memory: only Koh0920 author, no Co-Authored-By)
-cargo fmt -p capsule-core -p ato-cli
+cargo fmt -p capsule -p ato-cli
 
 # Recent commits in this feature line
-git log --oneline aa55a5a0..HEAD -- crates/capsule-core crates/ato-cli docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md
+git log --oneline aa55a5a0..HEAD -- crates/capsule crates/ato-cli docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md
 ```
 
 ## 8. Reading order for the next agent
@@ -271,7 +271,7 @@ After that you should have everything needed to design and implement phase 3 in 
 ## 9. Things to remember
 
 - **No `Co-Authored-By` trailers** in commits (memory: this repo lists only Koh0920).
-- Keep the brick boundary: capsule-core stays pure (no network/fs), ato-cli does the I/O.
+- Keep the brick boundary: capsule stays pure (no network/fs), ato-cli does the I/O.
 - The orchestrator is **already pure** with respect to fetching — phase 3's job is the I/O wrapper around it.
 - v1 backward compatibility is **not required** (per memory + repo policy).
 - All 9 v1 invariants are now machine-enforced; phase 3 must not regress any of them.

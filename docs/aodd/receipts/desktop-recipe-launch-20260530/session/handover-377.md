@@ -176,12 +176,12 @@ Desktop log が `"resolving capsule handle"` で止まり、その後の `"capsu
 
 | File | Change |
 |------|--------|
-| `crates/capsule-core/src/config/config_impl.rs` | `container_runtime` field added to `CapsuleConfig` |
-| `crates/capsule-core/src/engine/executors/oci.rs` | `detect_engine()` → health-check based selection |
-| `crates/capsule-core/src/packers/oci.rs` | `detect_engine()` → health-check based selection (mirror) |
-| `crates/capsule-core/src/adapters/capsule/cas_store.rs` | `use std::path::PathBuf` added (Windows build fix) |
-| `crates/capsule-core/src/packers/payload.rs` | `#[cfg(unix)]` guards for Unix imports (Windows build fix) |
-| `crates/capsule-core/src/foundation/types/manifest_validation.rs` | Mount path tests added |
+| `crates/capsule/src/config/config_impl.rs` | `container_runtime` field added to `CapsuleConfig` |
+| `crates/capsule/src/engine/executors/oci.rs` | `detect_engine()` → health-check based selection |
+| `crates/capsule/src/packers/oci.rs` | `detect_engine()` → health-check based selection (mirror) |
+| `crates/capsule/src/adapters/capsule/cas_store.rs` | `use std::path::PathBuf` added (Windows build fix) |
+| `crates/capsule/src/packers/payload.rs` | `#[cfg(unix)]` guards for Unix imports (Windows build fix) |
+| `crates/capsule/src/foundation/types/manifest_validation.rs` | Mount path tests added |
 | `crates/ato-cli/src/app_control/sample_recipes.rs` | pgweb + adminer added to catalog |
 
 ---

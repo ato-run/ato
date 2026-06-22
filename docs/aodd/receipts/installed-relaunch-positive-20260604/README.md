@@ -94,4 +94,4 @@ See `commands.log`. Baseline (`cargo fmt --all --check`, `cargo check --workspac
   - `app_control::sample_recipes::tests::catalog_manifests_are_publishable_to_community` fails in
     isolation: bundled sample recipe `openlist-google-drive-crypt` is missing `[source].repository`
     (`sample_recipes.rs`, not touched by these PRs; relates to the separate OpenList recipe work).
-- **`capsule-core`:** all pass.
+- **`capsule`:** all pass.

@@ -7,7 +7,7 @@ related:
   - samples/tutorial/docs/DESIGN.md (authoritative design)
   - crates/ato-desktop/src/ui/modals/mod.rs (modal infra reuse)
   - crates/ato-desktop/src/ui/chrome/mod.rs (omnibar)
-  - crates/capsule-wire/src/handle.rs (URL parsing)
+  - crates/ato-protocol/src/handle.rs (URL parsing)
   - crates/ato-cli/src/cli/commands/inspect.rs (manifest preview)
 ---
 
@@ -109,11 +109,11 @@ content work.
 Goal: paste `ato.run/s/tutorial-step1@r1` into the omnibar → orange
 confirmation modal → step 1 runs in a pane. No changes needed to step1
 content; this phase is entirely in `crates/ato-desktop/` + a small
-addition to `crates/capsule-wire/`.
+addition to `crates/ato-protocol/`.
 
 #### C.1 — Recognize share URLs
 
-`crates/capsule-wire/src/handle.rs` — extend `normalize_capsule_handle`
+`crates/ato-protocol/src/handle.rs` — extend `normalize_capsule_handle`
 to accept `ato.run/s/<slug>[@<rev>]` and emit the canonical
 `capsule://ato.run/<publisher>/<slug>[@<rev>]` form. Tests follow the
 same pattern as the existing `acme/chat` test cases.
@@ -128,7 +128,7 @@ namespace (`ato-run/tutorial`). Two compatible options:
 
 Recommend **Option 1** — fewer characters in marketing material,
 matches the design's example URLs. Encode the well-known-publisher
-mapping as a const in `capsule-wire`.
+mapping as a const in `ato-protocol`.
 
 #### C.2 — Capsule confirmation modal
 
@@ -247,7 +247,7 @@ From design §7 ("未決事項"):
    ```
 2. **PR-2 (tutorial sub-repo)** — Phase B.1–B.3: real `tutorial-app`
    shell + WebSocket log streamer + progress persistence.
-3. **PR-3 (parent repo, capsule-wire)** — Phase C.1: extend
+3. **PR-3 (parent repo, ato-protocol)** — Phase C.1: extend
    `normalize_capsule_handle` to accept `ato.run/s/<slug>` form. Add
    tests. ~80 LOC including tests.
 4. **PR-4 (parent repo, ato-desktop)** — Phase C.2: new
