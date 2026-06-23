@@ -996,12 +996,19 @@ fn native_inference_ready() -> bool {
 /// Lease "kinds"/runtimes this runner accepts dispatch for. The base command
 /// kinds plus `native-inference` when this host can actually run it — the control
 /// plane gates native-inference dispatch on this advertised value (ato#762).
-fn advertised_lease_kinds() -> Vec<String> {
+/// Pure: the lease kinds/runtimes to advertise given the host's native-inference
+/// readiness. Split from the cached host probe so the conditional `native-inference`
+/// append is unit-testable.
+fn advertised_lease_kinds_for(native_inference_ready: bool) -> Vec<String> {
     let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS.iter().map(|s| s.to_string()).collect();
-    if native_inference_ready() {
+    if native_inference_ready {
         kinds.push(NATIVE_INFERENCE_RUNTIME.to_string());
     }
     kinds
+}
+
+fn advertised_lease_kinds() -> Vec<String> {
+    advertised_lease_kinds_for(native_inference_ready())
 }
 
 /// Fail-closed dispatch guard. The control plane already gates native-inference
@@ -3074,6 +3081,29 @@ async fn handle_claimed_lease(
     public_url_template: Option<String>,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
+    // Fail closed FIRST — before resolving/materializing the lease or reporting
+    // Preparing: a native-inference lease must only run where this host can
+    // actually run native-inference. The control plane already capability-gates
+    // dispatch; this re-check is defence in depth, so a mis-dispatched
+    // native-inference lease is rejected with NO side effects (no recipe written,
+    // no Preparing churn) and is never forced into the sandbox.
+    if let Err((code, message)) = ensure_dispatch_supported(
+        RunnerDispatchMode::from_command(&lease.command),
+        native_inference_ready(),
+    ) {
+        eprintln!("⚠️  lease {} rejected: {}", lease.id, message);
+        let report = LeaseReport::Failed { code, message };
+        if let Err(err) =
+            report_lease_status(client, api_base, runner_token, &lease.id, &report).await
+        {
+            eprintln!(
+                "⚠️  failed to report lease failure: {}",
+                scrub_secrets(&format!("{err:#}"))
+            );
+        }
+        slot.release();
+        return;
+    }
     let execution = match resolve_lease_execution(&lease.command, &inline_recipe_dir(&lease.id)) {
         Ok(execution) => execution,
         Err((code, message)) => {
@@ -3087,6 +3117,10 @@ async fn handle_claimed_lease(
                     scrub_secrets(&format!("{err:#}"))
                 );
             }
+            // Release the slot the serve loop acquired — SlotLease has no Drop, so
+            // an early return otherwise strands it occupied (pre-existing on this
+            // reject path; release() is idempotent).
+            slot.release();
             return;
         }
     };
@@ -3121,19 +3155,8 @@ async fn handle_claimed_lease(
         dispatch_mode,
     } = execution;
     tokio::spawn(async move {
-        // Fail closed BEFORE any control watcher / child spawn: a native-inference
-        // lease must only run where this host can actually run native-inference.
-        // The control plane already capability-gates dispatch; this is defence in
-        // depth so a mis-dispatched lease is rejected, never forced into --sandbox.
-        if let Err((code, message)) =
-            ensure_dispatch_supported(dispatch_mode, native_inference_ready())
-        {
-            let report = LeaseReport::Failed { code, message };
-            let _ =
-                report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await;
-            slot.release();
-            return;
-        }
+        // (native-inference dispatch capability was already fail-closed checked in
+        // handle_claimed_lease before resolve/Preparing — see ensure_dispatch_supported.)
         // One control watcher for the whole lease lifetime: it flips stop_flag +
         // notifies on an owner stop in EITHER phase (needs_consent or running).
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -3994,6 +4017,27 @@ mod tests {
         assert!(
             kinds.contains(&RUN_CAPSULE_LEASE_KIND),
             "must advertise run_capsule now that execution is wired"
+        );
+    }
+
+    #[test]
+    fn advertised_lease_kinds_appends_native_inference_only_when_ready() {
+        // Not ready: base kinds only, NO native-inference advertised — so the
+        // control plane will not dispatch native-inference here (the slice-1 gate
+        // requires the capability).
+        let base = advertised_lease_kinds_for(false);
+        assert!(base.iter().any(|k| k == LEASE_COMMAND_KIND));
+        assert!(base.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
+        assert!(
+            !base.iter().any(|k| k == NATIVE_INFERENCE_RUNTIME),
+            "must NOT advertise native-inference when the host is not ready"
+        );
+        // Ready: base kinds preserved + native-inference appended.
+        let ready = advertised_lease_kinds_for(true);
+        assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
+        assert!(
+            ready.iter().any(|k| k == NATIVE_INFERENCE_RUNTIME),
+            "must advertise native-inference when the host is ready"
         );
     }
 
