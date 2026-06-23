@@ -1650,7 +1650,7 @@ impl WorkspacePaths {
         let ato_manifest = ato_root.join("Cargo.toml");
         // nacelle lives at <repo>/crates/nacelle in the monorepo.
         let nacelle_manifest = repo_root.join("crates").join("nacelle").join("Cargo.toml");
-        let netd_manifest = repo_root.join("crates").join("ato-netd").join("Cargo.toml");
+        let netd_manifest = repo_root.join("crates").join("netd").join("Cargo.toml");
         let target_root = repo_root.join("target");
         // ato-web lives as a sibling of the ato repo root
         // (apps/ato-web alongside apps/ato).
