@@ -1621,14 +1621,14 @@ impl WorkspacePaths {
             .map(Path::to_path_buf)
             .context("failed to resolve repository root from crates/ato-desktop")?;
         // Layouts probed in priority order:
-        //   1. monorepo:           <repo>/crates/ato-cli (current canonical)
+        //   1. monorepo:           <repo>/crates/cli (current canonical)
         //   2. legacy split-repo:  <repo>/apps/ato-cli (pre-M1)
         //   3. CI sibling clone:   <repo>/../ato-cli (legacy release workflow)
         // The fallback chain lets a single xtask binary build correctly
         // in both the monorepo and any leftover mirror checkout while M7
         // archives the old repos.
         let ato_root = {
-            let monorepo = repo_root.join("crates").join("ato-cli");
+            let monorepo = repo_root.join("crates").join("cli");
             if monorepo.exists() {
                 monorepo
             } else {
