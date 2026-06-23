@@ -72,7 +72,7 @@ export ATO_CAPSULE_REF="community/local-llm-chat"    # must be registered (#754)
 export ATO_RUNNER_SSH="ubuntu@<runner-host>"
 export ATO_RUNNER_SSH_KEY="$HOME/.ssh/<key>"          # if not in the agent
 
-apps/ato/scripts/smoke-connected-native-inference.sh
+scripts/smoke-connected-native-inference.sh
 ```
 
 Required inputs / secrets:
