@@ -45,6 +45,16 @@ pub fn run(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether this host can run native-inference capsules at all — the capability a
+/// Connected Runner advertises so the control plane only dispatches
+/// native-inference leases here (ato#762). True when no diagnostic check fails
+/// (platform supports the managed engine and the model cache is usable); mirrors
+/// the readiness rule in [`run`]. Cheap (no network), but heartbeat-path callers
+/// should cache the result — the host's capability is stable across a session.
+pub fn is_ready() -> bool {
+    diagnose().iter().all(|c| c.status != CheckStatus::Fail)
+}
+
 fn diagnose() -> Vec<CheckResult> {
     let mut results = Vec::new();
 
