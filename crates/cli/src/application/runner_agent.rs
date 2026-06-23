@@ -227,7 +227,7 @@ pub fn build_heartbeat_body(
         // Lease command kinds this runner can actually EXECUTE today. The control
         // plane gates dispatch on this so a runner is never sent a kind it would
         // reject on-device (e.g. `run_capsule` before that execution path ships).
-        "supported_lease_kinds": SUPPORTED_LEASE_KINDS,
+        "supported_lease_kinds": advertised_lease_kinds(),
         "os": os,
         "arch": arch,
         "agent_version": agent_version(),
@@ -955,6 +955,72 @@ pub const RUN_CAPSULE_LEASE_KIND: &str = "run_capsule";
 /// heartbeat so the control plane never dispatches a kind the runner would
 /// reject on-device.
 pub const SUPPORTED_LEASE_KINDS: &[&str] = &[LEASE_COMMAND_KIND, RUN_CAPSULE_LEASE_KIND];
+
+/// The lease command `runtime` value that selects HOST dispatch (no `--sandbox`).
+/// native-inference runs a managed engine (llama.cpp) as a host process and is
+/// incompatible with the source sandbox (ato#762). It is ALSO advertised in
+/// `supported_lease_kinds` (when this host can run it) so the control plane only
+/// dispatches native-inference leases to capable runners. Only this exact value
+/// selects host dispatch — there is no generic host-exec path.
+pub const NATIVE_INFERENCE_RUNTIME: &str = "native-inference";
+
+/// How the runner dispatches a claimed lease's `ato run` child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerDispatchMode {
+    /// Default: run the dispatched ref under the nacelle sandbox (`--sandbox`).
+    Sandboxed,
+    /// native-inference: host execution (managed engine/model), no `--sandbox`.
+    NativeInferenceHost,
+}
+
+impl RunnerDispatchMode {
+    /// Decide the mode from the lease command's `runtime` field. Only the exact
+    /// `native-inference` runtime selects host dispatch; absent or any other
+    /// runtime keeps the default sandboxed dispatch (no generic host-exec).
+    fn from_command(command: &serde_json::Value) -> Self {
+        match command.get("runtime").and_then(|v| v.as_str()) {
+            Some(NATIVE_INFERENCE_RUNTIME) => Self::NativeInferenceHost,
+            _ => Self::Sandboxed,
+        }
+    }
+}
+
+/// Cached host native-inference capability (probed once per process). The probe
+/// is cheap but the heartbeat path calls it frequently, and the host capability
+/// does not change across a serve session.
+fn native_inference_ready() -> bool {
+    static READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READY.get_or_init(crate::application::native_inference_doctor::is_ready)
+}
+
+/// Lease "kinds"/runtimes this runner accepts dispatch for. The base command
+/// kinds plus `native-inference` when this host can actually run it — the control
+/// plane gates native-inference dispatch on this advertised value (ato#762).
+fn advertised_lease_kinds() -> Vec<String> {
+    let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS.iter().map(|s| s.to_string()).collect();
+    if native_inference_ready() {
+        kinds.push(NATIVE_INFERENCE_RUNTIME.to_string());
+    }
+    kinds
+}
+
+/// Fail-closed dispatch guard. The control plane already gates native-inference
+/// dispatch on the advertised capability, but the runner re-checks before
+/// spawning so a mis-dispatched native-inference lease is rejected with a typed
+/// reason rather than forced into the sandbox (which native-inference cannot
+/// use). `native_inference_ready` is this host's (cached) capability.
+fn ensure_dispatch_supported(
+    mode: RunnerDispatchMode,
+    native_inference_ready: bool,
+) -> std::result::Result<(), (String, String)> {
+    if mode == RunnerDispatchMode::NativeInferenceHost && !native_inference_ready {
+        return Err((
+            "native_inference_unavailable".to_string(),
+            "received a native-inference lease but this runner cannot run native-inference (host not ready)".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 pub const DEFAULT_PROXY_LISTEN: &str = "127.0.0.1:8420";
 
@@ -2549,21 +2615,42 @@ pub fn child_run_ref(source_url: &str) -> String {
     source_url.to_string()
 }
 
+/// The `ato run` arguments for a claimed lease — selected by dispatch mode
+/// BEFORE spawn, never patched onto an already-built command. Sandboxed leases
+/// get `--sandbox`; native-inference (host) leases do NOT, because
+/// native-inference runs a managed engine as a host process and is incompatible
+/// with the source sandbox (ato#762).
+fn run_child_args(
+    run_ref: &str,
+    managed_state_root: Option<&Path>,
+    mode: RunnerDispatchMode,
+) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    let mut args: Vec<OsString> = vec![OsString::from("run"), OsString::from(run_ref)];
+    if mode == RunnerDispatchMode::Sandboxed {
+        args.push(OsString::from("--sandbox"));
+    }
+    args.push(OsString::from("-y"));
+    // run_capsule leases bind persistent state under a runner-managed root
+    // (scoped by owner + immutable capsule identity); source leases pass None.
+    if let Some(root) = managed_state_root {
+        args.push(OsString::from("--managed-state-root"));
+        args.push(root.as_os_str().to_os_string());
+    }
+    args
+}
+
 fn spawn_run_child(
     run_ref: &str,
     managed_state_root: Option<&Path>,
+    mode: RunnerDispatchMode,
 ) -> Result<tokio::process::Child> {
     let child_bin = match std::env::var("ATO_RUNNER_CHILD_BIN") {
         Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
         _ => std::env::current_exe().context("failed to resolve the ato binary path")?,
     };
     let mut cmd = tokio::process::Command::new(child_bin);
-    cmd.arg("run").arg(run_ref).arg("--sandbox").arg("-y");
-    // run_capsule leases bind persistent state under a runner-managed root
-    // (scoped by owner + immutable capsule identity); source leases pass None.
-    if let Some(root) = managed_state_root {
-        cmd.arg("--managed-state-root").arg(root);
-    }
+    cmd.args(run_child_args(run_ref, managed_state_root, mode));
     // Operator-controlled extras (e.g. --nacelle <path> on dev hosts). Comes
     // from the runner host env, never from the lease payload.
     if let Ok(extra) = std::env::var("ATO_RUNNER_RUN_ARGS") {
@@ -2592,6 +2679,7 @@ fn spawn_run_child(
 struct LeaseExecution {
     run_ref: String,
     managed_state_root: Option<PathBuf>,
+    dispatch_mode: RunnerDispatchMode,
 }
 
 /// Root for runner-managed persistent capsule state: `<runner-base>/state`.
@@ -2646,12 +2734,16 @@ fn resolve_lease_execution(
     recipe_dir: &Path,
 ) -> std::result::Result<LeaseExecution, (String, String)> {
     let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    // The runtime field (set by the control plane) selects host vs sandbox
+    // dispatch, independent of the lease kind (ato#762).
+    let dispatch_mode = RunnerDispatchMode::from_command(command);
     match kind {
         LEASE_COMMAND_KIND => {
             let c = parse_lease_command(command)?;
             Ok(LeaseExecution {
                 run_ref: child_run_ref(&c.source_url),
                 managed_state_root: None,
+                dispatch_mode,
             })
         }
         RUN_CAPSULE_LEASE_KIND => {
@@ -2668,6 +2760,7 @@ fn resolve_lease_execution(
             Ok(LeaseExecution {
                 run_ref,
                 managed_state_root: Some(root),
+                dispatch_mode,
             })
         }
         other => Err((
@@ -3025,8 +3118,22 @@ async fn handle_claimed_lease(
     let LeaseExecution {
         run_ref,
         managed_state_root,
+        dispatch_mode,
     } = execution;
     tokio::spawn(async move {
+        // Fail closed BEFORE any control watcher / child spawn: a native-inference
+        // lease must only run where this host can actually run native-inference.
+        // The control plane already capability-gates dispatch; this is defence in
+        // depth so a mis-dispatched lease is rejected, never forced into --sandbox.
+        if let Err((code, message)) =
+            ensure_dispatch_supported(dispatch_mode, native_inference_ready())
+        {
+            let report = LeaseReport::Failed { code, message };
+            let _ =
+                report_lease_status(&client, &api_base, &runner_token, &lease_id, &report).await;
+            slot.release();
+            return;
+        }
         // One control watcher for the whole lease lifetime: it flips stop_flag +
         // notifies on an owner stop in EITHER phase (needs_consent or running).
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -3059,7 +3166,8 @@ async fn handle_claimed_lease(
         let mut round: u32 = 0;
         let (mut report_rx, monitor, child_pid, first_report) = loop {
             round += 1;
-            let child = match spawn_run_child(&run_ref, managed_state_root.as_deref()) {
+            let child = match spawn_run_child(&run_ref, managed_state_root.as_deref(), dispatch_mode)
+            {
                 Ok(child) => child,
                 Err(err) => {
                     let report = LeaseReport::Failed {
@@ -3887,6 +3995,118 @@ mod tests {
             kinds.contains(&RUN_CAPSULE_LEASE_KIND),
             "must advertise run_capsule now that execution is wired"
         );
+    }
+
+    fn argv(args: Vec<std::ffi::OsString>) -> Vec<String> {
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn run_child_args_sandboxes_source_runs() {
+        // Default (source/sandbox) dispatch still passes --sandbox — ato#762
+        // leaves sandboxed source execution unchanged.
+        let a = argv(run_child_args(
+            "github.com/x/y",
+            None,
+            RunnerDispatchMode::Sandboxed,
+        ));
+        assert_eq!(a, vec!["run", "github.com/x/y", "--sandbox", "-y"]);
+    }
+
+    #[test]
+    fn run_child_args_omits_sandbox_for_native_inference() {
+        // native-inference is host execution — the child must NOT be sandboxed.
+        let a = argv(run_child_args(
+            "community/local-llm-chat",
+            None,
+            RunnerDispatchMode::NativeInferenceHost,
+        ));
+        assert_eq!(a, vec!["run", "community/local-llm-chat", "-y"]);
+        assert!(
+            !a.iter().any(|x| x == "--sandbox"),
+            "native-inference dispatch must not append --sandbox"
+        );
+    }
+
+    #[test]
+    fn run_child_args_keeps_managed_state_root_in_both_modes() {
+        let root = std::path::Path::new("/state/owner/ref");
+        for mode in [
+            RunnerDispatchMode::Sandboxed,
+            RunnerDispatchMode::NativeInferenceHost,
+        ] {
+            let a = argv(run_child_args("r", Some(root), mode));
+            let i = a
+                .iter()
+                .position(|x| x == "--managed-state-root")
+                .expect("managed-state-root flag present");
+            assert_eq!(a[i + 1], "/state/owner/ref");
+        }
+    }
+
+    #[test]
+    fn dispatch_mode_only_exact_native_inference_selects_host() {
+        // Exactly "native-inference" → host; absent / any other runtime → sandbox.
+        // No generic host-exec: "host-exec", "oci", "source/native" stay sandboxed.
+        assert_eq!(
+            RunnerDispatchMode::from_command(&serde_json::json!({"runtime": "native-inference"})),
+            RunnerDispatchMode::NativeInferenceHost
+        );
+        for other in [
+            serde_json::json!({}),
+            serde_json::json!({ "runtime": "oci" }),
+            serde_json::json!({ "runtime": "host-exec" }),
+            serde_json::json!({ "runtime": "source/native" }),
+            serde_json::json!({ "runtime": "native-inference-x" }),
+        ] {
+            assert_eq!(
+                RunnerDispatchMode::from_command(&other),
+                RunnerDispatchMode::Sandboxed,
+                "only the exact native-inference runtime selects host dispatch; got {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_dispatch_supported_fails_closed_without_native_inference_capability() {
+        // native-inference on a host that can't run it → typed failure, no spawn.
+        let (code, _) =
+            ensure_dispatch_supported(RunnerDispatchMode::NativeInferenceHost, false).unwrap_err();
+        assert_eq!(code, "native_inference_unavailable");
+        // Capable host → ok; sandboxed runs are never gated by this capability.
+        assert!(ensure_dispatch_supported(RunnerDispatchMode::NativeInferenceHost, true).is_ok());
+        assert!(ensure_dispatch_supported(RunnerDispatchMode::Sandboxed, false).is_ok());
+    }
+
+    #[test]
+    fn resolve_lease_execution_sets_dispatch_mode_from_runtime() {
+        // A run_capsule lease carrying runtime=native-inference resolves to host
+        // dispatch; the same lease without the field stays sandboxed.
+        let native = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule",
+                "run_ref": "community/local-llm-chat@1.0.0",
+                "owner_id": "u",
+                "runtime": NATIVE_INFERENCE_RUNTIME,
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
+        .expect("valid native-inference lease");
+        assert_eq!(
+            native.dispatch_mode,
+            RunnerDispatchMode::NativeInferenceHost
+        );
+
+        let sandboxed = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule", "run_ref": "community/x@1.0.0", "owner_id": "u",
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
+        .expect("valid sandboxed lease");
+        assert_eq!(sandboxed.dispatch_mode, RunnerDispatchMode::Sandboxed);
     }
 
     #[test]
