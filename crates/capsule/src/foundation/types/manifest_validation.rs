@@ -1225,6 +1225,30 @@ impl CapsuleManifest {
                         let state_name = binding.state.trim();
                         let target = binding.target.trim();
 
+                        // `service_target`, when present, must name a declared
+                        // `[services.<name>]`. At runtime the mount is routed by
+                        // matching `service_target` against SERVICE names (not
+                        // target names — see routing::router::services::
+                        // state_mounts_for_service). A value that matches no
+                        // service silently drops the mount, so a persistent
+                        // volume is never attached and its data is lost on
+                        // restart. Fail closed instead of mounting nothing.
+                        //
+                        // Compared raw (no trim) to mirror the runtime matcher
+                        // exactly: an empty/whitespace or space-padded value is
+                        // also rejected, since the runtime would never match it.
+                        if let Some(svc_target) = binding.service_target.as_deref()
+                            && !services.contains_key(svc_target)
+                        {
+                            errors.push(ValidationError::InvalidStateBinding(
+                                service_name.clone(),
+                                format!(
+                                    "service_target '{svc_target}' does not reference a declared [services.*] \
+                                     (binding for state '{state_name}' would never be mounted)"
+                                ),
+                            ));
+                        }
+
                         if state_name.is_empty() {
                             errors.push(ValidationError::InvalidStateBinding(
                                 service_name.clone(),
@@ -2042,6 +2066,63 @@ mod tests {
         ));
         // neither model nor model_url
         assert!(has_err(&validate_native_model(""), "model"));
+    }
+
+    fn validate_service_target_binding(
+        service_target: &str,
+    ) -> Result<(), Vec<super::ValidationError>> {
+        let toml = format!(
+            "schema_version = \"0.3\"\nname = \"svc-target\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+             default_target = \"server\"\n\
+             [targets.db]\nruntime = \"oci\"\nimage = \"redis:7-alpine\"\nport = 6379\n\
+             [targets.server]\nruntime = \"oci\"\nimage = \"redis:7-alpine\"\nport = 6380\n\
+             [state.data]\nkind = \"filesystem\"\ndurability = \"persistent\"\npurpose = \"x\"\n\
+             attach = \"explicit\"\nschema_id = \"sha256:demo\"\n\
+             [services.db]\ntarget = \"db\"\n\
+             [services.main]\ntarget = \"server\"\n\
+             [[services.main.state_bindings]]\nstate = \"data\"\ntarget = \"/data\"\n\
+             service_target = \"{service_target}\"\n"
+        );
+        let manifest: crate::foundation::types::manifest::CapsuleManifest =
+            toml::from_str(&toml).expect("parse manifest");
+        manifest.validate()
+    }
+
+    #[test]
+    fn state_binding_service_target_must_reference_declared_service() {
+        // "server" is a TARGET label, not a service name (services are db/main).
+        // The runtime resolves service_target against service names, so a bogus
+        // value silently drops the mount — validation must fail closed.
+        assert!(
+            has_err(&validate_service_target_binding("server"), "service_target"),
+            "bogus service_target (target name, not a service) must be rejected"
+        );
+        // "main" (the enclosing service) is declared — accepted.
+        assert!(
+            !has_err(&validate_service_target_binding("main"), "service_target"),
+            "valid service_target (enclosing service) must pass"
+        );
+        // "db" is a declared service other than the binding's enclosing one
+        // (cross-service routing) — accepted.
+        assert!(
+            !has_err(&validate_service_target_binding("db"), "service_target"),
+            "valid service_target naming a non-enclosing service must pass"
+        );
+        // Empty / whitespace-only is rejected: the runtime compares the raw
+        // value and would never match a service, dropping the mount.
+        assert!(
+            has_err(&validate_service_target_binding(""), "service_target"),
+            "empty service_target must be rejected"
+        );
+        assert!(
+            has_err(&validate_service_target_binding("   "), "service_target"),
+            "whitespace-only service_target must be rejected"
+        );
+        // Space-padded but otherwise-valid name is rejected (runtime is exact).
+        assert!(
+            has_err(&validate_service_target_binding(" main "), "service_target"),
+            "space-padded service_target must be rejected (runtime does not trim)"
+        );
     }
 
     #[test]
