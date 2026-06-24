@@ -4445,140 +4445,54 @@ where
 
 /// Fetch a managed native-inference engine binary into the toolchain cache
 /// before the host launcher resolves it. A local `engine_path` overrides this
-/// (nothing to fetch). Inc2 supports `engine = "llama.cpp"` + `engine_version`.
-/// Decide which managed llama.cpp build to fetch for a native-inference target,
-/// or the precise platform/variant fail-closed error.
+/// (nothing to fetch). Dispatches through the [`Engine`] trait
+/// (`capsule::routing::native_inference`): the engine resolves which build to
+/// fetch (variant/platform dispatch first, failing closed for an unsupported or
+/// not-ready accelerated variant) and performs the fetch.
 ///
-/// The dispatch is variant/platform FIRST — a broad GPU-presence gate would mask
-/// the real reason (e.g. report "needs an NVIDIA GPU" for a macOS-vulkan or a
-/// cuda manifest). Returns `Ok(None)` for the default CPU/Metal build,
-/// `Ok(Some("vulkan"))` for a Vulkan GPU build, or `Err(message)` to fail closed.
-///
-/// `vulkan_ready` is consulted ONLY for the Vulkan-on-Linux branch — a GPU build
-/// must never silently fall back to CPU, so it requires full Vulkan readiness
-/// (GPU + driver + Vulkan device), not mere GPU presence.
-fn resolve_engine_variant_action<F: FnOnce() -> bool>(
-    variant: Option<&str>,
-    target_os: &str,
-    vulkan_ready: F,
-) -> std::result::Result<Option<String>, String> {
-    let normalized = variant
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| !v.is_empty());
-    match normalized.as_deref() {
-        // Default CPU/Metal build — no GPU readiness gate.
-        None | Some("default") | Some("cpu") | Some("metal") => Ok(None),
-        Some("vulkan") => match target_os {
-            "linux" => {
-                if vulkan_ready() {
-                    Ok(Some("vulkan".to_string()))
-                } else {
-                    Err(
-                        "engine_variant=\"vulkan\" needs a ready NVIDIA Vulkan host \
-                         (GPU + driver + Vulkan device), but none was detected. Run \
-                         `ato runner doctor --profile nvidia-ubuntu` / \
-                         `ato runner provision --profile nvidia-ubuntu`, or set an explicit \
-                         engine_path."
-                            .to_string(),
-                    )
-                }
-            }
-            "macos" => Err(
-                "engine_variant=\"vulkan\" is not supported on macOS — omit \
-                            engine_variant to use the default Metal-accelerated build."
-                    .to_string(),
-            ),
-            other => Err(format!(
-                "engine_variant=\"vulkan\" has no llama.cpp prebuilt for {other} \
-                 (Linux only); set an explicit engine_path."
-            )),
-        },
-        Some("cuda") => Err("engine_variant=\"cuda\" has no managed llama.cpp prebuilt \
-                             (no Linux CUDA release; Windows CUDA is out of scope). Set an \
-                             explicit engine_path, use engine_variant=\"vulkan\" for managed \
-                             GPU acceleration, or wait for a future source-build slice."
-            .to_string()),
-        Some(other) => Err(format!(
-            "unknown engine_variant {other:?} (supported: vulkan; default = CPU/Metal)"
-        )),
-    }
-}
-
+/// [`Engine`]: capsule::routing::native_inference::Engine
 async fn ensure_native_inference_engine(plan: &capsule::router::ManifestData) -> Result<()> {
-    let has_engine_path = plan
-        .target_engine_path()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    if has_engine_path {
-        return Ok(());
-    }
+    use capsule::routing::native_inference::{self, HostCapabilities};
 
-    let engine = plan
-        .target_engine()
-        .map(|value| value.trim().to_ascii_lowercase());
-    match engine.as_deref() {
-        Some("llama.cpp") | Some("llamacpp") | Some("llama-cpp") => {
-            let version = plan
-                .target_engine_version()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "engine=\"llama.cpp\" requires `engine_version` (a build tag, e.g. \"b4231\")"
-                    )
-                })?;
-            let variant = plan
-                .target_engine_variant()
-                .filter(|value| !value.trim().is_empty());
-            // Variant/platform dispatch first; the Vulkan-on-Linux branch (and
-            // only it) probes full Vulkan readiness, failing closed rather than
-            // falling back to a CPU build.
-            let fetch_variant =
-                resolve_engine_variant_action(variant.as_deref(), std::env::consts::OS, || {
-                    capsule::foundation::host_gpu::detect_host_gpu_profile()
-                        .map(|profile| profile.native_inference_vulkan_ready())
-                        .unwrap_or(false)
-                })
-                .map_err(|message| anyhow::anyhow!(message))?;
-            capsule::packers::runtime_fetcher::RuntimeFetcher::new()?
-                .ensure_llamacpp(&version, fetch_variant.as_deref())
-                .await?;
-            Ok(())
-        }
-        // Unspecified/unknown managed engine: let the launcher's
-        // resolve_native_inference_engine_command produce the precise error.
-        _ => Ok(()),
-    }
+    let Some(engine) = native_inference::resolve_engine(plan) else {
+        // No recognized managed engine declared: the launcher's
+        // resolve_server_command produces the precise error.
+        return Ok(());
+    };
+
+    // Ensure-step: build a PROBED host snapshot (Vulkan readiness is detected on
+    // Linux) so the variant's platform/readiness fail-closed gate runs for real,
+    // rather than falling back to a CPU build. A failed probe is "not ready".
+    let host = HostCapabilities::from_profile(
+        capsule::foundation::host_gpu::detect_host_gpu_profile().ok(),
+    );
+    let ctx = native_inference::engine_context(plan, engine.as_ref());
+
+    let fetcher = capsule::packers::runtime_fetcher::RuntimeFetcher::new()?;
+    engine.ensure_engine(&ctx, &host, &fetcher).await?;
+    Ok(())
 }
 
-/// Download + verify a managed native-inference model (`model_url` +
-/// `model_sha256`) into the content-addressed cache before the host launcher
-/// resolves its deterministic blob path. A local `model` overrides this.
+/// Download + verify a managed native-inference model into the
+/// content-addressed cache before the host launcher resolves its deterministic
+/// blob path. A local `model` overrides this. Routed through the [`Engine`]
+/// trait's `ensure_model` (today's `model_url` + `model_sha256` CAS path for
+/// llama.cpp).
+///
+/// [`Engine`]: capsule::routing::native_inference::Engine
 async fn ensure_native_inference_model(plan: &capsule::router::ManifestData) -> Result<()> {
-    let has_local_model = plan
-        .target_model()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    if has_local_model {
+    use capsule::routing::native_inference;
+
+    let Some(engine) = native_inference::resolve_engine(plan) else {
+        // No recognized managed engine declared: the launcher's
+        // resolve_model_path produces the precise error.
         return Ok(());
-    }
-
-    let url = match plan
-        .target_model_url()
-        .filter(|value| !value.trim().is_empty())
-    {
-        Some(url) => url,
-        // No managed model declared: the launcher's resolve_native_inference_model
-        // produces the precise "requires model or model_url" error.
-        None => return Ok(()),
     };
-    let sha_raw = plan
-        .target_model_sha256()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("`model_url` requires `model_sha256`"))?;
-    let sha = capsule::foundation::types::manifest::normalize_model_sha256(&sha_raw)
-        .ok_or_else(|| anyhow::anyhow!("`model_sha256` must be a 64-char hex SHA-256"))?;
 
-    capsule::resource::model_cache::ensure_model(&url, &sha).await?;
+    // The model path/fetch is engine-driven and variant-independent.
+    let ctx = native_inference::engine_context(plan, engine.as_ref());
+
+    engine.ensure_model(&ctx).await?;
     Ok(())
 }
 
@@ -5509,7 +5423,7 @@ mod tests {
         collect_port_preferences, headless_state_instance_id, normalize_existing_path,
         normalize_write_path, parent_package_id, parse_external_service_contracts,
         parse_reuse_if_present_service_preflights, reconcile_compat_manifest_targets,
-        resolve_engine_variant_action, resolve_sandbox_grants, sandbox_session_data_env,
+        resolve_sandbox_grants, sandbox_session_data_env,
         sandbox_session_data_env_dir, unavailable_service_message,
         validate_sandbox_grants_best_effort,
     };
@@ -5557,67 +5471,9 @@ mod tests {
         ));
     }
 
-    // ── native-inference engine_variant fail-closed ordering (Inc4) ──
-    // A panicking probe asserts the GPU readiness check is NOT consulted.
-    fn never_ready() -> bool {
-        panic!("vulkan readiness must not be probed for this case")
-    }
-
-    #[test]
-    fn engine_variant_default_does_not_probe_gpu() {
-        for v in [None, Some("default"), Some("cpu"), Some("metal"), Some("")] {
-            let action = resolve_engine_variant_action(v, "linux", never_ready);
-            assert_eq!(
-                action,
-                Ok(None),
-                "variant {v:?} should fetch the default build"
-            );
-        }
-    }
-
-    #[test]
-    fn engine_variant_vulkan_on_macos_errors_with_metal_hint_not_gpu() {
-        let err = resolve_engine_variant_action(Some("vulkan"), "macos", never_ready)
-            .expect_err("macOS vulkan must fail");
-        assert!(err.contains("macOS") && err.contains("Metal"), "{err}");
-        // Must NOT be masked as a generic "needs an NVIDIA GPU" / readiness error.
-        assert!(!err.contains("NVIDIA Vulkan host") && !err.contains("runner doctor"));
-    }
-
-    #[test]
-    fn engine_variant_cuda_fails_closed_not_gpu_presence() {
-        let err = resolve_engine_variant_action(Some("cuda"), "linux", never_ready)
-            .expect_err("cuda must fail closed");
-        assert!(
-            err.contains("cuda") && err.contains("no managed llama.cpp prebuilt"),
-            "{err}"
-        );
-        // Not the vulkan-readiness message, and never a CPU fallback.
-        assert!(!err.contains("NVIDIA Vulkan host") && !err.contains("ubuntu-x64"));
-    }
-
-    #[test]
-    fn engine_variant_unknown_errors_as_unknown() {
-        let err = resolve_engine_variant_action(Some("rocm"), "linux", never_ready)
-            .expect_err("unknown variant must fail");
-        assert!(err.contains("unknown engine_variant"), "{err}");
-    }
-
-    #[test]
-    fn engine_variant_vulkan_linux_fails_closed_when_not_ready() {
-        let err = resolve_engine_variant_action(Some("vulkan"), "linux", || false)
-            .expect_err("vulkan with no readiness must fail closed");
-        assert!(
-            err.contains("runner doctor") || err.contains("runner provision"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn engine_variant_vulkan_linux_ready_fetches_vulkan() {
-        let action = resolve_engine_variant_action(Some("vulkan"), "linux", || true);
-        assert_eq!(action, Ok(Some("vulkan".to_string())));
-    }
+    // native-inference engine_variant fail-closed tests moved to
+    // `capsule::routing::native_inference::tests` (now exercised through the
+    // `LlamaCppEngine::plan_variant` trait method).
 
     #[test]
     fn sandbox_session_data_env_sets_absent_keys_only() {
