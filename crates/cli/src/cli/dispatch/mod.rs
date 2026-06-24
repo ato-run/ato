@@ -797,6 +797,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             crate::cli::DoctorTarget::NativeInference { json } => {
                 crate::application::native_inference_doctor::run(json)
             }
+            crate::cli::DoctorTarget::Disk { json } => crate::application::disk_doctor::run(json),
         },
 
         Commands::Login {
