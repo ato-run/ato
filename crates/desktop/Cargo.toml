@@ -150,3 +150,5 @@ embed-resource = "3"
 tempfile = "3"
 serial_test = { version = "3", features = ["log"] }
 chrono = { version = "0.4", default-features = true }
+# Set file mtimes in log-retention tests (already a transitive dep).
+filetime = "0.2"
