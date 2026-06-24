@@ -23,7 +23,7 @@ struct RuntimeInstallLock {
 mod fetcher;
 mod verifier;
 
-pub(crate) use fetcher::llamacpp_cache_key;
+pub(crate) use fetcher::{llamacpp_cache_key, sglang_venv_python};
 pub use verifier::{ArtifactVerifier, ChecksumVerifier};
 
 /// Whether this host has managed llama.cpp prebuilts for the native-inference
@@ -314,6 +314,47 @@ impl RuntimeFetcher {
         }
         info!("llama.cpp {} ready at {:?}", key, server_bin);
         Ok(server_bin)
+    }
+
+    /// Create (if needed) a managed Python venv for the pinned SGLang `version`
+    /// (the sglang wheel version, e.g. `"0.4.10.post2"`) and `pip install` the
+    /// pinned sglang + torch (cu124) + sgl-kernel/flashinfer requirements, then
+    /// run an `import sglang` smoke as a post-condition. Returns the canonical
+    /// venv python path `<cache>/sglang-<version>/bin/python[.exe]` — the exact
+    /// path the launcher resolves as the server command. Used by the SGLang
+    /// native-inference engine ensure-step.
+    ///
+    /// The venv install runs on any Linux+NVIDIA host; the `import sglang` smoke
+    /// requires the CUDA toolchain/kernels to load, so it only passes on a real
+    /// CUDA host (host-pending) — but the command is real, not stubbed.
+    pub async fn ensure_sglang(&self, version: &str) -> Result<PathBuf> {
+        let runtime_dir = self
+            .download_runtime_with_progress("sglang", version, true)
+            .await?;
+        let python = fetcher::sglang_venv_python(&runtime_dir);
+        if !python.is_file() {
+            return Err(CapsuleError::Pack(format!(
+                "sglang {version}: venv python missing at {python:?} after install"
+            )));
+        }
+        // Smoke: the venv must be able to import sglang (proves the install +
+        // its CUDA kernels resolve). On a non-CUDA host this fails honestly
+        // rather than reporting a usable engine.
+        let output = tokio::process::Command::new(&python)
+            .args(["-c", "import sglang"])
+            .output()
+            .await
+            .map_err(|e| CapsuleError::Pack(format!("sglang import smoke: failed to run {python:?}: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CapsuleError::Pack(format!(
+                "sglang {version}: `import sglang` failed in the managed venv \
+                 (CUDA toolchain/kernels required): {}",
+                stderr.trim()
+            )));
+        }
+        info!("sglang {} ready at {:?}", version, python);
+        Ok(python)
     }
 
     pub async fn ensure_uv(&self, version: Option<&str>) -> Result<PathBuf> {

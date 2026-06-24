@@ -1649,6 +1649,37 @@ pub struct NamedTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_format: Option<String>,
 
+    /// native-inference (multi-file engines, e.g. SGLang): a Hugging Face model
+    /// repo id (`"<org>/<name>"`) downloaded as a directory of shards. Mutually
+    /// exclusive with `model_url` (single-file). Used when `model` (a local dir)
+    /// is not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_repo: Option<String>,
+
+    /// native-inference: the immutable 40-hex Hugging Face commit the repo is
+    /// pinned to (reproducibility — a branch like `"main"` is rejected). Required
+    /// alongside `model_repo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_revision: Option<String>,
+
+    /// native-inference: the digest-of-digests over the included file set of the
+    /// pinned repo (the multi-file analogue of `model_sha256`; both the cache key
+    /// and the integrity gate). Required alongside `model_repo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_repo_sha256: Option<String>,
+
+    /// native-inference: optional glob allowlist of repo files to download (e.g.
+    /// `["config.json", "*.safetensors", "tokenizer*"]`). Empty = a built-in
+    /// default weights+config+tokenizer set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_repo_include: Vec<String>,
+
+    /// native-inference: when `true`, the repo is gated and the download sends an
+    /// `HF_TOKEN` bearer credential (read from the environment at fetch time,
+    /// never logged or persisted).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_repo_gated: bool,
+
     /// Required environment variable names.
     #[serde(default)]
     pub required_env: Vec<String>,
@@ -2237,6 +2268,42 @@ pub fn is_safe_model_url(value: &str) -> bool {
     resolve_model_url(value).is_ok()
 }
 
+/// A managed multi-file `model_repo` must be a `<org>/<name>` Hugging Face repo
+/// id: exactly one `/`, each segment starting with an alphanumeric and otherwise
+/// `[A-Za-z0-9._-]`. The id is interpolated into the HF API/download URLs and the
+/// content-addressed cache path, so reject path traversal (`..`), whitespace, and
+/// any extra slashes.
+pub fn is_safe_hf_repo(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() || v.contains("..") {
+        return false;
+    }
+    let Some((org, name)) = v.split_once('/') else {
+        return false;
+    };
+    if name.contains('/') {
+        return false;
+    }
+    let segment_ok = |s: &str| {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphanumeric() => {}
+            _ => return false,
+        }
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    segment_ok(org) && segment_ok(name)
+}
+
+/// A managed `model_revision` must be an immutable 40-char lowercase-hex Git
+/// commit SHA. A branch/tag (e.g. `"main"`) is deliberately rejected so a
+/// `model_repo` pin is reproducible (the bytes can't move under the digest).
+pub fn is_safe_hf_revision(value: &str) -> bool {
+    let v = value.trim();
+    v.len() == 40 && v.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
 #[cfg(test)]
 mod engine_version_tests {
     use super::is_safe_engine_version;
@@ -2328,6 +2395,38 @@ mod model_ref_tests {
         assert!(resolve_model_url("hf://org/repo").is_err());
         assert!(resolve_model_url("hf://org//file.gguf").is_err());
         assert!(resolve_model_url("s3://bucket/k").is_err());
+    }
+
+    #[test]
+    fn hf_repo_accepts_org_slash_name_and_rejects_traversal() {
+        use super::is_safe_hf_repo;
+        assert!(is_safe_hf_repo("Qwen/Qwen3-32B-AWQ"));
+        assert!(is_safe_hf_repo("meta-llama/Llama-3.1-8B-Instruct"));
+        assert!(is_safe_hf_repo("org/repo.name_v2"));
+        // Exactly one `/`, both segments alphanumeric-led.
+        assert!(!is_safe_hf_repo("noslash"));
+        assert!(!is_safe_hf_repo("a/b/c")); // extra slash
+        assert!(!is_safe_hf_repo("org/")); // empty name
+        assert!(!is_safe_hf_repo("/repo")); // empty org
+        assert!(!is_safe_hf_repo("../evil/repo")); // traversal
+        assert!(!is_safe_hf_repo("org/..")); // traversal
+        assert!(!is_safe_hf_repo(".hidden/repo")); // leading dot
+        assert!(!is_safe_hf_repo("org/repo name")); // whitespace
+        assert!(!is_safe_hf_repo(""));
+    }
+
+    #[test]
+    fn hf_revision_requires_immutable_40_hex_commit() {
+        use super::is_safe_hf_revision;
+        assert!(is_safe_hf_revision(&"a".repeat(40)));
+        assert!(is_safe_hf_revision("0123456789abcdef0123456789abcdef01234567"));
+        // Branches/tags and malformed lengths/casing are rejected.
+        assert!(!is_safe_hf_revision("main"));
+        assert!(!is_safe_hf_revision(&"a".repeat(39)));
+        assert!(!is_safe_hf_revision(&"a".repeat(41)));
+        assert!(!is_safe_hf_revision(&"A".repeat(40))); // uppercase
+        assert!(!is_safe_hf_revision(&"g".repeat(40))); // non-hex
+        assert!(!is_safe_hf_revision(""));
     }
 }
 

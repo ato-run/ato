@@ -1050,6 +1050,47 @@ impl ExecutionDescriptor {
         self.compat_str(&["targets", &self.selected_target, "model_sha256"])
     }
 
+    /// native-inference (multi-file engines, e.g. SGLang): the Hugging Face model
+    /// repo id (`"<org>/<name>"`) downloaded as a directory. Used when `model` (a
+    /// local dir) is unset; mutually exclusive with `model_url`.
+    pub fn target_model_repo(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "model_repo"])
+    }
+
+    /// native-inference: the immutable 40-hex Hugging Face commit `model_repo` is
+    /// pinned to (reproducibility).
+    pub fn target_model_revision(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "model_revision"])
+    }
+
+    /// native-inference: the digest-of-digests over `model_repo`'s included file
+    /// set (cache key + integrity gate; the multi-file analogue of model_sha256).
+    pub fn target_model_repo_sha256(&self) -> Option<String> {
+        self.compat_str(&["targets", &self.selected_target, "model_repo_sha256"])
+    }
+
+    /// native-inference: optional glob allowlist of `model_repo` files to fetch.
+    /// Empty `Vec` = the engine's built-in default file set.
+    pub fn target_model_repo_include(&self) -> Vec<String> {
+        self.compat_array(&["targets", &self.selected_target, "model_repo_include"])
+            .map(|values| {
+                values
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .filter(|s| !s.trim().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// native-inference: whether `model_repo` is gated (the download sends an
+    /// `HF_TOKEN` bearer credential read at fetch time). Defaults to `false`.
+    pub fn target_model_repo_gated(&self) -> bool {
+        self.compat_value(&["targets", &self.selected_target, "model_repo_gated"])
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     pub fn targets_oci_cmd(&self) -> Vec<String> {
         let cmd = self.target_cmd(&self.selected_target);
         if !cmd.is_empty() {

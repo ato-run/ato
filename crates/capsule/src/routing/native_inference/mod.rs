@@ -9,6 +9,7 @@
 
 mod engine;
 mod llamacpp;
+mod sglang;
 #[cfg(test)]
 mod tests;
 
@@ -54,6 +55,7 @@ pub fn resolve_engine(plan: &ManifestData) -> Option<Box<dyn Engine>> {
 pub fn engine_for(id: EngineId) -> Box<dyn Engine> {
     match id {
         EngineId::LlamaCpp => Box::new(llamacpp::LlamaCppEngine),
+        EngineId::SgLang => Box::new(sglang::SgLangEngine),
     }
 }
 
@@ -84,5 +86,14 @@ pub fn engine_context(plan: &ManifestData, engine: &dyn Engine) -> EngineContext
         model_sha256: plan
             .target_model_sha256()
             .filter(|v| !v.trim().is_empty()),
+        model_repo: plan.target_model_repo().filter(|v| !v.trim().is_empty()),
+        model_revision: plan
+            .target_model_revision()
+            .filter(|v| !v.trim().is_empty()),
+        model_repo_sha256: plan
+            .target_model_repo_sha256()
+            .filter(|v| !v.trim().is_empty()),
+        model_repo_include: plan.target_model_repo_include(),
+        model_repo_gated: plan.target_model_repo_gated(),
     }
 }

@@ -18,11 +18,12 @@ use crate::packers::runtime_fetcher::RuntimeFetcher;
 
 /// Canonical identity of a native-inference engine.
 ///
-/// Increment 1 ships llama.cpp only; the enum is the single place new engines
-/// are registered.
+/// The enum is the single place new engines are registered. Increment 1 shipped
+/// llama.cpp; increment 2 adds SGLang (CUDA-only, Linux/Ampere).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineId {
     LlamaCpp,
+    SgLang,
 }
 
 impl EngineId {
@@ -34,6 +35,7 @@ impl EngineId {
     pub fn from_manifest(engine: &str) -> Option<Self> {
         match engine.trim().to_ascii_lowercase().as_str() {
             "llama.cpp" | "llamacpp" | "llama-cpp" => Some(Self::LlamaCpp),
+            "sglang" | "sg-lang" => Some(Self::SgLang),
             _ => None,
         }
     }
@@ -42,6 +44,7 @@ impl EngineId {
     pub fn toolchain_key(self) -> &'static str {
         match self {
             Self::LlamaCpp => "llamacpp",
+            Self::SgLang => "sglang",
         }
     }
 }
@@ -133,6 +136,17 @@ impl HostCapabilities {
             .map(|p| p.native_inference_vulkan_ready())
             .unwrap_or(false)
     }
+
+    /// Whether this host has a usable CUDA native-inference path for SGLang
+    /// (NVIDIA GPU + driver + a detectable CUDA runtime). `false` when the probe
+    /// found nothing usable (or the host was not probed). See
+    /// [`HostGpuProfile::native_inference_cuda_ready`].
+    pub fn cuda_ready(&self) -> bool {
+        self.gpu
+            .as_ref()
+            .map(|p| p.native_inference_cuda_ready())
+            .unwrap_or(false)
+    }
 }
 
 /// Everything an engine needs from the manifest, resolved once by the router
@@ -157,12 +171,23 @@ pub struct EngineContext {
     /// the launcher and fetcher always agree — the platform/readiness
     /// fail-closed is enforced separately by the ensure-step.
     pub variant: VariantPlan,
-    /// Local model path override (wins over managed resolution).
+    /// Local model path override (wins over managed resolution). A file for
+    /// llama.cpp; a directory for SGLang.
     pub model: Option<String>,
     /// Managed single-file model URL (llama.cpp GGUF).
     pub model_url: Option<String>,
-    /// Required SHA-256 of the managed model (cache key + integrity check).
+    /// Required SHA-256 of the managed single-file model (cache key + check).
     pub model_sha256: Option<String>,
+    /// Managed multi-file Hugging Face repo id `<org>/<name>` (SGLang).
+    pub model_repo: Option<String>,
+    /// Immutable 40-hex Hugging Face commit the `model_repo` is pinned to (SGLang).
+    pub model_revision: Option<String>,
+    /// Digest-of-digests over the included `model_repo` file set (SGLang).
+    pub model_repo_sha256: Option<String>,
+    /// Glob allowlist of `model_repo` files to download; empty = engine default.
+    pub model_repo_include: Vec<String>,
+    /// Whether `model_repo` is gated (send `HF_TOKEN` at fetch time) (SGLang).
+    pub model_repo_gated: bool,
 }
 
 /// Status of an engine-side doctor check (capsule layer, no CLI dependency).

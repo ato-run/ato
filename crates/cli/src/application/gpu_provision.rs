@@ -1069,6 +1069,7 @@ mod tests {
                 nvidia_icd_present: true,
                 nvidia_device_visible: true,
             }),
+            cuda_runtime: None,
         }
     }
 
