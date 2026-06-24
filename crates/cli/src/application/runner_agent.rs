@@ -2375,11 +2375,119 @@ fn windows_pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// Terminate the workload's process group and wait for it to be reaped.
-/// SIGTERM first (let the app shut down cleanly), escalate to SIGKILL after a
-/// bounded grace, and confirm via the monitor task draining the child's output
-/// and reaping it. Returns true only when termination is confirmed; an
-/// unconfirmable outcome returns false so the caller can fail closed.
+/// `(pid, ppid, pgid)` for every process, so the teardown can walk a workload's
+/// whole subtree — including a native-inference engine that put ITSELF in its
+/// own process group (executors/source.rs) and would otherwise survive a single
+/// `kill(-root_pgid)`. Linux reads `/proc` directly; other Unix shells to `ps`.
+/// See ato#769.
+#[cfg(target_os = "linux")]
+fn read_process_table() -> Vec<(u32, u32, u32)> {
+    let mut rows = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return rows;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // "pid (comm) state ppid pgrp …" — comm may contain spaces and ')', so
+        // parse the fields AFTER the final ')'.
+        let Some((_, after)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = after.split_whitespace();
+        let _state = fields.next();
+        let ppid = fields.next().and_then(|s| s.parse::<u32>().ok());
+        let pgrp = fields.next().and_then(|s| s.parse::<u32>().ok());
+        if let (Some(ppid), Some(pgrp)) = (ppid, pgrp) {
+            rows.push((pid, ppid, pgrp));
+        }
+    }
+    rows
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn read_process_table() -> Vec<(u32, u32, u32)> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            Some((
+                cols.next()?.parse().ok()?,
+                cols.next()?.parse().ok()?,
+                cols.next()?.parse().ok()?,
+            ))
+        })
+        .collect()
+}
+
+/// Every distinct process group in the subtree rooted at `root_pid` (the root
+/// plus all descendants). The runner spawns `ato run` in its own group, but a
+/// native-inference run's engine puts ITSELF in another group
+/// (executors/source.rs `process_group(0)`), so terminating only the root group
+/// strands the engine. The teardown signals every group this returns. See
+/// ato#769.
+#[cfg(unix)]
+fn workload_subtree_groups(root_pid: u32) -> std::collections::HashSet<u32> {
+    use std::collections::{HashMap, HashSet};
+    let table = read_process_table();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut pgid_of: HashMap<u32, u32> = HashMap::new();
+    for &(pid, ppid, pgid) in &table {
+        children.entry(ppid).or_default().push(pid);
+        pgid_of.insert(pid, pgid);
+    }
+    let mut groups: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut stack = vec![root_pid];
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        if let Some(&pgid) = pgid_of.get(&pid).filter(|&&pgid| pgid != 0) {
+            groups.insert(pgid);
+        }
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    // The root leads its own group (spawn_run_child uses process_group(0)); keep
+    // it even if the table snapshot raced the root's appearance.
+    groups.insert(root_pid);
+    groups
+}
+
+/// Poll until every process group is confirmed gone (ESRCH) or `within`
+/// elapses. A SIGKILL'd engine that reparents to init is reaped within a beat,
+/// so a short poll avoids both a premature "stranded" verdict and an unbounded
+/// wait. See ato#769.
+#[cfg(unix)]
+async fn confirm_subtree_gone(groups: &std::collections::HashSet<u32>, within: Duration) -> bool {
+    tokio::time::timeout(within, async {
+        while !groups.iter().all(|&g| process_group_confirmed_gone(g)) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Terminate the workload's whole process-group SUBTREE and wait for it to be
+/// reaped. SIGTERM first (let each app shut down cleanly), escalate to SIGKILL
+/// after a bounded grace, and confirm every group is gone. A native-inference
+/// run's engine runs in its OWN process group (executors/source.rs), so we
+/// signal every group in the subtree — not just the `ato run` leader's — or the
+/// engine is stranded (ato#769). Returns true only when termination is
+/// confirmed; an unconfirmable outcome returns false so the caller fails closed.
 /// Non-Unix hosts have no POSIX process groups; there `taskkill /T /F`
 /// force-kills the whole subtree under the same confirm-or-fail-closed
 /// contract.
@@ -2394,17 +2502,34 @@ async fn terminate_child_group(
             let _ = monitor.await;
             return true;
         };
-        // Polite first: SIGTERM the whole group so the app can shut down.
-        let _ = kill_group(pid, libc::SIGTERM);
+        // Snapshot EVERY process group in the workload subtree BEFORE killing —
+        // a native-inference engine puts itself in its own group, so a single
+        // kill(-pid) would strand it (ato#769).
+        let mut groups = workload_subtree_groups(pid);
+        // Polite first: SIGTERM every group so each app can shut down.
+        for &g in &groups {
+            let _ = kill_group(g, libc::SIGTERM);
+        }
+        let mut monitor_done = false;
         tokio::select! {
-            _ = &mut monitor => return true,
+            _ = &mut monitor => { monitor_done = true; }
             _ = tokio::time::sleep(STOP_GRACE) => {}
         }
-        // Still alive after the grace window: force-kill the group.
-        let _ = kill_group(pid, libc::SIGKILL);
-        // SIGKILL cannot be caught; the monitor should reap promptly. If it
-        // still does not return, we cannot confirm termination — fail closed.
-        (tokio::time::timeout(STOP_KILL_GRACE, &mut monitor).await).is_ok()
+        // Force: SIGKILL every group; re-snapshot first so anything the grace
+        // window spawned is caught too, then union so nothing is missed.
+        groups.extend(workload_subtree_groups(pid));
+        for &g in &groups {
+            let _ = kill_group(g, libc::SIGKILL);
+        }
+        // Reap the leader via the monitor (frees the child handle / avoids a
+        // lingering zombie) — but only if it has not already completed, since a
+        // JoinHandle must not be polled after completion. The subtree confirm
+        // below is the source of truth.
+        if !monitor_done {
+            let _ = tokio::time::timeout(STOP_KILL_GRACE, &mut monitor).await;
+        }
+        // Confirm the WHOLE subtree is gone — fail closed if any group survives.
+        confirm_subtree_gone(&groups, STOP_KILL_GRACE).await
     }
     #[cfg(not(unix))]
     {
@@ -5475,6 +5600,109 @@ mod tests {
         assert!(
             !process_group_alive(pid),
             "no process in the workload group may survive the stop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_group_kills_engine_in_its_own_group() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        // ato#769: `ato run`'s host executor spawns the native-inference engine
+        // in its OWN process group (executors/source.rs `process_group(0)`), so a
+        // single kill(-ato_run_pgid) strands the engine. `bash`'s `set -m` (job
+        // control) makes the backgrounded `sleep` a CHILD of the shell but in its
+        // own group — the exact escape. (`bash` specifically: dash's `set -m`
+        // leaves the child in the shell's group.) The teardown must reap BOTH
+        // groups.
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg("set -m; sleep 300 & echo $!; wait")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn workload");
+        let pid = child.id().expect("child pid");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut lines = BufReader::new(stdout).lines();
+        let engine: u32 = tokio::time::timeout(Duration::from_secs(30), lines.next_line())
+            .await
+            .expect("engine pid printed within timeout")
+            .expect("read engine pid line")
+            .expect("engine pid line present")
+            .trim()
+            .parse()
+            .expect("engine pid parses");
+
+        // The engine leads its OWN process group, distinct from the shell's —
+        // the ato#769 escape that a single kill(-shell_pgid) would strand.
+        assert_ne!(pid, engine, "engine must lead a different group than the shell");
+        assert!(
+            process_group_alive(pid),
+            "shell group must be alive before the stop"
+        );
+        assert!(
+            process_group_alive(engine),
+            "engine group must be alive before the stop"
+        );
+
+        let monitor = tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        let terminated = terminate_child_group(Some(pid), monitor).await;
+        assert!(
+            terminated,
+            "teardown must confirm the whole subtree (shell + engine) is gone"
+        );
+
+        // Neither group may survive — the engine must NOT be stranded (ato#769).
+        for _ in 0..100 {
+            if !process_group_alive(pid) && !process_group_alive(engine) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !process_group_alive(pid),
+            "shell group must be gone after the stop"
+        );
+        assert!(
+            !process_group_alive(engine),
+            "engine group must be gone after the stop — not stranded (ato#769)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_group_repeated_stop_is_idempotent() {
+        // A redundant second owner stop (the run is already torn down) must still
+        // confirm `true`, never fail closed — repeated stops are idempotent.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 300")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn workload");
+        let pid = child.id().expect("child pid");
+
+        // First stop tears the workload down and confirms it.
+        let monitor = tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        assert!(
+            terminate_child_group(Some(pid), monitor).await,
+            "first stop must confirm the workload is gone"
+        );
+
+        // Second stop on the already-gone workload is a confirmed no-op.
+        let monitor = tokio::spawn(async {});
+        assert!(
+            terminate_child_group(Some(pid), monitor).await,
+            "a repeated stop on a gone workload must remain idempotent (true)"
         );
     }
 
