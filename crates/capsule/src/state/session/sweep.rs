@@ -30,6 +30,17 @@ const DEFAULT_LOG_SIZE_BUDGET: u64 = 512 * 1024 * 1024;
 /// cannot verify liveness, so we hold the dir until it is unambiguously old
 /// enough to be a leak rather than an in-flight write.
 const RUN_DIR_LEGACY_TTL_MULTIPLIER: u32 = 2;
+/// Maximum number of rotated guest-log generations the spawn-time rotator
+/// produces (`<log>.1` .. `<log>.N`). Kept in sync with
+/// `cli::adapters::runtime::executors::log_rotation::LOG_ROTATE_MAX_GENERATIONS`
+/// (the `cli` crate depends on `capsule`, so we cannot import it here without a
+/// dependency cycle). The TTL/size sweep matches any numeric `.N` suffix
+/// regardless of this value, so the two need not be byte-identical — this is the
+/// expected upper bound, not a hard limit. #767.
+// Referenced only by the candidate-matcher test (the production matchers accept
+// any numeric `.N` suffix); kept as the documented sync anchor regardless.
+#[cfg_attr(not(test), allow(dead_code))]
+const LOG_ROTATE_MAX_GENERATIONS: u32 = 3;
 const SWEEP_LOCK_FILE: &str = ".startup-sweep.lock";
 const SWEEP_STAMP_FILE: &str = ".startup-sweep.stamp";
 /// How long a completed sweep suppresses the next one. The sweep only
@@ -619,6 +630,38 @@ fn i32_to_pid(pid: i32) -> Option<u32> {
     (pid > 0).then_some(pid as u32)
 }
 
+/// Strip a rotated-generation suffix (`.1`, `.2`, ... — any numeric `.N`) from
+/// `name`, returning `(base, true)` when a suffix was present or `(name, false)`
+/// otherwise. The spawn-time rotator (see `log_rotation`) appends `.N` to a base
+/// log name, so `<base>` is the path the rest of the sweep reasons about (owner
+/// lookup, pid parsing). A purely-numeric trailing component is required so a
+/// genuine log name such as `engine-1234-5678.log` is never mistaken for a
+/// generation of `engine-1234-5678` (its trailing component `log` is not
+/// numeric). #767.
+fn strip_log_generation_suffix(name: &str) -> (&str, bool) {
+    if let Some((base, suffix)) = name.rsplit_once('.')
+        && !suffix.is_empty()
+        && suffix.bytes().all(|b| b.is_ascii_digit())
+    {
+        return (base, true);
+    }
+    (name, false)
+}
+
+/// `true` if `name` is a session guest log the TTL/size sweep should consider:
+/// the base `<session_id>.log` OR any rotated generation `<session_id>.log.N`.
+fn is_session_log_candidate(name: &str) -> bool {
+    let (base, _) = strip_log_generation_suffix(name);
+    Path::new(base).extension().and_then(|ext| ext.to_str()) == Some("log")
+}
+
+/// `true` if `name` is an engine guest log the TTL/size sweep should consider:
+/// the base `engine-<pid>-<stamp>.log` OR any rotated generation `...log.N`.
+fn is_engine_log_candidate(name: &str) -> bool {
+    let (base, _) = strip_log_generation_suffix(name);
+    base.starts_with("engine-") && base.ends_with(".log")
+}
+
 /// A guest log file the TTL/size sweep is considering, with the metadata the
 /// retention decision needs. `protected` is `true` when the owning process is
 /// known to still be alive (and therefore the file must never be reclaimed by
@@ -753,23 +796,38 @@ fn sweep_session_log_files(
             }
         };
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_session_log_candidate(name) {
             continue;
         }
-        let protected = session_log_owner_is_alive(session_root, &path);
+        // Only the *base* `<session_id>.log` of a live session is being actively
+        // written and must be protected. Rotated generations (`...log.N`) are
+        // old-by-definition, so they stay eligible for age/size reclamation even
+        // while the owning session lives. #767.
+        let (_, is_generation) = strip_log_generation_suffix(name);
+        let protected = !is_generation && session_log_owner_is_alive(session_root, &path);
         candidates.push(log_candidate(path, protected));
     }
     Ok(reclaim_logs(&candidates, now, ttl, size_budget))
 }
 
-/// `true` if the session record matching `log_path` (`<id>.log` ⇒ `<id>.json`)
-/// exists and is still alive. Missing/unparseable record ⇒ not alive (the log
-/// is an orphan eligible for plain age/size sweeping).
+/// `true` if the session record matching `log_path` exists and is still alive.
+/// Resolves the owning session id by stripping any rotated-generation suffix
+/// (`<id>.log.N` ⇒ `<id>.log`) and then the `.log` extension (`<id>.log` ⇒
+/// `<id>`), so a rotated generation is attributed to the same session as its
+/// base log (`<id>.json`). Missing/unparseable record ⇒ not alive (the log is an
+/// orphan eligible for plain age/size sweeping). #767.
 fn session_log_owner_is_alive(session_root: &Path, log_path: &Path) -> bool {
-    let Some(stem) = log_path.file_stem().and_then(|stem| stem.to_str()) else {
+    let Some(name) = log_path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    let record_path = session_root.join(format!("{stem}.json"));
+    let (base, _) = strip_log_generation_suffix(name);
+    let Some(session_id) = base.strip_suffix(".log") else {
+        return false;
+    };
+    let record_path = session_root.join(format!("{session_id}.json"));
     let record = match fs::read_to_string(&record_path)
         .ok()
         .and_then(|raw| serde_json::from_str::<StoredSessionInfo>(&raw).ok())
@@ -810,23 +868,33 @@ fn sweep_engine_log_files(
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        if !is_engine_log_candidate(name) {
+            continue;
+        }
         let Some(pid) = parse_engine_log_pid(name) else {
             continue;
         };
-        // Our own engine log (still being written by this process) and any
-        // live, current-user engine pid are protected.
-        let protected = pid == std::process::id()
-            || (pid_is_alive(pid) && current_user_owns_process(pid));
+        // Only the *base* `<engine>.log` of a live engine is being actively
+        // written and must be protected. Rotated generations (`...log.N`) are
+        // old-by-definition — the engine has already closed them — so they stay
+        // eligible for age/size reclamation even while their engine lives. #767.
+        let (_, is_generation) = strip_log_generation_suffix(name);
+        let protected = !is_generation
+            && (pid == std::process::id()
+                || (pid_is_alive(pid) && current_user_owns_process(pid)));
         candidates.push(log_candidate(path, protected));
     }
     Ok(reclaim_logs(&candidates, now, ttl, size_budget))
 }
 
-/// Extract the engine pid from an `engine-<pid>-<stamp>.log` file name. Returns
-/// `None` for any other name (only engine logs follow this scheme, see
-/// `phases::run`).
+/// Extract the engine pid from an `engine-<pid>-<stamp>.log` file name, or from
+/// any rotated generation `engine-<pid>-<stamp>.log.N` (the `.N` suffix is
+/// stripped first so a rotated generation is attributed to the same engine pid
+/// as its base log). Returns `None` for any other name (only engine logs follow
+/// this scheme, see `phases::run`). #767.
 fn parse_engine_log_pid(name: &str) -> Option<u32> {
-    let stem = name.strip_prefix("engine-")?.strip_suffix(".log")?;
+    let (base, _) = strip_log_generation_suffix(name);
+    let stem = base.strip_prefix("engine-")?.strip_suffix(".log")?;
     let pid = stem.split('-').next()?;
     pid.parse().ok()
 }
@@ -1718,6 +1786,143 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(!orphan.exists());
         assert!(owned_log.exists(), "log owned by a live pid must survive");
+    }
+
+    #[test]
+    fn strip_log_generation_suffix_handles_base_and_generations() {
+        assert_eq!(strip_log_generation_suffix("id.log"), ("id.log", false));
+        assert_eq!(strip_log_generation_suffix("id.log.1"), ("id.log", true));
+        assert_eq!(strip_log_generation_suffix("id.log.3"), ("id.log", true));
+        // Non-numeric trailing component is not a generation.
+        assert_eq!(
+            strip_log_generation_suffix("engine-1234-5678.log"),
+            ("engine-1234-5678.log", false)
+        );
+    }
+
+    #[test]
+    fn log_candidate_matchers_accept_base_and_rotated_generations() {
+        // Base log plus every rotated generation the spawn-time rotator can
+        // produce (`.1` .. `.LOG_ROTATE_MAX_GENERATIONS`).
+        let mut suffixes = vec![String::new()];
+        suffixes.extend((1..=LOG_ROTATE_MAX_GENERATIONS).map(|n| format!(".{n}")));
+        // …and an out-of-range numeric suffix, to prove matching is robust
+        // (not hard-capped at the rotator's nominal max).
+        suffixes.push(format!(".{}", LOG_ROTATE_MAX_GENERATIONS + 5));
+        for n in &suffixes {
+            assert!(is_session_log_candidate(&format!(
+                "ato-desktop-session-x.log{n}"
+            )));
+            assert!(is_engine_log_candidate(&format!("engine-1234-5678.log{n}")));
+        }
+        assert!(!is_session_log_candidate("ato-desktop-session-x.json"));
+        assert!(!is_engine_log_candidate("ato-desktop-1.sock"));
+        // Generation suffix on the engine log still resolves the owning pid.
+        assert_eq!(
+            parse_engine_log_pid("engine-1234-5678.log.1"),
+            Some(1234)
+        );
+    }
+
+    #[test]
+    fn sweep_engine_logs_reclaims_old_rotated_generation_keeps_live_base() {
+        let temp = tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run dir");
+
+        // A live engine (this process): its base .log is protected, but a
+        // rotated generation of the SAME live engine is reclaimable by age.
+        let self_pid = std::process::id();
+        let base = run_dir.join(format!("engine-{self_pid}-222.log"));
+        let generation = run_dir.join(format!("engine-{self_pid}-222.log.1"));
+        fs::write(&base, "live base").expect("write base log");
+        fs::write(&generation, "rotated").expect("write rotated log");
+
+        let now = SystemTime::now() + Duration::from_secs(30 * 24 * 60 * 60);
+        let removed = sweep_engine_log_files(
+            &run_dir,
+            now,
+            Duration::from_secs(14 * 24 * 60 * 60),
+            u64::MAX,
+        )
+        .expect("sweep engine logs");
+
+        assert_eq!(removed, 1, "rotated generation reclaimed by TTL");
+        assert!(base.exists(), "live engine base .log must be protected");
+        assert!(
+            !generation.exists(),
+            "rotated generation of a live engine must be reclaimed by TTL"
+        );
+    }
+
+    #[test]
+    fn sweep_engine_logs_evicts_rotated_generation_by_size_budget() {
+        let temp = tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("run dir");
+
+        // Dead-pid engine: base + one rotated generation, both fresh (not past
+        // TTL). A tiny size budget forces oldest-first eviction. The rotated
+        // generation (.1) is older than the base, so it is evicted first.
+        let base = run_dir.join("engine-999999999-222.log");
+        let generation = run_dir.join("engine-999999999-222.log.1");
+        // Back-date the generation so it sorts oldest for eviction ordering.
+        fs::write(&generation, vec![b'x'; 100]).expect("write rotated log");
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&base, vec![b'x'; 100]).expect("write base log");
+
+        let now = SystemTime::now();
+        let removed = sweep_engine_log_files(
+            &run_dir,
+            now,
+            Duration::from_secs(14 * 24 * 60 * 60), // nothing reclaimed by age
+            150,                                    // budget < 200 → evict oldest until fits
+        )
+        .expect("sweep engine logs");
+
+        assert_eq!(removed, 1, "one log evicted to fit the size budget");
+        assert!(
+            !generation.exists(),
+            "oldest (rotated generation) evicted first by size budget"
+        );
+        assert!(base.exists(), "newer base log retained under budget");
+    }
+
+    #[test]
+    fn sweep_session_logs_reclaims_old_rotated_generation_keeps_live_base() {
+        let temp = tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("session root");
+
+        // A live session (record pid = this process): the base .log is
+        // protected, but a rotated generation of the same session is reclaimable.
+        let session_id = "ato-desktop-session-live";
+        let base = session_root.join(format!("{session_id}.log"));
+        let generation = session_root.join(format!("{session_id}.log.1"));
+        fs::write(&base, "live base").expect("write base");
+        fs::write(&generation, "rotated").expect("write rotated");
+        let record = dead_session_record(session_id, std::process::id() as i32, &base);
+        fs::write(
+            session_root.join(format!("{session_id}.json")),
+            serde_json::to_vec(&record).expect("record"),
+        )
+        .expect("write record");
+
+        let now = SystemTime::now() + Duration::from_secs(30 * 24 * 60 * 60);
+        let removed = sweep_session_log_files(
+            &session_root,
+            now,
+            Duration::from_secs(14 * 24 * 60 * 60),
+            u64::MAX,
+        )
+        .expect("sweep session logs");
+
+        assert_eq!(removed, 1, "rotated generation reclaimed by TTL");
+        assert!(base.exists(), "live session base .log must be protected");
+        assert!(
+            !generation.exists(),
+            "rotated generation of a live session must be reclaimed by TTL"
+        );
     }
 
     /// Minimal `StoredSessionInfo` for sweep tests. `pid` controls liveness.
