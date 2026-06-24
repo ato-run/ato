@@ -416,6 +416,20 @@ mod tests {
     }
 
     #[test]
+    fn file_filter_caps_per_target_trace_to_debug() {
+        // The realistic case: a per-target directive (`desktop=trace`) raises the
+        // "desktop" target to TRACE. AND-combining with FILE_SINK_MAX_LEVEL must
+        // still cap the file sink at DEBUG, so TRACE is dropped from disk.
+        let per_target = EnvFilter::new("desktop=trace");
+        let capped = per_target.and(FILE_SINK_MAX_LEVEL);
+
+        let max = <_ as tracing_subscriber::layer::Filter<Registry>>::max_level_hint(&capped);
+        assert_eq!(max, Some(FILE_SINK_MAX_LEVEL));
+        assert_eq!(FILE_SINK_MAX_LEVEL, LevelFilter::DEBUG);
+        assert!(FILE_SINK_MAX_LEVEL < LevelFilter::TRACE);
+    }
+
+    #[test]
     fn file_filter_does_not_raise_a_quiet_env() {
         // The cap is a ceiling, not a floor: an INFO env stays INFO.
         let quiet = EnvFilter::new("info");
