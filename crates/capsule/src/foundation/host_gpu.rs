@@ -83,6 +83,25 @@ pub struct VulkanInfo {
     pub nvidia_device_visible: bool,
 }
 
+/// CUDA runtime readiness for the SGLang native-inference path. Distinct from
+/// [`CudaInfo`] (the driver-reported CUDA *driver-API* version): these are the
+/// host-side signals that a CUDA *runtime* is usable Dockerlessly — a CUDA
+/// driver-API version is visible (the driver exposes CUDA), and a Python 3
+/// interpreter with the `venv` module is present (SGLang installs into a managed
+/// venv). The deeper `import sglang` + device-visibility smoke is the
+/// `nvidia-cuda` doctor's job; these are the cheap, read-only host signals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CudaRuntimeInfo {
+    /// Whether the driver reports a CUDA driver-API version (CUDA is exposed).
+    pub cuda_runtime_present: bool,
+    /// Whether a `python3` interpreter is on PATH.
+    pub python3_ok: bool,
+    /// Whether `python3 -m venv` is importable (the stdlib `venv` module).
+    pub venv_module_ok: bool,
+    /// Max VRAM in bytes across detected GPUs (0 when none detected).
+    pub max_gpu_vram_bytes: u64,
+}
+
 /// Complete host GPU profile — the result of all detection probes.
 ///
 /// Fields are `Option` when the corresponding component is not installed
@@ -98,6 +117,10 @@ pub struct HostGpuProfile {
     /// source-build path); not required for the Vulkan native-inference path.
     pub cuda: Option<CudaInfo>,
     pub vulkan: Option<VulkanInfo>,
+    /// CUDA runtime readiness signals for the SGLang native-inference path.
+    /// `None` when not probed (e.g. on non-Linux hosts or older receipts).
+    #[serde(default)]
+    pub cuda_runtime: Option<CudaRuntimeInfo>,
 }
 
 impl HostGpuProfile {
@@ -159,6 +182,37 @@ impl HostGpuProfile {
             && self.vulkan_nvidia_device_visible()
     }
 
+    /// Max VRAM in bytes across all detected GPUs (0 when none detected).
+    pub fn max_gpu_vram_bytes(&self) -> u64 {
+        self.gpus.iter().map(|g| g.vram_bytes).max().unwrap_or(0)
+    }
+
+    /// `true` when the largest detected GPU has at least `need_bytes` of VRAM.
+    /// Used by the `nvidia-cuda` doctor as a (non-fatal) headroom hint for the
+    /// AWQ-quantized weights SGLang loads; `false` when no GPU was detected.
+    pub fn gpu_vram_meets(&self, need_bytes: u64) -> bool {
+        self.max_gpu_vram_bytes() >= need_bytes
+    }
+
+    /// `true` when the host can run the SGLang (CUDA) native-inference engine
+    /// Dockerlessly: an NVIDIA GPU + working driver + a detectable CUDA runtime
+    /// (the driver exposes a CUDA driver-API version) + a Python 3 interpreter
+    /// with the `venv` module (SGLang installs into a managed venv).
+    ///
+    /// Honest by construction: when CUDA, the driver, or Python/venv cannot be
+    /// detected this returns `false`, so doctor/provision never report "ready"
+    /// with a missing prerequisite. The deeper `import sglang` + GPU-visibility
+    /// smoke is the `nvidia-cuda` doctor's gate; this is the host-readiness floor.
+    pub fn native_inference_cuda_ready(&self) -> bool {
+        self.has_gpu()
+            && self.driver_installed()
+            && self
+                .cuda_runtime
+                .as_ref()
+                .map(|c| c.cuda_runtime_present && c.python3_ok && c.venv_module_ok)
+                .unwrap_or(false)
+    }
+
     /// `true` when the OS is Ubuntu 22.04 or 24.04 (the v0 supported set).
     pub fn os_supported(&self) -> bool {
         self.os.distro == "ubuntu" && (self.os.version == "22.04" || self.os.version == "24.04")
@@ -181,6 +235,7 @@ pub fn detect_host_gpu_profile() -> Result<HostGpuProfile> {
     let driver = detect_driver_info();
     let cuda = detect_cuda_info();
     let vulkan = detect_vulkan_info();
+    let cuda_runtime = detect_cuda_runtime_info(&gpus, cuda.as_ref());
 
     Ok(HostGpuProfile {
         os,
@@ -189,6 +244,42 @@ pub fn detect_host_gpu_profile() -> Result<HostGpuProfile> {
         driver,
         cuda,
         vulkan,
+        cuda_runtime,
+    })
+}
+
+/// Probe the SGLang CUDA-runtime readiness signals: a CUDA driver-API version is
+/// visible (the driver exposes CUDA), and a `python3` interpreter with the
+/// stdlib `venv` module is present (SGLang installs into a managed venv). These
+/// are cheap, read-only host signals — the heavy `import sglang` + device smoke
+/// is the `nvidia-cuda` doctor's job. Returns `None` only when there is nothing
+/// CUDA-relevant to report (no GPU AND no CUDA info), so a probed Linux host
+/// always carries the (possibly all-false) signals.
+fn detect_cuda_runtime_info(gpus: &[GpuDevice], cuda: Option<&CudaInfo>) -> Option<CudaRuntimeInfo> {
+    let cuda_runtime_present = cuda
+        .map(|c| !c.driver_api_version.trim().is_empty())
+        .unwrap_or(false);
+    if gpus.is_empty() && !cuda_runtime_present {
+        // Nothing CUDA-relevant on this host — leave the field unprobed.
+        return None;
+    }
+    let python3_ok = which::which("python3").is_ok();
+    // `python3 -c "import venv"` confirms the stdlib venv module is importable
+    // (some minimal distros ship python3 without it). Only meaningful when
+    // python3 exists.
+    let venv_module_ok = python3_ok
+        && Command::new("python3")
+            .args(["-c", "import venv"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+    let max_gpu_vram_bytes = gpus.iter().map(|g| g.vram_bytes).max().unwrap_or(0);
+
+    Some(CudaRuntimeInfo {
+        cuda_runtime_present,
+        python3_ok,
+        venv_module_ok,
+        max_gpu_vram_bytes,
     })
 }
 
@@ -476,6 +567,7 @@ mod tests {
             driver: None,
             cuda: None,
             vulkan: None,
+            cuda_runtime: None,
         };
         assert!(profile.os_supported());
         assert_eq!(os.distro, "ubuntu");
@@ -496,6 +588,7 @@ mod tests {
                 driver: None,
                 cuda: None,
                 vulkan: None,
+                cuda_runtime: None,
             }
             .os_supported()
         );
@@ -516,6 +609,7 @@ mod tests {
                 driver: None,
                 cuda: None,
                 vulkan: None,
+                cuda_runtime: None,
             }
             .os_supported()
         );
@@ -536,6 +630,7 @@ mod tests {
                 driver: None,
                 cuda: None,
                 vulkan: None,
+                cuda_runtime: None,
             }
             .os_supported()
         );
@@ -560,6 +655,7 @@ mod tests {
             driver: None,
             cuda: None,
             vulkan: None,
+            cuda_runtime: None,
         };
         assert!(profile.has_gpu());
     }
@@ -577,6 +673,7 @@ mod tests {
             driver: None,
             cuda: None,
             vulkan: None,
+            cuda_runtime: None,
         };
         assert!(!profile.has_gpu());
     }
@@ -597,6 +694,7 @@ mod tests {
             }),
             cuda: None,
             vulkan: None,
+            cuda_runtime: None,
         };
         assert!(profile.driver_installed());
     }
@@ -624,6 +722,7 @@ mod tests {
                         nvidia_icd_present: vk_device,
                         nvidia_device_visible: vk_device,
                     }),
+                    cuda_runtime: None,
                 }
             };
         let gpu = GpuDevice {
@@ -644,6 +743,79 @@ mod tests {
     }
 
     #[test]
+    fn cuda_ready_requires_gpu_driver_and_cuda_runtime() {
+        let mk = |gpus: Vec<GpuDevice>,
+                  driver_ok: bool,
+                  cuda_runtime: Option<CudaRuntimeInfo>| {
+            HostGpuProfile {
+                os: OsInfo {
+                    distro: "ubuntu".to_string(),
+                    version: "22.04".to_string(),
+                    kernel: "5.15.0".to_string(),
+                },
+                secure_boot_enabled: None,
+                gpus,
+                driver: driver_ok.then(|| DriverInfo {
+                    version: "575.57.08".to_string(),
+                    nvidia_smi_available: true,
+                }),
+                cuda: None,
+                vulkan: None,
+                cuda_runtime,
+            }
+        };
+        let gpu = GpuDevice {
+            index: 0,
+            name: "NVIDIA RTX A6000".to_string(),
+            uuid: None,
+            vram_bytes: 48 * 1024 * 1024 * 1024,
+            pcie_bus_id: None,
+        };
+        let ready_rt = || {
+            Some(CudaRuntimeInfo {
+                cuda_runtime_present: true,
+                python3_ok: true,
+                venv_module_ok: true,
+                max_gpu_vram_bytes: 48 * 1024 * 1024 * 1024,
+            })
+        };
+        // Fully ready.
+        assert!(mk(vec![gpu.clone()], true, ready_rt()).native_inference_cuda_ready());
+        // Missing ANY prerequisite → not ready (honest fail-closed).
+        assert!(!mk(vec![], true, ready_rt()).native_inference_cuda_ready());
+        assert!(!mk(vec![gpu.clone()], false, ready_rt()).native_inference_cuda_ready());
+        assert!(!mk(vec![gpu.clone()], true, None).native_inference_cuda_ready());
+        // CUDA runtime not visible → not ready.
+        assert!(
+            !mk(
+                vec![gpu.clone()],
+                true,
+                Some(CudaRuntimeInfo {
+                    cuda_runtime_present: false,
+                    python3_ok: true,
+                    venv_module_ok: true,
+                    max_gpu_vram_bytes: 0,
+                })
+            )
+            .native_inference_cuda_ready()
+        );
+        // python3/venv missing → not ready (SGLang needs a managed venv).
+        assert!(
+            !mk(
+                vec![gpu],
+                true,
+                Some(CudaRuntimeInfo {
+                    cuda_runtime_present: true,
+                    python3_ok: true,
+                    venv_module_ok: false,
+                    max_gpu_vram_bytes: 0,
+                })
+            )
+            .native_inference_cuda_ready()
+        );
+    }
+
+    #[test]
     fn vulkan_helpers_reflect_profile() {
         let profile = HostGpuProfile {
             os: OsInfo {
@@ -661,6 +833,7 @@ mod tests {
                 nvidia_icd_present: false,
                 nvidia_device_visible: false,
             }),
+            cuda_runtime: None,
         };
         assert!(profile.vulkan_loader_present());
         assert!(!profile.vulkaninfo_available());

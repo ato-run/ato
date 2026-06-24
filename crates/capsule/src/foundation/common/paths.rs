@@ -184,6 +184,15 @@ pub fn ato_store_blobs_dir() -> PathBuf {
     ato_store_dir().join("blobs")
 }
 
+/// Returns the content-addressed multi-file model-repo root.
+///
+/// Layout: `~/.ato/store/repos` — each managed Hugging Face model repo is
+/// materialized into a content-addressed `repos/sha256-<digest>/` directory
+/// (the multi-file analogue of `blobs/sha256-<digest>`).
+pub fn ato_store_repos_dir() -> PathBuf {
+    ato_store_dir().join("repos")
+}
+
 pub fn ato_store_refs_dir() -> PathBuf {
     ato_store_dir().join("refs")
 }

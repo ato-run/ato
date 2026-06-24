@@ -425,6 +425,23 @@ impl CapsuleManifest {
                         "target '{label}': `model_url` requires `model_sha256`"
                     )));
                 }
+                // `server_args` are appended verbatim to the engine argv. Reject
+                // any token that names a launcher- or engine-controlled flag
+                // (`--port`/`-p`, `--host`, `--model-path`/`-m`/`--model`) so a
+                // capsule can't break readiness/app_url or the model wiring. Both
+                // `--flag value` and `--flag=value` forms are caught.
+                for arg in &target.server_args {
+                    if let Some(flag) =
+                        crate::foundation::types::manifest::forbidden_native_inference_server_arg(arg)
+                    {
+                        errors.push(ValidationError::InvalidTarget(format!(
+                            "target '{label}': `server_args` must not set `{flag}` — it is \
+                             controlled by the launcher/engine (the launcher injects `--port`, \
+                             forces `--host 127.0.0.1`, and the engine sets the model path). \
+                             Remove {arg:?} from server_args."
+                        )));
+                    }
+                }
                 continue;
             }
 
@@ -2025,6 +2042,56 @@ mod tests {
         ));
         // neither model nor model_url
         assert!(has_err(&validate_native_model(""), "model"));
+    }
+
+    #[test]
+    fn native_inference_rejects_forbidden_server_args() {
+        let hex = "a".repeat(64);
+        let model = format!("model_url = \"https://e.com/m.gguf\"\nmodel_sha256 = \"{hex}\"\n");
+        // `--flag value` form — each launcher/engine-controlled flag is rejected,
+        // and the error names that flag.
+        for (forbidden, canonical) in [
+            ("--port", "--port"),
+            ("-p", "-p"),
+            ("--host", "--host"),
+            ("--model-path", "--model-path"),
+            ("-m", "-m"),
+            ("--model", "--model"),
+        ] {
+            let r = validate_native_model(&format!(
+                "{model}server_args = [\"{forbidden}\", \"value\"]\n"
+            ));
+            assert!(
+                has_err(&r, "server_args") && has_err(&r, canonical),
+                "must reject {forbidden} (space form): {r:?}"
+            );
+        }
+        // `--flag=value` form is caught too.
+        for (forbidden, canonical) in [
+            ("--port=9000", "--port"),
+            ("-p=9000", "-p"),
+            ("--host=0.0.0.0", "--host"),
+            ("--model-path=/x", "--model-path"),
+            ("-m=/x", "-m"),
+            ("--model=/x", "--model"),
+        ] {
+            let r = validate_native_model(&format!("{model}server_args = [\"{forbidden}\"]\n"));
+            assert!(
+                has_err(&r, "server_args") && has_err(&r, canonical),
+                "must reject {forbidden} (equals form): {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_inference_accepts_tunable_server_args() {
+        let hex = "a".repeat(64);
+        let r = validate_native_model(&format!(
+            "model_url = \"https://e.com/m.gguf\"\nmodel_sha256 = \"{hex}\"\n\
+             server_args = [\"--mem-fraction-static\", \"0.9\", \"--context-length\", \"8192\", \
+             \"--quantization\", \"moe_wna16\", \"--reasoning-parser\", \"qwen3\", \"--tp-size\", \"2\"]\n"
+        ));
+        assert!(r.is_ok(), "tunable server_args should validate: {r:?}");
     }
 }
 
