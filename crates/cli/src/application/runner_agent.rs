@@ -3213,8 +3213,15 @@ async fn handle_claimed_lease(
             // probe the possible survivor instead of fabricating teardown
             // evidence (#645).
             record_workload_group(&lease_id, child_pid);
+            // Reflect the ACTUAL dispatch: native-inference runs host (no
+            // `--sandbox`, see #763). The log previously printed `--sandbox`
+            // statically, misreporting native-inference dispatch (#769).
+            let dispatch_flag = match dispatch_mode {
+                RunnerDispatchMode::Sandboxed => " --sandbox",
+                RunnerDispatchMode::NativeInferenceHost => "",
+            };
             println!(
-                "🚀 lease {lease_id}: ato run {run_ref} --sandbox (round {round}, log: {})",
+                "🚀 lease {lease_id}: ato run {run_ref} -y{dispatch_flag} (round {round}, log: {})",
                 log_path.display()
             );
             let (report_tx, mut report_rx) = tokio::sync::mpsc::unbounded_channel::<LeaseReport>();

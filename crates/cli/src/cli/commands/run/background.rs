@@ -368,6 +368,35 @@ pub(super) async fn complete_foreground_source_process(
         is_one_shot,
         execution_id,
     )?;
+    // A Connected Runner stops a lease by SIGTERM-ing this `ato run`'s process
+    // group — NOT the SIGINT that Ctrl+C delivers. Without catching SIGTERM the
+    // OS default action terminates `ato run` before any teardown runs, which
+    // strands the host consumer: the native-inference engine (and other host
+    // workloads) lead their OWN process group via `cmd.process_group(0)`, so the
+    // group the runner kills does not contain them. Route SIGTERM through the
+    // SAME teardown the SIGINT handler uses — `run_sigint_cleanup()` reaps the
+    // registered consumer process group (SIGKILL to `-pid`, see
+    // `kill_process_if_exists`) — so a lease stop terminates the whole host
+    // process tree and the run settles `stopped`, not `failed`. The OCI
+    // orchestrator path handles SIGTERM separately (see
+    // `orchestrator::wait_for_shutdown_signal`); this only covers single-host
+    // foreground runs. See ato-run/ato#769.
+    #[cfg(unix)]
+    let exit_code = {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("failed to install SIGTERM handler for foreground run")?;
+        tokio::select! {
+            result = crate::executors::source::wait_for_exit(&mut process.child) => result?,
+            _ = sigterm.recv() => {
+                run_sigint_cleanup();
+                // 128 + SIGTERM(15): the conventional shell exit code for a
+                // process terminated by SIGTERM. The runner keys the run's
+                // terminal state on confirmed teardown, not this code.
+                std::process::exit(143);
+            }
+        }
+    };
+    #[cfg(not(unix))]
     let exit_code = crate::executors::source::wait_for_exit(&mut process.child).await?;
     if let Some(handle) = readiness_notifier {
         let _ = handle.join();
