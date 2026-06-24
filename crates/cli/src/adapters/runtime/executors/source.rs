@@ -405,6 +405,10 @@ fn open_log_file_for_stdio(log_path: &Path) -> Result<fs::File> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    // Bound the log across (re)spawns: if the existing file has grown past the
+    // cap, rotate it aside before re-opening for append so each new launch
+    // starts a fresh generation (#767).
+    super::log_rotation::rotate_before_append(log_path);
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
