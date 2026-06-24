@@ -11,8 +11,12 @@
 //!   pipeline writes `engine-*.log` (see `pipeline/phases/run.rs`).
 //! - SQLite DBs (+ `-wal`/`-shm` sidecars): `installed_state.sqlite3`
 //!   (`ato_state_dir()`), CAS `index.sqlite3` and `registry.sqlite3`.
-//! - CAS content store: the same root `LocalCasIndex::open_default` resolves
-//!   (`$ATO_CAS_ROOT` else `~/.ato/cas`).
+//! - CAS content store: the `chunks/` subdirectory of the root
+//!   `LocalCasIndex::open_default` resolves (`$ATO_CAS_ROOT` else `~/.ato/cas`).
+//!   We measure `cas_root()/chunks` — the content blobs — rather than the whole
+//!   root so the figure is DISJOINT from the CAS `index.sqlite3` row (which also
+//!   lives under `cas_root()`); otherwise the TOTAL would double-count the index
+//!   DB and its `-wal`/`-shm` sidecars.
 //!
 //! The size-aggregation and threshold logic is factored into pure functions
 //! ([`directory_size`], [`category_warning`]) so it is unit-testable against a
@@ -140,11 +144,15 @@ fn resolve_targets() -> Vec<Target> {
         path: cas_root().join("index.sqlite3"),
     });
 
-    // CAS content store root (the same root LocalCasIndex::open_default uses).
+    // CAS content store: only the `chunks/` blobs (where LocalCasIndex writes
+    // every chunk, rel_path `chunks/<aa>/<hash>`). Measuring the whole
+    // `cas_root()` would re-count `index.sqlite3` (+ sidecars), which already
+    // has its own row above; `chunks/` keeps the two categories disjoint so the
+    // TOTAL is correct.
     targets.push(Target {
-        name: "CAS store",
+        name: "CAS content store",
         kind: CategoryKind::CasStore,
-        path: cas_root(),
+        path: cas_root().join("chunks"),
     });
 
     targets
@@ -280,7 +288,7 @@ fn category_warning(
         CategoryKind::DesktopLogs => {
             if bytes > DESKTOP_LOGS_WARN_BYTES {
                 Some(format!(
-                    "{name} is {} (> {}) — prune old logs: `ato gc --logs` or delete old files under ~/.ato/logs",
+                    "{name} is {} (> {}) — these are trimmed automatically by desktop startup retention; or remove old files manually under ~/.ato/logs",
                     fmt_bytes(bytes),
                     fmt_bytes(DESKTOP_LOGS_WARN_BYTES),
                 ))
@@ -291,7 +299,7 @@ fn category_warning(
         CategoryKind::RunLogs => {
             if bytes > RUN_LOGS_WARN_BYTES {
                 Some(format!(
-                    "{name} is {} (> {}) — clear stale engine logs under ~/.ato/run",
+                    "{name} is {} (> {}) — these are trimmed automatically by the guest-log TTL/size sweep; or remove old files manually under ~/.ato/run",
                     fmt_bytes(bytes),
                     fmt_bytes(RUN_LOGS_WARN_BYTES),
                 ))
@@ -308,7 +316,7 @@ fn category_warning(
         CategoryKind::SessionLogs => {
             if largest_file_bytes > SINGLE_LOG_WARN_BYTES {
                 Some(format!(
-                    "{name} has a single record/log of {} (> {}) — inspect it and run `ato gc` to prune dead sessions",
+                    "{name} has a single record/log of {} (> {}) — inspect it; stale sessions are trimmed automatically by the log sweep, or remove old files manually under ~/.ato/apps/ato-desktop/sessions",
                     fmt_bytes(largest_file_bytes),
                     fmt_bytes(SINGLE_LOG_WARN_BYTES),
                 ))
@@ -319,7 +327,7 @@ fn category_warning(
         CategoryKind::CasStore => {
             if bytes > CAS_WARN_BYTES {
                 Some(format!(
-                    "{name} is {} (> {}) — reclaim space with `ato gc` (content-addressed store)",
+                    "{name} is {} (> {}) — large content-addressed cache; remove unreferenced blobs manually under ~/.ato/cas/chunks",
                     fmt_bytes(bytes),
                     fmt_bytes(CAS_WARN_BYTES),
                 ))
@@ -480,7 +488,16 @@ mod tests {
         )
         .expect("over threshold must warn");
         assert!(over.contains("desktop logs"));
-        assert!(over.contains("ato gc"), "warning must include a prune hint");
+        // The hint must point at automatic retention + the real directory, and
+        // must NOT invent a non-existent `ato gc --logs` flag.
+        assert!(
+            over.contains("automatically") && over.contains("~/.ato/logs"),
+            "warning must point at automatic retention and the real directory"
+        );
+        assert!(
+            !over.contains("ato gc"),
+            "warning must not reference the bogus `ato gc --logs` flag"
+        );
     }
 
     #[test]
@@ -507,7 +524,8 @@ mod tests {
             10,
         )
         .expect("aggregate over budget must warn");
-        assert!(w.contains("stale engine logs"));
+        assert!(w.contains("automatically") && w.contains("~/.ato/run"));
+        assert!(!w.contains("ato gc"), "no bogus gc flag for run logs");
     }
 
     #[test]
@@ -527,15 +545,65 @@ mod tests {
             SINGLE_LOG_WARN_BYTES + 1,
         )
         .expect("single large record must warn");
-        assert!(w.contains("ato gc"));
+        // Point at the automatic sweep + a real directory, not `ato gc`.
+        assert!(w.contains("automatically") && w.contains("sessions"));
+        assert!(
+            !w.contains("ato gc"),
+            "session hint must not reference `ato gc` (it prunes install revisions, not sessions/logs)"
+        );
     }
 
     #[test]
     fn cas_store_warns_over_budget() {
-        assert!(category_warning(CategoryKind::CasStore, "CAS store", CAS_WARN_BYTES, 0).is_none());
-        let w = category_warning(CategoryKind::CasStore, "CAS store", CAS_WARN_BYTES + 1, 0)
-            .expect("CAS over budget must warn");
-        assert!(w.contains("ato gc"));
+        assert!(
+            category_warning(CategoryKind::CasStore, "CAS content store", CAS_WARN_BYTES, 0)
+                .is_none()
+        );
+        let w =
+            category_warning(CategoryKind::CasStore, "CAS content store", CAS_WARN_BYTES + 1, 0)
+                .expect("CAS over budget must warn");
+        // `ato gc` collects install revisions, not CAS blobs — don't suggest it.
+        assert!(w.contains("~/.ato/cas/chunks"));
+        assert!(!w.contains("ato gc"), "no bogus gc hint for the CAS content store");
+    }
+
+    #[test]
+    fn cas_content_store_excludes_index_db_so_total_does_not_double_count() {
+        // Build a realistic CAS root: an index.sqlite3 (+ WAL/SHM sidecars) at
+        // the root, and the content blobs under `chunks/`. The two categories
+        // we measure — the SQLite family for `index.sqlite3` and the content
+        // store at `chunks/` — must be disjoint, so summing them never
+        // re-counts the index DB.
+        let cas_root = tempdir().unwrap();
+        let index_db = cas_root.path().join("index.sqlite3");
+        write_file(&index_db, 4096);
+        write_file(&cas_root.path().join("index.sqlite3-wal"), 1024);
+        write_file(&cas_root.path().join("index.sqlite3-shm"), 32);
+        // Content blobs, laid out as LocalCasIndex writes them: chunks/<aa>/<hash>.
+        write_file(&cas_root.path().join("chunks/ab/abcd"), 5000);
+        write_file(&cas_root.path().join("chunks/cd/cdef"), 7000);
+
+        // This mirrors resolve_targets(): the content store is cas_root/chunks,
+        // measured recursively; the index DB is measured as its sqlite family.
+        let content = path_measure(&cas_root.path().join("chunks"));
+        let index = sqlite_measure(&index_db);
+
+        // Content store = blobs only, NOT the index DB or its sidecars.
+        assert_eq!(content.bytes, 5000 + 7000);
+        assert_eq!(index.bytes, 4096 + 1024 + 32);
+
+        // Summing the two disjoint categories equals the on-disk sum of exactly
+        // those files — no overlap, so build_report's TOTAL cannot double-count.
+        assert_eq!(content.bytes + index.bytes, 12000 + 5152);
+
+        // Sanity: measuring the WHOLE cas_root (the old, buggy behavior) would
+        // include the index DB, proving the categories would have overlapped.
+        let whole_root = path_measure(cas_root.path());
+        assert_eq!(whole_root.bytes, content.bytes + index.bytes);
+        assert!(
+            whole_root.bytes > content.bytes,
+            "whole-root figure includes the index DB that the content store excludes"
+        );
     }
 
     #[test]
