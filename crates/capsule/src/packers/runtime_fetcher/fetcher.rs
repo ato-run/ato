@@ -615,7 +615,7 @@ pub(crate) struct SgLangRequirements {
 /// the exact path the launcher resolves as the server command, so both the
 /// fetcher (post-condition) and the engine (`resolve_server_command`) derive it
 /// from this single helper.
-pub(crate) fn sglang_venv_python(runtime_dir: &std::path::Path) -> PathBuf {
+pub fn sglang_venv_python(runtime_dir: &std::path::Path) -> PathBuf {
     if cfg!(windows) {
         runtime_dir.join("Scripts").join("python.exe")
     } else {

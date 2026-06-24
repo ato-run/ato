@@ -187,6 +187,13 @@ impl HostGpuProfile {
         self.gpus.iter().map(|g| g.vram_bytes).max().unwrap_or(0)
     }
 
+    /// `true` when the largest detected GPU has at least `need_bytes` of VRAM.
+    /// Used by the `nvidia-cuda` doctor as a (non-fatal) headroom hint for the
+    /// AWQ-quantized weights SGLang loads; `false` when no GPU was detected.
+    pub fn gpu_vram_meets(&self, need_bytes: u64) -> bool {
+        self.max_gpu_vram_bytes() >= need_bytes
+    }
+
     /// `true` when the host can run the SGLang (CUDA) native-inference engine
     /// Dockerlessly: an NVIDIA GPU + working driver + a detectable CUDA runtime
     /// (the driver exposes a CUDA driver-API version) + a Python 3 interpreter

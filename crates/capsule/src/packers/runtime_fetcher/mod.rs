@@ -23,7 +23,11 @@ struct RuntimeInstallLock {
 mod fetcher;
 mod verifier;
 
-pub(crate) use fetcher::{llamacpp_cache_key, sglang_venv_python};
+pub(crate) use fetcher::llamacpp_cache_key;
+// `sglang_venv_python` is re-exported `pub` (not `pub(crate)`) so the CLI's
+// `nvidia-cuda` doctor can probe the managed venv at the SAME canonical path the
+// launcher resolves — they must never disagree on where the venv python lives.
+pub use fetcher::sglang_venv_python;
 pub use verifier::{ArtifactVerifier, ChecksumVerifier};
 
 /// Whether this host has managed llama.cpp prebuilts for the native-inference

@@ -777,8 +777,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     max_slots,
                     public_url_template,
                 )),
-                crate::cli::RunnerCommands::Doctor { json } => {
-                    crate::application::gpu_provision::run_doctor(json)
+                crate::cli::RunnerCommands::Doctor { profile, json } => {
+                    crate::application::gpu_provision::run_doctor_for_profile(&profile, json)
                 }
                 crate::cli::RunnerCommands::Provision {
                     profile,
