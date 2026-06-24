@@ -105,8 +105,11 @@ impl RuntimeFetcher {
             "node" | "nodejs" => Some("node"),
             "deno" => Some("deno"),
             "bun" => Some("bun"),
-            "llamacpp" | "llama.cpp" | "llama-cpp" => Some("llamacpp"),
-            _ => None,
+            // Native-inference engines: the engine-string → toolchain-key mapping
+            // is owned by `EngineId` (the single source of the engine vocabulary)
+            // so a fetcher key never drifts from the launcher's dispatch.
+            other => crate::routing::native_inference::EngineId::from_manifest(other)
+                .map(|id| id.toolchain_key()),
         }
     }
 
