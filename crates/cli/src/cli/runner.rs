@@ -95,6 +95,12 @@ pub(crate) enum RunnerCommands {
     /// device), then prints a diagnostic table with recommended next steps.
     #[command(name = "doctor", about = "Check GPU host readiness for LLM workloads")]
     Doctor {
+        /// Host readiness profile to check. `nvidia-ubuntu` (default) checks the
+        /// Vulkan native-inference path (llama.cpp); `nvidia-cuda` checks the
+        /// SGLang CUDA path (driver + CUDA runtime + python/venv + sglang venv).
+        #[arg(long, value_name = "PROFILE", default_value = "nvidia-ubuntu")]
+        profile: String,
+
         /// Emit machine-readable JSON on stdout instead of a human table.
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -109,7 +115,9 @@ pub(crate) enum RunnerCommands {
         about = "Dockerless NVIDIA/Vulkan native-inference provisioning (Ubuntu)"
     )]
     Provision {
-        /// GPU provisioning profile (v0: `nvidia-ubuntu` only).
+        /// GPU provisioning profile. `nvidia-ubuntu` (default): NVIDIA driver +
+        /// Vulkan runtime for the llama.cpp engine. `nvidia-cuda`: NVIDIA driver
+        /// + python3-venv + the managed sglang venv for the SGLang CUDA engine.
         #[arg(long, value_name = "PROFILE", default_value = "nvidia-ubuntu")]
         profile: String,
 
