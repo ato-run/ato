@@ -157,7 +157,28 @@ fn derive_native_inference_launch_spec(
     // is injected by the host launcher from the resolved/allocated port; the
     // engine argv (`--host 127.0.0.1`, no `--port`) is byte-identical to before.
     let resolved_port = port.or_else(|| Some(engine.default_port()));
-    let args = engine.build_server_argv(&model, "127.0.0.1", resolved_port.unwrap_or(8080));
+    let mut args = engine.build_server_argv(&model, "127.0.0.1", resolved_port.unwrap_or(8080));
+
+    // Append the per-target `server_args` passthrough AFTER the engine's base
+    // flags and independent of the launcher's later `--port` injection
+    // (`executors/source.rs`). Engine-generic: works for every native-inference
+    // engine. Manifest validation already rejects launcher/engine-controlled
+    // flags (`--port`/`-p`, `--host`, `--model-path`/`-m`/`--model`); we re-check
+    // here as defense-in-depth so a forbidden flag can never reach the spawned
+    // argv even if a malformed plan bypassed validation. Empty `server_args`
+    // leaves `args` byte-identical to before this passthrough existed.
+    for arg in &ctx.server_args {
+        if let Some(flag) =
+            crate::foundation::types::manifest::forbidden_native_inference_server_arg(arg)
+        {
+            return Err(CapsuleError::Config(format!(
+                "target '{target}': `server_args` must not set `{flag}` — it is controlled by \
+                 the launcher/engine (the launcher injects `--port`, forces `--host 127.0.0.1`, \
+                 and the engine sets the model path). Remove {arg:?} from server_args."
+            )));
+        }
+        args.push(arg.clone());
+    }
 
     Ok(LaunchSpec {
         working_dir: plan.compat_manifest_dir().to_path_buf(),
@@ -520,6 +541,116 @@ port = 9001
         // `--port` is intentionally NOT in args: the host launcher injects the
         // resolved port so readiness and app_url agree.
         assert!(!spec.args.iter().any(|a| a == "--port"));
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_appends_server_args_after_base_flags() {
+        // The per-target `server_args` are appended AFTER the engine's base argv
+        // and the engine still omits `--port` (the host launcher injects it).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine_path = "./llama-server"
+model = "./model.gguf"
+server_args = ["--ctx-size", "8192", "--n-gpu-layers", "999"]
+"#
+            ),
+        );
+        let spec = derive_launch_spec(&plan).expect("server_args append");
+        assert_eq!(
+            spec.args,
+            vec![
+                "-m",
+                "./model.gguf",
+                "--host",
+                "127.0.0.1",
+                "--ctx-size",
+                "8192",
+                "--n-gpu-layers",
+                "999",
+            ]
+        );
+        assert!(!spec.args.iter().any(|a| a == "--port"));
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_empty_server_args_is_unchanged() {
+        // No-regression: omitting `server_args` (the default) yields argv
+        // byte-identical to before the passthrough existed.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine_path = "./llama-server"
+model = "./model.gguf"
+port = 9001
+"#
+            ),
+        );
+        let spec = derive_launch_spec(&plan).expect("empty server_args");
+        // Identical to `derive_launch_spec_native_inference_builds_engine_argv`.
+        assert_eq!(spec.args, vec!["-m", "./model.gguf", "--host", "127.0.0.1"]);
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_rejects_forbidden_server_arg_space_form() {
+        // Defense-in-depth: the launcher rejects a launcher/engine-controlled
+        // flag in `server_args` even though manifest validation already does.
+        for forbidden in ["--port", "-p", "--host", "--model-path", "-m", "--model"] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let plan = plan_from_manifest(
+                &tmp,
+                &format!(
+                    "{NATIVE_HEADER}[targets.app]\nruntime = \"native-inference\"\n\
+                     engine_path = \"./llama-server\"\nmodel = \"./model.gguf\"\n\
+                     server_args = [\"{forbidden}\", \"x\"]\n"
+                ),
+            );
+            let err = derive_launch_spec(&plan)
+                .expect_err(&format!("must reject {forbidden} (space form)"));
+            assert!(
+                err.to_string().contains(forbidden) && err.to_string().contains("server_args"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_rejects_forbidden_server_arg_equals_form() {
+        // The `--flag=value` form is caught as well as `--flag value`.
+        for (forbidden, canonical) in [
+            ("--port=9000", "--port"),
+            ("-p=9000", "-p"),
+            ("--host=0.0.0.0", "--host"),
+            ("--model-path=/x", "--model-path"),
+            ("-m=/x", "-m"),
+            ("--model=/x", "--model"),
+        ] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let plan = plan_from_manifest(
+                &tmp,
+                &format!(
+                    "{NATIVE_HEADER}[targets.app]\nruntime = \"native-inference\"\n\
+                     engine_path = \"./llama-server\"\nmodel = \"./model.gguf\"\n\
+                     server_args = [\"{forbidden}\"]\n"
+                ),
+            );
+            let err = derive_launch_spec(&plan)
+                .expect_err(&format!("must reject {forbidden} (equals form)"));
+            assert!(
+                err.to_string().contains(canonical) && err.to_string().contains("server_args"),
+                "got: {err}"
+            );
+        }
     }
 
     #[test]

@@ -1091,6 +1091,22 @@ impl ExecutionDescriptor {
             .unwrap_or(false)
     }
 
+    /// native-inference: extra args appended to the engine server argv after the
+    /// engine's base flags (e.g. SGLang `--mem-fraction-static` / `--context-length`,
+    /// llama.cpp `--ctx-size` / `--n-gpu-layers`). Empty `Vec` = base argv only.
+    /// Launcher/engine-controlled flags are rejected at manifest validation.
+    pub fn target_server_args(&self) -> Vec<String> {
+        self.compat_array(&["targets", &self.selected_target, "server_args"])
+            .map(|values| {
+                values
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .filter(|s| !s.trim().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn targets_oci_cmd(&self) -> Vec<String> {
         let cmd = self.target_cmd(&self.selected_target);
         if !cmd.is_empty() {

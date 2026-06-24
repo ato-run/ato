@@ -1680,6 +1680,17 @@ pub struct NamedTarget {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub model_repo_gated: bool,
 
+    /// native-inference: extra args appended to the engine server argv, AFTER the
+    /// engine's base flags and independent of the launcher-injected `--port`
+    /// (e.g. SGLang `["--mem-fraction-static", "0.9", "--context-length",
+    /// "8192"]`, llama.cpp `["--ctx-size", "8192", "--n-gpu-layers", "999"]`).
+    /// Engine-generic: passed through verbatim to whichever native-inference
+    /// engine runs. Launcher/engine-controlled flags (`--port`/`-p`, `--host`,
+    /// `--model-path`/`-m`/`--model`) are rejected at manifest validation so a
+    /// capsule can't break readiness/app_url or the model wiring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server_args: Vec<String>,
+
     /// Required environment variable names.
     #[serde(default)]
     pub required_env: Vec<String>,
@@ -2302,6 +2313,100 @@ pub fn is_safe_hf_repo(value: &str) -> bool {
 pub fn is_safe_hf_revision(value: &str) -> bool {
     let v = value.trim();
     v.len() == 40 && v.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// Flags a native-inference `server_args` token that names a launcher- or
+/// engine-controlled flag, which a capsule must NOT override:
+///  * `--port` / `-p` — the host launcher injects the resolved/allocated port so
+///    readiness and the app_url agree; a capsule-set port breaks both.
+///  * `--host` — forced to `127.0.0.1` by the launcher (the engine only listens
+///    on loopback; the proxy/readiness assume it).
+///  * `--model-path` / `-m` / `--model` — the engine sets the model from the
+///    resolved `model` / `model_url` / `model_repo`; a second value would fight it.
+///
+/// Matches both the `--flag value` form (the token is exactly the flag) and the
+/// `--flag=value` form (the token starts with `<flag>=`). Returns the offending
+/// canonical flag name when `arg` is forbidden, else `None`.
+pub fn forbidden_native_inference_server_arg(arg: &str) -> Option<&'static str> {
+    // Canonical launcher/engine-controlled flags. Short forms (`-p`, `-m`) are
+    // single-dash and must match exactly or as `-x=...`.
+    const FORBIDDEN: &[&str] = &["--port", "-p", "--host", "--model-path", "-m", "--model"];
+    let token = arg.trim();
+    // Compare the flag portion only (everything before a `=`), so `--port=9000`
+    // and `--port 9000` are both caught.
+    let flag = token.split('=').next().unwrap_or(token);
+    FORBIDDEN.iter().copied().find(|&f| f == flag)
+}
+
+#[cfg(test)]
+mod server_args_guard_tests {
+    use super::forbidden_native_inference_server_arg;
+
+    #[test]
+    fn rejects_each_forbidden_flag_space_form() {
+        // `--flag value` form: the token is exactly the flag.
+        assert_eq!(forbidden_native_inference_server_arg("--port"), Some("--port"));
+        assert_eq!(forbidden_native_inference_server_arg("-p"), Some("-p"));
+        assert_eq!(forbidden_native_inference_server_arg("--host"), Some("--host"));
+        assert_eq!(
+            forbidden_native_inference_server_arg("--model-path"),
+            Some("--model-path")
+        );
+        assert_eq!(forbidden_native_inference_server_arg("-m"), Some("-m"));
+        assert_eq!(forbidden_native_inference_server_arg("--model"), Some("--model"));
+    }
+
+    #[test]
+    fn rejects_each_forbidden_flag_equals_form() {
+        // `--flag=value` form: the token starts with `<flag>=`.
+        assert_eq!(
+            forbidden_native_inference_server_arg("--port=9000"),
+            Some("--port")
+        );
+        assert_eq!(forbidden_native_inference_server_arg("-p=9000"), Some("-p"));
+        assert_eq!(
+            forbidden_native_inference_server_arg("--host=0.0.0.0"),
+            Some("--host")
+        );
+        assert_eq!(
+            forbidden_native_inference_server_arg("--model-path=/x"),
+            Some("--model-path")
+        );
+        assert_eq!(forbidden_native_inference_server_arg("-m=/x"), Some("-m"));
+        assert_eq!(
+            forbidden_native_inference_server_arg("--model=/x"),
+            Some("--model")
+        );
+    }
+
+    #[test]
+    fn allows_tunable_engine_flags() {
+        for ok in [
+            "--mem-fraction-static",
+            "0.9",
+            "--context-length",
+            "8192",
+            "--quantization",
+            "moe_wna16",
+            "--reasoning-parser",
+            "qwen3",
+            "--tp-size",
+            "2",
+            "--ctx-size",
+            "--n-gpu-layers",
+            "999",
+            // A value that merely contains a forbidden substring is fine — only
+            // the flag portion is compared, and only exact flag names are caught.
+            "--model-loader-extra-config",
+            "--portfolio",
+        ] {
+            assert_eq!(
+                forbidden_native_inference_server_arg(ok),
+                None,
+                "{ok:?} should be allowed"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

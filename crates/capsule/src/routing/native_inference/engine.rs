@@ -188,6 +188,13 @@ pub struct EngineContext {
     pub model_repo_include: Vec<String>,
     /// Whether `model_repo` is gated (send `HF_TOKEN` at fetch time) (SGLang).
     pub model_repo_gated: bool,
+    /// Extra engine server args appended AFTER the engine's `build_server_argv`
+    /// base flags (and independent of the launcher's `--port` injection).
+    /// Engine-generic; passed through verbatim. Launcher/engine-controlled flags
+    /// (`--port`/`-p`, `--host`, `--model-path`/`-m`/`--model`) are rejected at
+    /// manifest validation, so by the time they reach here they are safe to
+    /// append. Empty = base argv only (byte-identical to pre-passthrough).
+    pub server_args: Vec<String>,
 }
 
 /// Status of an engine-side doctor check (capsule layer, no CLI dependency).

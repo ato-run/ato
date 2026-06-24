@@ -260,6 +260,7 @@ fn ctx(engine_path: Option<&str>, engine_version: Option<&str>, variant: Variant
         model_repo_sha256: None,
         model_repo_include: Vec::new(),
         model_repo_gated: false,
+        server_args: Vec::new(),
     }
 }
 
@@ -580,6 +581,7 @@ fn sglang_ctx(
         model_repo_sha256: None,
         model_repo_include: Vec::new(),
         model_repo_gated: false,
+        server_args: Vec::new(),
     }
 }
 
@@ -710,4 +712,124 @@ fn sglang_doctor_checks_warn_when_gpu_present_but_not_ready() {
     let cuda = checks.iter().find(|c| c.name == "sglang.cuda").unwrap();
     assert_eq!(cuda.status, EngineCheckStatus::Warn);
     assert!(cuda.recommendation.unwrap().contains("nvidia-cuda"));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// server_args passthrough (increment 2.5)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The launcher (`derive_native_inference_launch_spec`) appends the validated
+// `server_args` AFTER the engine's `build_server_argv(...)` base flags. These
+// tests assemble the argv exactly as the launcher does (base argv + appended
+// args) for BOTH engines, plus the empty-default no-regression case. The
+// launcher's own forbidden-flag guard is exercised end to end in
+// `launch_spec.rs`; the guard predicate itself is unit-tested in
+// `manifest::server_args_guard_tests`.
+
+use crate::foundation::types::manifest::forbidden_native_inference_server_arg;
+
+/// Reproduce the launcher's append: base argv from the engine, then the
+/// (already-validated) `server_args` pushed verbatim, in order.
+fn assemble_argv(base: Vec<String>, server_args: &[&str]) -> Vec<String> {
+    let mut argv = base;
+    for a in server_args {
+        // The launcher only appends args that pass the guard; mirror that so the
+        // helper can never silently append a forbidden flag.
+        assert!(
+            forbidden_native_inference_server_arg(a).is_none(),
+            "test fixture used a forbidden flag {a:?}"
+        );
+        argv.push((*a).to_string());
+    }
+    argv
+}
+
+#[test]
+fn llamacpp_server_args_appended_after_base_flags() {
+    let base = LlamaCppEngine.build_server_argv("/m.gguf", "127.0.0.1", 9001);
+    let argv = assemble_argv(base, &["--ctx-size", "8192", "--n-gpu-layers", "999"]);
+    assert_eq!(
+        argv,
+        vec![
+            "-m",
+            "/m.gguf",
+            "--host",
+            "127.0.0.1",
+            // appended AFTER the base flags, in manifest order:
+            "--ctx-size",
+            "8192",
+            "--n-gpu-layers",
+            "999",
+        ]
+    );
+    // Base flags are still present and unchanged, in front.
+    assert_eq!(&argv[..4], &["-m", "/m.gguf", "--host", "127.0.0.1"]);
+    // The launcher still injects `--port` separately — it is NOT in the engine argv.
+    assert!(!argv.iter().any(|a| a == "--port"));
+}
+
+#[test]
+fn sglang_server_args_appended_after_base_flags() {
+    let base = SgLangEngine.build_server_argv("/models/qwen", "127.0.0.1", 30001);
+    let argv = assemble_argv(
+        base,
+        &["--mem-fraction-static", "0.9", "--context-length", "8192"],
+    );
+    assert_eq!(
+        argv,
+        vec![
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            "/models/qwen",
+            "--host",
+            "127.0.0.1",
+            // appended AFTER the base flags, in manifest order:
+            "--mem-fraction-static",
+            "0.9",
+            "--context-length",
+            "8192",
+        ]
+    );
+    // Base flags unchanged, in front (model-path still the resolved dir).
+    assert_eq!(
+        &argv[..6],
+        &[
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            "/models/qwen",
+            "--host",
+            "127.0.0.1"
+        ]
+    );
+    assert!(!argv.iter().any(|a| a == "--port"));
+}
+
+#[test]
+fn empty_server_args_is_byte_identical_to_base_argv_both_engines() {
+    // No-regression: an empty `server_args` leaves the argv byte-identical to the
+    // engine's base `build_server_argv` output (i.e. identical to today).
+    let llama_base = LlamaCppEngine.build_server_argv("/m.gguf", "127.0.0.1", 8080);
+    assert_eq!(assemble_argv(llama_base.clone(), &[]), llama_base);
+    assert_eq!(
+        llama_base,
+        vec!["-m", "/m.gguf", "--host", "127.0.0.1"],
+        "llama.cpp base argv must be unchanged"
+    );
+
+    let sglang_base = SgLangEngine.build_server_argv("/models/qwen", "127.0.0.1", 30000);
+    assert_eq!(assemble_argv(sglang_base.clone(), &[]), sglang_base);
+    assert_eq!(
+        sglang_base,
+        vec![
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            "/models/qwen",
+            "--host",
+            "127.0.0.1"
+        ],
+        "sglang base argv must be unchanged"
+    );
 }

@@ -95,5 +95,6 @@ pub fn engine_context(plan: &ManifestData, engine: &dyn Engine) -> EngineContext
             .filter(|v| !v.trim().is_empty()),
         model_repo_include: plan.target_model_repo_include(),
         model_repo_gated: plan.target_model_repo_gated(),
+        server_args: plan.target_server_args(),
     }
 }
