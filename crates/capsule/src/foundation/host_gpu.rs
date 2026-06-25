@@ -98,6 +98,14 @@ pub struct CudaRuntimeInfo {
     pub python3_ok: bool,
     /// Whether `python3 -m venv` is importable (the stdlib `venv` module).
     pub venv_module_ok: bool,
+    /// Whether the CUDA toolkit's `nvcc` compiler is on PATH. SGLang 0.5.x
+    /// JIT-compiles CUDA kernels at runtime (tvm_ffi → ninja → nvcc → g++), so
+    /// `nvcc` is required for a green `nvidia-cuda` doctor — `provision` installs
+    /// the CUDA toolkit. Read-only here; not part of the host-readiness floor.
+    pub nvcc_ok: bool,
+    /// Whether the `ninja` build tool is on PATH. SGLang's runtime JIT invokes
+    /// `ninja` to drive `nvcc`; `provision` installs `ninja-build`. Read-only.
+    pub ninja_ok: bool,
     /// Max VRAM in bytes across detected GPUs (0 when none detected).
     pub max_gpu_vram_bytes: u64,
 }
@@ -273,12 +281,39 @@ fn detect_cuda_runtime_info(gpus: &[GpuDevice], cuda: Option<&CudaInfo>) -> Opti
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
+    // The SGLang runtime JIT toolchain (tvm_ffi → ninja → nvcc → g++). These are
+    // cheap PATH probes; `provision --profile nvidia-cuda` installs the CUDA
+    // toolkit (nvcc) + ninja-build. Surfaced as their own doctor rows so a green
+    // doctor implies sglang can actually compile kernels.
+    // nvcc may live under the CUDA toolkit prefix (`/usr/local/cuda-XX/bin`, where
+    // `provision --profile nvidia-cuda` installs it and points CUDA_HOME) without
+    // being on the default PATH, so check CUDA_HOME/bin and any /usr/local/cuda*/bin
+    // in addition to PATH — otherwise a correctly-provisioned host reports FAIL.
+    let nvcc_ok = which::which("nvcc").is_ok()
+        || std::env::var("CUDA_HOME")
+            .map(|h| std::path::Path::new(&h).join("bin/nvcc").is_file())
+            .unwrap_or(false)
+        || std::fs::read_dir("/usr/local")
+            .map(|entries| {
+                entries.flatten().any(|e| {
+                    let p = e.path();
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("cuda"))
+                        .unwrap_or(false)
+                        && p.join("bin/nvcc").is_file()
+                })
+            })
+            .unwrap_or(false);
+    let ninja_ok = which::which("ninja").is_ok();
     let max_gpu_vram_bytes = gpus.iter().map(|g| g.vram_bytes).max().unwrap_or(0);
 
     Some(CudaRuntimeInfo {
         cuda_runtime_present,
         python3_ok,
         venv_module_ok,
+        nvcc_ok,
+        ninja_ok,
         max_gpu_vram_bytes,
     })
 }
@@ -776,6 +811,8 @@ mod tests {
                 cuda_runtime_present: true,
                 python3_ok: true,
                 venv_module_ok: true,
+                nvcc_ok: true,
+                ninja_ok: true,
                 max_gpu_vram_bytes: 48 * 1024 * 1024 * 1024,
             })
         };
@@ -794,6 +831,8 @@ mod tests {
                     cuda_runtime_present: false,
                     python3_ok: true,
                     venv_module_ok: true,
+                    nvcc_ok: false,
+                    ninja_ok: false,
                     max_gpu_vram_bytes: 0,
                 })
             )
@@ -808,6 +847,8 @@ mod tests {
                     cuda_runtime_present: true,
                     python3_ok: true,
                     venv_module_ok: false,
+                    nvcc_ok: false,
+                    ninja_ok: false,
                     max_gpu_vram_bytes: 0,
                 })
             )
