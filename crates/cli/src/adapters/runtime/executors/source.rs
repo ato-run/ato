@@ -433,7 +433,7 @@ fn apply_logged_stdio(cmd: &mut Command, log_path: &Path) -> Result<()> {
 
 fn apply_host_isolation(
     cmd: &mut Command,
-    _plan: &ManifestData,
+    plan: &ManifestData,
     launch_env: &std::collections::HashMap<String, String>,
     launch_port: Option<u16>,
     launch_ctx: &RuntimeLaunchContext,
@@ -476,7 +476,32 @@ fn apply_host_isolation(
     }
     isolation.apply_to_command(cmd, extra_env);
 
+    // The isolation context env_clear()s the child and re-adds only a fixed
+    // passthrough set (PATH, …). A native-inference engine such as SGLang
+    // JIT-compiles CUDA kernels at runtime and needs host env that set omits
+    // (e.g. CUDA_HOME for nvcc/ninja). Honour the capsule's top-level
+    // `[isolation] allow_env` for any non-protected key present in the host env.
+    for key in manifest_allow_env_keys(plan) {
+        if isolation.is_key_protected(&key) {
+            continue;
+        }
+        if let Ok(value) = std::env::var(&key) {
+            cmd.env(&key, value);
+        }
+    }
+
     Ok(())
+}
+
+/// The capsule's top-level `[isolation] allow_env` keys (empty if absent). Lets a
+/// capsule pass specific host env vars (e.g. `CUDA_HOME`) through host isolation,
+/// which otherwise `env_clear()`s the child down to a fixed passthrough set.
+fn manifest_allow_env_keys(plan: &ManifestData) -> Vec<String> {
+    plan.typed_manifest()
+        .ok()
+        .and_then(|m| m.isolation)
+        .map(|iso| iso.allow_env)
+        .unwrap_or_default()
 }
 
 fn validated_launch_context_env(
