@@ -25,24 +25,65 @@ const PROVISION_MARKER_RELATIVE: &str = "runner/provision-marker.json";
 const NVIDIA_DRIVER_PACKAGE: &str = "nvidia-driver-575";
 
 /// The pinned sglang wheel the `nvidia-cuda` profile provisions into the managed
-/// venv. Mirrors the fetcher's pin (the torch cu124 triple + kernels live in
-/// `capsule::packers::runtime_fetcher`); the `nvidia-cuda` doctor/provision label
-/// this version and the provision drives `RuntimeFetcher::ensure_sglang` with it.
-/// The cu124 pin requires an NVIDIA driver new enough to expose CUDA ≥ 12.4 (the
-/// `R550`-era branch); the doctor surfaces that as a real gate.
-const SGLANG_REFERENCE_WHEEL: &str = "0.4.10.post2";
+/// venv. Mirrors the fetcher's pin (`sglang[srt]` resolved across PyPI + the
+/// cu128 extra-index lives in `capsule::packers::runtime_fetcher`); the
+/// `nvidia-cuda` doctor/provision label this version and the provision drives
+/// `RuntimeFetcher::ensure_sglang` with it. Validated on an RTX A6000:
+/// `sglang[srt]==0.5.9` resolves sglang 0.5.9 + torch 2.9.1+cu128 and runs
+/// Qwen3-30B-A3B-GPTQ. The cu128 wheels require an NVIDIA driver new enough to
+/// expose CUDA ≥ 12.8; the doctor surfaces that as a real gate.
+const SGLANG_REFERENCE_WHEEL: &str = "0.5.9";
 
-/// Minimum CUDA driver-API version (the `cu124` pin) the SGLang managed venv's
+/// Minimum CUDA driver-API version (the `cu128` pin) the SGLang managed venv's
 /// torch wheels require. A host whose driver exposes an older CUDA than this is a
 /// real FAIL in the `nvidia-cuda` doctor (the venv would import-fail at runtime).
 const SGLANG_MIN_CUDA_MAJOR: u32 = 12;
-const SGLANG_MIN_CUDA_MINOR: u32 = 4;
+const SGLANG_MIN_CUDA_MINOR: u32 = 8;
 
 /// `apt` packages the `nvidia-cuda` profile installs for the SGLang managed venv:
 /// a system `python3` plus the stdlib `venv` module (split from python3 on
 /// Debian/Ubuntu). `uv` (the venv/pip driver) is fetched by the runtime fetcher,
 /// not apt.
 const CUDA_PYTHON_PACKAGES: &[&str] = &["python3", "python3-venv"];
+
+/// The CUDA toolkit apt package the `nvidia-cuda` profile installs for the SGLang
+/// runtime JIT. SGLang 0.5.x compiles CUDA kernels at runtime (tvm_ffi → ninja →
+/// nvcc → g++); `cuda-toolkit-12-8` provides `nvcc` under
+/// [`CUDA_HOME_DIR`]. Installed from the NVIDIA CUDA apt repo (see
+/// [`cuda_keyring_url`]); pinned to 12.8 to match the cu128 torch/sglang wheels.
+const CUDA_TOOLKIT_PACKAGE: &str = "cuda-toolkit-12-8";
+
+/// Plain-apt packages the `nvidia-cuda` profile installs for the SGLang runtime
+/// JIT alongside the CUDA toolkit: `ninja-build` (the JIT build driver) and
+/// `build-essential` (the host C++ compiler `nvcc` shells out to). These come
+/// from the Ubuntu archive, not the NVIDIA repo.
+const CUDA_JIT_BUILD_PACKAGES: &[&str] = &["ninja-build", "build-essential"];
+
+/// The CUDA toolkit install prefix `cuda-toolkit-12-8` lays down. SGLang's JIT
+/// resolves `nvcc` via `CUDA_HOME` + PATH, so provision exports this for the venv
+/// build / import smoke and the capsule declares `allow_env=["CUDA_HOME"]`.
+const CUDA_HOME_DIR: &str = "/usr/local/cuda-12.8";
+
+/// The NVIDIA CUDA apt repository keyring `.deb` for a given Ubuntu version slug
+/// (`ubuntu2204` / `ubuntu2404`). Installing it registers the NVIDIA CUDA repo so
+/// `cuda-toolkit-12-8` is resolvable. Pinned to the `1.1-1` keyring release the
+/// A6000 host used. Returns `None` for an unsupported slug (we never guess a URL).
+fn cuda_keyring_url(ubuntu_repo_slug: &str) -> String {
+    format!(
+        "https://developer.download.nvidia.com/compute/cuda/repos/{ubuntu_repo_slug}/x86_64/cuda-keyring_1.1-1_all.deb"
+    )
+}
+
+/// Map a detected Ubuntu version (`"22.04"` / `"24.04"`) to the NVIDIA CUDA repo
+/// slug used in [`cuda_keyring_url`]. Returns `None` for anything outside the
+/// supported set (the OS gate already rejects those, but keep this honest).
+fn cuda_repo_slug_for_ubuntu(version: &str) -> Option<&'static str> {
+    match version {
+        "22.04" => Some("ubuntu2204"),
+        "24.04" => Some("ubuntu2404"),
+        _ => None,
+    }
+}
 
 /// GPU VRAM (bytes) the `nvidia-cuda` doctor treats as comfortable for the
 /// AWQ-quantized weights SGLang loads (~18-20GB) plus a KV cache. Below this is a
@@ -411,10 +452,23 @@ fn parse_cuda_version(raw: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// `true` when `(major, minor)` is at least the `cu124` floor SGLang's torch
+/// `true` when `(major, minor)` is at least the `cu128` floor SGLang's torch
 /// wheels need.
 fn cuda_meets_floor(major: u32, minor: u32) -> bool {
     (major, minor) >= (SGLANG_MIN_CUDA_MAJOR, SGLANG_MIN_CUDA_MINOR)
+}
+
+/// Resolve the profile `run_provision` actually runs. Normally the CLI
+/// `--profile` (default `nvidia-ubuntu`), but on `--resume` the marker's recorded
+/// profile wins so a resumed run continues the SAME profile it started — the
+/// driver/reboot leg writes the marker with its profile, and the CLI default
+/// would otherwise drop a resumed `nvidia-cuda` run back onto the Vulkan path. An
+/// absent or blank marker profile falls back to the CLI value.
+fn resolve_effective_profile<'a>(cli_profile: &'a str, marker: Option<&'a ProvisionMarker>) -> &'a str {
+    match marker {
+        Some(m) if !m.profile.trim().is_empty() => &m.profile,
+        _ => cli_profile,
+    }
 }
 
 /// Run `ato runner doctor --profile nvidia-cuda`: probe the host and report
@@ -552,7 +606,7 @@ fn diagnose_cuda(profile: &HostGpuProfile) -> Vec<CheckResult> {
                 name: "cuda_runtime",
                 status: CheckStatus::Ok,
                 detail: format!(
-                    "CUDA driver API {major}.{minor} (≥ {SGLANG_MIN_CUDA_MAJOR}.{SGLANG_MIN_CUDA_MINOR}, satisfies the cu124 sglang pin)"
+                    "CUDA driver API {major}.{minor} (≥ {SGLANG_MIN_CUDA_MAJOR}.{SGLANG_MIN_CUDA_MINOR}, satisfies the cu128 sglang pin)"
                 ),
                 recommendation: None,
             }),
@@ -560,10 +614,10 @@ fn diagnose_cuda(profile: &HostGpuProfile) -> Vec<CheckResult> {
                 name: "cuda_runtime",
                 status: CheckStatus::Fail,
                 detail: format!(
-                    "CUDA driver API {major}.{minor} is older than the cu124 sglang pin (needs ≥ {SGLANG_MIN_CUDA_MAJOR}.{SGLANG_MIN_CUDA_MINOR})"
+                    "CUDA driver API {major}.{minor} is older than the cu128 sglang pin (needs ≥ {SGLANG_MIN_CUDA_MAJOR}.{SGLANG_MIN_CUDA_MINOR})"
                 ),
                 recommendation: Some(
-                    "Upgrade the NVIDIA driver to an R550-era (CUDA 12.4+) branch: sudo ato runner provision --profile nvidia-cuda --force",
+                    "Upgrade the NVIDIA driver to an R570-era (CUDA 12.8+) branch: sudo ato runner provision --profile nvidia-cuda --force",
                 ),
             }),
             None => results.push(CheckResult {
@@ -625,7 +679,60 @@ fn diagnose_cuda(profile: &HostGpuProfile) -> Vec<CheckResult> {
         });
     }
 
-    // 8. sglang venv / `import sglang` — proves a usable managed engine. The venv
+    // 8. nvcc (CUDA toolkit) — SGLang 0.5.x JIT-compiles kernels at runtime
+    //    (tvm_ffi → ninja → nvcc → g++), so a green doctor must imply nvcc is
+    //    present. FAIL (with a provision hint) when missing.
+    let nvcc_ok = profile
+        .cuda_runtime
+        .as_ref()
+        .map(|c| c.nvcc_ok)
+        .unwrap_or(false);
+    if nvcc_ok {
+        results.push(CheckResult {
+            name: "nvcc",
+            status: CheckStatus::Ok,
+            detail: "nvcc (CUDA toolkit) present on PATH — sglang can JIT-compile kernels"
+                .to_string(),
+            recommendation: None,
+        });
+    } else {
+        results.push(CheckResult {
+            name: "nvcc",
+            status: CheckStatus::Fail,
+            detail: "nvcc not found — the CUDA toolkit is required for sglang's runtime JIT"
+                .to_string(),
+            recommendation: Some(
+                "Run: sudo ato runner provision --profile nvidia-cuda (installs the CUDA toolkit)",
+            ),
+        });
+    }
+
+    // 9. ninja — SGLang's runtime JIT invokes `ninja` to drive nvcc. FAIL (with a
+    //    provision hint) when missing, so a green doctor implies a usable JIT.
+    let ninja_ok = profile
+        .cuda_runtime
+        .as_ref()
+        .map(|c| c.ninja_ok)
+        .unwrap_or(false);
+    if ninja_ok {
+        results.push(CheckResult {
+            name: "ninja",
+            status: CheckStatus::Ok,
+            detail: "ninja present on PATH — sglang's JIT build driver is available".to_string(),
+            recommendation: None,
+        });
+    } else {
+        results.push(CheckResult {
+            name: "ninja",
+            status: CheckStatus::Fail,
+            detail: "ninja not found — sglang's runtime JIT uses ninja to drive nvcc".to_string(),
+            recommendation: Some(
+                "Run: sudo ato runner provision --profile nvidia-cuda (installs ninja-build)",
+            ),
+        });
+    }
+
+    // 10. sglang venv / `import sglang` — proves a usable managed engine. The venv
     //    is only present AFTER provision (and `import sglang` only passes on a
     //    real CUDA host). Probe the canonical venv python live, but degrade
     //    honestly to WARN (host CUDA-ready, venv just not built yet) rather than
@@ -661,7 +768,7 @@ fn diagnose_cuda(profile: &HostGpuProfile) -> Vec<CheckResult> {
         }),
     }
 
-    // 9. GPU VRAM headroom — a hint, not a gate (WARN below the recommended
+    // 11. GPU VRAM headroom — a hint, not a gate (WARN below the recommended
     //    floor; smaller models / quantizations still fit).
     if profile.has_gpu() {
         let vram = profile.max_gpu_vram_bytes();
@@ -688,7 +795,11 @@ fn diagnose_cuda(profile: &HostGpuProfile) -> Vec<CheckResult> {
         }
     }
 
-    // 10. Overall SGLang (CUDA) readiness floor — reuses the shared predicate.
+    // 12. Overall SGLang (CUDA) readiness floor — reuses the shared predicate.
+    //     NOTE: nvcc/ninja are deliberately NOT folded into this host-floor
+    //     predicate (that stays GPU+driver+CUDA+python/venv); they are surfaced as
+    //     their own FAIL rows above, so a *green* doctor (no FAIL rows) still
+    //     implies the JIT toolchain is present.
     if profile.native_inference_cuda_ready() {
         results.push(CheckResult {
             name: "native_inference_cuda_ready",
@@ -815,7 +926,13 @@ enum ProvisionEvent {
         action: ProvisionAction,
         detail: String,
     },
-    /// nvidia-cuda: building the managed sglang venv (uv venv + cu124 pip install).
+    /// nvidia-cuda: the CUDA JIT toolchain install (CUDA toolkit / nvcc + ninja +
+    /// build-essential) sglang 0.5.x needs to compile kernels at runtime.
+    CudaToolchain {
+        action: ProvisionAction,
+        detail: String,
+    },
+    /// nvidia-cuda: building the managed sglang venv (uv venv + cu128 pip install).
     SglangVenv {
         action: ProvisionAction,
         detail: String,
@@ -886,15 +1003,6 @@ pub async fn run_provision(
         );
     }
 
-    let is_cuda = match profile_name {
-        "nvidia-ubuntu" => false,
-        "nvidia-cuda" => true,
-        other => bail!(
-            "Unknown profile: {other}. Supported: 'nvidia-ubuntu' (Vulkan / llama.cpp), \
-             'nvidia-cuda' (SGLang)."
-        ),
-    };
-
     // Root check (skip only for --dry-run so users can preview without sudo).
     // --resume still needs root because it runs apt / systemctl / docker.
     if !dry_run && !is_root() {
@@ -906,6 +1014,23 @@ pub async fn run_provision(
         read_marker().context("No provision marker found — cannot resume. Run without --resume.")?
     } else {
         None
+    };
+
+    // The effective profile is the CLI `--profile` (default `nvidia-ubuntu`),
+    // EXCEPT on `--resume`: continue the SAME profile the marker recorded. The
+    // first leg (driver install + reboot) writes the marker with its profile, so
+    // a `--resume` after a `nvidia-cuda` reboot must not silently fall back to the
+    // default Vulkan path. The CLI default makes `--profile` un-omittable on
+    // resume otherwise, which is exactly the bug this guards.
+    let profile_name: &str = resolve_effective_profile(profile_name, marker.as_ref());
+
+    let is_cuda = match profile_name {
+        "nvidia-ubuntu" => false,
+        "nvidia-cuda" => true,
+        other => bail!(
+            "Unknown profile: {other}. Supported: 'nvidia-ubuntu' (Vulkan / llama.cpp), \
+             'nvidia-cuda' (SGLang)."
+        ),
     };
 
     let mut warnings = Vec::new();
@@ -1377,11 +1502,80 @@ async fn provision_cuda_phases(
         }
     }
 
-    // ── Phase E: the managed sglang venv (uv venv + cu124 pip + import smoke) ──
-    // `ensure_sglang` is the real fetch: it creates the venv, pip-installs the
-    // pinned torch(cu124)/sglang/kernels, and runs `import sglang` as a
-    // post-condition. The import only passes when the CUDA kernels load on a real
-    // GPU host — so this is the CUDA "GPU smoke" for the SGLang path.
+    // ── Phase D2: the CUDA JIT toolchain (CUDA toolkit / nvcc + ninja + g++) ──
+    // SGLang 0.5.x JIT-compiles CUDA kernels at runtime (tvm_ffi → ninja → nvcc →
+    // g++). Without these the venv import smoke (and any real `ato run`) fails when
+    // a kernel first compiles. Installed BEFORE the venv so the import smoke runs
+    // against a complete toolchain. The CUDA toolkit comes from the NVIDIA CUDA
+    // apt repo (keyring registered first); ninja + build-essential from the Ubuntu
+    // archive. nvidia-cuda-only — never runs on the Vulkan (nvidia-ubuntu) path.
+    let skip_toolchain = cuda_profile
+        .cuda_runtime
+        .as_ref()
+        .map(|c| c.nvcc_ok && c.ninja_ok)
+        .unwrap_or(false)
+        && !force;
+    if skip_toolchain {
+        emit_event(
+            json,
+            &ProvisionEvent::CudaToolchain {
+                action: ProvisionAction::Skip,
+                detail: "nvcc + ninja already present".to_string(),
+            },
+        );
+    } else {
+        let repo_slug = cuda_repo_slug_for_ubuntu(&cuda_profile.os.version);
+        let keyring_url = repo_slug.map(cuda_keyring_url);
+        emit_event(
+            json,
+            &ProvisionEvent::CudaToolchain {
+                action: if dry_run {
+                    ProvisionAction::DryRun
+                } else {
+                    ProvisionAction::Install
+                },
+                detail: format!(
+                    "register NVIDIA CUDA repo ({}) + apt-get install -y {CUDA_TOOLKIT_PACKAGE} {}",
+                    keyring_url.as_deref().unwrap_or("<unsupported ubuntu>"),
+                    CUDA_JIT_BUILD_PACKAGES.join(" ")
+                ),
+            },
+        );
+        if !dry_run {
+            let keyring_url = keyring_url.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no NVIDIA CUDA apt repo for Ubuntu {} — the nvidia-cuda profile needs Ubuntu 22.04 or 24.04",
+                    cuda_profile.os.version
+                )
+            })?;
+            install_cuda_toolchain(&keyring_url)?;
+            emit_event(
+                json,
+                &ProvisionEvent::CudaToolchain {
+                    action: ProvisionAction::Verify,
+                    detail: format!(
+                        "{CUDA_TOOLKIT_PACKAGE} + {} installed (CUDA_HOME={CUDA_HOME_DIR})",
+                        CUDA_JIT_BUILD_PACKAGES.join(" + ")
+                    ),
+                },
+            );
+        }
+    }
+
+    // Point CUDA_HOME / PATH at the toolkit so the venv build + `import sglang`
+    // smoke (and uv's resolver, if anything source-builds) can find nvcc. The
+    // child processes inherit this process's env. (At real run time the capsule
+    // re-supplies CUDA_HOME via `[isolation] allow_env=["CUDA_HOME"]`.)
+    if !dry_run {
+        export_cuda_home_env();
+    }
+
+    // ── Phase E: the managed sglang venv (uv venv + cu128 pip + import smoke) ──
+    // `ensure_sglang` is the real fetch: it creates the venv, pip-installs
+    // `sglang[srt]` (cu128, resolving torch + kernels in one solve), and runs
+    // `import sglang` as a post-condition. The import only passes when the CUDA
+    // toolchain/kernels load on a real GPU host — so this is the CUDA "GPU smoke"
+    // for the SGLang path.
     let mut sglang_import_ok = false;
     let smoke_result = if dry_run {
         emit_event(
@@ -1389,7 +1583,7 @@ async fn provision_cuda_phases(
             &ProvisionEvent::SglangVenv {
                 action: ProvisionAction::DryRun,
                 detail: format!(
-                    "uv venv + pip install (cu124) sglang=={SGLANG_REFERENCE_WHEEL}, then `import sglang`"
+                    "uv venv + pip install (cu128) sglang[srt]=={SGLANG_REFERENCE_WHEEL}, then `import sglang`"
                 ),
             },
         );
@@ -1399,7 +1593,7 @@ async fn provision_cuda_phases(
             json,
             &ProvisionEvent::SglangVenv {
                 action: ProvisionAction::Install,
-                detail: format!("building managed sglang {SGLANG_REFERENCE_WHEEL} venv (cu124)"),
+                detail: format!("building managed sglang {SGLANG_REFERENCE_WHEEL} venv (cu128)"),
             },
         );
         let fetcher =
@@ -1695,6 +1889,67 @@ fn run_apt(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Install the SGLang runtime JIT toolchain: register the NVIDIA CUDA apt repo
+/// (via its keyring `.deb` at `keyring_url`), then `apt-get install` the CUDA
+/// toolkit ([`CUDA_TOOLKIT_PACKAGE`], provides `nvcc`) plus the plain-archive JIT
+/// build deps ([`CUDA_JIT_BUILD_PACKAGES`]: ninja + build-essential). The keyring
+/// is fetched to a temp path and installed with `dpkg -i`; a failure at any step
+/// is surfaced (never silently skipped). nvidia-cuda-only.
+fn install_cuda_toolchain(keyring_url: &str) -> Result<()> {
+    // 1. Fetch + install the NVIDIA CUDA repo keyring so cuda-toolkit-12-8 resolves.
+    let keyring_deb = std::env::temp_dir().join("cuda-keyring_1.1-1_all.deb");
+    let curl = Command::new("curl")
+        .args([
+            "-fsSL",
+            "-o",
+            &keyring_deb.to_string_lossy(),
+            keyring_url,
+        ])
+        .status()
+        .with_context(|| format!("failed to run curl for the CUDA keyring {keyring_url}"))?;
+    if !curl.success() {
+        bail!("failed to download the NVIDIA CUDA keyring from {keyring_url} (curl exited {curl})");
+    }
+    let dpkg = Command::new("dpkg")
+        .args(["-i", &keyring_deb.to_string_lossy()])
+        .status()
+        .context("failed to run dpkg -i for the CUDA keyring")?;
+    if !dpkg.success() {
+        bail!("dpkg -i of the NVIDIA CUDA keyring failed (exited {dpkg})");
+    }
+    let _ = std::fs::remove_file(&keyring_deb);
+
+    // 2. Refresh the index (now incl. the NVIDIA repo) and install the toolchain.
+    run_apt(&["update"]).context("apt-get update failed after registering the NVIDIA CUDA repo")?;
+    let mut args = vec!["install", "-y", CUDA_TOOLKIT_PACKAGE];
+    args.extend_from_slice(CUDA_JIT_BUILD_PACKAGES);
+    run_apt(&args).context("Failed to install the CUDA toolkit / ninja / build-essential")?;
+    Ok(())
+}
+
+/// Export `CUDA_HOME=/usr/local/cuda-12.8` and prepend `<CUDA_HOME>/bin` to PATH
+/// in THIS process so the sglang venv build + `import sglang` smoke (child
+/// processes inherit the env) can resolve `nvcc`. Idempotent — only prepends the
+/// bin dir if not already on PATH.
+fn export_cuda_home_env() {
+    unsafe {
+        std::env::set_var("CUDA_HOME", CUDA_HOME_DIR);
+    }
+    let cuda_bin = format!("{CUDA_HOME_DIR}/bin");
+    match std::env::var_os("PATH") {
+        Some(path) if !path.to_string_lossy().split(':').any(|p| p == cuda_bin) => {
+            let new_path = format!("{cuda_bin}:{}", path.to_string_lossy());
+            unsafe {
+                std::env::set_var("PATH", new_path);
+            }
+        }
+        None => unsafe {
+            std::env::set_var("PATH", &cuda_bin);
+        },
+        _ => {}
+    }
+}
+
 /// Capture `python3 --version` (e.g. `"Python 3.12.3"`) for the CUDA receipt.
 /// Returns `None` when python3 is absent or the call fails. python prints the
 /// version to stdout (3.4+); older builds used stderr, so fall back to it.
@@ -1765,6 +2020,9 @@ fn emit_event(json: bool, event: &ProvisionEvent) {
             }
             ProvisionEvent::Python { action, detail } => {
                 ("python", action_str(*action), detail.clone())
+            }
+            ProvisionEvent::CudaToolchain { action, detail } => {
+                ("cuda_toolchain", action_str(*action), detail.clone())
             }
             ProvisionEvent::SglangVenv { action, detail } => {
                 ("sglang_venv", action_str(*action), detail.clone())
@@ -2072,10 +2330,10 @@ mod tests {
     // ── nvidia-cuda (SGLang) doctor ──
 
     /// A host that satisfies the CUDA host-readiness floor: NVIDIA GPU + driver +
-    /// CUDA driver-API 12.4 + python3/venv. (`sglang_venv` is probed live, so the
-    /// "fully ready" verdict depends on whether a managed venv exists — these
-    /// fixtures only assert the host-floor rows, never `native_inference_cuda_ready`
-    /// being the *only* OK row.)
+    /// CUDA driver-API 12.8 + python3/venv + nvcc/ninja. (`sglang_venv` is probed
+    /// live, so the "fully ready" verdict depends on whether a managed venv exists
+    /// — these fixtures only assert the host-floor rows, never
+    /// `native_inference_cuda_ready` being the *only* OK row.)
     fn cuda_profile() -> HostGpuProfile {
         HostGpuProfile {
             os: OsInfo {
@@ -2096,7 +2354,7 @@ mod tests {
                 nvidia_smi_available: true,
             }),
             cuda: Some(CudaInfo {
-                driver_api_version: "12.4".to_string(),
+                driver_api_version: "12.8".to_string(),
                 toolkit_version: None,
             }),
             vulkan: None,
@@ -2104,6 +2362,8 @@ mod tests {
                 cuda_runtime_present: true,
                 python3_ok: true,
                 venv_module_ok: true,
+                nvcc_ok: true,
+                ninja_ok: true,
                 max_gpu_vram_bytes: 48 * 1024 * 1024 * 1024,
             }),
         }
@@ -2126,11 +2386,14 @@ mod tests {
     }
 
     #[test]
-    fn cuda_meets_floor_enforces_cu124() {
-        assert!(cuda_meets_floor(12, 4));
-        assert!(cuda_meets_floor(12, 6));
+    fn cuda_meets_floor_enforces_cu128() {
+        // The sglang cu128 wheels need CUDA driver-API ≥ 12.8.
+        assert!(cuda_meets_floor(12, 8));
+        assert!(cuda_meets_floor(12, 9));
         assert!(cuda_meets_floor(13, 0));
-        assert!(!cuda_meets_floor(12, 3));
+        assert!(!cuda_meets_floor(12, 7));
+        // The old cu124 floor no longer passes (this is the bump).
+        assert!(!cuda_meets_floor(12, 4));
         assert!(!cuda_meets_floor(11, 8));
     }
 
@@ -2145,12 +2408,86 @@ mod tests {
             "cuda_runtime",
             "python3",
             "python_venv",
+            "nvcc",
+            "ninja",
             "sglang_venv",
             "gpu_vram",
             "native_inference_cuda_ready",
         ] {
             cuda_check(&checks, name);
         }
+    }
+
+    #[test]
+    fn diagnose_cuda_ok_host_passes_nvcc_and_ninja_rows() {
+        // A fully-provisioned host (nvcc + ninja present) → both rows OK, so a
+        // green doctor implies sglang can JIT-compile its kernels.
+        let checks = diagnose_cuda(&cuda_profile());
+        assert_eq!(cuda_check(&checks, "nvcc").status, CheckStatus::Ok);
+        assert_eq!(cuda_check(&checks, "ninja").status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn diagnose_cuda_fails_when_nvcc_missing() {
+        // nvcc absent (CUDA toolkit not installed) → FAIL with a provision hint.
+        let mut profile = cuda_profile();
+        profile.cuda_runtime = Some(CudaRuntimeInfo {
+            cuda_runtime_present: true,
+            python3_ok: true,
+            venv_module_ok: true,
+            nvcc_ok: false,
+            ninja_ok: true,
+            max_gpu_vram_bytes: 48 * 1024 * 1024 * 1024,
+        });
+        let checks = diagnose_cuda(&profile);
+        let nvcc = cuda_check(&checks, "nvcc");
+        assert_eq!(nvcc.status, CheckStatus::Fail);
+        assert!(nvcc.recommendation.is_some(), "must hint to run provision");
+    }
+
+    #[test]
+    fn diagnose_cuda_fails_when_ninja_missing() {
+        // ninja absent → FAIL with a provision hint (sglang's JIT drives ninja).
+        let mut profile = cuda_profile();
+        profile.cuda_runtime = Some(CudaRuntimeInfo {
+            cuda_runtime_present: true,
+            python3_ok: true,
+            venv_module_ok: true,
+            nvcc_ok: true,
+            ninja_ok: false,
+            max_gpu_vram_bytes: 48 * 1024 * 1024 * 1024,
+        });
+        let checks = diagnose_cuda(&profile);
+        let ninja = cuda_check(&checks, "ninja");
+        assert_eq!(ninja.status, CheckStatus::Fail);
+        assert!(ninja.recommendation.is_some(), "must hint to run provision");
+    }
+
+    #[test]
+    fn diagnose_cuda_missing_toolchain_is_a_fail_row_so_green_implies_jit() {
+        // The host-floor predicate (native_inference_cuda_ready) deliberately
+        // ignores nvcc/ninja, but a missing toolchain still makes the OVERALL
+        // doctor not-green (a FAIL row exists) — so "green doctor ⇒ JIT-capable".
+        let mut profile = cuda_profile();
+        profile.cuda_runtime = Some(CudaRuntimeInfo {
+            cuda_runtime_present: true,
+            python3_ok: true,
+            venv_module_ok: true,
+            nvcc_ok: false,
+            ninja_ok: false,
+            max_gpu_vram_bytes: 48 * 1024 * 1024 * 1024,
+        });
+        let checks = diagnose_cuda(&profile);
+        // The host floor can still be "ready"...
+        assert_eq!(
+            cuda_check(&checks, "native_inference_cuda_ready").status,
+            CheckStatus::Ok
+        );
+        // ...but at least one FAIL row exists, so the doctor is not green.
+        assert!(
+            checks.iter().any(|c| c.status == CheckStatus::Fail),
+            "a missing JIT toolchain must keep the doctor non-green"
+        );
     }
 
     #[test]
@@ -2208,7 +2545,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnose_cuda_fails_when_cuda_older_than_cu124() {
+    fn diagnose_cuda_fails_when_cuda_older_than_cu128() {
         let mut profile = cuda_profile();
         profile.cuda = Some(CudaInfo {
             driver_api_version: "12.2".to_string(),
@@ -2218,6 +2555,19 @@ mod tests {
         let cuda = cuda_check(&checks, "cuda_runtime");
         assert_eq!(cuda.status, CheckStatus::Fail);
         assert!(cuda.detail.contains("12.2"));
+    }
+
+    #[test]
+    fn diagnose_cuda_fails_when_cuda_is_12_4_below_the_cu128_floor() {
+        // The floor moved from cu124 → cu128: a 12.4 driver that used to pass now
+        // FAILs (the cu128 torch/sglang wheels need ≥ 12.8).
+        let mut profile = cuda_profile();
+        profile.cuda = Some(CudaInfo {
+            driver_api_version: "12.4".to_string(),
+            toolkit_version: None,
+        });
+        let checks = diagnose_cuda(&profile);
+        assert_eq!(cuda_check(&checks, "cuda_runtime").status, CheckStatus::Fail);
     }
 
     #[test]
@@ -2235,6 +2585,8 @@ mod tests {
             cuda_runtime_present: true,
             python3_ok: false,
             venv_module_ok: false,
+            nvcc_ok: true,
+            ninja_ok: true,
             max_gpu_vram_bytes: 48 * 1024 * 1024 * 1024,
         });
         let checks = diagnose_cuda(&profile);
@@ -2295,9 +2647,17 @@ mod tests {
                 "python",
             ),
             (
+                ProvisionEvent::CudaToolchain {
+                    action: ProvisionAction::Install,
+                    detail: "apt-get install -y cuda-toolkit-12-8 ninja-build build-essential"
+                        .to_string(),
+                },
+                "cuda_toolchain",
+            ),
+            (
                 ProvisionEvent::SglangVenv {
                     action: ProvisionAction::Install,
-                    detail: "building managed sglang 0.4.10.post2 venv".to_string(),
+                    detail: "building managed sglang 0.5.9 venv".to_string(),
                 },
                 "sglang_venv",
             ),
@@ -2308,5 +2668,92 @@ mod tests {
                 "expected phase {expected_phase} in {json}"
             );
         }
+    }
+
+    // ── CUDA JIT toolchain (provision) ──
+
+    #[test]
+    fn cuda_repo_slug_maps_supported_ubuntu_only() {
+        assert_eq!(cuda_repo_slug_for_ubuntu("22.04"), Some("ubuntu2204"));
+        assert_eq!(cuda_repo_slug_for_ubuntu("24.04"), Some("ubuntu2404"));
+        // Anything outside the supported set has no NVIDIA repo (never guessed).
+        assert_eq!(cuda_repo_slug_for_ubuntu("20.04"), None);
+        assert_eq!(cuda_repo_slug_for_ubuntu("23.10"), None);
+        assert_eq!(cuda_repo_slug_for_ubuntu(""), None);
+    }
+
+    #[test]
+    fn cuda_keyring_url_targets_the_nvidia_cuda_repo() {
+        let url = cuda_keyring_url("ubuntu2204");
+        assert!(url.starts_with("https://developer.download.nvidia.com/compute/cuda/repos/"));
+        assert!(url.contains("ubuntu2204"));
+        assert!(url.ends_with("cuda-keyring_1.1-1_all.deb"));
+    }
+
+    #[test]
+    fn cuda_toolchain_constants_are_the_validated_values() {
+        // The validated A6000 recipe: cuda-toolkit-12-8 under /usr/local/cuda-12.8,
+        // plus ninja-build + build-essential for the runtime JIT.
+        assert_eq!(CUDA_TOOLKIT_PACKAGE, "cuda-toolkit-12-8");
+        assert_eq!(CUDA_HOME_DIR, "/usr/local/cuda-12.8");
+        assert!(CUDA_JIT_BUILD_PACKAGES.contains(&"ninja-build"));
+        assert!(CUDA_JIT_BUILD_PACKAGES.contains(&"build-essential"));
+    }
+
+    #[test]
+    fn sglang_reference_wheel_is_the_validated_pin() {
+        // The A6000-validated sglang version (cu128 → torch 2.9.1).
+        assert_eq!(SGLANG_REFERENCE_WHEEL, "0.5.9");
+    }
+
+    // ── --resume profile resolution ──
+
+    fn marker_for(profile: &str) -> ProvisionMarker {
+        ProvisionMarker {
+            profile: profile.to_string(),
+            phase: ProvisionPhase::RebootRequired,
+            secure_boot_enabled: false,
+            timestamp_unix: 0,
+        }
+    }
+
+    #[test]
+    fn resume_continues_the_markers_profile_not_the_cli_default() {
+        // The bug: a `nvidia-cuda` first leg writes the marker, then `--resume`
+        // (with the CLI default `nvidia-ubuntu`) must continue `nvidia-cuda`.
+        let marker = marker_for("nvidia-cuda");
+        assert_eq!(
+            resolve_effective_profile("nvidia-ubuntu", Some(&marker)),
+            "nvidia-cuda"
+        );
+    }
+
+    #[test]
+    fn resume_with_vulkan_marker_stays_vulkan() {
+        let marker = marker_for("nvidia-ubuntu");
+        assert_eq!(
+            resolve_effective_profile("nvidia-ubuntu", Some(&marker)),
+            "nvidia-ubuntu"
+        );
+    }
+
+    #[test]
+    fn no_marker_uses_the_cli_profile() {
+        // Fresh run (no --resume / no marker): the CLI `--profile` is authoritative.
+        assert_eq!(resolve_effective_profile("nvidia-cuda", None), "nvidia-cuda");
+        assert_eq!(
+            resolve_effective_profile("nvidia-ubuntu", None),
+            "nvidia-ubuntu"
+        );
+    }
+
+    #[test]
+    fn blank_marker_profile_falls_back_to_cli() {
+        // A malformed marker with a blank profile must not blank out the profile.
+        let marker = marker_for("   ");
+        assert_eq!(
+            resolve_effective_profile("nvidia-cuda", Some(&marker)),
+            "nvidia-cuda"
+        );
     }
 }
