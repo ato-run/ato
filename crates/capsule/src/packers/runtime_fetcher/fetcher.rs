@@ -569,34 +569,38 @@ impl ToolchainFetcher for LlamaCppFetcher {
 }
 
 /// The Python version the SGLang managed venv is created with. SGLang + torch
-/// cu124 wheels target CPython 3.12.
+/// cu128 wheels target CPython 3.12.
 pub(crate) const SGLANG_VENV_PYTHON: &str = "3.12";
 
-/// The PyTorch cu124 wheel index. SGLang's CUDA path is pinned to a CUDA-12
-/// baseline (driver ≥ R550) rather than the bleeding-edge cu13 default for
-/// reproducibility on a typical Ampere host.
-pub(crate) const SGLANG_TORCH_INDEX_URL: &str = "https://download.pytorch.org/whl/cu124";
+/// The PyTorch cu128 wheel index, supplied as an `--extra-index-url` (PyPI stays
+/// the primary index) so the `sglang[srt]` resolve picks up CUDA-12.8 torch
+/// wheels. Validated on an RTX A6000: `sglang[srt]` resolves to sglang 0.5.9 +
+/// torch 2.9.1+cu128, `import sglang` succeeds, and Qwen3-30B-A3B-GPTQ runs via
+/// gptq_marlin. (The previous cu124 + `torch==2.6.0` pin was incoherent with the
+/// sglang 0.5.x wheels and source-built flashinfer.)
+pub(crate) const SGLANG_TORCH_INDEX_URL: &str = "https://download.pytorch.org/whl/cu128";
 
-/// The pinned torch triple installed from [`SGLANG_TORCH_INDEX_URL`] BEFORE
-/// sglang, so sglang's own resolver cannot silently upgrade torch off the cu124
-/// index (the torch auto-upgrade footgun). Pinned to a cu124-compatible release.
-pub(crate) const SGLANG_TORCH_PINS: &[&str] = &["torch==2.6.0", "torchvision", "torchaudio"];
+/// uv's resolver index strategy for the `sglang[srt]` install. `sglang[srt]`
+/// pulls torch from the cu128 extra-index and the rest from PyPI; the default
+/// "first index that has the package wins" strategy cannot satisfy that split,
+/// so we opt into `unsafe-best-match` (consider all indexes, pick the best
+/// version) — the strategy the validated manual recipe used.
+pub(crate) const SGLANG_INDEX_STRATEGY: &str = "unsafe-best-match";
 
-/// The CUDA kernel packages SGLang needs on Ampere, installed alongside the
-/// sglang wheel (matching cu124 wheels resolved from PyPI / the torch index).
-pub(crate) const SGLANG_KERNEL_PINS: &[&str] = &["sgl-kernel", "flashinfer-python"];
-
-/// The full pinned requirements set the SGLang fetcher installs for `version`
-/// (the sglang wheel version). Returned as two install phases: torch first (off
-/// the cu124 index), then sglang + its kernels. Surfaced for the doctor /
-/// receipt and unit tests so the exact pins are inspectable.
+/// The full pinned requirements the SGLang fetcher installs for `version` (the
+/// sglang wheel version). A single coherent `sglang[srt]==<version>` install
+/// resolved across PyPI + the cu128 extra-index — torch (and the CUDA kernels
+/// sglang declares as deps) resolve from that one solve rather than being pinned
+/// separately. Surfaced for the doctor / receipt and unit tests so the exact
+/// pins are inspectable.
 pub(crate) fn sglang_requirements(version: &str) -> SgLangRequirements {
     SgLangRequirements {
         python: SGLANG_VENV_PYTHON,
         torch_index_url: SGLANG_TORCH_INDEX_URL,
-        torch_pins: SGLANG_TORCH_PINS.iter().map(|s| s.to_string()).collect(),
-        sglang_pin: format!("sglang=={version}"),
-        kernel_pins: SGLANG_KERNEL_PINS.iter().map(|s| s.to_string()).collect(),
+        index_strategy: SGLANG_INDEX_STRATEGY,
+        // The `[srt]` extra pulls the SRT server deps (pydantic, etc.) the bare
+        // `sglang` wheel omits — bare `sglang` import-failed at runtime.
+        sglang_pin: format!("sglang[srt]=={version}"),
     }
 }
 
@@ -605,9 +609,8 @@ pub(crate) fn sglang_requirements(version: &str) -> SgLangRequirements {
 pub(crate) struct SgLangRequirements {
     pub python: &'static str,
     pub torch_index_url: &'static str,
-    pub torch_pins: Vec<String>,
+    pub index_strategy: &'static str,
     pub sglang_pin: String,
-    pub kernel_pins: Vec<String>,
 }
 
 /// The canonical venv python path inside an SGLang runtime directory
@@ -692,42 +695,26 @@ impl ToolchainFetcher for SgLangFetcher {
         )
         .await?;
 
-        // 2. torch first, off the cu124 index, so sglang's resolver can't bump it.
+        // 2. One coherent `sglang[srt]` install resolved across PyPI + the cu128
+        //    extra-index with `--index-strategy unsafe-best-match`. torch (cu128)
+        //    and the CUDA kernels sglang declares as deps resolve from this single
+        //    solve — the validated A6000 recipe (sglang 0.5.9 + torch 2.9.1+cu128).
         provider
             .reporter
-            .notify("⬇️  Installing torch (cu124)...".to_string())
+            .notify(format!("⬇️  Installing {} (cu128)...", reqs.sglang_pin))
             .await?;
         {
-            let mut args = vec![
+            let args = vec![
                 "pip".to_string(),
                 "install".to_string(),
                 "--python".to_string(),
                 venv_python.to_string_lossy().to_string(),
-                "--index-url".to_string(),
-                reqs.torch_index_url.to_string(),
-            ];
-            args.extend(reqs.torch_pins.iter().cloned());
-            run_uv(&uv, &args, show_progress).await?;
-        }
-
-        // 3. sglang + its CUDA kernels (sgl-kernel / flashinfer).
-        provider
-            .reporter
-            .notify(format!("⬇️  Installing {} + CUDA kernels...", reqs.sglang_pin))
-            .await?;
-        {
-            let mut args = vec![
-                "pip".to_string(),
-                "install".to_string(),
-                "--python".to_string(),
-                venv_python.to_string_lossy().to_string(),
-                // torch is already installed off cu124; let kernels resolve their
-                // matching wheels from the same index + PyPI.
+                "--index-strategy".to_string(),
+                reqs.index_strategy.to_string(),
                 "--extra-index-url".to_string(),
                 reqs.torch_index_url.to_string(),
                 reqs.sglang_pin.clone(),
             ];
-            args.extend(reqs.kernel_pins.iter().cloned());
             run_uv(&uv, &args, show_progress).await?;
         }
 
@@ -1112,29 +1099,33 @@ mod tests {
     }
 
     #[test]
-    fn sglang_requirements_pins_torch_first_then_sglang_on_cu124() {
-        let reqs = sglang_requirements("0.4.10.post2");
+    fn sglang_requirements_install_srt_extra_on_cu128_with_best_match() {
+        let reqs = sglang_requirements("0.5.9");
         assert_eq!(reqs.python, "3.12");
-        assert_eq!(reqs.torch_index_url, "https://download.pytorch.org/whl/cu124");
-        // torch is pinned and installed BEFORE sglang (defeats the auto-upgrade).
-        assert!(reqs.torch_pins.iter().any(|p| p == "torch==2.6.0"));
-        assert!(reqs.torch_pins.iter().any(|p| p == "torchvision"));
-        assert!(reqs.torch_pins.iter().any(|p| p == "torchaudio"));
-        // The wheel version flows through verbatim into the sglang pin.
-        assert_eq!(reqs.sglang_pin, "sglang==0.4.10.post2");
-        // The CUDA kernels SGLang needs on Ampere.
-        assert!(reqs.kernel_pins.iter().any(|p| p == "sgl-kernel"));
-        assert!(reqs.kernel_pins.iter().any(|p| p == "flashinfer-python"));
+        // cu128 extra-index (not the old cu124), supplied alongside PyPI.
+        assert_eq!(reqs.torch_index_url, "https://download.pytorch.org/whl/cu128");
+        // `unsafe-best-match` lets the single solve span PyPI + the cu128 index.
+        assert_eq!(reqs.index_strategy, "unsafe-best-match");
+        // The `[srt]` extra (server deps) + the wheel version flow into one pin —
+        // NOT a bare `sglang`, and NOT a separate torch / kernel install.
+        assert_eq!(reqs.sglang_pin, "sglang[srt]==0.5.9");
+        assert!(
+            reqs.sglang_pin.contains("[srt]"),
+            "must install the srt extra, not bare sglang"
+        );
+        // The broken cu124 / torch==2.6.0 / source-built-kernel recipe is gone.
+        assert!(!reqs.torch_index_url.contains("cu124"));
+        assert!(!reqs.sglang_pin.contains("2.6.0"));
     }
 
     #[test]
     fn sglang_venv_python_is_canonical_bin_python() {
-        let dir = std::path::Path::new("/cache/sglang-0.4.10.post2");
+        let dir = std::path::Path::new("/cache/sglang-0.5.9");
         let py = sglang_venv_python(dir);
         if cfg!(windows) {
             assert!(py.ends_with("Scripts/python.exe") || py.ends_with("Scripts\\python.exe"));
         } else {
-            assert_eq!(py, std::path::Path::new("/cache/sglang-0.4.10.post2/bin/python"));
+            assert_eq!(py, std::path::Path::new("/cache/sglang-0.5.9/bin/python"));
         }
     }
 
