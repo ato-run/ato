@@ -409,6 +409,8 @@ fn cuda_ready_profile() -> HostGpuProfile {
             cuda_runtime_present: true,
             python3_ok: true,
             venv_module_ok: true,
+            nvcc_ok: true,
+            ninja_ok: true,
             max_gpu_vram_bytes: 48 * 1024 * 1024 * 1024,
         }),
     }
@@ -421,6 +423,8 @@ fn gpu_not_cuda_ready_profile() -> HostGpuProfile {
         cuda_runtime_present: false,
         python3_ok: false,
         venv_module_ok: false,
+        nvcc_ok: false,
+        ninja_ok: false,
         max_gpu_vram_bytes: 0,
     });
     p
