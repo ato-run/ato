@@ -164,13 +164,29 @@ pub fn execute_host(
         .args
         .extend(launch_ctx.command_args().iter().cloned());
     let desktop_open_bundle = desktop_native_open_bundle_path(plan, authoritative_lock);
+    // A run command containing shell syntax (e.g. `python -m http.server $PORT`
+    // or `a && b`) is generated as a POSIX-shell wrapper: command="sh",
+    // args=["-c", "<run>"]. Such a launch MUST be executed by the shell — never
+    // wrapped in the Python/Node interpreter, since `python sh` / `node sh`
+    // would treat "sh" as a script path and fail with "can't open file 'sh'".
+    let command_is_shell_wrapper = is_shell_wrapper_command(&launch_spec.command);
     let force_python_server_tool = is_python_server_tool(&launch_spec.command)
         && plan
             .execution_driver()
             .map(|d| d.trim().eq_ignore_ascii_case("python"))
             .unwrap_or(false);
-    let force_python_no_bytecode = !force_python_server_tool
-        && is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
+    let python_intent =
+        is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
+    // `force_python_no_bytecode`: invoke via the venv interpreter (`python <file>`).
+    // `python_shell_launch`: a Python launch delivered as a shell wrapper
+    // (`sh -c "python …"`) — run it via the shell, but make the project venv's
+    // interpreter and console-script tools resolvable from inside the shell by
+    // prepending `.venv/bin` to PATH (applied after host isolation rebuilds env).
+    let (force_python_no_bytecode, python_shell_launch) =
+        python_launch_modes(python_intent, command_is_shell_wrapper, force_python_server_tool);
+    // NOTE: `is_node_launch_spec` has the same latent issue for node shell-wrapped
+    // run commands (`node sh`), but fixing it correctly needs the managed-node bin
+    // on PATH for the shell — out of scope for this Python-focused fix, left as-is.
     let force_node_runtime =
         is_node_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
     let injected_port =
@@ -240,8 +256,16 @@ pub fn execute_host(
         )?;
         apply_python_runtime_hardening(
             &mut cmd,
-            force_python_no_bytecode || force_python_server_tool,
+            force_python_no_bytecode || force_python_server_tool || python_shell_launch,
         );
+
+        // Shell-wrapped Python launch: prepend the venv bin dir to PATH so
+        // `python`/tools invoked inside `sh -c "…"` resolve to the project venv
+        // (`uv sync` output), not the host interpreter. Must run after
+        // apply_host_isolation, which rebuilds PATH from the host environment.
+        if python_shell_launch {
+            prepend_venv_bin_to_path(&mut cmd, &launch_spec.working_dir);
+        }
 
         if let Some(port) = &injected_port {
             cmd.env("PORT", port);
@@ -664,6 +688,63 @@ fn build_desktop_open_command(bundle_path: &Path, args: &[String]) -> Command {
 /// provisioning step created one. Returns `None` when the venv (or its
 /// `bin/python`) is missing, so callers can fall back to the
 /// ato-managed toolchain.
+/// Returns `true` when the launch command is a POSIX shell used as a wrapper
+/// (`sh -c "<run>"`). `config::runtime_config` emits this form for v0.3 `run`
+/// commands that contain shell syntax. Such a launch is executed by the shell
+/// itself, so it must NOT be wrapped in the Python/Node interpreter.
+fn is_shell_wrapper_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    let base = Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(trimmed);
+    base.eq_ignore_ascii_case("sh") || base.eq_ignore_ascii_case("sh.exe")
+}
+
+/// Decide how a Python source launch should be executed.
+///
+/// Returns `(force_python_no_bytecode, python_shell_launch)`:
+/// * `force_python_no_bytecode` — invoke the venv interpreter directly
+///   (`python <file>`). Never for a shell wrapper (would become `python sh`)
+///   nor for a server tool (handled by its own branch).
+/// * `python_shell_launch` — a Python launch delivered as a `sh -c "python …"`
+///   wrapper: run via the shell with the venv prepended to PATH.
+///
+/// A command is at most one of these (they are mutually exclusive).
+fn python_launch_modes(
+    python_intent: bool,
+    command_is_shell_wrapper: bool,
+    force_python_server_tool: bool,
+) -> (bool, bool) {
+    let force_python_no_bytecode =
+        !force_python_server_tool && python_intent && !command_is_shell_wrapper;
+    let python_shell_launch = python_intent && command_is_shell_wrapper;
+    (force_python_no_bytecode, python_shell_launch)
+}
+
+/// Prepend the project venv's bin dir to the command's `PATH` so a shell-wrapped
+/// Python launch (`sh -c "python …"`) resolves `python` and console-script
+/// tools to the `uv sync` venv rather than the host interpreter. No-op when the
+/// venv bin dir does not exist (capsules that ship deps another way). Must be
+/// called after host isolation has rebuilt the command environment.
+///
+/// The venv is resolved against `working_dir` (the materialized project root),
+/// not the spawn's execution cwd — consistent with [`venv_python_binary`] /
+/// [`venv_tool_binary`].
+fn prepend_venv_bin_to_path(cmd: &mut Command, working_dir: &Path) {
+    let venv_bin = if cfg!(windows) {
+        working_dir.join(".venv").join("Scripts")
+    } else {
+        working_dir.join(".venv").join("bin")
+    };
+    if !venv_bin.is_dir() {
+        return;
+    }
+    // Reuse the shared PATH-prepend helper (single derivation from the inherited
+    // PATH) rather than duplicating separator/ordering logic.
+    super::node_compat::prepend_dirs_to_path(cmd, &[venv_bin.as_path()]);
+}
+
 fn venv_python_binary(working_dir: &Path) -> Option<PathBuf> {
     // POSIX: `.venv/bin/python`. Windows: `.venv/Scripts/python.exe`.
     // We probe both candidates so the same code path works on every
@@ -1933,6 +2014,44 @@ mod tests {
 
         assert!(resolved.is_absolute());
         assert!(resolved.ends_with(Path::new("tests/fixtures/native-shell-capsule/run.sh")));
+    }
+
+    #[test]
+    fn is_shell_wrapper_command_detects_posix_shell() {
+        // `run` commands with shell syntax are generated as `sh -c "<run>"`;
+        // these must be recognized so the executor does not wrap them in the
+        // Python/Node interpreter (`python sh` would fail to open file 'sh').
+        assert!(is_shell_wrapper_command("sh"));
+        assert!(is_shell_wrapper_command("/bin/sh"));
+        assert!(is_shell_wrapper_command("  sh  "));
+        assert!(is_shell_wrapper_command("sh.exe"));
+        // Real interpreter/script commands are not shell wrappers.
+        assert!(!is_shell_wrapper_command("python"));
+        assert!(!is_shell_wrapper_command("python3"));
+        assert!(!is_shell_wrapper_command("app.py"));
+        assert!(!is_shell_wrapper_command("uvicorn"));
+        assert!(!is_shell_wrapper_command("/usr/bin/python3"));
+        // Intentionally narrow: the config generator only ever emits `sh -c`
+        // (config/runtime_config.rs), never bash/dash/zsh. If that changes, this
+        // matcher must be widened or python would again be wrapped as `python bash`.
+        assert!(!is_shell_wrapper_command("bash"));
+        assert!(!is_shell_wrapper_command("/bin/bash"));
+        assert!(!is_shell_wrapper_command("zsh"));
+    }
+
+    #[test]
+    fn python_launch_modes_truth_table() {
+        // (python_intent, shell_wrapper, server_tool) -> (no_bytecode, shell_launch)
+        // Plain python file launch -> interpreter wrap.
+        assert_eq!(python_launch_modes(true, false, false), (true, false));
+        // Python run command with shell syntax (`sh -c "python …"`) -> shell
+        // launch with venv on PATH, NOT interpreter-wrapped (the #779 fix).
+        assert_eq!(python_launch_modes(true, true, false), (false, true));
+        // Python server tool (uvicorn/gunicorn) -> neither (own branch).
+        assert_eq!(python_launch_modes(true, false, true), (false, false));
+        // Non-python launches -> neither, regardless of shell wrapping.
+        assert_eq!(python_launch_modes(false, false, false), (false, false));
+        assert_eq!(python_launch_modes(false, true, false), (false, false));
     }
 
     #[test]
