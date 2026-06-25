@@ -285,7 +285,26 @@ fn detect_cuda_runtime_info(gpus: &[GpuDevice], cuda: Option<&CudaInfo>) -> Opti
     // cheap PATH probes; `provision --profile nvidia-cuda` installs the CUDA
     // toolkit (nvcc) + ninja-build. Surfaced as their own doctor rows so a green
     // doctor implies sglang can actually compile kernels.
-    let nvcc_ok = which::which("nvcc").is_ok();
+    // nvcc may live under the CUDA toolkit prefix (`/usr/local/cuda-XX/bin`, where
+    // `provision --profile nvidia-cuda` installs it and points CUDA_HOME) without
+    // being on the default PATH, so check CUDA_HOME/bin and any /usr/local/cuda*/bin
+    // in addition to PATH — otherwise a correctly-provisioned host reports FAIL.
+    let nvcc_ok = which::which("nvcc").is_ok()
+        || std::env::var("CUDA_HOME")
+            .map(|h| std::path::Path::new(&h).join("bin/nvcc").is_file())
+            .unwrap_or(false)
+        || std::fs::read_dir("/usr/local")
+            .map(|entries| {
+                entries.flatten().any(|e| {
+                    let p = e.path();
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("cuda"))
+                        .unwrap_or(false)
+                        && p.join("bin/nvcc").is_file()
+                })
+            })
+            .unwrap_or(false);
     let ninja_ok = which::which("ninja").is_ok();
     let max_gpu_vram_bytes = gpus.iter().map(|g| g.vram_bytes).max().unwrap_or(0);
 
