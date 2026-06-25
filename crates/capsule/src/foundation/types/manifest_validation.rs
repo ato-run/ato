@@ -390,15 +390,21 @@ impl CapsuleManifest {
                          (alphanumeric, `.`/`_`/`-`)"
                     )));
                 }
-                // Model is either a local `model` path OR a managed model
-                // (`model_url` + `model_sha256`, content-addressed cache).
+                // Model is one of: a local `model` path; a managed single-file
+                // model (`model_url` + `model_sha256`, content-addressed cache);
+                // or a managed Hugging Face repo (`model_repo` + `model_repo_sha256`,
+                // the multi-file analogue used by the SGLang engine; the engine
+                // enforces `model_revision`'s 40-hex format at resolve time).
                 let has_local_model = nonempty(&target.model);
                 let has_managed_model =
                     nonempty(&target.model_url) && nonempty(&target.model_sha256);
-                if !has_local_model && !has_managed_model {
+                let has_managed_repo =
+                    nonempty(&target.model_repo) && nonempty(&target.model_repo_sha256);
+                if !has_local_model && !has_managed_model && !has_managed_repo {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "target '{label}': runtime=native-inference requires either `model` \
-                         (a local file) or `model_url` + `model_sha256` (managed)"
+                         (a local file), `model_url` + `model_sha256` (a managed single file), \
+                         or `model_repo` + `model_repo_sha256` (a managed Hugging Face repo)"
                     )));
                 }
                 if let Some(url) = target.model_url.as_deref()
@@ -2016,6 +2022,20 @@ mod tests {
             "model_url = \"https://example.com/m.gguf\"\nmodel_sha256 = \"{hex}\"\n"
         ));
         assert!(r.is_ok(), "managed model should validate: {r:?}");
+    }
+
+    #[test]
+    fn native_inference_accepts_managed_repo() {
+        // A managed Hugging Face repo (`model_repo` + `model_repo_sha256`) is a
+        // valid native-inference model source — the SGLang multi-file analogue.
+        // Without it an sglang capsule fails validation and cannot `ato run`.
+        let sha = "a".repeat(64);
+        let rev = "b".repeat(40);
+        let r = validate_native_model(&format!(
+            "model_repo = \"Qwen/Qwen3-30B-A3B-GPTQ-Int4\"\n\
+             model_revision = \"{rev}\"\nmodel_repo_sha256 = \"{sha}\"\n"
+        ));
+        assert!(r.is_ok(), "managed HF repo should validate: {r:?}");
     }
 
     #[test]
