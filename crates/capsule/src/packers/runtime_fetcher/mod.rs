@@ -14,7 +14,12 @@ use tracing::{debug, info};
 
 use crate::error::{CapsuleError, Result};
 
-const DEFAULT_UV_VERSION: &str = "0.4.19";
+// uv 0.4.19 (Oct 2024) cannot resolve modern PyTorch cu128 wheels off an
+// `--extra-index-url` — its resolver rejects e.g. `torchaudio==2.9.1+cu128-cp312`
+// as having "no wheels with a matching Python implementation tag", which breaks
+// the SGLang managed-venv build. A current uv resolves it. Verified on a real
+// A6000: 0.4.19 fails the `sglang[srt]==0.5.9` resolve, 0.11.24 succeeds.
+const DEFAULT_UV_VERSION: &str = "0.11.24";
 
 struct RuntimeInstallLock {
     _file: File,
