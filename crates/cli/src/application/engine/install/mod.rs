@@ -628,11 +628,68 @@ fn is_valid_segment(value: &str) -> bool {
     !value.ends_with('-')
 }
 
+/// Path portion after the `ato.run/` host for any `https://`, `http://`,
+/// `www.`, or bare `ato.run` URL. Returns `None` when `input` is not an
+/// `ato.run` URL; other hosts (`app.ato.run`, `api.ato.run`, …) are
+/// intentionally excluded so only the public store/site host is rewritten. A
+/// path-less bare host (`ato.run`) only matches when a scheme or `www.` was
+/// present, so an ambiguous bare `ato.run` filename keeps its old meaning.
+fn ato_url_host_rest(input: &str) -> Option<&str> {
+    let trimmed = input.trim();
+    let (after_scheme, had_scheme) = match trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+    {
+        Some(rest) => (rest, true),
+        None => (trimmed, false),
+    };
+    let (after_www, had_www) = match after_scheme.strip_prefix("www.") {
+        Some(rest) => (rest, true),
+        None => (after_scheme, false),
+    };
+    if let Some(rest) = after_www.strip_prefix("ato.run/") {
+        Some(rest)
+    } else if after_www == "ato.run" && (had_scheme || had_www) {
+        Some("")
+    } else {
+        None
+    }
+}
+
+/// Whether `input` is an `ato.run` site URL in any accepted spelling.
+pub(crate) fn is_ato_site_url(input: &str) -> bool {
+    ato_url_host_rest(input).is_some()
+}
+
+/// Reduce an `ato.run` store/open URL to its canonical `publisher/slug` scoped
+/// id (unvalidated — the result is parsed by [`parse_capsule_request`]).
+///
+/// Returns `None` when `input` is not an `ato.run` URL, is the bare host, or is
+/// a share link (`/s/...`). Share links are resolved by the share runner, not
+/// the store, so they must never be mistaken for an `s/<id>` scoped id.
+pub(crate) fn strip_ato_store_url(input: &str) -> Option<String> {
+    let rest = ato_url_host_rest(input)?.trim_start_matches('/');
+    if rest == "s" || rest.starts_with("s/") {
+        return None;
+    }
+    let rest = rest.strip_prefix("open/").unwrap_or(rest).trim_matches('/');
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
 fn split_capsule_request(input: &str) -> Result<(String, Option<String>)> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         bail!("scoped_id_required: use publisher/slug (for example: koh0920/sample-capsule)");
     }
+
+    // Accept pasted store/open links: `https://ato.run/<publisher>/<slug>`,
+    // `https://ato.run/open/<publisher>/<slug>`, and bare/`www.` variants all
+    // reduce to the canonical `publisher/slug` scoped id before parsing.
+    let store_url = strip_ato_store_url(trimmed);
+    let trimmed: &str = store_url.as_deref().unwrap_or(trimmed);
 
     let normalized = trimmed.strip_prefix('@').unwrap_or(trimmed).trim();
     if normalized.is_empty() {
