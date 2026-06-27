@@ -13,6 +13,7 @@ mod egress_policy;
 mod egress_proxy;
 mod github_manifest_draft;
 mod install_lifecycle_dashboard;
+mod intent;
 mod ipc;
 mod launch_intent;
 mod localization;
