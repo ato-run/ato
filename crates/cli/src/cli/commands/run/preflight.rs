@@ -943,9 +943,20 @@ fn preflight_python_uv_binary_for_source_driver(
 
     let dep_root = dependency_root(plan);
     if resolve_python_requirements_path(&dep_root).is_some() {
+        // A requirements.txt is present. Prefer a hermetic uv from
+        // capsule.lock.json (tools.uv) when one is available — a capsule that
+        // ships pyproject.toml + uv.lock + a (vestigial) requirements.txt
+        // resolves deps from the lock and needs no system uv at run time.
+        // Only fall back to requiring `uv` on PATH for a requirements.txt-only
+        // capsule with no hermetic uv. (Previously this always demanded system
+        // uv on PATH → E104 on managed/Connected-Runner hosts that have none.)
+        if runtime_manager::ensure_uv_binary_with_authority(plan, authoritative_lock).is_ok() {
+            return Ok(());
+        }
         return which::which("uv").map(|_| ()).map_err(|_| {
             AtoExecutionError::lock_incomplete(
-                "source/python target requires uv on PATH when using requirements.txt",
+                "source/python target requires uv on PATH (or a hermetic uv in \
+                 capsule.lock.json) when using requirements.txt",
                 Some("uv"),
             )
             .into()
