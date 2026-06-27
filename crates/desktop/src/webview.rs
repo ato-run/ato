@@ -2721,12 +2721,14 @@ impl WebViewManager {
         builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
 
         // Auth cookie injection is gated on BOTH the route's store class
-        // (must be System) and the URL pattern (ato.run/dock).  The store-
-        // class gate is the hard structural guard: even if a CapsuleUrl
-        // happens to point at https://ato.run/dock, `allows_ato_auth_cookies`
-        // returns false for CapsuleEphemeral routes and cookie injection is
-        // skipped.  The URL predicate is a secondary filter that limits
-        // injection to the specific system pages that need it.
+        // (must be System) and the URL — a fixed allowlist of full web origins:
+        // the embedded PWA Home (https://app.ato.run / https://stg-app.ato.run,
+        // plus http loopback in debug) and the legacy https://ato.run/dock page.
+        // The store-class gate is the hard structural guard: even if a CapsuleUrl
+        // happens to point at one of those, `allows_ato_auth_cookies` returns
+        // false for CapsuleEphemeral routes and cookie injection is skipped. The
+        // URL predicate (`should_install_ato_auth_cookies`) is the secondary
+        // filter that limits injection to those specific system origins.
         let desktop_auth_handoff = if store_class.allows_ato_auth_cookies()
             && should_install_ato_auth_cookies(&url)
         {
@@ -3571,11 +3573,59 @@ fn target_handle_for_version(canonical_handle: &str, latest: &str) -> String {
     format!("{}@{}", base, latest)
 }
 
+/// Whether `origin` (a canonical `scheme://host[:port]` web origin) is an
+/// embedded `ato-pwa` Home origin that may receive the desktop's signed-in
+/// account cookies (so Home renders signed-in without a second login).
+///
+/// FIXED ALLOWLIST of full web origins (a web origin is scheme + host + port,
+/// not host alone): the production + staging Home origins over `https` only.
+/// Debug builds additionally allow `http` loopback (any port) for a local
+/// `vite` dev server. `http://app.ato.run`, a non-default port, or an arbitrary
+/// host are all rejected — the account session cookie is only ever handed to
+/// known Ato origins.
+fn is_pwa_home_origin(origin: &str) -> bool {
+    if matches!(origin, "https://app.ato.run" | "https://stg-app.ato.run") {
+        return true;
+    }
+    cfg!(debug_assertions) && is_loopback_http_origin(origin)
+}
+
+/// Whether `origin` is an `http` loopback origin (localhost / 127.0.0.1 / ::1,
+/// any port). Self-contained so the Home-embed change carries no dependency on
+/// the intent module.
+fn is_loopback_http_origin(origin: &str) -> bool {
+    match url::Url::parse(origin) {
+        Ok(url) => {
+            url.scheme() == "http"
+                && url.host_str().is_some_and(|host| {
+                    host == "localhost"
+                        || host == "127.0.0.1"
+                        || host == "::1"
+                        || host == "[::1]"
+                        || host.ends_with(".localhost")
+                })
+        }
+        Err(_) => false,
+    }
+}
+
 fn should_install_ato_auth_cookies(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
-    parsed.host_str() == Some("ato.run") && parsed.path().starts_with("/dock")
+    // Legacy: the in-product dock page on the marketing site (https + path-gated).
+    if parsed.scheme() == "https"
+        && parsed.host_str() == Some("ato.run")
+        && parsed.path().starts_with("/dock")
+    {
+        return true;
+    }
+    // The embedded PWA Home — match the FULL web origin (scheme + host + port),
+    // so http://app.ato.run or a non-default port never receives cookies. The
+    // store-class gate at the call site still restricts injection to System
+    // routes only.
+    let origin = parsed.origin();
+    origin.is_tuple() && is_pwa_home_origin(&origin.ascii_serialization())
 }
 
 pub(crate) fn default_api_base_url() -> String {
@@ -5465,6 +5515,33 @@ mod tests {
         ));
         assert!(!should_install_ato_auth_cookies("https://ato.run/auth"));
         assert!(!should_install_ato_auth_cookies("https://example.com/dock"));
+    }
+
+    #[test]
+    fn pwa_home_origins_install_ato_auth_cookies() {
+        // The embedded PWA Home is a root-served SPA → any path qualifies.
+        assert!(should_install_ato_auth_cookies("https://app.ato.run/"));
+        assert!(should_install_ato_auth_cookies(
+            "https://app.ato.run/#route=/runners"
+        ));
+        assert!(should_install_ato_auth_cookies("https://stg-app.ato.run/"));
+        // Cookies are gated on the FULL web origin (scheme + host + port), not
+        // host alone: a downgraded scheme or a non-default port is a different
+        // origin and must not receive the account cookie.
+        assert!(!should_install_ato_auth_cookies("http://app.ato.run/"));
+        assert!(!should_install_ato_auth_cookies("https://app.ato.run:8443/"));
+        // The legacy dock page is https-gated too.
+        assert!(should_install_ato_auth_cookies("https://ato.run/dock"));
+        assert!(!should_install_ato_auth_cookies("http://ato.run/dock"));
+        // Look-alike / unrelated hosts never receive account cookies.
+        assert!(!should_install_ato_auth_cookies("https://app.evil.example/"));
+        assert!(!should_install_ato_auth_cookies("https://notapp.ato.run/"));
+        assert!(!should_install_ato_auth_cookies("https://custom.example/"));
+        // Loopback (http, any port) is only injected into in debug builds.
+        assert_eq!(
+            should_install_ato_auth_cookies("http://localhost:5173/"),
+            cfg!(debug_assertions)
+        );
     }
 
     /// Transient/preview capsule routes (LocalManifest, Capsule) must use
