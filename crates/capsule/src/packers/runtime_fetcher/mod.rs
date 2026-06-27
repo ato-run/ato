@@ -412,12 +412,15 @@ impl RuntimeFetcher {
         show_progress: bool,
     ) -> Result<PathBuf> {
         let install_dir = self.cache_dir.join(format!("uv-{}", version));
-        if install_dir.exists() {
+        // Validate-before-reuse: a bare `exists()` reuses a corrupt or
+        // half-extracted cache entry forever (it wedges). Reuse only when a
+        // usable `uv` binary is actually present, mirroring `ensure_llamacpp`.
+        if uv_cache_is_valid(&install_dir) {
             return Ok(install_dir);
         }
 
         let _lock = self.acquire_install_lock("uv", version).await?;
-        if install_dir.exists() {
+        if uv_cache_is_valid(&install_dir) {
             return Ok(install_dir);
         }
 
@@ -463,6 +466,45 @@ impl RuntimeFetcher {
             .await?;
         self.verify_sha256_of_file(&archive_path, &sha256)?;
 
+        // Extract into a temp dir, then atomically rename it into place. An
+        // in-place extract that is interrupted leaves a half-populated
+        // `install_dir` that the validity check above would wrongly reuse;
+        // the temp-dir + rename pattern (same as the Python/Node fetchers)
+        // guarantees `install_dir` only ever appears complete.
+        let temp_dir = self
+            .cache_dir
+            .join(format!("tmp-uv-{}-{}", version, target));
+        if temp_dir.exists() {
+            fs::remove_dir_all(&temp_dir).map_err(|e| {
+                CapsuleError::Pack(format!(
+                    "Failed to reset temp uv extract directory {:?}: {}",
+                    temp_dir, e
+                ))
+            })?;
+        }
+        fs::create_dir_all(&temp_dir).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to create temp uv extract directory {:?}: {}",
+                temp_dir, e
+            ))
+        })?;
+
+        if extension == "zip" {
+            Self::extract_zip_from_file(&archive_path, &temp_dir)?;
+        } else {
+            Self::extract_archive_from_file(&archive_path, &temp_dir)?;
+        }
+
+        // Refuse to promote a directory that lacks a usable uv binary, so we
+        // never publish a cache entry the validity check would later reject.
+        if locate_runtime_binary(&temp_dir, &["uv", "uv.exe"]).is_none() {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return Err(CapsuleError::Pack(format!(
+                "uv {} archive did not contain a uv binary after extraction",
+                version
+            )));
+        }
+
         if install_dir.exists() {
             fs::remove_dir_all(&install_dir).map_err(|e| {
                 CapsuleError::Pack(format!(
@@ -471,19 +513,13 @@ impl RuntimeFetcher {
                 ))
             })?;
         }
-
-        fs::create_dir_all(&install_dir).map_err(|e| {
+        fs::rename(&temp_dir, &install_dir).map_err(|e| {
             CapsuleError::Pack(format!(
-                "Failed to create uv install directory {:?}: {}",
+                "Failed to move extracted uv runtime into cache {:?}: {}",
                 install_dir, e
             ))
         })?;
-
-        if extension == "zip" {
-            Self::extract_zip_from_file(&archive_path, &install_dir)?;
-        } else {
-            Self::extract_archive_from_file(&archive_path, &install_dir)?;
-        }
+        let _ = fs::remove_file(&archive_path);
 
         Ok(install_dir)
     }
@@ -1006,9 +1042,18 @@ pub fn locate_runtime_binary(runtime_dir: &Path, candidates: &[&str]) -> Option<
     walk(runtime_dir, candidates).ok().flatten()
 }
 
+/// True when `install_dir` holds a usable managed uv install — i.e. a
+/// `uv`/`uv.exe` binary is actually present, not merely the version directory.
+/// Used by the uv fetcher to validate-before-reuse so a corrupt or partially
+/// extracted cache entry self-heals (gets rebuilt) instead of wedging forever.
+/// Mirrors `fetcher::llamacpp_cache_is_valid`; reuses `locate_runtime_binary`.
+fn uv_cache_is_valid(install_dir: &Path) -> bool {
+    locate_runtime_binary(install_dir, &["uv", "uv.exe"]).is_some()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeFetcher, llama_cpp_platform_support};
+    use super::{RuntimeFetcher, llama_cpp_platform_support, uv_cache_is_valid};
 
     #[test]
     fn test_normalize_semverish() {
@@ -1030,5 +1075,21 @@ mod tests {
         if s.os == "macos" {
             assert!(!s.vulkan_available, "macOS has no Vulkan prebuilt");
         }
+    }
+
+    // validate-before-reuse self-heal: an empty/corrupt uv cache dir must be
+    // reported invalid (so it is rebuilt), and only a dir that actually holds
+    // a `uv` binary may be reused.
+    #[test]
+    fn uv_cache_is_valid_requires_a_uv_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        // A missing dir is invalid.
+        assert!(!uv_cache_is_valid(&dir.path().join("uv-0.0.0")));
+        // An empty (partial/corrupt) dir is invalid -> triggers self-heal.
+        assert!(!uv_cache_is_valid(dir.path()));
+        // A dir containing the uv binary is valid.
+        let bin_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+        std::fs::write(dir.path().join(bin_name), b"uv").unwrap();
+        assert!(uv_cache_is_valid(dir.path()));
     }
 }
