@@ -15,9 +15,10 @@
 //!      Unknown verbs and malformed payloads are rejected (and logged), never
 //!      forwarded.
 //!
-//! Privileged verbs (run, runner control) additionally require explicit native
-//! confirmation at *dispatch* time — that lives with the UI that emits them.
-//! This module's job is to classify and gate; it never executes.
+//! Privileged verbs (run, runner control) are accepted only from a trusted,
+//! on-origin pane; their per-verb handling (and confirmation model) lives in the
+//! dispatcher (`crate::webview::dispatch_privileged_intent`), not here. This
+//! module's job is to classify and gate; it never executes.
 
 /// Outcome of classifying an intercepted `ato://` / `capsule://` navigation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,8 +29,9 @@ pub enum IntentDecision {
     /// The original URI is carried through unchanged. Only produced for trusted
     /// origins.
     HostRoute(String),
-    /// A privileged action that must be confirmed natively before dispatch.
-    /// Only produced for trusted origins.
+    /// A privileged action (local execution / runner control). Only produced
+    /// for a trusted, on-origin pane; the dispatcher decides how to handle each
+    /// verb (see `crate::webview::dispatch_privileged_intent`).
     Privileged(PrivilegedIntent),
     /// Rejected — untrusted origin, unknown verb, or malformed payload. Carries
     /// a human-readable reason for telemetry/logging. Never acted on.
@@ -37,12 +39,12 @@ pub enum IntentDecision {
 }
 
 /// A privileged intent: it touches local execution or the runner agent and so
-/// requires a trusted origin (enforced here) plus native confirmation (enforced
-/// by the dispatcher).
+/// requires a trusted origin (enforced here). Per-verb handling lives in the
+/// dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrivilegedIntent {
-    /// `ato://run?source=<capsule-ref>[&run_id=<id>]` — run a capsule on this
-    /// device after native confirmation.
+    /// `ato://run?source=<capsule-ref>[&run_id=<id>]` — request to run a capsule
+    /// on this device.
     Run {
         source: String,
         run_id: Option<String>,
@@ -56,26 +58,43 @@ pub enum PrivilegedIntent {
     RunnerStop,
 }
 
-/// Resolve the configured PWA Home host from `ATO_APP_BASE_URL` (mirrors
-/// [`crate::config::default_app_base_url`]) so local-dev / staging / custom
-/// deploys are trusted without code changes.
-fn configured_app_host() -> Option<String> {
-    url::Url::parse(&crate::config::default_app_base_url())
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
+/// Whether `host` is loopback (local dev). Only consulted in debug builds.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".localhost")
 }
 
-/// Whether `host` is a trusted Ato origin allowed to emit intents. The
-/// production marketing site (`ato.run`, for the dock + sign-in callbacks), the
-/// production + staging PWA Home hosts, and the configured `ATO_APP_BASE_URL`
-/// host are trusted; everything else (arbitrary sites opened in a WebView pane)
-/// is not.
+/// Whether `host` is a trusted Ato origin allowed to emit intents.
+///
+/// The set is a **fixed allowlist** — the production marketing site (`ato.run`,
+/// for the dock + sign-in callbacks) and the production + staging PWA Home hosts.
+/// Debug builds additionally trust loopback so a local `vite` dev server works.
+/// An arbitrary `ATO_APP_BASE_URL` host is deliberately **not** trusted in
+/// release builds: the Home may be pointed elsewhere, but only known Ato origins
+/// may drive privileged local behaviour.
 pub fn is_trusted_intent_origin(host: &str) -> bool {
     if host.is_empty() {
         return false;
     }
-    matches!(host, "ato.run" | "app.ato.run" | "stg-app.ato.run")
-        || configured_app_host().as_deref() == Some(host)
+    if matches!(host, "ato.run" | "app.ato.run" | "stg-app.ato.run") {
+        return true;
+    }
+    cfg!(debug_assertions) && is_loopback_host(host)
+}
+
+/// Whether navigating to `target_uri` leaves `pane_host` (a different-host
+/// http(s) top-level navigation). Used to invalidate intent-trust for a Home
+/// pane that has navigated off its trusted origin — so a page loaded *after*
+/// such a navigation can no longer emit trusted intents. Non-http(s) targets
+/// (e.g. the `ato://` intents themselves) never count as leaving.
+pub fn is_cross_origin_navigation(pane_host: &str, target_uri: &str) -> bool {
+    if !(target_uri.starts_with("http://") || target_uri.starts_with("https://")) {
+        return false;
+    }
+    match url::Url::parse(target_uri) {
+        Ok(target) => target.host_str().unwrap_or_default() != pane_host,
+        // Unparseable http(s) → treat as leaving (fail safe).
+        Err(_) => true,
+    }
 }
 
 /// Classify an intercepted custom-scheme navigation emitted by the pane at
@@ -170,13 +189,51 @@ mod tests {
     const UNTRUSTED: &str = "evil.example";
 
     #[test]
-    fn trusted_origins_are_recognized() {
+    fn trusted_origins_are_a_fixed_allowlist() {
         assert!(is_trusted_intent_origin("app.ato.run"));
         assert!(is_trusted_intent_origin("stg-app.ato.run"));
         assert!(is_trusted_intent_origin("ato.run"));
         assert!(!is_trusted_intent_origin("notapp.ato.run"));
         assert!(!is_trusted_intent_origin("app.evil.example"));
         assert!(!is_trusted_intent_origin(""));
+        // An arbitrary host is never trusted — even if it were configured as the
+        // Home base URL. Only the fixed allowlist (+ loopback in debug) qualifies.
+        assert!(!is_trusted_intent_origin("custom.example"));
+    }
+
+    #[test]
+    fn loopback_is_trusted_only_in_debug_builds() {
+        // Tests run in debug builds, so loopback is trusted here; the production
+        // guard is `cfg!(debug_assertions)` in `is_trusted_intent_origin`.
+        assert_eq!(
+            is_trusted_intent_origin("localhost"),
+            cfg!(debug_assertions)
+        );
+        assert_eq!(
+            is_trusted_intent_origin("127.0.0.1"),
+            cfg!(debug_assertions)
+        );
+    }
+
+    #[test]
+    fn cross_origin_navigation_detected_by_host() {
+        assert!(!is_cross_origin_navigation(
+            "app.ato.run",
+            "https://app.ato.run/#route=/runners"
+        ));
+        assert!(is_cross_origin_navigation(
+            "app.ato.run",
+            "https://evil.example/"
+        ));
+        // Non-http(s) (the intents themselves) never count as leaving.
+        assert!(!is_cross_origin_navigation(
+            "app.ato.run",
+            "ato://runner/start"
+        ));
+        assert!(!is_cross_origin_navigation(
+            "app.ato.run",
+            "capsule://ato.run/a/b"
+        ));
     }
 
     #[test]

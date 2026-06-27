@@ -63,7 +63,6 @@ pub use control_bar::{
     install_control_bar_controller, open_focus_control_bar, set_control_bar_mode, show_control_bar,
     toggle_control_bar,
 };
-pub use home::open_home_window;
 pub use orchestrator::open_app_window;
 
 pub(crate) fn stop_session_once_with_ui_completion(cx: &mut gpui::App, session_id: &str) {
