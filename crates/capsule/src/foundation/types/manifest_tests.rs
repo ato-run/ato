@@ -2065,7 +2065,7 @@ kind = "filesystem"
 durability = "persistent"
 purpose = "shared-uploads"
 attach = "explicit"
-schema_id = "sha256:app-uploads-v1"
+schema_id = "sha256:01b9e271e89123e18ad6774ed59f11eb5582b2674d7e92bb566b36595891c6e1"
 
 [services.main]
 target = "app"
@@ -2106,6 +2106,90 @@ target = "/app/storage"
 }
 
 #[test]
+fn persistent_state_rejects_malformed_sha256_schema_id() {
+    // A `sha256:`-prefixed schema_id that is not a real 64-hex digest passes
+    // `ato lock` today but is rejected at RUN time with E999. Fail closed at
+    // validation instead (the immich demo hit this with `sha256:immich-pgdata-v1`).
+    let toml = r#"
+schema_version = "0.3"
+name = "bad-schema-id"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "demo state"
+attach = "explicit"
+schema_id = "sha256:not-a-real-hash"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            ValidationError::InvalidState(_, message) if message.contains("sha256:<64")
+        )),
+        "expected a schema_id format error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn persistent_state_accepts_alias_schema_id() {
+    // A schema_id WITHOUT the `sha256:` prefix is a registry alias resolved at
+    // runtime — it must not be format-rejected at validation time.
+    let toml = r#"
+schema_version = "0.3"
+name = "alias-schema-id"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "demo state"
+attach = "explicit"
+schema_id = "my-app-state-v1"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    if let Err(errors) = manifest.validate() {
+        assert!(
+            !errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidState(_, message) if message.contains("sha256:<64")
+            )),
+            "alias schema_id must not be format-rejected, got: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn explicit_same_capsule_sharing_allows_multiple_writers() {
     let toml = r#"
 schema_version = "0.3"
@@ -2129,7 +2213,7 @@ kind = "filesystem"
 durability = "persistent"
 purpose = "shared-uploads"
 attach = "explicit"
-schema_id = "sha256:app-uploads-v1"
+schema_id = "sha256:01b9e271e89123e18ad6774ed59f11eb5582b2674d7e92bb566b36595891c6e1"
 sharing = "same-capsule"
 
 [services.main]
@@ -2348,7 +2432,7 @@ kind = "filesystem"
 durability = "persistent"
 purpose = "shared-uploads"
 attach = "explicit"
-schema_id = "sha256:app-uploads-v1"
+schema_id = "sha256:01b9e271e89123e18ad6774ed59f11eb5582b2674d7e92bb566b36595891c6e1"
 sharing = "same-capsule"
 
 [services.main]

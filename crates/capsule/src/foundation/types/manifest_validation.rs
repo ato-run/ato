@@ -1179,17 +1179,35 @@ impl CapsuleManifest {
                             "persistent state requires attach=\"explicit\"".to_string(),
                         ));
                     }
-                    if requirement
+                    match requirement
                         .schema_id
                         .as_deref()
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
-                        .is_none()
                     {
-                        errors.push(ValidationError::InvalidState(
+                        None => errors.push(ValidationError::InvalidState(
                             state_name.clone(),
                             "persistent state requires schema_id".to_string(),
-                        ));
+                        )),
+                        // A `sha256:`-prefixed schema_id must be a real 64-hex
+                        // digest. A placeholder like `sha256:immich-pgdata-v1`
+                        // passes `ato lock` but is rejected at RUN time with E999
+                        // "Schema hash has invalid format" (schema_registry::
+                        // validate_sha256_hash). Fail closed here instead. Values
+                        // without the `sha256:` prefix are registry aliases,
+                        // resolved at runtime, so they are not format-checked.
+                        Some(schema_id) => {
+                            if let Some(hex) = schema_id.strip_prefix("sha256:")
+                                && !is_valid_sha256(hex)
+                            {
+                                errors.push(ValidationError::InvalidState(
+                                    state_name.clone(),
+                                    format!(
+                                        "schema_id '{schema_id}' must be sha256:<64 hex chars>"
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
             }
