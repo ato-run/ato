@@ -24,6 +24,7 @@ mod proc_util;
 mod pwa_home;
 mod retention;
 mod runtime_control_client;
+mod runtime_intent;
 mod runtime_setup;
 mod secret_bridge;
 mod settings;

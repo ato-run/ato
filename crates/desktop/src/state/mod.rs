@@ -2360,6 +2360,40 @@ impl AppState {
             return;
         }
 
+        // ato://runtime/<verb>/<id> — runtime-control intents emitted by the
+        // embedded PWA (the only party allowed to reach this is a trusted PWA
+        // origin; the WebView navigation handler drops untrusted ones before
+        // they are queued). We strictly validate the verb + payload here and
+        // reject anything malformed or unknown. Privileged verbs (stop / run)
+        // require native confirmation before execution and are surfaced for that
+        // step; `open` is non-privileged (the PWA can also open its own session
+        // URL directly).
+        if crate::runtime_intent::is_runtime_intent_url(raw_route) {
+            match crate::runtime_intent::parse_runtime_intent(raw_route) {
+                Ok(intent) => {
+                    let needs_confirm = intent.requires_confirmation();
+                    self.push_activity(
+                        ActivityTone::Info,
+                        if needs_confirm {
+                            format!(
+                                "Runtime intent '{}' received — awaiting native confirmation",
+                                intent.verb()
+                            )
+                        } else {
+                            format!("Runtime intent '{}' received", intent.verb())
+                        },
+                    );
+                }
+                Err(err) => {
+                    self.push_activity(
+                        ActivityTone::Warning,
+                        format!("Rejected runtime intent {raw_route}: {err:?}"),
+                    );
+                }
+            }
+            return;
+        }
+
         // ato://open?handle=<percent-encoded-capsule-handle>
         // Lets external callers (browser, share menu, CLI) open a capsule in the desktop.
         if raw_route.starts_with("ato://open") {

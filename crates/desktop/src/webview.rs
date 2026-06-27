@@ -2683,17 +2683,36 @@ impl WebViewManager {
         }
 
         // For external URLs, intercept navigations that require browser-side auth.
-        if let GuestRoute::ExternalUrl(_) = &pane.route {
+        if let GuestRoute::ExternalUrl(pane_url) = &pane.route {
             let pane_binding = pane_binding.clone();
             let signals = self.pending_auth_handoffs.clone();
             let callback_queue = self.pending_callback_urls.clone();
             let auth_flow = pane.auth_flow;
+            // Origin of the page driving this WebView — used to gate privileged
+            // runtime intents (ato://runtime/...) at the boundary.
+            let pane_origin = pane_url.origin().ascii_serialization();
             builder = builder.with_navigation_handler(move |uri: String| {
                 // ato:// deep links arrive here when ato.run finishes
                 // an in-app OAuth flow and redirects to the desktop
                 // callback. WKWebView cannot load custom schemes, so
                 // we capture them and route via handle_host_route.
                 if uri.starts_with("ato://") || uri.starts_with("capsule://") {
+                    // Privileged runtime-control intents are only honored from a
+                    // trusted PWA origin. Drop them from any other embedded page
+                    // so an untrusted site cannot drive local sessions. OAuth /
+                    // capsule callbacks are unaffected.
+                    if crate::runtime_intent::is_runtime_intent_url(&uri)
+                        && !crate::runtime_intent::is_trusted_intent_origin(
+                            Some(pane_origin.as_str()),
+                            cfg!(debug_assertions),
+                        )
+                    {
+                        tracing::warn!(
+                            origin = %pane_origin,
+                            "dropping ato://runtime intent from untrusted origin"
+                        );
+                        return false;
+                    }
                     if let Ok(mut q) = callback_queue.lock() {
                         q.push(uri);
                     }
