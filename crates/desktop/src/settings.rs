@@ -527,6 +527,7 @@ fn parse_startup_surface(v: &str) -> Option<StartupSurface> {
     match v {
         "store" => Some(StartupSurface::Store),
         "start" => Some(StartupSurface::Start),
+        "home" => Some(StartupSurface::Home),
         "blank" => Some(StartupSurface::Blank),
         "restore-last" => Some(StartupSurface::RestoreLast),
         _ => None,
