@@ -24,6 +24,7 @@ pub mod dock;
 pub mod focus_dispatcher;
 pub mod focus_guest_panes;
 pub mod gestures;
+pub mod home;
 pub mod import_window;
 pub mod launch_window;
 pub mod webview_paste;
@@ -62,6 +63,7 @@ pub use control_bar::{
     install_control_bar_controller, open_focus_control_bar, set_control_bar_mode, show_control_bar,
     toggle_control_bar,
 };
+pub use home::open_home_window;
 pub use orchestrator::open_app_window;
 
 pub(crate) fn stop_session_once_with_ui_completion(cx: &mut gpui::App, session_id: &str) {
@@ -160,6 +162,10 @@ pub fn open_configured_startup_surface(
     startup_surface: crate::config::StartupSurface,
 ) -> anyhow::Result<()> {
     match startup_surface {
+        crate::config::StartupSurface::Home => {
+            home::open_home_window(cx)?;
+            Ok(())
+        }
         crate::config::StartupSurface::Start => {
             start_window::open_start_window(cx)?;
             Ok(())
@@ -193,6 +199,9 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// Mark the process as shutting down. Idempotent.
 pub fn begin_shutdown() {
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Foreground-only Connected Runner: terminate `ato runner serve` so the
+    // device does not linger online after the Desktop exits.
+    crate::runner_agent::shutdown();
 }
 
 /// True once [`begin_shutdown`] has been called.
