@@ -2173,6 +2173,40 @@ fn test_parse_capsule_request_strips_pasted_ato_store_urls() {
 }
 
 #[test]
+fn test_ato_share_url_detection_and_canonicalization() {
+    // Share-link detection across spellings (store refs are NOT share links).
+    assert!(is_ato_share_url("https://ato.run/s/abc"));
+    assert!(is_ato_share_url("ato.run/s/abc"));
+    assert!(is_ato_share_url("www.ato.run/s/abc"));
+    assert!(!is_ato_share_url("https://ato.run/koh0920/sample-capsule"));
+    assert!(!is_ato_share_url("https://ato.run/open/koh0920/sample-capsule"));
+    assert!(!is_ato_share_url("github.com/koh0920/repo"));
+
+    // Every spelling canonicalizes to the scheme-qualified share URL the share
+    // runner can parse — this is what lets bare `ato run ato.run/s/<id>` work.
+    for raw in [
+        "https://ato.run/s/abc",
+        "http://ato.run/s/abc",
+        "www.ato.run/s/abc",
+        "ato.run/s/abc",
+    ] {
+        assert_eq!(
+            canonical_ato_share_url(raw).as_deref(),
+            Some("https://ato.run/s/abc"),
+            "'{raw}' should canonicalize to https://ato.run/s/abc",
+        );
+    }
+    // Revision suffixes survive; non-share / id-less inputs yield None.
+    assert_eq!(
+        canonical_ato_share_url("ato.run/s/abc@r3").as_deref(),
+        Some("https://ato.run/s/abc@r3"),
+    );
+    assert!(canonical_ato_share_url("ato.run/s").is_none());
+    assert!(canonical_ato_share_url("https://ato.run/koh0920/sample-capsule").is_none());
+    assert!(canonical_ato_share_url("github.com/koh0920/repo").is_none());
+}
+
+#[test]
 fn test_normalize_github_repository_accepts_url_host_path_and_owner_repo() {
     assert_eq!(
         normalize_github_repository("https://github.com/Koh0920/ato-cli.git").unwrap(),

@@ -679,6 +679,36 @@ pub(crate) fn strip_ato_store_url(input: &str) -> Option<String> {
     Some(rest.to_string())
 }
 
+/// Whether `input` is an `ato.run` **share** link (`/s/<id>`) in any spelling.
+/// Share links are executed by the share runner, not resolved as store capsules.
+pub(crate) fn is_ato_share_url(input: &str) -> bool {
+    match ato_url_host_rest(input) {
+        Some(rest) => {
+            let rest = rest.trim_start_matches('/');
+            rest == "s" || rest.starts_with("s/")
+        }
+        None => false,
+    }
+}
+
+/// Canonicalize an `ato.run` share link to the scheme-qualified
+/// `https://ato.run/s/<id>` form the share runner can parse, collapsing the
+/// bare-host and `www.` spellings. Returns `None` for non-share inputs or a
+/// share path with no id.
+///
+/// `ato run ato.run/s/<id>` (no scheme) otherwise misses
+/// `share::looks_like_share_run_input` — which requires a scheme — and falls
+/// through to capsule resolution; normalizing here lets every share-link
+/// spelling reach the share runner consistently.
+pub(crate) fn canonical_ato_share_url(input: &str) -> Option<String> {
+    let rest = ato_url_host_rest(input)?.trim_start_matches('/');
+    let id = rest.strip_prefix("s/")?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(format!("https://ato.run/s/{id}"))
+}
+
 fn split_capsule_request(input: &str) -> Result<(String, Option<String>)> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
