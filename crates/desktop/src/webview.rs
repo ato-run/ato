@@ -2683,19 +2683,87 @@ impl WebViewManager {
         }
 
         // For external URLs, intercept navigations that require browser-side auth.
-        if let GuestRoute::ExternalUrl(_) = &pane.route {
+        if let GuestRoute::ExternalUrl(pane_url) = &pane.route {
             let pane_binding = pane_binding.clone();
             let signals = self.pending_auth_handoffs.clone();
             let callback_queue = self.pending_callback_urls.clone();
             let auth_flow = pane.auth_flow;
+            // The pane's canonical web origin (scheme + host + port). The P0
+            // trust boundary keys off this full origin, NOT host alone.
+            let pane_origin = pane_url.origin().ascii_serialization();
+            // Whether this pane is the embedded PWA Home (vs the dock or an
+            // arbitrary external site). Only the Home pane is pinned to its
+            // origin (cross-origin top-level navigation is blocked below).
+            let is_home_pane = is_pwa_home_origin(&pane_origin);
+            // Defense-in-depth: track navigation off the trusted origin so an
+            // off-origin page cannot emit trusted intents even if the block
+            // below is somehow bypassed. Not the primary boundary.
+            let navigated_off_origin =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             builder = builder.with_navigation_handler(move |uri: String| {
-                // ato:// deep links arrive here when ato.run finishes
-                // an in-app OAuth flow and redirects to the desktop
-                // callback. WKWebView cannot load custom schemes, so
-                // we capture them and route via handle_host_route.
+                // The embedded Home pane is PINNED to its trusted origin: block
+                // cross-origin top-level navigation and hand the link to the
+                // system browser. This is the primary guarantee that a page on
+                // another origin can never run inside — and therefore speak for
+                // — the Home pane. Sign-in panes are exempt (they legitimately
+                // round-trip through external OAuth origins).
+                if uri.starts_with("http://") || uri.starts_with("https://") {
+                    let nav = crate::intent::classify_top_level_navigation(
+                        &pane_origin,
+                        &uri,
+                        is_home_pane,
+                        auth_flow,
+                    );
+                    // A blocked navigation never leaves the Home origin, so it
+                    // must NOT downgrade trust (otherwise one external-link click
+                    // would poison subsequent ato:// intents from the still-
+                    // loaded Home page). Only allowed navigations record it.
+                    navigated_off_origin.store(nav.navigated_off, Ordering::Relaxed);
+                    if nav.block {
+                        tracing::info!(
+                            origin = %pane_origin,
+                            %uri,
+                            "home: blocked cross-origin top-level navigation; opening in system browser"
+                        );
+                        let _ = crate::proc_util::open_external_url(&uri);
+                        return false;
+                    }
+                }
+                // ato:// / capsule:// deep links arrive here when an Ato web
+                // surface navigates to a custom scheme. WKWebView cannot load
+                // these, so we capture them — but first classify + origin-gate
+                // every one (see `crate::intent`). Untrusted origins and
+                // unknown/malformed verbs are rejected and logged, never acted
+                // on.
                 if uri.starts_with("ato://") || uri.starts_with("capsule://") {
-                    if let Ok(mut q) = callback_queue.lock() {
-                        q.push(uri);
+                    // Defense-in-depth: if a non-auth pane somehow navigated
+                    // off-origin, treat it as untrusted regardless of its
+                    // initial URL.
+                    let effective_origin =
+                        if !auth_flow && navigated_off_origin.load(Ordering::Relaxed) {
+                            ""
+                        } else {
+                            pane_origin.as_str()
+                        };
+                    match crate::intent::classify(effective_origin, &uri) {
+                        crate::intent::IntentDecision::HostRoute(route) => {
+                            if let Ok(mut q) = callback_queue.lock() {
+                                q.push(route);
+                            }
+                        }
+                        crate::intent::IntentDecision::Privileged(intent) => {
+                            // Recognized + origin-accepted. Dispatch (and any
+                            // confirmation) is wired in the follow-up dispatch
+                            // change; here we only record acceptance.
+                            tracing::info!(
+                                origin = %pane_origin,
+                                ?intent,
+                                "intent: privileged intent recognized (dispatch lands in the dispatch PR)"
+                            );
+                        }
+                        crate::intent::IntentDecision::Reject(reason) => {
+                            tracing::warn!(origin = %pane_origin, %uri, %reason, "intent: rejected");
+                        }
                     }
                     return false;
                 }
