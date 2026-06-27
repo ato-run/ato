@@ -16,19 +16,42 @@ use serde::{Deserialize, Serialize};
 /// HTTP client for the `ato serve` Runtime Control API.
 pub(crate) struct RuntimeControlClient {
     base_url: String,
+    /// Desktop-scoped bearer token for privileged calls (launch/stop). The
+    /// hardened Runtime Control plane fails closed without a token, so the
+    /// write methods attach it when present. `None` keeps the read-only
+    /// base-URL behavior used by callers that only need `base_url()`.
+    token: Option<String>,
 }
 
 impl RuntimeControlClient {
-    /// Construct a client pointing at `http://127.0.0.1:<port>`.
+    /// Construct a read-only client pointing at `http://127.0.0.1:<port>`.
+    ///
+    /// Use [`RuntimeControlClient::with_token`] for launch/stop — the hardened
+    /// Runtime Control API now requires a bearer token for those.
     pub(crate) fn new(port: u16) -> Self {
         Self {
             base_url: format!("http://127.0.0.1:{port}"),
+            token: None,
+        }
+    }
+
+    /// Construct a client that authenticates privileged calls with the
+    /// Desktop-scoped Runtime Control token.
+    pub(crate) fn with_token(port: u16, token: &str) -> Self {
+        Self {
+            base_url: format!("http://127.0.0.1:{port}"),
+            token: Some(token.to_string()),
         }
     }
 
     /// The base URL for direct JS fetch calls (e.g. for SSE log streaming).
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Bearer header value, when a token is configured.
+    fn bearer(&self) -> Option<String> {
+        self.token.as_ref().map(|t| format!("Bearer {t}"))
     }
 
     /// `POST /v1/runtime/sessions` — launch a session for an installed profile.
@@ -46,8 +69,11 @@ impl RuntimeControlClient {
         };
         let url = format!("{}/v1/runtime/sessions", self.base_url);
         let body_value = serde_json::to_value(&body).context("serialise LaunchSessionRequest")?;
-        let response = ureq::post(&url)
-            .set("Content-Type", "application/json")
+        let mut request = ureq::post(&url).set("Content-Type", "application/json");
+        if let Some(bearer) = self.bearer() {
+            request = request.set("Authorization", &bearer);
+        }
+        let response = request
             .send_json(body_value)
             .map_err(|err| match err {
                 ureq::Error::Status(status, resp) => {
@@ -73,7 +99,11 @@ impl RuntimeControlClient {
     /// Returns `Ok(())` on success (204) and on 404 (session already gone).
     pub(crate) fn stop_session(&self, session_id: &str) -> Result<()> {
         let url = format!("{}/v1/runtime/sessions/{session_id}", self.base_url);
-        match ureq::delete(&url).call() {
+        let mut request = ureq::delete(&url);
+        if let Some(bearer) = self.bearer() {
+            request = request.set("Authorization", &bearer);
+        }
+        match request.call() {
             Ok(_) => Ok(()),
             Err(ureq::Error::Status(404, _)) => {
                 tracing::debug!(session_id, "stop_session: session already gone (404)");

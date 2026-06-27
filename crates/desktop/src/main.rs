@@ -21,6 +21,7 @@ mod net_client;
 mod netd;
 mod orchestrator;
 mod proc_util;
+mod pwa_home;
 mod retention;
 mod runtime_control_client;
 mod runtime_setup;

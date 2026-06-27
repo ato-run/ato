@@ -815,8 +815,11 @@ pub fn dispatch(
                 let label = target_label.clone();
                 let result = be
                     .spawn(async move {
-                        crate::runtime_control_client::RuntimeControlClient::new(port)
-                            .launch_session(&key, label.as_deref())
+                        crate::runtime_control_client::RuntimeControlClient::with_token(
+                            port,
+                            crate::pwa_home::runtime_control_token(),
+                        )
+                        .launch_session(&key, label.as_deref())
                     })
                     .await;
 
@@ -867,8 +870,11 @@ pub fn dispatch(
                 .unwrap_or_else(crate::config::default_local_registry_port);
 
             be.spawn(async move {
-                let result = crate::runtime_control_client::RuntimeControlClient::new(port)
-                    .stop_session(&session_id);
+                let result = crate::runtime_control_client::RuntimeControlClient::with_token(
+                    port,
+                    crate::pwa_home::runtime_control_token(),
+                )
+                .stop_session(&session_id);
                 match result {
                     Ok(()) => tracing::info!(
                         session_id = %session_id,

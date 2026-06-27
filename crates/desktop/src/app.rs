@@ -1340,8 +1340,10 @@ pub fn run(skip_onboarding: bool) {
                 cx,
                 std::time::Duration::from_millis(50),
                 |cx| {
-                    if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                        tracing::error!(error = %err, "failed to open start window");
+                    // Home surface: embeds the PWA when ATO_PWA_HOME_ENABLED is
+                    // set, otherwise the native Start window (unchanged default).
+                    if let Err(err) = crate::pwa_home::open_home(cx) {
+                        tracing::error!(error = %err, "failed to open home surface");
                     }
                 },
             );
@@ -1470,16 +1472,19 @@ fn reopen_start_or_quit(cx: &mut App) {
         {
             return;
         }
-        match crate::window::start_window::open_start_window(cx) {
+        // Reopen the Home surface as the landing window. `open_home` embeds the
+        // PWA when ATO_PWA_HOME_ENABLED is set and falls back to the native
+        // Start window on failure, so this path always yields a landing window.
+        match crate::pwa_home::open_home(cx) {
             Ok(()) => {
                 tracing::info!(
-                    "last content window closed — reopened Start capsule as landing surface"
+                    "last content window closed — reopened Home as landing surface"
                 );
             }
             Err(err) => {
                 tracing::error!(
                     error = %err,
-                    "failed to reopen Start capsule after last window closed; only the Control Bar remains — quitting as abnormal"
+                    "failed to reopen Home after last window closed; only the Control Bar remains — quitting as abnormal"
                 );
                 crate::window::begin_shutdown();
                 cx.quit();
