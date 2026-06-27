@@ -75,6 +75,13 @@ pub(super) struct RuntimeSessionResponse {
     pub(super) session: PlacedSessionSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) local_runtime_url: Option<String>,
+    /// Canonical catalog handle (`publisher/slug`) for this session, when
+    /// known. This is the shared cross-layer identity anchor the PWA uses to
+    /// join a local Desktop session to its app card (`capsule_scoped_id`).
+    /// It is deliberately the only identity beyond `install_profile_key` we
+    /// surface — no filesystem paths, secrets, or raw logs are included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) capsule_handle: Option<String>,
 }
 
 pub(super) async fn handle_runtime_providers(
@@ -232,7 +239,12 @@ pub(super) async fn handle_runtime_session_logs(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ProcessLogsQuery>,
 ) -> impl IntoResponse {
-    if let Err(err) = validate_read_auth(&headers, state.auth_token.as_deref()) {
+    // Raw session logs may contain secrets, absolute paths, and other
+    // sensitive runtime detail, so they are a PRIVILEGED operation: a control
+    // token is required and the endpoint fails closed when none is configured.
+    // The tokenless sanitized observe path (`GET /v1/runtime/sessions`) never
+    // returns log content, and the embedded PWA does not fetch logs.
+    if let Err(err) = validate_runtime_privileged_auth(&headers, state.auth_token.as_deref()) {
         return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
     }
 
@@ -363,6 +375,18 @@ pub(super) fn runtime_session_summary(
     let local_runtime_url = process
         .requested_port
         .map(|port| format!("http://127.0.0.1:{port}"));
+    // Canonical `publisher/slug` handle for the PWA card join. Prefer the
+    // stored record's canonical handle, then its raw handle, then the
+    // process's `scoped_id`. All three are public catalog identity — never a
+    // filesystem path or secret.
+    let capsule_handle = stored
+        .and_then(|record| {
+            record
+                .canonical_handle
+                .clone()
+                .or_else(|| Some(record.handle.clone()))
+        })
+        .or_else(|| process.scoped_id.clone());
     RuntimeSessionResponse {
         session: PlacedSessionSummary {
             session_id: process.id,
@@ -382,6 +406,7 @@ pub(super) fn runtime_session_summary(
                 .or(process.target_label),
         },
         local_runtime_url,
+        capsule_handle,
     }
 }
 
@@ -450,7 +475,7 @@ pub(super) async fn handle_runtime_launch_session(
     headers: HeaderMap,
     Json(request): Json<LaunchSessionRequest>,
 ) -> impl IntoResponse {
-    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+    if let Err(err) = validate_runtime_privileged_auth(&headers, state.auth_token.as_deref()) {
         return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
     }
 
@@ -664,7 +689,7 @@ pub(super) async fn handle_runtime_stop_session_post(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+    if let Err(err) = validate_runtime_privileged_auth(&headers, state.auth_token.as_deref()) {
         return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
     }
 
@@ -739,7 +764,7 @@ pub(super) async fn handle_runtime_stop_session(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+    if let Err(err) = validate_runtime_privileged_auth(&headers, state.auth_token.as_deref()) {
         return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
     }
 
@@ -957,7 +982,7 @@ pub(super) async fn handle_runtime_add_capsule(
     headers: HeaderMap,
     Json(request): Json<AddCapsuleRequest>,
 ) -> impl IntoResponse {
-    if let Err(err) = validate_write_auth(&headers, state.auth_token.as_deref()) {
+    if let Err(err) = validate_runtime_privileged_auth(&headers, state.auth_token.as_deref()) {
         return json_error(StatusCode::UNAUTHORIZED, "unauthorized", &err);
     }
 

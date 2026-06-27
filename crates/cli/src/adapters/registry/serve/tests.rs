@@ -619,6 +619,82 @@ fn constant_time_token_eq_handles_length_mismatch() {
 }
 
 #[test]
+fn validate_runtime_privileged_auth_fails_closed_without_token() {
+    // No token configured ⇒ even a request with no/any Authorization header
+    // is rejected. This is the core hardening: tokenless loopback serving must
+    // NOT leave launch/stop/logs unauthenticated.
+    let empty = HeaderMap::new();
+    assert!(validate_runtime_privileged_auth(&empty, None).is_err());
+    assert!(validate_runtime_privileged_auth(&empty, Some("   ")).is_err());
+    let with_bearer = bearer_headers("anything");
+    assert!(validate_runtime_privileged_auth(&with_bearer, None).is_err());
+}
+
+#[test]
+fn validate_runtime_privileged_auth_requires_matching_bearer_token() {
+    let headers = bearer_headers("secret-token");
+    assert!(validate_runtime_privileged_auth(&headers, Some("secret-token")).is_ok());
+    assert!(validate_runtime_privileged_auth(&headers, Some("wrong-token")).is_err());
+    // Token configured but request omits the header ⇒ rejected.
+    let empty = HeaderMap::new();
+    assert!(validate_runtime_privileged_auth(&empty, Some("secret-token")).is_err());
+}
+
+#[test]
+fn runtime_session_summary_excludes_sensitive_paths_logs_and_pid() {
+    use crate::runtime::process::{ProcessInfo, ProcessStatus};
+    // A process carrying sensitive filesystem detail and an error string.
+    let process = ProcessInfo {
+        id: "sess_abc".to_string(),
+        name: "demo".to_string(),
+        pid: 4242,
+        workload_pid: Some(4243),
+        status: ProcessStatus::Running,
+        runtime: "native".to_string(),
+        start_time: std::time::SystemTime::UNIX_EPOCH,
+        os_start_time_unix_ms: None,
+        workload_os_start_time_unix_ms: None,
+        manifest_path: Some(std::path::PathBuf::from(
+            "/Users/secret/.ato/SENSITIVE_MANIFEST_PATH/capsule.toml",
+        )),
+        scoped_id: Some("community/hello-capsule".to_string()),
+        target_label: Some("web".to_string()),
+        requested_port: Some(8420),
+        log_path: Some(std::path::PathBuf::from(
+            "/Users/secret/.ato/SENSITIVE_LOG_PATH/run.log",
+        )),
+        ready_at: None,
+        last_event: None,
+        last_error: Some("SENSITIVE_ERROR_DETAIL".to_string()),
+        exit_code: None,
+    };
+
+    let summary = runtime_session_summary(process, None);
+    let json = serde_json::to_string(&summary).expect("serialize summary");
+
+    // Sensitive values must never appear in the embedded read path.
+    assert!(
+        !json.contains("SENSITIVE_MANIFEST_PATH"),
+        "manifest path leaked"
+    );
+    assert!(!json.contains("SENSITIVE_LOG_PATH"), "log path leaked");
+    assert!(
+        !json.contains("SENSITIVE_ERROR_DETAIL"),
+        "error detail leaked"
+    );
+    assert!(!json.contains("manifest_path"), "manifest_path key present");
+    assert!(!json.contains("log_path"), "log_path key present");
+    assert!(!json.contains("\"pid\""), "pid leaked");
+
+    // Safe identity + the loopback URL are present; capsule_handle falls back
+    // to the process scoped_id so the PWA can join to its app card.
+    assert!(json.contains("sess_abc"));
+    assert!(json.contains("http://127.0.0.1:8420"));
+    assert!(json.contains("community/hello-capsule"));
+    assert!(json.contains("capsule_handle"));
+}
+
+#[test]
 fn resolve_public_base_url_uses_host_header() {
     let mut headers = HeaderMap::new();
     headers.insert(header::HOST, "100.64.0.10:8787".parse().unwrap());
@@ -1383,10 +1459,12 @@ async fn runtime_stop_post_rejects_wrong_token() {
 async fn runtime_stop_post_unknown_session_returns_404() {
     let _lock = env_lock().lock().unwrap();
     let _ato_home = AtoHomeGuard::set("stop-post-unknown");
-    let state = registry_test_state(None);
+    // Privileged endpoint: configure a token and present it so the handler
+    // reaches its 404 logic instead of failing closed at auth.
+    let state = registry_test_state(Some("test-token"));
     let response = handle_runtime_stop_session_post(
         State(state),
-        HeaderMap::new(),
+        bearer_headers("test-token"),
         AxumPath("nonexistent-session-id".to_string()),
     )
     .await
@@ -1394,14 +1472,75 @@ async fn runtime_stop_post_unknown_session_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// ─── Runtime control plane fail-closed contract (handler level) ───────────────
+// These prove the embedded-PWA safety hardening: privileged runtime endpoints
+// reject every request when no control token is configured, even with no auth
+// header. The sanitized read path (GET sessions) is exercised elsewhere.
+
 #[tokio::test(flavor = "current_thread")]
-async fn runtime_launch_empty_key_returns_400() {
-    let _lock = env_lock().lock().unwrap();
-    let _ato_home = AtoHomeGuard::set("launch-empty-key");
+async fn runtime_launch_without_token_fails_closed() {
     let state = registry_test_state(None);
     let response = handle_runtime_launch_session(
         State(state),
         HeaderMap::new(),
+        Json(LaunchSessionRequest {
+            install_profile_key: "ipk_anything::default".to_string(),
+            target_label: None,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_stop_post_without_token_fails_closed() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_stop_session_post(
+        State(state),
+        HeaderMap::new(),
+        AxumPath("any-session".to_string()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_session_logs_without_token_fails_closed() {
+    let state = registry_test_state(None);
+    let response = handle_runtime_session_logs(
+        State(state),
+        HeaderMap::new(),
+        AxumPath("any-session".to_string()),
+        Query(ProcessLogsQuery { tail: None }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_sessions_read_path_allowed_without_token() {
+    // The sanitized observe path stays reachable without a token (CORS-gated):
+    // hardening must not break read-only session listing.
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("sessions-read-no-token");
+    let state = registry_test_state(None);
+    let response = handle_runtime_sessions(State(state), HeaderMap::new())
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_launch_empty_key_returns_400() {
+    let _lock = env_lock().lock().unwrap();
+    let _ato_home = AtoHomeGuard::set("launch-empty-key");
+    let state = registry_test_state(Some("test-token"));
+    let response = handle_runtime_launch_session(
+        State(state),
+        bearer_headers("test-token"),
         Json(LaunchSessionRequest {
             install_profile_key: "".to_string(),
             target_label: None,
@@ -1416,10 +1555,10 @@ async fn runtime_launch_empty_key_returns_400() {
 async fn runtime_launch_unknown_key_returns_404() {
     let _lock = env_lock().lock().unwrap();
     let _ato_home = AtoHomeGuard::set("launch-unknown-key");
-    let state = registry_test_state(None);
+    let state = registry_test_state(Some("test-token"));
     let response = handle_runtime_launch_session(
         State(state),
-        HeaderMap::new(),
+        bearer_headers("test-token"),
         Json(LaunchSessionRequest {
             install_profile_key: "nonexistent::default".to_string(),
             target_label: None,
@@ -1516,10 +1655,10 @@ async fn runtime_launch_non_default_profile_returns_501() {
         .as_str()
         .to_string();
 
-    let state = registry_test_state(None);
+    let state = registry_test_state(Some("test-token"));
     let response = handle_runtime_launch_session(
         State(state),
-        HeaderMap::new(),
+        bearer_headers("test-token"),
         Json(LaunchSessionRequest {
             install_profile_key: ipk,
             target_label: None,
@@ -1564,8 +1703,10 @@ async fn runtime_session_logs_sse_streams_beyond_channel_capacity() {
     let log_content: String = (0..600).map(|i| format!("line {i}\n")).collect();
     std::fs::write(&log_path, log_content).expect("write log");
 
-    let state = registry_test_state(None);
-    let mut headers = HeaderMap::new();
+    // Logs are a privileged endpoint now (raw logs may contain secrets/paths):
+    // configure a token and present it alongside the SSE Accept header.
+    let state = registry_test_state(Some("test-token"));
+    let mut headers = bearer_headers("test-token");
     headers.insert(ACCEPT, "text/event-stream".parse().unwrap());
     let response = handle_runtime_session_logs(
         State(state),
@@ -1823,10 +1964,10 @@ async fn runtime_add_capsule_rejects_wrong_token() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_add_capsule_empty_source_returns_400() {
-    let state = registry_test_state(None);
+    let state = registry_test_state(Some("test-token"));
     let response = handle_runtime_add_capsule(
         State(state),
-        HeaderMap::new(),
+        bearer_headers("test-token"),
         Json(AddCapsuleRequest {
             source: "".to_string(),
             profile_id: None,
@@ -1844,10 +1985,10 @@ async fn runtime_add_capsule_empty_source_returns_400() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_add_capsule_rejects_unsafe_scheme() {
-    let state = registry_test_state(None);
+    let state = registry_test_state(Some("test-token"));
     let response = handle_runtime_add_capsule(
         State(state),
-        HeaderMap::new(),
+        bearer_headers("test-token"),
         Json(AddCapsuleRequest {
             source: "javascript:alert(1)".to_string(),
             profile_id: None,
@@ -1865,10 +2006,10 @@ async fn runtime_add_capsule_rejects_unsafe_scheme() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_add_capsule_non_default_profile_returns_501() {
-    let state = registry_test_state(None);
+    let state = registry_test_state(Some("test-token"));
     let response = handle_runtime_add_capsule(
         State(state),
-        HeaderMap::new(),
+        bearer_headers("test-token"),
         Json(AddCapsuleRequest {
             source: "koh0920/adminer".to_string(),
             profile_id: Some("gpu".to_string()),
