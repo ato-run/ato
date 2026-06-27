@@ -24,6 +24,7 @@ pub mod dock;
 pub mod focus_dispatcher;
 pub mod focus_guest_panes;
 pub mod gestures;
+pub mod home;
 pub mod import_window;
 pub mod launch_window;
 pub mod webview_paste;
@@ -160,6 +161,10 @@ pub fn open_configured_startup_surface(
     startup_surface: crate::config::StartupSurface,
 ) -> anyhow::Result<()> {
     match startup_surface {
+        crate::config::StartupSurface::Home => {
+            home::open_home_window(cx)?;
+            Ok(())
+        }
         crate::config::StartupSurface::Start => {
             start_window::open_start_window(cx)?;
             Ok(())
