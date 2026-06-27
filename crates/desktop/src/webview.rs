@@ -166,6 +166,13 @@ pub struct WebViewManager {
     /// so OAuth callbacks delivered via the in-app sign-in flow
     /// reach the same code path as macOS Launch Services callbacks.
     pending_callback_urls: Arc<Mutex<Vec<String>>>,
+    /// Privileged `ato://` intents (run, runner control) classified + origin-
+    /// accepted by `crate::intent` in a navigation handler. Drained on the next
+    /// `sync_from_state` pass (which has `cx`) and dispatched there. Kept
+    /// separate from `pending_callback_urls` because these touch local execution
+    /// / the runner agent and must never be forwarded to the origin-agnostic
+    /// `handle_host_route` path.
+    pending_privileged_intents: Arc<Mutex<Vec<crate::intent::PrivilegedIntent>>>,
     /// Live PTY sessions keyed by session_id.
     terminal_sessions: HashMap<String, Box<dyn TerminalCore>>,
     /// Session IDs that have already exited — prevents re-spawning a shell after a share terminal ends.
@@ -466,6 +473,7 @@ impl WebViewManager {
             visibility_cache: HashMap::new(),
             pending_auth_handoffs: Arc::new(Mutex::new(Vec::new())),
             pending_callback_urls: Arc::new(Mutex::new(Vec::new())),
+            pending_privileged_intents: Arc::new(Mutex::new(Vec::new())),
             terminal_sessions: HashMap::new(),
             completed_terminal_sessions: HashSet::new(),
             pending_terminal_errors: HashMap::new(),
@@ -567,6 +575,22 @@ impl WebViewManager {
         };
         for url in callback_urls {
             state.handle_host_route(&url);
+        }
+
+        // Drain privileged intents (run, runner control) that `crate::intent`
+        // classified + origin-accepted in a navigation handler. Dispatched here
+        // (where `state` is available) — never through the origin-agnostic
+        // host-route path. Runner control reuses `crate::runner_agent`: the
+        // Desktop performs the privileged local CLI spawn.
+        let privileged: Vec<crate::intent::PrivilegedIntent> = {
+            let mut q = self
+                .pending_privileged_intents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            q.drain(..).collect()
+        };
+        for intent in privileged {
+            dispatch_privileged_intent(state, intent);
         }
 
         // Drain auth handoff signals from navigation handlers before any other reconciliation.
@@ -2687,6 +2711,13 @@ impl WebViewManager {
             let pane_binding = pane_binding.clone();
             let signals = self.pending_auth_handoffs.clone();
             let callback_queue = self.pending_callback_urls.clone();
+            let privileged_queue = self.pending_privileged_intents.clone();
+            // Used to wake the window after enqueueing a privileged intent, so
+            // it is dispatched on the next sync rather than waiting for the next
+            // natural render (the custom-scheme navigation is blocked, so no
+            // page-load event fires).
+            let intent_async_app = self.async_app.clone();
+            let intent_window_handle = self.window_handle;
             let auth_flow = pane.auth_flow;
             // The pane's canonical web origin (scheme + host + port). The P0
             // trust boundary keys off this full origin, NOT host alone.
@@ -2752,14 +2783,23 @@ impl WebViewManager {
                             }
                         }
                         crate::intent::IntentDecision::Privileged(intent) => {
-                            // Recognized + origin-accepted. Dispatch (and any
-                            // confirmation) is wired in the follow-up dispatch
-                            // change; here we only record acceptance.
+                            // Recognized + origin-accepted from a trusted,
+                            // on-origin pane. Queue for the next sync_from_state
+                            // pass (which has `cx`), where it is dispatched —
+                            // NOT forwarded to the origin-agnostic host-route
+                            // path.
                             tracing::info!(
                                 origin = %pane_origin,
                                 ?intent,
-                                "intent: privileged intent recognized (dispatch lands in the dispatch PR)"
+                                "intent: privileged intent accepted"
                             );
+                            if let Ok(mut q) = privileged_queue.lock() {
+                                q.push(intent);
+                            }
+                            // Wake the window so the queued intent is dispatched
+                            // promptly (no page-load event fires for a blocked
+                            // custom-scheme navigation).
+                            notify_window(intent_async_app.clone(), intent_window_handle);
                         }
                         crate::intent::IntentDecision::Reject(reason) => {
                             tracing::warn!(origin = %pane_origin, %uri, %reason, "intent: rejected");
@@ -3639,6 +3679,73 @@ fn target_handle_for_version(canonical_handle: &str, latest: &str) -> String {
         None => canonical_handle,
     };
     format!("{}@{}", base, latest)
+}
+
+/// Dispatch a privileged `ato://` intent. The intent has already been
+/// origin-validated by `crate::intent` AND confirmed to come from a trusted,
+/// on-origin pane (the navigation-handler gate) — an arbitrary or off-origin web
+/// page cannot reach here.
+///
+/// Confirmation model per verb (no separate modal yet):
+///   - `runner/register` → `ato runner login` opens a browser device-flow; the
+///     operator's sign-in there IS the explicit authorization.
+///   - `runner/start` / `runner/stop` → toggle the local `ato runner serve`
+///     agent. First-party-origin-gated (only the trusted Ato Home can reach
+///     them) and recorded in the activity log so they are never silent; an
+///     explicit confirm dialog is a follow-up.
+///   - `run` → acknowledged in the activity log only. The full
+///     run-capsule-on-this-device path (store-ref resolution + a native pre-run
+///     confirmation) is a follow-up.
+fn dispatch_privileged_intent(state: &mut AppState, intent: crate::intent::PrivilegedIntent) {
+    use crate::intent::PrivilegedIntent;
+    use crate::runner_agent::RunnerStatus;
+    use crate::state::ActivityTone;
+
+    match intent {
+        PrivilegedIntent::RunnerRegister => {
+            // `register()` only launches a browser device-flow when not already
+            // registered / in progress (see runner_agent). Keep the activity
+            // message honest about what actually happened.
+            let status = crate::runner_agent::register();
+            let (tone, message) = match &status {
+                RunnerStatus::Registering => (
+                    ActivityTone::Info,
+                    "Connected Runner: registration started — authorize in your browser".to_string(),
+                ),
+                RunnerStatus::Error(_) => {
+                    (ActivityTone::Warning, format!("Connected Runner: {}", status.label()))
+                }
+                // Already registered (Serving / Stopped) → no browser flow began.
+                _ => (ActivityTone::Info, format!("Connected Runner: {}", status.label())),
+            };
+            state.push_activity(tone, message);
+        }
+        PrivilegedIntent::RunnerStart => {
+            let status = crate::runner_agent::start();
+            let tone = if matches!(status, RunnerStatus::Error(_)) {
+                ActivityTone::Warning
+            } else {
+                ActivityTone::Info
+            };
+            state.push_activity(tone, format!("Connected Runner: {}", status.label()));
+        }
+        PrivilegedIntent::RunnerStop => {
+            let status = crate::runner_agent::stop();
+            state.push_activity(
+                ActivityTone::Info,
+                format!("Connected Runner: {}", status.label()),
+            );
+        }
+        PrivilegedIntent::Run { source, run_id } => {
+            let detail = run_id.map(|id| format!(" (run {id})")).unwrap_or_default();
+            state.push_activity(
+                ActivityTone::Info,
+                format!(
+                    "Run requested for {source}{detail}. Open it from Discover to run on this device."
+                ),
+            );
+        }
+    }
 }
 
 /// Whether `origin` (a canonical `scheme://host[:port]` web origin) is an
