@@ -673,18 +673,33 @@ impl ProcessManager {
     }
 
     fn stop_process_tree(&self, info: &ProcessInfo, force: bool) -> Result<bool> {
+        // Reap the WHOLE process group, not just the leader pid. A plain
+        // background `ato run` spawns its server as a group leader
+        // (`cmd.process_group(0)`), so a forking server (uvicorn + its worker
+        // forks, npm → node, …) leaves orphaned children holding the
+        // configured port if we only signal the positive leader pid — the next
+        // `ato run` then fails to bind or gets a false-positive readiness from
+        // the orphan. `terminate_pgroup_with_escalation` signals the negative
+        // pid (SIGTERM → grace → SIGKILL) and falls back to the pid alone when
+        // the process is not a group leader (ESRCH/EPERM), so it is strictly
+        // safer than the old positive-pid `terminate_process`. The escalation
+        // also handles servers that trap SIGTERM (e.g. uvicorn lifespan hooks).
+        // Mirrors the orphan-reap path in `stop_dependency_session` (#121).
+        let grace = if force {
+            Duration::from_millis(0)
+        } else {
+            Duration::from_secs(3)
+        };
         let mut stopped = false;
-        if is_process_alive(info.pid)
-            && process_identity_matches(info)
-            && terminate_process(info.pid, force)?
-        {
+        if is_process_alive(info.pid) && process_identity_matches(info) {
+            terminate_pgroup_with_escalation(info.pid, grace);
             wait_for_process_exit(info.pid, 10)?;
             stopped = true;
         }
         if let Some(workload_pid) = info.workload_pid
             && is_process_alive(workload_pid)
-            && terminate_process(workload_pid, force)?
         {
+            terminate_pgroup_with_escalation(workload_pid, grace);
             wait_for_process_exit(workload_pid, 10)?;
             stopped = true;
         }
@@ -1840,10 +1855,19 @@ fn parse_unix_ps_process_line(line: &str) -> Option<UnixPsProcess> {
 }
 #[cfg(not(unix))]
 fn terminate_pgroup_with_escalation(pid: i32, _term_grace: Duration) {
-    // Windows: no process-group concept that maps cleanly. Fall back
-    // to terminating the pid; consumer subtrees on Windows are taken
-    // care of by Job Objects elsewhere.
-    let _ = terminate_process(pid, true);
+    #[cfg(windows)]
+    {
+        // Windows has no POSIX process group, but `taskkill /T` reaps the
+        // whole child tree rooted at `pid` (the same subtree a uvicorn/npm
+        // server forks). Use it so `ato stop` doesn't orphan worker forks
+        // holding the port — the cross-platform analogue of the unix
+        // negative-pid group kill.
+        let _ = terminate_windows_process_tree(pid, true);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = terminate_process(pid, true);
+    }
 }
 
 fn terminate_process(pid: i32, force: bool) -> Result<bool> {
@@ -2548,6 +2572,98 @@ mod tests {
         assert!(stopped);
         let _ = workload.wait().expect("wait workload");
         assert!(!pm.pid_file_path("capsule-workload").exists());
+    }
+
+    /// Regression for the `ato stop` orphan-child bug: a forking server
+    /// (uvicorn worker forks, npm → node, …) is spawned as a process-group
+    /// leader, so stopping it must reap the WHOLE group, not just the leader
+    /// pid. Before the fix `stop_process_tree` signalled only the positive
+    /// leader pid and left the forked child holding the port.
+    #[cfg(unix)]
+    #[test]
+    fn stop_process_tree_reaps_forked_child_in_group() {
+        use std::os::unix::process::CommandExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("create run dir");
+        let pm = ProcessManager { run_dir };
+
+        // Parent shell becomes its own group leader (`process_group(0)`) and
+        // forks a long-lived child into the SAME group (sh has job control off
+        // when non-interactive, so `&` does not move it to a new group). The
+        // child records its pid so the test can assert the group kill reaped it.
+        let child_pid_file = tmp.path().join("child.pid");
+        let script = format!(
+            "sleep 300 & echo $! > {} ; wait",
+            child_pid_file.display()
+        );
+        let mut parent = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .process_group(0)
+            .spawn()
+            .expect("spawn parent group leader");
+        let parent_pid = parent.id() as i32;
+
+        let mut child_pid = None;
+        for _ in 0..100 {
+            if let Ok(text) = fs::read_to_string(&child_pid_file)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                child_pid = Some(pid);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let child_pid = child_pid.expect("child recorded its pid");
+        assert!(
+            is_process_alive(child_pid),
+            "forked child must be alive before stop"
+        );
+
+        // Drive the stop through the workload-pid branch (pid: 0 skips the
+        // identity-checked leader branch), exactly like the prior test.
+        let info = ProcessInfo {
+            id: "group-capsule".to_string(),
+            name: "demo".to_string(),
+            pid: 0,
+            workload_pid: Some(parent_pid),
+            status: ProcessStatus::Ready,
+            runtime: "nacelle".to_string(),
+            start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
+            manifest_path: None,
+            scoped_id: None,
+            target_label: Some("app".to_string()),
+            requested_port: None,
+            log_path: None,
+            ready_at: Some(SystemTime::UNIX_EPOCH),
+            last_event: Some("ready".to_string()),
+            last_error: None,
+            exit_code: None,
+        };
+        pm.write_pid(&info).expect("write pid");
+
+        let stopped = pm.stop_process("group-capsule", true).expect("stop");
+        assert!(stopped, "stop must report the group as stopped");
+
+        for _ in 0..100 {
+            if !is_process_alive(parent_pid) && !is_process_alive(child_pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = parent.wait();
+        assert!(
+            !is_process_alive(parent_pid),
+            "group leader must be reaped"
+        );
+        assert!(
+            !is_process_alive(child_pid),
+            "forked child must be reaped by the group kill (orphan-child regression)"
+        );
     }
 
     #[cfg(unix)]
