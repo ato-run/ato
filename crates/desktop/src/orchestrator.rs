@@ -1987,6 +1987,89 @@ pub(crate) fn spawn_installed_launch(install_profile_key: &str) -> Result<Instal
     Ok(InstalledLaunchChild { child, log_path })
 }
 
+/// A managed `ato runner` child (login or serve) plus the log file its stdio is
+/// redirected to. Foreground-only (beta): the Desktop owns the `serve` child and
+/// terminates it on stop / shutdown, so the Connected Runner is online only
+/// while Desktop is running.
+pub(crate) struct RunnerChild {
+    pub child: std::process::Child,
+    pub log_path: PathBuf,
+}
+
+/// Spawn `ato runner serve` as a managed background child using the same helper
+/// plumbing (`ATO_HOME` + runtime opt-out + no-console + own process group) as
+/// every other Desktop→CLI subprocess. The serve loop runs for the Desktop's
+/// lifetime, so stdio is redirected to a log file; the caller polls the child
+/// for liveness and terminates the whole group via
+/// [`crate::window::launch_window::kill_installed_launch_process_group`] on stop
+/// / shutdown. The runner token is owned by the CLI
+/// (`~/.ato/runner/credentials.json`); the Desktop never reads it.
+pub(crate) fn spawn_runner_serve() -> Result<RunnerChild> {
+    spawn_runner_command(
+        &["runner", "serve"],
+        &runner_serve_log_path(),
+        "ato runner serve",
+    )
+}
+
+/// Spawn `ato runner login` (device-flow; opens the system browser for the
+/// operator to authorize). On success the CLI registers this host and writes the
+/// runner token to `~/.ato/runner/credentials.json`. The display name defaults
+/// to the hostname (the CLI's default). stdio is redirected to a log file so the
+/// device-code URL is captured for diagnostics; the caller polls the child for
+/// completion (exit 0 = registered).
+pub(crate) fn spawn_runner_login() -> Result<RunnerChild> {
+    spawn_runner_command(
+        &["runner", "login"],
+        &runner_login_log_path(),
+        "ato runner login",
+    )
+}
+
+fn spawn_runner_command(args: &[&str], log_path: &Path, context: &str) -> Result<RunnerChild> {
+    let ato_bin = resolve_ato_binary()?;
+    let mut cmd = ato_helper_command(&ato_bin);
+    cmd.args(args);
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let stdout = std::fs::File::create(log_path)
+        .with_context(|| format!("create {context} log {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("clone {context} log handle"))?;
+    cmd.stdout(Stdio::from(stdout));
+    cmd.stderr(Stdio::from(stderr));
+    // Own process-group leader so the Desktop can reap the whole agent (and any
+    // sandboxed runs it spawns) with one group-directed signal — mirrors
+    // `spawn_installed_launch`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn().with_context(|| format!("spawn `{context}`"))?;
+    Ok(RunnerChild {
+        child,
+        log_path: log_path.to_path_buf(),
+    })
+}
+
+/// Local path of the runner token written by `ato runner login`. Mirrors the
+/// CLI (`ato_path_or_workspace_tmp("runner/credentials.json")`) so the Desktop
+/// can detect registration without ever reading the token value.
+pub(crate) fn runner_credentials_path() -> PathBuf {
+    capsule::common::paths::ato_path_or_workspace_tmp("runner/credentials.json")
+}
+
+fn runner_serve_log_path() -> PathBuf {
+    capsule::common::paths::ato_path_or_workspace_tmp("logs").join("runner-serve.log")
+}
+
+fn runner_login_log_path() -> PathBuf {
+    capsule::common::paths::ato_path_or_workspace_tmp("logs").join("runner-login.log")
+}
+
 fn installed_launch_log_path(install_profile_key: &str) -> PathBuf {
     let safe: String = install_profile_key
         .chars()
