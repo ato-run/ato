@@ -2001,6 +2001,31 @@ fn extract_digest_from_ref(declared_ref: &str) -> Option<String> {
         .map(|pos| declared_ref[pos + 1..].to_string())
 }
 
+/// Fully-qualify a bare Docker Hub short-ref (mirrors Docker/containers ref
+/// normalization). The first path component is a registry only when it contains
+/// `.` or `:`, or is `localhost`; otherwise the ref lives on `docker.io`, and a
+/// single-name image (no `/`) gets the implicit `library/` namespace. Refs that
+/// already name a registry (`ghcr.io/...`, `host:port/...`, `localhost/...`) are
+/// returned unchanged. This lets a capsule declare `image = "frooodle/s-pdf:tag"`
+/// without `podman manifest inspect` failing to resolve it (E999). Applied where a
+/// manifest's declared OCI image is read for resolution (currently the
+/// `oci_multi_service` executor — the primary [targets.*] runtime=oci path) so the
+/// qualified ref flows through resolve + the digest-pinned pull. The compose /
+/// install.sh import resolvers read `svc.image_ref` and can adopt this helper next.
+pub(crate) fn normalize_oci_image_ref(declared_ref: &str) -> String {
+    let trimmed = declared_ref.trim();
+    let first = trimmed.split('/').next().unwrap_or("");
+    let has_registry = trimmed.contains('/')
+        && (first.contains('.') || first.contains(':') || first == "localhost");
+    if trimmed.is_empty() || has_registry {
+        trimmed.to_string()
+    } else if trimmed.contains('/') {
+        format!("docker.io/{trimmed}")
+    } else {
+        format!("docker.io/library/{trimmed}")
+    }
+}
+
 /// Auto-select a platform for the current host when no `requested_platform`
 /// was specified.  Podman containers always run Linux, so OS is always
 /// `linux`; architecture is mapped from the Rust `ARCH` constant.
@@ -4313,6 +4338,37 @@ mod tests {
         ));
         assert!(is_permission_denied("Access is denied (OS error 5)"));
         assert!(!is_permission_denied("connection refused"));
+    }
+
+    #[test]
+    fn normalize_oci_image_ref_qualifies_bare_docker_hub_refs() {
+        // bare single-name → docker.io/library/...
+        assert_eq!(
+            normalize_oci_image_ref("postgres:16"),
+            "docker.io/library/postgres:16"
+        );
+        // bare user/name → docker.io/...
+        assert_eq!(
+            normalize_oci_image_ref("frooodle/s-pdf:2.11.0"),
+            "docker.io/frooodle/s-pdf:2.11.0"
+        );
+        // already-qualified refs are returned unchanged
+        assert_eq!(
+            normalize_oci_image_ref("docker.io/frooodle/s-pdf:2.11.0"),
+            "docker.io/frooodle/s-pdf:2.11.0"
+        );
+        assert_eq!(
+            normalize_oci_image_ref("ghcr.io/immich-app/immich-server:v2.7.5"),
+            "ghcr.io/immich-app/immich-server:v2.7.5"
+        );
+        assert_eq!(
+            normalize_oci_image_ref("registry:5000/team/app:tag"),
+            "registry:5000/team/app:tag"
+        );
+        assert_eq!(
+            normalize_oci_image_ref("localhost/dev:latest"),
+            "localhost/dev:latest"
+        );
     }
 
     #[test]

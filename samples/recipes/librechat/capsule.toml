@@ -16,7 +16,8 @@ port = 27017
 runtime = "oci"
 image = "ghcr.io/danny-avila/librechat:v0.7.8"
 port = 3080
-env = { MONGO_URI = "mongodb://localhost:27017/LibreChat", JWT_SECRET = "changeme-demo-secret", JWT_REFRESH_SECRET = "changeme-refresh-secret", CREDS_KEY = "changeme-creds-key-32chars-padded", CREDS_IV = "changeme-creds-iv" }
+# Multi-container: the app reaches MongoDB via the `db` target's DNS name, not localhost.
+env = { MONGO_URI = "mongodb://db:27017/LibreChat", JWT_SECRET = "changeme-demo-secret", JWT_REFRESH_SECRET = "changeme-refresh-secret", CREDS_KEY = "changeme-creds-key-32chars-padded", CREDS_IV = "changeme-creds-iv" }
 depends_on = ["db"]
 
 [state.db-data]
@@ -25,6 +26,12 @@ durability = "persistent"
 purpose = "MongoDB data"
 attach = "explicit"
 schema_id = "sha256:librechat-mongodb-v1"
+
+# MongoDB must run as its own service for the db-data binding below to mount and
+# for the app (depends_on = ["db"]) to connect. Without this the volume is never
+# attached and MongoDB never starts.
+[services.db]
+target = "db"
 
 [services.main]
 target = "app"

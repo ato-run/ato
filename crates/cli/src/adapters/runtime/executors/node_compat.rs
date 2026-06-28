@@ -741,7 +741,7 @@ fn prepend_managed_node_to_path(cmd: &mut Command, node_bin: &Path) {
 /// ahead of the inherited environment. A single call so multiple prepends do
 /// not clobber each other (each derives from the *inherited* `PATH`, not the
 /// value a prior call set on `cmd`).
-fn prepend_dirs_to_path(cmd: &mut Command, dirs: &[&Path]) {
+pub(crate) fn prepend_dirs_to_path(cmd: &mut Command, dirs: &[&Path]) {
     #[cfg(windows)]
     let separator = ";";
     #[cfg(not(windows))]
