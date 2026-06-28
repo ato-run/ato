@@ -59,4 +59,3 @@ service_target = "db"
 [[services.main.state_bindings]]
 state = "storage"
 target = "/var/lib/outline/data"
-service_target = "app"

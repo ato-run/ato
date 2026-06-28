@@ -14,7 +14,12 @@ use tracing::{debug, info};
 
 use crate::error::{CapsuleError, Result};
 
-const DEFAULT_UV_VERSION: &str = "0.4.19";
+// uv 0.4.19 (Oct 2024) cannot resolve modern PyTorch cu128 wheels off an
+// `--extra-index-url` — its resolver rejects e.g. `torchaudio==2.9.1+cu128-cp312`
+// as having "no wheels with a matching Python implementation tag", which breaks
+// the SGLang managed-venv build. A current uv resolves it. Verified on a real
+// A6000: 0.4.19 fails the `sglang[srt]==0.5.9` resolve, 0.11.24 succeeds.
+const DEFAULT_UV_VERSION: &str = "0.11.24";
 
 struct RuntimeInstallLock {
     _file: File,
@@ -24,6 +29,10 @@ mod fetcher;
 mod verifier;
 
 pub(crate) use fetcher::llamacpp_cache_key;
+// `sglang_venv_python` is re-exported `pub` (not `pub(crate)`) so the CLI's
+// `nvidia-cuda` doctor can probe the managed venv at the SAME canonical path the
+// launcher resolves — they must never disagree on where the venv python lives.
+pub use fetcher::sglang_venv_python;
 pub use verifier::{ArtifactVerifier, ChecksumVerifier};
 
 /// Whether this host has managed llama.cpp prebuilts for the native-inference
@@ -105,8 +114,11 @@ impl RuntimeFetcher {
             "node" | "nodejs" => Some("node"),
             "deno" => Some("deno"),
             "bun" => Some("bun"),
-            "llamacpp" | "llama.cpp" | "llama-cpp" => Some("llamacpp"),
-            _ => None,
+            // Native-inference engines: the engine-string → toolchain-key mapping
+            // is owned by `EngineId` (the single source of the engine vocabulary)
+            // so a fetcher key never drifts from the launcher's dispatch.
+            other => crate::routing::native_inference::EngineId::from_manifest(other)
+                .map(|id| id.toolchain_key()),
         }
     }
 
@@ -313,6 +325,47 @@ impl RuntimeFetcher {
         Ok(server_bin)
     }
 
+    /// Create (if needed) a managed Python venv for the pinned SGLang `version`
+    /// (the sglang wheel version, e.g. `"0.4.10.post2"`) and `pip install` the
+    /// pinned sglang + torch (cu124) + sgl-kernel/flashinfer requirements, then
+    /// run an `import sglang` smoke as a post-condition. Returns the canonical
+    /// venv python path `<cache>/sglang-<version>/bin/python[.exe]` — the exact
+    /// path the launcher resolves as the server command. Used by the SGLang
+    /// native-inference engine ensure-step.
+    ///
+    /// The venv install runs on any Linux+NVIDIA host; the `import sglang` smoke
+    /// requires the CUDA toolchain/kernels to load, so it only passes on a real
+    /// CUDA host (host-pending) — but the command is real, not stubbed.
+    pub async fn ensure_sglang(&self, version: &str) -> Result<PathBuf> {
+        let runtime_dir = self
+            .download_runtime_with_progress("sglang", version, true)
+            .await?;
+        let python = fetcher::sglang_venv_python(&runtime_dir);
+        if !python.is_file() {
+            return Err(CapsuleError::Pack(format!(
+                "sglang {version}: venv python missing at {python:?} after install"
+            )));
+        }
+        // Smoke: the venv must be able to import sglang (proves the install +
+        // its CUDA kernels resolve). On a non-CUDA host this fails honestly
+        // rather than reporting a usable engine.
+        let output = tokio::process::Command::new(&python)
+            .args(["-c", "import sglang"])
+            .output()
+            .await
+            .map_err(|e| CapsuleError::Pack(format!("sglang import smoke: failed to run {python:?}: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CapsuleError::Pack(format!(
+                "sglang {version}: `import sglang` failed in the managed venv \
+                 (CUDA toolchain/kernels required): {}",
+                stderr.trim()
+            )));
+        }
+        info!("sglang {} ready at {:?}", version, python);
+        Ok(python)
+    }
+
     pub async fn ensure_uv(&self, version: Option<&str>) -> Result<PathBuf> {
         let version = version.unwrap_or(DEFAULT_UV_VERSION);
         let runtime_dir = self.download_uv_tool_with_progress(version, true).await?;
@@ -359,12 +412,15 @@ impl RuntimeFetcher {
         show_progress: bool,
     ) -> Result<PathBuf> {
         let install_dir = self.cache_dir.join(format!("uv-{}", version));
-        if install_dir.exists() {
+        // Validate-before-reuse: a bare `exists()` reuses a corrupt or
+        // half-extracted cache entry forever (it wedges). Reuse only when a
+        // usable `uv` binary is actually present, mirroring `ensure_llamacpp`.
+        if uv_cache_is_valid(&install_dir) {
             return Ok(install_dir);
         }
 
         let _lock = self.acquire_install_lock("uv", version).await?;
-        if install_dir.exists() {
+        if uv_cache_is_valid(&install_dir) {
             return Ok(install_dir);
         }
 
@@ -410,6 +466,45 @@ impl RuntimeFetcher {
             .await?;
         self.verify_sha256_of_file(&archive_path, &sha256)?;
 
+        // Extract into a temp dir, then atomically rename it into place. An
+        // in-place extract that is interrupted leaves a half-populated
+        // `install_dir` that the validity check above would wrongly reuse;
+        // the temp-dir + rename pattern (same as the Python/Node fetchers)
+        // guarantees `install_dir` only ever appears complete.
+        let temp_dir = self
+            .cache_dir
+            .join(format!("tmp-uv-{}-{}", version, target));
+        if temp_dir.exists() {
+            fs::remove_dir_all(&temp_dir).map_err(|e| {
+                CapsuleError::Pack(format!(
+                    "Failed to reset temp uv extract directory {:?}: {}",
+                    temp_dir, e
+                ))
+            })?;
+        }
+        fs::create_dir_all(&temp_dir).map_err(|e| {
+            CapsuleError::Pack(format!(
+                "Failed to create temp uv extract directory {:?}: {}",
+                temp_dir, e
+            ))
+        })?;
+
+        if extension == "zip" {
+            Self::extract_zip_from_file(&archive_path, &temp_dir)?;
+        } else {
+            Self::extract_archive_from_file(&archive_path, &temp_dir)?;
+        }
+
+        // Refuse to promote a directory that lacks a usable uv binary, so we
+        // never publish a cache entry the validity check would later reject.
+        if locate_runtime_binary(&temp_dir, &["uv", "uv.exe"]).is_none() {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return Err(CapsuleError::Pack(format!(
+                "uv {} archive did not contain a uv binary after extraction",
+                version
+            )));
+        }
+
         if install_dir.exists() {
             fs::remove_dir_all(&install_dir).map_err(|e| {
                 CapsuleError::Pack(format!(
@@ -418,19 +513,13 @@ impl RuntimeFetcher {
                 ))
             })?;
         }
-
-        fs::create_dir_all(&install_dir).map_err(|e| {
+        fs::rename(&temp_dir, &install_dir).map_err(|e| {
             CapsuleError::Pack(format!(
-                "Failed to create uv install directory {:?}: {}",
+                "Failed to move extracted uv runtime into cache {:?}: {}",
                 install_dir, e
             ))
         })?;
-
-        if extension == "zip" {
-            Self::extract_zip_from_file(&archive_path, &install_dir)?;
-        } else {
-            Self::extract_archive_from_file(&archive_path, &install_dir)?;
-        }
+        let _ = fs::remove_file(&archive_path);
 
         Ok(install_dir)
     }
@@ -953,9 +1042,18 @@ pub fn locate_runtime_binary(runtime_dir: &Path, candidates: &[&str]) -> Option<
     walk(runtime_dir, candidates).ok().flatten()
 }
 
+/// True when `install_dir` holds a usable managed uv install — i.e. a
+/// `uv`/`uv.exe` binary is actually present, not merely the version directory.
+/// Used by the uv fetcher to validate-before-reuse so a corrupt or partially
+/// extracted cache entry self-heals (gets rebuilt) instead of wedging forever.
+/// Mirrors `fetcher::llamacpp_cache_is_valid`; reuses `locate_runtime_binary`.
+fn uv_cache_is_valid(install_dir: &Path) -> bool {
+    locate_runtime_binary(install_dir, &["uv", "uv.exe"]).is_some()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeFetcher, llama_cpp_platform_support};
+    use super::{RuntimeFetcher, llama_cpp_platform_support, uv_cache_is_valid};
 
     #[test]
     fn test_normalize_semverish() {
@@ -977,5 +1075,21 @@ mod tests {
         if s.os == "macos" {
             assert!(!s.vulkan_available, "macOS has no Vulkan prebuilt");
         }
+    }
+
+    // validate-before-reuse self-heal: an empty/corrupt uv cache dir must be
+    // reported invalid (so it is rebuilt), and only a dir that actually holds
+    // a `uv` binary may be reused.
+    #[test]
+    fn uv_cache_is_valid_requires_a_uv_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        // A missing dir is invalid.
+        assert!(!uv_cache_is_valid(&dir.path().join("uv-0.0.0")));
+        // An empty (partial/corrupt) dir is invalid -> triggers self-heal.
+        assert!(!uv_cache_is_valid(dir.path()));
+        // A dir containing the uv binary is valid.
+        let bin_name = if cfg!(windows) { "uv.exe" } else { "uv" };
+        std::fs::write(dir.path().join(bin_name), b"uv").unwrap();
+        assert!(uv_cache_is_valid(dir.path()));
     }
 }
