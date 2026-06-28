@@ -4,6 +4,7 @@ members = [
     "crates/cli",
     "crates/capsule",
     "crates/capsulefs",
+    "crates/snapshot",
     "crates/protocol",
     "crates/cli/lock-draft-engine",
     "crates/nacelle",
