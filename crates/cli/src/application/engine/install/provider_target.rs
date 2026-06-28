@@ -2039,7 +2039,11 @@ Tag: py3-none-any\n";
 
     #[test]
     fn classify_run_target_rejects_malformed_ato_url_with_actionable_error() {
-        for raw in ["https://ato.run/", "https://ato.run", "https://ato.run/open/"] {
+        for raw in [
+            "https://ato.run/",
+            "https://ato.run",
+            "https://ato.run/open/",
+        ] {
             let err = classify_run_target(raw, Path::new(raw))
                 .expect_err("malformed ato.run URL must error");
             let message = err.to_string();

@@ -1258,12 +1258,8 @@ runtime_tools = { uv = "0.4" }
         // The node-pin guard is node-specific: an unrelated unmanaged command is
         // unaffected (resolves to None only because it does not exist on PATH).
         assert!(
-            host_fallback_for_unmanaged_command(
-                &plan,
-                "ato-nonexistent-tool-xyz build",
-                true
-            )
-            .is_none(),
+            host_fallback_for_unmanaged_command(&plan, "ato-nonexistent-tool-xyz build", true)
+                .is_none(),
             "node-pin guard must not change behavior for non-node commands"
         );
     }
