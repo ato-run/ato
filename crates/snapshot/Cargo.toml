@@ -1,0 +1,28 @@
+[package]
+name = "snapshot"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+description = "Backend-agnostic build/restore of Ready-State Capsule warm state. Defines SnapshotBackend + Ready-State artifact types; ships a KVM-free FakeSnapshotBackend and a Firecracker skeleton (Unsupported without /dev/kvm)."
+
+[package.metadata.dist]
+dist = false
+
+[lib]
+name = "snapshot"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+blake3 = "1.5"
+capsule = { path = "../capsule" }
+capsulefs = { path = "../capsulefs" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_jcs = "0.1"
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3"
