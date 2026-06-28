@@ -227,7 +227,7 @@ pub fn build_heartbeat_body(
         // Lease command kinds this runner can actually EXECUTE today. The control
         // plane gates dispatch on this so a runner is never sent a kind it would
         // reject on-device (e.g. `run_capsule` before that execution path ships).
-        "supported_lease_kinds": SUPPORTED_LEASE_KINDS,
+        "supported_lease_kinds": advertised_lease_kinds(),
         "os": os,
         "arch": arch,
         "agent_version": agent_version(),
@@ -955,6 +955,79 @@ pub const RUN_CAPSULE_LEASE_KIND: &str = "run_capsule";
 /// heartbeat so the control plane never dispatches a kind the runner would
 /// reject on-device.
 pub const SUPPORTED_LEASE_KINDS: &[&str] = &[LEASE_COMMAND_KIND, RUN_CAPSULE_LEASE_KIND];
+
+/// The lease command `runtime` value that selects HOST dispatch (no `--sandbox`).
+/// native-inference runs a managed engine (llama.cpp) as a host process and is
+/// incompatible with the source sandbox (ato#762). It is ALSO advertised in
+/// `supported_lease_kinds` (when this host can run it) so the control plane only
+/// dispatches native-inference leases to capable runners. Only this exact value
+/// selects host dispatch — there is no generic host-exec path.
+pub const NATIVE_INFERENCE_RUNTIME: &str = "native-inference";
+
+/// How the runner dispatches a claimed lease's `ato run` child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerDispatchMode {
+    /// Default: run the dispatched ref under the nacelle sandbox (`--sandbox`).
+    Sandboxed,
+    /// native-inference: host execution (managed engine/model), no `--sandbox`.
+    NativeInferenceHost,
+}
+
+impl RunnerDispatchMode {
+    /// Decide the mode from the lease command's `runtime` field. Only the exact
+    /// `native-inference` runtime selects host dispatch; absent or any other
+    /// runtime keeps the default sandboxed dispatch (no generic host-exec).
+    fn from_command(command: &serde_json::Value) -> Self {
+        match command.get("runtime").and_then(|v| v.as_str()) {
+            Some(NATIVE_INFERENCE_RUNTIME) => Self::NativeInferenceHost,
+            _ => Self::Sandboxed,
+        }
+    }
+}
+
+/// Cached host native-inference capability (probed once per process). The probe
+/// is cheap but the heartbeat path calls it frequently, and the host capability
+/// does not change across a serve session.
+fn native_inference_ready() -> bool {
+    static READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READY.get_or_init(crate::application::native_inference_doctor::is_ready)
+}
+
+/// Lease "kinds"/runtimes this runner accepts dispatch for. The base command
+/// kinds plus `native-inference` when this host can actually run it — the control
+/// plane gates native-inference dispatch on this advertised value (ato#762).
+/// Pure: the lease kinds/runtimes to advertise given the host's native-inference
+/// readiness. Split from the cached host probe so the conditional `native-inference`
+/// append is unit-testable.
+fn advertised_lease_kinds_for(native_inference_ready: bool) -> Vec<String> {
+    let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS.iter().map(|s| s.to_string()).collect();
+    if native_inference_ready {
+        kinds.push(NATIVE_INFERENCE_RUNTIME.to_string());
+    }
+    kinds
+}
+
+fn advertised_lease_kinds() -> Vec<String> {
+    advertised_lease_kinds_for(native_inference_ready())
+}
+
+/// Fail-closed dispatch guard. The control plane already gates native-inference
+/// dispatch on the advertised capability, but the runner re-checks before
+/// spawning so a mis-dispatched native-inference lease is rejected with a typed
+/// reason rather than forced into the sandbox (which native-inference cannot
+/// use). `native_inference_ready` is this host's (cached) capability.
+fn ensure_dispatch_supported(
+    mode: RunnerDispatchMode,
+    native_inference_ready: bool,
+) -> std::result::Result<(), (String, String)> {
+    if mode == RunnerDispatchMode::NativeInferenceHost && !native_inference_ready {
+        return Err((
+            "native_inference_unavailable".to_string(),
+            "received a native-inference lease but this runner cannot run native-inference (host not ready)".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 pub const DEFAULT_PROXY_LISTEN: &str = "127.0.0.1:8420";
 
@@ -2302,11 +2375,119 @@ fn windows_pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// Terminate the workload's process group and wait for it to be reaped.
-/// SIGTERM first (let the app shut down cleanly), escalate to SIGKILL after a
-/// bounded grace, and confirm via the monitor task draining the child's output
-/// and reaping it. Returns true only when termination is confirmed; an
-/// unconfirmable outcome returns false so the caller can fail closed.
+/// `(pid, ppid, pgid)` for every process, so the teardown can walk a workload's
+/// whole subtree — including a native-inference engine that put ITSELF in its
+/// own process group (executors/source.rs) and would otherwise survive a single
+/// `kill(-root_pgid)`. Linux reads `/proc` directly; other Unix shells to `ps`.
+/// See ato#769.
+#[cfg(target_os = "linux")]
+fn read_process_table() -> Vec<(u32, u32, u32)> {
+    let mut rows = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return rows;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // "pid (comm) state ppid pgrp …" — comm may contain spaces and ')', so
+        // parse the fields AFTER the final ')'.
+        let Some((_, after)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = after.split_whitespace();
+        let _state = fields.next();
+        let ppid = fields.next().and_then(|s| s.parse::<u32>().ok());
+        let pgrp = fields.next().and_then(|s| s.parse::<u32>().ok());
+        if let (Some(ppid), Some(pgrp)) = (ppid, pgrp) {
+            rows.push((pid, ppid, pgrp));
+        }
+    }
+    rows
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn read_process_table() -> Vec<(u32, u32, u32)> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            Some((
+                cols.next()?.parse().ok()?,
+                cols.next()?.parse().ok()?,
+                cols.next()?.parse().ok()?,
+            ))
+        })
+        .collect()
+}
+
+/// Every distinct process group in the subtree rooted at `root_pid` (the root
+/// plus all descendants). The runner spawns `ato run` in its own group, but a
+/// native-inference run's engine puts ITSELF in another group
+/// (executors/source.rs `process_group(0)`), so terminating only the root group
+/// strands the engine. The teardown signals every group this returns. See
+/// ato#769.
+#[cfg(unix)]
+fn workload_subtree_groups(root_pid: u32) -> std::collections::HashSet<u32> {
+    use std::collections::{HashMap, HashSet};
+    let table = read_process_table();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut pgid_of: HashMap<u32, u32> = HashMap::new();
+    for &(pid, ppid, pgid) in &table {
+        children.entry(ppid).or_default().push(pid);
+        pgid_of.insert(pid, pgid);
+    }
+    let mut groups: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut stack = vec![root_pid];
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        if let Some(&pgid) = pgid_of.get(&pid).filter(|&&pgid| pgid != 0) {
+            groups.insert(pgid);
+        }
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    // The root leads its own group (spawn_run_child uses process_group(0)); keep
+    // it even if the table snapshot raced the root's appearance.
+    groups.insert(root_pid);
+    groups
+}
+
+/// Poll until every process group is confirmed gone (ESRCH) or `within`
+/// elapses. A SIGKILL'd engine that reparents to init is reaped within a beat,
+/// so a short poll avoids both a premature "stranded" verdict and an unbounded
+/// wait. See ato#769.
+#[cfg(unix)]
+async fn confirm_subtree_gone(groups: &std::collections::HashSet<u32>, within: Duration) -> bool {
+    tokio::time::timeout(within, async {
+        while !groups.iter().all(|&g| process_group_confirmed_gone(g)) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Terminate the workload's whole process-group SUBTREE and wait for it to be
+/// reaped. SIGTERM first (let each app shut down cleanly), escalate to SIGKILL
+/// after a bounded grace, and confirm every group is gone. A native-inference
+/// run's engine runs in its OWN process group (executors/source.rs), so we
+/// signal every group in the subtree — not just the `ato run` leader's — or the
+/// engine is stranded (ato#769). Returns true only when termination is
+/// confirmed; an unconfirmable outcome returns false so the caller fails closed.
 /// Non-Unix hosts have no POSIX process groups; there `taskkill /T /F`
 /// force-kills the whole subtree under the same confirm-or-fail-closed
 /// contract.
@@ -2321,17 +2502,34 @@ async fn terminate_child_group(
             let _ = monitor.await;
             return true;
         };
-        // Polite first: SIGTERM the whole group so the app can shut down.
-        let _ = kill_group(pid, libc::SIGTERM);
+        // Snapshot EVERY process group in the workload subtree BEFORE killing —
+        // a native-inference engine puts itself in its own group, so a single
+        // kill(-pid) would strand it (ato#769).
+        let mut groups = workload_subtree_groups(pid);
+        // Polite first: SIGTERM every group so each app can shut down.
+        for &g in &groups {
+            let _ = kill_group(g, libc::SIGTERM);
+        }
+        let mut monitor_done = false;
         tokio::select! {
-            _ = &mut monitor => return true,
+            _ = &mut monitor => { monitor_done = true; }
             _ = tokio::time::sleep(STOP_GRACE) => {}
         }
-        // Still alive after the grace window: force-kill the group.
-        let _ = kill_group(pid, libc::SIGKILL);
-        // SIGKILL cannot be caught; the monitor should reap promptly. If it
-        // still does not return, we cannot confirm termination — fail closed.
-        (tokio::time::timeout(STOP_KILL_GRACE, &mut monitor).await).is_ok()
+        // Force: SIGKILL every group; re-snapshot first so anything the grace
+        // window spawned is caught too, then union so nothing is missed.
+        groups.extend(workload_subtree_groups(pid));
+        for &g in &groups {
+            let _ = kill_group(g, libc::SIGKILL);
+        }
+        // Reap the leader via the monitor (frees the child handle / avoids a
+        // lingering zombie) — but only if it has not already completed, since a
+        // JoinHandle must not be polled after completion. The subtree confirm
+        // below is the source of truth.
+        if !monitor_done {
+            let _ = tokio::time::timeout(STOP_KILL_GRACE, &mut monitor).await;
+        }
+        // Confirm the WHOLE subtree is gone — fail closed if any group survives.
+        confirm_subtree_gone(&groups, STOP_KILL_GRACE).await
     }
     #[cfg(not(unix))]
     {
@@ -2549,21 +2747,42 @@ pub fn child_run_ref(source_url: &str) -> String {
     source_url.to_string()
 }
 
+/// The `ato run` arguments for a claimed lease — selected by dispatch mode
+/// BEFORE spawn, never patched onto an already-built command. Sandboxed leases
+/// get `--sandbox`; native-inference (host) leases do NOT, because
+/// native-inference runs a managed engine as a host process and is incompatible
+/// with the source sandbox (ato#762).
+fn run_child_args(
+    run_ref: &str,
+    managed_state_root: Option<&Path>,
+    mode: RunnerDispatchMode,
+) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    let mut args: Vec<OsString> = vec![OsString::from("run"), OsString::from(run_ref)];
+    if mode == RunnerDispatchMode::Sandboxed {
+        args.push(OsString::from("--sandbox"));
+    }
+    args.push(OsString::from("-y"));
+    // run_capsule leases bind persistent state under a runner-managed root
+    // (scoped by owner + immutable capsule identity); source leases pass None.
+    if let Some(root) = managed_state_root {
+        args.push(OsString::from("--managed-state-root"));
+        args.push(root.as_os_str().to_os_string());
+    }
+    args
+}
+
 fn spawn_run_child(
     run_ref: &str,
     managed_state_root: Option<&Path>,
+    mode: RunnerDispatchMode,
 ) -> Result<tokio::process::Child> {
     let child_bin = match std::env::var("ATO_RUNNER_CHILD_BIN") {
         Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
         _ => std::env::current_exe().context("failed to resolve the ato binary path")?,
     };
     let mut cmd = tokio::process::Command::new(child_bin);
-    cmd.arg("run").arg(run_ref).arg("--sandbox").arg("-y");
-    // run_capsule leases bind persistent state under a runner-managed root
-    // (scoped by owner + immutable capsule identity); source leases pass None.
-    if let Some(root) = managed_state_root {
-        cmd.arg("--managed-state-root").arg(root);
-    }
+    cmd.args(run_child_args(run_ref, managed_state_root, mode));
     // Operator-controlled extras (e.g. --nacelle <path> on dev hosts). Comes
     // from the runner host env, never from the lease payload.
     if let Ok(extra) = std::env::var("ATO_RUNNER_RUN_ARGS") {
@@ -2592,6 +2811,7 @@ fn spawn_run_child(
 struct LeaseExecution {
     run_ref: String,
     managed_state_root: Option<PathBuf>,
+    dispatch_mode: RunnerDispatchMode,
 }
 
 /// Root for runner-managed persistent capsule state: `<runner-base>/state`.
@@ -2646,12 +2866,16 @@ fn resolve_lease_execution(
     recipe_dir: &Path,
 ) -> std::result::Result<LeaseExecution, (String, String)> {
     let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    // The runtime field (set by the control plane) selects host vs sandbox
+    // dispatch, independent of the lease kind (ato#762).
+    let dispatch_mode = RunnerDispatchMode::from_command(command);
     match kind {
         LEASE_COMMAND_KIND => {
             let c = parse_lease_command(command)?;
             Ok(LeaseExecution {
                 run_ref: child_run_ref(&c.source_url),
                 managed_state_root: None,
+                dispatch_mode,
             })
         }
         RUN_CAPSULE_LEASE_KIND => {
@@ -2668,6 +2892,7 @@ fn resolve_lease_execution(
             Ok(LeaseExecution {
                 run_ref,
                 managed_state_root: Some(root),
+                dispatch_mode,
             })
         }
         other => Err((
@@ -2981,6 +3206,29 @@ async fn handle_claimed_lease(
     public_url_template: Option<String>,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
+    // Fail closed FIRST — before resolving/materializing the lease or reporting
+    // Preparing: a native-inference lease must only run where this host can
+    // actually run native-inference. The control plane already capability-gates
+    // dispatch; this re-check is defence in depth, so a mis-dispatched
+    // native-inference lease is rejected with NO side effects (no recipe written,
+    // no Preparing churn) and is never forced into the sandbox.
+    if let Err((code, message)) = ensure_dispatch_supported(
+        RunnerDispatchMode::from_command(&lease.command),
+        native_inference_ready(),
+    ) {
+        eprintln!("⚠️  lease {} rejected: {}", lease.id, message);
+        let report = LeaseReport::Failed { code, message };
+        if let Err(err) =
+            report_lease_status(client, api_base, runner_token, &lease.id, &report).await
+        {
+            eprintln!(
+                "⚠️  failed to report lease failure: {}",
+                scrub_secrets(&format!("{err:#}"))
+            );
+        }
+        slot.release();
+        return;
+    }
     let execution = match resolve_lease_execution(&lease.command, &inline_recipe_dir(&lease.id)) {
         Ok(execution) => execution,
         Err((code, message)) => {
@@ -2994,6 +3242,10 @@ async fn handle_claimed_lease(
                     scrub_secrets(&format!("{err:#}"))
                 );
             }
+            // Release the slot the serve loop acquired — SlotLease has no Drop, so
+            // an early return otherwise strands it occupied (pre-existing on this
+            // reject path; release() is idempotent).
+            slot.release();
             return;
         }
     };
@@ -3025,8 +3277,11 @@ async fn handle_claimed_lease(
     let LeaseExecution {
         run_ref,
         managed_state_root,
+        dispatch_mode,
     } = execution;
     tokio::spawn(async move {
+        // (native-inference dispatch capability was already fail-closed checked in
+        // handle_claimed_lease before resolve/Preparing — see ensure_dispatch_supported.)
         // One control watcher for the whole lease lifetime: it flips stop_flag +
         // notifies on an owner stop in EITHER phase (needs_consent or running).
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -3059,7 +3314,8 @@ async fn handle_claimed_lease(
         let mut round: u32 = 0;
         let (mut report_rx, monitor, child_pid, first_report) = loop {
             round += 1;
-            let child = match spawn_run_child(&run_ref, managed_state_root.as_deref()) {
+            let child = match spawn_run_child(&run_ref, managed_state_root.as_deref(), dispatch_mode)
+            {
                 Ok(child) => child,
                 Err(err) => {
                     let report = LeaseReport::Failed {
@@ -3887,6 +4143,139 @@ mod tests {
             kinds.contains(&RUN_CAPSULE_LEASE_KIND),
             "must advertise run_capsule now that execution is wired"
         );
+    }
+
+    #[test]
+    fn advertised_lease_kinds_appends_native_inference_only_when_ready() {
+        // Not ready: base kinds only, NO native-inference advertised — so the
+        // control plane will not dispatch native-inference here (the slice-1 gate
+        // requires the capability).
+        let base = advertised_lease_kinds_for(false);
+        assert!(base.iter().any(|k| k == LEASE_COMMAND_KIND));
+        assert!(base.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
+        assert!(
+            !base.iter().any(|k| k == NATIVE_INFERENCE_RUNTIME),
+            "must NOT advertise native-inference when the host is not ready"
+        );
+        // Ready: base kinds preserved + native-inference appended.
+        let ready = advertised_lease_kinds_for(true);
+        assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
+        assert!(
+            ready.iter().any(|k| k == NATIVE_INFERENCE_RUNTIME),
+            "must advertise native-inference when the host is ready"
+        );
+    }
+
+    fn argv(args: Vec<std::ffi::OsString>) -> Vec<String> {
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn run_child_args_sandboxes_source_runs() {
+        // Default (source/sandbox) dispatch still passes --sandbox — ato#762
+        // leaves sandboxed source execution unchanged.
+        let a = argv(run_child_args(
+            "github.com/x/y",
+            None,
+            RunnerDispatchMode::Sandboxed,
+        ));
+        assert_eq!(a, vec!["run", "github.com/x/y", "--sandbox", "-y"]);
+    }
+
+    #[test]
+    fn run_child_args_omits_sandbox_for_native_inference() {
+        // native-inference is host execution — the child must NOT be sandboxed.
+        let a = argv(run_child_args(
+            "community/local-llm-chat",
+            None,
+            RunnerDispatchMode::NativeInferenceHost,
+        ));
+        assert_eq!(a, vec!["run", "community/local-llm-chat", "-y"]);
+        assert!(
+            !a.iter().any(|x| x == "--sandbox"),
+            "native-inference dispatch must not append --sandbox"
+        );
+    }
+
+    #[test]
+    fn run_child_args_keeps_managed_state_root_in_both_modes() {
+        let root = std::path::Path::new("/state/owner/ref");
+        for mode in [
+            RunnerDispatchMode::Sandboxed,
+            RunnerDispatchMode::NativeInferenceHost,
+        ] {
+            let a = argv(run_child_args("r", Some(root), mode));
+            let i = a
+                .iter()
+                .position(|x| x == "--managed-state-root")
+                .expect("managed-state-root flag present");
+            assert_eq!(a[i + 1], "/state/owner/ref");
+        }
+    }
+
+    #[test]
+    fn dispatch_mode_only_exact_native_inference_selects_host() {
+        // Exactly "native-inference" → host; absent / any other runtime → sandbox.
+        // No generic host-exec: "host-exec", "oci", "source/native" stay sandboxed.
+        assert_eq!(
+            RunnerDispatchMode::from_command(&serde_json::json!({"runtime": "native-inference"})),
+            RunnerDispatchMode::NativeInferenceHost
+        );
+        for other in [
+            serde_json::json!({}),
+            serde_json::json!({ "runtime": "oci" }),
+            serde_json::json!({ "runtime": "host-exec" }),
+            serde_json::json!({ "runtime": "source/native" }),
+            serde_json::json!({ "runtime": "native-inference-x" }),
+        ] {
+            assert_eq!(
+                RunnerDispatchMode::from_command(&other),
+                RunnerDispatchMode::Sandboxed,
+                "only the exact native-inference runtime selects host dispatch; got {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_dispatch_supported_fails_closed_without_native_inference_capability() {
+        // native-inference on a host that can't run it → typed failure, no spawn.
+        let (code, _) =
+            ensure_dispatch_supported(RunnerDispatchMode::NativeInferenceHost, false).unwrap_err();
+        assert_eq!(code, "native_inference_unavailable");
+        // Capable host → ok; sandboxed runs are never gated by this capability.
+        assert!(ensure_dispatch_supported(RunnerDispatchMode::NativeInferenceHost, true).is_ok());
+        assert!(ensure_dispatch_supported(RunnerDispatchMode::Sandboxed, false).is_ok());
+    }
+
+    #[test]
+    fn resolve_lease_execution_sets_dispatch_mode_from_runtime() {
+        // A run_capsule lease carrying runtime=native-inference resolves to host
+        // dispatch; the same lease without the field stays sandboxed.
+        let native = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule",
+                "run_ref": "community/local-llm-chat@1.0.0",
+                "owner_id": "u",
+                "runtime": NATIVE_INFERENCE_RUNTIME,
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
+        .expect("valid native-inference lease");
+        assert_eq!(
+            native.dispatch_mode,
+            RunnerDispatchMode::NativeInferenceHost
+        );
+
+        let sandboxed = resolve_lease_execution(
+            &serde_json::json!({
+                "kind": "run_capsule", "run_ref": "community/x@1.0.0", "owner_id": "u",
+            }),
+            std::path::Path::new("unused-recipe"),
+        )
+        .expect("valid sandboxed lease");
+        assert_eq!(sandboxed.dispatch_mode, RunnerDispatchMode::Sandboxed);
     }
 
     #[test]
@@ -5211,6 +5600,109 @@ mod tests {
         assert!(
             !process_group_alive(pid),
             "no process in the workload group may survive the stop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_group_kills_engine_in_its_own_group() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        // ato#769: `ato run`'s host executor spawns the native-inference engine
+        // in its OWN process group (executors/source.rs `process_group(0)`), so a
+        // single kill(-ato_run_pgid) strands the engine. `bash`'s `set -m` (job
+        // control) makes the backgrounded `sleep` a CHILD of the shell but in its
+        // own group — the exact escape. (`bash` specifically: dash's `set -m`
+        // leaves the child in the shell's group.) The teardown must reap BOTH
+        // groups.
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg("set -m; sleep 300 & echo $!; wait")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn workload");
+        let pid = child.id().expect("child pid");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut lines = BufReader::new(stdout).lines();
+        let engine: u32 = tokio::time::timeout(Duration::from_secs(30), lines.next_line())
+            .await
+            .expect("engine pid printed within timeout")
+            .expect("read engine pid line")
+            .expect("engine pid line present")
+            .trim()
+            .parse()
+            .expect("engine pid parses");
+
+        // The engine leads its OWN process group, distinct from the shell's —
+        // the ato#769 escape that a single kill(-shell_pgid) would strand.
+        assert_ne!(pid, engine, "engine must lead a different group than the shell");
+        assert!(
+            process_group_alive(pid),
+            "shell group must be alive before the stop"
+        );
+        assert!(
+            process_group_alive(engine),
+            "engine group must be alive before the stop"
+        );
+
+        let monitor = tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        let terminated = terminate_child_group(Some(pid), monitor).await;
+        assert!(
+            terminated,
+            "teardown must confirm the whole subtree (shell + engine) is gone"
+        );
+
+        // Neither group may survive — the engine must NOT be stranded (ato#769).
+        for _ in 0..100 {
+            if !process_group_alive(pid) && !process_group_alive(engine) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !process_group_alive(pid),
+            "shell group must be gone after the stop"
+        );
+        assert!(
+            !process_group_alive(engine),
+            "engine group must be gone after the stop — not stranded (ato#769)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_group_repeated_stop_is_idempotent() {
+        // A redundant second owner stop (the run is already torn down) must still
+        // confirm `true`, never fail closed — repeated stops are idempotent.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 300")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn workload");
+        let pid = child.id().expect("child pid");
+
+        // First stop tears the workload down and confirms it.
+        let monitor = tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        assert!(
+            terminate_child_group(Some(pid), monitor).await,
+            "first stop must confirm the workload is gone"
+        );
+
+        // Second stop on the already-gone workload is a confirmed no-op.
+        let monitor = tokio::spawn(async {});
+        assert!(
+            terminate_child_group(Some(pid), monitor).await,
+            "a repeated stop on a gone workload must remain idempotent (true)"
         );
     }
 
