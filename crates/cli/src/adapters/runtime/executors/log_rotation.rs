@@ -66,22 +66,21 @@ pub fn rotate_if_needed(log_path: &Path, threshold: u64, max_generations: u32) -
 
     // Drop the oldest generation so the shift below doesn't exceed the cap.
     let oldest = generation_path(log_path, max_generations);
-    if oldest.exists() {
-        if let Err(error) = std::fs::remove_file(&oldest) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                debug!(path = %oldest.display(), error = %error, "failed to remove oldest rotated log");
-            }
-        }
+    if oldest.exists()
+        && let Err(error) = std::fs::remove_file(&oldest)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        debug!(path = %oldest.display(), error = %error, "failed to remove oldest rotated log");
     }
 
     // Shift remaining generations up: .（N-1) -> .N, ..., .1 -> .2.
     for n in (1..max_generations).rev() {
         let from = generation_path(log_path, n);
         let to = generation_path(log_path, n + 1);
-        if from.exists() {
-            if let Err(error) = std::fs::rename(&from, &to) {
-                debug!(from = %from.display(), to = %to.display(), error = %error, "failed to shift rotated log generation");
-            }
+        if from.exists()
+            && let Err(error) = std::fs::rename(&from, &to)
+        {
+            debug!(from = %from.display(), to = %to.display(), error = %error, "failed to shift rotated log generation");
         }
     }
 
