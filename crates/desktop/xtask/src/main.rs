@@ -1880,10 +1880,35 @@ mod tests {
         assert!(
             paths
                 .netd_manifest
-                .ends_with(Path::new("crates/ato-netd/Cargo.toml")),
-            "expected ato-netd manifest path, got {}",
+                .ends_with(Path::new("crates/netd/Cargo.toml")),
+            "expected netd manifest path, got {}",
             paths.netd_manifest.display()
         );
+    }
+
+    /// Every build manifest the desktop bundler resolves must actually exist.
+    /// This is the gate the v0.7.0 release lacked: the `ato-cli->cli` and
+    /// `ato-netd->netd` crate renames left `WorkspacePaths::discover` pointing at
+    /// `crates/ato-cli` / `crates/ato-netd`, which no longer exist — and because the
+    /// xtask is excluded from `rust-ci`, that only surfaced at tag time when the
+    /// desktop bundles failed. An existence check (not a path-string match) catches
+    /// any future rename regardless of the new name. See ato-run/ato#758.
+    #[test]
+    fn discovered_crate_manifests_all_exist() {
+        let paths = WorkspacePaths::discover().expect("workspace paths should resolve");
+        for (label, manifest) in [
+            ("ato (cli)", &paths.ato_manifest),
+            ("ato-netd (netd)", &paths.netd_manifest),
+            ("ato-desktop (desktop)", &paths.desktop_manifest),
+            ("nacelle", &paths.nacelle_manifest),
+        ] {
+            assert!(
+                manifest.exists(),
+                "{label} build manifest does not exist: {} — a crate rename likely left \
+                 a stale path in WorkspacePaths::discover()",
+                manifest.display()
+            );
+        }
     }
 
     // ---- release helper consumption (issue #366) ----

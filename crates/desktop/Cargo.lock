@@ -1871,6 +1871,7 @@ dependencies = [
  "cookie",
  "dirs 5.0.1",
  "embed-resource",
+ "filetime",
  "gpui",
  "gpui-component",
  "gpui-component-assets",

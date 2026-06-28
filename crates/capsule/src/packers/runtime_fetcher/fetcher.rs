@@ -28,6 +28,7 @@ pub(crate) fn default_fetchers() -> HashMap<&'static str, Box<dyn ToolchainFetch
     fetchers.insert("deno", Box::new(DenoFetcher));
     fetchers.insert("bun", Box::new(BunFetcher));
     fetchers.insert("llamacpp", Box::new(LlamaCppFetcher));
+    fetchers.insert("sglang", Box::new(SgLangFetcher));
     fetchers
 }
 
@@ -567,6 +568,221 @@ impl ToolchainFetcher for LlamaCppFetcher {
     }
 }
 
+/// The Python version the SGLang managed venv is created with. SGLang + torch
+/// cu128 wheels target CPython 3.12.
+pub(crate) const SGLANG_VENV_PYTHON: &str = "3.12";
+
+/// The PyTorch cu128 wheel index, supplied as an `--extra-index-url` (PyPI stays
+/// the primary index) so the `sglang[srt]` resolve picks up CUDA-12.8 torch
+/// wheels. Validated on an RTX A6000: `sglang[srt]` resolves to sglang 0.5.9 +
+/// torch 2.9.1+cu128, `import sglang` succeeds, and Qwen3-30B-A3B-GPTQ runs via
+/// gptq_marlin. (The previous cu124 + `torch==2.6.0` pin was incoherent with the
+/// sglang 0.5.x wheels and source-built flashinfer.)
+pub(crate) const SGLANG_TORCH_INDEX_URL: &str = "https://download.pytorch.org/whl/cu128";
+
+/// uv's resolver index strategy for the `sglang[srt]` install. `sglang[srt]`
+/// pulls torch from the cu128 extra-index and the rest from PyPI; the default
+/// "first index that has the package wins" strategy cannot satisfy that split,
+/// so we opt into `unsafe-best-match` (consider all indexes, pick the best
+/// version) — the strategy the validated manual recipe used.
+pub(crate) const SGLANG_INDEX_STRATEGY: &str = "unsafe-best-match";
+
+/// The full pinned requirements the SGLang fetcher installs for `version` (the
+/// sglang wheel version). A single coherent `sglang[srt]==<version>` install
+/// resolved across PyPI + the cu128 extra-index — torch (and the CUDA kernels
+/// sglang declares as deps) resolve from that one solve rather than being pinned
+/// separately. Surfaced for the doctor / receipt and unit tests so the exact
+/// pins are inspectable.
+pub(crate) fn sglang_requirements(version: &str) -> SgLangRequirements {
+    SgLangRequirements {
+        python: SGLANG_VENV_PYTHON,
+        torch_index_url: SGLANG_TORCH_INDEX_URL,
+        index_strategy: SGLANG_INDEX_STRATEGY,
+        // The `[srt]` extra pulls the SRT server deps (pydantic, etc.) the bare
+        // `sglang` wheel omits — bare `sglang` import-failed at runtime.
+        sglang_pin: format!("sglang[srt]=={version}"),
+    }
+}
+
+/// The resolved, pinned SGLang requirements lock (see [`sglang_requirements`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SgLangRequirements {
+    pub python: &'static str,
+    pub torch_index_url: &'static str,
+    pub index_strategy: &'static str,
+    pub sglang_pin: String,
+}
+
+/// The canonical venv python path inside an SGLang runtime directory
+/// (`<dir>/bin/python` on Unix, `<dir>/Scripts/python.exe` on Windows). This is
+/// the exact path the launcher resolves as the server command, so both the
+/// fetcher (post-condition) and the engine (`resolve_server_command`) derive it
+/// from this single helper.
+pub fn sglang_venv_python(runtime_dir: &std::path::Path) -> PathBuf {
+    if cfg!(windows) {
+        runtime_dir.join("Scripts").join("python.exe")
+    } else {
+        runtime_dir.join("bin").join("python")
+    }
+}
+
+pub(crate) struct SgLangFetcher;
+
+#[async_trait]
+impl ToolchainFetcher for SgLangFetcher {
+    fn language(&self) -> &'static str {
+        "sglang"
+    }
+
+    async fn download_runtime(
+        &self,
+        provider: &RuntimeFetcher,
+        version: &str,
+        show_progress: bool,
+    ) -> Result<PathBuf> {
+        // Defense-in-depth: the version is interpolated into the pip pin and the
+        // cache path. Manifest validation enforces this, but reject unsafe values
+        // here too (this runs under the install lock).
+        if !crate::foundation::types::manifest::is_safe_engine_version(version) {
+            return Err(CapsuleError::Pack(format!(
+                "unsafe sglang engine_version {version:?} (expected a wheel version, e.g. \"0.4.10.post2\")"
+            )));
+        }
+
+        let runtime_dir = provider.get_runtime_path("sglang", version);
+        // Reuse only a COMPLETE venv (the canonical python is present). A partial
+        // venv from an interrupted install is discarded and rebuilt.
+        if sglang_venv_is_valid(&runtime_dir) {
+            info!("✓ sglang {} venv already present", version);
+            return Ok(runtime_dir);
+        }
+        if runtime_dir.exists() {
+            info!("sglang {} venv is incomplete; rebuilding", version);
+            std::fs::remove_dir_all(&runtime_dir)?;
+        }
+
+        // The whole install is built in a temp dir and atomically promoted, so a
+        // failed pip never leaves a half-built venv that the exists-check trusts.
+        let temp_dir = provider.cache_dir().join(format!("tmp-sglang-{version}"));
+        if temp_dir.exists() {
+            std::fs::remove_dir_all(&temp_dir)?;
+        }
+        if let Some(parent) = temp_dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let uv = provider.ensure_uv(None).await?;
+        let reqs = sglang_requirements(version);
+        let venv_python = sglang_venv_python(&temp_dir);
+
+        // 1. Create the CPython 3.12 venv.
+        provider
+            .reporter
+            .notify(format!(
+                "🐍 Creating sglang {version} venv (python {})...",
+                reqs.python
+            ))
+            .await?;
+        run_uv(
+            &uv,
+            &[
+                "venv".to_string(),
+                "--python".to_string(),
+                reqs.python.to_string(),
+                temp_dir.to_string_lossy().to_string(),
+            ],
+            show_progress,
+        )
+        .await?;
+
+        // 2. One coherent `sglang[srt]` install resolved across PyPI + the cu128
+        //    extra-index with `--index-strategy unsafe-best-match`. torch (cu128)
+        //    and the CUDA kernels sglang declares as deps resolve from this single
+        //    solve — the validated A6000 recipe (sglang 0.5.9 + torch 2.9.1+cu128).
+        provider
+            .reporter
+            .notify(format!("⬇️  Installing {} (cu128)...", reqs.sglang_pin))
+            .await?;
+        {
+            let args = vec![
+                "pip".to_string(),
+                "install".to_string(),
+                "--python".to_string(),
+                venv_python.to_string_lossy().to_string(),
+                "--index-strategy".to_string(),
+                reqs.index_strategy.to_string(),
+                "--extra-index-url".to_string(),
+                reqs.torch_index_url.to_string(),
+                reqs.sglang_pin.clone(),
+            ];
+            run_uv(&uv, &args, show_progress).await?;
+        }
+
+        // Post-condition: the canonical venv python must exist before promotion.
+        if !sglang_venv_is_valid(&temp_dir) {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(CapsuleError::Pack(format!(
+                "sglang {version}: venv python missing after install at {:?}",
+                sglang_venv_python(&temp_dir)
+            )));
+        }
+
+        if runtime_dir.exists() {
+            std::fs::remove_dir_all(&runtime_dir)?;
+        }
+        std::fs::rename(&temp_dir, &runtime_dir).map_err(|e| {
+            CapsuleError::Pack(format!("Failed to move sglang venv to cache: {e}"))
+        })?;
+
+        provider
+            .reporter
+            .notify(format!("✓ sglang {version} installed at {runtime_dir:?}"))
+            .await?;
+        Ok(runtime_dir)
+    }
+}
+
+/// `true` when an SGLang venv directory is complete: the canonical venv python
+/// exists. (The `import sglang` smoke is run separately by `ensure_sglang`,
+/// which can only meaningfully pass on a CUDA host.)
+pub(crate) fn sglang_venv_is_valid(runtime_dir: &std::path::Path) -> bool {
+    sglang_venv_python(runtime_dir).is_file()
+}
+
+/// Run a `uv` subcommand, mapping a non-zero exit (or spawn failure) to a
+/// `Pack` error with captured stderr. `uv` itself prints progress to stderr, so
+/// `show_progress` controls whether that is inherited (live) or captured.
+async fn run_uv(uv: &std::path::Path, args: &[String], show_progress: bool) -> Result<()> {
+    let mut cmd = tokio::process::Command::new(uv);
+    cmd.args(args);
+    if show_progress {
+        // Inherit stdio so uv's download/build progress streams to the user.
+        let status = cmd.status().await.map_err(|e| {
+            CapsuleError::Pack(format!("failed to run uv {}: {e}", args.first().cloned().unwrap_or_default()))
+        })?;
+        if !status.success() {
+            return Err(CapsuleError::Pack(format!(
+                "uv {} failed with status {status}",
+                args.first().cloned().unwrap_or_default()
+            )));
+        }
+        Ok(())
+    } else {
+        let output = cmd.output().await.map_err(|e| {
+            CapsuleError::Pack(format!("failed to run uv {}: {e}", args.first().cloned().unwrap_or_default()))
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CapsuleError::Pack(format!(
+                "uv {} failed: {}",
+                args.first().cloned().unwrap_or_default(),
+                stderr.trim()
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// When `dir` contains exactly one entry and it is a directory, move that
 /// directory's contents up into `dir` and remove the now-empty wrapper. This
 /// strips the single `llama-<tag>/` leading component that llama.cpp archives
@@ -761,7 +977,8 @@ pub(crate) fn llama_cpp_artifact_filename(
 mod tests {
     use super::{
         deno_artifact_filename, ensure_canonical_llama_server, llama_cpp_artifact_filename,
-        llamacpp_cache_is_valid, llamacpp_cache_key, llamacpp_server_filename,
+        llamacpp_cache_is_valid, llamacpp_cache_key, llamacpp_server_filename, sglang_requirements,
+        sglang_venv_python,
     };
 
     #[cfg(unix)]
@@ -879,6 +1096,37 @@ mod tests {
         assert_eq!(llamacpp_cache_key("b9754", None), "b9754");
         assert_eq!(llamacpp_cache_key("b9754", Some("cpu")), "b9754");
         assert_eq!(llamacpp_cache_key("b9754", Some("vulkan")), "b9754@vulkan");
+    }
+
+    #[test]
+    fn sglang_requirements_install_srt_extra_on_cu128_with_best_match() {
+        let reqs = sglang_requirements("0.5.9");
+        assert_eq!(reqs.python, "3.12");
+        // cu128 extra-index (not the old cu124), supplied alongside PyPI.
+        assert_eq!(reqs.torch_index_url, "https://download.pytorch.org/whl/cu128");
+        // `unsafe-best-match` lets the single solve span PyPI + the cu128 index.
+        assert_eq!(reqs.index_strategy, "unsafe-best-match");
+        // The `[srt]` extra (server deps) + the wheel version flow into one pin —
+        // NOT a bare `sglang`, and NOT a separate torch / kernel install.
+        assert_eq!(reqs.sglang_pin, "sglang[srt]==0.5.9");
+        assert!(
+            reqs.sglang_pin.contains("[srt]"),
+            "must install the srt extra, not bare sglang"
+        );
+        // The broken cu124 / torch==2.6.0 / source-built-kernel recipe is gone.
+        assert!(!reqs.torch_index_url.contains("cu124"));
+        assert!(!reqs.sglang_pin.contains("2.6.0"));
+    }
+
+    #[test]
+    fn sglang_venv_python_is_canonical_bin_python() {
+        let dir = std::path::Path::new("/cache/sglang-0.5.9");
+        let py = sglang_venv_python(dir);
+        if cfg!(windows) {
+            assert!(py.ends_with("Scripts/python.exe") || py.ends_with("Scripts\\python.exe"));
+        } else {
+            assert_eq!(py, std::path::Path::new("/cache/sglang-0.5.9/bin/python"));
+        }
     }
 
     #[test]

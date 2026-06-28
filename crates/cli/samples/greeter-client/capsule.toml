@@ -1,6 +1,8 @@
-# NOTE: This sample uses the legacy IPC format which is not supported by the current ato-cli.
-# The [ipc.imports] / [ipc.exports] feature has been removed from the manifest spec.
-# This sample is preserved for historical reference only.
+# BROKEN — DO NOT DEMO (not part of the beta demo set).
+# The [ipc] wiring was stripped from this sample, so greeter-client can no longer reach
+# greeter-service and it does not run as a working IPC demo. NOTE: IPC itself is still
+# supported in ato 0.7 (see crates/cli/tests/ipc_e2e.rs); this capsule simply no longer
+# declares the [ipc] tables that made the demo meaningful. Kept for historical reference.
 schema_version = "0.3"
 name = "greeter-client"
 version = "0.1.0"
