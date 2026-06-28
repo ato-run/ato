@@ -245,14 +245,14 @@ fn sqlite_measure(db_path: &Path) -> Measure {
     let mut largest: u64 = 0;
     let mut exists = false;
     for p in sqlite_family(db_path) {
-        if let Ok(meta) = p.symlink_metadata() {
-            if meta.is_file() {
-                exists = true;
-                let len = meta.len();
-                total = total.saturating_add(len);
-                if len > largest {
-                    largest = len;
-                }
+        if let Ok(meta) = p.symlink_metadata()
+            && meta.is_file()
+        {
+            exists = true;
+            let len = meta.len();
+            total = total.saturating_add(len);
+            if len > largest {
+                largest = len;
             }
         }
     }
@@ -267,11 +267,11 @@ fn sqlite_measure(db_path: &Path) -> Measure {
 /// `foo.sqlite3-shm`).
 fn sqlite_family(db_path: &Path) -> Vec<PathBuf> {
     let mut out = vec![db_path.to_path_buf()];
-    if let Some(name) = db_path.file_name().and_then(|n| n.to_str()) {
-        if let Some(parent) = db_path.parent() {
-            out.push(parent.join(format!("{name}-wal")));
-            out.push(parent.join(format!("{name}-shm")));
-        }
+    if let Some(name) = db_path.file_name().and_then(|n| n.to_str())
+        && let Some(parent) = db_path.parent()
+    {
+        out.push(parent.join(format!("{name}-wal")));
+        out.push(parent.join(format!("{name}-shm")));
     }
     out
 }
@@ -342,7 +342,7 @@ fn category_warning(
 /// Assemble the report: sort categories largest-first, sum the total, and
 /// collect the warning lines.
 fn build_report(mut categories: Vec<DiskCategory>) -> DiskReport {
-    categories.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    categories.sort_by_key(|c| std::cmp::Reverse(c.bytes));
     let total_bytes = categories
         .iter()
         .map(|c| c.bytes)
@@ -395,8 +395,7 @@ fn print_human(report: &DiskReport) {
         );
     }
     println!(
-        "  {} {:<name_w$}  {:>10}",
-        ' ',
+        "    {:<name_w$}  {:>10}",
         "TOTAL",
         fmt_bytes(report.total_bytes)
     );
