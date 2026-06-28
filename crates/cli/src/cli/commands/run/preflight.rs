@@ -268,6 +268,10 @@ pub(crate) async fn run_v03_lifecycle_steps(
     let lifecycle_roots = root_order(&lifecycle_targets);
     let typed_manifest = typed_manifest.as_ref();
 
+    // Warn once, the first time a lifecycle command actually runs unsandboxed on
+    // the host (build/install steps execute the capsule's own scripts on the host
+    // with no network/filesystem sandbox and no capsule secrets).
+    let mut host_lifecycle_warned = false;
     let mut provisioned_roots = std::collections::HashSet::new();
     for root in root_order(&lifecycle_targets) {
         let Some(root_target) = lifecycle_targets
@@ -314,6 +318,7 @@ pub(crate) async fn run_v03_lifecycle_steps(
                 reporter,
             )
             .await?;
+            warn_host_lifecycle_execution_once(reporter, &mut host_lifecycle_warned).await?;
             run_lifecycle_shell_command(
                 &install_plan,
                 launch_ctx,
@@ -346,6 +351,7 @@ pub(crate) async fn run_v03_lifecycle_steps(
                     reporter,
                 )
                 .await?;
+                warn_host_lifecycle_execution_once(reporter, &mut host_lifecycle_warned).await?;
                 run_lifecycle_shell_command(
                     &target_plan,
                     launch_ctx,
@@ -376,6 +382,7 @@ pub(crate) async fn run_v03_lifecycle_steps(
                 reporter,
             )
             .await?;
+            warn_host_lifecycle_execution_once(reporter, &mut host_lifecycle_warned).await?;
             run_lifecycle_shell_command(
                 &target_plan,
                 launch_ctx,
@@ -775,6 +782,31 @@ fn node_install_command_from_evidence(evidence: &ImportedEvidence) -> Result<Str
     Ok(command.to_string())
 }
 
+/// Emit a single host-execution security warning the first time a schema-0.3
+/// lifecycle command (install/provision/build) is about to run. These commands
+/// execute the capsule's own scripts directly on the host with no network or
+/// filesystem sandbox (and, since the PR2 fix, without this capsule's secrets),
+/// so they are only safe for code the user trusts. `warned` is flipped so the
+/// warning fires at most once per `ato run`.
+async fn warn_host_lifecycle_execution_once(
+    reporter: &Arc<CliReporter>,
+    warned: &mut bool,
+) -> Result<()> {
+    if *warned {
+        return Ok(());
+    }
+    *warned = true;
+    reporter
+        .notify(
+            "⚠️  Build and install steps run directly on your host without a network \
+             or filesystem sandbox, and without this capsule's secrets. Only run \
+             capsules whose source you trust."
+                .to_string(),
+        )
+        .await?;
+    Ok(())
+}
+
 fn run_lifecycle_shell_command(
     plan: &capsule::router::ManifestData,
     launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
@@ -813,7 +845,14 @@ fn run_lifecycle_shell_command(
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
     }
-    launch_ctx.apply_allowlisted_env(&mut cmd)?;
+    // SECURITY: the build/prepare/install lifecycle runs the capsule's own
+    // (potentially untrusted, e.g. `ato run github.com/...`) install/postinstall
+    // and build scripts directly on the host with no network or filesystem
+    // sandbox. Apply only the non-secret env here — capsule secrets (`secret.*` /
+    // sensitive `env.*` grants) must NOT be exposed to those scripts. Secrets stay
+    // scoped to the Execute/run spawn boundary (`apply_allowlisted_env`). Full
+    // sandboxing of this phase is the proper follow-up fix.
+    launch_ctx.apply_non_secret_env(&mut cmd)?;
 
     let output = crate::common::host_shell::run_streaming_with_tails(&mut cmd)
         .with_context(|| format!("Failed to execute {} command", phase))?;
@@ -943,9 +982,20 @@ fn preflight_python_uv_binary_for_source_driver(
 
     let dep_root = dependency_root(plan);
     if resolve_python_requirements_path(&dep_root).is_some() {
+        // A requirements.txt is present. Prefer a hermetic uv from
+        // capsule.lock.json (tools.uv) when one is available — a capsule that
+        // ships pyproject.toml + uv.lock + a (vestigial) requirements.txt
+        // resolves deps from the lock and needs no system uv at run time.
+        // Only fall back to requiring `uv` on PATH for a requirements.txt-only
+        // capsule with no hermetic uv. (Previously this always demanded system
+        // uv on PATH → E104 on managed/Connected-Runner hosts that have none.)
+        if runtime_manager::ensure_uv_binary_with_authority(plan, authoritative_lock).is_ok() {
+            return Ok(());
+        }
         return which::which("uv").map(|_| ()).map_err(|_| {
             AtoExecutionError::lock_incomplete(
-                "source/python target requires uv on PATH when using requirements.txt",
+                "source/python target requires uv on PATH (or a hermetic uv in \
+                 capsule.lock.json) when using requirements.txt",
                 Some("uv"),
             )
             .into()
