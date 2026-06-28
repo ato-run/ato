@@ -59,4 +59,3 @@ service_target = "db"
 [[services.main.state_bindings]]
 state = "data"
 target = "/usr/src/paperless/data"
-service_target = "app"
