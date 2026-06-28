@@ -206,6 +206,9 @@ pub fn build_launch_template(
         state_contract_hash,
         runner_compatibility_class,
         completeness_policy: RequirementGraphCompletenessPolicy::RequireComplete,
+        // Ready-State restore class — detection deferred; legacy cold launches
+        // pass None so the launch-template digest is unchanged. (plan M4)
+        ready_state_runner_class: None,
     })
     .map_err(
         |e| match e.downcast::<RequirementGraphSnapshotIdentityError>() {
