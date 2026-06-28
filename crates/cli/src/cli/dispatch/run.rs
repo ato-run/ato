@@ -157,13 +157,12 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
     // `looks_like_share_run_input` (which requires a scheme) and falls through
     // to capsule resolution. Scheme-qualified inputs are left untouched.
     let raw_target_ref = raw_target.as_ref();
-    let normalized_share = if raw_target_ref.starts_with("http://")
-        || raw_target_ref.starts_with("https://")
-    {
-        None
-    } else {
-        crate::install::canonical_ato_share_url(raw_target_ref)
-    };
+    let normalized_share =
+        if raw_target_ref.starts_with("http://") || raw_target_ref.starts_with("https://") {
+            None
+        } else {
+            crate::install::canonical_ato_share_url(raw_target_ref)
+        };
     let is_share_input = match normalized_share.as_deref() {
         Some(url) => share::looks_like_share_run_input(url),
         None => share::looks_like_share_run_input(raw_target_ref),

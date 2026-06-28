@@ -2594,10 +2594,7 @@ mod tests {
         // when non-interactive, so `&` does not move it to a new group). The
         // child records its pid so the test can assert the group kill reaped it.
         let child_pid_file = tmp.path().join("child.pid");
-        let script = format!(
-            "sleep 300 & echo $! > {} ; wait",
-            child_pid_file.display()
-        );
+        let script = format!("sleep 300 & echo $! > {} ; wait", child_pid_file.display());
         let mut parent = Command::new("sh")
             .arg("-c")
             .arg(&script)
@@ -2656,10 +2653,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = parent.wait();
-        assert!(
-            !is_process_alive(parent_pid),
-            "group leader must be reaped"
-        );
+        assert!(!is_process_alive(parent_pid), "group leader must be reaped");
         assert!(
             !is_process_alive(child_pid),
             "forked child must be reaped by the group kill (orphan-child regression)"

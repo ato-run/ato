@@ -1000,7 +1000,10 @@ fn native_inference_ready() -> bool {
 /// readiness. Split from the cached host probe so the conditional `native-inference`
 /// append is unit-testable.
 fn advertised_lease_kinds_for(native_inference_ready: bool) -> Vec<String> {
-    let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS.iter().map(|s| s.to_string()).collect();
+    let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     if native_inference_ready {
         kinds.push(NATIVE_INFERENCE_RUNTIME.to_string());
     }
@@ -2387,7 +2390,11 @@ fn read_process_table() -> Vec<(u32, u32, u32)> {
         return rows;
     };
     for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
             continue;
         };
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
@@ -3314,22 +3321,27 @@ async fn handle_claimed_lease(
         let mut round: u32 = 0;
         let (mut report_rx, monitor, child_pid, first_report) = loop {
             round += 1;
-            let child = match spawn_run_child(&run_ref, managed_state_root.as_deref(), dispatch_mode)
-            {
-                Ok(child) => child,
-                Err(err) => {
-                    let report = LeaseReport::Failed {
-                        code: "spawn_failed".to_string(),
-                        message: format!("{err:#}"),
-                    };
-                    let _ =
-                        report_lease_status(&client, &api_base, &runner_token, &lease_id, &report)
-                            .await;
-                    control.abort();
-                    slot.release();
-                    return;
-                }
-            };
+            let child =
+                match spawn_run_child(&run_ref, managed_state_root.as_deref(), dispatch_mode) {
+                    Ok(child) => child,
+                    Err(err) => {
+                        let report = LeaseReport::Failed {
+                            code: "spawn_failed".to_string(),
+                            message: format!("{err:#}"),
+                        };
+                        let _ = report_lease_status(
+                            &client,
+                            &api_base,
+                            &runner_token,
+                            &lease_id,
+                            &report,
+                        )
+                        .await;
+                        control.abort();
+                        slot.release();
+                        return;
+                    }
+                };
             // PID == process-group id (see spawn_run_child); a stop signals the
             // whole workload group.
             let child_pid = child.id();
@@ -5637,7 +5649,10 @@ mod tests {
 
         // The engine leads its OWN process group, distinct from the shell's —
         // the ato#769 escape that a single kill(-shell_pgid) would strand.
-        assert_ne!(pid, engine, "engine must lead a different group than the shell");
+        assert_ne!(
+            pid, engine,
+            "engine must lead a different group than the shell"
+        );
         assert!(
             process_group_alive(pid),
             "shell group must be alive before the stop"

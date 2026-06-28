@@ -2179,7 +2179,9 @@ fn test_ato_share_url_detection_and_canonicalization() {
     assert!(is_ato_share_url("ato.run/s/abc"));
     assert!(is_ato_share_url("www.ato.run/s/abc"));
     assert!(!is_ato_share_url("https://ato.run/koh0920/sample-capsule"));
-    assert!(!is_ato_share_url("https://ato.run/open/koh0920/sample-capsule"));
+    assert!(!is_ato_share_url(
+        "https://ato.run/open/koh0920/sample-capsule"
+    ));
     assert!(!is_ato_share_url("github.com/koh0920/repo"));
 
     // Every spelling canonicalizes to the scheme-qualified share URL the share

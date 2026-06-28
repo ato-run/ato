@@ -353,7 +353,11 @@ impl RuntimeFetcher {
             .args(["-c", "import sglang"])
             .output()
             .await
-            .map_err(|e| CapsuleError::Pack(format!("sglang import smoke: failed to run {python:?}: {e}")))?;
+            .map_err(|e| {
+                CapsuleError::Pack(format!(
+                    "sglang import smoke: failed to run {python:?}: {e}"
+                ))
+            })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(CapsuleError::Pack(format!(

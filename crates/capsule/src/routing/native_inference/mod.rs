@@ -73,9 +73,7 @@ pub fn engine_context(plan: &ManifestData, engine: &dyn Engine) -> EngineContext
     let variant = engine.cache_variant_plan(variant_raw.as_deref());
     EngineContext {
         target: plan.selected_target_label().to_string(),
-        engine_path: plan
-            .target_engine_path()
-            .filter(|v| !v.trim().is_empty()),
+        engine_path: plan.target_engine_path().filter(|v| !v.trim().is_empty()),
         engine_version: plan
             .target_engine_version()
             .filter(|v| !v.trim().is_empty()),
@@ -83,9 +81,7 @@ pub fn engine_context(plan: &ManifestData, engine: &dyn Engine) -> EngineContext
         variant,
         model: plan.target_model().filter(|v| !v.trim().is_empty()),
         model_url: plan.target_model_url().filter(|v| !v.trim().is_empty()),
-        model_sha256: plan
-            .target_model_sha256()
-            .filter(|v| !v.trim().is_empty()),
+        model_sha256: plan.target_model_sha256().filter(|v| !v.trim().is_empty()),
         model_repo: plan.target_model_repo().filter(|v| !v.trim().is_empty()),
         model_revision: plan
             .target_model_revision()
