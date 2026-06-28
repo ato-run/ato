@@ -182,8 +182,11 @@ pub fn execute_host(
     // (`sh -c "python …"`) — run it via the shell, but make the project venv's
     // interpreter and console-script tools resolvable from inside the shell by
     // prepending `.venv/bin` to PATH (applied after host isolation rebuilds env).
-    let (force_python_no_bytecode, python_shell_launch) =
-        python_launch_modes(python_intent, command_is_shell_wrapper, force_python_server_tool);
+    let (force_python_no_bytecode, python_shell_launch) = python_launch_modes(
+        python_intent,
+        command_is_shell_wrapper,
+        force_python_server_tool,
+    );
     // NOTE: `is_node_launch_spec` has the same latent issue for node shell-wrapped
     // run commands (`node sh`), but fixing it correctly needs the managed-node bin
     // on PATH for the shell — out of scope for this Python-focused fix, left as-is.

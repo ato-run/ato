@@ -5423,9 +5423,8 @@ mod tests {
         collect_port_preferences, headless_state_instance_id, normalize_existing_path,
         normalize_write_path, parent_package_id, parse_external_service_contracts,
         parse_reuse_if_present_service_preflights, reconcile_compat_manifest_targets,
-        resolve_sandbox_grants, sandbox_session_data_env,
-        sandbox_session_data_env_dir, unavailable_service_message,
-        validate_sandbox_grants_best_effort,
+        resolve_sandbox_grants, sandbox_session_data_env, sandbox_session_data_env_dir,
+        unavailable_service_message, validate_sandbox_grants_best_effort,
     };
     use capsule::ato_lock::AtoLock;
     use capsule::types::{CapsuleManifest, ParamValue};

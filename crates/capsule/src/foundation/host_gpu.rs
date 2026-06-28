@@ -263,7 +263,10 @@ pub fn detect_host_gpu_profile() -> Result<HostGpuProfile> {
 /// is the `nvidia-cuda` doctor's job. Returns `None` only when there is nothing
 /// CUDA-relevant to report (no GPU AND no CUDA info), so a probed Linux host
 /// always carries the (possibly all-false) signals.
-fn detect_cuda_runtime_info(gpus: &[GpuDevice], cuda: Option<&CudaInfo>) -> Option<CudaRuntimeInfo> {
+fn detect_cuda_runtime_info(
+    gpus: &[GpuDevice],
+    cuda: Option<&CudaInfo>,
+) -> Option<CudaRuntimeInfo> {
     let cuda_runtime_present = cuda
         .map(|c| !c.driver_api_version.trim().is_empty())
         .unwrap_or(false);
@@ -779,9 +782,7 @@ mod tests {
 
     #[test]
     fn cuda_ready_requires_gpu_driver_and_cuda_runtime() {
-        let mk = |gpus: Vec<GpuDevice>,
-                  driver_ok: bool,
-                  cuda_runtime: Option<CudaRuntimeInfo>| {
+        let mk = |gpus: Vec<GpuDevice>, driver_ok: bool, cuda_runtime: Option<CudaRuntimeInfo>| {
             HostGpuProfile {
                 os: OsInfo {
                     distro: "ubuntu".to_string(),

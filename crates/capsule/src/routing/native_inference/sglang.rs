@@ -68,23 +68,25 @@ impl Engine for SgLangEngine {
                 if !host.probed || host.cuda_ready() {
                     Ok(VariantPlan::default_build())
                 } else {
-                    Err("engine=\"sglang\" needs a CUDA-ready host (NVIDIA GPU + driver + \
+                    Err(
+                        "engine=\"sglang\" needs a CUDA-ready host (NVIDIA GPU + driver + \
                          CUDA runtime + a usable Python/venv), but none was detected. Run \
                          `sudo ato runner provision --profile nvidia-cuda` then \
                          `ato runner doctor --profile nvidia-cuda`, or set an explicit \
                          engine_path."
-                        .to_string())
+                            .to_string(),
+                    )
                 }
             }
             (None | Some("cuda"), other) => Err(format!(
                 "engine=\"sglang\" is Linux + CUDA only — no managed build for {other}. \
                  Run it on a Linux NVIDIA host, or set an explicit engine_path."
             )),
-            (Some("vulkan"), _) | (Some("metal"), _) | (Some("cpu"), _) => {
-                Err("engine=\"sglang\" has no CPU/Vulkan/Metal build — it is CUDA-only. \
+            (Some("vulkan"), _) | (Some("metal"), _) | (Some("cpu"), _) => Err(
+                "engine=\"sglang\" has no CPU/Vulkan/Metal build — it is CUDA-only. \
                      Omit engine_variant (it defaults to the CUDA build) on a CUDA host."
-                    .to_string())
-            }
+                    .to_string(),
+            ),
             (Some(other), _) => Err(format!(
                 "unknown engine_variant {other:?} for sglang (CUDA-only; omit engine_variant)."
             )),
@@ -291,7 +293,8 @@ impl Engine for SgLangEngine {
             .filter(|r| !r.is_empty())
             .ok_or_else(|| {
                 CapsuleError::Pack(
-                    "`model_repo` requires `model_revision` (an immutable 40-hex commit)".to_string(),
+                    "`model_repo` requires `model_revision` (an immutable 40-hex commit)"
+                        .to_string(),
                 )
             })?;
         if !crate::foundation::types::manifest::is_safe_hf_revision(revision) {
@@ -357,8 +360,9 @@ impl Engine for SgLangEngine {
                 results.push(EngineCheck {
                     name: "sglang.cuda",
                     status: EngineCheckStatus::Ok,
-                    detail: "CUDA ready — NVIDIA GPU + driver + CUDA runtime + python/venv detected"
-                        .to_string(),
+                    detail:
+                        "CUDA ready — NVIDIA GPU + driver + CUDA runtime + python/venv detected"
+                            .to_string(),
                     recommendation: None,
                 });
             }
@@ -366,9 +370,10 @@ impl Engine for SgLangEngine {
                 results.push(EngineCheck {
                     name: "sglang.cuda",
                     status: EngineCheckStatus::Warn,
-                    detail: "NVIDIA GPU + driver present but the CUDA runtime / python venv is not \
+                    detail:
+                        "NVIDIA GPU + driver present but the CUDA runtime / python venv is not \
                              ready — sglang cannot run yet"
-                        .to_string(),
+                            .to_string(),
                     recommendation: Some(
                         "Run `sudo ato runner provision --profile nvidia-cuda`, then \
                          `ato runner doctor --profile nvidia-cuda`.",
@@ -389,7 +394,8 @@ impl Engine for SgLangEngine {
             Some(_) => results.push(EngineCheck {
                 name: "sglang.cuda",
                 status: EngineCheckStatus::Fail,
-                detail: "No NVIDIA GPU detected — engine=\"sglang\" requires a CUDA GPU".to_string(),
+                detail: "No NVIDIA GPU detected — engine=\"sglang\" requires a CUDA GPU"
+                    .to_string(),
                 recommendation: Some("Use a Linux NVIDIA host for sglang capsules."),
             }),
             None => results.push(EngineCheck {
