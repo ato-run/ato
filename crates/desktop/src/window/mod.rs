@@ -198,6 +198,9 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// Mark the process as shutting down. Idempotent.
 pub fn begin_shutdown() {
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Foreground-only Connected Runner: terminate `ato runner serve` so the
+    // device does not linger online after the Desktop exits.
+    crate::runner_agent::shutdown();
 }
 
 /// True once [`begin_shutdown`] has been called.
