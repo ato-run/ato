@@ -880,8 +880,7 @@ fn sweep_engine_log_files(
         // eligible for age/size reclamation even while their engine lives. #767.
         let (_, is_generation) = strip_log_generation_suffix(name);
         let protected = !is_generation
-            && (pid == std::process::id()
-                || (pid_is_alive(pid) && current_user_owns_process(pid)));
+            && (pid == std::process::id() || (pid_is_alive(pid) && current_user_owns_process(pid)));
         candidates.push(log_candidate(path, protected));
     }
     Ok(reclaim_logs(&candidates, now, ttl, size_budget))
@@ -1818,10 +1817,7 @@ mod tests {
         assert!(!is_session_log_candidate("ato-desktop-session-x.json"));
         assert!(!is_engine_log_candidate("ato-desktop-1.sock"));
         // Generation suffix on the engine log still resolves the owning pid.
-        assert_eq!(
-            parse_engine_log_pid("engine-1234-5678.log.1"),
-            Some(1234)
-        );
+        assert_eq!(parse_engine_log_pid("engine-1234-5678.log.1"), Some(1234));
     }
 
     #[test]

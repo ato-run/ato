@@ -199,8 +199,8 @@ pub async fn ensure_model_repo(spec: &HfRepoSpec<'_>) -> Result<PathBuf> {
         .map_err(|e| CapsuleError::Pack(format!("create blobs dir: {e}")))?;
     let mut file_digests: Vec<(String, String)> = Vec::with_capacity(selected.len());
     for entry in &selected {
-        let sha = ensure_hf_file_blob(spec.repo, spec.revision, &entry.path, token.as_deref())
-            .await?;
+        let sha =
+            ensure_hf_file_blob(spec.repo, spec.revision, &entry.path, token.as_deref()).await?;
         file_digests.push((entry.path.clone(), sha));
     }
 
@@ -262,7 +262,8 @@ async fn list_hf_repo_tree(
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(CapsuleError::Network)?;
-    let mut url = format!("https://huggingface.co/api/models/{repo}/tree/{revision}?recursive=true");
+    let mut url =
+        format!("https://huggingface.co/api/models/{repo}/tree/{revision}?recursive=true");
     let mut out = Vec::new();
     loop {
         let mut request = client.get(&url);
@@ -592,7 +593,10 @@ mod tests {
 
     #[test]
     fn glob_match_supports_hf_include_patterns() {
-        assert!(glob_match("*.safetensors", "model-00001-of-00002.safetensors"));
+        assert!(glob_match(
+            "*.safetensors",
+            "model-00001-of-00002.safetensors"
+        ));
         assert!(!glob_match("*.safetensors", "config.json"));
         assert!(glob_match("tokenizer*", "tokenizer.json"));
         assert!(glob_match("tokenizer*", "tokenizer_config.json"));
@@ -606,8 +610,14 @@ mod tests {
     fn glob_match_uses_filename_only() {
         // The matcher is fed the filename via file_name_of, so a directory
         // prefix never defeats a filename pattern.
-        assert_eq!(file_name_of("sub/dir/model.safetensors"), "model.safetensors");
-        assert!(glob_match("*.safetensors", file_name_of("a/b/x.safetensors")));
+        assert_eq!(
+            file_name_of("sub/dir/model.safetensors"),
+            "model.safetensors"
+        );
+        assert!(glob_match(
+            "*.safetensors",
+            file_name_of("a/b/x.safetensors")
+        ));
     }
 
     #[test]
@@ -634,8 +644,7 @@ mod tests {
 
     #[test]
     fn parse_link_next_extracts_pagination_url() {
-        let header =
-            "<https://huggingface.co/api/models/x/tree/abc?cursor=2>; rel=\"next\", <https://x>; rel=\"first\"";
+        let header = "<https://huggingface.co/api/models/x/tree/abc?cursor=2>; rel=\"next\", <https://x>; rel=\"first\"";
         assert_eq!(
             parse_link_next(header).as_deref(),
             Some("https://huggingface.co/api/models/x/tree/abc?cursor=2")

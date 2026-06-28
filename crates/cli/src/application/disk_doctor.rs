@@ -556,15 +556,27 @@ mod tests {
     #[test]
     fn cas_store_warns_over_budget() {
         assert!(
-            category_warning(CategoryKind::CasStore, "CAS content store", CAS_WARN_BYTES, 0)
-                .is_none()
+            category_warning(
+                CategoryKind::CasStore,
+                "CAS content store",
+                CAS_WARN_BYTES,
+                0
+            )
+            .is_none()
         );
-        let w =
-            category_warning(CategoryKind::CasStore, "CAS content store", CAS_WARN_BYTES + 1, 0)
-                .expect("CAS over budget must warn");
+        let w = category_warning(
+            CategoryKind::CasStore,
+            "CAS content store",
+            CAS_WARN_BYTES + 1,
+            0,
+        )
+        .expect("CAS over budget must warn");
         // `ato gc` collects install revisions, not CAS blobs — don't suggest it.
         assert!(w.contains("~/.ato/cas/chunks"));
-        assert!(!w.contains("ato gc"), "no bogus gc hint for the CAS content store");
+        assert!(
+            !w.contains("ato gc"),
+            "no bogus gc hint for the CAS content store"
+        );
     }
 
     #[test]

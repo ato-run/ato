@@ -7,7 +7,9 @@
 //! gates a llama.cpp capsule EXACTLY as before.
 
 use crate::error::{CapsuleError, Result};
-use crate::packers::runtime_fetcher::{RuntimeFetcher, llama_cpp_platform_support, llamacpp_cache_key};
+use crate::packers::runtime_fetcher::{
+    RuntimeFetcher, llama_cpp_platform_support, llamacpp_cache_key,
+};
 
 use super::engine::{
     Engine, EngineCheck, EngineCheckStatus, EngineContext, EngineId, HostCapabilities, VariantPlan,
@@ -63,7 +65,9 @@ impl Engine for LlamaCppEngine {
             .filter(|v| !v.is_empty());
         match normalized.as_deref() {
             // Default CPU/Metal build — no GPU readiness gate.
-            None | Some("default") | Some("cpu") | Some("metal") => Ok(VariantPlan::default_build()),
+            None | Some("default") | Some("cpu") | Some("metal") => {
+                Ok(VariantPlan::default_build())
+            }
             Some("vulkan") => match host.os.as_str() {
                 "linux" => {
                     // A GPU build must never silently fall back to CPU, so when
@@ -318,9 +322,7 @@ impl Engine for LlamaCppEngine {
                     std::env::consts::OS,
                     std::env::consts::ARCH
                 ),
-                recommendation: Some(
-                    "native-inference supports macOS (arm64/x64) and Linux x64.",
-                ),
+                recommendation: Some("native-inference supports macOS (arm64/x64) and Linux x64."),
             }),
         }
 

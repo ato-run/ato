@@ -730,9 +730,8 @@ impl ToolchainFetcher for SgLangFetcher {
         if runtime_dir.exists() {
             std::fs::remove_dir_all(&runtime_dir)?;
         }
-        std::fs::rename(&temp_dir, &runtime_dir).map_err(|e| {
-            CapsuleError::Pack(format!("Failed to move sglang venv to cache: {e}"))
-        })?;
+        std::fs::rename(&temp_dir, &runtime_dir)
+            .map_err(|e| CapsuleError::Pack(format!("Failed to move sglang venv to cache: {e}")))?;
 
         provider
             .reporter
@@ -758,7 +757,10 @@ async fn run_uv(uv: &std::path::Path, args: &[String], show_progress: bool) -> R
     if show_progress {
         // Inherit stdio so uv's download/build progress streams to the user.
         let status = cmd.status().await.map_err(|e| {
-            CapsuleError::Pack(format!("failed to run uv {}: {e}", args.first().cloned().unwrap_or_default()))
+            CapsuleError::Pack(format!(
+                "failed to run uv {}: {e}",
+                args.first().cloned().unwrap_or_default()
+            ))
         })?;
         if !status.success() {
             return Err(CapsuleError::Pack(format!(
@@ -769,7 +771,10 @@ async fn run_uv(uv: &std::path::Path, args: &[String], show_progress: bool) -> R
         Ok(())
     } else {
         let output = cmd.output().await.map_err(|e| {
-            CapsuleError::Pack(format!("failed to run uv {}: {e}", args.first().cloned().unwrap_or_default()))
+            CapsuleError::Pack(format!(
+                "failed to run uv {}: {e}",
+                args.first().cloned().unwrap_or_default()
+            ))
         })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1103,7 +1108,10 @@ mod tests {
         let reqs = sglang_requirements("0.5.9");
         assert_eq!(reqs.python, "3.12");
         // cu128 extra-index (not the old cu124), supplied alongside PyPI.
-        assert_eq!(reqs.torch_index_url, "https://download.pytorch.org/whl/cu128");
+        assert_eq!(
+            reqs.torch_index_url,
+            "https://download.pytorch.org/whl/cu128"
+        );
         // `unsafe-best-match` lets the single solve span PyPI + the cu128 index.
         assert_eq!(reqs.index_strategy, "unsafe-best-match");
         // The `[srt]` extra (server deps) + the wheel version flow into one pin —

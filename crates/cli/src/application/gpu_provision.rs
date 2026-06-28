@@ -464,7 +464,10 @@ fn cuda_meets_floor(major: u32, minor: u32) -> bool {
 /// driver/reboot leg writes the marker with its profile, and the CLI default
 /// would otherwise drop a resumed `nvidia-cuda` run back onto the Vulkan path. An
 /// absent or blank marker profile falls back to the CLI value.
-fn resolve_effective_profile<'a>(cli_profile: &'a str, marker: Option<&'a ProvisionMarker>) -> &'a str {
+fn resolve_effective_profile<'a>(
+    cli_profile: &'a str,
+    marker: Option<&'a ProvisionMarker>,
+) -> &'a str {
     match marker {
         Some(m) if !m.profile.trim().is_empty() => &m.profile,
         _ => cli_profile,
@@ -667,7 +670,8 @@ fn diagnose_cuda(profile: &HostGpuProfile) -> Vec<CheckResult> {
         results.push(CheckResult {
             name: "python_venv",
             status: CheckStatus::Ok,
-            detail: "python3 -m venv is available (sglang installs into a managed venv)".to_string(),
+            detail: "python3 -m venv is available (sglang installs into a managed venv)"
+                .to_string(),
             recommendation: None,
         });
     } else {
@@ -675,7 +679,9 @@ fn diagnose_cuda(profile: &HostGpuProfile) -> Vec<CheckResult> {
             name: "python_venv",
             status: CheckStatus::Fail,
             detail: "the python3 `venv` module is not importable".to_string(),
-            recommendation: Some("Run: sudo ato runner provision --profile nvidia-cuda (installs python3-venv)"),
+            recommendation: Some(
+                "Run: sudo ato runner provision --profile nvidia-cuda (installs python3-venv)",
+            ),
         });
     }
 
@@ -777,7 +783,9 @@ fn diagnose_cuda(profile: &HostGpuProfile) -> Vec<CheckResult> {
             results.push(CheckResult {
                 name: "gpu_vram",
                 status: CheckStatus::Ok,
-                detail: format!("{vram_gb} GB VRAM on the largest GPU (comfortable for AWQ weights)"),
+                detail: format!(
+                    "{vram_gb} GB VRAM on the largest GPU (comfortable for AWQ weights)"
+                ),
                 recommendation: None,
             });
         } else {
@@ -1596,10 +1604,9 @@ async fn provision_cuda_phases(
                 detail: format!("building managed sglang {SGLANG_REFERENCE_WHEEL} venv (cu128)"),
             },
         );
-        let fetcher =
-            capsule::packers::runtime_fetcher::RuntimeFetcher::new().map_err(|err| {
-                anyhow::anyhow!("failed to init the toolchain cache for the sglang venv: {err}")
-            })?;
+        let fetcher = capsule::packers::runtime_fetcher::RuntimeFetcher::new().map_err(|err| {
+            anyhow::anyhow!("failed to init the toolchain cache for the sglang venv: {err}")
+        })?;
         match fetcher.ensure_sglang(SGLANG_REFERENCE_WHEEL).await {
             Ok(python) => {
                 sglang_import_ok = true;
@@ -1607,7 +1614,10 @@ async fn provision_cuda_phases(
                     json,
                     &ProvisionEvent::SglangVenv {
                         action: ProvisionAction::Verify,
-                        detail: format!("sglang venv ready at {} (`import sglang` ok)", python.display()),
+                        detail: format!(
+                            "sglang venv ready at {} (`import sglang` ok)",
+                            python.display()
+                        ),
                     },
                 );
                 emit_event(
@@ -1828,7 +1838,9 @@ fn print_provision_summary(receipt: &ProvisionReceipt) {
         );
     }
     let smoke = match receipt.gpu_smoke_result {
-        SmokeResult::Pass if is_cuda_receipt => "PASS (import sglang in the managed venv)".to_string(),
+        SmokeResult::Pass if is_cuda_receipt => {
+            "PASS (import sglang in the managed venv)".to_string()
+        }
         SmokeResult::Pass => format!(
             "PASS ({} GPUs via vulkaninfo/nvidia-smi)",
             receipt.smoke_gpu_count_detected.unwrap_or(0)
@@ -1899,12 +1911,7 @@ fn install_cuda_toolchain(keyring_url: &str) -> Result<()> {
     // 1. Fetch + install the NVIDIA CUDA repo keyring so cuda-toolkit-12-8 resolves.
     let keyring_deb = std::env::temp_dir().join("cuda-keyring_1.1-1_all.deb");
     let curl = Command::new("curl")
-        .args([
-            "-fsSL",
-            "-o",
-            &keyring_deb.to_string_lossy(),
-            keyring_url,
-        ])
+        .args(["-fsSL", "-o", &keyring_deb.to_string_lossy(), keyring_url])
         .status()
         .with_context(|| format!("failed to run curl for the CUDA keyring {keyring_url}"))?;
     if !curl.success() {
@@ -2510,7 +2517,13 @@ mod tests {
     #[test]
     fn diagnose_cuda_ok_host_passes_the_floor_rows() {
         let checks = diagnose_cuda(&cuda_profile());
-        for name in ["gpu", "nvidia_driver", "cuda_runtime", "python3", "python_venv"] {
+        for name in [
+            "gpu",
+            "nvidia_driver",
+            "cuda_runtime",
+            "python3",
+            "python_venv",
+        ] {
             assert_eq!(
                 cuda_check(&checks, name).status,
                 CheckStatus::Ok,
@@ -2541,7 +2554,10 @@ mod tests {
         let mut profile = cuda_profile();
         profile.driver = None;
         let checks = diagnose_cuda(&profile);
-        assert_eq!(cuda_check(&checks, "nvidia_driver").status, CheckStatus::Fail);
+        assert_eq!(
+            cuda_check(&checks, "nvidia_driver").status,
+            CheckStatus::Fail
+        );
     }
 
     #[test]
@@ -2567,7 +2583,10 @@ mod tests {
             toolkit_version: None,
         });
         let checks = diagnose_cuda(&profile);
-        assert_eq!(cuda_check(&checks, "cuda_runtime").status, CheckStatus::Fail);
+        assert_eq!(
+            cuda_check(&checks, "cuda_runtime").status,
+            CheckStatus::Fail
+        );
     }
 
     #[test]
@@ -2575,7 +2594,10 @@ mod tests {
         let mut profile = cuda_profile();
         profile.cuda = None;
         let checks = diagnose_cuda(&profile);
-        assert_eq!(cuda_check(&checks, "cuda_runtime").status, CheckStatus::Fail);
+        assert_eq!(
+            cuda_check(&checks, "cuda_runtime").status,
+            CheckStatus::Fail
+        );
     }
 
     #[test]
@@ -2740,7 +2762,10 @@ mod tests {
     #[test]
     fn no_marker_uses_the_cli_profile() {
         // Fresh run (no --resume / no marker): the CLI `--profile` is authoritative.
-        assert_eq!(resolve_effective_profile("nvidia-cuda", None), "nvidia-cuda");
+        assert_eq!(
+            resolve_effective_profile("nvidia-cuda", None),
+            "nvidia-cuda"
+        );
         assert_eq!(
             resolve_effective_profile("nvidia-ubuntu", None),
             "nvidia-ubuntu"

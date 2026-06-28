@@ -438,7 +438,9 @@ impl CapsuleManifest {
                 // `--flag value` and `--flag=value` forms are caught.
                 for arg in &target.server_args {
                     if let Some(flag) =
-                        crate::foundation::types::manifest::forbidden_native_inference_server_arg(arg)
+                        crate::foundation::types::manifest::forbidden_native_inference_server_arg(
+                            arg,
+                        )
                     {
                         errors.push(ValidationError::InvalidTarget(format!(
                             "target '{label}': `server_args` must not set `{flag}` — it is \
