@@ -2312,7 +2312,9 @@ pub fn is_safe_hf_repo(value: &str) -> bool {
 /// `model_repo` pin is reproducible (the bytes can't move under the digest).
 pub fn is_safe_hf_revision(value: &str) -> bool {
     let v = value.trim();
-    v.len() == 40 && v.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    v.len() == 40
+        && v.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// Flags a native-inference `server_args` token that names a launcher- or
@@ -2345,15 +2347,24 @@ mod server_args_guard_tests {
     #[test]
     fn rejects_each_forbidden_flag_space_form() {
         // `--flag value` form: the token is exactly the flag.
-        assert_eq!(forbidden_native_inference_server_arg("--port"), Some("--port"));
+        assert_eq!(
+            forbidden_native_inference_server_arg("--port"),
+            Some("--port")
+        );
         assert_eq!(forbidden_native_inference_server_arg("-p"), Some("-p"));
-        assert_eq!(forbidden_native_inference_server_arg("--host"), Some("--host"));
+        assert_eq!(
+            forbidden_native_inference_server_arg("--host"),
+            Some("--host")
+        );
         assert_eq!(
             forbidden_native_inference_server_arg("--model-path"),
             Some("--model-path")
         );
         assert_eq!(forbidden_native_inference_server_arg("-m"), Some("-m"));
-        assert_eq!(forbidden_native_inference_server_arg("--model"), Some("--model"));
+        assert_eq!(
+            forbidden_native_inference_server_arg("--model"),
+            Some("--model")
+        );
     }
 
     #[test]
@@ -2524,7 +2535,9 @@ mod model_ref_tests {
     fn hf_revision_requires_immutable_40_hex_commit() {
         use super::is_safe_hf_revision;
         assert!(is_safe_hf_revision(&"a".repeat(40)));
-        assert!(is_safe_hf_revision("0123456789abcdef0123456789abcdef01234567"));
+        assert!(is_safe_hf_revision(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
         // Branches/tags and malformed lengths/casing are rejected.
         assert!(!is_safe_hf_revision("main"));
         assert!(!is_safe_hf_revision(&"a".repeat(39)));

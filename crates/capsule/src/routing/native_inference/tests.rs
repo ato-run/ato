@@ -5,7 +5,9 @@
 //! produces identical argv/command/port) stay in `launch_spec.rs` and exercise
 //! the same code path end to end.
 
-use super::engine::{Engine, EngineCheckStatus, EngineContext, EngineId, HostCapabilities, VariantPlan};
+use super::engine::{
+    Engine, EngineCheckStatus, EngineContext, EngineId, HostCapabilities, VariantPlan,
+};
 use super::llamacpp::LlamaCppEngine;
 use super::sglang::SgLangEngine;
 use crate::foundation::host_gpu::{
@@ -91,7 +93,11 @@ fn gpu_not_vulkan_ready_profile() -> HostGpuProfile {
 #[test]
 fn engine_id_maps_llamacpp_aliases() {
     for s in ["llama.cpp", "llamacpp", "llama-cpp", "  LLAMA.CPP  "] {
-        assert_eq!(EngineId::from_manifest(s), Some(EngineId::LlamaCpp), "{s:?}");
+        assert_eq!(
+            EngineId::from_manifest(s),
+            Some(EngineId::LlamaCpp),
+            "{s:?}"
+        );
     }
     assert_eq!(EngineId::from_manifest("unknown-engine"), None);
     assert_eq!(EngineId::from_manifest(""), None);
@@ -180,8 +186,10 @@ fn plan_variant_vulkan_linux_probed_failed_probe_fails_closed() {
 
 #[test]
 fn plan_variant_vulkan_linux_probed_ready_returns_vulkan() {
-    let action = LlamaCppEngine
-        .plan_variant(Some("vulkan"), &linux_caps_probed(Some(vulkan_ready_profile())));
+    let action = LlamaCppEngine.plan_variant(
+        Some("vulkan"),
+        &linux_caps_probed(Some(vulkan_ready_profile())),
+    );
     assert_eq!(action, Ok(VariantPlan::named("vulkan")));
 }
 
@@ -226,7 +234,10 @@ fn cache_variant_plan_never_gates() {
 
 #[test]
 fn cache_key_separates_variants() {
-    assert_eq!(LlamaCppEngine.cache_key("b9754", &VariantPlan::default_build()), "b9754");
+    assert_eq!(
+        LlamaCppEngine.cache_key("b9754", &VariantPlan::default_build()),
+        "b9754"
+    );
     assert_eq!(
         LlamaCppEngine.cache_key("b9754", &VariantPlan::named("vulkan")),
         "b9754@vulkan"
@@ -245,7 +256,11 @@ fn build_server_argv_is_hardcoded_and_omits_port() {
 
 // ── resolve_server_command / resolve_model_path (pure) ────────────────────
 
-fn ctx(engine_path: Option<&str>, engine_version: Option<&str>, variant: VariantPlan) -> EngineContext {
+fn ctx(
+    engine_path: Option<&str>,
+    engine_version: Option<&str>,
+    variant: VariantPlan,
+) -> EngineContext {
     EngineContext {
         target: "app".to_string(),
         engine_path: engine_path.map(String::from),
@@ -267,7 +282,10 @@ fn ctx(engine_path: Option<&str>, engine_version: Option<&str>, variant: Variant
 #[test]
 fn resolve_server_command_prefers_engine_path() {
     let c = ctx(Some("./llama-server"), None, VariantPlan::default_build());
-    assert_eq!(LlamaCppEngine.resolve_server_command(&c).unwrap(), "./llama-server");
+    assert_eq!(
+        LlamaCppEngine.resolve_server_command(&c).unwrap(),
+        "./llama-server"
+    );
 }
 
 #[test]
@@ -307,7 +325,10 @@ fn resolve_server_command_variant_keys_cache_path() {
 fn resolve_model_path_prefers_local_model() {
     let mut c = ctx(Some("./llama-server"), None, VariantPlan::default_build());
     c.model = Some("./model.gguf".to_string());
-    assert_eq!(LlamaCppEngine.resolve_model_path(&c).unwrap(), "./model.gguf");
+    assert_eq!(
+        LlamaCppEngine.resolve_model_path(&c).unwrap(),
+        "./model.gguf"
+    );
 }
 
 #[test]
@@ -357,9 +378,7 @@ fn resolve_model_path_requires_model_or_url() {
 fn doctor_checks_include_engine_rows() {
     // The engine owns platform / acceleration / recommended_target; model_cache
     // is the CLI doctor's host-cache row (not engine-specific).
-    let caps = HostCapabilities::from_profile(
-        capsule_detect_or_none(),
-    );
+    let caps = HostCapabilities::from_profile(capsule_detect_or_none());
     let checks = LlamaCppEngine.doctor_checks(&caps);
     for name in ["platform", "acceleration", "recommended_target"] {
         assert!(checks.iter().any(|c| c.name == name), "missing {name}");
@@ -567,10 +586,7 @@ fn sglang_build_server_argv_is_launch_server_and_omits_port() {
 
 // ── resolve_server_command (pure) ──────────────────────────────────────────
 
-fn sglang_ctx(
-    engine_path: Option<&str>,
-    engine_version: Option<&str>,
-) -> EngineContext {
+fn sglang_ctx(engine_path: Option<&str>, engine_version: Option<&str>) -> EngineContext {
     EngineContext {
         target: "app".to_string(),
         engine_path: engine_path.map(String::from),
