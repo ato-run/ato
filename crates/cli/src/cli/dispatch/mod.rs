@@ -777,8 +777,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     max_slots,
                     public_url_template,
                 )),
-                crate::cli::RunnerCommands::Doctor { json } => {
-                    crate::application::gpu_provision::run_doctor(json)
+                crate::cli::RunnerCommands::Doctor { profile, json } => {
+                    crate::application::gpu_provision::run_doctor_for_profile(&profile, json)
                 }
                 crate::cli::RunnerCommands::Provision {
                     profile,
@@ -797,6 +797,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             crate::cli::DoctorTarget::NativeInference { json } => {
                 crate::application::native_inference_doctor::run(json)
             }
+            crate::cli::DoctorTarget::Disk { json } => crate::application::disk_doctor::run(json),
         },
 
         Commands::Login {

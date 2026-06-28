@@ -9,10 +9,18 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-image = "frooodle/s-pdf:2.11.0"
+# Fully-qualified docker.io ref: ato's OCI digest resolver fails on a bare Docker Hub
+# short-ref ("frooodle/s-pdf:2.11.0" -> E999 "failed to resolve image"); the explicit
+# registry form resolves (verified on a Linux Connected Runner — see ato-demo-apps).
+image = "docker.io/frooodle/s-pdf:2.11.0"
 port = 8080
+# Stirling PDF v2.x enables an account/login wall by default (GET / -> 401, default
+# admin/stirling user + MFA prompts). Disable the login system for a frictionless
+# single-user demo so the browser opens straight into the PDF tools. Do NOT use this
+# for any shared/multi-user deployment.
+env = { SECURITY_ENABLELOGIN = "false", DISABLE_ADDITIONAL_FEATURES = "true" }
 
 [services.main]
 target = "app"
-# Note: / returns 401 (auth required); /login returns 200 — use login page as readiness target
-readiness_probe = { http_get = "/login", port = "8080" }
+# With login disabled, GET / returns 200 (the app shell) — probe it directly.
+readiness_probe = { http_get = "/", port = "8080" }

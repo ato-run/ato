@@ -1,0 +1,65 @@
+name: Connected native-inference smoke (#754)
+
+# Manual-only gate for #754. Dispatches ONE native-inference run to a Connected
+# Runner and verifies the #149/#763 contract end-to-end, then stops it. Never runs
+# on push/PR. See docs/ops/connected-runner-native-inference-smoke.md.
+#
+# Required repo secret: ATO_SESSION (operator better-auth session token).
+# Optional repo secret: ATO_RUNNER_SSH_KEY (private key for the direct argv proof).
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: "API base"
+        type: choice
+        options:
+          - https://staging.api.ato.run
+          - https://api.ato.run
+        default: https://staging.api.ato.run
+      runner_id:
+        description: "Connected Runner id (owned, online, advertising native-inference)"
+        required: true
+      capsule_ref:
+        description: "native-inference capsule ref"
+        default: community/local-llm-chat
+      runner_ssh:
+        description: "optional user@host for the direct --sandbox-absent proof"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+      - name: stage optional runner ssh key
+        if: ${{ inputs.runner_ssh != '' }}
+        env:
+          KEY: ${{ secrets.ATO_RUNNER_SSH_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            mkdir -p "$HOME/.ssh"
+            printf '%s\n' "$KEY" > "$HOME/.ssh/runner_key"
+            chmod 600 "$HOME/.ssh/runner_key"
+            echo "ATO_RUNNER_SSH_KEY=$HOME/.ssh/runner_key" >> "$GITHUB_ENV"
+          fi
+      - name: smoke
+        env:
+          ATO_API_BASE: ${{ inputs.api_base }}
+          ATO_SESSION: ${{ secrets.ATO_SESSION }}
+          ATO_RUNNER_ID: ${{ inputs.runner_id }}
+          ATO_CAPSULE_REF: ${{ inputs.capsule_ref }}
+          ATO_RUNNER_SSH: ${{ inputs.runner_ssh }}
+        run: scripts/smoke-connected-native-inference.sh
+      - name: upload redacted evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-evidence
+          path: smoke-evidence/
+          if-no-files-found: warn

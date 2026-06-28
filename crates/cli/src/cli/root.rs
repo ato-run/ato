@@ -1210,4 +1210,15 @@ pub(crate) enum DoctorTarget {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Report the on-disk footprint of the local `~/.ato` caches that grow
+    /// silently — desktop/session/engine logs, the SQLite state DBs, and the
+    /// CAS content store — sorted largest-first, and warn before they bloat.
+    /// Read-only: it only measures, never deletes.
+    #[command(name = "disk")]
+    Disk {
+        /// Emit machine-readable JSON on stdout instead of a human table.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
