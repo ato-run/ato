@@ -166,6 +166,13 @@ pub struct WebViewManager {
     /// so OAuth callbacks delivered via the in-app sign-in flow
     /// reach the same code path as macOS Launch Services callbacks.
     pending_callback_urls: Arc<Mutex<Vec<String>>>,
+    /// Privileged `ato://` intents (run, runner control) classified + origin-
+    /// accepted by `crate::intent` in a navigation handler. Drained on the next
+    /// `sync_from_state` pass (which has `cx`) and dispatched there. Kept
+    /// separate from `pending_callback_urls` because these touch local execution
+    /// / the runner agent and must never be forwarded to the origin-agnostic
+    /// `handle_host_route` path.
+    pending_privileged_intents: Arc<Mutex<Vec<crate::intent::PrivilegedIntent>>>,
     /// Live PTY sessions keyed by session_id.
     terminal_sessions: HashMap<String, Box<dyn TerminalCore>>,
     /// Session IDs that have already exited — prevents re-spawning a shell after a share terminal ends.
@@ -466,6 +473,7 @@ impl WebViewManager {
             visibility_cache: HashMap::new(),
             pending_auth_handoffs: Arc::new(Mutex::new(Vec::new())),
             pending_callback_urls: Arc::new(Mutex::new(Vec::new())),
+            pending_privileged_intents: Arc::new(Mutex::new(Vec::new())),
             terminal_sessions: HashMap::new(),
             completed_terminal_sessions: HashSet::new(),
             pending_terminal_errors: HashMap::new(),
@@ -567,6 +575,22 @@ impl WebViewManager {
         };
         for url in callback_urls {
             state.handle_host_route(&url);
+        }
+
+        // Drain privileged intents (run, runner control) that `crate::intent`
+        // classified + origin-accepted in a navigation handler. Dispatched here
+        // (where `state` is available) — never through the origin-agnostic
+        // host-route path. Runner control reuses `crate::runner_agent`: the
+        // Desktop performs the privileged local CLI spawn.
+        let privileged: Vec<crate::intent::PrivilegedIntent> = {
+            let mut q = self
+                .pending_privileged_intents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            q.drain(..).collect()
+        };
+        for intent in privileged {
+            dispatch_privileged_intent(state, intent);
         }
 
         // Drain auth handoff signals from navigation handlers before any other reconciliation.
@@ -2683,19 +2707,103 @@ impl WebViewManager {
         }
 
         // For external URLs, intercept navigations that require browser-side auth.
-        if let GuestRoute::ExternalUrl(_) = &pane.route {
+        if let GuestRoute::ExternalUrl(pane_url) = &pane.route {
             let pane_binding = pane_binding.clone();
             let signals = self.pending_auth_handoffs.clone();
             let callback_queue = self.pending_callback_urls.clone();
+            let privileged_queue = self.pending_privileged_intents.clone();
+            // Used to wake the window after enqueueing a privileged intent, so
+            // it is dispatched on the next sync rather than waiting for the next
+            // natural render (the custom-scheme navigation is blocked, so no
+            // page-load event fires).
+            let intent_async_app = self.async_app.clone();
+            let intent_window_handle = self.window_handle;
             let auth_flow = pane.auth_flow;
+            // The pane's canonical web origin (scheme + host + port). The P0
+            // trust boundary keys off this full origin, NOT host alone.
+            let pane_origin = pane_url.origin().ascii_serialization();
+            // Whether this pane is the embedded PWA Home (vs the dock or an
+            // arbitrary external site). Only the Home pane is pinned to its
+            // origin (cross-origin top-level navigation is blocked below).
+            let is_home_pane = is_pwa_home_origin(&pane_origin);
+            // Defense-in-depth: track navigation off the trusted origin so an
+            // off-origin page cannot emit trusted intents even if the block
+            // below is somehow bypassed. Not the primary boundary.
+            let navigated_off_origin =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             builder = builder.with_navigation_handler(move |uri: String| {
-                // ato:// deep links arrive here when ato.run finishes
-                // an in-app OAuth flow and redirects to the desktop
-                // callback. WKWebView cannot load custom schemes, so
-                // we capture them and route via handle_host_route.
+                // The embedded Home pane is PINNED to its trusted origin: block
+                // cross-origin top-level navigation and hand the link to the
+                // system browser. This is the primary guarantee that a page on
+                // another origin can never run inside — and therefore speak for
+                // — the Home pane. Sign-in panes are exempt (they legitimately
+                // round-trip through external OAuth origins).
+                if uri.starts_with("http://") || uri.starts_with("https://") {
+                    let nav = crate::intent::classify_top_level_navigation(
+                        &pane_origin,
+                        &uri,
+                        is_home_pane,
+                        auth_flow,
+                    );
+                    // A blocked navigation never leaves the Home origin, so it
+                    // must NOT downgrade trust (otherwise one external-link click
+                    // would poison subsequent ato:// intents from the still-
+                    // loaded Home page). Only allowed navigations record it.
+                    navigated_off_origin.store(nav.navigated_off, Ordering::Relaxed);
+                    if nav.block {
+                        tracing::info!(
+                            origin = %pane_origin,
+                            %uri,
+                            "home: blocked cross-origin top-level navigation; opening in system browser"
+                        );
+                        let _ = crate::proc_util::open_external_url(&uri);
+                        return false;
+                    }
+                }
+                // ato:// / capsule:// deep links arrive here when an Ato web
+                // surface navigates to a custom scheme. WKWebView cannot load
+                // these, so we capture them — but first classify + origin-gate
+                // every one (see `crate::intent`). Untrusted origins and
+                // unknown/malformed verbs are rejected and logged, never acted
+                // on.
                 if uri.starts_with("ato://") || uri.starts_with("capsule://") {
-                    if let Ok(mut q) = callback_queue.lock() {
-                        q.push(uri);
+                    // Defense-in-depth: if a non-auth pane somehow navigated
+                    // off-origin, treat it as untrusted regardless of its
+                    // initial URL.
+                    let effective_origin =
+                        if !auth_flow && navigated_off_origin.load(Ordering::Relaxed) {
+                            ""
+                        } else {
+                            pane_origin.as_str()
+                        };
+                    match crate::intent::classify(effective_origin, &uri) {
+                        crate::intent::IntentDecision::HostRoute(route) => {
+                            if let Ok(mut q) = callback_queue.lock() {
+                                q.push(route);
+                            }
+                        }
+                        crate::intent::IntentDecision::Privileged(intent) => {
+                            // Recognized + origin-accepted from a trusted,
+                            // on-origin pane. Queue for the next sync_from_state
+                            // pass (which has `cx`), where it is dispatched —
+                            // NOT forwarded to the origin-agnostic host-route
+                            // path.
+                            tracing::info!(
+                                origin = %pane_origin,
+                                ?intent,
+                                "intent: privileged intent accepted"
+                            );
+                            if let Ok(mut q) = privileged_queue.lock() {
+                                q.push(intent);
+                            }
+                            // Wake the window so the queued intent is dispatched
+                            // promptly (no page-load event fires for a blocked
+                            // custom-scheme navigation).
+                            notify_window(intent_async_app.clone(), intent_window_handle);
+                        }
+                        crate::intent::IntentDecision::Reject(reason) => {
+                            tracing::warn!(origin = %pane_origin, %uri, %reason, "intent: rejected");
+                        }
                     }
                     return false;
                 }
@@ -2721,12 +2829,14 @@ impl WebViewManager {
         builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
 
         // Auth cookie injection is gated on BOTH the route's store class
-        // (must be System) and the URL pattern (ato.run/dock).  The store-
-        // class gate is the hard structural guard: even if a CapsuleUrl
-        // happens to point at https://ato.run/dock, `allows_ato_auth_cookies`
-        // returns false for CapsuleEphemeral routes and cookie injection is
-        // skipped.  The URL predicate is a secondary filter that limits
-        // injection to the specific system pages that need it.
+        // (must be System) and the URL — a fixed allowlist of full web origins:
+        // the embedded PWA Home (https://app.ato.run / https://stg-app.ato.run,
+        // plus http loopback in debug) and the legacy https://ato.run/dock page.
+        // The store-class gate is the hard structural guard: even if a CapsuleUrl
+        // happens to point at one of those, `allows_ato_auth_cookies` returns
+        // false for CapsuleEphemeral routes and cookie injection is skipped. The
+        // URL predicate (`should_install_ato_auth_cookies`) is the secondary
+        // filter that limits injection to those specific system origins.
         let desktop_auth_handoff = if store_class.allows_ato_auth_cookies()
             && should_install_ato_auth_cookies(&url)
         {
@@ -3571,11 +3681,126 @@ fn target_handle_for_version(canonical_handle: &str, latest: &str) -> String {
     format!("{}@{}", base, latest)
 }
 
+/// Dispatch a privileged `ato://` intent. The intent has already been
+/// origin-validated by `crate::intent` AND confirmed to come from a trusted,
+/// on-origin pane (the navigation-handler gate) — an arbitrary or off-origin web
+/// page cannot reach here.
+///
+/// Confirmation model per verb (no separate modal yet):
+///   - `runner/register` → `ato runner login` opens a browser device-flow; the
+///     operator's sign-in there IS the explicit authorization.
+///   - `runner/start` / `runner/stop` → toggle the local `ato runner serve`
+///     agent. First-party-origin-gated (only the trusted Ato Home can reach
+///     them) and recorded in the activity log so they are never silent; an
+///     explicit confirm dialog is a follow-up.
+///   - `run` → acknowledged in the activity log only. The full
+///     run-capsule-on-this-device path (store-ref resolution + a native pre-run
+///     confirmation) is a follow-up.
+fn dispatch_privileged_intent(state: &mut AppState, intent: crate::intent::PrivilegedIntent) {
+    use crate::intent::PrivilegedIntent;
+    use crate::runner_agent::RunnerStatus;
+    use crate::state::ActivityTone;
+
+    match intent {
+        PrivilegedIntent::RunnerRegister => {
+            // `register()` only launches a browser device-flow when not already
+            // registered / in progress (see runner_agent). Keep the activity
+            // message honest about what actually happened.
+            let status = crate::runner_agent::register();
+            let (tone, message) = match &status {
+                RunnerStatus::Registering => (
+                    ActivityTone::Info,
+                    "Connected Runner: registration started — authorize in your browser".to_string(),
+                ),
+                RunnerStatus::Error(_) => {
+                    (ActivityTone::Warning, format!("Connected Runner: {}", status.label()))
+                }
+                // Already registered (Serving / Stopped) → no browser flow began.
+                _ => (ActivityTone::Info, format!("Connected Runner: {}", status.label())),
+            };
+            state.push_activity(tone, message);
+        }
+        PrivilegedIntent::RunnerStart => {
+            let status = crate::runner_agent::start();
+            let tone = if matches!(status, RunnerStatus::Error(_)) {
+                ActivityTone::Warning
+            } else {
+                ActivityTone::Info
+            };
+            state.push_activity(tone, format!("Connected Runner: {}", status.label()));
+        }
+        PrivilegedIntent::RunnerStop => {
+            let status = crate::runner_agent::stop();
+            state.push_activity(
+                ActivityTone::Info,
+                format!("Connected Runner: {}", status.label()),
+            );
+        }
+        PrivilegedIntent::Run { source, run_id } => {
+            let detail = run_id.map(|id| format!(" (run {id})")).unwrap_or_default();
+            state.push_activity(
+                ActivityTone::Info,
+                format!(
+                    "Run requested for {source}{detail}. Open it from Discover to run on this device."
+                ),
+            );
+        }
+    }
+}
+
+/// Whether `origin` (a canonical `scheme://host[:port]` web origin) is an
+/// embedded `ato-pwa` Home origin that may receive the desktop's signed-in
+/// account cookies (so Home renders signed-in without a second login).
+///
+/// FIXED ALLOWLIST of full web origins (a web origin is scheme + host + port,
+/// not host alone): the production + staging Home origins over `https` only.
+/// Debug builds additionally allow `http` loopback (any port) for a local
+/// `vite` dev server. `http://app.ato.run`, a non-default port, or an arbitrary
+/// host are all rejected — the account session cookie is only ever handed to
+/// known Ato origins.
+fn is_pwa_home_origin(origin: &str) -> bool {
+    if matches!(origin, "https://app.ato.run" | "https://stg-app.ato.run") {
+        return true;
+    }
+    cfg!(debug_assertions) && is_loopback_http_origin(origin)
+}
+
+/// Whether `origin` is an `http` loopback origin (localhost / 127.0.0.1 / ::1,
+/// any port). Self-contained so the Home-embed change carries no dependency on
+/// the intent module.
+fn is_loopback_http_origin(origin: &str) -> bool {
+    match url::Url::parse(origin) {
+        Ok(url) => {
+            url.scheme() == "http"
+                && url.host_str().is_some_and(|host| {
+                    host == "localhost"
+                        || host == "127.0.0.1"
+                        || host == "::1"
+                        || host == "[::1]"
+                        || host.ends_with(".localhost")
+                })
+        }
+        Err(_) => false,
+    }
+}
+
 fn should_install_ato_auth_cookies(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
-    parsed.host_str() == Some("ato.run") && parsed.path().starts_with("/dock")
+    // Legacy: the in-product dock page on the marketing site (https + path-gated).
+    if parsed.scheme() == "https"
+        && parsed.host_str() == Some("ato.run")
+        && parsed.path().starts_with("/dock")
+    {
+        return true;
+    }
+    // The embedded PWA Home — match the FULL web origin (scheme + host + port),
+    // so http://app.ato.run or a non-default port never receives cookies. The
+    // store-class gate at the call site still restricts injection to System
+    // routes only.
+    let origin = parsed.origin();
+    origin.is_tuple() && is_pwa_home_origin(&origin.ascii_serialization())
 }
 
 pub(crate) fn default_api_base_url() -> String {
@@ -5465,6 +5690,33 @@ mod tests {
         ));
         assert!(!should_install_ato_auth_cookies("https://ato.run/auth"));
         assert!(!should_install_ato_auth_cookies("https://example.com/dock"));
+    }
+
+    #[test]
+    fn pwa_home_origins_install_ato_auth_cookies() {
+        // The embedded PWA Home is a root-served SPA → any path qualifies.
+        assert!(should_install_ato_auth_cookies("https://app.ato.run/"));
+        assert!(should_install_ato_auth_cookies(
+            "https://app.ato.run/#route=/runners"
+        ));
+        assert!(should_install_ato_auth_cookies("https://stg-app.ato.run/"));
+        // Cookies are gated on the FULL web origin (scheme + host + port), not
+        // host alone: a downgraded scheme or a non-default port is a different
+        // origin and must not receive the account cookie.
+        assert!(!should_install_ato_auth_cookies("http://app.ato.run/"));
+        assert!(!should_install_ato_auth_cookies("https://app.ato.run:8443/"));
+        // The legacy dock page is https-gated too.
+        assert!(should_install_ato_auth_cookies("https://ato.run/dock"));
+        assert!(!should_install_ato_auth_cookies("http://ato.run/dock"));
+        // Look-alike / unrelated hosts never receive account cookies.
+        assert!(!should_install_ato_auth_cookies("https://app.evil.example/"));
+        assert!(!should_install_ato_auth_cookies("https://notapp.ato.run/"));
+        assert!(!should_install_ato_auth_cookies("https://custom.example/"));
+        // Loopback (http, any port) is only injected into in debug builds.
+        assert_eq!(
+            should_install_ato_auth_cookies("http://localhost:5173/"),
+            cfg!(debug_assertions)
+        );
     }
 
     /// Transient/preview capsule routes (LocalManifest, Capsule) must use
