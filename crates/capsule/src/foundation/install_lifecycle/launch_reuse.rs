@@ -250,6 +250,7 @@ mod tests {
             runner_compatibility_class: RunnerCompatibilityClass::new(
                 "managed_runner/linux-x86_64",
             ),
+            ready_state_runner_class: None,
         }
     }
 
