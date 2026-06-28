@@ -173,6 +173,7 @@ pub(crate) async fn build_lifecycle_path_plan(
     materialized_toolchains: MaterializedLifecycleToolchains,
     reporter: &Arc<CliReporter>,
 ) -> Result<LifecyclePathPlan> {
+    let node_pinned = node_runtime_pinned(plan);
     let dependency_root = dependency_root(plan);
     let (dependency_output_bins, dependency_bins) = if matches!(phase, LifecyclePhase::Install) {
         (Vec::new(), Vec::new())
@@ -201,7 +202,7 @@ pub(crate) async fn build_lifecycle_path_plan(
         },
     };
     if let Some((bin_dir, fallback_provenance)) =
-        host_fallback_for_unmanaged_command(&plan, command)
+        host_fallback_for_unmanaged_command(&plan, command, node_pinned)
     {
         plan.host_fallback_bins.push(bin_dir);
         plan.provenance.ato_toolchains.push(fallback_provenance);
@@ -234,6 +235,7 @@ pub(crate) fn materialize_lifecycle_toolchains(
         .map(|driver| driver.trim().eq_ignore_ascii_case("node"))
         .unwrap_or(false)
         || matches!(command_name, Some("npm" | "npx" | "pnpm" | "yarn"))
+        || node_runtime_pinned(plan)
         || runtime_tools
             .iter()
             .any(|tool| tool.spec.depends_on.contains(&"node"));
@@ -376,6 +378,25 @@ fn lifecycle_runtime_tools(
     }
 
     Ok(tools)
+}
+
+/// True when the manifest pins a managed `node` runtime via any supported
+/// `runtime_tools` form (top-level flat, target-level, or the `[[tools]]` /
+/// `[tools.node]` schema). Reuses the canonical
+/// [`capsule::tools::read_tool_version`] reader that `lifecycle_runtime_tools`
+/// already relies on, so every manifest shape resolves identically.
+///
+/// A declared pin makes managed node **required**: it is provisioned onto the
+/// lifecycle PATH by [`materialize_lifecycle_toolchains`] and excluded from the
+/// host `which::which` fallback in [`host_fallback_for_unmanaged_command`], so a
+/// pinned capsule can never silently run on whatever `node` the host happens to
+/// have. `node` is intentionally not a `RuntimeToolSpec` in the registry (it is
+/// a runtime, not an auxiliary tool), so `lifecycle_runtime_tools` never sees
+/// the pin on its own — this is the single place that reconnects the pin to the
+/// node-required decision.
+fn node_runtime_pinned(plan: &ManifestData) -> bool {
+    capsule::tools::read_tool_version(&plan.manifest, plan.selected_target_label(), "node")
+        .is_some_and(|version| !version.trim().is_empty())
 }
 
 fn ensure_runtime_tool_for_lifecycle(
@@ -662,10 +683,22 @@ fn runtime_tool_name_for_command(command_name: &str) -> Option<&'static str> {
 fn host_fallback_for_unmanaged_command(
     plan: &LifecyclePathPlan,
     command: &str,
+    node_pinned: bool,
 ) -> Option<(PathBuf, ToolchainProvenance)> {
     let command_name = leading_command_name(command)?;
     if runtime_tool_name_for_command(command_name).is_some() {
         // The managed-tool flow owns this command; never widen its PATH here.
+        return None;
+    }
+    if node_pinned && command_name == "node" {
+        // `runtime_tools.node` pins managed node, which
+        // `materialize_lifecycle_toolchains` provisions onto the lifecycle
+        // PATH. Never widen the PATH to the host's `node` here: a pinned
+        // capsule must run on managed node or fail honestly (exit 127 / an
+        // `unavailable` marker), not silently inherit whatever `node` the host
+        // has installed. When managed provisioning succeeded this `node`
+        // already resolves from the planned PATH above; this guard only bites
+        // when provisioning was unavailable.
         return None;
     }
     let path_env = plan.path_env().ok()?;
@@ -1134,6 +1167,100 @@ port = 3000
                 .iter()
                 .any(|p| p.tool == "bun" && p.requested_version.as_deref() == Some("1.2")),
             "run provenance must record the declared bun pin"
+        );
+    }
+
+    #[test]
+    fn node_pin_marks_managed_node_required_across_manifest_forms() {
+        // PR6: `node` is not a RuntimeToolSpec, so lifecycle_runtime_tools never
+        // surfaces a node pin. node_runtime_pinned is the single predicate that
+        // reconnects the pin (any supported form) to the node-required decision.
+        let dir = tempdir().expect("dir");
+
+        // (a) Top-level flat v0.3 form on a non-node runtime: the exact PR6
+        // scenario — source/python that also pins node.
+        let flat = build_plan(
+            dir.path(),
+            r#"
+schema_version = "0.3"
+name = "py-with-node"
+type = "app"
+
+runtime = "source/python"
+runtime_version = "3.12"
+runtime_tools = { node = "20" }
+
+run = "python app.py"
+port = 8000
+"#,
+        );
+        assert!(
+            node_runtime_pinned(&flat),
+            "top-level runtime_tools.node pin must mark managed node required"
+        );
+
+        // (b) Target-level form.
+        let target_level = build_plan(
+            dir.path(),
+            r#"
+name = "py-with-node"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source/python"
+run_command = "python app.py"
+runtime_tools = { node = "20" }
+"#,
+        );
+        assert!(
+            node_runtime_pinned(&target_level),
+            "target-level runtime_tools.node pin must mark managed node required"
+        );
+
+        // (c) No node pin: a python-only capsule must NOT force managed node.
+        let no_pin = build_plan(
+            dir.path(),
+            r#"
+name = "py-only"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source/python"
+run_command = "python app.py"
+runtime_tools = { uv = "0.4" }
+"#,
+        );
+        assert!(
+            !node_runtime_pinned(&no_pin),
+            "a capsule with no node pin must not force managed node"
+        );
+    }
+
+    #[test]
+    fn pinned_node_is_excluded_from_host_which_fallback() {
+        // With an empty managed PATH (managed provisioning unavailable), a
+        // pinned capsule must still refuse the host's node — it fails honestly
+        // instead of silently inheriting whatever node the host has.
+        let plan = LifecyclePathPlan {
+            phase: LifecyclePhase::Run,
+            ato_toolchain_bins: Vec::new(),
+            dependency_output_bins: Vec::new(),
+            minimal_system_bins: Vec::new(),
+            host_fallback_bins: Vec::new(),
+            provenance: LifecyclePathProvenance::default(),
+        };
+        assert!(
+            host_fallback_for_unmanaged_command(&plan, "node server.js", true).is_none(),
+            "pinned node must not fall back to host node"
+        );
+        // The node-pin guard is node-specific: an unrelated unmanaged command is
+        // unaffected (resolves to None only because it does not exist on PATH).
+        assert!(
+            host_fallback_for_unmanaged_command(&plan, "ato-nonexistent-tool-xyz build", true)
+                .is_none(),
+            "node-pin guard must not change behavior for non-node commands"
         );
     }
 }

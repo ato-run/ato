@@ -60,4 +60,3 @@ service_target = "db"
 [[services.main.state_bindings]]
 state = "storage"
 target = "/app/packages/twenty-server/.local-storage"
-service_target = "app"
