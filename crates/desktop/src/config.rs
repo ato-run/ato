@@ -314,6 +314,11 @@ pub struct DesktopSettings {
     /// Keys are stored as `capsule://{handle}` and sorted on save for diff stability.
     #[serde(default)]
     pub pinned_capsules: Vec<String>,
+    /// Base URL of the embedded `ato-pwa` Home (`StartupSurface::Home`).
+    /// Defaults to `https://app.ato.run`; override via the `ATO_APP_BASE_URL`
+    /// env var (e.g. `https://stg-app.ato.run` for staging, or a local dev URL).
+    #[serde(default = "default_app_base_url")]
+    pub app_base_url: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -391,8 +396,14 @@ impl<'de> Deserialize<'de> for ControlBarSettings {
 #[serde(rename_all = "kebab-case")]
 pub enum StartupSurface {
     Store,
-    #[default]
+    /// Native, bundled `ato-start` landing. Always available offline; also
+    /// serves as the fallback when the remote PWA Home is unreachable.
     Start,
+    /// The `ato-pwa` Home (`app.ato.run`), embedded in a WebView. This is the
+    /// unified Home surface (LP ↔ PWA ↔ Desktop). Falls back to [`Start`] when
+    /// the host is unreachable.
+    #[default]
+    Home,
     Blank,
     RestoreLast,
 }
@@ -441,7 +452,7 @@ fn default_control_bar_visible_on_startup() -> bool {
 impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
-            startup_surface: StartupSurface::Start,
+            startup_surface: StartupSurface::Home,
             content_window_default_presentation: ContentWindowPresentation::Windowed,
             capsule_open_mode: CapsuleOpenMode::Window,
             restore_window_frames: false,
@@ -449,6 +460,7 @@ impl Default for DesktopSettings {
             control_bar: ControlBarSettings::default(),
             pinned_capsules: Vec::new(),
             window_close_behavior: WindowCloseBehavior::KeepSessionRunning,
+            app_base_url: default_app_base_url(),
         }
     }
 }
@@ -628,6 +640,17 @@ fn default_store_api_url() -> String {
 
 fn default_store_site_url() -> String {
     "https://ato.run".to_string()
+}
+
+/// Base URL of the embedded `ato-pwa` Home. `ATO_APP_BASE_URL` overrides the
+/// production default so staging (`https://stg-app.ato.run`) and local dev
+/// builds can point the Home surface elsewhere without editing config files.
+pub(crate) fn default_app_base_url() -> String {
+    std::env::var("ATO_APP_BASE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "https://app.ato.run".to_string())
 }
 
 pub(crate) fn default_local_registry_port() -> u16 {
@@ -1472,7 +1495,8 @@ mod tests {
     fn desktop_settings_default_values() {
         let config = DesktopConfig::default();
         let d = &config.desktop;
-        assert_eq!(d.startup_surface, StartupSurface::Start);
+        assert_eq!(d.startup_surface, StartupSurface::Home);
+        assert_eq!(d.app_base_url, "https://app.ato.run");
         assert_eq!(
             d.content_window_default_presentation,
             ContentWindowPresentation::Windowed
@@ -1557,7 +1581,7 @@ mod tests {
         let json = r#"{"general": {"theme": "light"}}"#;
         let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.general.theme, ThemeConfig::Light);
-        assert_eq!(parsed.desktop.startup_surface, StartupSurface::Start);
+        assert_eq!(parsed.desktop.startup_surface, StartupSurface::Home);
         assert!(parsed.desktop.control_bar.always_on_top);
         assert!(!parsed.desktop.onboarding.completed);
         assert!(!parsed.desktop.onboarding.skipped);
