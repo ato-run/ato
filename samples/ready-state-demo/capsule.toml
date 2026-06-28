@@ -1,0 +1,74 @@
+schema_version = "0.3"
+name = "ready-state-demo"
+version = "0.1.0"
+type = "app"
+description = "Demonstrates the Ready-State Capsule authoring tables ([snapshot], [secrets], [bindings], [external], [context]). PARSE-ONLY in the current milestone: these tables are read and validated but do not yet drive a snapshot/restore runtime backend (that lands with crates/snapshot on a KVM host). A capsule that omits every table here behaves exactly as a normal v0.3 capsule."
+homepage = "https://github.com/ato-run/ato"
+default_target = "app"
+
+# ── A normal single-process web app target ──────────────────────────────────
+[targets.app]
+runtime = "source"
+run = "python app.py"
+port = 8080
+
+# A secret-free readiness signal is REQUIRED for Ready-State sealing: the
+# snapshot is captured at `boot_until` with no secrets and no user data present.
+[targets.app.readiness_probe]
+type = "http"
+path = "/health"
+
+# ── [snapshot] — how this capsule is sealed & restored ──────────────────────
+# mode:        none | cold | warm | booted   (warm/booted = Ready-State line)
+# boot_until:  healthcheck | ready | first_request
+# runner_class only *constrains* the resolved runner_class_id; the full id is
+# derived from build-host facts (arch/kernel/vmm/cpu_template).
+[snapshot]
+mode = "warm"
+boot_until = "healthcheck"
+sanitize_after_restore = true
+runner_class = "managed/linux-aarch64"
+max_restore_seconds = 8
+
+# ── [secrets.<name>] — required secrets as REFS, never values ───────────────
+# delivery = "proxy" routes through the capability broker (raw key never enters
+# the app process). An app that REQUIRES a secret to reach `boot_until` is not
+# Ready-State-eligible at that boot point — keep readiness secret-free.
+[secrets.openai_api_key]
+required = false
+env = "OPENAI_API_KEY"
+delivery = "proxy"
+class = "api_key"
+
+# ── [bindings.<name>] — post-restore, user/billing/env-specific injection ───
+[bindings.user_files]
+kind = "user_files"
+required = false
+scope = "user"
+mount = "/data"
+
+# ── [external.<name>] — heavy external capabilities (Public Instant Run ≤ 3) ─
+# providers listed in preference order; degrade keeps the session usable.
+[external.llm]
+type = "llm"
+required = false
+providers = ["local", "ato_model", "user_byok"]
+provision = "parallel"
+locality = "local_preferred"
+degraded = "demo"
+
+# ── [context] — User Context Store binding (survives capsule swaps) ──────────
+[context]
+store = "user_shared"
+artifacts = true
+index = true
+mount = "/context"
+provenance = true
+
+# Posture that keeps this capsule eligible for a Public Instant Run:
+#   - no [requirements.capabilities].network (default-deny)
+#   - no persistent [state.*]
+#   - no required secret
+#   - <= 3 [external.*]
+#   - a readiness probe is present
+# Compute it from code with `CapsuleManifest::instant_run_eligibility()`.
