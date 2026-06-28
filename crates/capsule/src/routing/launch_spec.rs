@@ -128,149 +128,70 @@ fn derive_native_inference_launch_spec(
     env_vars: HashMap<String, String>,
     port: Option<u16>,
 ) -> Result<LaunchSpec> {
+    use super::native_inference;
+
     let target = plan.selected_target_label().to_string();
 
-    let engine_command = resolve_native_inference_engine_command(plan, &target)?;
-    let model = resolve_native_inference_model(plan, &target)?;
+    // Single engine-string dispatch site. `None` = no recognized managed engine
+    // declared AND no `engine_path` override → emit the canonical
+    // "requires engine_path or engine + engine_version" error.
+    let engine = native_inference::resolve_engine(plan).ok_or_else(|| {
+        CapsuleError::Config(format!(
+            "target '{target}': runtime=native-inference requires either `engine_path` (a local \
+             engine binary) or `engine` + `engine_version` (managed, e.g. engine=\"llama.cpp\", \
+             engine_version=\"b4231\")"
+        ))
+    })?;
 
-    // `--host 127.0.0.1` is fixed; `--port <N>` is injected by the host launcher
-    // from the resolved/allocated port so the readiness probe and app_url agree.
-    let args = vec![
-        "-m".to_string(),
-        model,
-        "--host".to_string(),
-        "127.0.0.1".to_string(),
-    ];
+    // Launcher path: the variant resolves to a deterministic cache key via the
+    // engine's NON-GATING `cache_variant_plan` (the platform/readiness
+    // fail-closed runs at the probed ensure-step, never in the launcher — so an
+    // accelerated-variant manifest keys its cache path here without erroring).
+    let ctx = native_inference::engine_context(plan, engine.as_ref());
+
+    let command = engine.resolve_server_command(&ctx)?;
+    let model = engine.resolve_model_path(&ctx)?;
+
+    // Default to the engine's conventional port when the manifest omits one so
+    // the launcher has a readiness target and can form an app_url. `--port <N>`
+    // is injected by the host launcher from the resolved/allocated port; the
+    // engine argv (`--host 127.0.0.1`, no `--port`) is byte-identical to before.
+    let resolved_port = port.or_else(|| Some(engine.default_port()));
+    let mut args = engine.build_server_argv(&model, "127.0.0.1", resolved_port.unwrap_or(8080));
+
+    // Append the per-target `server_args` passthrough AFTER the engine's base
+    // flags and independent of the launcher's later `--port` injection
+    // (`executors/source.rs`). Engine-generic: works for every native-inference
+    // engine. Manifest validation already rejects launcher/engine-controlled
+    // flags (`--port`/`-p`, `--host`, `--model-path`/`-m`/`--model`); we re-check
+    // here as defense-in-depth so a forbidden flag can never reach the spawned
+    // argv even if a malformed plan bypassed validation. Empty `server_args`
+    // leaves `args` byte-identical to before this passthrough existed.
+    for arg in &ctx.server_args {
+        if let Some(flag) =
+            crate::foundation::types::manifest::forbidden_native_inference_server_arg(arg)
+        {
+            return Err(CapsuleError::Config(format!(
+                "target '{target}': `server_args` must not set `{flag}` — it is controlled by \
+                 the launcher/engine (the launcher injects `--port`, forces `--host 127.0.0.1`, \
+                 and the engine sets the model path). Remove {arg:?} from server_args."
+            )));
+        }
+        args.push(arg.clone());
+    }
 
     Ok(LaunchSpec {
         working_dir: plan.compat_manifest_dir().to_path_buf(),
-        command: engine_command,
+        command,
         args,
         env_vars,
         required_lockfile: None,
         runtime: Some("native-inference".to_string()),
         driver: Some("native".to_string()),
         language: None,
-        // Default to llama.cpp's conventional 8080 when the manifest omits a port
-        // so the launcher has a readiness target and can form an app_url.
-        port: port.or(Some(8080)),
+        port: resolved_port,
         source: LaunchSpecSource::Entrypoint,
     })
-}
-
-/// Resolve the engine server command for a native-inference target:
-///  1. an explicit local `engine_path` always wins (override), or
-///  2. a managed engine: `engine = "llama.cpp"` + `engine_version` → the cached
-///     `llama-server` binary (must already be fetched by the ensure-step).
-fn resolve_native_inference_engine_command(plan: &ManifestData, target: &str) -> Result<String> {
-    if let Some(engine_path) = plan
-        .target_engine_path()
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Ok(engine_path);
-    }
-
-    let engine = plan
-        .target_engine()
-        .map(|value| value.trim().to_ascii_lowercase());
-    match engine.as_deref() {
-        Some("llama.cpp") | Some("llamacpp") | Some("llama-cpp") => {
-            let version = plan
-                .target_engine_version()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    CapsuleError::Config(format!(
-                        "target '{target}': engine=\"llama.cpp\" requires `engine_version` \
-                         (a build tag, e.g. \"b4231\") — or set an explicit `engine_path`"
-                    ))
-                })?;
-            // Defense-in-depth: the version is interpolated into the cache path.
-            if !crate::foundation::types::manifest::is_safe_engine_version(&version) {
-                return Err(CapsuleError::Config(format!(
-                    "target '{target}': unsafe `engine_version` {version:?} \
-                     (alphanumeric / `.`/`_`/`-` only; no path separators or `..`)"
-                )));
-            }
-            let variant = plan
-                .target_engine_variant()
-                .filter(|value| !value.trim().is_empty());
-            // The platform-specific fail-closed for an unsupported variant
-            // (e.g. `cuda` on Linux, `vulkan` on macOS) is enforced by the
-            // fetcher at the ensure-step; here we only need the variant-aware
-            // cache KEY so this deterministic path matches what the fetcher
-            // populates (GPU and CPU builds of a tag never share a directory).
-            let key =
-                crate::packers::runtime_fetcher::llamacpp_cache_key(&version, variant.as_deref());
-            // Deterministic cached path: `<cache>/llamacpp-<key>/llama-server`.
-            // The fetcher GUARANTEES this canonical path as a post-condition, so
-            // we build it WITHOUT an existence check — the receipt/preflight
-            // builders call this before the async ensure-step has downloaded the
-            // binary, which the ensure-step then guarantees by spawn time.
-            let fetcher =
-                crate::packers::runtime_fetcher::RuntimeFetcher::new().map_err(|err| {
-                    CapsuleError::Config(format!("failed to init toolchain cache: {err}"))
-                })?;
-            let binary_name = if cfg!(target_os = "windows") {
-                "llama-server.exe"
-            } else {
-                "llama-server"
-            };
-            let binary = fetcher.get_runtime_path("llamacpp", &key).join(binary_name);
-            Ok(binary.to_string_lossy().to_string())
-        }
-        _ => Err(CapsuleError::Config(format!(
-            "target '{target}': runtime=native-inference requires either `engine_path` (a local \
-             engine binary) or `engine` + `engine_version` (managed, e.g. engine=\"llama.cpp\", \
-             engine_version=\"b4231\")"
-        ))),
-    }
-}
-
-/// Resolve the `-m <model>` value for a native-inference target:
-///  1. an explicit local `model` path always wins (override), or
-///  2. a managed model: `model_url` + `model_sha256` → the deterministic
-///     content-addressed cache path (`~/.ato/store/blobs/sha256-<hash>`), which
-///     the async ensure-step downloads + verifies before spawn.
-fn resolve_native_inference_model(plan: &ManifestData, target: &str) -> Result<String> {
-    if let Some(model) = plan.target_model().filter(|value| !value.trim().is_empty()) {
-        return Ok(model);
-    }
-
-    match plan
-        .target_model_url()
-        .filter(|value| !value.trim().is_empty())
-    {
-        Some(url) => {
-            if !crate::foundation::types::manifest::is_safe_model_url(&url) {
-                return Err(CapsuleError::Config(format!(
-                    "target '{target}': `model_url` must be a plain http(s):// URL"
-                )));
-            }
-            let sha_raw = plan
-                .target_model_sha256()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    CapsuleError::Config(format!(
-                        "target '{target}': `model_url` requires `model_sha256`"
-                    ))
-                })?;
-            let sha = crate::foundation::types::manifest::normalize_model_sha256(&sha_raw)
-                .ok_or_else(|| {
-                    CapsuleError::Config(format!(
-                        "target '{target}': `model_sha256` must be a 64-char hex SHA-256"
-                    ))
-                })?;
-            // Deterministic content-addressed path — known from the sha256 alone,
-            // so preflight/receipt builders resolve it before the ensure-step
-            // downloads + verifies it (which guarantees it by spawn time).
-            let blob = crate::resource::model_cache::model_blob_path(&sha);
-            Ok(blob.to_string_lossy().to_string())
-        }
-        None => Err(CapsuleError::Config(format!(
-            "target '{target}': runtime=native-inference requires either `model` (a local file) \
-             or `model_url` + `model_sha256` (managed)"
-        ))),
-    }
 }
 
 fn derive_run_command_launch_spec(
@@ -620,6 +541,116 @@ port = 9001
         // `--port` is intentionally NOT in args: the host launcher injects the
         // resolved port so readiness and app_url agree.
         assert!(!spec.args.iter().any(|a| a == "--port"));
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_appends_server_args_after_base_flags() {
+        // The per-target `server_args` are appended AFTER the engine's base argv
+        // and the engine still omits `--port` (the host launcher injects it).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine_path = "./llama-server"
+model = "./model.gguf"
+server_args = ["--ctx-size", "8192", "--n-gpu-layers", "999"]
+"#
+            ),
+        );
+        let spec = derive_launch_spec(&plan).expect("server_args append");
+        assert_eq!(
+            spec.args,
+            vec![
+                "-m",
+                "./model.gguf",
+                "--host",
+                "127.0.0.1",
+                "--ctx-size",
+                "8192",
+                "--n-gpu-layers",
+                "999",
+            ]
+        );
+        assert!(!spec.args.iter().any(|a| a == "--port"));
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_empty_server_args_is_unchanged() {
+        // No-regression: omitting `server_args` (the default) yields argv
+        // byte-identical to before the passthrough existed.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            &format!(
+                "{NATIVE_HEADER}{}",
+                r#"
+[targets.app]
+runtime = "native-inference"
+engine_path = "./llama-server"
+model = "./model.gguf"
+port = 9001
+"#
+            ),
+        );
+        let spec = derive_launch_spec(&plan).expect("empty server_args");
+        // Identical to `derive_launch_spec_native_inference_builds_engine_argv`.
+        assert_eq!(spec.args, vec!["-m", "./model.gguf", "--host", "127.0.0.1"]);
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_rejects_forbidden_server_arg_space_form() {
+        // Defense-in-depth: the launcher rejects a launcher/engine-controlled
+        // flag in `server_args` even though manifest validation already does.
+        for forbidden in ["--port", "-p", "--host", "--model-path", "-m", "--model"] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let plan = plan_from_manifest(
+                &tmp,
+                &format!(
+                    "{NATIVE_HEADER}[targets.app]\nruntime = \"native-inference\"\n\
+                     engine_path = \"./llama-server\"\nmodel = \"./model.gguf\"\n\
+                     server_args = [\"{forbidden}\", \"x\"]\n"
+                ),
+            );
+            let err = derive_launch_spec(&plan)
+                .expect_err(&format!("must reject {forbidden} (space form)"));
+            assert!(
+                err.to_string().contains(forbidden) && err.to_string().contains("server_args"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn derive_launch_spec_native_inference_rejects_forbidden_server_arg_equals_form() {
+        // The `--flag=value` form is caught as well as `--flag value`.
+        for (forbidden, canonical) in [
+            ("--port=9000", "--port"),
+            ("-p=9000", "-p"),
+            ("--host=0.0.0.0", "--host"),
+            ("--model-path=/x", "--model-path"),
+            ("-m=/x", "-m"),
+            ("--model=/x", "--model"),
+        ] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let plan = plan_from_manifest(
+                &tmp,
+                &format!(
+                    "{NATIVE_HEADER}[targets.app]\nruntime = \"native-inference\"\n\
+                     engine_path = \"./llama-server\"\nmodel = \"./model.gguf\"\n\
+                     server_args = [\"{forbidden}\"]\n"
+                ),
+            );
+            let err = derive_launch_spec(&plan)
+                .expect_err(&format!("must reject {forbidden} (equals form)"));
+            assert!(
+                err.to_string().contains(canonical) && err.to_string().contains("server_args"),
+                "got: {err}"
+            );
+        }
     }
 
     #[test]
