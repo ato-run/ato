@@ -1062,6 +1062,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "capsulefs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "fastcdc",
+ "hex",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
