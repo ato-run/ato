@@ -319,10 +319,9 @@ pub trait Engine: Send + Sync {
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .ok_or_else(|| CapsuleError::Pack("`model_url` requires `model_sha256`".into()))?;
-        let sha = crate::foundation::types::manifest::normalize_model_sha256(sha_raw)
-            .ok_or_else(|| {
-                CapsuleError::Pack("`model_sha256` must be a 64-char hex SHA-256".into())
-            })?;
+        let sha = crate::foundation::types::manifest::normalize_model_sha256(sha_raw).ok_or_else(
+            || CapsuleError::Pack("`model_sha256` must be a 64-char hex SHA-256".into()),
+        )?;
         crate::resource::model_cache::ensure_model(url, &sha)
             .await
             .map(|_| ())
