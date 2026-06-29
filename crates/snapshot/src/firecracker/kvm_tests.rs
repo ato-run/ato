@@ -73,11 +73,42 @@ fn fc_kvm_build_restore_roundtrip() {
     let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: None }).expect("restore");
     assert_eq!(r.session.guest_port, Some(8080));
     assert!(r.session.restored_bytes > 0);
+    let overlay = r.session.overlay_root.clone();
     let td = b.stop(r.session).expect("stop");
+    // Teardown leaves NO resources: overlay gone, tap gone, no firecracker proc.
     assert!(td.overlay_removed);
-    // no orphan firecracker process referencing our work dir
+    assert!(!overlay.exists(), "overlay dir not removed");
+    let tap = FirecrackerConfig::default().tap_dev;
+    let taps = std::process::Command::new("ip").args(["link", "show", &tap]).output().unwrap();
+    assert!(!taps.status.success(), "tap {tap} still present after stop");
     let out = std::process::Command::new("pgrep").args(["-af", "firecracker --api-sock"]).output().unwrap();
-    assert!(String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).count() == 0, "orphan firecracker left");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).count(),
+        0,
+        "orphan firecracker left after stop"
+    );
+}
+
+#[test]
+#[ignore]
+fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
+    // Disk-leak safety by construction: the rootfs drive is read-only and at a
+    // stable content-addressed path shared by every restore, so no disk mutation
+    // can leak between sessions. Assert the config + that the same rootfs path is
+    // reused (not rewritten) across two restores.
+    let Some((b, rootfs)) = skip() else { return };
+    assert!(FirecrackerConfig::default().rootfs_read_only, "default must be read-only");
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs.clone(), vec![])).expect("build").manifest;
+    let stable = FirecrackerConfig::default().work_root.join("rootfs").join(format!("{}.ext4", blake3::hash(&rootfs).to_hex()));
+    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: dir.path().join("ov1"), host_runner_class: None }).expect("restore1");
+    let mtime1 = std::fs::metadata(&stable).unwrap().modified().unwrap();
+    b.stop(r1.session).expect("stop1");
+    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov2"), host_runner_class: None }).expect("restore2");
+    let mtime2 = std::fs::metadata(&stable).unwrap().modified().unwrap();
+    b.stop(r2.session).expect("stop2");
+    assert_eq!(mtime1, mtime2, "read-only rootfs was rewritten between restores (should be shared immutable)");
 }
 
 #[test]
