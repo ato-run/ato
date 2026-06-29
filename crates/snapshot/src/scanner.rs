@@ -102,6 +102,34 @@ pub struct ScanReport {
     pub heuristic: Vec<SecretFinding>,
 }
 
+impl ScanReport {
+    /// **Blocking** heuristic findings — provider-key prefixes and secret-named
+    /// env assignments. These are high-precision, so the build fails closed on
+    /// them (alongside any [`declared_hits`](Self::declared_hits)).
+    pub fn blocking(&self) -> Vec<&SecretFinding> {
+        self.heuristic
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment
+                )
+            })
+            .collect()
+    }
+
+    /// **Advisory** heuristic findings — high-entropy token runs. These
+    /// false-positive on lockfile integrity hashes, minified assets, and binary
+    /// blobs in real dependency/app layers, so they are reported (not gating):
+    /// the build does NOT fail on them.
+    pub fn advisory(&self) -> Vec<&SecretFinding> {
+        self.heuristic
+            .iter()
+            .filter(|f| matches!(f.kind, FindingKind::HighEntropyToken))
+            .collect()
+    }
+}
+
 fn is_token_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
 }

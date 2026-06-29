@@ -31,6 +31,11 @@ pub struct BackendRequirements {
     pub filesystem_model: Option<FilesystemModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_profile: Option<DeviceProfile>,
+    /// GPU posture. **Only `Some(Passthrough)` constrains placement** (and no
+    /// M0/M1 backend is passthrough-capable, so it fails closed). `External` GPU
+    /// is provisioned post-restore by the external-capability resolver, NOT the
+    /// snapshot backend, so it must NOT filter backend placement; `None`/`External`
+    /// are treated as unconstrained here. See [`matches`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_mode: Option<GpuMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,7 +67,11 @@ pub fn matches(req: &BackendRequirements, cap: &BackendCapabilities) -> bool {
     req.snapshot_kind.is_none_or(|k| k == cap.snapshot_kind)
         && req.filesystem_model.is_none_or(|f| f == cap.filesystem_model)
         && req.device_profile.is_none_or(|d| d == cap.device_profile)
-        && req.gpu_mode.is_none_or(|g| g == cap.gpu_mode)
+        // GPU: only an in-VM `Passthrough` requirement constrains placement.
+        // `External` GPU is a post-restore external-capability binding (not a
+        // backend capability), and `None` runs anywhere — neither filters, so an
+        // external-GPU capsule still places on a normal microVM backend.
+        && (req.gpu_mode != Some(GpuMode::Passthrough) || cap.gpu_mode == GpuMode::Passthrough)
         && req
             .isolation_boundary
             .is_none_or(|i| i == cap.isolation_boundary)
@@ -185,19 +194,38 @@ mod tests {
     }
 
     #[test]
-    fn gpu_none_requirement_rejects_passthrough_backend() {
-        let mut passthrough = microvm_caps("qemu", true);
-        passthrough.gpu_mode = GpuMode::Passthrough;
+    fn external_gpu_requirement_does_not_filter_placement() {
+        // THE fix: an external-GPU capsule (GPU provisioned post-restore) must
+        // still place on a normal microVM backend whose gpu_mode is None.
+        let req_external = BackendRequirements {
+            snapshot_kind: Some(SnapshotKind::MicroVm),
+            gpu_mode: Some(GpuMode::External),
+            ..Default::default()
+        };
+        let fake = microvm_caps("fake", true); // gpu_mode: None
+        assert!(matches(&req_external, &fake));
+        assert_eq!(select_ready_state_backend(&req_external, &[fake]), Ok(0));
+        // None is likewise unconstrained.
         let req_none = BackendRequirements {
             gpu_mode: Some(GpuMode::None),
             ..Default::default()
         };
-        assert!(!matches(&req_none, &passthrough));
+        assert!(matches(&req_none, &microvm_caps("fake", true)));
+    }
+
+    #[test]
+    fn passthrough_gpu_requirement_finds_no_m0_backend() {
+        // Only Passthrough constrains; no M0/M1 backend is passthrough-capable,
+        // so it fails closed (a passthrough capsule is Ready-State-ineligible
+        // anyway, gated earlier).
         let req_pass = BackendRequirements {
             gpu_mode: Some(GpuMode::Passthrough),
             ..Default::default()
         };
         assert!(!matches(&req_pass, &microvm_caps("fake", true)));
+        let mut passthrough = microvm_caps("qemu", true);
+        passthrough.gpu_mode = GpuMode::Passthrough;
+        assert!(matches(&req_pass, &passthrough));
     }
 
     #[test]
