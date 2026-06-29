@@ -30,19 +30,30 @@
 mod backend;
 mod fake;
 mod firecracker;
+mod kata;
 mod manifest;
+mod placement;
+mod qemu;
+mod scanner;
 
 pub use backend::{
-    BackendCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt,
-    RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend, SnapshotError,
-    SnapshotInspection, TeardownReceipt,
+    BackendCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
+    FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
+    RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
+    TeardownReceipt, ensure_gpu_not_in_snapshot,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend};
+pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
     NoSecretProof, READY_STATE_SCHEMA, ReadyStateLayers, ReadyStateManifest, RestoreContract,
     SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackendInfo,
 };
+pub use placement::{
+    BackendRequirements, PlacementError, matches, ready_state_safe, select_ready_state_backend,
+};
+pub use qemu::{QEMU_BACKEND_ID, QemuBackend};
+pub use scanner::{FindingKind, SCANNER_VERSION, ScanReport, SecretFinding};
 
 #[cfg(test)]
 mod e2e_tests {
