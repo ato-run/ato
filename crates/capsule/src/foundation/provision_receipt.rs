@@ -81,6 +81,31 @@ pub struct ProvisionReceipt {
     pub reboot_required: bool,
     pub warnings: Vec<String>,
     pub ato_cli_version: String,
+
+    // ── CUDA / SGLang fields (profile = "nvidia-cuda" only) ──
+    // All optional + `#[serde(default)]` so an existing `nvidia-ubuntu` receipt
+    // (which never set these) still deserializes, and a CUDA receipt round-trips.
+    /// Whether the driver exposed a CUDA driver-API version after provisioning
+    /// (the host-side "CUDA runtime present" signal). `None` on a Vulkan receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cuda_runtime_present: Option<bool>,
+    /// The `python3 --version` string captured after provisioning (the host
+    /// interpreter the managed sglang venv is built from). `None` on a Vulkan
+    /// receipt, or when python3 could not be queried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python3_version: Option<String>,
+    /// The pinned sglang wheel version the managed venv targets. `None` on a
+    /// Vulkan receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sglang_version: Option<String>,
+    /// Whether `import sglang` succeeded in the managed venv (the CUDA smoke).
+    /// `None` on a Vulkan receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sglang_import_ok: Option<bool>,
+    /// Largest detected GPU's VRAM in bytes (the CUDA capacity hint). `None` on
+    /// a Vulkan receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gpu_vram_bytes: Option<u64>,
 }
 
 // ─────────────────────────────────────────────
@@ -173,12 +198,90 @@ mod tests {
             reboot_required: false,
             warnings: vec![],
             ato_cli_version: "0.7.0-dev".to_string(),
+            cuda_runtime_present: None,
+            python3_version: None,
+            sglang_version: None,
+            sglang_import_ok: None,
+            max_gpu_vram_bytes: None,
         };
         let json = serde_json::to_string(&receipt).unwrap();
         let decoded: ProvisionReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, receipt);
         assert_eq!(decoded.gpu_count, 2);
         assert_eq!(decoded.gpu_smoke_result, SmokeResult::Pass);
+    }
+
+    #[test]
+    fn cuda_receipt_round_trips_with_sglang_fields() {
+        let receipt = ProvisionReceipt {
+            timestamp_unix: 1718700000,
+            profile: "nvidia-cuda".to_string(),
+            os: OsInfo {
+                distro: "ubuntu".to_string(),
+                version: "24.04".to_string(),
+                kernel: "6.8.0-31-generic".to_string(),
+            },
+            kernel_version: "6.8.0-31-generic".to_string(),
+            secure_boot_enabled: false,
+            driver_version: Some("570.124.06".to_string()),
+            cuda_driver_api_version: Some("12.4".to_string()),
+            gpu_count: 1,
+            gpu_devices: vec![GpuDeviceSummary {
+                name: "NVIDIA RTX A6000".to_string(),
+                vram_bytes: 48 * 1024 * 1024 * 1024,
+            }],
+            vulkan_loader_present: false,
+            vulkaninfo_available: false,
+            nvidia_vulkan_icd_present: false,
+            vulkan_nvidia_device_visible: false,
+            gpu_smoke_result: SmokeResult::Pass,
+            smoke_gpu_count_detected: Some(1),
+            reboot_required: false,
+            warnings: vec![],
+            ato_cli_version: "0.7.0-dev".to_string(),
+            cuda_runtime_present: Some(true),
+            python3_version: Some("Python 3.12.3".to_string()),
+            sglang_version: Some("0.4.10.post2".to_string()),
+            sglang_import_ok: Some(true),
+            max_gpu_vram_bytes: Some(48 * 1024 * 1024 * 1024),
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        let decoded: ProvisionReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, receipt);
+        assert_eq!(decoded.sglang_version.as_deref(), Some("0.4.10.post2"));
+        assert_eq!(decoded.sglang_import_ok, Some(true));
+    }
+
+    #[test]
+    fn legacy_vulkan_receipt_without_cuda_fields_still_deserializes() {
+        // A receipt written by the pre-CUDA build (no sglang/cuda fields). The
+        // new optional fields must default to `None` so old receipts load.
+        let legacy = r#"{
+            "timestamp_unix": 1718700000,
+            "profile": "nvidia-ubuntu",
+            "os": {"distro":"ubuntu","version":"22.04","kernel":"5.15.0-91-generic"},
+            "kernel_version": "5.15.0-91-generic",
+            "secure_boot_enabled": false,
+            "driver_version": "575.57.08",
+            "cuda_driver_api_version": "12.4",
+            "gpu_count": 1,
+            "gpu_devices": [{"name":"NVIDIA GeForce RTX 3060","vram_bytes":12884901888}],
+            "vulkan_loader_present": true,
+            "vulkaninfo_available": true,
+            "nvidia_vulkan_icd_present": true,
+            "vulkan_nvidia_device_visible": true,
+            "gpu_smoke_result": "pass",
+            "smoke_gpu_count_detected": 1,
+            "reboot_required": false,
+            "warnings": [],
+            "ato_cli_version": "0.6.0"
+        }"#;
+        let decoded: ProvisionReceipt = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.profile, "nvidia-ubuntu");
+        assert_eq!(decoded.cuda_runtime_present, None);
+        assert_eq!(decoded.sglang_version, None);
+        assert_eq!(decoded.sglang_import_ok, None);
+        assert_eq!(decoded.max_gpu_vram_bytes, None);
     }
 
     #[test]

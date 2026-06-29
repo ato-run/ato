@@ -354,7 +354,17 @@ impl RuntimeLaunchContext {
         keys
     }
 
-    pub fn apply_allowlisted_env(&self, cmd: &mut Command) -> Result<()> {
+    /// Apply the **non-secret** launch env — the allowlisted IPC session env plus
+    /// the receipt-observed [`Self::injected_env`] — to `cmd`, WITHOUT the
+    /// SecretStore-backed [`Self::secret_env`] channel.
+    ///
+    /// Used by the build/prepare/install lifecycle phase, which runs the capsule's
+    /// own (potentially untrusted, e.g. `ato run github.com/...`) install and build
+    /// scripts UNSANDBOXED on the host. Capsule secrets must not be exposed to those
+    /// scripts; they are injected only at the Execute/run spawn boundary via
+    /// [`Self::apply_allowlisted_env`]. Full sandboxing of the build phase is the
+    /// proper follow-up fix.
+    pub fn apply_non_secret_env(&self, cmd: &mut Command) -> Result<()> {
         if let Some(env) = self.ipc_env_vars() {
             for (key, value) in env {
                 if key.starts_with("CAPSULE_IPC_") || key == "ATO_BRIDGE_TOKEN" {
@@ -376,8 +386,17 @@ impl RuntimeLaunchContext {
             cmd.env(key, value);
         }
 
+        Ok(())
+    }
+
+    pub fn apply_allowlisted_env(&self, cmd: &mut Command) -> Result<()> {
+        self.apply_non_secret_env(cmd)?;
+
         // Secret grants last so they win for their exact env key. Applied here at
         // the spawn boundary only; never merged into the receipt-observed env.
+        // Deliberately excluded from `apply_non_secret_env`, which the unsandboxed
+        // build/prepare/install lifecycle phase uses so untrusted build scripts
+        // never see capsule secrets.
         for secret in &self.secret_env {
             cmd.env(&secret.name, secret.value.expose());
         }
@@ -585,5 +604,72 @@ mod tests {
 
         assert_eq!(ctx.command_args(), &["--help".to_string()]);
         assert_eq!(ctx.effective_cwd(), Some(&cwd));
+    }
+
+    #[test]
+    fn apply_non_secret_env_omits_secret_env_but_keeps_injected_env() {
+        use crate::adapters::runtime::secret_injection::{RuntimeSecretEnv, SecretValue};
+        // Build-phase env carries benign config on `injected_env` (e.g. a managed
+        // tool dir + ATO_* metadata the build legitimately needs) plus a declared
+        // capsule secret on the dedicated `secret_env` channel.
+        let ctx = RuntimeLaunchContext::empty()
+            .with_injected_env(
+                [
+                    (
+                        "ATO_MANAGED_NODE_DIR".to_string(),
+                        "/managed/node/bin".to_string(),
+                    ),
+                    ("ATO_RUN_ID".to_string(), "run-123".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .with_secret_env(vec![RuntimeSecretEnv {
+                name: "OPENAI_API_KEY".to_string(),
+                value: SecretValue::new("sk-must-not-leak-to-build".to_string()),
+            }]);
+
+        // The unsandboxed build/install lifecycle uses `apply_non_secret_env`.
+        let mut build_cmd = std::process::Command::new("echo");
+        ctx.apply_non_secret_env(&mut build_cmd).unwrap();
+        let build_env: std::collections::HashMap<String, String> = build_cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+
+        // Benign build env survives so legitimate builds keep working.
+        assert_eq!(
+            build_env.get("ATO_MANAGED_NODE_DIR").map(String::as_str),
+            Some("/managed/node/bin"),
+        );
+        assert_eq!(
+            build_env.get("ATO_RUN_ID").map(String::as_str),
+            Some("run-123"),
+        );
+        // The declared capsule secret MUST NOT reach the unsandboxed build phase.
+        assert!(
+            !build_env.contains_key("OPENAI_API_KEY"),
+            "capsule secret must be withheld from the build/install lifecycle phase",
+        );
+
+        // The Execute/run spawn boundary still injects the secret.
+        let mut run_cmd = std::process::Command::new("echo");
+        ctx.apply_allowlisted_env(&mut run_cmd).unwrap();
+        let run_has_secret = run_cmd.get_envs().any(|(k, v)| {
+            k == "OPENAI_API_KEY"
+                && v.map(|v| v.to_string_lossy() == "sk-must-not-leak-to-build")
+                    .unwrap_or(false)
+        });
+        assert!(
+            run_has_secret,
+            "secret must still reach the run/execute phase",
+        );
     }
 }
