@@ -58,7 +58,7 @@ pub use chunk::{
     Chunk, ChunkParams, MEMORY_PAGE_CHUNK_SIZE, chunk_content_defined, chunk_page_aligned,
 };
 pub use gc::{GcReport, collect_garbage};
-pub use hash::{ContentHash, hash_bytes};
+pub use hash::{ContentHash, InvalidContentHash, hash_bytes};
 pub use hotset::{HotsetProfile, HotsetRecorder};
 pub use manifest::{BlobManifest, ChunkingKind, LayerKind};
 pub use reader::LazyBlobReader;

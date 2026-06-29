@@ -72,7 +72,7 @@ impl BlobManifest {
     pub fn id(&self) -> ContentHash {
         let canonical = serde_jcs::to_vec(self)
             .expect("BlobManifest is always JCS-canonicalizable (no floats / non-string keys)");
-        ContentHash::from_string(format!("blake3:{}", blake3::hash(&canonical).to_hex()))
+        ContentHash::new_unchecked(format!("blake3:{}", blake3::hash(&canonical).to_hex()))
     }
 
     /// The distinct chunk hashes this manifest references (deduplicated).
