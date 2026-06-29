@@ -41,12 +41,21 @@ impl FirecrackerBackend {
     }
 
     fn unsupported(&self) -> SnapshotError {
-        SnapshotError::Unsupported {
-            backend: FIRECRACKER_BACKEND_ID.to_string(),
-            reason: format!(
+        // Two distinct reasons: no KVM at all, vs. KVM present but the real VMM
+        // implementation has not landed. Report the accurate one.
+        let reason = if Self::kvm_present() {
+            "FirecrackerBackend is a skeleton: build/restore not implemented yet. The real VMM \
+             backend (jailer, API socket, CreateSnapshot/LoadSnapshot) lands in a later milestone."
+                .to_string()
+        } else {
+            format!(
                 "{KVM_DEVICE} not present; Firecracker needs KVM. Build/restore must run on a \
                  KVM-capable host (e.g. an OCI bare-metal shape), not a KVM-less VM."
-            ),
+            )
+        };
+        SnapshotError::Unsupported {
+            backend: FIRECRACKER_BACKEND_ID.to_string(),
+            reason,
         }
     }
 }
