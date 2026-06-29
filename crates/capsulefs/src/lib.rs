@@ -83,6 +83,15 @@ pub enum CapsuleFsError {
     #[error("range {offset}..{end} is outside blob of length {len}")]
     RangeOutOfBounds { offset: u64, end: u64, len: u64 },
 
+    /// A [`BlobManifest`]'s self-described layout is internally inconsistent —
+    /// a chunk's declared `length` does not match the bytes it addresses, the
+    /// chunk lengths do not sum to `total_len`, or an `offset + length` would
+    /// overflow. A manifest is untrusted input (it may arrive from another
+    /// host), so a malformed layout is rejected here as an error rather than
+    /// being trusted into an out-of-bounds slice / panic.
+    #[error("malformed blob manifest: {0}")]
+    MalformedManifest(String),
+
     /// Underlying I/O failure.
     #[error("capsulefs io error: {0}")]
     Io(#[from] std::io::Error),
