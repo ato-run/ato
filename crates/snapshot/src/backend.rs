@@ -293,6 +293,13 @@ pub enum SnapshotError {
     )]
     GpuStateNotSnapshottable { gpu_mode: String },
 
+    /// A backend runtime failure (VMM API error, boot/restore timeout, network
+    /// setup, snapshot create/load). Distinct from `Unsupported` (which means
+    /// the backend can't run here at all) — this is an operational failure of an
+    /// available backend.
+    #[error("snapshot backend '{backend}' error: {reason}")]
+    Backend { backend: String, reason: String },
+
     /// A CapsuleFS operation failed.
     #[error(transparent)]
     CapsuleFs(#[from] capsulefs::CapsuleFsError),
