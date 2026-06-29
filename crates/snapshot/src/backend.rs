@@ -90,8 +90,11 @@ pub struct RestoreReadyStateInput<'a> {
     pub manifest: ReadyStateManifest,
     /// Ephemeral writable overlay root for this session (destroyed on stop).
     pub overlay_root: PathBuf,
-    /// The candidate restore host's runner class. If both this and the
-    /// manifest's class are present they MUST match (fail-closed).
+    /// The candidate restore host's runner class. Fail-closed semantics: when
+    /// the manifest pins a class, this MUST be present **and** equal — an
+    /// unknown host class (`None`) is rejected, not waved through. When the
+    /// manifest pins no class (e.g. host detection has not landed yet), the gate
+    /// is a no-op.
     pub host_runner_class: Option<RunnerClassId>,
 }
 
@@ -161,6 +164,15 @@ pub enum SnapshotError {
     /// Restore was attempted on a host of the wrong runner class (fail-closed).
     #[error(transparent)]
     RunnerClassMismatch(#[from] RunnerClassMismatch),
+
+    /// The snapshot pins a runner class but the restore host's class is
+    /// unknown. Unknown is **not** compatible — a snapshot is only restorable
+    /// on a host proven to match its build class, so this fails closed.
+    #[error(
+        "restore host runner class is unknown but the snapshot requires '{expected}'; \
+         refusing to restore (unknown != compatible)"
+    )]
+    MissingHostRunnerClass { expected: RunnerClassId },
 
     /// The no-secret gate found a secret in the sealed layers (fail-closed).
     #[error("no-secret gate failed: {0:?}")]
