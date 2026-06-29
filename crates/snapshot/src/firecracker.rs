@@ -516,7 +516,7 @@ impl SnapshotBackend for FirecrackerBackend {
             let _ = std::fs::remove_dir_all(&build_dir);
             return Err(SnapshotError::SecretScanFindings(blocking.into_iter().cloned().collect()));
         }
-        let advisories: Vec<String> = report.advisory().iter().map(|f| f.summary()).collect();
+        let advisories = scanner::advisory_summaries_capped(&report, 50);
 
         let cd = ChunkingKind::ContentDefined;
         let page = ChunkingKind::PageAligned { page_size: MEMORY_PAGE_CHUNK_SIZE as u64 };
