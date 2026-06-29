@@ -43,6 +43,7 @@ use crate::adapters::runtime::ingress_router;
 use crate::adapters::runtime::oci_provider::{
     DefaultOciProviderSelector, OciImageResolutionMode, OciImageResolutionRequest,
     OciPlatformPolicy, OciProvider, OciProviderError, OciProviderSelector, build_digest_pull_ref,
+    normalize_oci_image_ref,
 };
 use crate::adapters::runtime::oci_session_store::{
     IngressRouteRecord, OciServiceRecord, OciSessionIngressRecord, OciSessionMeta,
@@ -150,7 +151,12 @@ pub(crate) async fn execute_multi_service(
             }
             None => {
                 // No lock entry — resolve from the declared image ref at run time.
-                let declared_ref = rt.image.as_deref().unwrap_or_default();
+                // Fully-qualify a bare Docker Hub short-ref (e.g.
+                // `frooodle/s-pdf:2.11.0` → `docker.io/frooodle/s-pdf:2.11.0`) so
+                // `podman manifest inspect` can resolve it; the qualified ref then
+                // flows through resolution and the digest-pinned pull.
+                let declared_ref = normalize_oci_image_ref(rt.image.as_deref().unwrap_or_default());
+                let declared_ref = declared_ref.as_str();
                 if declared_ref.is_empty() {
                     anyhow::bail!(
                         "OCI target '{}' (service '{}') has no image declared and no lock entry; \

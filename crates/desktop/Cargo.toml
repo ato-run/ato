@@ -11,7 +11,7 @@
 
 [package]
 name = "desktop"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."
@@ -150,3 +150,5 @@ embed-resource = "3"
 tempfile = "3"
 serial_test = { version = "3", features = ["log"] }
 chrono = { version = "0.4", default-features = true }
+# Set file mtimes in log-retention tests (already a transitive dep).
+filetime = "0.2"
