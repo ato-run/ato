@@ -105,32 +105,50 @@ pub struct ScanReport {
     pub heuristic: Vec<SecretFinding>,
 }
 
+/// Layers small enough and build-authored enough that a provider-key/env
+/// heuristic hit is worth failing the build closed. The large opaque layers
+/// (rootfs/runtime/vmstate/memory) are full OS / guest-RAM images whose normal
+/// contents (font + unicode tables, udev hwdb `KEYBOARD_KEY_*=`, `LoadCredential=`,
+/// coincidental `sk-`+token runs) make byte-heuristics produce many false
+/// positives — empirically confirmed on a real Ubuntu rootfs + booted memory
+/// image — so heuristic hits there are advisory, not gating.
+const HEURISTIC_BLOCKING_LAYERS: &[&str] = &["app", "dependency"];
+
 impl ScanReport {
-    /// **Blocking** heuristic findings — provider-key prefixes and secret-named
-    /// env assignments. These are high-precision, so the build fails closed on
-    /// them (alongside any [`declared_hits`](Self::declared_hits)).
-    pub fn blocking(&self) -> Vec<&SecretFinding> {
-        self.heuristic
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.kind,
-                    FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment
-                )
-            })
-            .collect()
+    fn is_blocking(f: &SecretFinding) -> bool {
+        matches!(
+            f.kind,
+            FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment
+        ) && HEURISTIC_BLOCKING_LAYERS.contains(&f.layer)
     }
 
-    /// **Advisory** heuristic findings — high-entropy token runs. These
-    /// false-positive on lockfile integrity hashes, minified assets, and binary
-    /// blobs in real dependency/app layers, so they are reported (not gating):
-    /// the build does NOT fail on them.
-    pub fn advisory(&self) -> Vec<&SecretFinding> {
-        self.heuristic
-            .iter()
-            .filter(|f| matches!(f.kind, FindingKind::HighEntropyToken))
-            .collect()
+    /// **Blocking** heuristic findings — provider-key prefixes and secret-named
+    /// env assignments **on the build-authored layers** (`app`/`dependency`).
+    /// The build fails closed on these (alongside any
+    /// [`declared_hits`](Self::declared_hits), which block on every layer).
+    pub fn blocking(&self) -> Vec<&SecretFinding> {
+        self.heuristic.iter().filter(|f| Self::is_blocking(f)).collect()
     }
+
+    /// **Advisory** findings — high-entropy token runs (any layer) and
+    /// provider/env hits on the large opaque layers (rootfs/runtime/vmstate/
+    /// memory). Reported for review, never gating (they false-positive on real
+    /// OS/RAM images and lockfile/minified assets).
+    pub fn advisory(&self) -> Vec<&SecretFinding> {
+        self.heuristic.iter().filter(|f| !Self::is_blocking(f)).collect()
+    }
+}
+
+/// Advisory finding summaries, capped so a real OS/RAM image (which can yield
+/// hundreds of advisory hits) doesn't bloat the Ready-State manifest.
+pub fn advisory_summaries_capped(report: &ScanReport, cap: usize) -> Vec<String> {
+    let adv = report.advisory();
+    let total = adv.len();
+    let mut out: Vec<String> = adv.iter().take(cap).map(|f| f.summary()).collect();
+    if total > cap {
+        out.push(format!("... +{} more advisory findings", total - cap));
+    }
+    out
 }
 
 fn is_token_byte(b: u8) -> bool {
