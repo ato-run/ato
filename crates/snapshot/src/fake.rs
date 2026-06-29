@@ -84,16 +84,23 @@ impl SnapshotBackend for FakeSnapshotBackend {
         &self,
         input: BuildReadyStateInput<'_>,
     ) -> Result<BuildReadyStateReceipt, SnapshotError> {
-        // ── no-secret gate (plan §8.1): fail closed on any finding ──────────
-        // Declared markers first (verbatim, legacy error), then the heuristic
-        // all-layer scanner (provider keys / secret env / high-entropy tokens).
+        // ── no-secret gate (plan §8.1) ──────────────────────────────────────
+        // Fail CLOSED on declared markers (verbatim) and the high-precision
+        // heuristics (provider-key prefixes, secret-named env). High-entropy
+        // findings are ADVISORY only — they false-positive on lockfile hashes /
+        // minified assets / binaries in real layers, so they are recorded in the
+        // proof, not gated.
         let report = scanner::scan_build_layers(&input.layers, &input.declared_secret_markers);
         if !report.declared_hits.is_empty() {
             return Err(SnapshotError::SecretFoundInSnapshot(report.declared_hits));
         }
-        if !report.heuristic.is_empty() {
-            return Err(SnapshotError::SecretScanFindings(report.heuristic));
+        let blocking = report.blocking();
+        if !blocking.is_empty() {
+            return Err(SnapshotError::SecretScanFindings(
+                blocking.into_iter().cloned().collect(),
+            ));
         }
+        let advisories: Vec<String> = report.advisory().iter().map(|f| f.summary()).collect();
 
         let cd = ChunkingKind::ContentDefined;
         let page = ChunkingKind::PageAligned {
@@ -144,6 +151,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
             scanner_version: scanner::SCANNER_VERSION.to_string(),
             scanned_layers: layers.iter().map(|(n, _)| n.to_string()).collect(),
             findings: Vec::new(),
+            advisories,
             verdict: "clean".to_string(),
         };
 
@@ -560,5 +568,32 @@ mod tests {
         // Neither the Debug nor the Display of the error may contain the secret.
         assert!(!format!("{err:?}").contains(secret_suffix));
         assert!(!err.to_string().contains(secret_suffix));
+    }
+
+    #[test]
+    fn realistic_dependency_and_app_layers_do_not_block_build() {
+        // Regression: high-entropy content that is NOT a secret — lockfile
+        // integrity hashes, a minified asset with a base64 data string — must
+        // NOT fail the build closed. (High-entropy is advisory, not blocking.)
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let mut input = build_input(&store, vec![]);
+        input.layers.dependency = Some(
+            br#"{"packages":{"node_modules/left-pad":{"integrity":"sha512-aB3xY9kPqRsTuVwXyZ0123456789abcdefghijklmnopqrstuvwXYZ12=="},"node_modules/lodash":{"integrity":"sha512-Zz9YxWvUtSrQpOnMlKjIhGfEdCbA0987654321zyxwvutsrqponmlkj=="}}}"#
+                .to_vec(),
+        );
+        input.layers.app = Some(
+            b"var f=function(t){return t*2};const data=\"aGVsbG8gd29ybGQgdGhpcyBpcyBhIGJhc2U2NCBhc3NldA==\";".to_vec(),
+        );
+        // Build must SUCCEED (no blocking finding); the proof is clean.
+        let receipt = backend
+            .build_ready_state(input)
+            .expect("realistic lockfile/minified layers must not block the build");
+        assert!(
+            receipt.no_secret_proof.is_clean(),
+            "no blocking findings on realistic layers; advisories: {:?}",
+            receipt.no_secret_proof.advisories
+        );
     }
 }

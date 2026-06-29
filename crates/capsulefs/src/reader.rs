@@ -54,13 +54,16 @@ impl<'a> LazyBlobReader<'a> {
     }
 
     /// Realize the whole blob through the selected backend. `File` reads it
-    /// (== [`read_all`](Self::read_all)); `Uffd` is the reserved Stage-2 seam.
+    /// (== [`read_all`](Self::read_all)); `Uffd` is the reserved Stage-2 seam and
+    /// fails closed with [`CapsuleFsError::Unsupported`] (never panics) so a
+    /// mis-selected backend errors cleanly.
     pub fn realize(&self) -> Result<Vec<u8>> {
         match self.backend {
             MemBackend::File => self.read_all(),
-            MemBackend::Uffd => unimplemented!(
+            MemBackend::Uffd => Err(CapsuleFsError::Unsupported(
                 "UFFD demand-paging memory backend is a Stage 2 seam; not implemented in Stage 1"
-            ),
+                    .to_string(),
+            )),
         }
     }
 
@@ -340,11 +343,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "UFFD")]
-    fn mem_backend_uffd_is_unimplemented() {
+    fn mem_backend_uffd_fails_closed_not_panic() {
         let (_dir, store, manifest) = store_with_blob(b"some bytes");
-        let _ = LazyBlobReader::new(&store, &manifest)
+        let err = LazyBlobReader::new(&store, &manifest)
             .with_backend(MemBackend::Uffd)
-            .realize();
+            .realize()
+            .unwrap_err();
+        assert!(matches!(err, CapsuleFsError::Unsupported(_)));
     }
 }
