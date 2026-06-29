@@ -11,15 +11,57 @@ use crate::hotset::HotsetProfile;
 use crate::manifest::BlobManifest;
 use crate::{CapsuleFsError, Result};
 
+/// Which memory backend realizes a blob's bytes (plan §7).
+///
+/// Stage 1 implements [`File`](MemBackend::File): chunks are read from local SSD
+/// on demand. [`Uffd`](MemBackend::Uffd) is the reserved Stage-2 seam — a UFFD
+/// page server serving chunks on demand — and is `unimplemented!` for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemBackend {
+    /// File-backed demand read from local SSD (Stage 1, implemented).
+    #[default]
+    File,
+    /// UFFD page server (Stage 2, reserved — not implemented).
+    Uffd,
+}
+
 /// A lazy view over one stored blob.
 pub struct LazyBlobReader<'a> {
     store: &'a CasStore,
     manifest: &'a BlobManifest,
+    backend: MemBackend,
 }
 
 impl<'a> LazyBlobReader<'a> {
     pub fn new(store: &'a CasStore, manifest: &'a BlobManifest) -> Self {
-        Self { store, manifest }
+        Self {
+            store,
+            manifest,
+            backend: MemBackend::File,
+        }
+    }
+
+    /// Select the memory backend (builder style). Default is
+    /// [`MemBackend::File`].
+    pub fn with_backend(mut self, backend: MemBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// The selected memory backend.
+    pub fn backend(&self) -> MemBackend {
+        self.backend
+    }
+
+    /// Realize the whole blob through the selected backend. `File` reads it
+    /// (== [`read_all`](Self::read_all)); `Uffd` is the reserved Stage-2 seam.
+    pub fn realize(&self) -> Result<Vec<u8>> {
+        match self.backend {
+            MemBackend::File => self.read_all(),
+            MemBackend::Uffd => unimplemented!(
+                "UFFD demand-paging memory backend is a Stage 2 seam; not implemented in Stage 1"
+            ),
+        }
     }
 
     /// Reassemble and return the entire blob. Verifies each chunk on read.
@@ -286,5 +328,23 @@ mod tests {
         let payload = vec![1u8; MEMORY_PAGE_CHUNK_SIZE + 10];
         let chunks = chunk_page_aligned(&payload, MEMORY_PAGE_CHUNK_SIZE);
         assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn mem_backend_default_is_file() {
+        let payload: Vec<u8> = (0..100_000u32).map(|i| (i % 256) as u8).collect();
+        let (_dir, store, manifest) = store_with_blob(&payload);
+        let reader = LazyBlobReader::new(&store, &manifest);
+        assert_eq!(reader.backend(), MemBackend::File);
+        assert_eq!(reader.realize().unwrap(), reader.read_all().unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "UFFD")]
+    fn mem_backend_uffd_is_unimplemented() {
+        let (_dir, store, manifest) = store_with_blob(b"some bytes");
+        let _ = LazyBlobReader::new(&store, &manifest)
+            .with_backend(MemBackend::Uffd)
+            .realize();
     }
 }
