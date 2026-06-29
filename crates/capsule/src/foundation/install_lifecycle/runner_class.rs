@@ -16,8 +16,12 @@
 //!
 //! ## Status in this milestone
 //!
-//! Types and hashing only. **Detection is deferred**: nothing here probes the
-//! build host yet (that extends `provision_receipt` / `host_gpu` on a KVM host).
+//! Types, hashing, and **KVM-free host detection** ([`RunnerClassFacts::from_host`]):
+//! os/arch, kernel ABI class, CPU feature set, VMM presence/version, and cgroup
+//! version are probed from the host without needing `/dev/kvm`. The facets a real
+//! snapshot backend supplies — `snapshot_format`, `cpu_template`, `guest_kernel_id`,
+//! `rootfs_base_id` — are still sentinels (`"none"`/`None`/`"unset"`) until the
+//! backend lands on a KVM host; a true build-for class must override those.
 //! [`RunnerClassId`] is wired as an *optional* fold input on
 //! [`LaunchTemplateKey`](super::launch_template::LaunchTemplateKey) and is
 //! intended to also become a declared `execution_id` facet — when `None`
@@ -148,6 +152,148 @@ impl RunnerClassFacts {
     }
 }
 
+// ── KVM-free host detection ────────────────────────────────────────────────
+//
+// Sentinels for facets no pure host probe can resolve yet (a real snapshot
+// backend overrides these before the id is treated as a true build-for class).
+const FACET_UNSET: &str = "unset";
+const VMM_NONE: &str = "none";
+const SNAPSHOT_FORMAT_NONE: &str = "none";
+const DEFAULT_DEVICE_PROFILE: &str = "virtio-blk+virtio-net+vsock";
+const DEFAULT_NETWORK_MODEL: &str = "tap-nat";
+const FIRECRACKER_VMM: &str = "firecracker";
+
+impl RunnerClassFacts {
+    /// Probe the host for the facets that need no VMM and no `/dev/kvm`.
+    ///
+    /// Best-effort and total — every probe falls back to a sentinel, so this
+    /// never fails. os/arch come from [`std::env::consts`]; `kernel_abi_class`
+    /// is bucketed from the kernel release; `cpu_features` from `/proc/cpuinfo`
+    /// (linux only); `vmm`/`vmm_version` from a `firecracker --version` probe
+    /// (else `"none"`); `cgroup` from `/sys/fs/cgroup`. The backend-supplied
+    /// facets (`snapshot_format`, `cpu_template`, `guest_kernel_id`,
+    /// `rootfs_base_id`) stay sentinels until a snapshot backend fills them — so
+    /// the resulting id is correct for KVM-free testing but is **not** yet a
+    /// true build-for class (a real backend must override those four).
+    pub fn from_host() -> Self {
+        let (vmm, vmm_version) = detect_vmm();
+        Self {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            kernel_abi_class: bucket_kernel_abi_class(&detect_kernel_release()),
+            vmm,
+            vmm_version,
+            snapshot_format: SNAPSHOT_FORMAT_NONE.to_string(),
+            cpu_template: None,
+            cpu_features: detect_cpu_features(),
+            guest_kernel_id: FACET_UNSET.to_string(),
+            rootfs_base_id: FACET_UNSET.to_string(),
+            device_profile: DEFAULT_DEVICE_PROFILE.to_string(),
+            cgroup: detect_cgroup_version(),
+            network_model: DEFAULT_NETWORK_MODEL.to_string(),
+        }
+    }
+}
+
+/// Bucket a kernel release string to its ABI class: `"6.8.0-31-generic"` →
+/// `"linux-6.8"`. Anything without a leading `major.minor` → `"linux-unknown"`.
+fn bucket_kernel_abi_class(release: &str) -> String {
+    let mut parts = release.split(['.', '-']).filter(|s| !s.is_empty());
+    let is_num = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let major = parts.next().filter(|s| is_num(s));
+    let minor = parts.next().filter(|s| is_num(s));
+    match (major, minor) {
+        (Some(maj), Some(min)) => format!("linux-{maj}.{min}"),
+        _ => "linux-unknown".to_string(),
+    }
+}
+
+/// Parse the normalized, sorted, deduped CPU feature set from `/proc/cpuinfo`
+/// text. Reads the first `flags` (x86) or `Features` (arm64) line. Sorting +
+/// dedup makes the resulting [`RunnerClassId`] stable across reads.
+fn parse_cpu_features(cpuinfo: &str) -> Vec<String> {
+    for line in cpuinfo.lines() {
+        if let Some((key, val)) = line.split_once(':') {
+            let k = key.trim();
+            if k == "flags" || k == "Features" {
+                let mut feats: Vec<String> = val.split_whitespace().map(str::to_string).collect();
+                feats.sort();
+                feats.dedup();
+                return feats;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Extract a `major.minor[.patch]` version from a `firecracker --version` line:
+/// `"Firecracker v1.7.0"` → `Some("1.7.0")`. No `vX.Y` token → `None`.
+fn parse_firecracker_version(output: &str) -> Option<String> {
+    for tok in output.split_whitespace() {
+        if let Some(v) = tok.strip_prefix('v') {
+            let mut segs = v.split('.');
+            let major_numeric = segs
+                .next()
+                .map(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+                .unwrap_or(false);
+            if major_numeric && segs.next().is_some() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn detect_kernel_release() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        String::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_cpu_features() -> Vec<String> {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .map(|c| parse_cpu_features(&c))
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_cpu_features() -> Vec<String> {
+    Vec::new()
+}
+
+/// Probe for Firecracker by running `firecracker --version`. A spawn error
+/// (not on PATH) means no VMM. Avoids a `which`-style dependency.
+fn detect_vmm() -> (String, String) {
+    match std::process::Command::new("firecracker")
+        .arg("--version")
+        .output()
+    {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let version =
+                parse_firecracker_version(&text).unwrap_or_else(|| VMM_NONE.to_string());
+            (FIRECRACKER_VMM.to_string(), version)
+        }
+        Err(_) => (VMM_NONE.to_string(), VMM_NONE.to_string()),
+    }
+}
+
+fn detect_cgroup_version() -> String {
+    if std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
+        "v2".to_string()
+    } else {
+        "v1".to_string()
+    }
+}
+
 /// Content-addressed runner-class identifier: `blake3:<hex>`.
 ///
 /// `#[serde(transparent)]` so it serializes as the bare hash string (a launch
@@ -268,5 +414,81 @@ mod tests {
         assert_eq!(json, "\"blake3:abc\"");
         let back: RunnerClassId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, id);
+    }
+
+    // ── KVM-free host detection (Workstream B) ─────────────────────────────
+
+    #[test]
+    fn bucket_kernel_abi_class_buckets_to_major_minor() {
+        assert_eq!(bucket_kernel_abi_class("6.8.0-31-generic"), "linux-6.8");
+        assert_eq!(bucket_kernel_abi_class("5.15.0-91-generic"), "linux-5.15");
+        assert_eq!(bucket_kernel_abi_class("6.1.0-10"), "linux-6.1");
+        assert_eq!(bucket_kernel_abi_class(""), "linux-unknown");
+        assert_eq!(bucket_kernel_abi_class("garbage"), "linux-unknown");
+    }
+
+    #[test]
+    fn parse_cpu_features_parses_normalizes_and_dedups() {
+        let x86 = "processor\t: 0\nflags\t\t: fpu vme de fpu\nbugs\t: none";
+        assert_eq!(parse_cpu_features(x86), vec!["de", "fpu", "vme"]);
+        let arm = "processor\t: 0\nFeatures\t: fp asimd evtstrm\nCPU part\t: 0xd0c";
+        assert_eq!(parse_cpu_features(arm), vec!["asimd", "evtstrm", "fp"]);
+        assert!(parse_cpu_features("processor\t: 0\nmodel\t: 1").is_empty());
+    }
+
+    #[test]
+    fn parse_firecracker_version_extracts_semver() {
+        assert_eq!(
+            parse_firecracker_version("Firecracker v1.7.0"),
+            Some("1.7.0".to_string())
+        );
+        assert_eq!(
+            parse_firecracker_version("Firecracker v1.10.1\n"),
+            Some("1.10.1".to_string())
+        );
+        assert_eq!(parse_firecracker_version("no version here"), None);
+    }
+
+    #[test]
+    fn from_host_fills_os_and_arch_from_env_consts() {
+        let facts = RunnerClassFacts::from_host();
+        assert_eq!(facts.os, std::env::consts::OS);
+        assert_eq!(facts.arch, std::env::consts::ARCH);
+    }
+
+    #[test]
+    fn from_host_sentinels_until_backend() {
+        // These facets need a real backend; from_host leaves them as sentinels
+        // (no dependence on uname/firecracker, so this test is non-flaky).
+        let facts = RunnerClassFacts::from_host();
+        assert_eq!(facts.snapshot_format, "none");
+        assert_eq!(facts.cpu_template, None);
+        assert_eq!(facts.guest_kernel_id, "unset");
+        assert_eq!(facts.rootfs_base_id, "unset");
+        assert_eq!(facts.device_profile, "virtio-blk+virtio-net+vsock");
+        assert_eq!(facts.network_model, "tap-nat");
+    }
+
+    #[test]
+    fn from_host_without_vmm_reports_none() {
+        // Guard: only assert the no-VMM expectation when firecracker is absent.
+        if std::process::Command::new("firecracker")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
+            return;
+        }
+        let facts = RunnerClassFacts::from_host();
+        assert_eq!(facts.vmm, "none");
+        assert_eq!(facts.vmm_version, "none");
+    }
+
+    #[test]
+    fn from_host_id_is_blake3_and_deterministic() {
+        let id = RunnerClassFacts::from_host().id();
+        assert!(id.as_str().starts_with("blake3:"));
+        // Host facts are stable within a process, so two probes hash equal.
+        assert_eq!(RunnerClassFacts::from_host().id(), id);
     }
 }
