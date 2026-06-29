@@ -59,13 +59,13 @@ pub enum PlacementError {
 /// bool facets constrain only when `Some(true)`. Does **not** itself enforce the
 /// seal-before-bind gate (see [`ready_state_safe`]).
 pub fn matches(req: &BackendRequirements, cap: &BackendCapabilities) -> bool {
-    req.snapshot_kind.map_or(true, |k| k == cap.snapshot_kind)
-        && req.filesystem_model.map_or(true, |f| f == cap.filesystem_model)
-        && req.device_profile.map_or(true, |d| d == cap.device_profile)
-        && req.gpu_mode.map_or(true, |g| g == cap.gpu_mode)
+    req.snapshot_kind.is_none_or(|k| k == cap.snapshot_kind)
+        && req.filesystem_model.is_none_or(|f| f == cap.filesystem_model)
+        && req.device_profile.is_none_or(|d| d == cap.device_profile)
+        && req.gpu_mode.is_none_or(|g| g == cap.gpu_mode)
         && req
             .isolation_boundary
-            .map_or(true, |i| i == cap.isolation_boundary)
+            .is_none_or(|i| i == cap.isolation_boundary)
         && (!matches!(req.memory_snapshot, Some(true)) || cap.memory_snapshot)
         && (!matches!(req.oci_native, Some(true)) || cap.oci_native)
         && (!matches!(req.disposable_overlay, Some(true)) || cap.supports_disposable_overlay)

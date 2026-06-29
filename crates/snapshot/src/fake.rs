@@ -17,7 +17,7 @@ use capsulefs::{
 };
 
 use crate::backend::{
-    BackendCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
+    BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
 };
@@ -283,6 +283,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BuildLayers;
     use crate::manifest::{RestoreContract, SanitizerContract};
 
     fn build_input<'a>(store: &'a CasStore, secret_markers: Vec<String>) -> BuildReadyStateInput<'a> {
