@@ -35,7 +35,10 @@ pub enum SnapshotKind {
     None,
     /// Process-level checkpoint (e.g. CRIU).
     Process,
-    /// MicroVM full memory + device snapshot (Firecracker).
+    /// MicroVM full memory + device snapshot (Firecracker). Token `microvm`
+    /// (matches the requirements §0.5 contract token, not snake_case's
+    /// `micro_vm`).
+    #[serde(rename = "microvm")]
     MicroVm,
     /// Full-VM snapshot (QEMU/Cloud Hypervisor).
     FullVm,
@@ -80,7 +83,8 @@ pub enum IsolationBoundary {
     Process,
     /// Sandboxed process (Landlock/seccomp/bwrap).
     Sandbox,
-    /// MicroVM.
+    /// MicroVM. Token `microvm` (see [`SnapshotKind::MicroVm`]).
+    #[serde(rename = "microvm")]
     MicroVm,
     /// Full VM.
     Vm,
