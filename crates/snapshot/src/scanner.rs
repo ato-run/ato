@@ -23,7 +23,10 @@
 pub const SCANNER_VERSION: &str = "ato-rs-scan/0.2.0";
 
 // ── tunable thresholds ─────────────────────────────────────────────────────
-const MIN_PROVIDER_SUFFIX_LEN: usize = 8;
+// Real provider keys are long, mixed-class tokens. A short/low-entropy suffix is
+// almost always binary noise in a large OS rootfs (false positive), so require a
+// realistic key shape: standalone token + length + mixed classes + distinct bytes.
+const MIN_PROVIDER_SUFFIX_LEN: usize = 20;
 const MIN_ENV_VALUE_LEN: usize = 6;
 const MIN_ENTROPY_RUN_LEN: usize = 24;
 const MIN_ENTROPY_DISTINCT: usize = 12;
@@ -232,12 +235,19 @@ fn scan_provider_prefixes(layer: &'static str, bytes: &[u8], out: &mut Vec<Secre
         let mut i = 0;
         while i + pb.len() <= bytes.len() {
             if &bytes[i..i + pb.len()] == pb {
+                // The prefix must START a token (preceded by a non-token byte or
+                // the layer start) — rejects "sk-" embedded mid-binary/mid-word.
+                let at_boundary = i == 0 || !is_token_byte(bytes[i - 1]);
                 let mut j = i + pb.len();
                 while j < bytes.len() && is_token_byte(bytes[j]) {
                     j += 1;
                 }
-                let suffix_len = j - (i + pb.len());
-                if suffix_len >= MIN_PROVIDER_SUFFIX_LEN {
+                let suffix = &bytes[i + pb.len()..j];
+                if at_boundary
+                    && suffix.len() >= MIN_PROVIDER_SUFFIX_LEN
+                    && class_count(suffix) >= MIN_ENTROPY_CLASS_COUNT
+                    && distinct_count(suffix) >= MIN_ENTROPY_DISTINCT
+                {
                     out.push(SecretFinding {
                         layer,
                         offset: i,
@@ -284,8 +294,10 @@ fn scan_env_assignments(layer: &'static str, bytes: &[u8], out: &mut Vec<SecretF
         while val_end < n && is_token_byte(bytes[val_end]) {
             val_end += 1;
         }
-        let value_len = val_end - (eq + 1);
-        if value_len >= MIN_ENV_VALUE_LEN {
+        let value = &bytes[eq + 1..val_end];
+        // A real secret value is a long, mixed-class token; a short or
+        // single-class run after NAME= in binary data is noise.
+        if value.len() >= MIN_ENV_VALUE_LEN && class_count(value) >= MIN_ENTROPY_CLASS_COUNT {
             out.push(SecretFinding {
                 layer,
                 offset: name_start,
@@ -483,6 +495,25 @@ mod tests {
             .heuristic
             .iter()
             .any(|f| f.kind == FindingKind::ProviderKeyPrefix));
+    }
+
+    #[test]
+    fn provider_prefix_rejects_binary_noise() {
+        // A real OS rootfs has many coincidental "sk-" runs. These must NOT fire:
+        //  - embedded (preceded by a token byte) -> not a token boundary
+        //  - long but single-class (low distinct) -> not key-shaped
+        //  - short suffix (< 20)
+        let noise = b"x Xsk-ABCDEFGHIJ1234567890abc then sk-aaaaaaaaaaaaaaaaaaaaaaaaaa and sk-short9chars";
+        let report = scan_build_layers(&layers_with_app(noise), &[]);
+        assert!(
+            !report.heuristic.iter().any(|f| f.kind == FindingKind::ProviderKeyPrefix),
+            "binary-noise sk- runs must not be flagged: {:?}",
+            report.heuristic.iter().map(|f| f.summary()).collect::<Vec<_>>()
+        );
+        // A genuine key shape (boundary + long + mixed-class) still fires.
+        let real = b"token sk-proj-AbCdEf0123456789GhIjKlMnOp here";
+        let r2 = scan_build_layers(&layers_with_app(real), &[]);
+        assert!(r2.heuristic.iter().any(|f| f.kind == FindingKind::ProviderKeyPrefix));
     }
 
     #[test]
