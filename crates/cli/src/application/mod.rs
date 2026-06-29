@@ -36,6 +36,7 @@ pub(crate) mod producer_input;
 pub(crate) mod projection;
 pub(crate) mod provider_cache;
 pub(crate) mod provider_projection;
+pub(crate) mod ready_state;
 pub(crate) mod receipt_boundary;
 pub(crate) mod runner_agent;
 pub(crate) mod runtime_observation;
