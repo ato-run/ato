@@ -32,6 +32,12 @@ impl CasStore {
     }
 
     /// On-disk path for a content hash (whether or not it exists).
+    ///
+    /// Safe against path traversal by construction: [`ContentHash`] is a
+    /// validated type whose `hex()` is always exactly 64 lowercase-hex
+    /// characters — a single path component with no separators or `..`. A
+    /// hostile manifest can never produce a `ContentHash` that escapes the CAS
+    /// root, so this join cannot leave `<root>/blobs/blake3/`.
     fn chunk_path(&self, hash: &ContentHash) -> PathBuf {
         self.root.join("blobs").join("blake3").join(hash.hex())
     }
@@ -106,7 +112,12 @@ impl CasStore {
             if name.contains(".tmp.") {
                 continue;
             }
-            out.push(ContentHash::from_string(format!("blake3:{name}")));
+            // Validate before admitting: a stray non-chunk file in the CAS dir
+            // must never become a ContentHash the rest of the system trusts.
+            match ContentHash::parse(&format!("blake3:{name}")) {
+                Ok(h) => out.push(h),
+                Err(_) => continue,
+            }
         }
         Ok(out)
     }
