@@ -328,22 +328,58 @@ fn blake3_file(path: &Path) -> Option<String> {
 }
 
 // ── HTTP/1.1 over the Firecracker API unix socket (no extra deps) ────────────
+//
+// Firecracker's micro-http server keeps the connection alive, so we must NOT
+// read to EOF (that blocks until the read timeout). Read exactly the status line
+// + headers (until CRLFCRLF), then `Content-Length` body bytes, then stop.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 fn fc_request(sock: &Path, method: &str, path: &str, body: Option<&str>) -> std::io::Result<(u16, String)> {
     let mut stream = UnixStream::connect(sock)?;
-    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let body = body.unwrap_or("");
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
         body.len(), body
     );
     stream.write_all(req.as_bytes())?;
     stream.flush()?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf)?;
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    let status = text.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0u16);
-    Ok((status, text))
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 2048];
+    // 1) read until end of headers.
+    let header_end = loop {
+        if let Some(p) = find_subslice(&buf, b"\r\n\r\n") {
+            break p + 4;
+        }
+        let n = stream.read(&mut tmp)?;
+        if n == 0 {
+            break buf.len();
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.len() > 256 * 1024 {
+            break buf.len();
+        }
+    };
+    let headers = String::from_utf8_lossy(&buf[..header_end.min(buf.len())]).into_owned();
+    let status = headers.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0u16);
+    let content_length = headers
+        .lines()
+        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().ok()))
+        .flatten()
+        .unwrap_or(0);
+    // 2) read exactly the declared body, then stop (don't wait for close).
+    while buf.len() < header_end + content_length {
+        let n = stream.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    Ok((status, String::from_utf8_lossy(&buf).into_owned()))
 }
 
 /// A spawned Firecracker process. RAII: dropping it kills+reaps the VMM and
@@ -705,7 +741,11 @@ mod tests {
         let c = FirecrackerConfig::default();
         assert_eq!(c.vcpu_count, 2);
         assert_eq!(c.healthcheck_port, 8080);
-        assert!(c.rootfs_read_only, "rootfs is read-only by default (leak-safe)");
+        // rootfs_read_only defaults to true, but honors ATO_FC_ROOTFS_READONLY
+        // (the KVM integration run sets =0), so assert it matches the env rather
+        // than a fixed value.
+        let expect_ro = std::env::var("ATO_FC_ROOTFS_READONLY").map(|v| v != "0").unwrap_or(true);
+        assert_eq!(c.rootfs_read_only, expect_ro);
     }
 
     #[test]
