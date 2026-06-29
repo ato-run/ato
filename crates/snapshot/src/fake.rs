@@ -17,13 +17,14 @@ use capsulefs::{
 };
 
 use crate::backend::{
-    BackendCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt,
-    RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend, SnapshotError,
-    SnapshotInspection,
+    BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
+    FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
+    RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
 };
 use crate::manifest::{
     NoSecretProof, ReadyStateLayers, ReadyStateManifest, SnapshotBackendInfo, READY_STATE_SCHEMA,
 };
+use crate::scanner;
 
 /// Backend id reported by [`FakeSnapshotBackend`].
 pub const FAKE_BACKEND_ID: &str = "fake";
@@ -36,36 +37,6 @@ impl FakeSnapshotBackend {
     pub fn new() -> Self {
         Self
     }
-}
-
-/// Scan layer bytes for any declared secret marker. Returns the markers found.
-/// Scans every sealed layer including vmstate and memory (plan §8.1).
-fn scan_for_secrets(layers: &BuildLayers, markers: &[String]) -> Vec<String> {
-    if markers.is_empty() {
-        return Vec::new();
-    }
-    let haystacks: [&[u8]; 6] = [
-        &layers.rootfs,
-        layers.runtime.as_deref().unwrap_or(&[]),
-        layers.dependency.as_deref().unwrap_or(&[]),
-        layers.app.as_deref().unwrap_or(&[]),
-        &layers.vmstate,
-        &layers.memory,
-    ];
-    let mut found = Vec::new();
-    for marker in markers {
-        let needle = marker.as_bytes();
-        if needle.is_empty() {
-            continue;
-        }
-        if haystacks
-            .iter()
-            .any(|h| h.windows(needle.len()).any(|w| w == needle))
-        {
-            found.push(marker.clone());
-        }
-    }
-    found
 }
 
 /// Store one optional layer, returning its `BlobManifest`.
@@ -95,6 +66,17 @@ impl SnapshotBackend for FakeSnapshotBackend {
             arch: std::env::consts::ARCH.to_string(),
             kvm_present: Path::new("/dev/kvm").exists(),
             vmm_version: Some("fake-0.1.0".to_string()),
+            // It stands in for a sealable microVM so the KVM-free E2E exercises
+            // the real Ready-State path (microvm + seal-before-bind + overlay).
+            snapshot_kind: SnapshotKind::MicroVm,
+            memory_snapshot: true,
+            filesystem_model: FilesystemModel::Block,
+            device_profile: DeviceProfile::Minimal,
+            gpu_mode: GpuMode::None,
+            oci_native: false,
+            isolation_boundary: IsolationBoundary::MicroVm,
+            supports_seal_before_bind: true,
+            supports_disposable_overlay: true,
         }
     }
 
@@ -102,11 +84,23 @@ impl SnapshotBackend for FakeSnapshotBackend {
         &self,
         input: BuildReadyStateInput<'_>,
     ) -> Result<BuildReadyStateReceipt, SnapshotError> {
-        // ── no-secret gate (plan §8.1): fail closed on any finding ──────────
-        let findings = scan_for_secrets(&input.layers, &input.declared_secret_markers);
-        if !findings.is_empty() {
-            return Err(SnapshotError::SecretFoundInSnapshot(findings));
+        // ── no-secret gate (plan §8.1) ──────────────────────────────────────
+        // Fail CLOSED on declared markers (verbatim) and the high-precision
+        // heuristics (provider-key prefixes, secret-named env). High-entropy
+        // findings are ADVISORY only — they false-positive on lockfile hashes /
+        // minified assets / binaries in real layers, so they are recorded in the
+        // proof, not gated.
+        let report = scanner::scan_build_layers(&input.layers, &input.declared_secret_markers);
+        if !report.declared_hits.is_empty() {
+            return Err(SnapshotError::SecretFoundInSnapshot(report.declared_hits));
         }
+        let blocking = report.blocking();
+        if !blocking.is_empty() {
+            return Err(SnapshotError::SecretScanFindings(
+                blocking.into_iter().cloned().collect(),
+            ));
+        }
+        let advisories: Vec<String> = report.advisory().iter().map(|f| f.summary()).collect();
 
         let cd = ChunkingKind::ContentDefined;
         let page = ChunkingKind::PageAligned {
@@ -154,9 +148,10 @@ impl SnapshotBackend for FakeSnapshotBackend {
         let hotset_profile = rec.finish();
 
         let no_secret_proof = NoSecretProof {
-            scanner_version: "fake-scan-0.1.0".to_string(),
+            scanner_version: scanner::SCANNER_VERSION.to_string(),
             scanned_layers: layers.iter().map(|(n, _)| n.to_string()).collect(),
             findings: Vec::new(),
+            advisories,
             verdict: "clean".to_string(),
         };
 
@@ -296,6 +291,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BuildLayers;
     use crate::manifest::{RestoreContract, SanitizerContract};
 
     fn build_input<'a>(store: &'a CasStore, secret_markers: Vec<String>) -> BuildReadyStateInput<'a> {
@@ -513,5 +509,91 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restore.session.restored_bytes, expected_total);
+    }
+
+    // ── real no-secret scanner integration (Workstream D) ──────────────────
+
+    #[test]
+    fn build_fails_closed_on_planted_provider_key_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let mut input = build_input(&store, vec![]);
+        // Plant a provider-key-shaped token in the memory image (no declared marker).
+        let mut mem = vec![b' '; 64];
+        mem.extend_from_slice(b"sk-proj-ABCDEFGHIJ1234567890abcdef");
+        mem.extend_from_slice(&[b' '; 64]);
+        input.layers.memory = mem;
+        let err = backend.build_ready_state(input).unwrap_err();
+        assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "{err:?}");
+        assert!(store.list_chunks().unwrap().is_empty(), "nothing sealed");
+    }
+
+    #[test]
+    fn build_fails_closed_on_env_style_secret_in_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let mut input = build_input(&store, vec![]);
+        input.layers.app = Some(b"API_KEY=sk-live-deadbeefcafef00d12345".to_vec());
+        let err = backend.build_ready_state(input).unwrap_err();
+        assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "{err:?}");
+        assert!(store.list_chunks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn clean_build_emits_real_no_secret_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let receipt = backend.build_ready_state(build_input(&store, vec![])).unwrap();
+        assert!(receipt.no_secret_proof.is_clean());
+        assert_eq!(receipt.no_secret_proof.scanner_version, scanner::SCANNER_VERSION);
+        assert!(receipt.no_secret_proof.findings.is_empty());
+        assert!(receipt
+            .no_secret_proof
+            .scanned_layers
+            .contains(&"memory".to_string()));
+    }
+
+    #[test]
+    fn scan_findings_error_is_non_leaking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let mut input = build_input(&store, vec![]);
+        let secret_suffix = "DEADBEEFcafef00d12345678";
+        input.layers.app = Some(format!("ghp_{secret_suffix}").into_bytes());
+        let err = backend.build_ready_state(input).unwrap_err();
+        // Neither the Debug nor the Display of the error may contain the secret.
+        assert!(!format!("{err:?}").contains(secret_suffix));
+        assert!(!err.to_string().contains(secret_suffix));
+    }
+
+    #[test]
+    fn realistic_dependency_and_app_layers_do_not_block_build() {
+        // Regression: high-entropy content that is NOT a secret — lockfile
+        // integrity hashes, a minified asset with a base64 data string — must
+        // NOT fail the build closed. (High-entropy is advisory, not blocking.)
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let mut input = build_input(&store, vec![]);
+        input.layers.dependency = Some(
+            br#"{"packages":{"node_modules/left-pad":{"integrity":"sha512-aB3xY9kPqRsTuVwXyZ0123456789abcdefghijklmnopqrstuvwXYZ12=="},"node_modules/lodash":{"integrity":"sha512-Zz9YxWvUtSrQpOnMlKjIhGfEdCbA0987654321zyxwvutsrqponmlkj=="}}}"#
+                .to_vec(),
+        );
+        input.layers.app = Some(
+            b"var f=function(t){return t*2};const data=\"aGVsbG8gd29ybGQgdGhpcyBpcyBhIGJhc2U2NCBhc3NldA==\";".to_vec(),
+        );
+        // Build must SUCCEED (no blocking finding); the proof is clean.
+        let receipt = backend
+            .build_ready_state(input)
+            .expect("realistic lockfile/minified layers must not block the build");
+        assert!(
+            receipt.no_secret_proof.is_clean(),
+            "no blocking findings on realistic layers; advisories: {:?}",
+            receipt.no_secret_proof.advisories
+        );
     }
 }
