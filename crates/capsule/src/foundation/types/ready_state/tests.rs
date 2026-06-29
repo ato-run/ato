@@ -608,3 +608,31 @@ type = "accelerator"
     assert!(m.has_external_gpu_capability());
     assert!(m.instant_run_eligibility().gpu_external_binding);
 }
+
+fn read_sample(rel: &str) -> CapsuleManifest {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    CapsuleManifest::from_toml(&text).expect("sample should parse")
+}
+
+#[test]
+fn shipped_gpu_external_sample_is_eligible() {
+    let m = read_sample("../../samples/ready-state-gpu-external/capsule.toml");
+    use crate::foundation::types::ready_state::GpuMode;
+    assert_eq!(m.gpu_mode(), GpuMode::External);
+    let e = m.instant_run_eligibility();
+    assert!(e.requires_gpu && e.gpu_external_binding && !e.gpu_blocks_ready_state);
+    assert!(e.eligible, "{:?}", e.blocking_reasons);
+}
+
+#[test]
+fn shipped_gpu_invm_sample_is_ineligible_fail_closed() {
+    let m = read_sample("../../samples/ready-state-gpu-invm/capsule.toml");
+    use crate::foundation::types::ready_state::GpuMode;
+    assert_eq!(m.gpu_mode(), GpuMode::Passthrough);
+    let e = m.instant_run_eligibility();
+    assert!(e.requires_gpu && e.gpu_blocks_ready_state && !e.eligible);
+    // The manifest itself is still valid (parsed fine); only Ready-State is gated.
+    assert!(m.is_ready_state_eligible(), "snapshot mode is warm");
+}
