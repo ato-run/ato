@@ -1062,6 +1062,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "capsulefs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "fastcdc",
+ "hex",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6467,6 +6482,21 @@ name = "smawk"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7c388c1b5e93756d0c740965c41e8822f866621d41acbdf6336a6a168f8840c"
+
+[[package]]
+name = "snapshot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "capsule",
+ "capsulefs",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "socket2"
