@@ -292,4 +292,17 @@ mod tests {
             "{}"
         );
     }
+
+    #[test]
+    fn microvm_uses_the_contract_token_not_snake_case() {
+        // requirements §0.5 token is "microvm", not snake_case "micro_vm".
+        let req = BackendRequirements {
+            snapshot_kind: Some(SnapshotKind::MicroVm),
+            isolation_boundary: Some(IsolationBoundary::MicroVm),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"microvm\""), "{json}");
+        assert!(!json.contains("micro_vm"), "{json}");
+    }
 }
