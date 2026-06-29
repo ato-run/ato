@@ -768,6 +768,35 @@ pub struct CapsuleManifest {
     /// requests by path prefix to upstream container services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<IngressConfig>,
+
+    /// Ready-State Capsule sealing/restore policy (`[snapshot]`).
+    ///
+    /// Parse-only in the current milestone. Absent or `mode = "none"` means the
+    /// legacy cold path. See [`super::ready_state`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<super::ready_state::SnapshotConfig>,
+
+    /// Required secrets declared as refs (`[secrets.<name>]`), never values.
+    ///
+    /// Resolved post-restore via the existing secret-injection path. Parse-only
+    /// in the current milestone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secrets: BTreeMap<String, super::ready_state::SecretSpec>,
+
+    /// Post-restore, user/billing/env-specific injections (`[bindings.<name>]`).
+    /// Parse-only in the current milestone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, super::ready_state::BindingSpec>,
+
+    /// Heavy external capabilities (`[external.<name>]`), max 3 for Public
+    /// Instant Run. Parse-only in the current milestone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external: BTreeMap<String, super::ready_state::ExternalCapabilitySpec>,
+
+    /// User Context Store binding (`[context]`). Parse-only in the current
+    /// milestone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<super::ready_state::ContextConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

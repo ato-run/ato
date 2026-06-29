@@ -399,6 +399,14 @@ pub struct LaunchTemplateKey {
     pub capability_policy_hash: String,
     pub state_contract_hash: String,
     pub runner_compatibility_class: RunnerCompatibilityClass,
+    /// Ready-State restore-compatibility class (plan §5). `None` for every
+    /// legacy (cold) launch; when `None`, JCS skips the field so the key digest
+    /// is byte-identical to the pre-Ready-State key — adding the slot does not
+    /// reshuffle existing template identities. When `Some`, a snapshot built for
+    /// one runner class gets a distinct template identity from one built for
+    /// another, so a warm template is never reused across incompatible hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_state_runner_class: Option<super::runner_class::RunnerClassId>,
 }
 
 /// Inputs to the safe [`LaunchTemplateKey::from_inputs`] constructor (#581 wave 3C).
@@ -417,6 +425,10 @@ pub struct LaunchTemplateKeyInputs {
     pub state_contract_hash: String,
     pub runner_compatibility_class: RunnerCompatibilityClass,
     pub completeness_policy: RequirementGraphCompletenessPolicy,
+    /// Ready-State restore-compatibility class; `None` for legacy cold launches.
+    /// Detection (probing the build host) is deferred — callers pass `None`
+    /// today. See [`super::runner_class`].
+    pub ready_state_runner_class: Option<super::runner_class::RunnerClassId>,
 }
 
 impl LaunchTemplateKey {
@@ -448,6 +460,7 @@ impl LaunchTemplateKey {
             capability_policy_hash: inputs.capability_policy_hash,
             state_contract_hash: inputs.state_contract_hash,
             runner_compatibility_class: inputs.runner_compatibility_class,
+            ready_state_runner_class: inputs.ready_state_runner_class,
         })
     }
 
@@ -615,6 +628,7 @@ mod tests {
             runner_compatibility_class: RunnerCompatibilityClass::new(
                 "managed_runner/linux-x86_64",
             ),
+            ready_state_runner_class: None,
         }
     }
 
@@ -727,6 +741,7 @@ mod tests {
                 "managed_runner/linux-x86_64",
             ),
             completeness_policy,
+            ready_state_runner_class: None,
         }
     }
 
