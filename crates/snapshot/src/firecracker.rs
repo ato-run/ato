@@ -14,8 +14,9 @@ use std::path::Path;
 use capsulefs::CasStore;
 
 use crate::backend::{
-    BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, RestoreReadyStateInput,
-    RestoreReceipt, RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection,
+    BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
+    FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
+    RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
     TeardownReceipt,
 };
 use crate::manifest::ReadyStateManifest;
@@ -88,6 +89,17 @@ impl SnapshotBackend for FirecrackerBackend {
             // Version detection (running `firecracker --version`) is part of the
             // real implementation; unknown in the skeleton.
             vmm_version: None,
+            // The facets Firecracker *provides* (independent of availability), so
+            // placement can reason about it: a minimal-device sealable microVM.
+            snapshot_kind: SnapshotKind::MicroVm,
+            memory_snapshot: true,
+            filesystem_model: FilesystemModel::Block,
+            device_profile: DeviceProfile::Minimal,
+            gpu_mode: GpuMode::None,
+            oci_native: false,
+            isolation_boundary: IsolationBoundary::MicroVm,
+            supports_seal_before_bind: true,
+            supports_disposable_overlay: true,
         }
     }
 
