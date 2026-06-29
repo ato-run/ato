@@ -23,16 +23,50 @@ impl<'a> LazyBlobReader<'a> {
     }
 
     /// Reassemble and return the entire blob. Verifies each chunk on read.
+    ///
+    /// Validates the manifest's self-description before trusting it: the chunk
+    /// lengths must sum (without overflow) to `total_len`, and each chunk's
+    /// declared `length` must match the bytes it actually addresses. A manifest
+    /// that lies about either is rejected with [`CapsuleFsError::MalformedManifest`]
+    /// rather than silently returning truncated/oversized data.
     pub fn read_all(&self) -> Result<Vec<u8>> {
+        // Structural check: declared lengths sum to total_len (overflow-safe).
+        let mut declared_sum: u64 = 0;
+        for chunk in &self.manifest.chunks {
+            declared_sum = declared_sum.checked_add(chunk.length).ok_or_else(|| {
+                CapsuleFsError::MalformedManifest(
+                    "sum of chunk lengths overflows u64".to_string(),
+                )
+            })?;
+        }
+        if declared_sum != self.manifest.total_len {
+            return Err(CapsuleFsError::MalformedManifest(format!(
+                "chunk lengths sum to {declared_sum} but total_len is {}",
+                self.manifest.total_len
+            )));
+        }
+
         let mut out = Vec::with_capacity(self.manifest.total_len as usize);
         for chunk in &self.manifest.chunks {
-            out.extend_from_slice(&self.store.get_chunk(&chunk.hash)?);
+            let bytes = self.store.get_chunk(&chunk.hash)?;
+            if bytes.len() as u64 != chunk.length {
+                return Err(CapsuleFsError::MalformedManifest(format!(
+                    "chunk {} declares length {} but addresses {} bytes",
+                    chunk.hash,
+                    chunk.length,
+                    bytes.len()
+                )));
+            }
+            out.extend_from_slice(&bytes);
         }
         Ok(out)
     }
 
     /// Read `len` bytes starting at `offset`, touching only the chunks that
-    /// overlap the range (lazy). Errors if the range is outside the blob.
+    /// overlap the range (lazy). Errors if the range is outside the blob, or if
+    /// the manifest is malformed (an `offset + length` overflow, or a chunk
+    /// whose declared `length` does not match its actual bytes — which would
+    /// otherwise slice out of bounds and panic).
     pub fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
         let end = offset.saturating_add(len);
         if end > self.manifest.total_len {
@@ -45,12 +79,28 @@ impl<'a> LazyBlobReader<'a> {
         let mut out = Vec::with_capacity(len as usize);
         for chunk in &self.manifest.chunks {
             let chunk_start = chunk.offset;
-            let chunk_end = chunk.offset + chunk.length;
+            // Overflow-safe end: an untrusted manifest must not be able to wrap.
+            let chunk_end = chunk_start.checked_add(chunk.length).ok_or_else(|| {
+                CapsuleFsError::MalformedManifest(format!(
+                    "chunk offset {chunk_start} + length {} overflows u64",
+                    chunk.length
+                ))
+            })?;
             // Skip chunks entirely before or after the requested range.
             if chunk_end <= offset || chunk_start >= end {
                 continue;
             }
             let bytes = self.store.get_chunk(&chunk.hash)?;
+            // The manifest's declared length must match the real chunk bytes;
+            // otherwise the `to` bound below could exceed `bytes.len()`.
+            if bytes.len() as u64 != chunk.length {
+                return Err(CapsuleFsError::MalformedManifest(format!(
+                    "chunk {} declares length {} but addresses {} bytes",
+                    chunk.hash,
+                    chunk.length,
+                    bytes.len()
+                )));
+            }
             let from = offset.saturating_sub(chunk_start);
             let to = (end - chunk_start).min(chunk.length);
             out.extend_from_slice(&bytes[from as usize..to as usize]);
@@ -156,6 +206,78 @@ mod tests {
         let reader = LazyBlobReader::new(&store, &manifest);
         let warmed = reader.prefetch_hotset(&hotset).unwrap();
         assert_eq!(warmed, 3, "foreign chunk must be skipped");
+    }
+
+    #[test]
+    fn read_range_errors_when_chunk_declared_length_exceeds_actual_bytes() {
+        // A hostile manifest references a small real chunk but lies about its
+        // length. Slicing on the lie would panic; we must error instead.
+        use crate::chunk::Chunk;
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let hash = store.put_chunk(b"hello").unwrap(); // 5 real bytes
+        let manifest = BlobManifest::new(
+            LayerKind::Other("evil".to_string()),
+            100,
+            ChunkingKind::ContentDefined,
+            vec![Chunk {
+                hash,
+                offset: 0,
+                length: 100, // lies: claims 100, holds 5
+            }],
+        );
+        let reader = LazyBlobReader::new(&store, &manifest);
+        assert!(matches!(
+            reader.read_range(0, 50),
+            Err(CapsuleFsError::MalformedManifest(_))
+        ));
+    }
+
+    #[test]
+    fn read_all_errors_when_chunk_sum_does_not_match_total_len() {
+        use crate::chunk::Chunk;
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let hash = store.put_chunk(b"hello").unwrap(); // 5 real bytes
+        let manifest = BlobManifest::new(
+            LayerKind::Other("evil".to_string()),
+            999, // lies: declared total != sum of chunk lengths (5)
+            ChunkingKind::ContentDefined,
+            vec![Chunk {
+                hash,
+                offset: 0,
+                length: 5,
+            }],
+        );
+        let reader = LazyBlobReader::new(&store, &manifest);
+        assert!(matches!(
+            reader.read_all(),
+            Err(CapsuleFsError::MalformedManifest(_))
+        ));
+    }
+
+    #[test]
+    fn read_range_errors_on_chunk_offset_length_overflow() {
+        use crate::chunk::Chunk;
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        // The chunk need not exist: the overflow check runs before any read.
+        let hash = crate::hash::hash_bytes(b"x");
+        let manifest = BlobManifest::new(
+            LayerKind::Other("evil".to_string()),
+            u64::MAX, // large enough that the range bounds-check passes
+            ChunkingKind::ContentDefined,
+            vec![Chunk {
+                hash,
+                offset: u64::MAX,
+                length: 10, // offset + length overflows u64
+            }],
+        );
+        let reader = LazyBlobReader::new(&store, &manifest);
+        assert!(matches!(
+            reader.read_range(0, 10),
+            Err(CapsuleFsError::MalformedManifest(_))
+        ));
     }
 
     #[test]
