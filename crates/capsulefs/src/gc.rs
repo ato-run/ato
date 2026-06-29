@@ -252,4 +252,35 @@ mod tests {
         let summary = lines.last().unwrap();
         assert!(summary.contains("kept") && summary.contains("reclaimed"));
     }
+
+    #[test]
+    fn shared_chunk_survives_when_a_live_manifest_references_it() {
+        // The core ref-count property: a chunk that a live manifest references
+        // must survive even though a dead (not-passed) manifest also used it;
+        // a chunk only the dead manifest used is reclaimed.
+        use crate::chunk::Chunk;
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let shared = store.put_chunk(b"shared chunk bytes").unwrap();
+        let dead_only = store.put_chunk(b"dead-only chunk bytes").unwrap();
+        let shared_len = store.get_chunk(&shared).unwrap().len() as u64;
+
+        let live = BlobManifest::new(
+            LayerKind::App,
+            shared_len,
+            ChunkingKind::ContentDefined,
+            vec![Chunk {
+                hash: shared.clone(),
+                offset: 0,
+                length: shared_len,
+            }],
+        );
+
+        let report = collect_garbage(&store, std::slice::from_ref(&live), &HashSet::new()).unwrap();
+        assert!(store.has_chunk(&shared), "shared chunk must survive");
+        assert!(!store.has_chunk(&dead_only), "dead-only chunk must be reclaimed");
+        assert!(report.deleted.contains(&dead_only));
+        assert!(!report.deleted.contains(&shared));
+        assert_eq!(report.kept, 1);
+    }
 }

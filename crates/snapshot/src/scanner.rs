@@ -458,6 +458,19 @@ mod tests {
     }
 
     #[test]
+    fn high_entropy_provider_key_is_flagged_once_not_double() {
+        // A provider key that is also a high-entropy run must yield exactly ONE
+        // finding (the provider-prefix), not a duplicate HighEntropyToken —
+        // guards the de-overlap suppression in scan_entropy_runs.
+        let mut mem = vec![b' '; 16];
+        mem.extend_from_slice(b"sk-proj-ABCDEFGHIJ1234567890abcdefKLMNOP");
+        mem.extend_from_slice(&[b' '; 16]);
+        let report = scan_build_layers(&layers_with_memory(mem), &[]);
+        assert_eq!(report.heuristic.len(), 1, "{:?}", report.heuristic);
+        assert_eq!(report.heuristic[0].kind, FindingKind::ProviderKeyPrefix);
+    }
+
+    #[test]
     fn offset_and_len_point_at_match() {
         let secret = b"ghp_ABCDEFGHIJ1234567890abcdefXYZ";
         let mut app = vec![b'.'; 5];
