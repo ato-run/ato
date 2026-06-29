@@ -364,3 +364,113 @@ run = "python app.py"
     assert!(!e.has_healthcheck);
     assert!(!e.eligible);
 }
+
+#[test]
+fn probe_on_non_default_target_does_not_count() {
+    // The default target has NO readiness probe; a different target does. The
+    // run serves the default target, so it is NOT ready-detectable → ineligible.
+    let toml = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+run = "python app.py"
+
+[targets.other]
+runtime = "source"
+run = "python other.py"
+
+[targets.other.readiness_probe]
+type = "http"
+path = "/health"
+"#;
+    let m = CapsuleManifest::from_toml(toml).expect("parse");
+    let e = m.instant_run_eligibility();
+    assert!(
+        !e.has_healthcheck,
+        "a probe on a non-serving target must not satisfy the healthcheck gate"
+    );
+    assert!(!e.eligible);
+    assert!(e.blocking_reasons.iter().any(|r| r.contains("serving target 'app'")));
+}
+
+#[test]
+fn probe_on_default_target_counts() {
+    // BASE already puts the probe on the default target `app`.
+    let m = parse("");
+    assert!(m.instant_run_eligibility().has_healthcheck);
+}
+
+#[test]
+fn probe_on_a_service_in_the_default_target_graph_counts() {
+    // The default target has no probe of its own, but a service it depends on
+    // (transitively) does. That service IS in the serving graph → counts.
+    let toml = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+run = "python app.py"
+
+[services.web]
+target = "web"
+depends_on = ["db"]
+
+[services.db]
+entrypoint = "postgres"
+
+[services.db.readiness_probe]
+tcp_connect = "localhost"
+port = "PORT"
+"#;
+    let m = CapsuleManifest::from_toml(toml).expect("parse");
+    let e = m.instant_run_eligibility();
+    assert!(
+        e.has_healthcheck,
+        "a probe on a service in the serving target's graph must count: {:?}",
+        e.blocking_reasons
+    );
+}
+
+#[test]
+fn probe_on_a_service_bound_to_another_target_does_not_count() {
+    // The serving (default) target `web` has no probe; a service explicitly
+    // bound to a DIFFERENT target carries one. Out of the serving graph → no.
+    let toml = r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+run = "python app.py"
+
+[targets.worker]
+runtime = "source"
+run = "python worker.py"
+
+[services.worker]
+target = "worker"
+
+[services.worker.readiness_probe]
+tcp_connect = "localhost"
+port = "PORT"
+"#;
+    let m = CapsuleManifest::from_toml(toml).expect("parse");
+    let e = m.instant_run_eligibility();
+    assert!(
+        !e.has_healthcheck,
+        "a probe on a service bound to a non-serving target must not count"
+    );
+    assert!(!e.eligible);
+}

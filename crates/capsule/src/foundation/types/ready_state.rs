@@ -381,8 +381,10 @@ impl CapsuleManifest {
     ///   any `[secrets.*]` entry marked `required`.
     /// * **external count ≤ 3** — at most [`MAX_EXTERNAL_CAPABILITIES`]
     ///   `[external.*]` entries.
-    /// * **healthcheck present** — a readiness probe exists on the default
-    ///   target or any service.
+    /// * **healthcheck present** — a readiness probe exists on the *serving*
+    ///   target (`default_target`, or the sole target when none is named) or a
+    ///   service in that target's dependency graph. A probe on an unrelated
+    ///   target does not count.
     pub fn instant_run_eligibility(&self) -> InstantRunEligibility {
         let mut blocking_reasons = Vec::new();
 
@@ -460,25 +462,75 @@ impl CapsuleManifest {
             ));
         }
 
-        // ── healthcheck present ───────────────────────────────────────────
-        let target_has_probe = self
-            .targets
-            .as_ref()
-            .map(|t| {
-                t.named_targets()
-                    .values()
-                    .any(|nt| nt.readiness_probe.is_some())
-            })
+        // ── healthcheck present (scoped to the SERVING target) ────────────
+        // A readiness probe only makes a run ready-detectable if it sits on the
+        // target that actually serves — the `default_target` (or, when none is
+        // named, the sole target). A probe on some *other* target does not let
+        // `ato run` decide the served capsule is ready, so it must NOT count.
+        let named = self.targets.as_ref().map(|t| t.named_targets());
+        let serving_label: Option<&str> = {
+            let dt = self.default_target.trim();
+            if !dt.is_empty() {
+                Some(dt)
+            } else {
+                // No default named: unambiguous only when exactly one target.
+                named.and_then(|nt| {
+                    if nt.len() == 1 {
+                        nt.keys().next().map(String::as_str)
+                    } else {
+                        None
+                    }
+                })
+            }
+        };
+        let serving_target = serving_label
+            .and_then(|label| named.and_then(|nt| nt.get(label)));
+
+        let target_has_probe = serving_target
+            .map(|nt| nt.readiness_probe.is_some())
             .unwrap_or(false);
-        let service_has_probe = self
-            .services
-            .as_ref()
-            .map(|s| s.values().any(|svc| svc.readiness_probe.is_some()))
-            .unwrap_or(false);
+
+        // Services count only when they belong to the serving target's graph:
+        // a service whose `target` is the serving label (or omitted — the router
+        // falls back to `default_target`), plus that service's `depends_on`
+        // closure. A probe on a service bound to a different target is ignored.
+        let service_has_probe = match (serving_label, self.services.as_ref()) {
+            (Some(label), Some(services)) => {
+                let mut stack: Vec<&str> = services
+                    .iter()
+                    .filter(|(_, svc)| match &svc.target {
+                        Some(t) => t == label,
+                        None => true, // router binds target-less services to default_target
+                    })
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                let mut seen = std::collections::HashSet::new();
+                let mut found = false;
+                while let Some(name) = stack.pop() {
+                    if !seen.insert(name) {
+                        continue;
+                    }
+                    if let Some(svc) = services.get(name) {
+                        if svc.readiness_probe.is_some() {
+                            found = true;
+                            break;
+                        }
+                        if let Some(deps) = &svc.depends_on {
+                            stack.extend(deps.iter().map(String::as_str));
+                        }
+                    }
+                }
+                found
+            }
+            _ => false,
+        };
+
         let has_healthcheck = target_has_probe || service_has_probe;
         if !has_healthcheck {
-            blocking_reasons
-                .push("no readiness probe on the default target or any service".to_string());
+            let where_ = serving_label.unwrap_or("<unresolved default target>");
+            blocking_reasons.push(format!(
+                "no readiness probe on the serving target '{where_}' or its service graph"
+            ));
         }
 
         let eligible = blocking_reasons.is_empty();
