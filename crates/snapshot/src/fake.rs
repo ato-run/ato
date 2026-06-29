@@ -215,12 +215,12 @@ impl SnapshotBackend for FakeSnapshotBackend {
         input: RestoreReadyStateInput<'_>,
     ) -> Result<RestoreReceipt, SnapshotError> {
         // ── runner-class gate (fail-closed) ─────────────────────────────────
-        // Both ids present and unequal → mismatch. With only ids in hand (facts
-        // are a build-host concern) the divergent field is the id itself.
-        if let (Some(expected), Some(actual)) =
-            (&input.manifest.runner_class_id, &input.host_runner_class)
-        {
-            if expected != actual {
+        // A snapshot pinned to a runner class is only restorable on a host
+        // *proven* to match it. Unknown host class is NOT compatible — it is
+        // rejected, never waved through. With only ids in hand (facts are a
+        // build-host concern) the divergent field is the id itself.
+        match (&input.manifest.runner_class_id, &input.host_runner_class) {
+            (Some(expected), Some(actual)) if expected != actual => {
                 return Err(SnapshotError::RunnerClassMismatch(
                     capsule::foundation::install_lifecycle::RunnerClassMismatch {
                         expected: expected.clone(),
@@ -229,6 +229,13 @@ impl SnapshotBackend for FakeSnapshotBackend {
                     },
                 ));
             }
+            (Some(expected), None) => {
+                return Err(SnapshotError::MissingHostRunnerClass {
+                    expected: expected.clone(),
+                });
+            }
+            // Both present and equal, or the snapshot pins no class → ok.
+            _ => {}
         }
 
         // ── rehydrate layers (proves the CapsuleFS round-trip) ──────────────
@@ -432,6 +439,33 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, SnapshotError::RunnerClassMismatch(_)));
+    }
+
+    #[test]
+    fn restore_fails_closed_when_host_runner_class_unknown() {
+        use capsule::foundation::install_lifecycle::RunnerClassId;
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let backend = FakeSnapshotBackend::new();
+
+        // Snapshot pins a class; the restore host's class is unknown (None).
+        // Unknown != compatible → must reject.
+        let mut input = build_input(&store, vec![]);
+        input.runner_class = Some(RunnerClassId::from_hash("blake3:class-A"));
+        let manifest = backend.build_ready_state(input).unwrap().manifest;
+
+        let err = backend
+            .restore(RestoreReadyStateInput {
+                store: &store,
+                manifest,
+                overlay_root: dir.path().join("ov"),
+                host_runner_class: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::MissingHostRunnerClass { .. }),
+            "unknown host class must fail closed, got {err:?}"
+        );
     }
 
     #[test]
