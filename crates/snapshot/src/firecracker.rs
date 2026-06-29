@@ -58,11 +58,22 @@ impl SnapshotBackend for FirecrackerBackend {
 
     fn probe(&self) -> BackendCapabilities {
         let kvm_present = Self::kvm_present();
+        // `available` means "this backend can build/restore on this host right
+        // now". This is a skeleton: every build/restore call returns
+        // `Unsupported`, so it is NEVER available yet — not even on a
+        // KVM-capable host. Reporting `available: true` here would let a runner
+        // advertise a Ready-State capability it cannot honor. Until the real
+        // VMM implementation lands, fail closed. `kvm_present` is still reported
+        // truthfully so callers/diagnostics can see why.
+        let reason = if !kvm_present {
+            format!("{KVM_DEVICE} not present; Firecracker needs KVM")
+        } else {
+            "FirecrackerBackend is a skeleton: build/restore not implemented yet".to_string()
+        };
         BackendCapabilities {
             backend_id: FIRECRACKER_BACKEND_ID.to_string(),
-            available: kvm_present,
-            reason: (!kvm_present)
-                .then(|| format!("{KVM_DEVICE} not present")),
+            available: false,
+            reason: Some(reason),
             arch: std::env::consts::ARCH.to_string(),
             kvm_present,
             // Version detection (running `firecracker --version`) is part of the
@@ -103,15 +114,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn probe_reports_kvm_state() {
+    fn probe_is_never_available_while_skeleton() {
         let p = FirecrackerBackend::new().probe();
         assert_eq!(p.backend_id, FIRECRACKER_BACKEND_ID);
-        // available iff /dev/kvm exists; on a KVM-less host it is false with a
-        // reason, and build/restore are Unsupported.
-        assert_eq!(p.available, FirecrackerBackend::kvm_present());
-        if !p.available {
-            assert!(p.reason.is_some());
-        }
+        // The skeleton can never build/restore, so it must NEVER advertise
+        // availability — not even where /dev/kvm is present. It always carries a
+        // reason, and reports kvm_present truthfully for diagnostics.
+        assert!(!p.available, "skeleton must not advertise availability");
+        assert!(p.reason.is_some());
+        assert_eq!(p.kvm_present, FirecrackerBackend::kvm_present());
     }
 
     #[test]
