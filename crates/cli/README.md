@@ -7,7 +7,7 @@
 
 **Run any project instantly. Share it with one URL.**
 
-Point `ato` at a Python script, a Node app, a Rust binary, or a GitHub repo — it figures out the runtime, bootstraps only what's needed, and runs in a sandboxed environment. No Dockerfile. No setup guide. No manual environment.
+Point `ato` at a Python script, a Node app, a Rust binary, or a GitHub repo — it figures out the runtime, bootstraps only what's needed, and runs it in a sandboxed runtime. No Dockerfile. No setup guide. No manual environment.
 
 [Install](#install) · [Quick start](#quick-start) · [Why Ato](#why-ato) · [Commands](#core-commands) · [Contributing](#contributing)
 
@@ -112,7 +112,7 @@ ato encap
 
 Every time you share a project, someone has to set up an environment before they can run it — virtualenvs, `node_modules`, container builds, README instructions that drift. Ato removes that layer entirely.
 
-Ato reads your project directly — `pyproject.toml`, `package.json`, `deno.json`, `Cargo.toml`, a bare script — and materializes only the runtime it needs. No config to write. For Python and native binaries, execution routes through [Nacelle](https://github.com/ato-run/nacelle), a sandboxed runtime that blocks unapproved filesystem and network access by default. `ato encap` captures a reproducible workspace descriptor that anyone can restore with `ato decap`.
+Ato reads your project directly — `pyproject.toml`, `package.json`, `deno.json`, `Cargo.toml`, a bare script — and materializes only the runtime it needs. No config to write. For Python and native binaries, the run phase routes through [Nacelle](https://github.com/ato-run/nacelle), a sandbox that applies OS-native filesystem and network isolation when your code executes (see [Security and isolation](#security-and-isolation) for what each platform enforces). `ato encap` captures a reproducible workspace descriptor that anyone can restore with `ato decap`.
 
 ### Mental model: Try → Keep → Share
 
@@ -141,7 +141,7 @@ Commands are ordered by the Try → Keep → Share journey.
 
 `ato run` accepts a local path, a share URL, or a GitHub repository reference. It covers two distinct use cases:
 
-**Run it — try any project in a sandbox (consume):**
+**Run it — try a project in a sandboxed run environment (consume):**
 
 ```bash
 ato run hello.py
@@ -210,12 +210,21 @@ Use `encap` for private/informal sharing; use `publish` when you want a durable,
 
 ## Security and isolation
 
-Ato is fail-closed by default.
+Ato's isolation applies to the **run phase** — when your code (or someone
+else's) actually executes. It is layered, and the guarantees differ by platform
+and runtime, so here is what is and isn't enforced today.
 
-- Sandbox isolation: Tier 2 targets such as `source/python`, `web/python`, and `source/native` run through Nacelle.
-- Filesystem protection: unknown code does not get unrestricted host access by default.
-- Network control: unapproved network access is blocked under strict enforcement.
-- Environment handling: missing required environment variables stop execution before launch, and `--prompt-env` can collect them interactively.
+**What the run phase enforces**
+
+- Sandbox isolation: Tier 2 targets such as `source/python`, `web/python`, and `source/native` execute through Nacelle, which applies OS-native sandboxing (Landlock on Linux, Seatbelt on macOS).
+- Filesystem isolation: on Linux the source filesystem view is a deny-by-default allowlist — code sees only the paths explicitly granted. On macOS it is currently allow-by-default with a blocklist of sensitive paths (SSH keys, cloud credentials, and similar), not yet a strict allowlist; treat it as defense-in-depth rather than a hard boundary.
+- Network control: deny-all egress (`network.enabled = false`) is fully enforced on both platforms. A hostname/IP `egress_allow` allowlist is advisory only on source runtimes today — do not rely on it to contain a process that already has network access.
+- Environment handling: the run process starts from a reconstructed, isolated environment with host secrets excluded by default. `--prompt-env` can collect required values interactively.
+
+**What is not sandboxed yet**
+
+- The **build / prepare phase runs unsandboxed on the host**, with your normal environment, secrets, and network access. Dependency installs, `build`, and `prepare` lifecycle commands are ordinary host processes — the run-phase sandbox does not retroactively contain what they did. **Only build code you trust.**
+- `required_env` and `egress_allow` are advisory in v0.x: a missing `required_env` entry warns but does not abort the launch, and `egress_allow` does not enforce a hostname allowlist on source runtimes. See [Known limitations](#known-limitations).
 
 For normal local runs, Ato usually bootstraps a compatible Nacelle release automatically when Tier 2 execution requires it. In CI or offline environments, auto-bootstrap is intentionally restricted, so preinstall or register Nacelle ahead of time if needed.
 

@@ -390,15 +390,21 @@ impl CapsuleManifest {
                          (alphanumeric, `.`/`_`/`-`)"
                     )));
                 }
-                // Model is either a local `model` path OR a managed model
-                // (`model_url` + `model_sha256`, content-addressed cache).
+                // Model is one of: a local `model` path; a managed single-file
+                // model (`model_url` + `model_sha256`, content-addressed cache);
+                // or a managed Hugging Face repo (`model_repo` + `model_repo_sha256`,
+                // the multi-file analogue used by the SGLang engine; the engine
+                // enforces `model_revision`'s 40-hex format at resolve time).
                 let has_local_model = nonempty(&target.model);
                 let has_managed_model =
                     nonempty(&target.model_url) && nonempty(&target.model_sha256);
-                if !has_local_model && !has_managed_model {
+                let has_managed_repo =
+                    nonempty(&target.model_repo) && nonempty(&target.model_repo_sha256);
+                if !has_local_model && !has_managed_model && !has_managed_repo {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "target '{label}': runtime=native-inference requires either `model` \
-                         (a local file) or `model_url` + `model_sha256` (managed)"
+                         (a local file), `model_url` + `model_sha256` (a managed single file), \
+                         or `model_repo` + `model_repo_sha256` (a managed Hugging Face repo)"
                     )));
                 }
                 if let Some(url) = target.model_url.as_deref()
@@ -424,6 +430,25 @@ impl CapsuleManifest {
                     errors.push(ValidationError::InvalidTarget(format!(
                         "target '{label}': `model_url` requires `model_sha256`"
                     )));
+                }
+                // `server_args` are appended verbatim to the engine argv. Reject
+                // any token that names a launcher- or engine-controlled flag
+                // (`--port`/`-p`, `--host`, `--model-path`/`-m`/`--model`) so a
+                // capsule can't break readiness/app_url or the model wiring. Both
+                // `--flag value` and `--flag=value` forms are caught.
+                for arg in &target.server_args {
+                    if let Some(flag) =
+                        crate::foundation::types::manifest::forbidden_native_inference_server_arg(
+                            arg,
+                        )
+                    {
+                        errors.push(ValidationError::InvalidTarget(format!(
+                            "target '{label}': `server_args` must not set `{flag}` — it is \
+                             controlled by the launcher/engine (the launcher injects `--port`, \
+                             forces `--host 127.0.0.1`, and the engine sets the model path). \
+                             Remove {arg:?} from server_args."
+                        )));
+                    }
                 }
                 continue;
             }
@@ -1156,22 +1181,69 @@ impl CapsuleManifest {
                             "persistent state requires attach=\"explicit\"".to_string(),
                         ));
                     }
-                    if requirement
+                    match requirement
                         .schema_id
                         .as_deref()
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
-                        .is_none()
                     {
-                        errors.push(ValidationError::InvalidState(
+                        None => errors.push(ValidationError::InvalidState(
                             state_name.clone(),
                             "persistent state requires schema_id".to_string(),
-                        ));
+                        )),
+                        // A `sha256:`-prefixed schema_id must be a real 64-hex
+                        // digest. A placeholder like `sha256:immich-pgdata-v1`
+                        // passes `ato lock` but is rejected at RUN time with E999
+                        // "Schema hash has invalid format" (schema_registry::
+                        // validate_sha256_hash). Fail closed here instead. Values
+                        // without the `sha256:` prefix are registry aliases,
+                        // resolved at runtime, so they are not format-checked.
+                        Some(schema_id) => {
+                            if let Some(hex) = schema_id.strip_prefix("sha256:")
+                                && !is_valid_sha256(hex)
+                            {
+                                errors.push(ValidationError::InvalidState(
+                                    state_name.clone(),
+                                    format!(
+                                        "schema_id '{schema_id}' must be sha256:<64 hex chars>"
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
             }
 
             if let Some(services) = self.services.as_ref() {
+                // The set of service names the runtime actually matches
+                // `service_target` against: declared `[services.*]` PLUS implicit
+                // services synthesized from dependency targets referenced via a
+                // service target's `needs`/`depends_on` (see
+                // routing::router::services::resolve_services, which auto-creates
+                // a service for each such target without an explicit
+                // `[services.<dep>]`). Validating only against declared
+                // `[services.*]` is too strict and rejects valid capsules whose
+                // `service_target` names a depends_on target that becomes an
+                // implicit service (e.g. a `db` pulled in by the app target's
+                // `depends_on`).
+                let resolved_service_names: std::collections::HashSet<String> = {
+                    let mut set: std::collections::HashSet<String> =
+                        services.keys().cloned().collect();
+                    for (svc_name, svc) in services {
+                        let target_label = svc
+                            .target
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or(svc_name.as_str());
+                        if let Some(target) = named_targets.get(target_label) {
+                            for dep in &target.needs {
+                                set.insert(dep.clone());
+                            }
+                        }
+                    }
+                    set
+                };
                 for (service_name, service) in services {
                     if service.state_bindings.is_empty() {
                         continue;
@@ -1207,6 +1279,36 @@ impl CapsuleManifest {
                     for binding in &service.state_bindings {
                         let state_name = binding.state.trim();
                         let target = binding.target.trim();
+
+                        // `service_target`, when present, must resolve to a
+                        // service the runtime can actually mount onto: a declared
+                        // `[services.<name>]` OR an implicit service synthesized
+                        // from a dependency target (a `needs`/`depends_on` label
+                        // of some service's target — see `resolved_service_names`
+                        // above). At runtime the mount is routed by matching
+                        // `service_target` against the RESOLVED service names
+                        // (routing::router::services::resolve_services +
+                        // state_mounts_for_service). A value that matches no
+                        // resolved service silently drops the mount, so a
+                        // persistent volume is never attached and its data is
+                        // lost on restart. Fail closed instead of mounting
+                        // nothing.
+                        //
+                        // Compared raw (no trim) to mirror the runtime matcher
+                        // exactly: an empty/whitespace or space-padded value is
+                        // also rejected, since the runtime would never match it.
+                        if let Some(svc_target) = binding.service_target.as_deref()
+                            && !resolved_service_names.contains(svc_target)
+                        {
+                            errors.push(ValidationError::InvalidStateBinding(
+                                service_name.clone(),
+                                format!(
+                                    "service_target '{svc_target}' does not resolve to a service \
+                                     (no declared [services.*] and no depends_on/needs target named \
+                                     '{svc_target}'); binding for state '{state_name}' would never be mounted"
+                                ),
+                            ));
+                        }
 
                         if state_name.is_empty() {
                             errors.push(ValidationError::InvalidStateBinding(
@@ -2002,6 +2104,20 @@ mod tests {
     }
 
     #[test]
+    fn native_inference_accepts_managed_repo() {
+        // A managed Hugging Face repo (`model_repo` + `model_repo_sha256`) is a
+        // valid native-inference model source — the SGLang multi-file analogue.
+        // Without it an sglang capsule fails validation and cannot `ato run`.
+        let sha = "a".repeat(64);
+        let rev = "b".repeat(40);
+        let r = validate_native_model(&format!(
+            "model_repo = \"Qwen/Qwen3-30B-A3B-GPTQ-Int4\"\n\
+             model_revision = \"{rev}\"\nmodel_repo_sha256 = \"{sha}\"\n"
+        ));
+        assert!(r.is_ok(), "managed HF repo should validate: {r:?}");
+    }
+
+    #[test]
     fn native_inference_rejects_bad_model_url_and_sha() {
         let hex = "a".repeat(64);
         // non-http(s) url
@@ -2025,6 +2141,113 @@ mod tests {
         ));
         // neither model nor model_url
         assert!(has_err(&validate_native_model(""), "model"));
+    }
+
+    fn validate_service_target_binding(
+        service_target: &str,
+    ) -> Result<(), Vec<super::ValidationError>> {
+        let toml = format!(
+            "schema_version = \"0.3\"\nname = \"svc-target\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+             default_target = \"server\"\n\
+             [targets.db]\nruntime = \"oci\"\nimage = \"redis:7-alpine\"\nport = 6379\n\
+             [targets.server]\nruntime = \"oci\"\nimage = \"redis:7-alpine\"\nport = 6380\n\
+             [state.data]\nkind = \"filesystem\"\ndurability = \"persistent\"\npurpose = \"x\"\n\
+             attach = \"explicit\"\nschema_id = \"sha256:demo\"\n\
+             [services.db]\ntarget = \"db\"\n\
+             [services.main]\ntarget = \"server\"\n\
+             [[services.main.state_bindings]]\nstate = \"data\"\ntarget = \"/data\"\n\
+             service_target = \"{service_target}\"\n"
+        );
+        let manifest: crate::foundation::types::manifest::CapsuleManifest =
+            toml::from_str(&toml).expect("parse manifest");
+        manifest.validate()
+    }
+
+    #[test]
+    fn state_binding_service_target_must_reference_declared_service() {
+        // "server" is a TARGET label, not a service name (services are db/main).
+        // The runtime resolves service_target against service names, so a bogus
+        // value silently drops the mount — validation must fail closed.
+        assert!(
+            has_err(&validate_service_target_binding("server"), "service_target"),
+            "bogus service_target (target name, not a service) must be rejected"
+        );
+        // "main" (the enclosing service) is declared — accepted.
+        assert!(
+            !has_err(&validate_service_target_binding("main"), "service_target"),
+            "valid service_target (enclosing service) must pass"
+        );
+        // "db" is a declared service other than the binding's enclosing one
+        // (cross-service routing) — accepted.
+        assert!(
+            !has_err(&validate_service_target_binding("db"), "service_target"),
+            "valid service_target naming a non-enclosing service must pass"
+        );
+        // Empty / whitespace-only is rejected: the runtime compares the raw
+        // value and would never match a service, dropping the mount.
+        assert!(
+            has_err(&validate_service_target_binding(""), "service_target"),
+            "empty service_target must be rejected"
+        );
+        assert!(
+            has_err(&validate_service_target_binding("   "), "service_target"),
+            "whitespace-only service_target must be rejected"
+        );
+        // Space-padded but otherwise-valid name is rejected (runtime is exact).
+        assert!(
+            has_err(&validate_service_target_binding(" main "), "service_target"),
+            "space-padded service_target must be rejected (runtime does not trim)"
+        );
+    }
+
+    #[test]
+    fn native_inference_rejects_forbidden_server_args() {
+        let hex = "a".repeat(64);
+        let model = format!("model_url = \"https://e.com/m.gguf\"\nmodel_sha256 = \"{hex}\"\n");
+        // `--flag value` form — each launcher/engine-controlled flag is rejected,
+        // and the error names that flag.
+        for (forbidden, canonical) in [
+            ("--port", "--port"),
+            ("-p", "-p"),
+            ("--host", "--host"),
+            ("--model-path", "--model-path"),
+            ("-m", "-m"),
+            ("--model", "--model"),
+        ] {
+            let r = validate_native_model(&format!(
+                "{model}server_args = [\"{forbidden}\", \"value\"]\n"
+            ));
+            assert!(
+                has_err(&r, "server_args") && has_err(&r, canonical),
+                "must reject {forbidden} (space form): {r:?}"
+            );
+        }
+        // `--flag=value` form is caught too.
+        for (forbidden, canonical) in [
+            ("--port=9000", "--port"),
+            ("-p=9000", "-p"),
+            ("--host=0.0.0.0", "--host"),
+            ("--model-path=/x", "--model-path"),
+            ("-m=/x", "-m"),
+            ("--model=/x", "--model"),
+        ] {
+            let r = validate_native_model(&format!("{model}server_args = [\"{forbidden}\"]\n"));
+            assert!(
+                has_err(&r, "server_args") && has_err(&r, canonical),
+                "must reject {forbidden} (equals form): {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_inference_accepts_tunable_server_args() {
+        let hex = "a".repeat(64);
+        let r = validate_native_model(&format!(
+            "model_url = \"https://e.com/m.gguf\"\nmodel_sha256 = \"{hex}\"\n\
+             server_args = [\"--mem-fraction-static\", \"0.9\", \"--context-length\", \"8192\", \
+             \"--quantization\", \"moe_wna16\", \"--reasoning-parser\", \"qwen3\", \"--tp-size\", \"2\"]\n"
+        ));
+        assert!(r.is_ok(), "tunable server_args should validate: {r:?}");
     }
 }
 

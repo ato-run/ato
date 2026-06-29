@@ -1,0 +1,60 @@
+name: Release dry-run
+
+# Exercises the FULL release artifact path on release-bound PRs WITHOUT publishing,
+# so failures that previously only appeared AFTER `git tag` are caught at PR time.
+#
+# Motivation (ato-run/ato#758): v0.7.0 shipped 5 build blockers that the normal
+# feature-PR gate never ran — all crate-rename leftovers (`ato-cli->cli`,
+# `ato-netd->netd`) in release tooling:
+#   - crates/cli/wix/main.wxs still said Name='ato-cli'  -> cargo-dist plan failed
+#   - ato-desktop-xtask built crates/ato-cli / crates/ato-netd (gone) -> bundles failed
+# rust-ci runs clippy/fmt/test but excludes the desktop/xtask packages and never
+# runs cargo-dist, so these only surfaced when the real release.yml /
+# desktop-release.yml ran on the tag. This workflow closes that gap.
+#
+# This is a *dry run*: it never tags, builds signed bundles, or publishes.
+
+on:
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  dist-check:
+    name: cargo-dist generate --check + plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Pin the same cargo-dist the real release uses (see release.yml installer URL).
+      - name: install cargo-dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+      # Fails if any generated installer/CI file is stale (e.g. wix/main.wxs after a
+      # crate rename) — the exact blocker that forced a v0.7.0 re-tag.
+      - name: dist generate --check
+        run: dist generate --check
+      # Runs the same manifest/version resolution the release `plan` job does.
+      - name: dist plan
+        run: dist plan
+
+  xtask-build-paths:
+    name: desktop xtask build paths
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # ato-desktop-xtask is a pure-Rust build tool (anyhow + sha2 only, no GUI deps)
+      # and is excluded from rust-ci. Its WorkspacePaths::discover() resolves the
+      # cli/netd/desktop/nacelle build manifests; discovered_crate_manifests_all_exist
+      # asserts each one exists, catching crate-rename leftovers that previously only
+      # failed when desktop-release ran on the tag.
+      - name: xtask path tests
+        run: cargo test --manifest-path crates/desktop/xtask/Cargo.toml

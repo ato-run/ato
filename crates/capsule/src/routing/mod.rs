@@ -10,4 +10,5 @@ pub mod handle_store;
 pub mod importer;
 pub mod input_resolver;
 pub mod launch_spec;
+pub mod native_inference;
 pub mod router;

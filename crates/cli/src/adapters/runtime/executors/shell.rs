@@ -98,6 +98,9 @@ fn apply_logged_stdio(cmd: &mut Command, log_path: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    // Bound the log across (re)spawns before re-opening for append (#767).
+    // Mirrors `source::open_log_file_for_stdio`.
+    super::log_rotation::rotate_before_append(log_path);
     let stdout_handle = fs::OpenOptions::new()
         .create(true)
         .append(true)

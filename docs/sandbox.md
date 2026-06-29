@@ -43,6 +43,22 @@ At runtime:
 - nacelle MUST act as sandbox enforcer, not as the policy decision layer.
 - `discover_nacelle()` in `capsule` intentionally disables PATH fallback for security; however `resolve_nacelle_binary()` (executor path) and `find_nacelle_binary()` (bundle path) MAY fall back to PATH search as a last resort.
 
+> **Implementation status (v0.x).** The statements above describe the target
+> security model (see the linked RFCs). The current implementation does not yet
+> meet all of them on every platform:
+>
+> - **Filesystem is a strict deny-by-default allowlist on Linux only.** On
+>   macOS the source sandbox is `(allow default)` plus a blocklist of ~12
+>   sensitive paths (SSH keys, cloud credentials, and similar), so it is
+>   defense-in-depth, not a deny-default allowlist.
+> - **Network deny-all is enforced; the egress allowlist is not.**
+>   `network.enabled = false` (deny-all) is enforced on both platforms, but a
+>   hostname/IP `egress_allow` list is advisory only on source runtimes — there
+>   is no enforcing SOCKS sidecar yet.
+> - **The build / prepare phase is not sandboxed.** Dependency installs and
+>   `build` / `prepare` lifecycle commands run as ordinary host processes with
+>   the host environment, secrets, and network. Only the run phase is isolated.
+
 References:
 
 - [`rfcs/accepted/SECURITY_AND_ISOLATION_MODEL.md`](rfcs/accepted/SECURITY_AND_ISOLATION_MODEL.md)
