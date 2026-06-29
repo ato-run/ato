@@ -194,12 +194,19 @@ impl FirecrackerBackend {
         )
     }
 
-    fn rootfs_dir(&self) -> PathBuf {
-        self.config.work_root.join("rootfs")
+    /// Stable cache path keyed on a layer's content id (no content read needed),
+    /// so build and restore agree and large immutable layers are rehydrated from
+    /// CapsuleFS at most once, then reused across restores.
+    fn cache_path(&self, kind: &str, blob: &BlobManifest, ext: &str) -> PathBuf {
+        self.config.work_root.join(kind).join(format!("{}.{ext}", blob_id_hex(blob)))
     }
-    /// Stable, content-addressed path the snapshot records for the rootfs drive.
-    fn rootfs_path_for(&self, bytes: &[u8]) -> PathBuf {
-        self.rootfs_dir().join(format!("{}.ext4", blake3::hash(bytes).to_hex()))
+    /// Rehydrate a layer to `path` only if it is not already on disk.
+    fn ensure_cached(&self, path: &Path, store: &CasStore, blob: &BlobManifest) -> Result<(), SnapshotError> {
+        if !path.exists() {
+            let bytes = LazyBlobReader::new(store, blob).read_all()?;
+            self.write_file(path, &bytes)?;
+        }
+        Ok(())
     }
     fn lock_path(&self) -> PathBuf {
         self.config.work_root.join(format!("{}.lock", self.config.tap_dev))
@@ -325,6 +332,10 @@ fn hc_path(c: &RestoreContract, fallback: &str) -> String {
 
 fn blake3_file(path: &Path) -> Option<String> {
     Some(format!("blake3:{}", blake3::hash(&std::fs::read(path).ok()?).to_hex()))
+}
+
+fn blob_id_hex(blob: &BlobManifest) -> String {
+    blob.id().hex().to_string()
 }
 
 // ── HTTP/1.1 over the Firecracker API unix socket (no extra deps) ────────────
@@ -464,9 +475,12 @@ impl SnapshotBackend for FirecrackerBackend {
         let build_dir = self.config.work_root.join(format!("build-{}", std::process::id()));
         std::fs::create_dir_all(&build_dir).map_err(|e| self.backend_err(e.to_string()))?;
 
-        // rootfs at its stable content-addressed path (kept for restore; the
-        // snapshot will record THIS path for the block device).
-        let rootfs_path = self.rootfs_path_for(&input.layers.rootfs);
+        // Store the rootfs blob first so its content id keys the stable drive
+        // path the snapshot records (restore reuses the same path without
+        // re-reading 300MB to recompute it).
+        let cd = ChunkingKind::ContentDefined;
+        let rootfs_blob = store_blob(input.store, LayerKind::Rootfs, &input.layers.rootfs, cd)?;
+        let rootfs_path = self.cache_path("rootfs", &rootfs_blob, "ext4");
         if !rootfs_path.exists() {
             self.write_file(&rootfs_path, &input.layers.rootfs)?;
         }
@@ -518,13 +532,12 @@ impl SnapshotBackend for FirecrackerBackend {
         }
         let advisories = scanner::advisory_summaries_capped(&report, 50);
 
-        let cd = ChunkingKind::ContentDefined;
         let page = ChunkingKind::PageAligned { page_size: MEMORY_PAGE_CHUNK_SIZE as u64 };
         let seal = |kind: LayerKind, bytes: Option<&[u8]>, ch: ChunkingKind| -> Result<Option<BlobManifest>, SnapshotError> {
             match bytes { Some(b) => Ok(Some(store_blob(input.store, kind, b, ch)?)), None => Ok(None) }
         };
         let layers = ReadyStateLayers {
-            rootfs: seal(LayerKind::Rootfs, Some(&input.layers.rootfs), cd)?,
+            rootfs: Some(rootfs_blob), // already stored above
             runtime: seal(LayerKind::Runtime, input.layers.runtime.as_deref(), cd)?,
             dependency: seal(LayerKind::Dependency, input.layers.dependency.as_deref(), cd)?,
             app: seal(LayerKind::App, input.layers.app.as_deref(), cd)?,
@@ -609,28 +622,31 @@ impl SnapshotBackend for FirecrackerBackend {
         // From here, on any error we must release the lock + net before returning.
         let result = (|| -> Result<(RestoredSession, Child), SnapshotError> {
             std::fs::create_dir_all(&input.overlay_root).map_err(|e| self.backend_err(e.to_string()))?;
-            let mut restored_bytes = 0u64;
-            let mut rehydrate = |blob: &BlobManifest| -> Result<Vec<u8>, SnapshotError> {
-                let bytes = LazyBlobReader::new(input.store, blob).read_all()?;
-                restored_bytes += bytes.len() as u64;
-                Ok(bytes)
-            };
-            let rootfs_bytes = rehydrate(rootfs)?;
-            let vmstate_bytes = rehydrate(vmstate)?;
-            let mem_bytes = rehydrate(memory)?;
+            // restored_bytes = the logical bytes the session is restored from
+            // (independent of whether a cached layer was reused on disk).
+            let restored_bytes = rootfs.total_len + vmstate.total_len + memory.total_len;
 
-            // rootfs must be at the SAME content-addressed path the snapshot
-            // recorded. Read-only: reuse the shared immutable copy (leak-safe by
-            // immutability). Read-write: rewrite a fresh copy per restore (single
-            // session ⇒ no overlap; fresh ⇒ leak-safe).
-            let rootfs_path = self.rootfs_path_for(&rootfs_bytes);
-            if !self.config.rootfs_read_only || !rootfs_path.exists() {
-                self.write_file(&rootfs_path, &rootfs_bytes)?;
+            // mem + vmstate are immutable snapshot outputs → content-addressed
+            // shared cache, rehydrated from CapsuleFS at most ONCE then reused
+            // across restores (Firecracker maps the mem file private/CoW, so
+            // sharing is leak-safe — proven by the state-leak test). This avoids
+            // re-reading + rewriting ~512MB of memory image every restore.
+            let mem_path = self.cache_path("mem", memory, "mem");
+            self.ensure_cached(&mem_path, input.store, memory)?;
+            let vmstate_path = self.cache_path("vmstate", vmstate, "vmstate");
+            self.ensure_cached(&vmstate_path, input.store, vmstate)?;
+
+            // rootfs must be at the SAME content-id path the snapshot recorded.
+            // Read-only: reuse the shared immutable copy (leak-safe + fast).
+            // Read-write: rewrite a fresh copy per restore (single session ⇒ no
+            // overlap; fresh ⇒ leak-safe), at the cost of a per-restore copy.
+            let rootfs_path = self.cache_path("rootfs", rootfs, "ext4");
+            if self.config.rootfs_read_only {
+                self.ensure_cached(&rootfs_path, input.store, rootfs)?;
+            } else {
+                let bytes = LazyBlobReader::new(input.store, rootfs).read_all()?;
+                self.write_file(&rootfs_path, &bytes)?;
             }
-            let vmstate_path = input.overlay_root.join("vmstate");
-            let mem_path = input.overlay_root.join("mem");
-            self.write_file(&vmstate_path, &vmstate_bytes)?;
-            self.write_file(&mem_path, &mem_bytes)?;
 
             let port = hc_port(&input.manifest.restore_contract, self.config.healthcheck_port);
             let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);

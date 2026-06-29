@@ -104,7 +104,8 @@ fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
     let dir = tempfile::tempdir().unwrap();
     let store = CasStore::open(dir.path().join("cas")).unwrap();
     let m = b.build_ready_state(build_input(&store, rootfs.clone(), vec![])).expect("build").manifest;
-    let stable = FirecrackerConfig::default().work_root.join("rootfs").join(format!("{}.ext4", blake3::hash(&rootfs).to_hex()));
+    let id_hex = m.layers.rootfs.as_ref().unwrap().id().hex().to_string();
+    let stable = FirecrackerConfig::default().work_root.join("rootfs").join(format!("{id_hex}.ext4"));
     let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: dir.path().join("ov1"), host_runner_class: None }).expect("restore1");
     let mtime1 = std::fs::metadata(&stable).unwrap().modified().unwrap();
     b.stop(r1.session).expect("stop1");
