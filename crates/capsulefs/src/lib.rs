@@ -44,6 +44,7 @@
 //! both blob-content and structural ids on blake3 means there is exactly one
 //! hash family on the CapsuleFS hot path.
 
+mod binding;
 mod cas;
 mod chunk;
 pub mod gc;
@@ -53,15 +54,16 @@ mod manifest;
 mod reader;
 mod writer;
 
+pub use binding::{FileBindingSpec, WritebackMode};
 pub use cas::CasStore;
 pub use chunk::{
     Chunk, ChunkParams, MEMORY_PAGE_CHUNK_SIZE, chunk_content_defined, chunk_page_aligned,
 };
-pub use gc::{GcReport, collect_garbage};
+pub use gc::{EvictedChunk, GcReport, collect_garbage};
 pub use hash::{ContentHash, InvalidContentHash, hash_bytes};
 pub use hotset::{HotsetProfile, HotsetRecorder};
 pub use manifest::{BlobManifest, ChunkingKind, LayerKind};
-pub use reader::LazyBlobReader;
+pub use reader::{LazyBlobReader, MemBackend};
 pub use writer::store_blob;
 
 /// Errors raised by the CapsuleFS store.
@@ -91,6 +93,12 @@ pub enum CapsuleFsError {
     /// being trusted into an out-of-bounds slice / panic.
     #[error("malformed blob manifest: {0}")]
     MalformedManifest(String),
+
+    /// A requested capability is not implemented in this stage (e.g. the UFFD
+    /// memory backend is a Stage-2 seam). Fail-closed rather than panic so a
+    /// mis-selected backend errors cleanly.
+    #[error("capsulefs unsupported: {0}")]
+    Unsupported(String),
 
     /// Underlying I/O failure.
     #[error("capsulefs io error: {0}")]
