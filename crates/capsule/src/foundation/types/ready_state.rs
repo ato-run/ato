@@ -328,6 +328,34 @@ fn default_true() -> bool {
 /// Run. Authored capsules may declare more, but they fail the eligibility gate.
 pub const MAX_EXTERNAL_CAPABILITIES: usize = 3;
 
+/// How a capsule's GPU requirement (if any) relates to a Ready-State snapshot.
+///
+/// The invariant is "GPU **execution** is supported; GPU **snapshot** is not":
+/// GPU/accelerator device state is never sealed into a Ready-State memory image.
+/// A GPU declared as a post-restore `[external.*]` capability ([`External`]) is
+/// fine; an in-VM GPU with no external binding ([`Passthrough`]) makes the
+/// capsule Ready-State-ineligible (it must use a GPU runner class / external
+/// capability instead). This is the single shared `GpuMode` — the `snapshot`
+/// crate's `BackendCapabilities.gpu_mode` reuses it rather than minting a copy.
+///
+/// [`External`]: GpuMode::External
+/// [`Passthrough`]: GpuMode::Passthrough
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuMode {
+    /// No GPU requirement (default).
+    #[default]
+    None,
+    /// GPU provided post-restore as an external capability — snapshot-safe.
+    External,
+    /// In-VM GPU with no external binding — NOT snapshottable, Ready-State-ineligible.
+    Passthrough,
+}
+
+/// `[external.<name>]` `type` strings that denote a GPU/accelerator capability
+/// (matched ASCII-case-insensitively).
+pub const GPU_EXTERNAL_KINDS: &[&str] = &["gpu", "accelerator"];
+
 /// Computed Public Instant Run eligibility, derived entirely from the manifest.
 ///
 /// This is a *read-only projection*: it never mutates the manifest and is safe
@@ -351,6 +379,15 @@ pub struct InstantRunEligibility {
     /// A readiness/healthcheck signal exists (so an instant run can be detected
     /// as ready).
     pub has_healthcheck: bool,
+    /// The capsule declares a GPU requirement (in-VM or external).
+    #[serde(default)]
+    pub requires_gpu: bool,
+    /// The GPU requirement is satisfied by a post-restore `[external.*]` binding.
+    #[serde(default)]
+    pub gpu_external_binding: bool,
+    /// An in-VM GPU with no external binding blocks Ready-State (not snapshottable).
+    #[serde(default)]
+    pub gpu_blocks_ready_state: bool,
     /// Human-readable reasons the capsule is ineligible (empty when eligible).
     pub blocking_reasons: Vec<String>,
 }
@@ -533,6 +570,22 @@ impl CapsuleManifest {
             ));
         }
 
+        // ── GPU posture (snapshot-safety) ─────────────────────────────────
+        // "GPU execution yes, GPU snapshot no": an in-VM GPU with no external
+        // binding cannot be sealed into a Ready-State snapshot, so it blocks
+        // Ready-State (use a GPU runner class / external capability instead).
+        let gpu_mode = self.gpu_mode();
+        let requires_gpu = gpu_mode != GpuMode::None;
+        let gpu_external_binding = gpu_mode == GpuMode::External;
+        let gpu_blocks_ready_state = gpu_mode == GpuMode::Passthrough;
+        if gpu_blocks_ready_state {
+            blocking_reasons.push(
+                "GPU is required in-VM but GPU state is not snapshottable; declare it as an \
+                 [external.*] GPU capability or use a GPU runner class"
+                    .to_string(),
+            );
+        }
+
         let eligible = blocking_reasons.is_empty();
         InstantRunEligibility {
             eligible,
@@ -542,7 +595,43 @@ impl CapsuleManifest {
             external_count,
             external_within_limit,
             has_healthcheck,
+            requires_gpu,
+            gpu_external_binding,
+            gpu_blocks_ready_state,
             blocking_reasons,
+        }
+    }
+
+    /// Whether the capsule asks for an in-VM GPU (vram requirement or a build
+    /// GPU flag). Broader than just `[requirements]` by deliberate fail-closed
+    /// choice: `[build].gpu` also counts, so GPU state can never be sealed by
+    /// accident.
+    pub fn requires_in_vm_gpu(&self) -> bool {
+        self.requirements.vram_min.is_some()
+            || self.requirements.vram_recommended.is_some()
+            || self.build.as_ref().map(|b| b.gpu).unwrap_or(false)
+    }
+
+    /// Whether a GPU/accelerator is declared as a post-restore `[external.*]`
+    /// capability (snapshot-safe — provisioned after restore, never sealed).
+    pub fn has_external_gpu_capability(&self) -> bool {
+        self.external.values().any(|spec| {
+            GPU_EXTERNAL_KINDS
+                .iter()
+                .any(|kind| spec.kind.trim().eq_ignore_ascii_case(kind))
+        })
+    }
+
+    /// Classify the capsule's GPU posture. An external binding wins (it is the
+    /// snapshot-safe path); an in-VM GPU with no external binding is
+    /// `Passthrough` (Ready-State-ineligible); otherwise `None`.
+    pub fn gpu_mode(&self) -> GpuMode {
+        let in_vm = self.requires_in_vm_gpu();
+        let external = self.has_external_gpu_capability();
+        match (in_vm, external) {
+            (_, true) => GpuMode::External,
+            (true, false) => GpuMode::Passthrough,
+            (false, false) => GpuMode::None,
         }
     }
 }
