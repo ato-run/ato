@@ -94,6 +94,12 @@ pub enum CapsuleFsError {
     #[error("malformed blob manifest: {0}")]
     MalformedManifest(String),
 
+    /// A requested capability is not implemented in this stage (e.g. the UFFD
+    /// memory backend is a Stage-2 seam). Fail-closed rather than panic so a
+    /// mis-selected backend errors cleanly.
+    #[error("capsulefs unsupported: {0}")]
+    Unsupported(String),
+
     /// Underlying I/O failure.
     #[error("capsulefs io error: {0}")]
     Io(#[from] std::io::Error),
