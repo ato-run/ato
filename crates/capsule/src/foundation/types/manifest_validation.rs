@@ -1215,6 +1215,35 @@ impl CapsuleManifest {
             }
 
             if let Some(services) = self.services.as_ref() {
+                // The set of service names the runtime actually matches
+                // `service_target` against: declared `[services.*]` PLUS implicit
+                // services synthesized from dependency targets referenced via a
+                // service target's `needs`/`depends_on` (see
+                // routing::router::services::resolve_services, which auto-creates
+                // a service for each such target without an explicit
+                // `[services.<dep>]`). Validating only against declared
+                // `[services.*]` is too strict and rejects valid capsules whose
+                // `service_target` names a depends_on target that becomes an
+                // implicit service (e.g. a `db` pulled in by the app target's
+                // `depends_on`).
+                let resolved_service_names: std::collections::HashSet<String> = {
+                    let mut set: std::collections::HashSet<String> =
+                        services.keys().cloned().collect();
+                    for (svc_name, svc) in services {
+                        let target_label = svc
+                            .target
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or(svc_name.as_str());
+                        if let Some(target) = named_targets.get(target_label) {
+                            for dep in &target.needs {
+                                set.insert(dep.clone());
+                            }
+                        }
+                    }
+                    set
+                };
                 for (service_name, service) in services {
                     if service.state_bindings.is_empty() {
                         continue;
@@ -1251,26 +1280,32 @@ impl CapsuleManifest {
                         let state_name = binding.state.trim();
                         let target = binding.target.trim();
 
-                        // `service_target`, when present, must name a declared
-                        // `[services.<name>]`. At runtime the mount is routed by
-                        // matching `service_target` against SERVICE names (not
-                        // target names — see routing::router::services::
+                        // `service_target`, when present, must resolve to a
+                        // service the runtime can actually mount onto: a declared
+                        // `[services.<name>]` OR an implicit service synthesized
+                        // from a dependency target (a `needs`/`depends_on` label
+                        // of some service's target — see `resolved_service_names`
+                        // above). At runtime the mount is routed by matching
+                        // `service_target` against the RESOLVED service names
+                        // (routing::router::services::resolve_services +
                         // state_mounts_for_service). A value that matches no
-                        // service silently drops the mount, so a persistent
-                        // volume is never attached and its data is lost on
-                        // restart. Fail closed instead of mounting nothing.
+                        // resolved service silently drops the mount, so a
+                        // persistent volume is never attached and its data is
+                        // lost on restart. Fail closed instead of mounting
+                        // nothing.
                         //
                         // Compared raw (no trim) to mirror the runtime matcher
                         // exactly: an empty/whitespace or space-padded value is
                         // also rejected, since the runtime would never match it.
                         if let Some(svc_target) = binding.service_target.as_deref()
-                            && !services.contains_key(svc_target)
+                            && !resolved_service_names.contains(svc_target)
                         {
                             errors.push(ValidationError::InvalidStateBinding(
                                 service_name.clone(),
                                 format!(
-                                    "service_target '{svc_target}' does not reference a declared [services.*] \
-                                     (binding for state '{state_name}' would never be mounted)"
+                                    "service_target '{svc_target}' does not resolve to a service \
+                                     (no declared [services.*] and no depends_on/needs target named \
+                                     '{svc_target}'); binding for state '{state_name}' would never be mounted"
                                 ),
                             ));
                         }
