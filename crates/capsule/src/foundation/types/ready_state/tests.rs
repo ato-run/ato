@@ -474,3 +474,165 @@ port = "PORT"
     );
     assert!(!e.eligible);
 }
+
+// ── GPU judgment (Workstream C) ───────────────────────────────────────────
+
+#[test]
+fn gpu_vram_min_blocks_ready_state() {
+    let m = parse(
+        r#"
+[requirements]
+vram_min = "8GB"
+"#,
+    );
+    let e = m.instant_run_eligibility();
+    assert!(e.requires_gpu);
+    assert!(e.gpu_blocks_ready_state);
+    assert!(!e.gpu_external_binding);
+    assert!(!e.eligible);
+    assert!(
+        e.blocking_reasons
+            .iter()
+            .any(|r| r.contains("GPU") && r.contains("snapshot")),
+        "{:?}",
+        e.blocking_reasons
+    );
+}
+
+#[test]
+fn gpu_vram_recommended_blocks_ready_state() {
+    let m = parse(
+        r#"
+[requirements]
+vram_recommended = "8GB"
+"#,
+    );
+    let e = m.instant_run_eligibility();
+    assert!(e.gpu_blocks_ready_state);
+    assert!(!e.eligible);
+}
+
+#[test]
+fn gpu_build_flag_blocks_ready_state() {
+    let m = parse(
+        r#"
+[build]
+gpu = true
+"#,
+    );
+    let e = m.instant_run_eligibility();
+    assert!(e.requires_gpu);
+    assert!(e.gpu_blocks_ready_state);
+    assert!(!e.eligible);
+}
+
+#[test]
+fn gpu_external_capability_stays_eligible() {
+    let m = parse(
+        r#"
+[external.gpu]
+type = "gpu"
+"#,
+    );
+    let e = m.instant_run_eligibility();
+    assert!(e.requires_gpu);
+    assert!(e.gpu_external_binding);
+    assert!(!e.gpu_blocks_ready_state);
+    assert!(e.eligible, "{:?}", e.blocking_reasons);
+}
+
+#[test]
+fn gpu_vram_with_external_binding_stays_eligible() {
+    let m = parse(
+        r#"
+[requirements]
+vram_min = "8GB"
+
+[external.gpu]
+type = "gpu"
+"#,
+    );
+    let e = m.instant_run_eligibility();
+    assert!(e.requires_gpu);
+    assert!(e.gpu_external_binding);
+    assert!(!e.gpu_blocks_ready_state);
+    assert!(e.eligible, "{:?}", e.blocking_reasons);
+}
+
+#[test]
+fn cpu_only_capsule_has_no_gpu_requirement() {
+    let e = parse("").instant_run_eligibility();
+    assert!(!e.requires_gpu);
+    assert!(!e.gpu_external_binding);
+    assert!(!e.gpu_blocks_ready_state);
+    assert!(e.eligible);
+}
+
+#[test]
+fn gpu_mode_classification_matrix() {
+    use crate::foundation::types::ready_state::GpuMode;
+    assert_eq!(parse("").gpu_mode(), GpuMode::None);
+    assert_eq!(
+        parse("[requirements]\nvram_min = \"8GB\"").gpu_mode(),
+        GpuMode::Passthrough
+    );
+    assert_eq!(
+        parse("[external.gpu]\ntype = \"gpu\"").gpu_mode(),
+        GpuMode::External
+    );
+    assert_eq!(
+        parse("[requirements]\nvram_min = \"8GB\"\n[external.gpu]\ntype = \"gpu\"").gpu_mode(),
+        GpuMode::External
+    );
+}
+
+#[test]
+fn gpu_predicate_is_additive() {
+    let m = parse("[requirements]\nvram_min = \"8GB\"");
+    let e = m.instant_run_eligibility();
+    assert!(
+        e.network_default_deny && e.ephemeral_only && e.no_secrets_required && e.has_healthcheck
+    );
+    assert_eq!(e.blocking_reasons.len(), 1);
+    assert!(e.blocking_reasons[0].contains("GPU"));
+}
+
+#[test]
+fn accelerator_external_kind_recognised() {
+    let m = parse(
+        r#"
+[external.accel]
+type = "accelerator"
+"#,
+    );
+    assert!(m.has_external_gpu_capability());
+    assert!(m.instant_run_eligibility().gpu_external_binding);
+}
+
+fn read_sample(rel: &str) -> CapsuleManifest {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    CapsuleManifest::from_toml(&text).expect("sample should parse")
+}
+
+#[test]
+fn shipped_gpu_external_sample_is_eligible() {
+    let m = read_sample("../../samples/ready-state-gpu-external/capsule.toml");
+    use crate::foundation::types::ready_state::GpuMode;
+    assert_eq!(m.gpu_mode(), GpuMode::External);
+    let e = m.instant_run_eligibility();
+    assert!(e.requires_gpu && e.gpu_external_binding && !e.gpu_blocks_ready_state);
+    assert!(e.eligible, "{:?}", e.blocking_reasons);
+}
+
+#[test]
+fn shipped_gpu_invm_sample_is_ineligible_fail_closed() {
+    let m = read_sample("../../samples/ready-state-gpu-invm/capsule.toml");
+    use crate::foundation::types::ready_state::GpuMode;
+    assert_eq!(m.gpu_mode(), GpuMode::Passthrough);
+    let e = m.instant_run_eligibility();
+    assert!(e.requires_gpu && e.gpu_blocks_ready_state && !e.eligible);
+    // The manifest itself is still valid (parsed fine); only Ready-State is gated.
+    assert!(m.is_ready_state_eligible(), "snapshot mode is warm");
+}
