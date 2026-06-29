@@ -174,9 +174,15 @@ pub struct NoSecretProof {
     pub scanner_version: String,
     /// Names of the layers scanned.
     pub scanned_layers: Vec<String>,
-    /// Findings (empty when clean).
+    /// Blocking findings that fail the build closed (declared markers, provider
+    /// key prefixes, secret-named env). Empty when clean.
     #[serde(default)]
     pub findings: Vec<String>,
+    /// Non-blocking advisories that do NOT fail the build — high-entropy token
+    /// runs, which false-positive on lockfile hashes / minified assets / binary
+    /// blobs in real dependency/app layers. Surfaced for review, not gating.
+    #[serde(default)]
+    pub advisories: Vec<String>,
     /// Verdict, e.g. `"clean"`.
     pub verdict: String,
 }

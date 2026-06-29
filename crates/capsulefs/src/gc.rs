@@ -17,13 +17,25 @@ use crate::hash::ContentHash;
 use crate::manifest::BlobManifest;
 use crate::Result;
 
+/// One evicted chunk: its content address and the bytes reclaimed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvictedChunk {
+    /// The content address of the chunk that was removed.
+    pub hash: ContentHash,
+    /// Bytes reclaimed by removing it.
+    pub bytes: u64,
+}
+
 /// What a GC pass kept and reclaimed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcReport {
     /// Number of chunks retained (reachable or pinned).
     pub kept: usize,
-    /// Chunks deleted because nothing reachable referenced them.
+    /// Chunks deleted because nothing reachable referenced them. Kept for
+    /// back-compat; `evicted` carries the same hashes plus per-chunk bytes.
     pub deleted: Vec<ContentHash>,
+    /// Per-chunk eviction record (hash + bytes). One entry per `deleted` hash.
+    pub evicted: Vec<EvictedChunk>,
     /// Total bytes reclaimed by the deletions.
     pub reclaimed_bytes: u64,
 }
@@ -32,6 +44,23 @@ impl GcReport {
     /// Number of chunks deleted.
     pub fn deleted_count(&self) -> usize {
         self.deleted.len()
+    }
+
+    /// Human-readable eviction log: one line per evicted chunk (no silent
+    /// drops, plan §7) plus a trailing summary line. Callers log these.
+    pub fn eviction_log_lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .evicted
+            .iter()
+            .map(|e| format!("capsulefs gc: evicted {} ({} bytes)", e.hash, e.bytes))
+            .collect();
+        lines.push(format!(
+            "capsulefs gc: kept {}, evicted {}, reclaimed {} bytes",
+            self.kept,
+            self.evicted.len(),
+            self.reclaimed_bytes
+        ));
+        lines
     }
 }
 
@@ -55,15 +84,28 @@ pub fn collect_garbage(
         }
     }
 
+    let listed = store.list_chunks()?;
+    let listed_total = listed.len();
     let mut report = GcReport::default();
-    for hash in store.list_chunks()? {
+    for hash in listed {
         if reachable.contains(&hash) {
             report.kept += 1;
         } else {
-            report.reclaimed_bytes += store.remove_chunk(&hash)?;
+            let bytes = store.remove_chunk(&hash)?;
+            report.reclaimed_bytes += bytes;
+            report.evicted.push(EvictedChunk {
+                hash: hash.clone(),
+                bytes,
+            });
             report.deleted.push(hash);
         }
     }
+    // No silent drops: every pre-GC chunk is either kept or evicted (plan §7).
+    debug_assert_eq!(
+        report.kept + report.deleted.len(),
+        listed_total,
+        "GC accounting lost a chunk"
+    );
     Ok(report)
 }
 
@@ -146,5 +188,99 @@ mod tests {
         let report = collect_garbage(&store, &[], &HashSet::new()).unwrap();
         assert_eq!(report.kept, 0);
         assert!(store.list_chunks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gc_report_enumerates_evicted_chunks_with_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let _dead = store_blob(
+            &store,
+            LayerKind::App,
+            &vec![5u8; 300_000],
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
+        let report = collect_garbage(&store, &[], &HashSet::new()).unwrap();
+        assert!(!report.evicted.is_empty());
+        assert!(report.evicted.iter().all(|e| e.bytes > 0));
+        let sum: u64 = report.evicted.iter().map(|e| e.bytes).sum();
+        assert_eq!(sum, report.reclaimed_bytes);
+        assert_eq!(report.evicted.len(), report.deleted_count());
+    }
+
+    #[test]
+    fn gc_accounting_has_no_silent_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let live = store_blob(
+            &store,
+            LayerKind::App,
+            &vec![1u8; 200_000],
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
+        let _dead = store_blob(
+            &store,
+            LayerKind::App,
+            &vec![2u8; 200_000],
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
+        let before = store.list_chunks().unwrap().len();
+        let report = collect_garbage(&store, std::slice::from_ref(&live), &HashSet::new()).unwrap();
+        assert_eq!(report.kept + report.deleted_count(), before);
+    }
+
+    #[test]
+    fn eviction_log_lines_enumerate_each_eviction_plus_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let _dead = store_blob(
+            &store,
+            LayerKind::App,
+            &vec![9u8; 300_000],
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
+        let report = collect_garbage(&store, &[], &HashSet::new()).unwrap();
+        let lines = report.eviction_log_lines();
+        assert_eq!(lines.len(), report.evicted.len() + 1);
+        for (line, ev) in lines.iter().zip(report.evicted.iter()) {
+            assert!(line.contains(ev.hash.as_str()));
+        }
+        let summary = lines.last().unwrap();
+        assert!(summary.contains("kept") && summary.contains("reclaimed"));
+    }
+
+    #[test]
+    fn shared_chunk_survives_when_a_live_manifest_references_it() {
+        // The core ref-count property: a chunk that a live manifest references
+        // must survive even though a dead (not-passed) manifest also used it;
+        // a chunk only the dead manifest used is reclaimed.
+        use crate::chunk::Chunk;
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let shared = store.put_chunk(b"shared chunk bytes").unwrap();
+        let dead_only = store.put_chunk(b"dead-only chunk bytes").unwrap();
+        let shared_len = store.get_chunk(&shared).unwrap().len() as u64;
+
+        let live = BlobManifest::new(
+            LayerKind::App,
+            shared_len,
+            ChunkingKind::ContentDefined,
+            vec![Chunk {
+                hash: shared.clone(),
+                offset: 0,
+                length: shared_len,
+            }],
+        );
+
+        let report = collect_garbage(&store, std::slice::from_ref(&live), &HashSet::new()).unwrap();
+        assert!(store.has_chunk(&shared), "shared chunk must survive");
+        assert!(!store.has_chunk(&dead_only), "dead-only chunk must be reclaimed");
+        assert!(report.deleted.contains(&dead_only));
+        assert!(!report.deleted.contains(&shared));
+        assert_eq!(report.kept, 1);
     }
 }
