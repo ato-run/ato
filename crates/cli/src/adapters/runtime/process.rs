@@ -622,35 +622,59 @@ impl ProcessManager {
     /// (idempotent, safe on double-stop / after crash). A dirty overlay (removal
     /// failed) is quarantined so it is never reused.
     fn teardown_ready_state_session(&self, info: &ProcessInfo) {
-        use snapshot::SnapshotBackend;
         let Some(backend_id) = info.ready_state_backend_id.as_deref() else { return };
         let overlay = info.ready_state_overlay_root.clone().unwrap_or_default();
+        let session_id = info.ready_state_session_id.as_deref().unwrap_or(&info.id);
+        let _ = self.teardown_ready_state(backend_id, session_id, &overlay, Some(info.pid), info.requested_port);
+    }
+
+    /// Shared Ready-State teardown core (used by `ato stop`, stale-pid cleanup,
+    /// and the orphan-overlay sweep): reconstruct a `RestoredSession`, instantiate
+    /// the backend by id, `backend.stop()`. The Firecracker `stop()` reaps the
+    /// recorded pid + tap + lock from `overlay/.fc-session.json`, so this works
+    /// cross-process (empty in-memory registry). Returns `true` if the overlay was
+    /// removed; on a failed removal the dirty overlay is **quarantined** (never
+    /// reused) and `false` is returned. Best-effort — errors are logged, not
+    /// propagated.
+    fn teardown_ready_state(
+        &self,
+        backend_id: &str,
+        session_id: &str,
+        overlay: &Path,
+        vmm_pid: Option<i32>,
+        guest_port: Option<u16>,
+    ) -> bool {
+        use snapshot::SnapshotBackend;
         let session = snapshot::RestoredSession {
-            session_id: info.ready_state_session_id.clone().unwrap_or_else(|| info.id.clone()),
+            session_id: session_id.to_string(),
             backend_id: backend_id.to_string(),
-            guest_port: info.requested_port,
-            overlay_root: overlay.clone(),
+            guest_port,
+            overlay_root: overlay.to_path_buf(),
             restored_bytes: 0,
-            vmm_pid: Some(info.pid),
+            vmm_pid,
         };
         let backend: Box<dyn SnapshotBackend> = match backend_id {
             "firecracker" => Box::new(snapshot::FirecrackerBackend::new()),
             "fake" => Box::new(snapshot::FakeSnapshotBackend::new()),
             other => {
                 tracing::warn!(target: "ato::ready_state", "stop: unknown ready-state backend '{other}'");
-                return;
+                return false;
             }
         };
         match backend.stop(session) {
-            Ok(receipt) => {
-                if !receipt.overlay_removed && overlay.exists() {
-                    let key = info.ready_state_session_id.as_deref().unwrap_or(&info.id);
-                    if let Err(e) = self.quarantine_overlay(key, &overlay) {
-                        tracing::warn!(target: "ato::ready_state", "stop: quarantine overlay failed: {e}");
-                    }
+            Ok(receipt) if receipt.overlay_removed => true,
+            Ok(_) => {
+                if overlay.exists()
+                    && let Err(e) = self.quarantine_overlay(session_id, overlay)
+                {
+                    tracing::warn!(target: "ato::ready_state", "stop: quarantine overlay failed: {e}");
                 }
+                false
             }
-            Err(e) => tracing::warn!(target: "ato::ready_state", "stop: ready-state teardown error: {e}"),
+            Err(e) => {
+                tracing::warn!(target: "ato::ready_state", "stop: ready-state teardown error: {e}");
+                false
+            }
         }
     }
 
@@ -952,7 +976,82 @@ impl ProcessManager {
             }
         }
 
+        // Class 4: orphaned Ready-State overlay dirs (`ready-state-*`) with no live
+        // backing session — reap or quarantine so a crashed/abandoned session never
+        // leaks its tap/lock/overlay. Flag-gated so flag-off startup is unchanged.
+        if crate::application::ready_state::flags::ready_state_enabled() {
+            self.sweep_ready_state_overlays(&mut report, now, socket_grace);
+        }
+
         Ok(report)
+    }
+
+    /// Class 4 helper: scan `run_dir` for `ready-state-*` overlay dirs not backed by
+    /// a live pid record. A dir with a still-alive recorded pid is left alone (a
+    /// live session whose pid file we simply didn't find). With `.fc-session.json`
+    /// and a dead pid → reconstruct + backend stop (reaps tap/lock/overlay from the
+    /// record). Without a record (crashed before writing it) the tap name is
+    /// unknown → quarantine only. A `socket_grace`-fresh dir (mid-restore, pre-pid)
+    /// is skipped.
+    fn sweep_ready_state_overlays(&self, report: &mut RunDirSweepReport, now: SystemTime, grace: Duration) {
+        // Overlays still owned by a live (pid-alive) Ready-State session.
+        let live: std::collections::HashSet<PathBuf> = self
+            .list_processes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(process_info_is_alive)
+            .filter_map(|p| p.ready_state_overlay_root)
+            .collect();
+
+        let Ok(entries) = fs::read_dir(&self.run_dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !name.starts_with("ready-state-") || !path.is_dir() || live.contains(&path) {
+                continue;
+            }
+            // Grace: a dir younger than `grace` may be a session mid-restore that
+            // has not yet written its pid file — never reap it.
+            if entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age < grace)
+            {
+                continue;
+            }
+
+            let record = path.join(".fc-session.json");
+            if record.exists() {
+                let json = fs::read_to_string(&record).unwrap_or_default();
+                let val: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+                let pid = val.as_ref().and_then(|v| v.get("pid")).and_then(|p| p.as_i64()).map(|p| p as i32);
+                let session_id = val
+                    .as_ref()
+                    .and_then(|v| v.get("session_id"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or(name)
+                    .to_string();
+                // A live recorded pid → a running VMM we lack a pid file for. Never
+                // kill it; leave the overlay for `ato stop` / its real owner.
+                if pid.is_some_and(is_process_alive) {
+                    continue;
+                }
+                // Long-lived serving is Firecracker-only; the record omits backend id.
+                if self.teardown_ready_state("firecracker", &session_id, &path, pid, None) {
+                    report.orphan_overlays_reaped += 1;
+                } else {
+                    report.orphan_overlays_quarantined += 1;
+                }
+            } else {
+                // No record: the tap name is unknown, so we cannot reap the tap —
+                // quarantine the dir (never reuse) and accept the rare tap leak.
+                if self.quarantine_overlay(name, &path).is_ok() {
+                    report.orphan_overlays_quarantined += 1;
+                }
+            }
+        }
     }
 
     pub fn cleanup_dead_processes_with_details(&self) -> Result<Vec<ProcessInfo>> {
@@ -1001,6 +1100,12 @@ pub struct RunDirSweepReport {
     pub pid_files_removed: usize,
     pub sockets_removed: usize,
     pub import_preview: ImportPreviewSweepReport,
+    /// Ready-State overlay dirs with no live backing pid that were reaped
+    /// (VM/tap/overlay/lock removed) via the recorded `.fc-session.json`.
+    pub orphan_overlays_reaped: usize,
+    /// Ready-State overlay dirs quarantined (no record, or removal failed) —
+    /// preserved for forensics, never reused as a live overlay.
+    pub orphan_overlays_quarantined: usize,
 }
 
 /// Parse the embedded `<pid>` from a `*.sock` / `*.sock.txt` filename.
@@ -2610,6 +2715,46 @@ start_time = [0, 0]
 
         // Double-stop is safe (no pid file -> Ok(false), no panic).
         assert!(!pm.stop_process("capsule-7", false).unwrap());
+    }
+
+    #[test]
+    fn sweep_ready_state_overlays_quarantines_orphan_without_record() {
+        let run = tempfile::tempdir().unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run.path().to_path_buf());
+        let ov = run.path().join("ready-state-888");
+        std::fs::create_dir_all(&ov).unwrap();
+        std::fs::write(ov.join("data"), "x").unwrap(); // crashed before writing .fc-session.json
+        let mut report = RunDirSweepReport::default();
+        // grace=0 so the just-created dir isn't grace-skipped.
+        pm.sweep_ready_state_overlays(&mut report, SystemTime::now(), Duration::from_secs(0));
+        assert_eq!(report.orphan_overlays_quarantined, 1);
+        assert_eq!(report.orphan_overlays_reaped, 0);
+        assert!(!ov.exists(), "orphan overlay moved out of the live path");
+        assert!(
+            run.path().join("quarantine").read_dir().unwrap().next().is_some(),
+            "overlay preserved in quarantine"
+        );
+    }
+
+    #[test]
+    fn sweep_ready_state_overlays_skips_live_backed_session() {
+        let run = tempfile::tempdir().unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run.path().to_path_buf());
+        let ov = run.path().join("ready-state-self");
+        std::fs::create_dir_all(&ov).unwrap();
+        let mut info = microvm_info("capsule-self", ov.clone());
+        info.pid = std::process::id() as i32; // this test process — alive
+        info.os_start_time_unix_ms =
+            capsule::state::session::process::process_start_time_unix_ms(std::process::id());
+        pm.write_pid(&info).unwrap();
+        let mut report = RunDirSweepReport::default();
+        pm.sweep_ready_state_overlays(&mut report, SystemTime::now(), Duration::from_secs(0));
+        assert_eq!(
+            report.orphan_overlays_reaped + report.orphan_overlays_quarantined,
+            0,
+            "an overlay backed by a live session must never be swept"
+        );
+        assert!(ov.exists(), "live-backed overlay left intact");
     }
 
     #[test]
