@@ -37,6 +37,11 @@ pub(crate) fn restore_and_expose(
 }
 
 /// Tear down a restored session: stop the VM and destroy its disposable overlay.
+/// (Long-lived serving registers the session instead of tearing it down inline;
+/// `ato stop` reaps it from the on-disk record via
+/// `ProcessManager::teardown_ready_state_session`. Kept as the engine-level
+/// teardown for tests + a future foreground-serve SIGINT hook.)
+#[allow(dead_code)]
 pub(crate) fn teardown(
     backend: &dyn SnapshotBackend,
     session: RestoredSession,

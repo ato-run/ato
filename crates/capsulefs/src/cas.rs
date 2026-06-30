@@ -59,7 +59,7 @@ impl CasStore {
         }
         // Temp name is content-derived + pid to avoid collisions without needing
         // a random source (kept dependency-free).
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp = path.with_extension(crate::unique_tmp_suffix());
         fs::write(&tmp, bytes)?;
         // rename is atomic on the same filesystem; if another writer won the
         // race the destination already exists and rename still yields the

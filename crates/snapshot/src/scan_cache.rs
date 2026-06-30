@@ -101,7 +101,7 @@ impl ScanCache {
             let _ = std::fs::create_dir_all(parent);
         }
         let Ok(json) = serde_json::to_vec(&rec) else { return };
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp = path.with_extension(capsulefs::unique_tmp_suffix());
         if std::fs::write(&tmp, &json).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
