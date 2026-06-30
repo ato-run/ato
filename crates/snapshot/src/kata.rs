@@ -68,6 +68,9 @@ impl SnapshotBackend for KataBackend {
             // snapshot backend. The placement seal gate relies on this.
             supports_seal_before_bind: false,
             supports_disposable_overlay: true,
+            // UFFD mem_backend is a Firecracker snapshot feature; Kata is not it.
+            supports_uffd_mem_backend: false,
+            uffd_reason: Some("kata is not a Firecracker UFFD mem-backend".to_string()),
         }
     }
 
