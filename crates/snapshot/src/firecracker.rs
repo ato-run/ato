@@ -868,7 +868,13 @@ impl SnapshotBackend for FirecrackerBackend {
                     UffdMode::Cas => {
                         let store = capsulefs::CasStore::open(input.store.root())
                             .map_err(|e| self.backend_err(format!("uffd cas store: {e}")))?;
-                        crate::uffd_page_server::PageSource::cas(store, memory.clone())
+                        // U6 (#859): ATO_FC_UFFD_REMOTE=<root> → read through a remote
+                        // CAS on a local miss (fetch + cache local, then serve).
+                        let remote = std::env::var("ATO_FC_UFFD_REMOTE")
+                            .ok()
+                            .filter(|v| !v.is_empty())
+                            .and_then(|root| capsulefs::CasStore::open(root).ok());
+                        crate::uffd_page_server::PageSource::cas(store, memory.clone(), remote)
                     }
                 };
                 let server = crate::uffd_page_server::PageServer::bind(&sock, source)
