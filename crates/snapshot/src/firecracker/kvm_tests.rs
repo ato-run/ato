@@ -358,6 +358,48 @@ fn fc_kvm_uffd_hotset_prefetch_cuts_demand_faults() {
     assert_clean_teardown(&ov2);
 }
 
+/// U5 (#858): a corrupt/missing memory chunk in CAS must FAIL CLOSED — the page-
+/// server's read_range fails the hash check, so the guest can never fault its memory
+/// in; restore returns Err (fast, not a full-timeout hang) and leaves no orphan
+/// firecracker/tap. Never silently boots a VM on corrupt memory.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd fail-closed needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    // Corrupt EVERY memory chunk in CAS (wrong bytes → blake3 mismatch on read), so
+    // the guest's first memory fault hits a bad chunk and the serve fails closed.
+    let mem = m.layers.memory.as_ref().expect("memory layer");
+    let blobs = dir.path().join("cas").join("blobs").join("blake3");
+    for c in &mem.chunks {
+        std::fs::write(blobs.join(c.hash.hex()), b"CORRUPT-NOT-THE-REAL-CHUNK").unwrap();
+    }
+    let overlay = dir.path().join("ov");
+    let started = std::time::Instant::now();
+    unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    unsafe { std::env::remove_var("ATO_FC_UFFD") };
+
+    assert!(r.is_err(), "corrupt CAS memory chunk must fail closed, got Ok");
+    eprintln!("### U5 fail-closed in {}ms: {}", started.elapsed().as_millis(), r.unwrap_err());
+    // No orphan VM/tap left behind by the failed restore.
+    let tap = FirecrackerConfig::default().tap_dev;
+    let taps = std::process::Command::new("ip").args(["link", "show", &tap]).output().unwrap();
+    assert!(!taps.status.success(), "tap {tap} leaked after failed restore");
+    let out = std::process::Command::new("pgrep").args(["-af", "firecracker --api-sock"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).count(),
+        0,
+        "orphan firecracker after failed restore"
+    );
+}
+
 #[test]
 #[ignore]
 fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
