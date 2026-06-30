@@ -90,3 +90,47 @@ reports `true` on a conforming x86_64 host (mirrors `fc_kvm_probe_available`).
 See also [`desktop-runner.md`](./desktop-runner.md) and
 [`criu-container-spike.md`](./criu-container-spike.md) for the sibling
 capability-probe spikes.
+
+---
+
+# Results — U0–U6 (hardware-validated, 2026-06-30)
+
+All on GCP `n2-standard-4` (Cascade Lake) / Firecracker v1.16.0 / kernel 5.10.223,
+read-only-shared rootfs, `fulltest` (FastAPI `/health`) rootfs, 512 MB guest memory.
+Each phase is a `#[ignore]`d KVM smoke (`fc_kvm_uffd_*`, behind the test-only
+`ATO_FC_UFFD` gate). The default File restore path + `ato run` are unchanged.
+
+| phase | what | receipt |
+|---|---|---|
+| U0 (#862) | capability probe | truthful `supports_uffd_mem_backend` |
+| U1 (#865) | page-server handshake | reaches `/health` from an `.mem` mmap; ~11.7 MiB working set, p50 fault 5 µs |
+| U2 (#866) | lazy from **local CAS** (no `.mem` materialization) | `/health` in 363 ms faulting **2.3 % of 512 MB** |
+| U3 (#867) | per-restore fault trace | 2874 pre-health pages = the hotset |
+| U4 (#868) | **hotset prefetch** | demand faults **2985 → 3**, `/health` **366 → 166 ms (−55 %)** |
+| U5 (#869) | fail-closed on CAS miss/corrupt | restore `Err`, no orphan VM/tap |
+| U6 (#870) | **remote CAS read-through** | `/health` from remote, **50 / 256 chunks** fetched on demand (489 ms) |
+
+## When UFFD beats the File backend (the U6 gate)
+
+The File backend **eagerly rehydrates the whole memory image** (~512 MB ≈ 0.69 s)
+before `LoadSnapshot`, but that cost is **amortized**: the rehydrated `.mem` is
+content-addressed and reused, so *warm* File restores skip it (~150–220 ms,
+Firecracker-bound). UFFD instead faults in only the **working set** (~12 MiB here =
+2.3 %), every restore, with no eager copy.
+
+- **UFFD wins on a cold cache** (first restore on a host, or eviction): File must
+  pay the full eager rehydrate; UFFD pays only the working set.
+- **UFFD wins as the memory image grows** (multi-GB): the eager-rehydrate cost
+  scales with image size, while the working set stays roughly constant — so the
+  larger the image relative to its hot set, the more UFFD wins.
+- **UFFD wins for remote/streamed artifacts** (U6): only the working set crosses the
+  network, not the whole image.
+- **File is competitive when warm + small**: a small image with a hot disk cache is
+  already Firecracker-bound; UFFD's per-fault overhead (and, for demand-only, its
+  higher first-fault latency) buys little. **Hotset prefetch (U4) closes that gap** —
+  166 ms time-to-health is in the warm-File range while still demand-loading from CAS.
+
+**Net:** UFFD's value is **large or remote memory images on a cold cache**; the
+hotset profile is what makes it competitive even when File is warm. Wiring this into
+the product (replacing the `ATO_FC_UFFD` env gate with a placement-contract-driven
+`mem_backend` selection, #816) is a separate phase beyond this spike.
