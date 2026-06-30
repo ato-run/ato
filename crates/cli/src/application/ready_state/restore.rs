@@ -37,11 +37,10 @@ pub(crate) fn restore_and_expose(
 }
 
 /// Tear down a restored session: stop the VM and destroy its disposable overlay.
-/// (Long-lived serving registers the session instead of tearing it down inline;
-/// `ato stop` reaps it from the on-disk record via
-/// `ProcessManager::teardown_ready_state_session`. Kept as the engine-level
-/// teardown for tests + a future foreground-serve SIGINT hook.)
-#[allow(dead_code)]
+/// Long-lived serving (Firecracker) registers the session instead and leaves it
+/// running for a later `ato stop`; this is the verify-only teardown taken by
+/// backends with no serving process (Fake / KVM-free) and by the engine smoke
+/// tests / future foreground-serve SIGINT hook.
 pub(crate) fn teardown(
     backend: &dyn SnapshotBackend,
     session: RestoredSession,
