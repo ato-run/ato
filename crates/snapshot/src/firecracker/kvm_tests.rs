@@ -296,6 +296,68 @@ fn fc_kvm_uffd_fault_trace_records_hotset() {
     assert_clean_teardown(&overlay);
 }
 
+/// U4 (#857): build a HotsetProfile from a demand-only restore's trace, then prefetch
+/// it on a second restore — the prefetched hotset cuts demand faults in the
+/// pre-health window. Compares demand-only vs hotset-prefetch.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_hotset_prefetch_cuts_demand_faults() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd hotset needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+
+    // Run 1: demand-only (cas) → trace → profile.
+    let ov1 = dir.path().join("ov1");
+    unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
+    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: ov1.clone(), host_runner_class: None });
+    unsafe { std::env::remove_var("ATO_FC_UFFD") };
+    let r1 = r1.expect("restore1 (demand)");
+    let rec1 = read_uffd_receipt(&ov1);
+    let trace = read_hotset_trace(&ov1);
+    let profile = crate::uffd_page_server::HotsetProfile::from_trace(&trace);
+    assert!(!profile.pages.is_empty(), "hotset profile built from trace");
+    let profile_path = dir.path().join("hotset.json");
+    std::fs::write(&profile_path, serde_json::to_string(&profile).unwrap()).unwrap();
+    b.stop(r1.session).expect("stop1");
+
+    // Run 2: cas + hotset prefetch.
+    let ov2 = dir.path().join("ov2");
+    unsafe {
+        std::env::set_var("ATO_FC_UFFD", "cas");
+        std::env::set_var("ATO_FC_UFFD_HOTSET", &profile_path);
+    }
+    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: ov2.clone(), host_runner_class: None });
+    unsafe {
+        std::env::remove_var("ATO_FC_UFFD");
+        std::env::remove_var("ATO_FC_UFFD_HOTSET");
+    }
+    let r2 = r2.expect("restore2 (prefetch)");
+    let rec2 = read_uffd_receipt(&ov2);
+
+    assert!(rec2.prefetch_pages > 0, "prefetched the hotset: {}", rec2.prefetch_pages);
+    assert!(rec2.vm_reaches_health, "prefetch run reaches health");
+    // The prefetched hotset cuts demand faults in the latency window.
+    assert!(
+        rec2.page_fault_count < rec1.page_fault_count / 2,
+        "prefetch cut demand faults: prefetch-run demand={} vs demand-only baseline={}",
+        rec2.page_fault_count,
+        rec1.page_fault_count
+    );
+    eprintln!(
+        "### U4-COMPARE demand_only={{faults:{},health_ms:{:?}}} prefetch={{prefetch:{},demand:{},health_ms:{:?}}}",
+        rec1.page_fault_count, rec1.time_to_health_ms,
+        rec2.prefetch_pages, rec2.page_fault_count, rec2.time_to_health_ms
+    );
+
+    b.stop(r2.session).expect("stop2");
+    assert_clean_teardown(&ov2);
+}
+
 #[test]
 #[ignore]
 fn fc_kvm_rootfs_is_read_only_shared_across_restores() {

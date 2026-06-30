@@ -80,6 +80,10 @@ pub(crate) struct U1Receipt {
     /// U4 prefetch will target). `None` for modes that never reach health (U1a zero).
     #[serde(default)]
     pub pre_health_pages: Option<u64>,
+    /// U4 (#857): pages prefetched proactively from the hotset profile (0 when no
+    /// profile was supplied — the demand-only baseline).
+    #[serde(default)]
+    pub prefetch_pages: u64,
 }
 
 /// U3 (#856): one recorded page fault — the raw signal a [`HotsetProfile`] is built
@@ -117,12 +121,40 @@ impl HotsetTrace {
     }
 }
 
+/// U4 (#857): the predictive prefetch model derived from a prior restore's
+/// [`HotsetTrace`] — the distinct page GPAs touched before `/health`, in
+/// first-touch order. On the next restore the page-server `UFFDIO_COPY`s these
+/// proactively (before the guest demand-faults them) to cut faults in the
+/// latency-critical pre-health window.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct HotsetProfile {
+    /// Hot page GPAs, in first-touch order.
+    pub pages: Vec<u64>,
+}
+
+impl HotsetProfile {
+    /// Build a profile from a trace: the pre-health pages, de-duplicated, kept in
+    /// first-touch order (earliest fault first).
+    pub(crate) fn from_trace(trace: &HotsetTrace) -> HotsetProfile {
+        let mut seen = std::collections::HashSet::new();
+        let mut pages = Vec::new();
+        let mut pre: Vec<&TraceEntry> = trace.entries.iter().filter(|e| e.phase == "pre_health").collect();
+        pre.sort_by_key(|e| e.first_fault_at_us);
+        for e in pre {
+            if seen.insert(e.page_gpa) {
+                pages.push(e.page_gpa);
+            }
+        }
+        HotsetProfile { pages }
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) use linux_impl::{PageServer, PageServerHandle, PageSource};
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use super::{file_offset_for, page_align_down, region_for, HotsetTrace, Region, TraceEntry, U1Receipt};
+    use super::{file_offset_for, page_align_down, region_for, HotsetProfile, HotsetTrace, Region, TraceEntry, U1Receipt};
     use capsulefs::{BlobManifest, CasStore, LazyBlobReader, MEMORY_PAGE_CHUNK_SIZE};
     use std::collections::HashMap;
     use std::io;
@@ -374,6 +406,8 @@ mod linux_impl {
         // pre_health vs post_health; the per-fault trace feeds U4's hotset profile.
         health_reached: AtomicBool,
         trace: Mutex<Vec<TraceEntry>>,
+        // U4 (#857): pages prefetched proactively from the hotset profile.
+        prefetch_count: AtomicU64,
     }
 
     pub(crate) struct PageServer {
@@ -392,13 +426,14 @@ mod linux_impl {
         }
 
         /// Spawn the serving thread (accept the FC connection → `SCM_RIGHTS`
-        /// handshake → uffd event loop) and return a handle.
-        pub(crate) fn serve(self) -> PageServerHandle {
+        /// handshake → optional hotset prefetch → uffd event loop) and return a
+        /// handle. `hotset` (U4): pages to `UFFDIO_COPY` proactively before demand.
+        pub(crate) fn serve(self, hotset: Option<HotsetProfile>) -> PageServerHandle {
             let shared = Arc::new(Shared::default());
             let t_shared = Arc::clone(&shared);
             let PageServer { listener, source, page_size } = self;
             let join = std::thread::spawn(move || {
-                if let Err(e) = serve_loop(&listener, &source, page_size, &t_shared) {
+                if let Err(e) = serve_loop(&listener, &source, page_size, &t_shared, hotset.as_ref()) {
                     eprintln!("UFFD page-server: serve loop ended: {e}");
                 }
             });
@@ -470,6 +505,7 @@ mod linux_impl {
         source: &PageSource,
         page_size: usize,
         shared: &Arc<Shared>,
+        hotset: Option<&HotsetProfile>,
     ) -> io::Result<()> {
         let (conn, _) = listener.accept()?;
         let (uffd, regions) = recv_handshake(conn.as_raw_fd())?;
@@ -477,6 +513,36 @@ mod linux_impl {
         shared.region_count.store(regions.len() as u32, Ordering::SeqCst);
         let uffd_fd = uffd.as_raw_fd();
         let loop_start = Instant::now();
+
+        // U4 (#857): prefetch the hotset BEFORE entering the demand loop — proactively
+        // UFFDIO_COPY each profiled page (which also wakes any guest thread already
+        // blocked on it), so the latency-critical pre-health working set is resident
+        // and the guest demand-faults far fewer pages. EEXIST (guest beat us to it) is
+        // benign. Non-hotset faults queue in the uffd and drain in the demand loop.
+        if let Some(profile) = hotset {
+            for &page_gpa in &profile.pages {
+                if shared.stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let fault_page = page_align_down(page_gpa, page_size as u64);
+                let Some(region) = region_for(&regions, fault_page) else { continue };
+                let file_offset = file_offset_for(region, fault_page);
+                let t0 = Instant::now();
+                if let Ok(bytes) = source.serve_fault(uffd_fd, fault_page, file_offset, page_size) {
+                    shared.prefetch_count.fetch_add(1, Ordering::SeqCst);
+                    shared.bytes_copied.fetch_add(bytes, Ordering::SeqCst);
+                    if let Ok(mut t) = shared.trace.lock() {
+                        t.push(TraceEntry {
+                            page_gpa: fault_page,
+                            first_fault_at_us: loop_start.elapsed().as_micros(),
+                            fault_service_us: t0.elapsed().as_micros(),
+                            source: "prefetch".to_string(),
+                            phase: "pre_health".to_string(),
+                        });
+                    }
+                }
+            }
+        }
 
         loop {
             if shared.stop.load(Ordering::SeqCst) {
@@ -631,6 +697,7 @@ mod linux_impl {
                 } else {
                     None
                 },
+                prefetch_pages: self.shared.prefetch_count.load(Ordering::SeqCst),
             }
         }
 
@@ -675,7 +742,7 @@ mod stub {
         pub(crate) fn bind(_sock_path: &Path, _source: PageSource) -> io::Result<PageServer> {
             Err(io::Error::other("UFFD page-server is Linux-only"))
         }
-        pub(crate) fn serve(self) -> PageServerHandle {
+        pub(crate) fn serve(self, _hotset: Option<super::HotsetProfile>) -> PageServerHandle {
             PageServerHandle
         }
     }
