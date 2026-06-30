@@ -520,6 +520,14 @@ impl SnapshotBackend for FirecrackerBackend {
         } else {
             None
         };
+        // U0: truthfully report whether this host could drive a `Uffd` mem_backend
+        // (probe only — no restore path uses it yet). See crate::uffd.
+        let (supports_uffd_mem_backend, uffd_reason) = crate::uffd::evaluate(
+            std::env::consts::ARCH,
+            kvm,
+            version.as_deref(),
+            crate::uffd::host_userfaultfd_present(),
+        );
         BackendCapabilities {
             backend_id: FIRECRACKER_BACKEND_ID.to_string(),
             available,
@@ -536,6 +544,8 @@ impl SnapshotBackend for FirecrackerBackend {
             isolation_boundary: IsolationBoundary::MicroVm,
             supports_seal_before_bind: true,
             supports_disposable_overlay: true,
+            supports_uffd_mem_backend,
+            uffd_reason,
         }
     }
 
@@ -894,6 +904,13 @@ mod tests {
         let expect = FirecrackerBackend::kvm_present() && FirecrackerBackend::new().detect_version().is_some();
         assert_eq!(p.available, expect);
         if !p.available { assert!(p.reason.is_some()); }
+        // U0 UFFD facet invariant: false ⇒ a concrete reason; true ⇒ no reason.
+        // (On this test host — non-x86_64 or no /dev/kvm — it is false with a reason.)
+        if p.supports_uffd_mem_backend {
+            assert!(p.uffd_reason.is_none());
+        } else {
+            assert!(p.uffd_reason.is_some(), "unsupported UFFD must carry a reason");
+        }
     }
 
     #[test]
