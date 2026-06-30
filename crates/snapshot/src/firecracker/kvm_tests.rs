@@ -205,6 +205,50 @@ fn fc_kvm_uffd_real_pages_reaches_health() {
     assert_clean_teardown(&overlay);
 }
 
+/// U2 (#855): the page-server serves memory pages **lazily from local CAS** (no full
+/// `.mem` materialization) via `read_range` (2 MiB fault-around), and the VM reaches
+/// `/health`. Demand-only: only the working set is faulted in, far less than the full
+/// memory image.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_cas_demand_serves_from_local_cas() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd cas serving needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let mem_total = m.layers.memory.as_ref().expect("memory layer").total_len;
+    let overlay = dir.path().join("ov");
+    // SAFETY: KVM suite runs --test-threads=1; gate is removed before returning.
+    unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    unsafe { std::env::remove_var("ATO_FC_UFFD") };
+    let r = r.expect("restore (uffd cas)");
+    let port = r.session.guest_port.unwrap_or(8080);
+
+    let rec = read_uffd_receipt(&overlay);
+    assert!(rec.fd_received && rec.region_count > 0);
+    assert!(rec.vm_reaches_health, "CAS-served real pages must reach health");
+    assert!(rec.page_fault_count > 0 && rec.bytes_copied > 0, "faults served from CAS");
+    // Demand-only: the working set faulted in is far smaller than the full memory
+    // image — we never materialized the whole .mem.
+    assert!(
+        rec.bytes_copied < mem_total / 2,
+        "demand-only: bytes_copied {} should be << mem_total {}",
+        rec.bytes_copied,
+        mem_total
+    );
+    let gip = FirecrackerConfig::default().guest_ip;
+    assert!(!http_get(&gip, port, "/health").is_empty(), "guest /health reachable over CAS-UFFD restore");
+    eprintln!("### U2-RECEIPT mem_total={mem_total} {}", serde_json::to_string(&rec).unwrap());
+
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
 #[test]
 #[ignore]
 fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
