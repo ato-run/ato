@@ -225,7 +225,7 @@ impl FirecrackerBackend {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p).map_err(|e| self.backend_err(e.to_string()))?;
         }
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp = path.with_extension(capsulefs::unique_tmp_suffix());
         std::fs::write(&tmp, bytes).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             self.backend_err(format!("write {}: {e}", tmp.display()))
@@ -781,6 +781,7 @@ impl SnapshotBackend for FirecrackerBackend {
                 guest_port: Some(port),
                 overlay_root: input.overlay_root.clone(),
                 restored_bytes,
+                vmm_pid: Some(child.id() as i32),
             };
             Ok((session, child))
         })();
@@ -800,22 +801,24 @@ impl SnapshotBackend for FirecrackerBackend {
     }
 
     fn stop(&self, session: RestoredSession) -> Result<TeardownReceipt, SnapshotError> {
-        // Primary: kill + reap the child we spawned (no zombie).
-        let reaped = if let Some(mut child) = self.sessions.lock().unwrap().remove(&session.session_id) {
+        // Read the session record FIRST: a cross-process `ato stop` has a fresh
+        // backend (empty in-memory registry) and possibly a different ATO_FC_TAP
+        // env than the run process, so the authoritative pid + tap come from
+        // .fc-session.json (written at restore), not self.config / self.sessions.
+        let meta = std::fs::read_to_string(session.overlay_root.join(".fc-session.json")).unwrap_or_default();
+        let recorded_tap = json_str(&meta, "tap");
+        let tap = recorded_tap.as_deref().unwrap_or(&self.config.tap_dev);
+
+        // Kill + reap the child we spawned (no zombie); else kill by recorded pid.
+        if let Some(mut child) = self.sessions.lock().unwrap().remove(&session.session_id) {
             let _ = child.kill();
             let _ = child.wait();
-            true
-        } else {
-            // Fallback (cross-instance stop): kill by recorded pid (best effort).
-            let meta = std::fs::read_to_string(session.overlay_root.join(".fc-session.json")).unwrap_or_default();
-            if let Some(pid) = json_u32(&meta, "pid") {
-                let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
-            }
-            false
-        };
-        let _ = reaped;
-        self.net_down();
-        self.release_lock();
+        } else if let Some(pid) = session.vmm_pid.map(|p| p as u32).or_else(|| json_u32(&meta, "pid")) {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
+        // Tear down the RECORDED tap + its single-session lockfile (env-independent).
+        let _ = Command::new("ip").args(["link", "del", tap]).status();
+        let _ = std::fs::remove_file(self.config.work_root.join(format!("{tap}.lock")));
         let overlay_removed = session.overlay_root.exists() && std::fs::remove_dir_all(&session.overlay_root).is_ok();
         Ok(TeardownReceipt { session_id: session.session_id, overlay_removed })
     }
@@ -830,6 +833,15 @@ fn json_u32(s: &str, key: &str) -> Option<u32> {
     let rest = s[i..].trim_start();
     let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
     rest[..end].parse().ok()
+}
+/// Extract a quoted string value for `key` from a flat JSON object (no deps).
+fn json_str(s: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let i = s.find(&needle)? + needle.len();
+    let rest = s[i..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 #[cfg(test)]

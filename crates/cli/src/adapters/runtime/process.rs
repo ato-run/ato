@@ -52,6 +52,22 @@ pub struct ProcessInfo {
     pub last_error: Option<String>,
     #[serde(default)]
     pub exit_code: Option<i32>,
+    // ── Ready-State (microVM) session fields (additive; `serde(default)` so
+    // legacy .pid TOML still parses). Present only for `runtime == "microvm"`;
+    // they let a fresh-process `ato stop` reconstruct the session and tear it
+    // down from the on-disk record (not the in-memory backend registry).
+    /// Snapshot backend that restored this session (e.g. `firecracker` / `fake`).
+    #[serde(default)]
+    pub ready_state_backend_id: Option<String>,
+    /// Disposable overlay root (holds `.fc-session.json`); removed on teardown.
+    #[serde(default)]
+    pub ready_state_overlay_root: Option<PathBuf>,
+    /// `RestoredSession.session_id` — the backend's session key.
+    #[serde(default)]
+    pub ready_state_session_id: Option<String>,
+    /// TAP device (informational; the authoritative tap is in `.fc-session.json`).
+    #[serde(default)]
+    pub ready_state_tap_dev: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -561,6 +577,18 @@ impl ProcessManager {
             }
         };
 
+        // Ready-State (microVM) session: tear down via the snapshot backend from
+        // the persisted record (this is a fresh process — the backend's in-memory
+        // registry is empty), then delete the pid file. Idempotent + best-effort:
+        // killing an already-dead VMM is a no-op, and a double-stop just finds no
+        // pid file. Handled before the is_active/is_alive checks so a stale/exited
+        // microVM still gets its tap/lock/overlay reaped.
+        if info.runtime == "microvm" && info.ready_state_backend_id.is_some() {
+            self.teardown_ready_state_session(&info);
+            self.delete_pid(id)?;
+            return Ok(true);
+        }
+
         if !info.status.is_active() {
             let stopped_deps = self.stop_dependency_session(id, force)?;
             if stopped_deps {
@@ -585,6 +613,62 @@ impl ProcessManager {
             self.delete_pid(id)?;
             Ok(stopped_deps)
         }
+    }
+
+    /// Tear down a Ready-State (microVM) session via the snapshot backend, from
+    /// the persisted [`ProcessInfo`] record (the calling process has a fresh
+    /// backend whose in-memory session registry is empty). Best-effort: errors
+    /// are logged, never propagated, so the pid file can always be deleted
+    /// (idempotent, safe on double-stop / after crash). A dirty overlay (removal
+    /// failed) is quarantined so it is never reused.
+    fn teardown_ready_state_session(&self, info: &ProcessInfo) {
+        use snapshot::SnapshotBackend;
+        let Some(backend_id) = info.ready_state_backend_id.as_deref() else { return };
+        let overlay = info.ready_state_overlay_root.clone().unwrap_or_default();
+        let session = snapshot::RestoredSession {
+            session_id: info.ready_state_session_id.clone().unwrap_or_else(|| info.id.clone()),
+            backend_id: backend_id.to_string(),
+            guest_port: info.requested_port,
+            overlay_root: overlay.clone(),
+            restored_bytes: 0,
+            vmm_pid: Some(info.pid),
+        };
+        let backend: Box<dyn SnapshotBackend> = match backend_id {
+            "firecracker" => Box::new(snapshot::FirecrackerBackend::new()),
+            "fake" => Box::new(snapshot::FakeSnapshotBackend::new()),
+            other => {
+                tracing::warn!(target: "ato::ready_state", "stop: unknown ready-state backend '{other}'");
+                return;
+            }
+        };
+        match backend.stop(session) {
+            Ok(receipt) => {
+                if !receipt.overlay_removed && overlay.exists() {
+                    let key = info.ready_state_session_id.as_deref().unwrap_or(&info.id);
+                    if let Err(e) = self.quarantine_overlay(key, &overlay) {
+                        tracing::warn!(target: "ato::ready_state", "stop: quarantine overlay failed: {e}");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(target: "ato::ready_state", "stop: ready-state teardown error: {e}"),
+        }
+    }
+
+    /// Move a dirty overlay (whose removal failed) into `<run_dir>/quarantine/` so
+    /// it is preserved for forensics and never reused as a live session path.
+    fn quarantine_overlay(&self, session_id: &str, overlay: &Path) -> Result<()> {
+        let qdir = self.run_dir.join("quarantine");
+        fs::create_dir_all(&qdir)?;
+        let ts = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let safe: String = session_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
+            .collect();
+        fs::rename(overlay, qdir.join(format!("{safe}-{ts}")))?;
+        Ok(())
     }
 
     pub fn stop_import_preview_session(
@@ -889,6 +973,13 @@ impl ProcessManager {
                     || (info.status.is_active() && !process_info_is_alive(&info)))
                 && self.stop_dependency_session(id, false).is_ok()
             {
+                // A stale Ready-State session: reap its tap/lockfile/overlay via
+                // the backend (idempotent — the VMM is already dead) before
+                // dropping the pid file, so a crashed session never leaks the tap
+                // (which would block the next single-session run) or its overlay.
+                if info.runtime == "microvm" && info.ready_state_backend_id.is_some() {
+                    self.teardown_ready_state_session(&info);
+                }
                 let _ = self.delete_pid(id);
                 cleaned.push(info);
             }
@@ -2455,6 +2546,72 @@ mod tests {
         assert_eq!(format_duration(zero_sec), "0s");
     }
 
+    fn microvm_info(id: &str, overlay: PathBuf) -> ProcessInfo {
+        ProcessInfo {
+            id: id.to_string(),
+            name: "demo".to_string(),
+            pid: std::process::id() as i32,
+            workload_pid: None,
+            status: ProcessStatus::Ready,
+            runtime: "microvm".to_string(),
+            start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
+            manifest_path: None,
+            scoped_id: None,
+            target_label: None,
+            requested_port: Some(8080),
+            log_path: None,
+            ready_at: None,
+            last_event: Some("restored".to_string()),
+            last_error: None,
+            exit_code: None,
+            ready_state_backend_id: Some("fake".to_string()),
+            ready_state_overlay_root: Some(overlay),
+            ready_state_session_id: Some("sess-1".to_string()),
+            ready_state_tap_dev: None,
+        }
+    }
+
+    #[test]
+    fn ready_state_fields_round_trip_and_legacy_pid_still_parses() {
+        let info = microvm_info("capsule-7", PathBuf::from("/tmp/ov-7"));
+        let de: ProcessInfo = toml::from_str(&toml::to_string(&info).unwrap()).unwrap();
+        assert_eq!(de.runtime, "microvm");
+        assert_eq!(de.ready_state_backend_id.as_deref(), Some("fake"));
+        assert_eq!(de.ready_state_overlay_root, Some(PathBuf::from("/tmp/ov-7")));
+        assert_eq!(de.ready_state_session_id.as_deref(), Some("sess-1"));
+        // Legacy .pid TOML (written before Phase 7) must still parse (serde default).
+        let legacy = r#"
+id = "capsule-old"
+name = "old"
+pid = 42
+status = "Running"
+runtime = "shell"
+start_time = [0, 0]
+"#;
+        let old: ProcessInfo = toml::from_str(legacy).expect("legacy pid parses");
+        assert!(old.ready_state_backend_id.is_none());
+    }
+
+    #[test]
+    fn stop_process_reaps_ready_state_session_and_is_idempotent() {
+        let run_dir = tempfile::tempdir().unwrap();
+        let overlay = run_dir.path().join("ready-state-ov");
+        std::fs::create_dir_all(&overlay).unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run_dir.path().to_path_buf());
+        pm.write_pid(&microvm_info("capsule-7", overlay.clone())).unwrap();
+        assert!(pm.pid_file_path("capsule-7").exists());
+
+        let stopped = pm.stop_process("capsule-7", false).unwrap();
+        assert!(stopped, "microVM session stopped");
+        assert!(!pm.pid_file_path("capsule-7").exists(), "pid file deleted");
+        assert!(!overlay.exists(), "Fake backend teardown removed the disposable overlay");
+
+        // Double-stop is safe (no pid file -> Ok(false), no panic).
+        assert!(!pm.stop_process("capsule-7", false).unwrap());
+    }
+
     #[test]
     fn test_process_info_serialization() {
         let info = ProcessInfo {
@@ -2476,6 +2633,10 @@ mod tests {
             last_event: Some("spawned".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
 
         let serialized = toml::to_string(&info).expect("Failed to serialize");
@@ -2519,6 +2680,10 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
 
         let serialized = toml::to_string(&info).expect("Failed to serialize");
@@ -2560,6 +2725,10 @@ mod tests {
             last_event: Some("ready".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -2640,6 +2809,10 @@ mod tests {
             last_event: Some("ready".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -2756,6 +2929,10 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -2864,6 +3041,10 @@ mod tests {
             last_event: Some("ready".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
 
         let serialized = toml::to_string(&info).expect("serialize host fallback process info");
@@ -2901,6 +3082,10 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
         let other = ProcessInfo {
             id: "other-1".to_string(),
@@ -2921,6 +3106,10 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
 
         pm.write_pid(&matching).expect("write matching");
@@ -3005,6 +3194,10 @@ mod tests {
             last_event: Some("ready".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         };
 
         pm.write_pid(&info).expect("write pid file");

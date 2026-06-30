@@ -209,6 +209,11 @@ pub struct RestoredSession {
     pub overlay_root: PathBuf,
     /// Bytes rehydrated from the layers.
     pub restored_bytes: u64,
+    /// PID of the live VMM process serving this session, when the backend spawns
+    /// one (Firecracker). `None` for backends with no serving process (Fake). The
+    /// long-lived-serving run gate stamps this into the on-disk session record so
+    /// a later `ato stop` (fresh backend, empty in-memory registry) can reap it.
+    pub vmm_pid: Option<i32>,
 }
 
 impl RestoredSession {

@@ -3766,19 +3766,65 @@ where
             let handle =
                 ready_state::runtime_adapter::RestoredRuntimeHandle::new(session.clone());
             let metrics = handle.capture_metrics().await.map_err(anyhow::Error::new)?;
+            // Long-lived serving (Phase 7): the restored Firecracker child is
+            // already detached (reparents to init), so it KEEPS SERVING after this
+            // returns. Register it like a background process so `ato ps` lists it
+            // and a LATER fresh-process `ato stop` reaps it from the on-disk record
+            // (pid/tap/overlay), NOT the in-memory backend registry. NO teardown
+            // here. (Binding-required capsules already failed closed above; this
+            // session is no-binding.)
+            let serving_pid = session.vmm_pid.unwrap_or(std::process::id() as i32);
+            let id = format!("capsule-{serving_pid}");
+            let now = SystemTime::now();
+            let info = crate::runtime::process::ProcessInfo {
+                id: id.clone(),
+                name: decision
+                    .plan
+                    .manifest_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "capsule".to_string()),
+                pid: serving_pid,
+                workload_pid: None,
+                status: crate::runtime::process::ProcessStatus::Ready,
+                runtime: "microvm".to_string(),
+                start_time: now,
+                os_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
+                    serving_pid as u32,
+                ),
+                workload_os_start_time_unix_ms: None,
+                manifest_path: Some(decision.plan.manifest_path.clone()),
+                scoped_id: None,
+                target_label: Some(decision.plan.selected_target_label().to_string()),
+                requested_port: session.guest_port,
+                log_path: Some(session.overlay_root.join("console.log")),
+                ready_at: Some(now),
+                last_event: Some("restored".to_string()),
+                last_error: None,
+                exit_code: None,
+                ready_state_backend_id: Some(backend.id().to_string()),
+                ready_state_overlay_root: Some(session.overlay_root.clone()),
+                ready_state_session_id: Some(session.session_id.clone()),
+                ready_state_tap_dev: None,
+            };
+            crate::runtime::process::ProcessManager::new()?.write_pid(&info)?;
             tracing::info!(
                 target: "ato::ready_state",
                 backend = backend.id(),
                 metadata = ?metrics.metadata,
+                session = %session.session_id,
+                pid = serving_pid,
                 port = ?session.guest_port,
-                restored_bytes = session.restored_bytes,
-                "READY-STATE: restored microVM (developer-preview — reclaiming after verify)"
+                "READY-STATE: serving (long-lived; `ato stop` to reap)"
             );
-            // Developer-preview reclaims the disposable overlay/session here.
-            // Long-lived foreground serving, background ProcessInfo stamping, and
-            // `ato stop` teardown are a fast follow.
-            let td = ready_state::restore::teardown(backend.as_ref(), session)?;
-            debug_assert!(td.overlay_removed);
+            request
+                .reporter
+                .notify(format!(
+                    "🚀 Ready-State microVM serving (ID: {id}) on port {} — stop with `ato stop {id}`",
+                    session.guest_port.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+                ))
+                .await?;
+            progress.ok(HourglassPhase::Execute, "ready-state microVM serving");
             return Ok(());
         }
     }
@@ -3836,6 +3882,10 @@ where
                 last_event: Some("spawned".to_string()),
                 last_error: None,
                 exit_code: None,
+                ready_state_backend_id: None,
+                ready_state_overlay_root: None,
+                ready_state_session_id: None,
+                ready_state_tap_dev: None,
             };
 
             let process_manager = crate::runtime::process::ProcessManager::new()?;
@@ -4350,6 +4400,10 @@ where
                     last_event: Some("spawned".to_string()),
                     last_error: None,
                     exit_code: None,
+                    ready_state_backend_id: None,
+                    ready_state_overlay_root: None,
+                    ready_state_session_id: None,
+                    ready_state_tap_dev: None,
                 };
 
                 let process_manager = crate::runtime::process::ProcessManager::new()?;
