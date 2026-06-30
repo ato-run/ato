@@ -3742,6 +3742,14 @@ where
         let rs_hash = ready_state::capsule_manifest_hash(&decision.plan.manifest)?;
         let rs_root = ready_state::state_root();
         if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
+            // Fail closed BEFORE any restore/expose if the capsule requires runtime
+            // bindings (BindingLease injection is not wired yet — a restored session
+            // would serve without its credentials). The artifact stays pre-bind /
+            // secret-free; no binding values are injected here.
+            ready_state::bindings::ensure_no_unwired_runtime_bindings(
+                &rs_manifest,
+                ready_state::bindings::BindingGuardMode::VerifyOnly,
+            )?;
             let backend = ready_state::backend::select_backend()?;
             let store = ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
             let overlay = capsule::common::paths::ato_path_or_workspace_tmp("run")
