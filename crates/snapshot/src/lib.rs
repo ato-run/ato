@@ -39,6 +39,7 @@ mod placement;
 mod qemu;
 mod scanner;
 mod uffd;
+mod uffd_page_server;
 
 pub use backend::{
     BackendCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,

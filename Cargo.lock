@@ -6493,6 +6493,7 @@ dependencies = [
  "blake3",
  "capsule",
  "capsulefs",
+ "libc",
  "serde",
  "serde_jcs",
  "serde_json",
