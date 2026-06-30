@@ -90,8 +90,12 @@ pub(crate) struct U1Receipt {
 /// from in U4.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TraceEntry {
-    /// Page-aligned guest physical address that faulted.
+    /// Page-aligned host virtual address that faulted (run-specific — Firecracker
+    /// mmaps guest memory at a different host address each restore).
     pub page_gpa: u64,
+    /// Offset into the memory image for this page (STABLE across restores — this is
+    /// the portable key a `HotsetProfile` is built from).
+    pub file_offset: u64,
     /// Latency from event-loop entry to this fault (µs).
     pub first_fault_at_us: u128,
     /// Time to service this fault (the ioctl) (µs).
@@ -128,28 +132,39 @@ impl HotsetTrace {
 /// latency-critical pre-health window.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct HotsetProfile {
-    /// Hot page GPAs, in first-touch order.
-    pub pages: Vec<u64>,
+    /// Hot memory-image **file offsets** (stable across restores), in first-touch
+    /// order. The page-server maps each back to this run's host address.
+    pub offsets: Vec<u64>,
 }
 
 impl HotsetProfile {
-    /// Build a profile from a trace: the pre-health pages, de-duplicated, kept in
-    /// first-touch order (earliest fault first). (U4 derives the next restore's
-    /// prefetch list from a prior restore's trace; currently exercised by the KVM
+    /// Build a profile from a trace: the pre-health page **file offsets**,
+    /// de-duplicated, in first-touch order (earliest fault first). File offsets are
+    /// portable across restores; host addresses are not. (U4 derives the next
+    /// restore's prefetch list from a prior restore's trace; exercised by the KVM
     /// smoke — a product path that persists profiles per capsule is later.)
     #[allow(dead_code)]
     pub(crate) fn from_trace(trace: &HotsetTrace) -> HotsetProfile {
         let mut seen = std::collections::HashSet::new();
-        let mut pages = Vec::new();
+        let mut offsets = Vec::new();
         let mut pre: Vec<&TraceEntry> = trace.entries.iter().filter(|e| e.phase == "pre_health").collect();
         pre.sort_by_key(|e| e.first_fault_at_us);
         for e in pre {
-            if seen.insert(e.page_gpa) {
-                pages.push(e.page_gpa);
+            if seen.insert(e.file_offset) {
+                offsets.push(e.file_offset);
             }
         }
-        HotsetProfile { pages }
+        HotsetProfile { offsets }
     }
+}
+
+/// Find the region whose **file-offset** range contains `file_offset`, and the host
+/// page address that offset maps to in this run.
+pub(crate) fn host_page_for_offset(regions: &[Region], file_offset: u64) -> Option<u64> {
+    regions
+        .iter()
+        .find(|r| file_offset >= r.offset && file_offset < r.offset.wrapping_add(r.size))
+        .map(|r| r.base_host_virt_addr + (file_offset - r.offset))
 }
 
 #[cfg(target_os = "linux")]
@@ -157,7 +172,7 @@ pub(crate) use linux_impl::{PageServer, PageServerHandle, PageSource};
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use super::{file_offset_for, page_align_down, region_for, HotsetProfile, HotsetTrace, Region, TraceEntry, U1Receipt};
+    use super::{file_offset_for, host_page_for_offset, page_align_down, region_for, HotsetProfile, HotsetTrace, Region, TraceEntry, U1Receipt};
     use capsulefs::{BlobManifest, CasStore, LazyBlobReader, MEMORY_PAGE_CHUNK_SIZE};
     use std::collections::HashMap;
     use std::io;
@@ -523,20 +538,21 @@ mod linux_impl {
         // and the guest demand-faults far fewer pages. EEXIST (guest beat us to it) is
         // benign. Non-hotset faults queue in the uffd and drain in the demand loop.
         if let Some(profile) = hotset {
-            for &page_gpa in &profile.pages {
+            for &file_offset in &profile.offsets {
                 if shared.stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let fault_page = page_align_down(page_gpa, page_size as u64);
-                let Some(region) = region_for(&regions, fault_page) else { continue };
-                let file_offset = file_offset_for(region, fault_page);
+                let aligned = page_align_down(file_offset, page_size as u64);
+                // Map the stable file offset to THIS run's host page address.
+                let Some(fault_page) = host_page_for_offset(&regions, aligned) else { continue };
                 let t0 = Instant::now();
-                if let Ok(bytes) = source.serve_fault(uffd_fd, fault_page, file_offset, page_size) {
+                if let Ok(bytes) = source.serve_fault(uffd_fd, fault_page, aligned, page_size) {
                     shared.prefetch_count.fetch_add(1, Ordering::SeqCst);
                     shared.bytes_copied.fetch_add(bytes, Ordering::SeqCst);
                     if let Ok(mut t) = shared.trace.lock() {
                         t.push(TraceEntry {
                             page_gpa: fault_page,
+                            file_offset: aligned,
                             first_fault_at_us: loop_start.elapsed().as_micros(),
                             fault_service_us: t0.elapsed().as_micros(),
                             source: "prefetch".to_string(),
@@ -619,6 +635,7 @@ mod linux_impl {
                     if let Ok(mut t) = shared.trace.lock() {
                         t.push(TraceEntry {
                             page_gpa: fault_page,
+                            file_offset,
                             first_fault_at_us: at_us,
                             fault_service_us: service_us,
                             source: "demand".to_string(),
