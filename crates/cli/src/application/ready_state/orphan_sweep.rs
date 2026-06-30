@@ -3,15 +3,26 @@
 //! A long-lived Firecracker serving session leaves a writable overlay at
 //! `<run-root>/ready-state-<pid>/` with a `.fc-session.json` record
 //! (`{pid, tap, session_id}`). If the run process (or the host) crashes, the
-//! overlay is orphaned. This sweep reclaims them, fail-closed:
+//! overlay is orphaned. This sweep reclaims them — but **never destroys a live or
+//! in-progress session**, so it is conservative:
 //!
-//! - **record present + VMM pid alive** → a live serving session; left untouched.
-//! - **record present + VMM pid dead** → orphan; **reaped via the backend's
+//! - **usable record + VMM pid alive** → a live serving session; left untouched.
+//! - **usable record + VMM pid dead** → orphan; **reaped via the backend's
 //!   record-driven `stop`** — the *same* path `ato stop` uses (kill recorded pid,
-//!   delete recorded tap, remove the lockfile, remove the overlay), never a
+//!   delete recorded **tap**, remove the lockfile, remove the overlay), never a
 //!   re-implementation.
-//! - **no usable record** → it cannot be reaped safely (no pid/tap), so it is
-//!   **quarantined** (moved aside, never blind-deleted) for operator inspection.
+//! - **no usable record, overlay younger than [`ORPHAN_GRACE`]** → **skipped**: a
+//!   concurrent `ato run` may have just created the dir and not yet written its
+//!   `.fc-session.json`; quarantining it would destroy a live restore.
+//! - **no usable record, overlay older than the grace window** → **quarantined**
+//!   (moved aside, never blind-deleted) for operator inspection.
+//!
+//! A record is *usable* only when it has a non-zero `pid` **and** a non-empty
+//! `tap` ([`read_usable_record`]). Record-driven Firecracker teardown deletes the
+//! **recorded** tap; a record without a usable tap would force `backend.stop` to
+//! fall back to a default/current tap and risk deleting the wrong device — so
+//! such a record (and any malformed/partially-written one) is treated as *no
+//! usable record* and quarantined after the grace window, never reaped.
 //!
 //! Scope: Linux / Firecracker / Ready-State only (behind `ATO_READY_STATE_ENABLED`).
 //! No Desktop Runner, no CRIU, no `BindingLease`. Reuses
@@ -21,6 +32,7 @@
 //! ([`classify`]) and unit-tested KVM-free with the Fake backend.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -32,14 +44,18 @@ const OVERLAY_PREFIX: &str = "ready-state-";
 const SESSION_RECORD: &str = ".fc-session.json";
 /// Sub-dir of the run root that unrecorded overlays are moved into.
 const QUARANTINE_DIR: &str = "quarantine";
+/// An overlay younger than this with no usable record may be a concurrent
+/// restore mid-flight (dir created, record not yet written) — skip it, don't
+/// quarantine. Tuned to comfortably exceed the restore→record-write window.
+const ORPHAN_GRACE: Duration = Duration::from_secs(30);
 
 /// Parsed `.fc-session.json` — the record the Firecracker restore stamps so a
-/// cross-process reap has the authoritative pid + tap.
+/// cross-process reap has the authoritative pid **and** tap. `tap` is required:
+/// a record missing it is not usable for record-driven teardown.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct FcSessionRecord {
     pid: u32,
-    #[serde(default)]
-    tap: Option<String>,
+    tap: String,
     #[serde(default)]
     session_id: Option<String>,
 }
@@ -48,22 +64,32 @@ struct FcSessionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "disposition", rename_all = "snake_case")]
 pub(crate) enum Disposition {
-    /// Record present + VMM pid alive → a live serving session; untouched.
+    /// Usable record + VMM pid alive → a live serving session; untouched.
     Live { pid: u32 },
-    /// Record present + VMM pid dead → orphan; reaped via the backend.
+    /// Usable record + VMM pid dead → orphan; reaped via the backend.
     Reap { pid: u32 },
-    /// No usable record → cannot reap safely; quarantined for inspection.
+    /// No usable record but the overlay is younger than the grace window — it may
+    /// be a concurrent restore mid-flight; left untouched this pass.
+    Skip { reason: String },
+    /// No usable record and past the grace window → quarantined for inspection.
     Quarantine { reason: String },
 }
 
-/// Pure classification — the side-effecting pid probe is injected so this is
-/// unit-tested without a live process.
-fn classify(record: Option<&FcSessionRecord>, pid_alive: bool) -> Disposition {
+/// Pure classification — the side-effecting pid probe and freshness check are
+/// injected so the full matrix is unit-tested without a live process / clock.
+///
+/// `fresh` matters only when there is no usable record (a usable record always
+/// resolves to Live/Reap regardless of overlay age).
+fn classify(record: Option<&FcSessionRecord>, pid_alive: bool, fresh: bool) -> Disposition {
     match record {
         Some(r) if pid_alive => Disposition::Live { pid: r.pid },
         Some(r) => Disposition::Reap { pid: r.pid },
+        None if fresh => Disposition::Skip {
+            reason: "fresh overlay with no usable record (possible in-progress restore)"
+                .to_string(),
+        },
         None => Disposition::Quarantine {
-            reason: "no .fc-session.json record".to_string(),
+            reason: "no usable .fc-session.json record (pid+tap)".to_string(),
         },
     }
 }
@@ -73,7 +99,7 @@ fn classify(record: Option<&FcSessionRecord>, pid_alive: bool) -> Disposition {
 pub(crate) struct OverlayOutcome {
     pub(crate) overlay: String,
     pub(crate) disposition: Disposition,
-    /// Whether the reap/quarantine action was carried out (false for Live,
+    /// Whether the reap/quarantine action was carried out (false for Live, Skip,
     /// dry-run, or a recorded failure).
     pub(crate) acted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,18 +113,24 @@ pub(crate) struct SweepReport {
     pub(crate) scanned: usize,
     pub(crate) live: usize,
     pub(crate) reaped: usize,
+    pub(crate) skipped: usize,
     pub(crate) quarantined: usize,
     pub(crate) failed: usize,
     pub(crate) outcomes: Vec<OverlayOutcome>,
 }
 
 /// Sweep orphan Ready-State overlays under the run root with the live host pid
-/// probe. Best-effort: a per-overlay failure is recorded, never propagated.
+/// probe and overlay-mtime freshness. Best-effort: a per-overlay failure is
+/// recorded, never propagated.
 pub(crate) fn sweep(backend: &dyn SnapshotBackend, dry_run: bool) -> SweepReport {
     let root = capsule::common::paths::ato_path_or_workspace_tmp("run");
-    sweep_in(&root, backend, dry_run, &|pid| {
-        capsule::state::session::process::pid_is_alive(pid)
-    })
+    sweep_in(
+        &root,
+        backend,
+        dry_run,
+        &|pid| capsule::state::session::process::pid_is_alive(pid),
+        &|path| overlay_is_fresh(path, ORPHAN_GRACE),
+    )
 }
 
 /// Testable core: enumerate `ready-state-*` overlays under `root` and act on each.
@@ -107,6 +139,7 @@ fn sweep_in(
     backend: &dyn SnapshotBackend,
     dry_run: bool,
     pid_alive: &dyn Fn(u32) -> bool,
+    is_fresh: &dyn Fn(&Path) -> bool,
 ) -> SweepReport {
     let mut report = SweepReport {
         root: root.display().to_string(),
@@ -123,13 +156,20 @@ fn sweep_in(
         }
         report.scanned += 1;
 
-        let record = read_record(&path);
+        let record = read_usable_record(&path);
         let alive = record.as_ref().map(|r| pid_alive(r.pid)).unwrap_or(false);
-        let disposition = classify(record.as_ref(), alive);
+        // Freshness only matters for the no-usable-record branch; compute it
+        // only then so a recorded overlay never depends on mtime.
+        let fresh = record.is_none() && is_fresh(&path);
+        let disposition = classify(record.as_ref(), alive, fresh);
 
         let (acted, note) = match &disposition {
             Disposition::Live { .. } => {
                 report.live += 1;
+                (false, None)
+            }
+            Disposition::Skip { .. } => {
+                report.skipped += 1;
                 (false, None)
             }
             Disposition::Reap { pid } => {
@@ -175,14 +215,40 @@ fn sweep_in(
     report
 }
 
-fn read_record(overlay: &Path) -> Option<FcSessionRecord> {
+/// Read a `.fc-session.json` record only if it is **usable** for record-driven
+/// teardown: parseable, non-zero `pid`, and a non-empty `tap`. A missing,
+/// malformed, partially-written, or tap-less record returns `None` (→ treated as
+/// no usable record), so we never reap on incomplete information.
+fn read_usable_record(overlay: &Path) -> Option<FcSessionRecord> {
     let raw = std::fs::read_to_string(overlay.join(SESSION_RECORD)).ok()?;
-    serde_json::from_str(&raw).ok()
+    let record: FcSessionRecord = serde_json::from_str(&raw).ok()?;
+    if record.pid == 0 || record.tap.trim().is_empty() {
+        return None;
+    }
+    Some(record)
+}
+
+/// Whether `overlay`'s mtime is younger than `grace`. Conservative: if the mtime
+/// cannot be determined (or is in the future), treat the overlay as fresh so a
+/// possibly-live restore is skipped rather than quarantined.
+fn overlay_is_fresh(overlay: &Path, grace: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(overlay) else {
+        return true;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return true;
+    };
+    match mtime.elapsed() {
+        Ok(age) => age < grace,
+        Err(_) => true, // mtime in the future → treat as fresh.
+    }
 }
 
 /// Reap via the backend's record-driven `stop` (the same teardown `ato stop`
 /// uses): kill the recorded pid, delete the recorded tap, remove the lockfile,
-/// and remove the overlay. We do **not** re-implement that sequence here.
+/// and remove the overlay. We do **not** re-implement that sequence here. Only
+/// reached for a usable record (pid + tap), so `backend.stop` reads the same
+/// record and deletes the recorded tap.
 fn reap(
     backend: &dyn SnapshotBackend,
     overlay: &Path,
@@ -226,6 +292,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    /// An overlay with a usable record (pid + tap).
     fn overlay_with_record(root: &Path, name: &str, pid: u32) -> PathBuf {
         let dir = root.join(name);
         fs::create_dir_all(&dir).unwrap();
@@ -237,6 +304,15 @@ mod tests {
         dir
     }
 
+    /// An overlay whose record has a pid but no tap (not usable).
+    fn overlay_with_pid_no_tap(root: &Path, name: &str, pid: u32) -> PathBuf {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SESSION_RECORD), format!(r#"{{"pid":{pid}}}"#)).unwrap();
+        dir
+    }
+
+    /// An overlay with no record at all (e.g. a just-created restore dir).
     fn overlay_without_record(root: &Path, name: &str) -> PathBuf {
         let dir = root.join(name);
         fs::create_dir_all(&dir).unwrap();
@@ -244,19 +320,55 @@ mod tests {
         dir
     }
 
+    const ALWAYS_OLD: &dyn Fn(&Path) -> bool = &|_| false;
+    const ALWAYS_FRESH: &dyn Fn(&Path) -> bool = &|_| true;
+
     #[test]
-    fn classify_is_live_reap_quarantine() {
+    fn classify_covers_live_reap_skip_quarantine() {
         let rec = FcSessionRecord {
             pid: 42,
-            tap: Some("tap0".into()),
+            tap: "tap0".into(),
             session_id: Some("s".into()),
         };
-        assert_eq!(classify(Some(&rec), true), Disposition::Live { pid: 42 });
-        assert_eq!(classify(Some(&rec), false), Disposition::Reap { pid: 42 });
+        assert_eq!(
+            classify(Some(&rec), true, false),
+            Disposition::Live { pid: 42 }
+        );
+        assert_eq!(
+            classify(Some(&rec), false, false),
+            Disposition::Reap { pid: 42 }
+        );
         assert!(matches!(
-            classify(None, false),
+            classify(None, false, true),
+            Disposition::Skip { .. }
+        ));
+        assert!(matches!(
+            classify(None, false, false),
             Disposition::Quarantine { .. }
         ));
+    }
+
+    #[test]
+    fn read_usable_record_requires_pid_and_tap() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_usable_record(&overlay_with_record(tmp.path(), "ready-state-1", 1)).is_some());
+        assert!(
+            read_usable_record(&overlay_with_pid_no_tap(tmp.path(), "ready-state-2", 2)).is_none()
+        );
+        // Empty tap and pid=0 are both unusable.
+        let d = tmp.path().join("ready-state-3");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(SESSION_RECORD), r#"{"pid":3,"tap":"  "}"#).unwrap();
+        assert!(read_usable_record(&d).is_none());
+        let d = tmp.path().join("ready-state-4");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(SESSION_RECORD), r#"{"pid":0,"tap":"tap0"}"#).unwrap();
+        assert!(read_usable_record(&d).is_none());
+        // Malformed / partially-written JSON → unusable, not a panic.
+        let d = tmp.path().join("ready-state-5");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(SESSION_RECORD), r#"{"pid":5,"tap":"tap"#).unwrap();
+        assert!(read_usable_record(&d).is_none());
     }
 
     #[test]
@@ -264,46 +376,82 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = overlay_with_record(tmp.path(), "ready-state-111", 111);
         let backend = FakeSnapshotBackend::new();
-        // pid reported alive → Live.
-        let report = sweep_in(tmp.path(), &backend, false, &|_| true);
-        assert_eq!(report.scanned, 1);
+        let report = sweep_in(tmp.path(), &backend, false, &|_| true, ALWAYS_OLD);
         assert_eq!(report.live, 1);
         assert_eq!(report.reaped, 0);
         assert!(dir.exists(), "a live session's overlay must not be removed");
     }
 
     #[test]
-    fn dead_session_overlay_is_reaped_via_backend() {
+    fn dead_session_with_pid_and_tap_is_reaped() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = overlay_with_record(tmp.path(), "ready-state-222", 222);
         let backend = FakeSnapshotBackend::new();
-        // pid reported dead → Reap → backend.stop removes the overlay.
-        let report = sweep_in(tmp.path(), &backend, false, &|_| false);
+        // pid dead → Reap → backend.stop removes the overlay.
+        let report = sweep_in(tmp.path(), &backend, false, &|_| false, ALWAYS_OLD);
         assert_eq!(report.reaped, 1);
         assert_eq!(report.failed, 0);
-        assert!(!dir.exists(), "orphan overlay should be reaped");
+        assert!(
+            !dir.exists(),
+            "orphan overlay with pid+tap should be reaped"
+        );
     }
 
     #[test]
-    fn unrecorded_overlay_is_quarantined_not_deleted() {
+    fn record_with_pid_but_no_tap_is_quarantined_not_reaped() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = overlay_without_record(tmp.path(), "ready-state-333");
+        let dir = overlay_with_pid_no_tap(tmp.path(), "ready-state-333", 333);
         let backend = FakeSnapshotBackend::new();
-        let report = sweep_in(tmp.path(), &backend, false, &|_| false);
+        // Even with a dead pid, a tap-less record must NOT be reaped.
+        let report = sweep_in(tmp.path(), &backend, false, &|_| false, ALWAYS_OLD);
+        assert_eq!(report.reaped, 0);
+        assert_eq!(report.quarantined, 1);
+        assert!(!dir.exists());
+        assert!(
+            tmp.path()
+                .join(QUARANTINE_DIR)
+                .join("ready-state-333")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn fresh_no_record_overlay_is_skipped_not_quarantined() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = overlay_without_record(tmp.path(), "ready-state-444");
+        let backend = FakeSnapshotBackend::new();
+        // Fresh (younger than grace) → Skip; a concurrent restore may own it.
+        let report = sweep_in(tmp.path(), &backend, false, &|_| false, ALWAYS_FRESH);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.quarantined, 0);
+        assert!(
+            dir.exists(),
+            "a fresh in-progress overlay must not be touched"
+        );
+    }
+
+    #[test]
+    fn old_no_record_overlay_is_quarantined_preserving_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = overlay_without_record(tmp.path(), "ready-state-555");
+        let backend = FakeSnapshotBackend::new();
+        let report = sweep_in(tmp.path(), &backend, false, &|_| false, ALWAYS_OLD);
         assert_eq!(report.quarantined, 1);
         assert!(!dir.exists(), "original overlay moved");
-        let quarantined = tmp.path().join(QUARANTINE_DIR).join("ready-state-333");
-        assert!(quarantined.exists(), "overlay preserved under quarantine/");
-        assert!(quarantined.join("some-state").exists(), "state preserved");
+        let q = tmp.path().join(QUARANTINE_DIR).join("ready-state-555");
+        assert!(
+            q.exists() && q.join("some-state").exists(),
+            "state preserved"
+        );
     }
 
     #[test]
     fn dry_run_acts_on_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let reapable = overlay_with_record(tmp.path(), "ready-state-444", 444);
-        let unrecorded = overlay_without_record(tmp.path(), "ready-state-555");
+        let reapable = overlay_with_record(tmp.path(), "ready-state-666", 666);
+        let unrecorded = overlay_without_record(tmp.path(), "ready-state-777");
         let backend = FakeSnapshotBackend::new();
-        let report = sweep_in(tmp.path(), &backend, true, &|_| false);
+        let report = sweep_in(tmp.path(), &backend, true, &|_| false, ALWAYS_OLD);
         assert_eq!(report.scanned, 2);
         assert_eq!(report.reaped, 0);
         assert_eq!(report.quarantined, 0);
@@ -320,7 +468,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("engine-logs")).unwrap();
         fs::write(tmp.path().join("ready-state-not-a-dir"), b"file").unwrap();
         let backend = FakeSnapshotBackend::new();
-        let report = sweep_in(tmp.path(), &backend, false, &|_| false);
+        let report = sweep_in(tmp.path(), &backend, false, &|_| false, ALWAYS_OLD);
         assert_eq!(report.scanned, 0, "only ready-state-* dirs are scanned");
     }
 
@@ -328,9 +476,22 @@ mod tests {
     fn missing_root_is_a_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let backend = FakeSnapshotBackend::new();
-        let report = sweep_in(&tmp.path().join("does-not-exist"), &backend, false, &|_| {
-            false
-        });
+        let report = sweep_in(
+            &tmp.path().join("does-not-exist"),
+            &backend,
+            false,
+            &|_| false,
+            ALWAYS_OLD,
+        );
         assert_eq!(report.scanned, 0);
+    }
+
+    #[test]
+    fn overlay_is_fresh_uses_mtime_grace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = overlay_without_record(tmp.path(), "ready-state-888");
+        // Just-created → fresh under a 30s grace, not fresh under a 0s grace.
+        assert!(overlay_is_fresh(&dir, Duration::from_secs(30)));
+        assert!(!overlay_is_fresh(&dir, Duration::from_secs(0)));
     }
 }
