@@ -199,6 +199,11 @@ impl DesktopRunnerFacts {
     }
 
     /// Render the facts as a stable, pretty JSON receipt.
+    ///
+    /// Test-only today: the live `ato doctor desktop-runner --json` emits the
+    /// richer `{facts, placement}` report, and the smoke's skip path dumps facts.
+    /// The M3 run path will log facts from non-test code and drop the `cfg`.
+    #[cfg(test)]
     pub(crate) fn to_receipt_json(&self) -> String {
         // DesktopRunnerFacts is always serializable (no NaN floats / non-string
         // keys), so this never fails; fall back to a debug string if it ever does.

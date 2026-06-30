@@ -1,32 +1,88 @@
 //! `ato doctor desktop-runner` — surface the Desktop Runner capability probe
-//! ([`super::probe`]) to developers (MacBook M1).
+//! ([`super::probe`]) and placement decision ([`super::placement`]) to
+//! developers (MacBook M1 + M2).
 //!
 //! Read-only and side-effect free, exactly like the probe: it reports what this
 //! host *could* run as a local Ato Runner provider — it never starts the
-//! `container` service and never launches a workload. `--json` emits the raw
-//! [`DesktopRunnerFacts`] receipt; the default is a human summary.
+//! `container` service and never launches a workload. `--json` emits a
+//! `{facts, placement}` receipt; the default is a human summary. The placement
+//! is a *decision*, not an execution (`is_executable_now: false`).
 //!
 //! Diagnostics (e.g. "macOS 26+ required") are surfaced **only** here, when the
 //! user explicitly invokes this command — never during normal startup.
 //!
-//! [`human_summary`] is a pure function of the facts so the rendering is
-//! unit-tested against constructed hosts without a real Mac.
+//! [`human_summary`] and [`placement_summary`] are pure functions of their
+//! inputs so the rendering is unit-tested against constructed hosts without a
+//! real Mac.
 
 use std::fmt::Write as _;
 
 use anyhow::Result;
+use capsule::foundation::install_lifecycle::RunnerClassFacts;
+use serde::Serialize;
 
 use super::facts::DesktopRunnerFacts;
+use super::placement::{DesktopPlacementDecision, decide};
 
-/// Run `ato doctor desktop-runner`. `json` ⇒ raw facts receipt; else human table.
+/// Run `ato doctor desktop-runner`. `json` ⇒ a `{facts, placement}` receipt; else
+/// a human summary. Read-only: probing only, no service start, no execution.
 pub(crate) fn run(json: bool) -> Result<()> {
     let facts = super::probe();
+    // Decide what this host *would* do for a cold run — a decision, not an
+    // execution. `None` artifact = the no-specific-capsule (cold) scenario.
+    let ready_state_enabled = crate::application::ready_state::flags::ready_state_enabled();
+    let decision = decide(
+        &facts,
+        &RunnerClassFacts::from_host(),
+        None,
+        ready_state_enabled,
+    );
+
     if json {
-        println!("{}", facts.to_receipt_json());
+        #[derive(Serialize)]
+        struct Report<'a> {
+            facts: &'a DesktopRunnerFacts,
+            placement: &'a DesktopPlacementDecision,
+        }
+        let report = Report {
+            facts: &facts,
+            placement: &decision,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         print!("{}", human_summary(&facts));
+        print!("{}", placement_summary(&decision));
     }
     Ok(())
+}
+
+/// Render the placement-decision section of the human summary (pure).
+pub(crate) fn placement_summary(decision: &DesktopPlacementDecision) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "  placement (ready-state {}): {}",
+        if decision.ready_state_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        decision.placement,
+    );
+    if let Some(b) = &decision.backend_substrate {
+        let _ = writeln!(s, "    backend: {b}");
+    }
+    let _ = writeln!(s, "    reason: {}", decision.reason);
+    if decision.suggests_managed_runner() {
+        let _ = writeln!(s, "    recommended: managed runner");
+    }
+    // Make the M2 boundary explicit: this is a decision, not a run.
+    let _ = writeln!(
+        s,
+        "    note: local execution is not wired yet (decision only)"
+    );
+    s
 }
 
 /// Render the developer-facing human summary (pure).
@@ -142,6 +198,29 @@ mod tests {
             out.contains("fallback:") && out.contains("managed runner"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn placement_summary_shows_decision_and_decision_only_note() {
+        let facts = build_macos_facts(&inputs(), "0.7.0");
+        // Ready-State disabled cold scenario → local cold-OCI candidate.
+        let decision = decide(&facts, &RunnerClassFacts::from_host(), None, false);
+        let out = placement_summary(&decision);
+        assert!(out.contains("placement (ready-state disabled)"), "{out}");
+        assert!(out.contains("local_cold_oci_candidate"), "{out}");
+        assert!(out.contains("decision only"), "{out}");
+    }
+
+    #[test]
+    fn placement_summary_recommends_managed_runner_when_unsupported() {
+        let mut i = inputs();
+        i.container_path = None;
+        i.container_version = None;
+        let facts = build_macos_facts(&i, "0.7.0");
+        let decision = decide(&facts, &RunnerClassFacts::from_host(), None, false);
+        let out = placement_summary(&decision);
+        assert!(out.contains("suggest_managed_runner"), "{out}");
+        assert!(out.contains("recommended: managed runner"), "{out}");
     }
 
     #[test]
