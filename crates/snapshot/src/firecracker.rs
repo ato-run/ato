@@ -46,23 +46,25 @@ use std::time::{Duration, Instant};
 
 use capsule::foundation::install_lifecycle::RunnerClassFacts;
 use capsulefs::{
-    BlobManifest, CasStore, ChunkingKind, HotsetRecorder, LayerKind, LazyBlobReader,
-    MEMORY_PAGE_CHUNK_SIZE, store_blob,
+    BlobManifest, CasStore, ChunkingKind, HotsetRecorder, LayerKind, LazyBlobReader, store_blob,
 };
 use serde_json::json;
 
 use crate::backend::{
-    BackendCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
+    BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
     TeardownReceipt,
 };
 use crate::manifest::{
-    NoSecretProof, ReadyStateLayers, ReadyStateManifest, RestoreContract, SnapshotBackendInfo,
-    READY_STATE_SCHEMA,
+    NoSecretProof, ReadyStateManifest, RestoreContract, SnapshotBackendInfo, READY_STATE_SCHEMA,
 };
 use crate::bench;
 use crate::scanner;
+#[cfg(test)]
+use crate::backend::BuildLayers;
+#[cfg(test)]
+use crate::manifest::ReadyStateLayers;
 
 pub const FIRECRACKER_BACKEND_ID: &str = "firecracker";
 const KVM_DEVICE: &str = "/dev/kvm";
@@ -522,43 +524,43 @@ impl SnapshotBackend for FirecrackerBackend {
             Err(e) => { let _ = std::fs::remove_dir_all(&build_dir); return Err(e); }
         };
 
-        // ── no-secret gate over all sealed layers (high-entropy advisory) ────
-        let sealed = BuildLayers {
-            rootfs: input.layers.rootfs.clone(),
-            runtime: input.layers.runtime.clone(),
-            dependency: input.layers.dependency.clone(),
-            app: input.layers.app.clone(),
-            vmstate: vmstate.clone(),
-            memory: mem.clone(),
-        };
-        let report = bench::time("build.no_secret_scan", || {
-            scanner::scan_build_layers(&sealed, &input.declared_secret_markers)
+        // ── seal + no-secret scan via the shared orchestration ───────────────
+        // rootfs was already stored above (for the stable drive path) → pass it
+        // as prestored. vmstate/mem are scanned by REFERENCE — no clone of the
+        // ~100s-of-MB images. Declared markers fail closed on every layer;
+        // provider/env block on app/dependency; the large opaque layers are
+        // advisory + content-cached + budgeted.
+        let cache = crate::scan_cache::ScanCache::open(input.store.root());
+        let out = bench::time("build.seal_and_scan", || {
+            crate::seal::seal_and_scan(
+                input.store,
+                crate::seal::SealLayersRef {
+                    rootfs: &input.layers.rootfs,
+                    runtime: input.layers.runtime.as_deref(),
+                    dependency: input.layers.dependency.as_deref(),
+                    app: input.layers.app.as_deref(),
+                    vmstate: &vmstate,
+                    memory: &mem,
+                },
+                &input.declared_secret_markers,
+                &cache,
+                crate::seal::advisory_budget_from_env(),
+                Some(rootfs_blob),
+            )
         });
-        if !report.declared_hits.is_empty() {
-            let _ = std::fs::remove_dir_all(&build_dir);
-            return Err(SnapshotError::SecretFoundInSnapshot(report.declared_hits));
-        }
-        let blocking = report.blocking();
-        if !blocking.is_empty() {
-            let _ = std::fs::remove_dir_all(&build_dir);
-            return Err(SnapshotError::SecretScanFindings(blocking.into_iter().cloned().collect()));
-        }
-        let advisories = scanner::advisory_summaries_capped(&report, 50);
-
-        let page = ChunkingKind::PageAligned { page_size: MEMORY_PAGE_CHUNK_SIZE as u64 };
-        let seal = |kind: LayerKind, bytes: Option<&[u8]>, ch: ChunkingKind| -> Result<Option<BlobManifest>, SnapshotError> {
-            match bytes { Some(b) => Ok(Some(store_blob(input.store, kind, b, ch)?)), None => Ok(None) }
+        // seal_and_scan fails closed (nothing stored) on declared/blocking hits.
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&build_dir);
+                return Err(e);
+            }
         };
-        let layers = bench::time("build.seal_store", || -> Result<ReadyStateLayers, SnapshotError> {
-            Ok(ReadyStateLayers {
-                rootfs: Some(rootfs_blob), // already stored above
-                runtime: seal(LayerKind::Runtime, input.layers.runtime.as_deref(), cd)?,
-                dependency: seal(LayerKind::Dependency, input.layers.dependency.as_deref(), cd)?,
-                app: seal(LayerKind::App, input.layers.app.as_deref(), cd)?,
-                vmstate: seal(LayerKind::VmState, Some(&vmstate), cd)?,
-                memory: seal(LayerKind::Memory, Some(&mem), page)?,
-            })
-        })?;
+        let advisories = scanner::advisory_summaries_capped(&out.report, 50);
+        let coverage = out.coverage;
+        let sealed_bytes = out.sealed_bytes;
+        let layers = out.layers;
+
         let mut rec = HotsetRecorder::new();
         if let Some(m) = &layers.memory { rec.extend_from_manifest(m); }
         if let Some(r) = &layers.rootfs { rec.extend_from_manifest(r); }
@@ -570,8 +572,8 @@ impl SnapshotBackend for FirecrackerBackend {
             findings: Vec::new(),
             advisories,
             verdict: "clean".to_string(),
+            coverage,
         };
-        let sealed_bytes = layers.iter().map(|(_, m)| m.total_len).sum();
         let runner_class_id = Some(input.runner_class.unwrap_or_else(|| self.runner_facts().id()));
         let manifest = ReadyStateManifest {
             schema: READY_STATE_SCHEMA.to_string(),

@@ -11,10 +11,7 @@
 
 use std::path::Path;
 
-use capsulefs::{
-    BlobManifest, CasStore, ChunkingKind, HotsetRecorder, LayerKind, MEMORY_PAGE_CHUNK_SIZE,
-    store_blob,
-};
+use capsulefs::{CasStore, HotsetRecorder};
 
 use crate::backend::{
     BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
@@ -22,7 +19,7 @@ use crate::backend::{
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
 };
 use crate::manifest::{
-    NoSecretProof, ReadyStateLayers, ReadyStateManifest, SnapshotBackendInfo, READY_STATE_SCHEMA,
+    NoSecretProof, ReadyStateManifest, SnapshotBackendInfo, READY_STATE_SCHEMA,
 };
 use crate::scanner;
 
@@ -40,18 +37,6 @@ impl FakeSnapshotBackend {
 }
 
 /// Store one optional layer, returning its `BlobManifest`.
-fn seal_layer(
-    store: &CasStore,
-    kind: LayerKind,
-    bytes: Option<&[u8]>,
-    chunking: ChunkingKind,
-) -> Result<Option<BlobManifest>, SnapshotError> {
-    match bytes {
-        Some(b) => Ok(Some(store_blob(store, kind, b, chunking)?)),
-        None => Ok(None),
-    }
-}
-
 impl SnapshotBackend for FakeSnapshotBackend {
     fn id(&self) -> &str {
         FAKE_BACKEND_ID
@@ -90,48 +75,30 @@ impl SnapshotBackend for FakeSnapshotBackend {
         // findings are ADVISORY only — they false-positive on lockfile hashes /
         // minified assets / binaries in real layers, so they are recorded in the
         // proof, not gated.
-        let report = scanner::scan_build_layers(&input.layers, &input.declared_secret_markers);
-        if !report.declared_hits.is_empty() {
-            return Err(SnapshotError::SecretFoundInSnapshot(report.declared_hits));
-        }
-        let blocking = report.blocking();
-        if !blocking.is_empty() {
-            return Err(SnapshotError::SecretScanFindings(
-                blocking.into_iter().cloned().collect(),
-            ));
-        }
-        let advisories = scanner::advisory_summaries_capped(&report, 50);
-
-        let cd = ChunkingKind::ContentDefined;
-        let page = ChunkingKind::PageAligned {
-            page_size: MEMORY_PAGE_CHUNK_SIZE as u64,
-        };
-
-        let layers = ReadyStateLayers {
-            rootfs: seal_layer(input.store, LayerKind::Rootfs, Some(&input.layers.rootfs), cd)?,
-            runtime: seal_layer(
-                input.store,
-                LayerKind::Runtime,
-                input.layers.runtime.as_deref(),
-                cd,
-            )?,
-            dependency: seal_layer(
-                input.store,
-                LayerKind::Dependency,
-                input.layers.dependency.as_deref(),
-                cd,
-            )?,
-            app: seal_layer(input.store, LayerKind::App, input.layers.app.as_deref(), cd)?,
-            // VM state is small + structured; content-defined is fine.
-            vmstate: seal_layer(
-                input.store,
-                LayerKind::VmState,
-                Some(&input.layers.vmstate),
-                cd,
-            )?,
-            // Memory image is page-chunked for demand paging.
-            memory: seal_layer(input.store, LayerKind::Memory, Some(&input.layers.memory), page)?,
-        };
+        // Seal + scan via the shared orchestration (same policy as Firecracker):
+        // declared markers fail closed on every layer; provider/env block on
+        // app/dependency; large opaque layers are advisory + content-cached +
+        // budgeted. High-entropy is advisory everywhere.
+        let cache = crate::scan_cache::ScanCache::open(input.store.root());
+        let out = crate::seal::seal_and_scan(
+            input.store,
+            crate::seal::SealLayersRef {
+                rootfs: &input.layers.rootfs,
+                runtime: input.layers.runtime.as_deref(),
+                dependency: input.layers.dependency.as_deref(),
+                app: input.layers.app.as_deref(),
+                vmstate: &input.layers.vmstate,
+                memory: &input.layers.memory,
+            },
+            &input.declared_secret_markers,
+            &cache,
+            crate::seal::advisory_budget_from_env(),
+            None,
+        )?; // seal_and_scan fails closed (nothing stored) on declared/blocking hits
+        let advisories = scanner::advisory_summaries_capped(&out.report, 50);
+        let coverage = out.coverage;
+        let sealed_bytes = out.sealed_bytes;
+        let layers = out.layers;
 
         // Hotset: memory pages first (the demand-paging hot path), then rootfs.
         let mut rec = HotsetRecorder::new();
@@ -153,9 +120,8 @@ impl SnapshotBackend for FakeSnapshotBackend {
             findings: Vec::new(),
             advisories,
             verdict: "clean".to_string(),
+            coverage,
         };
-
-        let sealed_bytes = layers.iter().map(|(_, m)| m.total_len).sum();
 
         let manifest = ReadyStateManifest {
             schema: READY_STATE_SCHEMA.to_string(),
@@ -616,5 +582,61 @@ mod tests {
             "no blocking findings on realistic layers; advisories: {:?}",
             receipt.no_secret_proof.advisories
         );
+    }
+
+    #[test]
+    fn scan_cache_hit_skips_rescan_on_second_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        // Build #1 (cold cache) scans + caches the base layers.
+        let r1 = backend.build_ready_state(build_input(&store, vec![])).unwrap();
+        let rootfs1 = r1.no_secret_proof.coverage.iter().find(|c| c.layer == "rootfs").unwrap();
+        assert_eq!(rootfs1.source, "scanned");
+        // Build #2 (same store, identical layers) reuses the cache — no rescan.
+        let r2 = backend.build_ready_state(build_input(&store, vec![])).unwrap();
+        let rootfs2 = r2.no_secret_proof.coverage.iter().find(|c| c.layer == "rootfs").unwrap();
+        assert_eq!(rootfs2.source, "cache_hit", "identical rootfs must hit the scan cache");
+        // app stays "scanned" — build-authored layers are never cache-consulted.
+        let app2 = r2.no_secret_proof.coverage.iter().find(|c| c.layer == "app").unwrap();
+        assert_eq!(app2.source, "scanned");
+    }
+
+    #[test]
+    fn poisoned_cache_cannot_suppress_app_blocking() {
+        use capsulefs::{store_blob, ChunkingKind, LayerKind};
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let app_bytes = b"token sk-proj-ABCDEFGHIJ1234567890abcdef end".to_vec();
+        // Pre-write a "clean" cache entry at the app blob's id. app is NEVER
+        // cache-consulted, so this poison must not suppress the fail-closed gate.
+        let app_blob = store_blob(&store, LayerKind::App, &app_bytes, ChunkingKind::ContentDefined).unwrap();
+        crate::scan_cache::ScanCache::open(store.root()).put(app_blob.id().hex(), false, &[]);
+        let mut input = build_input(&store, vec![]);
+        input.layers.app = Some(app_bytes);
+        let err = backend.build_ready_state(input).unwrap_err();
+        assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "app must fail closed despite poisoned cache: {err:?}");
+    }
+
+    #[test]
+    fn advisory_budget_caps_large_opaque_layer() {
+        // SAFETY: single-threaded test body; the var is restored at the end.
+        let prev = std::env::var("ATO_SCAN_ADVISORY_BUDGET_BYTES").ok();
+        unsafe { std::env::set_var("ATO_SCAN_ADVISORY_BUDGET_BYTES", "1024") };
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        // build_input's memory layer is 300_000 bytes > 1024 budget → capped.
+        let r = backend.build_ready_state(build_input(&store, vec![])).unwrap();
+        let mem = r.no_secret_proof.coverage.iter().find(|c| c.layer == "memory").unwrap();
+        assert_eq!(mem.coverage, "budget_capped");
+        assert!(r.no_secret_proof.is_clean(), "budget cap is advisory — build stays clean");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ATO_SCAN_ADVISORY_BUDGET_BYTES", v),
+                None => std::env::remove_var("ATO_SCAN_ADVISORY_BUDGET_BYTES"),
+            }
+        }
     }
 }
