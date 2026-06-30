@@ -3851,13 +3851,52 @@ where
                 session = %session.session_id,
                 pid = serving_pid,
                 port = ?session.guest_port,
-                "READY-STATE: serving (long-lived; `ato stop` to reap)"
+                "READY-STATE: serving (long-lived)"
             );
+            let port_str = session.guest_port.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+
+            if ready_state::flags::foreground_serve_enabled() {
+                // Foreground serve (Phase 7.5b, opt-in): BLOCK until the guest exits
+                // or Ctrl-C, tearing the microVM down either way. The SIGINT hook
+                // reuses the dep-contract teardown registry; it captures only Send
+                // data (cloned session + id) and reconstructs a fresh Firecracker
+                // backend + ProcessManager inside (cross-process via .fc-session.json),
+                // so it owns no non-Send state. teardown + delete_pid are idempotent,
+                // so double-SIGINT and a SIGINT racing the normal-exit path are safe.
+                use snapshot::SnapshotBackend as _;
+                request
+                    .reporter
+                    .notify(format!(
+                        "🚀 Ready-State microVM serving (ID: {id}) on port {port_str} — Ctrl-C to stop"
+                    ))
+                    .await?;
+                let sigint_session = session.clone();
+                let sigint_id = id.clone();
+                let token = crate::application::pipeline::cleanup::register_dep_contract_sigint_teardown(
+                    move || {
+                        let _ = snapshot::FirecrackerBackend::new().stop(sigint_session);
+                        if let Ok(pm) = crate::runtime::process::ProcessManager::new() {
+                            let _ = pm.delete_pid(&sigint_id);
+                        }
+                    },
+                );
+                let exit = crate::executors::source::wait_for_pid_exit(serving_pid as u32).await;
+                // Normal exit (guest shut down on its own): drop the now-stale SIGINT
+                // hook so it can't double-fire, then reap tap/overlay/lock + pid record.
+                crate::application::pipeline::cleanup::unregister_dep_contract_sigint_teardown(token);
+                let _ = ready_state::restore::teardown(backend.as_ref(), session);
+                let _ = crate::runtime::process::ProcessManager::new().map(|pm| pm.delete_pid(&id));
+                let code = exit.unwrap_or(0);
+                tracing::info!(target: "ato::ready_state", id = %id, code, "READY-STATE: foreground serve ended");
+                progress.ok(HourglassPhase::Execute, "ready-state microVM exited");
+                return Ok(());
+            }
+
+            // Default (#845): background register-and-return; `ato stop` reaps later.
             request
                 .reporter
                 .notify(format!(
-                    "🚀 Ready-State microVM serving (ID: {id}) on port {} — stop with `ato stop {id}`",
-                    session.guest_port.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+                    "🚀 Ready-State microVM serving (ID: {id}) on port {port_str} — stop with `ato stop {id}`"
                 ))
                 .await?;
             progress.ok(HourglassPhase::Execute, "ready-state microVM serving");
