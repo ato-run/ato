@@ -109,6 +109,102 @@ fn fc_kvm_build_restore_roundtrip() {
     );
 }
 
+// ── U1 (#854): UFFD page-server handshake smokes ───────────────────────────────
+// These set the process-global ATO_FC_UFFD gate, so run the KVM suite with
+// --test-threads=1 (as documented for the fc_kvm_* tests).
+
+fn read_uffd_receipt(overlay: &std::path::Path) -> crate::uffd_page_server::U1Receipt {
+    let text = std::fs::read_to_string(overlay.join(".uffd-receipt.json")).expect("uffd receipt written");
+    serde_json::from_str(&text).expect("parse uffd receipt")
+}
+
+fn assert_clean_teardown(overlay: &std::path::Path) {
+    assert!(!overlay.exists(), "overlay dir not removed");
+    let tap = FirecrackerConfig::default().tap_dev;
+    let taps = std::process::Command::new("ip").args(["link", "show", &tap]).output().unwrap();
+    assert!(!taps.status.success(), "tap {tap} still present after stop");
+    let out = std::process::Command::new("pgrep").args(["-af", "firecracker --api-sock"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).count(),
+        0,
+        "orphan firecracker after stop"
+    );
+    assert!(!overlay.join(".page-server.sock").exists(), "page-server socket not removed");
+}
+
+/// U1a: zero/test pages prove the SCM_RIGHTS fd handoff + region parse + uffd event
+/// loop + UFFDIO_ZEROPAGE plumbing. The guest gets garbage memory, so it does NOT
+/// reach health — we only require the fault loop fired. Teardown must be clean.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_zero_pages_plumbing() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd plumbing needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let overlay = dir.path().join("ov");
+    // SAFETY: KVM suite runs --test-threads=1; gate is removed before returning.
+    unsafe { std::env::set_var("ATO_FC_UFFD", "zero") };
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    unsafe { std::env::remove_var("ATO_FC_UFFD") };
+    let r = r.expect("restore (uffd zero)");
+
+    let rec = read_uffd_receipt(&overlay);
+    assert!(rec.fd_received, "userfault fd received via SCM_RIGHTS");
+    assert!(rec.region_count > 0, "guest regions parsed: {}", rec.region_count);
+    assert!(rec.page_fault_count > 0, "uffd event loop served at least one fault");
+    assert!(rec.bytes_copied > 0, "UFFDIO_ZEROPAGE served bytes");
+    assert!(!rec.vm_reaches_health, "zero pages must NOT reach health");
+    assert!(rec.first_fault_us.is_some(), "first-fault latency recorded");
+    assert_eq!(rec.page_server_pid, Some(std::process::id() as i32), "in-process page-server");
+    eprintln!("### U1a-RECEIPT {}", serde_json::to_string(&rec).unwrap());
+
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
+/// U1b: the page-server serves real pages from the materialized .mem file via
+/// UFFDIO_COPY, so the VM reaches /health. Proves the full UFFD restore handshake
+/// end-to-end (sans CAS, which is U2). Teardown must be clean.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_real_pages_reaches_health() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd serving needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let overlay = dir.path().join("ov");
+    // SAFETY: KVM suite runs --test-threads=1; gate is removed before returning.
+    unsafe { std::env::set_var("ATO_FC_UFFD", "mem") };
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    unsafe { std::env::remove_var("ATO_FC_UFFD") };
+    let r = r.expect("restore (uffd mem)");
+    let port = r.session.guest_port.unwrap_or(8080);
+
+    let rec = read_uffd_receipt(&overlay);
+    assert!(rec.fd_received && rec.region_count > 0);
+    assert!(rec.vm_reaches_health, "UFFDIO_COPY'd real pages must reach health");
+    assert!(rec.time_to_health_ms.is_some(), "time-to-health recorded");
+    assert!(rec.page_fault_count > 0, "working set faulted in: {}", rec.page_fault_count);
+    assert!(rec.bytes_copied > 0 && rec.p50_fault_service_us.is_some() && rec.p95_fault_service_us.is_some());
+
+    // The VM actually served from UFFDIO_COPY'd pages.
+    let gip = FirecrackerConfig::default().guest_ip;
+    assert!(!http_get(&gip, port, "/health").is_empty(), "guest /health reachable over UFFD restore");
+    eprintln!("### U1b-RECEIPT {}", serde_json::to_string(&rec).unwrap());
+
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
 #[test]
 #[ignore]
 fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
