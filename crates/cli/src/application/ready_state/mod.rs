@@ -1,7 +1,7 @@
 //! Ready-State use-case layer (E7): orchestrates the snapshot + capsulefs crates
 //! behind the `ATO_READY_STATE_ENABLED` flag. The build seal branch
 //! ([`build::seal`]) and the run restore sub-mode ([`restore::restore_and_expose`]
-//! + [`runtime_adapter::RestoredRuntimeHandle`]) are wired from
+//! with [`runtime_adapter::RestoredRuntimeHandle`]) are wired from
 //! `cli/commands/build.rs` and `application/pipeline/phases/run.rs` respectively;
 //! everything here is additive and a legacy run never touches it.
 //!
@@ -18,6 +18,9 @@ pub(crate) mod flags;
 pub(crate) mod restore;
 pub(crate) mod runtime_adapter;
 pub(crate) mod store;
+
+#[cfg(test)]
+mod kvm_smoke;
 
 use std::path::{Path, PathBuf};
 
