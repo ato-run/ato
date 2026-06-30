@@ -215,7 +215,11 @@ pub struct LayerScanCoverage {
 }
 
 impl NoSecretProof {
-    /// Whether the scan found nothing.
+    /// Whether the **blocking gate** passed (no declared markers, no app/dependency
+    /// provider/env). NOTE: `verdict == "clean"` means *blocking-gate clean* — not
+    /// that every byte of every layer was heuristically inspected. Advisory
+    /// scans of large opaque layers may be `budget_capped` (see
+    /// [`coverage`](Self::coverage)); consult `coverage` for the full picture.
     pub fn is_clean(&self) -> bool {
         self.findings.is_empty() && self.verdict == "clean"
     }
