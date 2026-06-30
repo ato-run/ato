@@ -12,6 +12,11 @@
 //!    M0 never restores (no backend `supports_ready_state_restore`), so a
 //!    Ready-State run resolves to an **explicit** managed-runner suggestion
 //!    rather than a silent cold fallback or a wrong-class restore.
+//!
+//! This selection layer is wired into a real run/placement decision in MacBook
+//! M2 (#838); until then it is reachable only from tests, hence the scoped
+//! `dead_code` allow (removed when M2 lands).
+#![allow(dead_code)]
 
 use capsule::foundation::install_lifecycle::{RunnerClassFacts, RunnerClassMismatch};
 

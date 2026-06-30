@@ -26,11 +26,12 @@
 //! - Session isolation is per VM (VM-wrapped container); shared caches hold only
 //!   immutable pre-bind artifacts.
 //!
-//! M0 is intentionally **not** wired into `ato run`/runner selection yet (that is
-//! a #838 follow-up), so its placement/receipt surface is reachable only from
-//! tests for now — hence the module-scoped `dead_code` allow.
-#![allow(dead_code)]
+//! The probe is wired into the developer diagnostic `ato doctor desktop-runner`
+//! ([`diagnostics`], MacBook M1). The placement [`matching`] layer is wired into
+//! a real run/selection path in MacBook M2 (#838); until then it carries its own
+//! scoped `dead_code` allow rather than a module-wide one.
 
+pub(crate) mod diagnostics;
 pub(crate) mod facts;
 pub(crate) mod macos;
 pub(crate) mod matching;
@@ -156,15 +157,18 @@ mod tests {
 //
 //   cargo test -p cli desktop_runner::smoke -- --ignored --nocapture
 //
-// It pulls/runs a tiny HTTP OCI image, waits for it to answer, stops it, and
-// prints a [`ColdOciSmokeReceipt`]. It never starts the `container` system
-// service unless `ATO_DESKTOP_SMOKE_START_SERVICE=1` is set (opt-in).
+// It cold-starts a tiny HTTP OCI image, waits for it to answer, then stops and
+// deletes it, and prints a [`ColdOciSmokeReceipt`]. It never starts the
+// `container` system service unless `ATO_DESKTOP_SMOKE_START_SERVICE=1` is set.
+// Hardening (M1): a unique container name per run, a `Drop`-guarded cleanup that
+// always runs (even on a failed assertion), per-command timeouts, and captured
+// stdout/stderr in failure messages.
 #[cfg(test)]
 mod smoke {
     use super::facts::SUBSTRATE_APPLE_CONTAINERIZATION;
     use serde::Serialize;
-    use std::process::Command;
-    use std::time::{Duration, Instant};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// Receipt emitted by the manual cold-OCI smoke.
     #[derive(Debug, Serialize)]
@@ -176,13 +180,123 @@ mod smoke {
         substrate: String,
         isolation_boundary: String,
         ready_state_kind: String,
+        image: String,
         elapsed_start_to_health_ms: u128,
+        cleanup_ok: bool,
+    }
+
+    /// Outcome of one `container` invocation under a timeout.
+    #[derive(Default)]
+    struct CmdResult {
+        timed_out: bool,
+        status_ok: bool,
+        stdout: String,
+        stderr: String,
     }
 
     /// The tiny HTTP image to cold-start. Overridable for offline mirrors.
     fn smoke_image() -> String {
         std::env::var("ATO_DESKTOP_SMOKE_IMAGE")
             .unwrap_or_else(|_| "docker.io/library/python:3-alpine".to_string())
+    }
+
+    /// Run `container <args>` with captured output and a hard timeout. On timeout
+    /// the child is killed. Output is tiny for every command we run here, so
+    /// piping without concurrent draining cannot deadlock.
+    fn container(args: &[&str], timeout: Duration) -> CmdResult {
+        let mut child = match Command::new("container")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return CmdResult {
+                    stderr: format!("spawn `container {}` failed: {e}", args.join(" ")),
+                    ..Default::default()
+                };
+            }
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let out = child.wait_with_output().ok();
+                    let (stdout, stderr) = out
+                        .map(|o| {
+                            (
+                                String::from_utf8_lossy(&o.stdout).into_owned(),
+                                String::from_utf8_lossy(&o.stderr).into_owned(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    return CmdResult {
+                        timed_out: false,
+                        status_ok: status.success(),
+                        stdout,
+                        stderr,
+                    };
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return CmdResult {
+                            timed_out: true,
+                            stderr: format!(
+                                "`container {}` timed out after {timeout:?}",
+                                args.join(" ")
+                            ),
+                            ..Default::default()
+                        };
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => {
+                    return CmdResult {
+                        stderr: format!("wait `container {}` failed: {e}", args.join(" ")),
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+    }
+
+    /// Stops and deletes a container on drop, so a panicking assertion never
+    /// leaves a stray container behind.
+    struct ContainerGuard {
+        name: String,
+        cleaned: bool,
+    }
+
+    impl ContainerGuard {
+        fn new(name: String) -> Self {
+            Self {
+                name,
+                cleaned: false,
+            }
+        }
+
+        /// Stop then delete the container. Returns true once it is gone. Apple
+        /// `container` uses `delete`; fall back to `rm` for other CLIs.
+        fn cleanup(&mut self) -> bool {
+            if self.cleaned {
+                return true;
+            }
+            self.cleaned = true;
+            let _ = container(&["stop", &self.name], Duration::from_secs(15));
+            container(&["delete", &self.name], Duration::from_secs(15)).status_ok
+                || container(&["rm", &self.name], Duration::from_secs(15)).status_ok
+        }
+    }
+
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) {
+            if !self.cleaned {
+                let _ = self.cleanup();
+            }
+        }
     }
 
     #[test]
@@ -208,7 +322,7 @@ mod smoke {
             .is_some_and(|s| s.system_service_running);
         if !service_running {
             if std::env::var("ATO_DESKTOP_SMOKE_START_SERVICE").as_deref() == Ok("1") {
-                let _ = Command::new("container").args(["system", "start"]).status();
+                let _ = container(&["system", "start"], Duration::from_secs(30));
             } else {
                 eprintln!(
                     "SKIP: `container` system service not running; \
@@ -219,43 +333,51 @@ mod smoke {
         }
 
         let image = smoke_image();
-        let name = "ato-desktop-smoke";
-        // Best-effort cleanup of any prior run.
-        let _ = Command::new("container").args(["stop", name]).status();
+        // Unique per run so repeated/parallel smokes never collide on a name.
+        let pid = std::process::id();
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let name = format!("ato-desktop-smoke-{pid}-{millis}");
+        let mut guard = ContainerGuard::new(name.clone());
 
         let started = Instant::now();
-        let run = Command::new("container")
-            .args([
+        let run = container(
+            &[
                 "run",
                 "-d",
                 "--name",
-                name,
+                &name,
                 &image,
                 "python3",
                 "-m",
                 "http.server",
                 "8080",
-            ])
-            .status()
-            .expect("spawn `container run`");
-        assert!(run.success(), "container run failed for {image}");
+            ],
+            Duration::from_secs(120),
+        );
+        assert!(
+            run.status_ok,
+            "`container run` failed for {image} (timed_out={}): {}\n{}",
+            run.timed_out, run.stdout, run.stderr
+        );
 
-        // Poll the container's health for up to 30s.
+        // Poll health for up to 30s.
         let mut healthy = false;
-        let deadline = started + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            let ok = Command::new("container")
-                .args([
+        let health_deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < health_deadline {
+            let probe = container(
+                &[
                     "exec",
-                    name,
+                    &name,
                     "python3",
                     "-c",
                     "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080')",
-                ])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if ok {
+                ],
+                Duration::from_secs(10),
+            );
+            if probe.status_ok {
                 healthy = true;
                 break;
             }
@@ -263,33 +385,26 @@ mod smoke {
         }
         let elapsed = started.elapsed().as_millis();
 
-        // Always stop the container, healthy or not.
-        let _ = Command::new("container").args(["stop", name]).status();
-        let _ = Command::new("container").args(["rm", name]).status();
+        // Explicit cleanup so we can record the outcome; Drop is the backstop.
+        let cleanup_ok = guard.cleanup();
 
         assert!(healthy, "{image} did not become healthy within 30s");
 
-        let macos_version = facts.host_platform_version.clone();
-        let container_version = facts
-            .substrates
-            .iter()
-            .find(|s| s.substrate == SUBSTRATE_APPLE_CONTAINERIZATION)
-            .and_then(|s| s.tool_version.clone());
         let receipt = ColdOciSmokeReceipt {
             host_os: facts.host_os.clone(),
             host_arch: facts.host_arch.clone(),
-            macos_version,
-            container_version,
+            macos_version: facts.host_platform_version.clone(),
+            container_version: facts
+                .substrates
+                .iter()
+                .find(|s| s.substrate == SUBSTRATE_APPLE_CONTAINERIZATION)
+                .and_then(|s| s.tool_version.clone()),
             substrate: backend.substrate.clone(),
-            isolation_boundary: serde_json::to_value(backend.isolation_boundary)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default(),
-            ready_state_kind: serde_json::to_value(backend.ready_state_kind)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default(),
+            isolation_boundary: backend.isolation_boundary.as_str().to_string(),
+            ready_state_kind: backend.ready_state_kind.as_str().to_string(),
+            image,
             elapsed_start_to_health_ms: elapsed,
+            cleanup_ok,
         };
         println!(
             "cold-OCI smoke receipt:\n{}",

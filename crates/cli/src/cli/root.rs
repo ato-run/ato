@@ -1221,4 +1221,16 @@ pub(crate) enum DoctorTarget {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Report this host's readiness to act as a local Desktop Runner: the
+    /// isolation substrate (macOS Apple Containerization / `container`), what it
+    /// can run today (cold OCI), and what is not yet supported (Ready-State
+    /// restore, CRIU, bindings). Read-only: it only probes, never starts the
+    /// `container` service or launches a workload.
+    #[command(name = "desktop-runner")]
+    DesktopRunner {
+        /// Emit machine-readable JSON on stdout instead of a human summary.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
