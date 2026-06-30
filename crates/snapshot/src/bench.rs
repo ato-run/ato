@@ -42,6 +42,27 @@ pub struct Span {
 
 thread_local! {
     static SPANS: RefCell<Vec<Span>> = const { RefCell::new(Vec::new()) };
+    static COUNTS: RefCell<Vec<(&'static str, u64)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Add `n` to a named counter (no-op when instrumentation is off). Used to
+/// attribute work — e.g. bytes scanned vs bytes skipped by the scan cache.
+pub fn count(name: &'static str, n: u64) {
+    if enabled() {
+        COUNTS.with(|c| {
+            let mut c = c.borrow_mut();
+            if let Some(e) = c.iter_mut().find(|(k, _)| *k == name) {
+                e.1 += n;
+            } else {
+                c.push((name, n));
+            }
+        });
+    }
+}
+
+/// Take and clear the counters recorded on this thread since the last drain.
+pub fn drain_counts() -> Vec<(&'static str, u64)> {
+    COUNTS.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// Record a pre-measured span (no-op when instrumentation is off).

@@ -32,6 +32,8 @@ pub mod bench;
 mod fake;
 mod firecracker;
 mod kata;
+mod scan_cache;
+mod seal;
 mod manifest;
 mod placement;
 mod qemu;
@@ -47,14 +49,17 @@ pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend};
 pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
-    NoSecretProof, READY_STATE_SCHEMA, ReadyStateLayers, ReadyStateManifest, RestoreContract,
-    SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackendInfo,
+    LayerScanCoverage, NoSecretProof, READY_STATE_SCHEMA, ReadyStateLayers, ReadyStateManifest,
+    RestoreContract, SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackendInfo,
 };
 pub use placement::{
     BackendRequirements, PlacementError, matches, ready_state_safe, select_ready_state_backend,
 };
 pub use qemu::{QEMU_BACKEND_ID, QemuBackend};
-pub use scanner::{FindingKind, SCANNER_VERSION, ScanReport, SecretFinding};
+pub use scanner::{
+    FindingKind, POLICY_VERSION, SCANNER_VERSION, ScanReport, SecretFinding, policy_fingerprint,
+    scan_build_layers,
+};
 
 #[cfg(test)]
 mod e2e_tests {

@@ -19,8 +19,16 @@
 //! provenance comments — they are not importable (`cli` depends on `capsule`,
 //! `snapshot` cannot depend on `cli`), so no new crate dependency is taken.
 
-/// Scanner version stamped into [`crate::manifest::NoSecretProof`].
+/// Scanner version stamped into [`crate::manifest::NoSecretProof`]. Tracks the
+/// scanning ALGORITHM/code.
 pub const SCANNER_VERSION: &str = "ato-rs-scan/0.2.0";
+
+/// Policy version: tracks the tables + thresholds that change *which bytes* are
+/// flagged (prefix/env tables, MIN_* thresholds, blocking-layer partition).
+/// Both versions key the [`crate::scan_cache::ScanCache`], so editing a table
+/// without bumping this would otherwise reuse stale advisory results — the
+/// `policy_fingerprint_is_pinned` test forces a bump on any table/threshold edit.
+pub const POLICY_VERSION: &str = "ato-rs-policy/1";
 
 // ── tunable thresholds ─────────────────────────────────────────────────────
 // Real provider keys are long, mixed-class tokens. A short/low-entropy suffix is
@@ -46,7 +54,7 @@ const SENSITIVE_ENV_MARKERS: &[&str] = &[
 ];
 
 /// What a finding is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FindingKind {
     /// A known provider-key prefix followed by a token run.
     ProviderKeyPrefix,
@@ -389,6 +397,81 @@ pub fn scan_build_layers(
     }
 }
 
+// ── per-layer entry points for the cached/orchestrated path (seal.rs) ────────
+
+/// Heuristic findings for one layer's bytes (the cacheable, deterministic unit).
+pub fn scan_layer(layer: &'static str, bytes: &[u8]) -> Vec<SecretFinding> {
+    scan_layer_heuristics(layer, bytes)
+}
+
+/// Heuristic scan of one layer bounded to the first `budget` bytes (`budget == 0`
+/// ⇒ unbounded). Returns `(findings, capped)` where `capped` is true when the
+/// layer was longer than the budget — so the no-secret proof can record
+/// `budget_capped` honestly rather than claiming a full clean scan. This bounds
+/// the **advisory** scan of large opaque layers (memory/vmstate) so the build
+/// doesn't block tens of seconds; the build GATE (declared markers + app/dep) is
+/// never budgeted.
+pub fn scan_layer_budgeted(layer: &'static str, bytes: &[u8], budget: usize) -> (Vec<SecretFinding>, bool) {
+    if budget == 0 || bytes.len() <= budget {
+        (scan_layer_heuristics(layer, bytes), false)
+    } else {
+        (scan_layer_heuristics(layer, &bytes[..budget]), true)
+    }
+}
+
+/// Verbatim declared-marker hits in one layer's bytes. Empty marker list
+/// short-circuits (the common production case) — no O(n·m) scan. Declared
+/// matching is ALWAYS run on the full bytes of every layer (never budgeted,
+/// never cached): it is the precise fail-closed gate.
+pub fn declared_hits_in(bytes: &[u8], markers: &[String]) -> Vec<String> {
+    if markers.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for marker in markers {
+        let needle = marker.as_bytes();
+        if !needle.is_empty()
+            && bytes.windows(needle.len()).any(|w| w == needle)
+            && !hits.contains(marker)
+        {
+            hits.push(marker.clone());
+        }
+    }
+    hits
+}
+
+/// Stable fingerprint of the policy tables + thresholds. The
+/// `policy_fingerprint_is_pinned` test asserts this equals a literal, forcing a
+/// [`POLICY_VERSION`] bump whenever a table/threshold edit changes which bytes
+/// are flagged — closing the stale-advisory-cache hole.
+pub fn policy_fingerprint() -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(POLICY_VERSION.as_bytes());
+    for p in PROVIDER_KEY_PREFIXES {
+        h.update(p.as_bytes());
+        h.update(b"\0");
+    }
+    for m in SENSITIVE_ENV_MARKERS {
+        h.update(m.as_bytes());
+        h.update(b"\0");
+    }
+    for v in [
+        MIN_PROVIDER_SUFFIX_LEN,
+        MIN_ENV_VALUE_LEN,
+        MIN_ENTROPY_RUN_LEN,
+        MIN_ENTROPY_DISTINCT,
+        MIN_ENTROPY_CLASS_COUNT,
+    ] {
+        h.update(&(v as u64).to_le_bytes());
+    }
+    h.update(&ENTROPY_BITS_THRESHOLD.to_le_bytes());
+    for l in HEURISTIC_BLOCKING_LAYERS {
+        h.update(l.as_bytes());
+        h.update(b"\0");
+    }
+    h.finalize().to_hex().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,5 +643,21 @@ mod tests {
             .expect("finding");
         assert_eq!(f.offset, 5);
         assert_eq!(f.len, secret.len());
+    }
+}
+
+#[cfg(test)]
+mod policy_guard {
+    /// Pins the policy fingerprint. If you edit a provider/env table, a MIN_*
+    /// threshold, the entropy threshold, or the blocking-layer partition, this
+    /// test fails — bump [`super::POLICY_VERSION`] (so the scan cache invalidates)
+    /// and update this literal in the SAME change.
+    #[test]
+    fn policy_fingerprint_is_pinned() {
+        assert_eq!(
+            super::policy_fingerprint(),
+            "15dcc2450fbb83f126ce7d1a1237945bcd830c33b1c0922755f0ad0a03e89c4f",
+            "policy tables/thresholds changed — bump POLICY_VERSION and this literal together"
+        );
     }
 }
