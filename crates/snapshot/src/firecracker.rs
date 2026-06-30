@@ -885,15 +885,25 @@ impl SnapshotBackend for FirecrackerBackend {
                 }
                 None
             } else {
-                Some(bench::time("restore.wait_health", || self.wait_health(port, &path))?)
+                let ms = bench::time("restore.wait_health", || self.wait_health(port, &path))?;
+                // U3 (#856): tag faults after this point as post-health, so the trace
+                // separates the pre-health hotset (what U4 will prefetch) from the rest.
+                if let Some(h) = &page_handle {
+                    h.mark_health_reached();
+                }
+                Some(ms)
             };
 
-            // U1: snapshot a receipt for the smoke to read back.
+            // U1: snapshot a receipt + (U3) the per-restore fault trace for the smoke.
             if let Some(h) = &page_handle {
                 let r = h.receipt(time_to_health_ms.is_some(), time_to_health_ms);
                 let _ = std::fs::write(
                     input.overlay_root.join(".uffd-receipt.json"),
                     serde_json::to_string_pretty(&r).unwrap_or_default(),
+                );
+                let _ = std::fs::write(
+                    input.overlay_root.join(".hotset-trace.json"),
+                    serde_json::to_string(&h.trace()).unwrap_or_default(),
                 );
             }
 
