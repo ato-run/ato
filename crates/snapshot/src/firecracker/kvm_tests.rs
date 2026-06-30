@@ -161,6 +161,7 @@ fn fc_kvm_uffd_zero_pages_plumbing() {
     assert!(!rec.vm_reaches_health, "zero pages must NOT reach health");
     assert!(rec.first_fault_us.is_some(), "first-fault latency recorded");
     assert_eq!(rec.page_server_pid, Some(std::process::id() as i32), "in-process page-server");
+    eprintln!("### U1a-RECEIPT {}", serde_json::to_string(&rec).unwrap());
 
     b.stop(r.session).expect("stop");
     assert_clean_teardown(&overlay);
@@ -198,6 +199,7 @@ fn fc_kvm_uffd_real_pages_reaches_health() {
     // The VM actually served from UFFDIO_COPY'd pages.
     let gip = FirecrackerConfig::default().guest_ip;
     assert!(!http_get(&gip, port, "/health").is_empty(), "guest /health reachable over UFFD restore");
+    eprintln!("### U1b-RECEIPT {}", serde_json::to_string(&rec).unwrap());
 
     b.stop(r.session).expect("stop");
     assert_clean_teardown(&overlay);
