@@ -42,6 +42,10 @@ pub(crate) mod facts;
 pub(crate) mod macos;
 pub(crate) mod matching;
 pub(crate) mod placement;
+/// M3.5 Step 1 port-publish verification harness (test-only; nothing here
+/// changes the product — see `docs/ready-state/desktop-runner-port-verification.md`).
+#[cfg(test)]
+mod port_verify;
 
 use facts::{DesktopRunnerFacts, Maturity, PROVIDER_KIND_DESKTOP, SubstrateCapability};
 
