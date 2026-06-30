@@ -125,6 +125,10 @@ pub struct FirecrackerBackend {
     /// Live restored sessions (session_id → VMM child), so `stop()` can
     /// kill **and reap** the process it spawned (not just `kill -9` a pid).
     sessions: Arc<Mutex<HashMap<String, Child>>>,
+    /// U1 (#854): live UFFD page-server threads keyed by session_id, kept alive
+    /// for the session (faults arrive lazily) and joined on `stop()`. Empty unless
+    /// `ATO_FC_UFFD` selected the Uffd `mem_backend` for that restore.
+    page_servers: Arc<Mutex<HashMap<String, crate::uffd_page_server::PageServerHandle>>>,
 }
 
 impl FirecrackerBackend {
@@ -133,7 +137,7 @@ impl FirecrackerBackend {
     }
 
     pub fn with_config(config: FirecrackerConfig) -> Self {
-        Self { config, sessions: Arc::default() }
+        Self { config, sessions: Arc::default(), page_servers: Arc::default() }
     }
 
     pub fn kvm_present() -> bool {
@@ -402,6 +406,24 @@ fn verify_hash_enabled() -> bool {
     std::env::var("ATO_READY_STATE_VERIFY_HASH")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// U1 (#854) test-only gate: `ATO_FC_UFFD` selects the Uffd `mem_backend` for a
+/// restore instead of the default File backend. `zero` → serve kernel-zeroed pages
+/// (U1a plumbing); `mem`/`1` → serve real pages from the materialized `.mem`
+/// (U1b). Unset / `0` / `file` → File backend (default, unchanged). Exercised only
+/// by the `#[ignore]`d KVM smokes; never a product default.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UffdMode {
+    Zero,
+    Mem,
+}
+fn uffd_mode() -> Option<UffdMode> {
+    match std::env::var("ATO_FC_UFFD").ok().as_deref() {
+        Some("zero") => Some(UffdMode::Zero),
+        Some("mem") | Some("1") => Some(UffdMode::Mem),
+        _ => None,
+    }
 }
 
 fn hotset_enabled() -> bool {
@@ -732,7 +754,7 @@ impl SnapshotBackend for FirecrackerBackend {
 
         self.acquire_lock("restore")?;
         // From here, on any error we must release the lock + net before returning.
-        let result = (|| -> Result<(RestoredSession, Child), SnapshotError> {
+        let result = (|| -> Result<(RestoredSession, Child, Option<crate::uffd_page_server::PageServerHandle>), SnapshotError> {
             std::fs::create_dir_all(&input.overlay_root).map_err(|e| self.backend_err(e.to_string()))?;
             // restored_bytes = the logical bytes the session is restored from
             // (independent of whether a cached layer was reused on disk).
@@ -802,17 +824,62 @@ impl SnapshotBackend for FirecrackerBackend {
             let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);
 
             self.net_up()?;
+
+            // U1 (#854): when ATO_FC_UFFD is set, start the local page-server on a
+            // UDS BEFORE LoadSnapshot (Firecracker connects to it during load) and
+            // switch the mem_backend from File to Uffd. Default (unset) keeps the
+            // File path byte-for-byte. The .mem file is still materialized above —
+            // U1b serves real pages from it; U1 does not yet optimize the copy away.
+            let uffd = uffd_mode();
+            let sock = input.overlay_root.join(".page-server.sock");
+            let mut page_handle: Option<crate::uffd_page_server::PageServerHandle> = None;
+            if let Some(mode) = uffd {
+                let source = match mode {
+                    UffdMode::Zero => crate::uffd_page_server::PageSource::Zero,
+                    UffdMode::Mem => crate::uffd_page_server::PageSource::mem_file(&mem_path)
+                        .map_err(|e| self.backend_err(format!("uffd mem source: {e}")))?,
+                };
+                let server = crate::uffd_page_server::PageServer::bind(&sock, source)
+                    .map_err(|e| self.backend_err(format!("uffd page-server bind: {e}")))?;
+                page_handle = Some(server.serve());
+            }
+
             let fc = bench::time("restore.start_fc", || {
                 self.start_fc(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"))
             })?;
             bench::time("restore.load_snapshot", || {
+                let mem_backend = if uffd.is_some() {
+                    json!({"backend_type":"Uffd","backend_path": sock.to_string_lossy()})
+                } else {
+                    json!({"backend_type":"File","backend_path": mem_path.to_string_lossy()})
+                };
                 fc.api(self, "PUT", "/snapshot/load", Some(&json!({
                     "snapshot_path": vmstate_path.to_string_lossy(),
-                    "mem_backend": {"backend_type":"File","backend_path": mem_path.to_string_lossy()},
+                    "mem_backend": mem_backend,
                     "resume_vm": true
                 }).to_string()))
             })?;
-            bench::time("restore.wait_health", || self.wait_health(port, &path))?;
+
+            // Readiness: U1a (Zero) serves garbage pages, so the guest never reaches
+            // health — confirm the fault loop fired instead. Everything else (File,
+            // U1b Mem) waits for health as usual.
+            let time_to_health_ms: Option<u128> = if uffd == Some(UffdMode::Zero) {
+                if let Some(h) = &page_handle {
+                    h.wait_for_first_fault(Duration::from_secs(10));
+                }
+                None
+            } else {
+                Some(bench::time("restore.wait_health", || self.wait_health(port, &path))?)
+            };
+
+            // U1: snapshot a receipt for the smoke to read back.
+            if let Some(h) = &page_handle {
+                let r = h.receipt(time_to_health_ms.is_some(), time_to_health_ms);
+                let _ = std::fs::write(
+                    input.overlay_root.join(".uffd-receipt.json"),
+                    serde_json::to_string_pretty(&r).unwrap_or_default(),
+                );
+            }
 
             let session_id = format!("fc-{}-{}", manifest_short(&input.manifest), std::process::id());
             let child = fc.detach().ok_or_else(|| self.backend_err("lost firecracker child after restore"))?;
@@ -827,12 +894,15 @@ impl SnapshotBackend for FirecrackerBackend {
                 restored_bytes,
                 vmm_pid: Some(child.id() as i32),
             };
-            Ok((session, child))
+            Ok((session, child, page_handle))
         })();
 
         match result {
-            Ok((session, child)) => {
+            Ok((session, child, page_handle)) => {
                 self.sessions.lock().unwrap().insert(session.session_id.clone(), child);
+                if let Some(h) = page_handle {
+                    self.page_servers.lock().unwrap().insert(session.session_id.clone(), h);
+                }
                 // lock + tap intentionally held for the live session (released by stop()).
                 Ok(RestoreReceipt { ready_state_manifest_id: input.manifest.id(), session })
             }
@@ -859,6 +929,12 @@ impl SnapshotBackend for FirecrackerBackend {
             let _ = child.wait();
         } else if let Some(pid) = session.vmm_pid.map(|p| p as u32).or_else(|| json_u32(&meta, "pid")) {
             let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
+        // U1 (#854): stop + join the page-server thread (if any) AFTER killing the
+        // child, so the guest stops faulting and the uffd read hits EOF. The
+        // .page-server.sock is removed by the overlay teardown below.
+        if let Some(h) = self.page_servers.lock().unwrap().remove(&session.session_id) {
+            let _ = h.stop_and_join();
         }
         // Tear down the RECORDED tap + its single-session lockfile (env-independent).
         let _ = Command::new("ip").args(["link", "del", tap]).status();
