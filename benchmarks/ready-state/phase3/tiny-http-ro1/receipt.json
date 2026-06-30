@@ -1,0 +1,52 @@
+{
+  "build_total_ms": {
+    "max": 6755.130623999999,
+    "median": 6199.7448779999995,
+    "min": 6185.935897,
+    "n": 5,
+    "p90": 6755.130623999999,
+    "p95": 6755.130623999999
+  },
+  "config": {
+    "build_runs": 5,
+    "restore_runs": 30,
+    "rootfs_input_bytes": 134217728
+  },
+  "host": {
+    "arch": "x86_64",
+    "cgroup_version": 2,
+    "cpu_model": "Intel(R) Xeon(R) CPU @ 2.80GHz",
+    "cpu_platform": "Intel Cascade Lake",
+    "dev_kvm": true,
+    "disk_root_rota": "0",
+    "firecracker_version": "Firecracker v1.16.0",
+    "kernel": "6.17.0-1020-gcp",
+    "machine_type": "n2-standard-4",
+    "rootfs_read_only": true
+  },
+  "restore_total_ms": {
+    "cold-cache": {
+      "max": 995.668998,
+      "median": 972.7813130000001,
+      "min": 921.23894,
+      "n": 30,
+      "p90": 986.3518310000001,
+      "p95": 992.004056
+    },
+    "warm-cache": {
+      "max": 122.54838799999999,
+      "median": 116.66576500000001,
+      "min": 114.762219,
+      "n": 30,
+      "p90": 119.226317,
+      "p95": 121.41478599999999
+    }
+  },
+  "sealed_bytes": {
+    "memory": 536870912,
+    "rootfs": 134217728,
+    "total": 671112615,
+    "vmstate": 23975
+  },
+  "target": "tiny-http-ro1"
+}
