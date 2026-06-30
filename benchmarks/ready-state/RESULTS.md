@@ -74,3 +74,74 @@ rewritten, so warm < cold and both approach (Firecracker 150 ms + mem rehydrate)
   Express. **medium-python / heavy-assets not yet run** (need larger rootfs
   images) — follow-up.
 - Raw per-run records + host facts: `<target>/{raw.jsonl,receipt.json,summary.md}`.
+
+---
+
+# Phase 3 — read-only-shared rootfs (2026-06-30)
+
+Same host class (n2-standard-4 / Cascade Lake / FC v1.16.0 / pd-ssd). Rebuilt the
+rootfs images **ro-bootable** (init mounts tmpfs over `/tmp`,`/run`,`/var/tmp`, so
+the app needs no writable root) and ran the benchmark in **both** modes, 5 builds /
+30 restores each. Raw records under `phase3/<target>-ro{0,1}/`.
+
+## Restore latency — fresh-copy (ro0) vs read-only-shared (ro1), p95 ms
+
+| target | cold ro0 | cold ro1 | **warm ro0** | **warm ro1** | warm speedup |
+|---|---:|---:|---:|---:|---:|
+| tiny-http    | 999  | 992  | 985  | **121**  | ~8× |
+| light-python | 2275 | 2272 | 5959 | **222**  | **~27×** |
+| light-node   | 2309 | 2297 | 6095 | **193**  | **~31×** |
+
+## Why (light-python restore span decomposition, ms)
+
+| span | ro0 cold | ro0 **warm** | ro1 cold | ro1 **warm** |
+|---|---:|---:|---:|---:|
+| cache_rootfs | 1359 | **6140** | 1369 | **0** |
+| cache_mem | 698 | 0 | 682 | 0 |
+| start_fc + load_snapshot + wait_health (Firecracker) | ~110 | ~153 | ~161 | ~152 |
+| **total** | 2234 | **6360** | 2281 | **222** |
+
+- **Fresh-copy (ro0) rewrites the 1 GB rootfs every restore** (`cache_rootfs`),
+  and warm degrades to ~6 s under repeated-write/writeback pressure.
+- **Read-only-shared (ro1) never rewrites the rootfs** (`cache_rootfs` = **0** in
+  warm) — the immutable rootfs image is shared across all restores. Warm restore
+  is now **Firecracker-bound (~150 ms)** + wait_health.
+- Cold-cache is the same in both modes (~2.25 s): the first-touch rehydrate of
+  rootfs (~1.36 s) + memory (~0.69 s) from CapsuleFS.
+
+## Invariants (fc_kvm suite, read-only mode, fulltest FastAPI rootfs): **7/7 PASS**
+
+probe · build→restore (+teardown: 0 firecracker / 0 tap / overlay removed) ·
+restore_latency_20x (min 175 / median 220 / p95 895 ms) ·
+**rootfs_is_read_only_shared_across_restores** (now RUNS in ro mode — rootfs image
+mtime unchanged across restores ⇒ **no mutation**) · runner_class_mismatch
+fail-closed · **state_leak** (marker did not survive a fresh restore) ·
+**no_secret** (post-restore sentinel absent from sealed mem/vmstate).
+
+## Verdict
+
+**Read-only-shared rootfs mode is now hardware-validated.** It boots ro, builds,
+restores, does not mutate the shared rootfs across restores, preserves the
+state-leak and no-secret invariants, and tears down cleanly — while cutting warm
+restore for 1 GB apps from ~6 s to ~0.2 s (the per-restore rootfs rewrite is
+eliminated). This makes the shared rootfs a safe, reusable immutable artifact —
+the substrate for treating a Capsule as a verified distribution object.
+
+## Phase 6 hotset recommendation: target **memory** first
+
+Warm restore is solved (Firecracker-bound ~150–220 ms). The remaining cost is
+**cold-cache** (~2.25 s, first-touch). Of that, the rootfs rehydrate (~1.36 s) is
+**amortized** by ro-shared — paid once per base-image per runner, then shared by
+every restore. The **memory rehydrate (~0.69 s) is per-capsule** — every distinct
+capsule's first restore on a runner pays it. So **Phase 6 hotset should prefetch
+the memory chunks touched before first health** (the per-new-capsule cold cost),
+with rootfs prefetch as a secondary base-image/runner-warming step. The
+`HotsetRecorder` already records mem + rootfs chunks; prioritize memory in the
+prefetch order.
+
+## Scope / caveats
+- x86_64 / Firecracker / File memory only; no lazy rootfs, no UFFD, no product
+  wiring (all out of scope here).
+- ro-bootable build scripts: `build_rootfs_ro.sh` + `run_builds_ro.sh` +
+  `build_fulltest.sh` (the /marker+/secret FastAPI image for the invariant suite).
+- medium-python / heavy-assets still not run (follow-up).
