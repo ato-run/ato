@@ -195,6 +195,50 @@ fn fc_kvm_no_secret_invariant() {
     assert!(!vmstate.windows(needle.len()).any(|w| w == needle), "secret leaked into sealed vmstate");
 }
 
+#[test]
+#[ignore]
+fn fc_kvm_cross_process_stop_via_record() {
+    // Phase 7: a restored session must survive its restoring backend being dropped
+    // (the firecracker child is detached → reparents to init), and a FRESH backend
+    // (empty in-memory registry, like a separate `ato stop` process) must reap it
+    // purely from overlay_root/.fc-session.json (recorded pid + tap).
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let overlay = dir.path().join("ov");
+    let gip = FirecrackerConfig::default().guest_ip;
+    let port = FirecrackerConfig::default().healthcheck_port;
+
+    // Process A: restore, then DROP backend A. Its sessions map drops, but a std
+    // Child drop does NOT kill the process — the detached VM keeps serving.
+    let session = {
+        let backend_a = FirecrackerBackend::new();
+        let r = backend_a
+            .restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: overlay.clone(), host_runner_class: None })
+            .expect("restore");
+        r.session
+    };
+    assert!(overlay.join(".fc-session.json").exists(), "session record written");
+    assert!(!http_get(&gip, port, "/health").is_empty(), "VM still serving after backend A dropped");
+
+    // Process B: a FRESH backend reaps from the on-disk record (empty registry).
+    let backend_b = FirecrackerBackend::new();
+    let td = backend_b.stop(session).expect("cross-process stop");
+    assert!(td.overlay_removed, "overlay removed");
+    assert!(!overlay.exists(), "overlay dir gone");
+
+    let tap = FirecrackerConfig::default().tap_dev;
+    let taps = std::process::Command::new("ip").args(["link", "show", &tap]).output().unwrap();
+    assert!(!taps.status.success(), "tap {tap} still present after cross-process stop");
+    let out = std::process::Command::new("pgrep").args(["-af", "firecracker --api-sock"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).count(),
+        0,
+        "orphan firecracker after cross-process stop"
+    );
+}
+
 // minimal HTTP helpers (guest is on the tap network)
 fn http_get(ip: &str, port: u16, path: &str) -> String {
     http_req(ip, port, "GET", path, None)
