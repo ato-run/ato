@@ -3751,22 +3751,10 @@ where
                 ready_state::bindings::BindingGuardMode::VerifyOnly,
             )?;
             let backend = ready_state::backend::select_backend()?;
-            // Phase 7.5: reap orphan overlays left by crashed prior Firecracker
-            // serving runs before restoring a fresh one. Best-effort and
-            // Firecracker-only — never breaks the run; Live sessions are left
-            // untouched, unrecorded overlays are quarantined, not deleted.
-            if backend.id() == snapshot::FIRECRACKER_BACKEND_ID {
-                let report = ready_state::orphan_sweep::sweep(backend.as_ref(), false);
-                if report.reaped + report.quarantined + report.failed > 0 {
-                    tracing::info!(
-                        target: "ato::ready_state",
-                        reaped = report.reaped,
-                        quarantined = report.quarantined,
-                        failed = report.failed,
-                        "READY-STATE: orphan overlay sweep"
-                    );
-                }
-            }
+            // Orphan Ready-State overlays from crashed prior serving runs are
+            // reaped/quarantined by the canonical startup sweep
+            // (`RuntimeProcessRegistry::sweep_run_dir_orphans` → Class 4); no
+            // separate sweep is wired here.
             let store = ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
             let overlay = capsule::common::paths::ato_path_or_workspace_tmp("run")
                 .join(format!("ready-state-{}", std::process::id()));
