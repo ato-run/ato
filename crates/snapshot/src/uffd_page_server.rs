@@ -134,7 +134,10 @@ pub(crate) struct HotsetProfile {
 
 impl HotsetProfile {
     /// Build a profile from a trace: the pre-health pages, de-duplicated, kept in
-    /// first-touch order (earliest fault first).
+    /// first-touch order (earliest fault first). (U4 derives the next restore's
+    /// prefetch list from a prior restore's trace; currently exercised by the KVM
+    /// smoke — a product path that persists profiles per capsule is later.)
+    #[allow(dead_code)]
     pub(crate) fn from_trace(trace: &HotsetTrace) -> HotsetProfile {
         let mut seen = std::collections::HashSet::new();
         let mut pages = Vec::new();
