@@ -3739,14 +3739,17 @@ where
         // non-eligible capsule (→ legacy dispatch below).
         //
         // Eligibility + the artifact key MUST be derived from the SAME manifest the
-        // `ato build` seal used — the RAW `capsule.toml` on disk. `decision.plan.manifest`
-        // is the derived/normalized ExecutionPlan manifest: it drops the top-level
-        // `[snapshot]` section (→ never Ready-State-eligible) and canonicalizes
-        // differently (→ a different `capsule_manifest_hash` than the seal). Using it
-        // here made `ato run` silently cold-path past every sealed artifact. Read the
-        // raw manifest from `manifest_path` (the build's `raw_manifest` source);
-        // fall back to the plan manifest only if the file can't be read/parsed.
-        let rs_raw: toml::Value = std::fs::read_to_string(&decision.plan.manifest_path)
+        // `ato build` seal used — the RAW `capsule.toml` in the source dir.
+        // `decision.plan.manifest` is the derived/normalized ExecutionPlan manifest:
+        // it drops the top-level `[snapshot]` section (→ never Ready-State-eligible)
+        // and canonicalizes differently (→ a different `capsule_manifest_hash` than
+        // the seal). And `decision.plan.manifest_path` is the resolved `ato.lock.json`,
+        // not the capsule manifest. Either made `ato run` silently cold-path past
+        // every sealed artifact. Read the raw `capsule.toml` from the source dir
+        // (`manifest_dir`) — the same bytes the build sealed; fall back to the plan
+        // manifest only if the file can't be read/parsed.
+        let rs_capsule_toml = decision.plan.manifest_dir.join("capsule.toml");
+        let rs_raw: toml::Value = std::fs::read_to_string(&rs_capsule_toml)
             .ok()
             .and_then(|text| toml::from_str(&text).ok())
             .unwrap_or_else(|| decision.plan.manifest.clone());
