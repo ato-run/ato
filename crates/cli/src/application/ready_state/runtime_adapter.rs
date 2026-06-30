@@ -72,6 +72,7 @@ mod tests {
             guest_port: Some(8080),
             overlay_root: std::path::PathBuf::from("/tmp/ov"),
             restored_bytes: 123,
+            vmm_pid: None,
         }
     }
 
