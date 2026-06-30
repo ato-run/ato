@@ -176,14 +176,32 @@ fn main() {
     let mut last: Option<(PathBuf, CasStore, snapshot::ReadyStateManifest)> = None;
     let mut build_totals = Vec::new();
     let mut sealed_bytes = json!({});
-    for i in 0..args.build_runs {
+    'builds: for i in 0..args.build_runs {
         let dir = scratch.join(format!("build-{i}"));
         std::fs::create_dir_all(&dir).unwrap();
         let store = CasStore::open(dir.join("cas")).unwrap();
-        let _ = bench::drain();
-        let t = Instant::now();
-        let receipt = backend.build_ready_state(build_input(&store, &rootfs)).expect("build_ready_state");
-        let total = t.elapsed().as_secs_f64() * 1000.0;
+        // Builds boot+snapshot a real VM; the VMM occasionally hiccups
+        // (e.g. snapshot/create returning HTTP 0). Retry rather than aborting the
+        // whole benchmark, and skip the run if it never succeeds.
+        let mut attempt = 0;
+        let (total, receipt) = loop {
+            let _ = bench::drain();
+            let t = Instant::now();
+            match backend.build_ready_state(build_input(&store, &rootfs)) {
+                Ok(r) => break (t.elapsed().as_secs_f64() * 1000.0, r),
+                Err(e) if attempt < 2 => {
+                    attempt += 1;
+                    eprintln!("[build {i}] retry {attempt} after error: {e}");
+                    clear_layer_cache();
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                Err(e) => {
+                    eprintln!("[build {i}] FAILED after retries: {e}");
+                    raw.push(json!({"phase": "build", "run": i, "error": e.to_string()}));
+                    continue 'builds;
+                }
+            }
+        };
         let spans = bench::drain();
         let m = &receipt.manifest;
         let bytes = |b: &Option<capsulefs::BlobManifest>| b.as_ref().map(|x| x.total_len).unwrap_or(0);
@@ -196,7 +214,18 @@ fn main() {
         eprintln!("[build {i}] {total:.0}ms");
         last = Some((dir, store, receipt.manifest));
     }
-    let (keep_dir, store, manifest) = last.expect("at least one build");
+    let Some((keep_dir, store, manifest)) = last else {
+        eprintln!("[bench] all builds failed — writing build-only receipt, skipping restore");
+        let receipt = json!({
+            "target": args.target, "host": host_facts(),
+            "config": {"build_runs": args.build_runs, "restore_runs": args.restore_runs, "rootfs_input_bytes": rootfs.len()},
+            "error": "all builds failed",
+        });
+        std::fs::write(out_dir.join("receipt.json"), serde_json::to_string_pretty(&receipt).unwrap()).unwrap();
+        std::fs::write(out_dir.join("raw.jsonl"), raw.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::process::exit(1);
+    };
 
     // ── RESTORE phase: cold-cache then warm-cache. ───────────────────────────
     let mut restore_summ = serde_json::Map::new();
