@@ -100,7 +100,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
                 blocking.into_iter().cloned().collect(),
             ));
         }
-        let advisories: Vec<String> = report.advisory().iter().map(|f| f.summary()).collect();
+        let advisories = scanner::advisory_summaries_capped(&report, 50);
 
         let cd = ChunkingKind::ContentDefined;
         let page = ChunkingKind::PageAligned {
@@ -514,16 +514,37 @@ mod tests {
     // ── real no-secret scanner integration (Workstream D) ──────────────────
 
     #[test]
-    fn build_fails_closed_on_planted_provider_key_in_memory() {
+    fn provider_key_in_memory_is_advisory_not_blocking() {
+        // A heuristic hit in the MEMORY image is advisory, not gating: a real
+        // guest-RAM image legitimately contains coincidental sk-+token runs, so
+        // byte-heuristics there false-positive. The build succeeds; the finding
+        // is recorded as an advisory; the no-secret guarantee for memory comes
+        // from seal-before-bind + the cross-restore/no-secret invariant tests.
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path()).unwrap();
         let backend = FakeSnapshotBackend::new();
         let mut input = build_input(&store, vec![]);
-        // Plant a provider-key-shaped token in the memory image (no declared marker).
         let mut mem = vec![b' '; 64];
         mem.extend_from_slice(b"sk-proj-ABCDEFGHIJ1234567890abcdef");
         mem.extend_from_slice(&[b' '; 64]);
         input.layers.memory = mem;
+        let receipt = backend.build_ready_state(input).expect("memory heuristic must not block");
+        assert!(receipt.no_secret_proof.is_clean());
+        assert!(
+            receipt.no_secret_proof.advisories.iter().any(|a| a.contains("memory") && a.contains("provider-key")),
+            "advisories: {:?}",
+            receipt.no_secret_proof.advisories
+        );
+    }
+
+    #[test]
+    fn provider_key_in_app_still_fails_closed() {
+        // The build-authored app/dependency layers DO fail closed on a provider key.
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let mut input = build_input(&store, vec![]);
+        input.layers.app = Some(b"token sk-proj-ABCDEFGHIJ1234567890abcdef end".to_vec());
         let err = backend.build_ready_state(input).unwrap_err();
         assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "{err:?}");
         assert!(store.list_chunks().unwrap().is_empty(), "nothing sealed");
