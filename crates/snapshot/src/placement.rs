@@ -133,6 +133,8 @@ mod tests {
             isolation_boundary: IsolationBoundary::MicroVm,
             supports_seal_before_bind: true,
             supports_disposable_overlay: true,
+            supports_uffd_mem_backend: false,
+            uffd_reason: Some("test fixture".to_string()),
         }
     }
 
@@ -154,6 +156,8 @@ mod tests {
             isolation_boundary: IsolationBoundary::MicroVm,
             supports_seal_before_bind: false,
             supports_disposable_overlay: true,
+            supports_uffd_mem_backend: false,
+            uffd_reason: Some("test fixture".to_string()),
         }
     }
 
