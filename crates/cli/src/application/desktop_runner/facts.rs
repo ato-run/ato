@@ -1,0 +1,210 @@
+//! Desktop Runner capability facts — what a *local* Ato Runner provider can
+//! honestly execute on this host (#838, M0).
+//!
+//! A Desktop Runner is a local provider (the macOS/desktop shell acting as a
+//! Connected Runner) backed by an isolation substrate. These types describe the
+//! substrate and per-backend capabilities the host advertises — they are the
+//! Desktop equivalent of the runner-agent heartbeat's
+//! [`collect_capabilities`](crate::application::runner_agent::collect_capabilities),
+//! but structured rather than flat strings so a placement decision can reason
+//! about guest OS/arch, isolation boundary, and Ready-State maturity.
+//!
+//! Honesty is the contract: every `supports_*` flag starts `false` and only a
+//! real, validated mechanism flips it to `true`. M0 advertises a cold-OCI
+//! substrate only — no Ready-State restore, no CRIU, no bindings (see
+//! `docs/ready-state/desktop-runner.md`). The restore-compatibility class a
+//! Ready-State artifact pins lives in
+//! [`RunnerClassFacts`](capsule::foundation::install_lifecycle::RunnerClassFacts);
+//! these facts describe the *provider*, not the restore class.
+
+use serde::{Deserialize, Serialize};
+
+/// `provider_kind` for every Desktop Runner backend/fact.
+pub(crate) const PROVIDER_KIND_DESKTOP: &str = "desktop";
+
+/// Apple Containerization substrate identifier (`container` / Apple VZ).
+pub(crate) const SUBSTRATE_APPLE_CONTAINERIZATION: &str = "apple_containerization";
+
+/// Apple Virtualization.framework accelerator label.
+pub(crate) const ACCELERATOR_APPLE_VZ: &str = "apple_vz";
+
+/// The isolation boundary a backend executes a session inside.
+///
+/// Serialized in snake_case so a receipt reads `"vm_wrapped_container"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IsolationBoundary {
+    /// An OCI container running inside a per-session lightweight Linux VM
+    /// (Apple Containerization / Apple VZ).
+    VmWrappedContainer,
+    /// A bare microVM (e.g. Firecracker) — the existing snapshot path's domain,
+    /// reported here only for matrix completeness, never produced by M0.
+    MicroVm,
+}
+
+/// The Ready-State mechanism a backend can restore from.
+///
+/// M0 is `ColdOci` only; `CriuCheckpoint`/`VmSnapshot` are future inner
+/// mechanisms tracked separately (CRIU is #839, a Linux-gated spike first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReadyStateKind {
+    /// Cold start of an OCI image (no warm restore). The only M0 mode.
+    ColdOci,
+    /// In-VM CRIU checkpoint/restore (future, #839).
+    CriuCheckpoint,
+    /// Full VM-memory snapshot/restore (future; Firecracker's mode).
+    VmSnapshot,
+}
+
+/// How mature/trustworthy a backend is. M0 backends are `Experimental`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Maturity {
+    Experimental,
+    Beta,
+    Stable,
+}
+
+/// Availability of one isolation substrate on this host (e.g. Apple
+/// Containerization). Reported even when unavailable so a diagnostic can name
+/// what is missing — but an unavailable substrate yields no [`BackendCapability`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SubstrateCapability {
+    /// e.g. [`SUBSTRATE_APPLE_CONTAINERIZATION`].
+    pub(crate) substrate: String,
+    /// Whether this substrate can actually be used on this host right now.
+    pub(crate) available: bool,
+    /// The CLI/tool backing the substrate (e.g. `"container"`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool: Option<String>,
+    /// Resolved path to the tool, if found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_path: Option<String>,
+    /// Tool version string, if probed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_version: Option<String>,
+    /// Whether the substrate's system service is already running. **Detected,
+    /// never auto-started** — M0 must not invoke `container system start`.
+    pub(crate) system_service_running: bool,
+    /// Hardware accelerator the substrate uses, e.g. [`ACCELERATOR_APPLE_VZ`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) accelerator: Option<String>,
+    pub(crate) maturity: Maturity,
+}
+
+/// One concrete entry in the Desktop Runner backend matrix: a (substrate ×
+/// host × guest × ready-state) capability the host can honestly serve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BackendCapability {
+    /// Always [`PROVIDER_KIND_DESKTOP`] for Desktop Runner backends.
+    pub(crate) provider: String,
+    pub(crate) substrate: String,
+    pub(crate) host_os: String,
+    pub(crate) host_arch: String,
+    pub(crate) guest_os: String,
+    pub(crate) guest_arch: String,
+    pub(crate) isolation_boundary: IsolationBoundary,
+    pub(crate) ready_state_kind: ReadyStateKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) accelerator: Option<String>,
+    /// Runtime binding injection after restore/start. `false` in M0.
+    pub(crate) supports_bindings: bool,
+    /// Warm Ready-State restore on this backend. `false` in M0 (cold only).
+    pub(crate) supports_ready_state_restore: bool,
+    /// In-VM CRIU checkpoint. `false` in M0 (#839 track).
+    pub(crate) supports_criu_checkpoint: bool,
+    /// Read-only shared rootfs reuse. `false` in M0.
+    pub(crate) supports_readonly_shared_rootfs: bool,
+    pub(crate) maturity: Maturity,
+}
+
+/// The Desktop Runner provider facts for this host — the structured capability
+/// report (and receipt) a local Desktop Runner advertises.
+///
+/// `RunnerProviderFacts` in the design; named `DesktopRunnerFacts` because every
+/// instance is `provider_kind == "desktop"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DesktopRunnerFacts {
+    /// Always [`PROVIDER_KIND_DESKTOP`].
+    pub(crate) provider_kind: String,
+    /// `"macos"` | `"linux"` | `"windows"` (from `std::env::consts::OS`).
+    pub(crate) host_os: String,
+    /// `"aarch64"` | `"x86_64"`.
+    pub(crate) host_arch: String,
+    /// Host platform version, e.g. macOS `sw_vers -productVersion` → `"26.0"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) host_platform_version: Option<String>,
+    /// Version of the Desktop Runner runtime (the `ato` CLI driving it).
+    pub(crate) desktop_runtime_version: String,
+    /// Whether hardware virtualization is available for VM-backed substrates.
+    pub(crate) virtualization_available: bool,
+    pub(crate) substrates: Vec<SubstrateCapability>,
+    pub(crate) backends: Vec<BackendCapability>,
+    /// Actionable diagnostics (e.g. "container not installed"). Carried but
+    /// surfaced **only** when the user selects local Desktop Runner execution —
+    /// never raised during normal Desktop startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) diagnostics: Vec<String>,
+}
+
+impl DesktopRunnerFacts {
+    /// True when this host advertises at least one backend on the named substrate.
+    pub(crate) fn has_substrate_backend(&self, substrate: &str) -> bool {
+        self.backends.iter().any(|b| b.substrate == substrate)
+    }
+
+    /// The first backend whose host facets match this host (the local backend a
+    /// placement would target), if any.
+    pub(crate) fn local_backend(&self) -> Option<&BackendCapability> {
+        self.backends
+            .iter()
+            .find(|b| b.host_os == self.host_os && b.host_arch == self.host_arch)
+    }
+
+    /// Render the facts as a stable, pretty JSON receipt.
+    pub(crate) fn to_receipt_json(&self) -> String {
+        // DesktopRunnerFacts is always serializable (no NaN floats / non-string
+        // keys), so this never fails; fall back to a debug string if it ever does.
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| format!("{self:?}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enums_serialize_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&IsolationBoundary::VmWrappedContainer).unwrap(),
+            "\"vm_wrapped_container\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReadyStateKind::ColdOci).unwrap(),
+            "\"cold_oci\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Maturity::Experimental).unwrap(),
+            "\"experimental\""
+        );
+    }
+
+    #[test]
+    fn receipt_roundtrips() {
+        let facts = DesktopRunnerFacts {
+            provider_kind: PROVIDER_KIND_DESKTOP.into(),
+            host_os: "macos".into(),
+            host_arch: "aarch64".into(),
+            host_platform_version: Some("26.0".into()),
+            desktop_runtime_version: "0.7.0".into(),
+            virtualization_available: true,
+            substrates: vec![],
+            backends: vec![],
+            diagnostics: vec![],
+        };
+        let json = facts.to_receipt_json();
+        let back: DesktopRunnerFacts = serde_json::from_str(&json).unwrap();
+        assert_eq!(facts, back);
+    }
+}
