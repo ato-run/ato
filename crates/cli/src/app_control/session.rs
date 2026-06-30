@@ -788,6 +788,10 @@ pub(super) fn start_guest_session(
         last_event: Some("spawned".to_string()),
         last_error: None,
         exit_code: None,
+        ready_state_backend_id: None,
+        ready_state_overlay_root: None,
+        ready_state_session_id: None,
+        ready_state_tap_dev: None,
     };
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_pid");
     process_manager.write_pid(&process_info)?;
@@ -1147,6 +1151,10 @@ pub(super) fn start_runtime_session(
         ),
         last_error: None,
         exit_code: None,
+        ready_state_backend_id: None,
+        ready_state_overlay_root: None,
+        ready_state_session_id: None,
+        ready_state_tap_dev: None,
     };
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_pid");
     process_manager.write_pid(&process_info)?;
@@ -1536,6 +1544,10 @@ pub(super) fn start_orchestration_session_in_process(
         last_event: Some("ready".to_string()),
         last_error: None,
         exit_code: None,
+        ready_state_backend_id: None,
+        ready_state_overlay_root: None,
+        ready_state_session_id: None,
+        ready_state_tap_dev: None,
     };
     process_manager.write_pid(&process_info)?;
 
@@ -1800,6 +1812,10 @@ pub(super) fn start_orchestration_session_supervisor(
         last_event: Some("ready".to_string()),
         last_error: None,
         exit_code: None,
+        ready_state_backend_id: None,
+        ready_state_overlay_root: None,
+        ready_state_session_id: None,
+        ready_state_tap_dev: None,
     };
     process_manager.write_pid(&process_info)?;
 
@@ -4781,6 +4797,10 @@ mod tests {
                 last_event: Some("ready".to_string()),
                 last_error: None,
                 exit_code: None,
+                ready_state_backend_id: None,
+                ready_state_overlay_root: None,
+                ready_state_session_id: None,
+                ready_state_tap_dev: None,
             })
             .expect("write pid file");
 
@@ -5192,6 +5212,10 @@ mod tests {
                 last_event: Some("ready".to_string()),
                 last_error: None,
                 exit_code: None,
+                ready_state_backend_id: None,
+                ready_state_overlay_root: None,
+                ready_state_session_id: None,
+                ready_state_tap_dev: None,
             })
             .expect("write pid file");
 

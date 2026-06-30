@@ -1101,6 +1101,10 @@ async fn github_run_sweep_preserves_checkout_referenced_by_active_process() {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
         })
         .expect("write active process record");
 
