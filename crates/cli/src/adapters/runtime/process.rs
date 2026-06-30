@@ -1026,7 +1026,15 @@ impl ProcessManager {
             if record.exists() {
                 let json = fs::read_to_string(&record).unwrap_or_default();
                 let val: Option<serde_json::Value> = serde_json::from_str(&json).ok();
-                let pid = val.as_ref().and_then(|v| v.get("pid")).and_then(|p| p.as_i64()).map(|p| p as i32);
+                // A *positive* recorded pid only; 0/negative/missing → None. A
+                // `vmm_pid` of 0 must never reach teardown (it would `kill -9 0`,
+                // signalling the whole process group), so it is not reapable.
+                let pid = val
+                    .as_ref()
+                    .and_then(|v| v.get("pid"))
+                    .and_then(|p| p.as_i64())
+                    .filter(|p| *p > 0)
+                    .map(|p| p as i32);
                 let session_id = val
                     .as_ref()
                     .and_then(|v| v.get("session_id"))
@@ -1036,6 +1044,22 @@ impl ProcessManager {
                 // A live recorded pid → a running VMM we lack a pid file for. Never
                 // kill it; leave the overlay for `ato stop` / its real owner.
                 if pid.is_some_and(is_process_alive) {
+                    continue;
+                }
+                // A record is reapable only if it carries BOTH a positive pid AND a
+                // non-empty recorded tap. Record-driven teardown kills the recorded
+                // pid and deletes the recorded tap, so a missing/zero pid or a
+                // missing/empty tap (or a malformed/partially-written record) must
+                // NOT be reaped — quarantine it like a no-record dir instead.
+                let has_tap = val
+                    .as_ref()
+                    .and_then(|v| v.get("tap"))
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| !t.trim().is_empty());
+                if pid.is_none() || !has_tap {
+                    if self.quarantine_overlay(&session_id, &path).is_ok() {
+                        report.orphan_overlays_quarantined += 1;
+                    }
                     continue;
                 }
                 // Long-lived serving is Firecracker-only; the record omits backend id.
@@ -2734,6 +2758,77 @@ start_time = [0, 0]
             run.path().join("quarantine").read_dir().unwrap().next().is_some(),
             "overlay preserved in quarantine"
         );
+    }
+
+    /// A pid guaranteed dead: a child we spawned and reaped. Safe to pass to
+    /// `kill` — the OS returns ESRCH, not a signal to a live process.
+    fn dead_pid() -> i32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("/bin/sh")
+                    .args(["-c", "exit 0"])
+                    .spawn()
+            })
+            .expect("spawn a short-lived child");
+        let pid = child.id() as i32;
+        let _ = child.wait();
+        pid
+    }
+
+    /// Write a `.fc-session.json` overlay and run the sweep with grace=0. Returns
+    /// `(reaped, quarantined, overlay_still_exists)`.
+    fn sweep_one_record(record_json: &str) -> (usize, usize, bool) {
+        let run = tempfile::tempdir().unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run.path().to_path_buf());
+        let ov = run.path().join("ready-state-rec");
+        std::fs::create_dir_all(&ov).unwrap();
+        std::fs::write(ov.join(".fc-session.json"), record_json).unwrap();
+        let mut report = RunDirSweepReport::default();
+        pm.sweep_ready_state_overlays(&mut report, SystemTime::now(), Duration::from_secs(0));
+        (
+            report.orphan_overlays_reaped,
+            report.orphan_overlays_quarantined,
+            ov.exists(),
+        )
+    }
+
+    #[test]
+    fn sweep_quarantines_dead_record_without_tap() {
+        // Dead pid > 0 but no tap → not reapable (teardown deletes the recorded
+        // tap) → quarantined.
+        let json = format!(r#"{{"pid":{},"session_id":"fc-notap"}}"#, dead_pid());
+        let (reaped, quarantined, exists) = sweep_one_record(&json);
+        assert_eq!((reaped, quarantined), (0, 1), "tap-less record must be quarantined");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn sweep_quarantines_record_with_tap_but_missing_pid() {
+        // tap present but no pid field → vmm_pid would be unknown → quarantined.
+        let (reaped, quarantined, exists) =
+            sweep_one_record(r#"{"tap":"tap-test","session_id":"fc-nopid"}"#);
+        assert_eq!((reaped, quarantined), (0, 1), "missing pid must be quarantined");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn sweep_quarantines_record_with_tap_and_pid_zero() {
+        // pid=0 must never reach teardown (it would `kill -9 0`) → quarantined.
+        let (reaped, quarantined, exists) =
+            sweep_one_record(r#"{"pid":0,"tap":"tap-test","session_id":"fc-pid0"}"#);
+        assert_eq!((reaped, quarantined), (0, 1), "pid=0 must be quarantined");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn sweep_reaps_dead_record_with_pid_and_tap() {
+        // Positive dead pid + non-empty tap → a usable record → reaped via the
+        // backend (kill is a no-op ESRCH on the already-dead pid).
+        let json = format!(r#"{{"pid":{},"tap":"tap-test","session_id":"fc-ok"}}"#, dead_pid());
+        let (reaped, quarantined, exists) = sweep_one_record(&json);
+        assert_eq!((reaped, quarantined), (1, 0), "pid+tap dead record must be reaped");
+        assert!(!exists);
     }
 
     #[test]

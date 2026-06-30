@@ -14,7 +14,6 @@ pub(crate) mod backend;
 pub(crate) mod bindings;
 pub(crate) mod build;
 pub(crate) mod flags;
-pub(crate) mod orphan_sweep;
 pub(crate) mod restore;
 pub(crate) mod runtime_adapter;
 pub(crate) mod store;
