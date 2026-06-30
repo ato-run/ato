@@ -3723,6 +3723,58 @@ where
         .map_err(|e| anyhow::Error::new(*e))?;
     }
 
+    // ── Ready-State restore sub-mode (additive; developer-preview) ───────────
+    // Legacy fall-through (None) happens ONLY for: flag off, or flag on + capsule
+    // NOT Ready-State-eligible. With the flag ON + an eligible capsule, a MISSING
+    // sealed artifact FAILS CLOSED (not a silent cold run) — the user explicitly
+    // enabled Ready-State as a validation mode. An explicit-but-unavailable
+    // backend also fails closed (`select_backend`).
+    if crate::application::ready_state::flags::ready_state_enabled() {
+        use capsule::Measurable;
+        use crate::application::ready_state;
+        // Only reached when the flag is on, so the legacy path does ZERO of this
+        // (no manifest re-parse / hash). decide_ready_state_run fails CLOSED when
+        // the capsule is eligible but no sealed artifact exists (validation mode
+        // must not silently degrade to a cold run); returns None only for a
+        // non-eligible capsule (→ legacy dispatch below).
+        let rs_manifest =
+            capsule::types::CapsuleManifest::from_toml(&toml::to_string(&decision.plan.manifest)?)?;
+        let rs_hash = ready_state::capsule_manifest_hash(&decision.plan.manifest)?;
+        let rs_root = ready_state::state_root();
+        if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
+            let backend = ready_state::backend::select_backend()?;
+            let store = ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
+            let overlay = capsule::common::paths::ato_path_or_workspace_tmp("run")
+                .join(format!("ready-state-{}", std::process::id()));
+            let receipt = ready_state::restore::restore_and_expose(
+                backend.as_ref(),
+                &store,
+                plan.manifest,
+                overlay,
+                plan.host_runner_class,
+            )?;
+            let session = receipt.session;
+            // Surface RuntimeMetadata::MicroVm through the restored-session handle.
+            let handle =
+                ready_state::runtime_adapter::RestoredRuntimeHandle::new(session.clone());
+            let metrics = handle.capture_metrics().await.map_err(anyhow::Error::new)?;
+            tracing::info!(
+                target: "ato::ready_state",
+                backend = backend.id(),
+                metadata = ?metrics.metadata,
+                port = ?session.guest_port,
+                restored_bytes = session.restored_bytes,
+                "READY-STATE: restored microVM (developer-preview — reclaiming after verify)"
+            );
+            // Developer-preview reclaims the disposable overlay/session here.
+            // Long-lived foreground serving, background ProcessInfo stamping, and
+            // `ato stop` teardown are a fast follow.
+            let td = ready_state::restore::teardown(backend.as_ref(), session)?;
+            debug_assert!(td.overlay_removed);
+            return Ok(());
+        }
+    }
+
     let run_command_uses_specialized_executor = decision
         .plan
         .execution_driver()
