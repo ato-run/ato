@@ -413,21 +413,20 @@ fn fc_kvm_uffd_remote_readthrough_reaches_health() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let store = CasStore::open(dir.path().join("cas")).unwrap();
-    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
-    let mem = m.layers.memory.as_ref().expect("memory layer");
-
-    // Simulate a remote: copy the memory chunks to a separate store, then DELETE them
-    // from local. Local keeps rootfs/vmstate; memory must come via read-through.
+    // Build into the REMOTE store; the local store gets only rootfs + vmstate, so the
+    // guest's memory must be read through from remote on demand.
     let remote = CasStore::open(dir.path().join("remote")).unwrap();
-    let local_blobs = dir.path().join("cas").join("blobs").join("blake3");
-    for c in &mem.chunks {
-        let bytes = store.get_chunk(&c.hash).unwrap();
-        remote.put_chunk(&bytes).unwrap();
-        std::fs::remove_file(local_blobs.join(c.hash.hex())).unwrap();
+    let m = b.build_ready_state(build_input(&remote, rootfs, vec![])).expect("build").manifest;
+    let mem = m.layers.memory.as_ref().expect("memory layer");
+    let store = CasStore::open(dir.path().join("local")).unwrap();
+    for layer in [m.layers.rootfs.as_ref(), m.layers.vmstate.as_ref()].into_iter().flatten() {
+        for c in &layer.chunks {
+            let bytes = remote.get_chunk(&c.hash).unwrap();
+            store.put_chunk(&bytes).unwrap(); // idempotent (content-addressed)
+        }
     }
     let local_mem_before = mem.chunks.iter().filter(|c| store.has_chunk(&c.hash)).count();
-    assert_eq!(local_mem_before, 0, "memory chunks removed from local");
+    assert!(local_mem_before < mem.chunks.len(), "most memory chunks are NOT local (came from remote)");
 
     let overlay = dir.path().join("ov");
     unsafe {
@@ -443,10 +442,11 @@ fn fc_kvm_uffd_remote_readthrough_reaches_health() {
 
     let rec = read_uffd_receipt(&overlay);
     assert!(rec.vm_reaches_health, "remote read-through reaches health");
-    // Read-through proof: local re-gained the working-set memory chunks, but NOT all
-    // of them (demand-only — only the touched chunks crossed the "network").
+    // Read-through proof: local gained the working-set memory chunks (beyond any
+    // shared with rootfs/vmstate), but NOT all of them (demand-only — only the touched
+    // chunks crossed the "network").
     let local_mem_after = mem.chunks.iter().filter(|c| store.has_chunk(&c.hash)).count();
-    assert!(local_mem_after > 0, "read-through cached working-set chunks locally");
+    assert!(local_mem_after > local_mem_before, "read-through cached working-set chunks locally");
     assert!(local_mem_after < mem.chunks.len(), "demand-only: not the whole memory image was fetched");
     eprintln!(
         "### U6 read-through: local_mem_chunks {}/{} fetched, health_ms={:?}",
