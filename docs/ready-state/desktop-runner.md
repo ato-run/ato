@@ -1,8 +1,9 @@
 # Desktop Runner (macOS) — capability model
 
-> Status: **M0 (developer-preview)**. Implements the capability *probe* and
-> placement *matching* only. No Ready-State restore, no CRIU, no binding
-> injection, no user traffic. Tracked under #838; CRIU is the separate #839 track.
+> Status: **M0–M3 (developer-preview)**. Capability *probe* (M0), developer
+> *diagnostic* (M1), placement *decision* (M2), and an explicitly-selected local
+> *cold-OCI run* path (M3). No Ready-State restore, no CRIU, no binding
+> injection. Tracked under #838; CRIU is the separate #839 track.
 
 The **Desktop Runner** is the desktop shell acting as a *local* Ato Runner
 provider, backed by a host isolation substrate. On macOS that substrate is
@@ -134,6 +135,42 @@ decision carries `is_executable_now: false`, and `suggest_managed_runner` is a
 `{facts, placement}` object). It changes **no** default `ato run` path; the run
 path consults the decision only when the Desktop Runner is explicitly selected
 (MacBook M3).
+
+## Local cold-OCI run (M3)
+
+The first *executable* Desktop Runner path (`cold_oci.rs` + `execute.rs`). It
+runs **only** when the Desktop Runner is explicitly selected — the default
+`ato run` is untouched:
+
+```sh
+ATO_DESKTOP_RUNNER_EXECUTE=1 ato run ./my-oci-capsule    # or: ATO_RUN_PROVIDER=desktop
+```
+
+It is fail-closed, in order:
+
+1. **placement gate** — proceeds only on `local_cold_oci_candidate`;
+   `suggest_managed_runner` / `ready_state_restore_unsupported_local` print a
+   clear message and run nothing (no auto-dispatch, no cold-start of a
+   wrong-class artifact).
+2. **binding guard** — a capsule declaring `[secrets.*]` / `[bindings.*]` /
+   `[external.*]` (reusing `ready_state::bindings::requires_runtime_bindings`) is
+   rejected **before** any container starts: *"local cold OCI does not support
+   runtime bindings yet … use a managed runner."*
+3. **OCI resolution** — only `runtime = "oci"` targets with an `image` run;
+   source/web/wasm capsules are a clear "unsupported in M3" error, never a faked
+   success (no source→OCI materialization yet).
+
+The container command (`build_run_args`) is detached, uniquely named, passes
+**declared env only** (never the host environment), mounts no host paths, and
+does **not** publish a port (M3 health-checks inside the container; external
+serving / port publish awaits CLI verification on macOS 26). One run = one
+Apple Containerization VM-wrapped container, stopped and deleted on completion.
+The session receipt records the **guest** execution class (`guest_os=linux`,
+`guest_arch=aarch64`, `substrate=apple_containerization`) — distinct from the
+macOS host — plus `binding_required=false` and `binding_leases=0`.
+
+Not in M3: Ready-State restore, CRIU, binding injection, long-lived serving,
+port publish, source→OCI materialization, default-path execution.
 
 ## Security invariants
 
