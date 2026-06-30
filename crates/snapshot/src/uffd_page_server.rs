@@ -298,6 +298,10 @@ mod linux_impl {
     /// uncontended.
     pub(crate) struct CasSource {
         store: CasStore,
+        /// U6 (#859): optional remote CAS the page-server reads through on a local
+        /// miss (fetch the chunk from remote, cache it local, then serve). Demand-
+        /// only — only the working set crosses the "network".
+        remote: Option<CasStore>,
         mem_blob: BlobManifest,
         chunk_size: u64,
         total_len: u64,
@@ -308,8 +312,29 @@ mod linux_impl {
         fn chunk_start(&self, file_offset: u64) -> u64 {
             (file_offset / self.chunk_size) * self.chunk_size
         }
+        /// U6: ensure the CAS chunks overlapping `[start, start+len)` are present in
+        /// the local store, fetching any missing ones from the remote read-through.
+        fn ensure_local(&self, start: u64, len: u64) -> io::Result<()> {
+            let Some(remote) = &self.remote else { return Ok(()) };
+            let end = start + len;
+            for c in &self.mem_blob.chunks {
+                let c_end = c.offset.wrapping_add(c.length);
+                if c_end <= start || c.offset >= end {
+                    continue;
+                }
+                if !self.store.has_chunk(&c.hash) {
+                    let bytes = remote
+                        .get_chunk(&c.hash)
+                        .map_err(|e| io::Error::other(format!("remote read-through {}: {e}", c.hash.hex())))?;
+                    self.store
+                        .put_chunk(&bytes)
+                        .map_err(|e| io::Error::other(format!("cache read-through chunk: {e}")))?;
+                }
+            }
+            Ok(())
+        }
         /// Get the (cached) 2 MiB chunk containing `file_offset`, reading it from CAS
-        /// on a miss.
+        /// on a miss (read-through from remote first, if configured).
         fn chunk_for(&self, file_offset: u64) -> io::Result<Arc<Vec<u8>>> {
             let start = self.chunk_start(file_offset);
             let mut cache = self.cache.lock().unwrap();
@@ -317,6 +342,7 @@ mod linux_impl {
                 return Ok(Arc::clone(c));
             }
             let len = self.chunk_size.min(self.total_len.saturating_sub(start));
+            self.ensure_local(start, len)?;
             let bytes = LazyBlobReader::new(&self.store, &self.mem_blob)
                 .read_range(start, len)
                 .map_err(|e| io::Error::other(format!("cas read_range @{start}+{len}: {e}")))?;
@@ -331,10 +357,11 @@ mod linux_impl {
             Ok(PageSource::MemFile(MemMap::open(mem_path)?))
         }
 
-        pub(crate) fn cas(store: CasStore, mem_blob: BlobManifest) -> PageSource {
+        pub(crate) fn cas(store: CasStore, mem_blob: BlobManifest, remote: Option<CasStore>) -> PageSource {
             let total_len = mem_blob.total_len;
             PageSource::Cas(CasSource {
                 store,
+                remote,
                 mem_blob,
                 chunk_size: MEMORY_PAGE_CHUNK_SIZE as u64,
                 total_len,
@@ -770,7 +797,11 @@ mod stub {
         pub(crate) fn mem_file(_mem_path: &Path) -> io::Result<PageSource> {
             Err(io::Error::other("UFFD page-server is Linux-only"))
         }
-        pub(crate) fn cas(_store: capsulefs::CasStore, _mem_blob: capsulefs::BlobManifest) -> PageSource {
+        pub(crate) fn cas(
+            _store: capsulefs::CasStore,
+            _mem_blob: capsulefs::BlobManifest,
+            _remote: Option<capsulefs::CasStore>,
+        ) -> PageSource {
             PageSource::Zero // unreachable: bind() fails closed on non-linux
         }
     }
