@@ -249,6 +249,53 @@ fn fc_kvm_uffd_cas_demand_serves_from_local_cas() {
     assert_clean_teardown(&overlay);
 }
 
+fn read_hotset_trace(overlay: &std::path::Path) -> crate::uffd_page_server::HotsetTrace {
+    let text = std::fs::read_to_string(overlay.join(".hotset-trace.json")).expect("hotset trace written");
+    serde_json::from_str(&text).expect("parse hotset trace")
+}
+
+/// U3 (#856): the page-server records a per-restore fault trace (HotsetTrace) — the
+/// signal U4's hotset prefetch consumes. Asserts the trace captures the pre-health
+/// hotset, page-aligned GPAs, all demand-sourced (no prefetch yet).
+#[test]
+#[ignore]
+fn fc_kvm_uffd_fault_trace_records_hotset() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd trace needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let overlay = dir.path().join("ov");
+    // SAFETY: KVM suite runs --test-threads=1; gate removed before returning.
+    unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    unsafe { std::env::remove_var("ATO_FC_UFFD") };
+    let r = r.expect("restore (uffd cas, trace)");
+
+    let trace = read_hotset_trace(&overlay);
+    assert!(!trace.entries.is_empty(), "fault trace recorded");
+    let pre = trace.entries.iter().filter(|e| e.phase == "pre_health").count();
+    assert!(pre > 0, "pre-health faults recorded (the hotset)");
+    assert!(trace.entries.iter().all(|e| e.page_gpa % 4096 == 0), "page-aligned GPAs");
+    assert!(trace.entries.iter().all(|e| e.source == "demand"), "U3 is all demand (no prefetch yet)");
+    // The receipt's pre_health_pages == distinct pre-health page GPAs in the trace.
+    let rec = read_uffd_receipt(&overlay);
+    assert_eq!(rec.pre_health_pages, Some(trace.pre_health_pages()), "receipt agrees with trace");
+    assert!(rec.pre_health_pages.unwrap() > 0);
+    eprintln!(
+        "### U3-RECEIPT trace_entries={} pre_health_pages={:?} {}",
+        trace.entries.len(),
+        rec.pre_health_pages,
+        serde_json::to_string(&rec).unwrap()
+    );
+
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
 #[test]
 #[ignore]
 fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
