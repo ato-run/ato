@@ -37,6 +37,42 @@ substrate*. CRIU is a later *inner Ready-State mechanism*. The two are not
 conflated: the substrate question ("where does a session run?") is answered in
 M0; the Ready-State question ("can we restore a warm session?") is not.
 
+## Developer diagnostic (`ato doctor desktop-runner`)
+
+The probe is surfaced through a read-only doctor command (MacBook M1):
+
+```sh
+ato doctor desktop-runner          # human summary
+ato doctor desktop-runner --json   # raw DesktopRunnerFacts receipt
+```
+
+It only probes — it never starts the `container` service or launches a
+workload. Example on a macOS < 26 Apple-silicon host (no `container`):
+
+```text
+ato doctor desktop-runner
+  host: macos/aarch64 (15.7.4)  ·  runtime 0.7.1  ·  virtualization available
+
+  Desktop Runner: unavailable
+  reason:
+    - Apple Containerization requires macOS 26+ (found macOS 15.7.4). ...
+    - Apple `container` is not installed. Install it from https://github.com/apple/container, ...
+  fallback:
+    - managed runner
+```
+
+On a supported host the summary instead reports `Desktop Runner: available`
+with `substrate: apple_containerization`, `isolation: vm_wrapped_container`,
+`mode: cold_oci`, and `ready-state restore / CRIU / bindings: unsupported`.
+
+### Live validation
+
+| Host | `ato doctor desktop-runner` expectation |
+|---|---|
+| macOS < 26, Apple silicon | command succeeds; `host_arch=aarch64` (even under Rosetta); `backends: []`; `apple_containerization available=false`; diagnostics name macOS 26+ and missing `container`; no service start; no automatic managed-runner handoff |
+| macOS 26+, Apple silicon, `container` installed | `apple_containerization available=true`; one cold-OCI backend (`guest=linux/aarch64`, `vm_wrapped_container`, all `supports_*=false`); service status *detected*, not auto-started |
+| Intel Mac / Linux / Windows | no Apple Containerization backend; Linux notes the separate Firecracker/KVM path; Windows shows the WSL2 placeholder |
+
 ## What M0 does
 
 | Allowed | Not allowed (yet) |
@@ -117,10 +153,21 @@ ATO_DESKTOP_SMOKE_START_SERVICE=1 \
   cargo test -p cli desktop_runner::smoke -- --ignored --nocapture
 ```
 
-It cold-starts a tiny HTTP OCI image, waits for health, stops it, and prints a
-receipt with `host_os`, `host_arch`, macOS version, `container` version,
-`substrate = apple_containerization`, `isolation_boundary =
-vm_wrapped_container`, `ready_state_kind = cold_oci`, and elapsed
-start→health. The image is overridable with `ATO_DESKTOP_SMOKE_IMAGE`.
+It cold-starts a tiny HTTP OCI image, waits for health, then stops **and
+deletes** it, and prints a receipt with `host_os`, `host_arch`, macOS version,
+`container` version, `substrate = apple_containerization`, `isolation_boundary =
+vm_wrapped_container`, `ready_state_kind = cold_oci`, `image`, elapsed
+start→health, and `cleanup_ok`. The image is overridable with
+`ATO_DESKTOP_SMOKE_IMAGE`.
+
+Hardening (M1): a **unique container name per run** (`ato-desktop-smoke-<pid>-<ms>`),
+a `Drop`-guarded cleanup that runs even if an assertion fails, **per-command
+timeouts** (run / health-poll / stop), captured `stdout`/`stderr` in failure
+messages, and `container delete` with an `rm` fallback for CLI-version drift.
+
+> ⚠️ The smoke's `container` subcommands (`run`/`exec`/`stop`/`delete`) should be
+> re-verified against the current Apple `container` CLI on a real macOS 26
+> Apple-silicon host and adjusted if the CLI has changed; it is `#[ignore]`d so
+> it never gates CI.
 
 See also [`backend-matrix.md`](./backend-matrix.md).
