@@ -3737,9 +3737,21 @@ where
         // the capsule is eligible but no sealed artifact exists (validation mode
         // must not silently degrade to a cold run); returns None only for a
         // non-eligible capsule (→ legacy dispatch below).
-        let rs_manifest =
-            capsule::types::CapsuleManifest::from_toml(&toml::to_string(&decision.plan.manifest)?)?;
-        let rs_hash = ready_state::capsule_manifest_hash(&decision.plan.manifest)?;
+        //
+        // Eligibility + the artifact key MUST be derived from the SAME manifest the
+        // `ato build` seal used — the RAW `capsule.toml` on disk. `decision.plan.manifest`
+        // is the derived/normalized ExecutionPlan manifest: it drops the top-level
+        // `[snapshot]` section (→ never Ready-State-eligible) and canonicalizes
+        // differently (→ a different `capsule_manifest_hash` than the seal). Using it
+        // here made `ato run` silently cold-path past every sealed artifact. Read the
+        // raw manifest from `manifest_path` (the build's `raw_manifest` source);
+        // fall back to the plan manifest only if the file can't be read/parsed.
+        let rs_raw: toml::Value = std::fs::read_to_string(&decision.plan.manifest_path)
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_else(|| decision.plan.manifest.clone());
+        let rs_manifest = capsule::types::CapsuleManifest::from_toml(&toml::to_string(&rs_raw)?)?;
+        let rs_hash = ready_state::capsule_manifest_hash(&rs_raw)?;
         let rs_root = ready_state::state_root();
         if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
             // Fail closed BEFORE any restore/expose if the capsule requires runtime
