@@ -29,10 +29,15 @@
 //! The probe is wired into the developer diagnostic `ato doctor desktop-runner`
 //! ([`diagnostics`], MacBook M1). The placement layer ([`matching`] +
 //! [`placement`], MacBook M2) turns the probe into a [`placement::DesktopPlacementDecision`]
-//! that the diagnostic surfaces — it decides, it does not execute. A local
-//! Apple Containerization run path is MacBook M3.
+//! that the diagnostic surfaces — it decides, it does not execute. The local
+//! cold-OCI run path ([`cold_oci`] + [`execute`], MacBook M3) runs a
+//! `runtime = "oci"` capsule **only** when the Desktop Runner is explicitly
+//! selected and no runtime bindings are required — Ready-State restore, CRIU,
+//! and binding injection remain future work.
 
+pub(crate) mod cold_oci;
 pub(crate) mod diagnostics;
+pub(crate) mod execute;
 pub(crate) mod facts;
 pub(crate) mod macos;
 pub(crate) mod matching;
@@ -167,9 +172,9 @@ mod tests {
 // stdout/stderr in failure messages.
 #[cfg(test)]
 mod smoke {
+    use super::cold_oci::{ContainerGuard, container};
     use super::facts::SUBSTRATE_APPLE_CONTAINERIZATION;
     use serde::Serialize;
-    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// Receipt emitted by the manual cold-OCI smoke.
@@ -187,118 +192,10 @@ mod smoke {
         cleanup_ok: bool,
     }
 
-    /// Outcome of one `container` invocation under a timeout.
-    #[derive(Default)]
-    struct CmdResult {
-        timed_out: bool,
-        status_ok: bool,
-        stdout: String,
-        stderr: String,
-    }
-
     /// The tiny HTTP image to cold-start. Overridable for offline mirrors.
     fn smoke_image() -> String {
         std::env::var("ATO_DESKTOP_SMOKE_IMAGE")
             .unwrap_or_else(|_| "docker.io/library/python:3-alpine".to_string())
-    }
-
-    /// Run `container <args>` with captured output and a hard timeout. On timeout
-    /// the child is killed. Output is tiny for every command we run here, so
-    /// piping without concurrent draining cannot deadlock.
-    fn container(args: &[&str], timeout: Duration) -> CmdResult {
-        let mut child = match Command::new("container")
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return CmdResult {
-                    stderr: format!("spawn `container {}` failed: {e}", args.join(" ")),
-                    ..Default::default()
-                };
-            }
-        };
-        let deadline = Instant::now() + timeout;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let out = child.wait_with_output().ok();
-                    let (stdout, stderr) = out
-                        .map(|o| {
-                            (
-                                String::from_utf8_lossy(&o.stdout).into_owned(),
-                                String::from_utf8_lossy(&o.stderr).into_owned(),
-                            )
-                        })
-                        .unwrap_or_default();
-                    return CmdResult {
-                        timed_out: false,
-                        status_ok: status.success(),
-                        stdout,
-                        stderr,
-                    };
-                }
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return CmdResult {
-                            timed_out: true,
-                            stderr: format!(
-                                "`container {}` timed out after {timeout:?}",
-                                args.join(" ")
-                            ),
-                            ..Default::default()
-                        };
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Err(e) => {
-                    return CmdResult {
-                        stderr: format!("wait `container {}` failed: {e}", args.join(" ")),
-                        ..Default::default()
-                    };
-                }
-            }
-        }
-    }
-
-    /// Stops and deletes a container on drop, so a panicking assertion never
-    /// leaves a stray container behind.
-    struct ContainerGuard {
-        name: String,
-        cleaned: bool,
-    }
-
-    impl ContainerGuard {
-        fn new(name: String) -> Self {
-            Self {
-                name,
-                cleaned: false,
-            }
-        }
-
-        /// Stop then delete the container. Returns true once it is gone. Apple
-        /// `container` uses `delete`; fall back to `rm` for other CLIs.
-        fn cleanup(&mut self) -> bool {
-            if self.cleaned {
-                return true;
-            }
-            self.cleaned = true;
-            let _ = container(&["stop", &self.name], Duration::from_secs(15));
-            container(&["delete", &self.name], Duration::from_secs(15)).status_ok
-                || container(&["rm", &self.name], Duration::from_secs(15)).status_ok
-        }
-    }
-
-    impl Drop for ContainerGuard {
-        fn drop(&mut self) {
-            if !self.cleaned {
-                let _ = self.cleanup();
-            }
-        }
     }
 
     #[test]
