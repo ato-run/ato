@@ -10,6 +10,7 @@ pub(crate) mod credential;
 pub(crate) mod dependency_credentials;
 pub(crate) mod dependency_materializer;
 pub(crate) mod dependency_runtime;
+pub(crate) mod desktop_runner;
 pub(crate) mod disk_doctor;
 pub(crate) mod engine;
 pub(crate) mod execution_graph_adapter;
