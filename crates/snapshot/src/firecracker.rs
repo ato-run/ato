@@ -471,6 +471,19 @@ impl SnapshotBackend for FirecrackerBackend {
         &self,
         input: BuildReadyStateInput<'_>,
     ) -> Result<BuildReadyStateReceipt, SnapshotError> {
+        // PREFLIGHT GATE (fail closed BEFORE any store / stable-rootfs write / boot):
+        // a declared marker in rootfs/runtime/dependency/app, or a provider/env
+        // secret in app/dependency, rejects the build before secret-bearing rootfs
+        // bytes are ever written to CAS. Runs even without /dev/kvm. The full
+        // six-layer gate (incl. vmstate/memory) still runs post-snapshot in
+        // seal_and_scan, before THOSE layers are stored.
+        crate::seal::preflight_gate(
+            &input.layers.rootfs,
+            input.layers.runtime.as_deref(),
+            input.layers.dependency.as_deref(),
+            input.layers.app.as_deref(),
+            &input.declared_secret_markers,
+        )?;
         self.ensure_available()?;
         self.acquire_lock("build")?;
         let _lock = BuildLock { path: self.lock_path() };
@@ -774,6 +787,35 @@ mod tests {
         let backend = FirecrackerBackend::new();
         let input = RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: None };
         assert!(matches!(backend.restore(input), Err(SnapshotError::Unsupported { .. })));
+    }
+
+    #[test]
+    fn build_preflight_rejects_declared_marker_before_kvm_and_store() {
+        // Even on a KVM-less host, a declared marker in rootfs is rejected by the
+        // preflight gate BEFORE ensure_available()/any CAS store — proving the
+        // gate-before-store invariant on the Firecracker path.
+        use crate::manifest::{RestoreContract, SanitizerContract};
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let input = BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: "blake3:preflight".to_string(),
+            runner_class: None,
+            layers: BuildLayers {
+                rootfs: b"....PREFLIGHT_MARKER_XYZ....".to_vec(),
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".to_string()), expected_ready_ms: Some(3000) },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: vec!["PREFLIGHT_MARKER_XYZ".to_string()],
+        };
+        let err = FirecrackerBackend::new().build_ready_state(input).unwrap_err();
+        assert!(matches!(err, SnapshotError::SecretFoundInSnapshot(_)), "preflight must reject before KVM/store: {err:?}");
+        assert!(store.list_chunks().unwrap().is_empty(), "rejected build must persist no rootfs in CAS");
     }
 
     #[test]
