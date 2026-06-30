@@ -857,7 +857,13 @@ impl SnapshotBackend for FirecrackerBackend {
                 };
                 let server = crate::uffd_page_server::PageServer::bind(&sock, source)
                     .map_err(|e| self.backend_err(format!("uffd page-server bind: {e}")))?;
-                page_handle = Some(server.serve());
+                // U4 (#857): ATO_FC_UFFD_HOTSET=<profile.json> → prefetch the hotset.
+                let hotset = std::env::var("ATO_FC_UFFD_HOTSET").ok().and_then(|p| {
+                    std::fs::read_to_string(&p)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<crate::uffd_page_server::HotsetProfile>(&t).ok())
+                });
+                page_handle = Some(server.serve(hotset));
             }
 
             let fc = bench::time("restore.start_fc", || {
