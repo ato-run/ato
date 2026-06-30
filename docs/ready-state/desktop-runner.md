@@ -162,8 +162,9 @@ It is fail-closed, in order:
 
 The container command (`build_run_args`) is detached, uniquely named, passes
 **declared env only** (never the host environment), mounts no host paths, and
-does **not** publish a port (M3 health-checks inside the container; external
-serving / port publish awaits CLI verification on macOS 26). One run = one
+does **not** publish a port (M3 only checks the container's running state via
+`container ls`; external serving / port publish awaits CLI verification on
+macOS 26). One run = one
 Apple Containerization VM-wrapped container, stopped and deleted on completion.
 The session receipt records the **guest** execution class (`guest_os=linux`,
 `guest_arch=aarch64`, `substrate=apple_containerization`) — distinct from the
