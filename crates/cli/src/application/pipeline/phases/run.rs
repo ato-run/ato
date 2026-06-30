@@ -3729,9 +3729,14 @@ where
     // Ready-State-eligible, OR no sealed artifact exists. So legacy runs NEVER
     // enter this branch. The only fail-CLOSED case is an explicit-but-unavailable
     // backend (`select_backend`), which errors rather than silently skipping.
-    {
+    if crate::application::ready_state::flags::ready_state_enabled() {
         use capsule::Measurable;
         use crate::application::ready_state;
+        // Only reached when the flag is on, so the legacy path does ZERO of this
+        // (no manifest re-parse / hash). decide_ready_state_run fails CLOSED when
+        // the capsule is eligible but no sealed artifact exists (validation mode
+        // must not silently degrade to a cold run); returns None only for a
+        // non-eligible capsule (→ legacy dispatch below).
         let rs_manifest =
             capsule::types::CapsuleManifest::from_toml(&toml::to_string(&decision.plan.manifest)?)?;
         let rs_hash = ready_state::capsule_manifest_hash(&decision.plan.manifest)?;
