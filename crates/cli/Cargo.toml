@@ -30,6 +30,8 @@ path = "src/main.rs"
 
 [dependencies]
 capsule = { path = "../capsule", version = "0.11.0" }
+snapshot = { path = "../snapshot", version = "0.1.0" }
+capsulefs = { path = "../capsulefs", version = "0.1.0" }
 protocol = { path = "../protocol", version = "0.1.0" }
 lock-draft-engine = { path = "lock-draft-engine", version = "0.1.0" }
 anyhow = "1.0"
