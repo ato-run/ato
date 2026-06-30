@@ -111,9 +111,29 @@ startup.
 - Managed Cloud handoff is always **explicit** in the reason string (intended
   for logs/receipt).
 
-In M0 no backend sets `supports_ready_state_restore`, so a Ready-State run on a
-Desktop Runner host resolves to an explicit managed-runner suggestion rather
+In M0–M2 no backend sets `supports_ready_state_restore`, so a Ready-State run on
+a Desktop Runner host resolves to an explicit managed-runner suggestion rather
 than a restore.
+
+### Placement decision (M2)
+
+`placement.rs` turns `select_placement` into a serializable
+`DesktopPlacementDecision` — the decision record the diagnostic surfaces and a
+future run path will consult. **It decides; it does not execute** — every
+decision carries `is_executable_now: false`, and `suggest_managed_runner` is a
+*recommendation*, never an automatic dispatch. `placement` is one of:
+
+| `placement` | When |
+|---|---|
+| `local_cold_oci_candidate` | Ready-State off + a local cold-OCI backend exists (candidate only; local run lands in M3) |
+| `ready_state_restore_unsupported_local` | exact-class artifact but no local restore backend + Ready-State on → explicit managed-runner handoff |
+| `suggest_managed_runner` | no safe local path (no backend / wrong class / Ready-State on without a sealed artifact) |
+| `ready_state_restore` | exact class match + a restore-capable backend (unreachable until a future milestone) |
+
+`ato doctor desktop-runner` shows this decision (human + `--json`'s
+`{facts, placement}` object). It changes **no** default `ato run` path; the run
+path consults the decision only when the Desktop Runner is explicitly selected
+(MacBook M3).
 
 ## Security invariants
 
