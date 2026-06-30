@@ -78,6 +78,9 @@ impl SnapshotBackend for QemuBackend {
             isolation_boundary: IsolationBoundary::Vm,
             supports_seal_before_bind: true,
             supports_disposable_overlay: true,
+            // UFFD mem_backend is a Firecracker snapshot feature; QEMU is not it.
+            supports_uffd_mem_backend: false,
+            uffd_reason: Some("qemu is not a Firecracker UFFD mem-backend".to_string()),
         }
     }
 
