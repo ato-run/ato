@@ -349,10 +349,26 @@ impl FirecrackerBackend {
 
     /// Poll the guest healthcheck (contract-driven port/path) until ready.
     fn wait_health(&self, port: u16, path: &str) -> Result<u128, SnapshotError> {
+        self.wait_health_until(port, path, || None)
+    }
+
+    /// `wait_health` with a fail-fast `abort` check polled each iteration (U5
+    /// #858): when it returns `Some(reason)` the wait stops with an error instead of
+    /// burning the full `boot_timeout` — used so a UFFD page-server failure (CAS
+    /// miss/corrupt → the guest can never fault its memory in) fails closed fast.
+    fn wait_health_until(
+        &self,
+        port: u16,
+        path: &str,
+        abort: impl Fn() -> Option<String>,
+    ) -> Result<u128, SnapshotError> {
         let addr: std::net::SocketAddr = format!("{}:{}", self.config.guest_ip, port)
             .parse().map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
         let start = Instant::now();
         while start.elapsed() < self.config.boot_timeout {
+            if let Some(reason) = abort() {
+                return Err(self.backend_err(format!("restore failed closed: {reason}")));
+            }
             if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
                 let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
                 let req = format!("GET {path} HTTP/1.0\r\nHost: {}\r\n\r\n", self.config.guest_ip);
@@ -885,19 +901,22 @@ impl SnapshotBackend for FirecrackerBackend {
             // Readiness: U1a (Zero) serves garbage pages, so the guest never reaches
             // health — confirm the fault loop fired instead. Everything else (File,
             // U1b Mem) waits for health as usual.
-            let time_to_health_ms: Option<u128> = if uffd == Some(UffdMode::Zero) {
-                if let Some(h) = &page_handle {
+            let time_to_health_ms: Option<u128> = match (uffd, &page_handle) {
+                // U1a: zero pages → never reaches health; confirm the loop fired.
+                (Some(UffdMode::Zero), Some(h)) => {
                     h.wait_for_first_fault(Duration::from_secs(10));
+                    None
                 }
-                None
-            } else {
-                let ms = bench::time("restore.wait_health", || self.wait_health(port, &path))?;
-                // U3 (#856): tag faults after this point as post-health, so the trace
-                // separates the pre-health hotset (what U4 will prefetch) from the rest.
-                if let Some(h) = &page_handle {
+                // U1b/U2 (uffd mem/cas): wait for health but FAIL CLOSED FAST (U5) if
+                // the page-server hits a fatal CAS miss/corrupt — don't burn the full
+                // timeout booting a VM on memory that can never be served.
+                (Some(_), Some(h)) => {
+                    let ms = self.wait_health_until(port, &path, || h.failed())?;
                     h.mark_health_reached();
+                    Some(ms)
                 }
-                Some(ms)
+                // File backend (default): unchanged.
+                _ => Some(bench::time("restore.wait_health", || self.wait_health(port, &path))?),
             };
 
             // U1: snapshot a receipt + (U3) the per-restore fault trace for the smoke.
