@@ -115,7 +115,7 @@ pub fn load_credentials(path: &std::path::Path) -> Result<RunnerCredentials> {
 // Capabilities
 // ─────────────────────────────────────────────
 
-fn binary_on_path(name: &str) -> bool {
+pub(crate) fn binary_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
