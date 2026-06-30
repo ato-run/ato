@@ -33,6 +33,17 @@ fn runtime_display(runtime: &str) -> String {
     runtime.to_string()
 }
 
+/// Whether a Ready-State session's disposable overlay (with its `.fc-session.json`
+/// record) is still on disk. `"-"` for non-microVM rows. Shared by JSON + table so
+/// they never diverge; pure (no VM) so it is unit-testable.
+fn overlay_status(p: &crate::runtime::process::ProcessInfo) -> &'static str {
+    match &p.ready_state_overlay_root {
+        Some(root) if root.join(".fc-session.json").exists() => "present",
+        Some(_) => "missing",
+        None => "-",
+    }
+}
+
 fn oci_session_visible(status: &OciSessionStatus, all: bool) -> bool {
     all || status.is_active()
 }
@@ -89,7 +100,18 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                     "ready_at": p.ready_at,
                     "last_event": p.last_event,
                     "last_error": p.last_error,
-                    "exit_code": p.exit_code
+                    "exit_code": p.exit_code,
+                    "port": p.requested_port,
+                    // Ready-State (microVM) session metadata (additive; null/absent
+                    // for legacy rows). Lets runners/tools identify + query a
+                    // long-lived Ready-State session (backend, session key, overlay
+                    // for GC, tap for net debugging).
+                    "ready_state": p.runtime == "microvm",
+                    "ready_state_backend_id": p.ready_state_backend_id,
+                    "ready_state_session_id": p.ready_state_session_id,
+                    "ready_state_overlay_root": p.ready_state_overlay_root.as_ref().map(|m| m.display().to_string()),
+                    "ready_state_tap_dev": p.ready_state_tap_dev,
+                    "ready_state_overlay_status": overlay_status(p)
                 })
             })
             .collect();
@@ -225,6 +247,18 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                 p.pid, id, name, status_str, runtime_str, uptime
             )))?;
 
+            if p.runtime == "microvm" {
+                let f = |o: &Option<String>| o.clone().unwrap_or_else(|| "-".to_string());
+                futures::executor::block_on(reporter.notify(format!(
+                    "         ready-state: backend={} session={} port={} overlay={} tap={}",
+                    f(&p.ready_state_backend_id),
+                    f(&p.ready_state_session_id),
+                    p.requested_port.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
+                    overlay_status(p),
+                    f(&p.ready_state_tap_dev),
+                )))?;
+            }
+
             if let Some(snapshot) = pm.read_dependency_session_snapshot(&p.id).ok().flatten()
                 && !snapshot.providers.is_empty()
             {
@@ -347,6 +381,12 @@ mod tests {
             runtime_display("source/node [host-fallback]"),
             "source/node ⚠️ (Host Fallback)"
         );
+    }
+
+    #[test]
+    fn runtime_display_shows_microvm_plainly() {
+        // Ready-State long-lived sessions render as a clear, ASCII, non-lying label.
+        assert_eq!(runtime_display("microvm"), "microvm");
     }
 
     #[test]
