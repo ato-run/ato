@@ -27,14 +27,16 @@
 //!   immutable pre-bind artifacts.
 //!
 //! The probe is wired into the developer diagnostic `ato doctor desktop-runner`
-//! ([`diagnostics`], MacBook M1). The placement [`matching`] layer is wired into
-//! a real run/selection path in MacBook M2 (#838); until then it carries its own
-//! scoped `dead_code` allow rather than a module-wide one.
+//! ([`diagnostics`], MacBook M1). The placement layer ([`matching`] +
+//! [`placement`], MacBook M2) turns the probe into a [`placement::DesktopPlacementDecision`]
+//! that the diagnostic surfaces — it decides, it does not execute. A local
+//! Apple Containerization run path is MacBook M3.
 
 pub(crate) mod diagnostics;
 pub(crate) mod facts;
 pub(crate) mod macos;
 pub(crate) mod matching;
+pub(crate) mod placement;
 
 use facts::{DesktopRunnerFacts, Maturity, PROVIDER_KIND_DESKTOP, SubstrateCapability};
 

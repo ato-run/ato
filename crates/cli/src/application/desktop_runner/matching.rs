@@ -9,14 +9,12 @@
 //!    told to restore a `linux`/`x86_64`/`firecracker` artifact.
 //! 2. [`select_placement`] — combines class compatibility, the host's
 //!    [`DesktopRunnerFacts`], and the Ready-State flag into a [`DesktopPlacement`].
-//!    M0 never restores (no backend `supports_ready_state_restore`), so a
+//!    M0–M2 never restore (no backend `supports_ready_state_restore`), so a
 //!    Ready-State run resolves to an **explicit** managed-runner suggestion
 //!    rather than a silent cold fallback or a wrong-class restore.
 //!
-//! This selection layer is wired into a real run/placement decision in MacBook
-//! M2 (#838); until then it is reachable only from tests, hence the scoped
-//! `dead_code` allow (removed when M2 lands).
-#![allow(dead_code)]
+//! Consumed by the placement-decision layer ([`super::placement`], MacBook M2),
+//! which the developer diagnostic surfaces — no execution happens here.
 
 use capsule::foundation::install_lifecycle::{RunnerClassFacts, RunnerClassMismatch};
 
@@ -26,11 +24,15 @@ use super::facts::{DesktopRunnerFacts, ReadyStateKind};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DesktopPlacement {
     /// Exact RunnerClass match **and** a local backend can restore — a
-    /// Ready-State restore is permitted. (Unreachable in M0: no backend sets
+    /// Ready-State restore is permitted. (Unreachable in M0–M2: no backend sets
     /// `supports_ready_state_restore`.)
     ReadyStateRestore { backend_substrate: String },
     /// No Ready-State restore; start the capsule cold on a local backend.
     ColdOciLocal { backend_substrate: String },
+    /// The artifact's class matches this host but no local backend can restore
+    /// Ready-State yet, and Ready-State was explicitly enabled — so we will not
+    /// silently cold-start. An explicit managed-runner handoff is the answer.
+    ReadyStateRestoreUnsupportedLocal { reason: String },
     /// No safe local path. An **explicit** managed-runner handoff — the reason
     /// is meant to be logged and shown, never a silent degrade.
     SuggestManagedRunner { reason: String },
@@ -102,10 +104,10 @@ pub(crate) fn select_placement(
                         backend_substrate: b.substrate.clone(),
                     }
                 } else if ready_state_enabled {
-                    DesktopPlacement::SuggestManagedRunner {
+                    DesktopPlacement::ReadyStateRestoreUnsupportedLocal {
                         reason:
                             "RunnerClass matches but no local Desktop Runner backend can restore \
-                             Ready-State yet (cold-OCI M0); use a managed runner"
+                             Ready-State yet (cold-OCI only); use a managed runner"
                                 .to_string(),
                     }
                 } else {
@@ -124,8 +126,8 @@ pub(crate) fn select_placement(
             if ready_state_enabled {
                 DesktopPlacement::SuggestManagedRunner {
                     reason:
-                        "Ready-State is enabled but no sealed artifact exists for this host class; \
-                         build one or use a managed runner"
+                        "Ready-State is enabled but this Desktop Runner cannot restore locally \
+                         (no sealed artifact for this host class); use a managed runner"
                             .to_string(),
                 }
             } else {
@@ -218,6 +220,22 @@ mod tests {
                 assert!(reason.contains("managed runner"), "{reason}");
             }
             other => panic!("expected explicit managed-runner suggestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matching_artifact_with_ready_state_enabled_is_unsupported_local_not_cold() {
+        // Exact-class artifact but no restore backend (M2) + Ready-State on:
+        // never silently cold-start — surface the local-restore gap explicitly.
+        let host = mac_facts();
+        let host_class = RunnerClassFacts::from_host();
+        let artifact = host_class.clone();
+        let placement = select_placement(&host, &host_class, Some(&artifact), true);
+        match placement {
+            DesktopPlacement::ReadyStateRestoreUnsupportedLocal { reason } => {
+                assert!(reason.contains("managed runner"), "{reason}");
+            }
+            other => panic!("expected ReadyStateRestoreUnsupportedLocal, got {other:?}"),
         }
     }
 
