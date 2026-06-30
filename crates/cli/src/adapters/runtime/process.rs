@@ -1038,6 +1038,21 @@ impl ProcessManager {
                 if pid.is_some_and(is_process_alive) {
                     continue;
                 }
+                // Record-driven teardown deletes the RECORDED tap; without a usable
+                // tap (missing/empty, or a malformed/partially-written record) a
+                // fallback could delete the wrong device — so such a record is NOT
+                // reapable. Quarantine it like a no-record dir instead.
+                let has_tap = val
+                    .as_ref()
+                    .and_then(|v| v.get("tap"))
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| !t.trim().is_empty());
+                if !has_tap {
+                    if self.quarantine_overlay(&session_id, &path).is_ok() {
+                        report.orphan_overlays_quarantined += 1;
+                    }
+                    continue;
+                }
                 // Long-lived serving is Firecracker-only; the record omits backend id.
                 if self.teardown_ready_state("firecracker", &session_id, &path, pid, None) {
                     report.orphan_overlays_reaped += 1;
@@ -2734,6 +2749,28 @@ start_time = [0, 0]
             run.path().join("quarantine").read_dir().unwrap().next().is_some(),
             "overlay preserved in quarantine"
         );
+    }
+
+    #[test]
+    fn sweep_ready_state_overlays_quarantines_dead_record_without_tap() {
+        // A record with a dead pid but no usable tap must NOT be reaped (record-
+        // driven teardown deletes the recorded tap; a fallback could delete the
+        // wrong device) — it is quarantined like a no-record dir.
+        let run = tempfile::tempdir().unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run.path().to_path_buf());
+        let ov = run.path().join("ready-state-999");
+        std::fs::create_dir_all(&ov).unwrap();
+        // Dead pid (0), no `tap` field.
+        std::fs::write(
+            ov.join(".fc-session.json"),
+            r#"{"pid":0,"session_id":"fc-notap"}"#,
+        )
+        .unwrap();
+        let mut report = RunDirSweepReport::default();
+        pm.sweep_ready_state_overlays(&mut report, SystemTime::now(), Duration::from_secs(0));
+        assert_eq!(report.orphan_overlays_reaped, 0, "tap-less record must not be reaped");
+        assert_eq!(report.orphan_overlays_quarantined, 1);
+        assert!(!ov.exists(), "overlay moved to quarantine");
     }
 
     #[test]
