@@ -126,9 +126,9 @@ impl ColdOciRunRequest {
 ///
 /// Detached (`-d`), uniquely named, **declared env only** (`--env K=V` — never
 /// the host environment), optional `--user`. It deliberately does **not**
-/// `--publish` a port or mount any host path: M3 health-checks inside the
-/// container and does not expose external user traffic (a publish/port command
-/// must be verified against the real Apple `container` CLI first).
+/// `--publish` a port or mount any host path: M3 only checks the container's
+/// running state and does not expose external user traffic (a publish/port
+/// command must be verified against the real Apple `container` CLI first).
 pub(crate) fn build_run_args(req: &ColdOciRunRequest) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -348,7 +348,7 @@ pub(crate) fn run(
                 "exited".to_string()
             };
             if health_status == "running" {
-                eprintln!("DESKTOP-RUNNER: serving ({})", req.container_name);
+                eprintln!("DESKTOP-RUNNER: running ({})", req.container_name);
                 break;
             }
         }
