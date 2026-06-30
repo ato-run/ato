@@ -320,7 +320,7 @@ fn fc_kvm_uffd_hotset_prefetch_cuts_demand_faults() {
     let rec1 = read_uffd_receipt(&ov1);
     let trace = read_hotset_trace(&ov1);
     let profile = crate::uffd_page_server::HotsetProfile::from_trace(&trace);
-    assert!(!profile.pages.is_empty(), "hotset profile built from trace");
+    assert!(!profile.offsets.is_empty(), "hotset profile built from trace");
     let profile_path = dir.path().join("hotset.json");
     std::fs::write(&profile_path, serde_json::to_string(&profile).unwrap()).unwrap();
     b.stop(r1.session).expect("stop1");
