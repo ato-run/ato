@@ -38,6 +38,7 @@ mod manifest;
 mod placement;
 mod qemu;
 mod scanner;
+mod uffd;
 
 pub use backend::{
     BackendCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,

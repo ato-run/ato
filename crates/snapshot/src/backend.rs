@@ -134,6 +134,17 @@ pub struct BackendCapabilities {
     pub supports_seal_before_bind: bool,
     /// Whether it gives each session a disposable writable overlay.
     pub supports_disposable_overlay: bool,
+    /// Whether this backend can drive a Firecracker `Uffd` snapshot `mem_backend`
+    /// (lazy page faulting via a page-server) on this host. **U0 scope** is
+    /// x86_64 + `/dev/kvm` + Firecracker ≥ the version whose swagger declares the
+    /// `Uffd` backend type + kernel `userfaultfd`; everything else is `false`.
+    /// This is a truthful capability probe only — no restore path uses it yet
+    /// (see `docs/ready-state/uffd-mem-backend.md`).
+    pub supports_uffd_mem_backend: bool,
+    /// Why UFFD is unsupported, when `!supports_uffd_mem_backend` (introspectable
+    /// reason, e.g. `"aarch64 not in U0 scope (x86_64 only)"`, `"firecracker
+    /// 0.25.2 < 1.0.0"`, `"userfaultfd disabled on host"`).
+    pub uffd_reason: Option<String>,
 }
 
 /// Raw layer bytes handed to a build. The caller assembles these from the

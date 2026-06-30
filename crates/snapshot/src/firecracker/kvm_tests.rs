@@ -59,6 +59,26 @@ fn fc_kvm_probe_available() {
     assert!(p.vmm_version.is_some());
 }
 
+/// U0: on a real KVM host the UFFD facet must be truthful — `true` (no reason)
+/// only when x86_64 + kernel userfaultfd, else `false` with a concrete reason.
+#[test]
+#[ignore]
+fn fc_kvm_probe_uffd() {
+    if !FirecrackerBackend::kvm_present() { eprintln!("SKIP: no kvm"); return; }
+    let p = FirecrackerBackend::new().probe();
+    if std::env::consts::ARCH == "x86_64" && crate::uffd::host_userfaultfd_present() {
+        assert!(
+            p.supports_uffd_mem_backend,
+            "expected UFFD support on x86_64 KVM host with userfaultfd: {:?}",
+            p.uffd_reason
+        );
+        assert!(p.uffd_reason.is_none());
+    } else {
+        assert!(!p.supports_uffd_mem_backend);
+        assert!(p.uffd_reason.is_some());
+    }
+}
+
 #[test]
 #[ignore]
 fn fc_kvm_build_restore_roundtrip() {
