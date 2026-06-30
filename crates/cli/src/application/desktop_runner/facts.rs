@@ -57,6 +57,27 @@ pub(crate) enum ReadyStateKind {
     VmSnapshot,
 }
 
+impl IsolationBoundary {
+    /// The snake_case wire label (matches the serde representation).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::VmWrappedContainer => "vm_wrapped_container",
+            Self::MicroVm => "micro_vm",
+        }
+    }
+}
+
+impl ReadyStateKind {
+    /// The snake_case wire label (matches the serde representation).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ColdOci => "cold_oci",
+            Self::CriuCheckpoint => "criu_checkpoint",
+            Self::VmSnapshot => "vm_snapshot",
+        }
+    }
+}
+
 /// How mature/trustworthy a backend is. M0 backends are `Experimental`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +85,17 @@ pub(crate) enum Maturity {
     Experimental,
     Beta,
     Stable,
+}
+
+impl Maturity {
+    /// The snake_case wire label (matches the serde representation).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Experimental => "experimental",
+            Self::Beta => "beta",
+            Self::Stable => "stable",
+        }
+    }
 }
 
 /// Availability of one isolation substrate on this host (e.g. Apple
@@ -150,6 +182,10 @@ pub(crate) struct DesktopRunnerFacts {
 
 impl DesktopRunnerFacts {
     /// True when this host advertises at least one backend on the named substrate.
+    ///
+    /// Test-only today (assertions across simulated hosts); the M2 placement
+    /// path will use it from non-test code and drop the `cfg`.
+    #[cfg(test)]
     pub(crate) fn has_substrate_backend(&self, substrate: &str) -> bool {
         self.backends.iter().any(|b| b.substrate == substrate)
     }
