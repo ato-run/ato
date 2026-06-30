@@ -3724,11 +3724,11 @@ where
     }
 
     // ── Ready-State restore sub-mode (additive; developer-preview) ───────────
-    // `decide_ready_state_run` returns None — and we fall through to the unchanged
-    // legacy executor dispatch below — when the flag is off, the capsule is not
-    // Ready-State-eligible, OR no sealed artifact exists. So legacy runs NEVER
-    // enter this branch. The only fail-CLOSED case is an explicit-but-unavailable
-    // backend (`select_backend`), which errors rather than silently skipping.
+    // Legacy fall-through (None) happens ONLY for: flag off, or flag on + capsule
+    // NOT Ready-State-eligible. With the flag ON + an eligible capsule, a MISSING
+    // sealed artifact FAILS CLOSED (not a silent cold run) — the user explicitly
+    // enabled Ready-State as a validation mode. An explicit-but-unavailable
+    // backend also fails closed (`select_backend`).
     if crate::application::ready_state::flags::ready_state_enabled() {
         use capsule::Measurable;
         use crate::application::ready_state;
