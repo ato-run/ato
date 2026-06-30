@@ -23,7 +23,10 @@
 pub const SCANNER_VERSION: &str = "ato-rs-scan/0.2.0";
 
 // ── tunable thresholds ─────────────────────────────────────────────────────
-const MIN_PROVIDER_SUFFIX_LEN: usize = 8;
+// Real provider keys are long, mixed-class tokens. A short/low-entropy suffix is
+// almost always binary noise in a large OS rootfs (false positive), so require a
+// realistic key shape: standalone token + length + mixed classes + distinct bytes.
+const MIN_PROVIDER_SUFFIX_LEN: usize = 20;
 const MIN_ENV_VALUE_LEN: usize = 6;
 const MIN_ENTROPY_RUN_LEN: usize = 24;
 const MIN_ENTROPY_DISTINCT: usize = 12;
@@ -102,32 +105,50 @@ pub struct ScanReport {
     pub heuristic: Vec<SecretFinding>,
 }
 
+/// Layers small enough and build-authored enough that a provider-key/env
+/// heuristic hit is worth failing the build closed. The large opaque layers
+/// (rootfs/runtime/vmstate/memory) are full OS / guest-RAM images whose normal
+/// contents (font + unicode tables, udev hwdb `KEYBOARD_KEY_*=`, `LoadCredential=`,
+/// coincidental `sk-`+token runs) make byte-heuristics produce many false
+/// positives — empirically confirmed on a real Ubuntu rootfs + booted memory
+/// image — so heuristic hits there are advisory, not gating.
+const HEURISTIC_BLOCKING_LAYERS: &[&str] = &["app", "dependency"];
+
 impl ScanReport {
-    /// **Blocking** heuristic findings — provider-key prefixes and secret-named
-    /// env assignments. These are high-precision, so the build fails closed on
-    /// them (alongside any [`declared_hits`](Self::declared_hits)).
-    pub fn blocking(&self) -> Vec<&SecretFinding> {
-        self.heuristic
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.kind,
-                    FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment
-                )
-            })
-            .collect()
+    fn is_blocking(f: &SecretFinding) -> bool {
+        matches!(
+            f.kind,
+            FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment
+        ) && HEURISTIC_BLOCKING_LAYERS.contains(&f.layer)
     }
 
-    /// **Advisory** heuristic findings — high-entropy token runs. These
-    /// false-positive on lockfile integrity hashes, minified assets, and binary
-    /// blobs in real dependency/app layers, so they are reported (not gating):
-    /// the build does NOT fail on them.
-    pub fn advisory(&self) -> Vec<&SecretFinding> {
-        self.heuristic
-            .iter()
-            .filter(|f| matches!(f.kind, FindingKind::HighEntropyToken))
-            .collect()
+    /// **Blocking** heuristic findings — provider-key prefixes and secret-named
+    /// env assignments **on the build-authored layers** (`app`/`dependency`).
+    /// The build fails closed on these (alongside any
+    /// [`declared_hits`](Self::declared_hits), which block on every layer).
+    pub fn blocking(&self) -> Vec<&SecretFinding> {
+        self.heuristic.iter().filter(|f| Self::is_blocking(f)).collect()
     }
+
+    /// **Advisory** findings — high-entropy token runs (any layer) and
+    /// provider/env hits on the large opaque layers (rootfs/runtime/vmstate/
+    /// memory). Reported for review, never gating (they false-positive on real
+    /// OS/RAM images and lockfile/minified assets).
+    pub fn advisory(&self) -> Vec<&SecretFinding> {
+        self.heuristic.iter().filter(|f| !Self::is_blocking(f)).collect()
+    }
+}
+
+/// Advisory finding summaries, capped so a real OS/RAM image (which can yield
+/// hundreds of advisory hits) doesn't bloat the Ready-State manifest.
+pub fn advisory_summaries_capped(report: &ScanReport, cap: usize) -> Vec<String> {
+    let adv = report.advisory();
+    let total = adv.len();
+    let mut out: Vec<String> = adv.iter().take(cap).map(|f| f.summary()).collect();
+    if total > cap {
+        out.push(format!("... +{} more advisory findings", total - cap));
+    }
+    out
 }
 
 fn is_token_byte(b: u8) -> bool {
@@ -232,12 +253,19 @@ fn scan_provider_prefixes(layer: &'static str, bytes: &[u8], out: &mut Vec<Secre
         let mut i = 0;
         while i + pb.len() <= bytes.len() {
             if &bytes[i..i + pb.len()] == pb {
+                // The prefix must START a token (preceded by a non-token byte or
+                // the layer start) — rejects "sk-" embedded mid-binary/mid-word.
+                let at_boundary = i == 0 || !is_token_byte(bytes[i - 1]);
                 let mut j = i + pb.len();
                 while j < bytes.len() && is_token_byte(bytes[j]) {
                     j += 1;
                 }
-                let suffix_len = j - (i + pb.len());
-                if suffix_len >= MIN_PROVIDER_SUFFIX_LEN {
+                let suffix = &bytes[i + pb.len()..j];
+                if at_boundary
+                    && suffix.len() >= MIN_PROVIDER_SUFFIX_LEN
+                    && class_count(suffix) >= MIN_ENTROPY_CLASS_COUNT
+                    && distinct_count(suffix) >= MIN_ENTROPY_DISTINCT
+                {
                     out.push(SecretFinding {
                         layer,
                         offset: i,
@@ -284,8 +312,10 @@ fn scan_env_assignments(layer: &'static str, bytes: &[u8], out: &mut Vec<SecretF
         while val_end < n && is_token_byte(bytes[val_end]) {
             val_end += 1;
         }
-        let value_len = val_end - (eq + 1);
-        if value_len >= MIN_ENV_VALUE_LEN {
+        let value = &bytes[eq + 1..val_end];
+        // A real secret value is a long, mixed-class token; a short or
+        // single-class run after NAME= in binary data is noise.
+        if value.len() >= MIN_ENV_VALUE_LEN && class_count(value) >= MIN_ENTROPY_CLASS_COUNT {
             out.push(SecretFinding {
                 layer,
                 offset: name_start,
@@ -483,6 +513,25 @@ mod tests {
             .heuristic
             .iter()
             .any(|f| f.kind == FindingKind::ProviderKeyPrefix));
+    }
+
+    #[test]
+    fn provider_prefix_rejects_binary_noise() {
+        // A real OS rootfs has many coincidental "sk-" runs. These must NOT fire:
+        //  - embedded (preceded by a token byte) -> not a token boundary
+        //  - long but single-class (low distinct) -> not key-shaped
+        //  - short suffix (< 20)
+        let noise = b"x Xsk-ABCDEFGHIJ1234567890abc then sk-aaaaaaaaaaaaaaaaaaaaaaaaaa and sk-short9chars";
+        let report = scan_build_layers(&layers_with_app(noise), &[]);
+        assert!(
+            !report.heuristic.iter().any(|f| f.kind == FindingKind::ProviderKeyPrefix),
+            "binary-noise sk- runs must not be flagged: {:?}",
+            report.heuristic.iter().map(|f| f.summary()).collect::<Vec<_>>()
+        );
+        // A genuine key shape (boundary + long + mixed-class) still fires.
+        let real = b"token sk-proj-AbCdEf0123456789GhIjKlMnOp here";
+        let r2 = scan_build_layers(&layers_with_app(real), &[]);
+        assert!(r2.heuristic.iter().any(|f| f.kind == FindingKind::ProviderKeyPrefix));
     }
 
     #[test]
