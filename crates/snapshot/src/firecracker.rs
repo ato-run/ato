@@ -209,7 +209,29 @@ impl FirecrackerBackend {
     /// memory/rootfs file — required for the parallel prefetch path (Phase 6A).
     fn rehydrate_atomic(&self, path: &Path, store: &CasStore, blob: &BlobManifest, always: bool) -> Result<(), SnapshotError> {
         if !always && path.exists() {
-            return Ok(());
+            // Validate the cached file before trusting it (Phase 7.5c). The
+            // rehydrate path is already integrity-checked (read_all re-hashes every
+            // CAS chunk, fail-closed); a cache HIT is the only unvalidated path.
+            // A `total_len` size check catches truncation / interrupted writes /
+            // disk-full partials — the realistic corruption of an immutable
+            // content-addressed file. On mismatch (or in opt-in deep mode) we drop
+            // the file and re-rehydrate from CAS, which re-verifies all chunks and
+            // fails closed BEFORE LoadSnapshot if CAS cannot supply valid bytes.
+            let actual = std::fs::metadata(path).map(|m| m.len()).ok();
+            let size_ok = actual == Some(blob.total_len);
+            if size_ok && !verify_hash_enabled() {
+                return Ok(());
+            }
+            if !size_ok {
+                eprintln!(
+                    "READY-STATE: cached layer {} failed size validation (expected {}, got {:?}) — discarding + re-rehydrating from CAS",
+                    blob_id_hex(blob),
+                    blob.total_len,
+                    actual
+                );
+                let _ = std::fs::remove_file(path);
+            }
+            // (deep mode with size_ok: fall through to re-read + re-verify chunks.)
         }
         let bytes = LazyBlobReader::new(store, blob).read_all()?;
         self.write_atomic(path, &bytes)
@@ -370,6 +392,18 @@ fn blob_id_hex(blob: &BlobManifest) -> String {
 /// scheduling**, NOT lazy memory / UFFD — File memory still needs a complete file
 /// before LoadSnapshot. Enabled by `ATO_READY_STATE_HOTSET=1` or
 /// `ATO_READY_STATE_PREFETCH=memory`.
+/// Opt-in deep cache mode (Phase 7.5c): `ATO_READY_STATE_VERIFY_HASH=1` makes a
+/// restore **not trust the cache hit** — it re-rehydrates every cached layer from
+/// CAS, which re-verifies all chunk hashes (it does NOT hash the existing cached
+/// file in place; there is no aggregate cached-file hash). Off by default — for
+/// paranoid/CI runs that want to catch a same-size in-place bit-flip in a cached
+/// file. Default validation is size-only (`total_len`).
+fn verify_hash_enabled() -> bool {
+    std::env::var("ATO_READY_STATE_VERIFY_HASH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn hotset_enabled() -> bool {
     std::env::var("ATO_READY_STATE_HOTSET")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -965,6 +999,27 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .count();
         assert_eq!(temps, 0, "atomic write must leave no temp files");
+    }
+
+    #[test]
+    fn rehydrate_atomic_discards_wrong_size_cache_and_rehydrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let blob = store_blob(&store, LayerKind::Memory, b"good-memory-bytes", ChunkingKind::ContentDefined).unwrap();
+        let b = FirecrackerBackend::new();
+        let path = dir.path().join("layers").join("mem.bin");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        // A corrupt (truncated) cached file must be detected by the size check and
+        // re-rehydrated from CAS — never trusted into LoadSnapshot.
+        std::fs::write(&path, b"truncated").unwrap();
+        b.rehydrate_atomic(&path, &store, &blob, false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"good-memory-bytes", "corrupt cache repaired from CAS");
+
+        // A correct cache (size matches) is a no-op hit (not rewritten).
+        let m1 = std::fs::metadata(&path).unwrap().modified().unwrap();
+        b.rehydrate_atomic(&path, &store, &blob, false).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), m1, "valid cache must not be rewritten");
     }
 
     #[test]
