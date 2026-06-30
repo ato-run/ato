@@ -76,6 +76,45 @@ pub(crate) struct U1Receipt {
     pub time_to_health_ms: Option<u128>,
     /// `Some(pid)` — the U1 page-server is local/in-process (a thread).
     pub page_server_pid: Option<i32>,
+    /// U3 (#856): distinct guest pages faulted in BEFORE `/health` (the hotset the
+    /// U4 prefetch will target). `None` for modes that never reach health (U1a zero).
+    #[serde(default)]
+    pub pre_health_pages: Option<u64>,
+}
+
+/// U3 (#856): one recorded page fault — the raw signal a [`HotsetProfile`] is built
+/// from in U4.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TraceEntry {
+    /// Page-aligned guest physical address that faulted.
+    pub page_gpa: u64,
+    /// Latency from event-loop entry to this fault (µs).
+    pub first_fault_at_us: u128,
+    /// Time to service this fault (the ioctl) (µs).
+    pub fault_service_us: u128,
+    /// `demand` (U3) or `prefetch` (U4).
+    pub source: String,
+    /// `pre_health` or `post_health` (load-snapshot faults fold into pre_health).
+    pub phase: String,
+}
+
+/// U3 (#856): the per-restore fault trace (the input to U4's `HotsetProfile`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct HotsetTrace {
+    pub entries: Vec<TraceEntry>,
+}
+
+impl HotsetTrace {
+    /// Distinct page GPAs faulted before `/health` — the hotset.
+    pub(crate) fn pre_health_pages(&self) -> u64 {
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            if e.phase == "pre_health" {
+                seen.insert(e.page_gpa);
+            }
+        }
+        seen.len() as u64
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -83,7 +122,7 @@ pub(crate) use linux_impl::{PageServer, PageServerHandle, PageSource};
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use super::{file_offset_for, page_align_down, region_for, Region, U1Receipt};
+    use super::{file_offset_for, page_align_down, region_for, HotsetTrace, Region, TraceEntry, U1Receipt};
     use capsulefs::{BlobManifest, CasStore, LazyBlobReader, MEMORY_PAGE_CHUNK_SIZE};
     use std::collections::HashMap;
     use std::io;
@@ -331,6 +370,10 @@ mod linux_impl {
         first_fault_us: AtomicU64, // 0 = unset
         service_us: Mutex<Vec<u32>>,
         stop: AtomicBool,
+        // U3 (#856): set by restore() when /health passes, so faults are tagged
+        // pre_health vs post_health; the per-fault trace feeds U4's hotset profile.
+        health_reached: AtomicBool,
+        trace: Mutex<Vec<TraceEntry>>,
     }
 
     pub(crate) struct PageServer {
@@ -490,16 +533,32 @@ mod linux_impl {
             let file_offset = file_offset_for(region, fault_page);
             match source.serve_fault(uffd_fd, fault_page, file_offset, page_size) {
                 Ok(bytes) => {
+                    let at_us = loop_start.elapsed().as_micros();
+                    let service_us = t0.elapsed().as_micros();
                     shared.page_fault_count.fetch_add(1, Ordering::SeqCst);
                     shared.bytes_copied.fetch_add(bytes, Ordering::SeqCst);
                     let _ = shared.first_fault_us.compare_exchange(
                         0,
-                        loop_start.elapsed().as_micros().max(1) as u64,
+                        at_us.max(1) as u64,
                         Ordering::SeqCst,
                         Ordering::SeqCst,
                     );
                     if let Ok(mut v) = shared.service_us.lock() {
-                        v.push(t0.elapsed().as_micros() as u32);
+                        v.push(service_us as u32);
+                    }
+                    // U3: record the fault for the hotset trace.
+                    if let Ok(mut t) = shared.trace.lock() {
+                        t.push(TraceEntry {
+                            page_gpa: fault_page,
+                            first_fault_at_us: at_us,
+                            fault_service_us: service_us,
+                            source: "demand".to_string(),
+                            phase: if shared.health_reached.load(Ordering::SeqCst) {
+                                "post_health".to_string()
+                            } else {
+                                "pre_health".to_string()
+                            },
+                        });
                     }
                     crate::bench::count("uffd.fault_events", 1);
                 }
@@ -532,6 +591,17 @@ mod linux_impl {
             self.shared.page_fault_count.load(Ordering::SeqCst) > 0
         }
 
+        /// U3: tag subsequent faults as post-health (call when `/health` passes).
+        pub(crate) fn mark_health_reached(&self) {
+            self.shared.health_reached.store(true, Ordering::SeqCst);
+        }
+
+        /// U3: snapshot the per-restore fault trace (for the `.hotset-trace.json`).
+        pub(crate) fn trace(&self) -> HotsetTrace {
+            let entries = self.shared.trace.lock().map(|t| t.clone()).unwrap_or_default();
+            HotsetTrace { entries }
+        }
+
         /// Snapshot the counters into a receipt WITHOUT stopping the thread.
         pub(crate) fn receipt(&self, vm_reaches_health: bool, time_to_health_ms: Option<u128>) -> U1Receipt {
             let faults = self.shared.page_fault_count.load(Ordering::SeqCst);
@@ -556,6 +626,11 @@ mod linux_impl {
                 vm_reaches_health,
                 time_to_health_ms,
                 page_server_pid: Some(self.pid),
+                pre_health_pages: if vm_reaches_health {
+                    Some(self.trace().pre_health_pages())
+                } else {
+                    None
+                },
             }
         }
 
@@ -609,6 +684,10 @@ mod stub {
     impl PageServerHandle {
         pub(crate) fn wait_for_first_fault(&self, _timeout: Duration) -> bool {
             false
+        }
+        pub(crate) fn mark_health_reached(&self) {}
+        pub(crate) fn trace(&self) -> super::HotsetTrace {
+            super::HotsetTrace::default()
         }
         pub(crate) fn receipt(&self, _h: bool, _t: Option<u128>) -> U1Receipt {
             unreachable!("uffd page-server is linux-only")
