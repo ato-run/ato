@@ -195,3 +195,31 @@ fail-closed on any prefetch task error (Firecracker never started). #836 missing
   rootfs behind it — at that point reducing cold further needs **UFFD / lazy memory** (a later
   phase): File-memory eager materialization caps how low cold can go because LoadSnapshot
   requires a complete memory file. Phase 6A does not claim demand-paged memory restore.
+
+---
+
+# Phase 7 — long-lived serving + ato stop (2026-06-30)
+
+KVM-gated validation on n2-standard-4 / Cascade Lake / FC v1.16.0, **read-only-shared**,
+`fulltest` FastAPI rootfs (/health + /marker + /secret). Full `fc_kvm` suite (now **8/8**,
+`--test-threads=1`):
+
+```
+fc_kvm_probe_available ......................... ok
+fc_kvm_build_restore_roundtrip ................. ok
+fc_kvm_rootfs_is_read_only_shared_across_restores  ok
+fc_kvm_restore_latency_ ........................ ok   (min 344 / median 394 / p95 1229 ms)
+fc_kvm_runner_class_mismatch_fails_closed ...... ok
+fc_kvm_state_leak_regression ................... ok
+fc_kvm_no_secret_invariant ..................... ok
+fc_kvm_cross_process_stop_via_record ........... ok   ← Phase 7
+test result: ok. 8 passed; 0 failed.  (152.59s)
+```
+
+**`fc_kvm_cross_process_stop_via_record`** is the Phase 7 proof: restore a session, **drop the
+restoring backend** (the detached VM keeps serving — confirmed by a live `/health` after the
+drop), then a **fresh `FirecrackerBackend`** (empty in-memory registry, like a separate `ato
+stop` process) reaps it purely from `overlay_root/.fc-session.json` → VM dead, **tap deleted,
+overlay removed, zero orphan firecracker**. The other 7 confirm the `stop()` change (tap+pid now
+read from the record) preserves every prior invariant (ro-shared no-mutation, state-leak,
+no-secret, runner-class fail-closed, latency).
