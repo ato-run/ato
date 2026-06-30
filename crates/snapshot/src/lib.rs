@@ -28,6 +28,7 @@
 //!   `runner_class_id` differs from the one the snapshot was built for.
 
 mod backend;
+pub mod bench;
 mod fake;
 mod firecracker;
 mod kata;
