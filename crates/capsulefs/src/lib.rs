@@ -48,6 +48,23 @@ mod binding;
 mod cas;
 mod chunk;
 pub mod gc;
+
+/// A process- and thread-unique temp filename suffix for atomic temp+rename
+/// writes (`<dest>.<suffix>`, then rename over `<dest>`). Dependency-free (no
+/// rand crate): process id + a process-global atomic counter (disambiguates two
+/// threads writing identical content concurrently — the pid-only collision the
+/// hardening calls out) + current nanos for entropy across rapid reuse. Always
+/// begins `tmp.` so `.tmp.` skip/orphan filters keep matching.
+pub fn unique_tmp_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("tmp.{}.{:x}.{:x}", std::process::id(), n, nanos)
+}
 mod hash;
 mod hotset;
 mod manifest;
