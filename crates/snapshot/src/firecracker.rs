@@ -203,13 +203,37 @@ impl FirecrackerBackend {
     fn cache_path(&self, kind: &str, blob: &BlobManifest, ext: &str) -> PathBuf {
         self.config.work_root.join(kind).join(format!("{}.{ext}", blob_id_hex(blob)))
     }
-    /// Rehydrate a layer to `path` only if it is not already on disk.
-    fn ensure_cached(&self, path: &Path, store: &CasStore, blob: &BlobManifest) -> Result<(), SnapshotError> {
-        if !path.exists() {
-            let bytes = LazyBlobReader::new(store, blob).read_all()?;
-            self.write_file(path, &bytes)?;
+    /// Rehydrate a layer to `path`. `always` forces a fresh write (rw rootfs);
+    /// otherwise it is a no-op when the file is already cached. Materialization is
+    /// ATOMIC (write a temp file, then rename) so Firecracker never sees a partial
+    /// memory/rootfs file — required for the parallel prefetch path (Phase 6A).
+    fn rehydrate_atomic(&self, path: &Path, store: &CasStore, blob: &BlobManifest, always: bool) -> Result<(), SnapshotError> {
+        if !always && path.exists() {
+            return Ok(());
         }
-        Ok(())
+        let bytes = LazyBlobReader::new(store, blob).read_all()?;
+        self.write_atomic(path, &bytes)
+    }
+    /// Rehydrate a layer to `path` only if it is not already on disk (atomic).
+    fn ensure_cached(&self, path: &Path, store: &CasStore, blob: &BlobManifest) -> Result<(), SnapshotError> {
+        self.rehydrate_atomic(path, store, blob, false)
+    }
+    /// Atomic file write: write a sibling temp file, then rename over `path`, so a
+    /// concurrent/aborted writer never exposes a partial file. Cleans the temp on
+    /// failure.
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), SnapshotError> {
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).map_err(|e| self.backend_err(e.to_string()))?;
+        }
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::write(&tmp, bytes).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            self.backend_err(format!("write {}: {e}", tmp.display()))
+        })?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            self.backend_err(format!("rename {} -> {}: {e}", tmp.display(), path.display()))
+        })
     }
     fn lock_path(&self) -> PathBuf {
         self.config.work_root.join(format!("{}.lock", self.config.tap_dev))
@@ -339,6 +363,20 @@ fn blake3_file(path: &Path) -> Option<String> {
 
 fn blob_id_hex(blob: &BlobManifest) -> String {
     blob.id().hex().to_string()
+}
+
+/// Phase 6A opt-in: memory-first parallel restore prefetch. Off → the default
+/// sequential rehydrate (unchanged restore semantics). This is **restore I/O
+/// scheduling**, NOT lazy memory / UFFD — File memory still needs a complete file
+/// before LoadSnapshot. Enabled by `ATO_READY_STATE_HOTSET=1` or
+/// `ATO_READY_STATE_PREFETCH=memory`.
+fn hotset_enabled() -> bool {
+    std::env::var("ATO_READY_STATE_HOTSET")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || std::env::var("ATO_READY_STATE_PREFETCH")
+            .map(|v| v.eq_ignore_ascii_case("memory"))
+            .unwrap_or(false)
 }
 
 // ── HTTP/1.1 over the Firecracker API unix socket (no extra deps) ────────────
@@ -661,25 +699,60 @@ impl SnapshotBackend for FirecrackerBackend {
             // across restores (Firecracker maps the mem file private/CoW, so
             // sharing is leak-safe — proven by the state-leak test). This avoids
             // re-reading + rewriting ~512MB of memory image every restore.
+            // rootfs at the SAME content-id path the snapshot recorded. Read-only:
+            // reuse the shared immutable copy (leak-safe + fast). Read-write:
+            // rewrite a fresh copy per restore (single session ⇒ no overlap;
+            // fresh ⇒ leak-safe), at the cost of a per-restore copy.
             let mem_path = self.cache_path("mem", memory, "mem");
-            bench::time("restore.cache_mem", || self.ensure_cached(&mem_path, input.store, memory))?;
             let vmstate_path = self.cache_path("vmstate", vmstate, "vmstate");
-            bench::time("restore.cache_vmstate", || self.ensure_cached(&vmstate_path, input.store, vmstate))?;
-
-            // rootfs must be at the SAME content-id path the snapshot recorded.
-            // Read-only: reuse the shared immutable copy (leak-safe + fast).
-            // Read-write: rewrite a fresh copy per restore (single session ⇒ no
-            // overlap; fresh ⇒ leak-safe), at the cost of a per-restore copy.
             let rootfs_path = self.cache_path("rootfs", rootfs, "ext4");
-            bench::time("restore.cache_rootfs", || -> Result<(), SnapshotError> {
-                if self.config.rootfs_read_only {
-                    self.ensure_cached(&rootfs_path, input.store, rootfs)?;
-                } else {
-                    let bytes = LazyBlobReader::new(input.store, rootfs).read_all()?;
-                    self.write_file(&rootfs_path, &bytes)?;
-                }
-                Ok(())
-            })?;
+            let rw_rootfs = !self.config.rootfs_read_only;
+
+            if hotset_enabled() {
+                // ── Phase 6A: memory-FIRST parallel rehydrate ───────────────────
+                // Overlap memory/rootfs/vmstate materialization so cold-cache
+                // restore approaches max(rootfs, memory) instead of their sum. All
+                // files are ATOMICALLY materialized and JOINED before LoadSnapshot.
+                // NOT lazy memory / UFFD — File memory still needs a complete file;
+                // this is restore I/O scheduling, not guest page hotset. A task
+                // error fails closed (Firecracker is never started).
+                bench::record("restore.prefetch.plan", Duration::from_micros(0));
+                let join_start = Instant::now();
+                let (md, rd, vd) = std::thread::scope(
+                    |s| -> Result<(Duration, Duration, Duration), SnapshotError> {
+                        // memory is spawned first (priority — the per-capsule cold cost).
+                        let mem_t = s.spawn(|| {
+                            let t = Instant::now();
+                            self.rehydrate_atomic(&mem_path, input.store, memory, false).map(|_| t.elapsed())
+                        });
+                        let rootfs_t = s.spawn(|| {
+                            let t = Instant::now();
+                            self.rehydrate_atomic(&rootfs_path, input.store, rootfs, rw_rootfs).map(|_| t.elapsed())
+                        });
+                        let vmstate_t = s.spawn(|| {
+                            let t = Instant::now();
+                            self.rehydrate_atomic(&vmstate_path, input.store, vmstate, false).map(|_| t.elapsed())
+                        });
+                        let md = mem_t.join().map_err(|_| self.backend_err("memory prefetch task panicked"))??;
+                        let rd = rootfs_t.join().map_err(|_| self.backend_err("rootfs prefetch task panicked"))??;
+                        let vd = vmstate_t.join().map_err(|_| self.backend_err("vmstate prefetch task panicked"))??;
+                        Ok((md, rd, vd))
+                    },
+                )?;
+                // Record the parallel per-layer durations + the wall-clock join on
+                // the main thread (sub-thread thread-locals don't reach the drain).
+                bench::record("restore.prefetch.memory", md);
+                bench::record("restore.prefetch.rootfs", rd);
+                bench::record("restore.prefetch.vmstate", vd);
+                bench::record("restore.prefetch.join", join_start.elapsed());
+            } else {
+                // Sequential rehydrate (default — unchanged restore semantics).
+                bench::time("restore.cache_mem", || self.ensure_cached(&mem_path, input.store, memory))?;
+                bench::time("restore.cache_vmstate", || self.ensure_cached(&vmstate_path, input.store, vmstate))?;
+                bench::time("restore.cache_rootfs", || {
+                    self.rehydrate_atomic(&rootfs_path, input.store, rootfs, rw_rootfs)
+                })?;
+            }
 
             let port = hc_port(&input.manifest.restore_contract, self.config.healthcheck_port);
             let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);
@@ -828,6 +901,58 @@ mod tests {
         // than a fixed value.
         let expect_ro = std::env::var("ATO_FC_ROOTFS_READONLY").map(|v| v != "0").unwrap_or(true);
         assert_eq!(c.rootfs_read_only, expect_ro);
+    }
+
+    #[test]
+    fn hotset_flag_detection() {
+        // SAFETY: serial within this fn; vars restored at the end.
+        let p1 = std::env::var("ATO_READY_STATE_HOTSET").ok();
+        let p2 = std::env::var("ATO_READY_STATE_PREFETCH").ok();
+        let set = |k: &str, v: Option<&str>| unsafe {
+            match v { Some(v) => std::env::set_var(k, v), None => std::env::remove_var(k) }
+        };
+        set("ATO_READY_STATE_HOTSET", None);
+        set("ATO_READY_STATE_PREFETCH", None);
+        assert!(!hotset_enabled(), "off by default");
+        set("ATO_READY_STATE_HOTSET", Some("1"));
+        assert!(hotset_enabled());
+        set("ATO_READY_STATE_HOTSET", Some("0"));
+        set("ATO_READY_STATE_PREFETCH", Some("memory"));
+        assert!(hotset_enabled(), "PREFETCH=memory enables");
+        set("ATO_READY_STATE_PREFETCH", Some("rootfs"));
+        assert!(!hotset_enabled(), "PREFETCH=rootfs does not enable memory-first");
+        set("ATO_READY_STATE_HOTSET", p1.as_deref());
+        set("ATO_READY_STATE_PREFETCH", p2.as_deref());
+    }
+
+    #[test]
+    fn rehydrate_atomic_materializes_caches_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let blob = store_blob(&store, LayerKind::Memory, b"mem-bytes-xyz", ChunkingKind::ContentDefined).unwrap();
+        let b = FirecrackerBackend::new();
+        let path = dir.path().join("layers").join("mem.bin");
+
+        // materializes the full content (atomic).
+        b.rehydrate_atomic(&path, &store, &blob, false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"mem-bytes-xyz");
+
+        // cache hit: second non-forced call does not rewrite.
+        let m1 = std::fs::metadata(&path).unwrap().modified().unwrap();
+        b.rehydrate_atomic(&path, &store, &blob, false).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), m1, "cached layer must not be rewritten");
+
+        // always=true forces a fresh write (rw rootfs semantics).
+        b.rehydrate_atomic(&path, &store, &blob, true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"mem-bytes-xyz");
+
+        // no leftover temp files (atomic temp+rename cleaned up).
+        let temps = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(temps, 0, "atomic write must leave no temp files");
     }
 
     #[test]
