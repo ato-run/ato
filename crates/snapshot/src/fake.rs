@@ -62,6 +62,9 @@ impl SnapshotBackend for FakeSnapshotBackend {
             isolation_boundary: IsolationBoundary::MicroVm,
             supports_seal_before_bind: true,
             supports_disposable_overlay: true,
+            // The Fake backend never boots a VMM, so it has no UFFD mem-backend.
+            supports_uffd_mem_backend: false,
+            uffd_reason: Some("fake backend has no Firecracker UFFD mem-backend".to_string()),
         }
     }
 
