@@ -185,10 +185,41 @@ pub struct NoSecretProof {
     pub advisories: Vec<String>,
     /// Verdict, e.g. `"clean"`.
     pub verdict: String,
+    /// Per-layer scan coverage: what was synchronously fail-closed-checked vs
+    /// advisory, scanned vs reused from the content-addressed cache, and whether
+    /// the advisory scan was budget-capped. Keeps the security contract honest
+    /// after large opaque layers are cached/deferred. Additive (`serde(default)`).
+    #[serde(default)]
+    pub coverage: Vec<LayerScanCoverage>,
+}
+
+/// What was actually checked for one sealed layer (see [`NoSecretProof::coverage`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerScanCoverage {
+    /// Layer name (rootfs/runtime/dependency/app/vmstate/memory).
+    pub layer: String,
+    /// The layer's content hash (the scan-cache key).
+    pub content_hash: String,
+    pub scanner_version: String,
+    pub policy_version: String,
+    /// Declared-marker scan ran on the full layer bytes (always true).
+    pub declared_checked: bool,
+    /// Heuristic passes run synchronously as a build-FAILING gate (app/dependency).
+    pub blocking_checks: Vec<String>,
+    /// Heuristic passes run as advisory only (large opaque layers; entropy everywhere).
+    pub advisory_checks: Vec<String>,
+    /// `"full"` or `"budget_capped"` (advisory scan bounded by the byte budget).
+    pub coverage: String,
+    /// `"scanned"` or `"cache_hit"` (advisory result reused from the scan cache).
+    pub source: String,
 }
 
 impl NoSecretProof {
-    /// Whether the scan found nothing.
+    /// Whether the **blocking gate** passed (no declared markers, no app/dependency
+    /// provider/env). NOTE: `verdict == "clean"` means *blocking-gate clean* — not
+    /// that every byte of every layer was heuristically inspected. Advisory
+    /// scans of large opaque layers may be `budget_capped` (see
+    /// [`coverage`](Self::coverage)); consult `coverage` for the full picture.
     pub fn is_clean(&self) -> bool {
         self.findings.is_empty() && self.verdict == "clean"
     }
