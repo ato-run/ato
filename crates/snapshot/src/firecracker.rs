@@ -61,6 +61,7 @@ use crate::manifest::{
     NoSecretProof, ReadyStateLayers, ReadyStateManifest, RestoreContract, SnapshotBackendInfo,
     READY_STATE_SCHEMA,
 };
+use crate::bench;
 use crate::scanner;
 
 pub const FIRECRACKER_BACKEND_ID: &str = "firecracker";
@@ -479,7 +480,9 @@ impl SnapshotBackend for FirecrackerBackend {
         // path the snapshot records (restore reuses the same path without
         // re-reading 300MB to recompute it).
         let cd = ChunkingKind::ContentDefined;
-        let rootfs_blob = store_blob(input.store, LayerKind::Rootfs, &input.layers.rootfs, cd)?;
+        let rootfs_blob = bench::time("build.store_rootfs", || {
+            store_blob(input.store, LayerKind::Rootfs, &input.layers.rootfs, cd)
+        })?;
         let rootfs_path = self.cache_path("rootfs", &rootfs_blob, "ext4");
         if !rootfs_path.exists() {
             self.write_file(&rootfs_path, &input.layers.rootfs)?;
@@ -491,19 +494,27 @@ impl SnapshotBackend for FirecrackerBackend {
 
         self.net_up()?;
         let snap = (|| -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
-            let fc = self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))?;
+            let fc = bench::time("build.start_fc", || {
+                self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
+            })?;
             self.configure_boot(&fc, &self.config.kernel_path, &rootfs_path, self.config.rootfs_read_only)?;
-            fc.api(self, "PUT", "/actions", Some(&json!({"action_type":"InstanceStart"}).to_string()))?;
-            self.wait_health(port, &path)?; // secret-free seal point
-            fc.api(self, "PATCH", "/vm", Some(&json!({"state":"Paused"}).to_string()))?;
-            fc.api(self, "PUT", "/snapshot/create", Some(&json!({
-                "snapshot_type":"Full",
-                "snapshot_path": vmstate_path.to_string_lossy(),
-                "mem_file_path": mem_path.to_string_lossy()
-            }).to_string()))?;
-            let vmstate = std::fs::read(&vmstate_path).map_err(|e| self.backend_err(format!("read vmstate: {e}")))?;
-            let mem = std::fs::read(&mem_path).map_err(|e| self.backend_err(format!("read mem: {e}")))?;
-            Ok((vmstate, mem)) // fc drops here → killed+reaped
+            bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
+                fc.api(self, "PUT", "/actions", Some(&json!({"action_type":"InstanceStart"}).to_string()))?;
+                self.wait_health(port, &path)?; // secret-free seal point
+                Ok(())
+            })?;
+            bench::time("build.snapshot_create", || -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
+                fc.api(self, "PATCH", "/vm", Some(&json!({"state":"Paused"}).to_string()))?;
+                fc.api(self, "PUT", "/snapshot/create", Some(&json!({
+                    "snapshot_type":"Full",
+                    "snapshot_path": vmstate_path.to_string_lossy(),
+                    "mem_file_path": mem_path.to_string_lossy()
+                }).to_string()))?;
+                let vmstate = std::fs::read(&vmstate_path).map_err(|e| self.backend_err(format!("read vmstate: {e}")))?;
+                let mem = std::fs::read(&mem_path).map_err(|e| self.backend_err(format!("read mem: {e}")))?;
+                Ok((vmstate, mem))
+            })
+            // fc drops here → killed+reaped
         })();
         self.net_down();
         let (vmstate, mem) = match snap {
@@ -520,7 +531,9 @@ impl SnapshotBackend for FirecrackerBackend {
             vmstate: vmstate.clone(),
             memory: mem.clone(),
         };
-        let report = scanner::scan_build_layers(&sealed, &input.declared_secret_markers);
+        let report = bench::time("build.no_secret_scan", || {
+            scanner::scan_build_layers(&sealed, &input.declared_secret_markers)
+        });
         if !report.declared_hits.is_empty() {
             let _ = std::fs::remove_dir_all(&build_dir);
             return Err(SnapshotError::SecretFoundInSnapshot(report.declared_hits));
@@ -536,14 +549,16 @@ impl SnapshotBackend for FirecrackerBackend {
         let seal = |kind: LayerKind, bytes: Option<&[u8]>, ch: ChunkingKind| -> Result<Option<BlobManifest>, SnapshotError> {
             match bytes { Some(b) => Ok(Some(store_blob(input.store, kind, b, ch)?)), None => Ok(None) }
         };
-        let layers = ReadyStateLayers {
-            rootfs: Some(rootfs_blob), // already stored above
-            runtime: seal(LayerKind::Runtime, input.layers.runtime.as_deref(), cd)?,
-            dependency: seal(LayerKind::Dependency, input.layers.dependency.as_deref(), cd)?,
-            app: seal(LayerKind::App, input.layers.app.as_deref(), cd)?,
-            vmstate: seal(LayerKind::VmState, Some(&vmstate), cd)?,
-            memory: seal(LayerKind::Memory, Some(&mem), page)?,
-        };
+        let layers = bench::time("build.seal_store", || -> Result<ReadyStateLayers, SnapshotError> {
+            Ok(ReadyStateLayers {
+                rootfs: Some(rootfs_blob), // already stored above
+                runtime: seal(LayerKind::Runtime, input.layers.runtime.as_deref(), cd)?,
+                dependency: seal(LayerKind::Dependency, input.layers.dependency.as_deref(), cd)?,
+                app: seal(LayerKind::App, input.layers.app.as_deref(), cd)?,
+                vmstate: seal(LayerKind::VmState, Some(&vmstate), cd)?,
+                memory: seal(LayerKind::Memory, Some(&mem), page)?,
+            })
+        })?;
         let mut rec = HotsetRecorder::new();
         if let Some(m) = &layers.memory { rec.extend_from_manifest(m); }
         if let Some(r) = &layers.rootfs { rec.extend_from_manifest(r); }
@@ -632,33 +647,40 @@ impl SnapshotBackend for FirecrackerBackend {
             // sharing is leak-safe — proven by the state-leak test). This avoids
             // re-reading + rewriting ~512MB of memory image every restore.
             let mem_path = self.cache_path("mem", memory, "mem");
-            self.ensure_cached(&mem_path, input.store, memory)?;
+            bench::time("restore.cache_mem", || self.ensure_cached(&mem_path, input.store, memory))?;
             let vmstate_path = self.cache_path("vmstate", vmstate, "vmstate");
-            self.ensure_cached(&vmstate_path, input.store, vmstate)?;
+            bench::time("restore.cache_vmstate", || self.ensure_cached(&vmstate_path, input.store, vmstate))?;
 
             // rootfs must be at the SAME content-id path the snapshot recorded.
             // Read-only: reuse the shared immutable copy (leak-safe + fast).
             // Read-write: rewrite a fresh copy per restore (single session ⇒ no
             // overlap; fresh ⇒ leak-safe), at the cost of a per-restore copy.
             let rootfs_path = self.cache_path("rootfs", rootfs, "ext4");
-            if self.config.rootfs_read_only {
-                self.ensure_cached(&rootfs_path, input.store, rootfs)?;
-            } else {
-                let bytes = LazyBlobReader::new(input.store, rootfs).read_all()?;
-                self.write_file(&rootfs_path, &bytes)?;
-            }
+            bench::time("restore.cache_rootfs", || -> Result<(), SnapshotError> {
+                if self.config.rootfs_read_only {
+                    self.ensure_cached(&rootfs_path, input.store, rootfs)?;
+                } else {
+                    let bytes = LazyBlobReader::new(input.store, rootfs).read_all()?;
+                    self.write_file(&rootfs_path, &bytes)?;
+                }
+                Ok(())
+            })?;
 
             let port = hc_port(&input.manifest.restore_contract, self.config.healthcheck_port);
             let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);
 
             self.net_up()?;
-            let fc = self.start_fc(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"))?;
-            fc.api(self, "PUT", "/snapshot/load", Some(&json!({
-                "snapshot_path": vmstate_path.to_string_lossy(),
-                "mem_backend": {"backend_type":"File","backend_path": mem_path.to_string_lossy()},
-                "resume_vm": true
-            }).to_string()))?;
-            self.wait_health(port, &path)?;
+            let fc = bench::time("restore.start_fc", || {
+                self.start_fc(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"))
+            })?;
+            bench::time("restore.load_snapshot", || {
+                fc.api(self, "PUT", "/snapshot/load", Some(&json!({
+                    "snapshot_path": vmstate_path.to_string_lossy(),
+                    "mem_backend": {"backend_type":"File","backend_path": mem_path.to_string_lossy()},
+                    "resume_vm": true
+                }).to_string()))
+            })?;
+            bench::time("restore.wait_health", || self.wait_health(port, &path))?;
 
             let session_id = format!("fc-{}-{}", manifest_short(&input.manifest), std::process::id());
             let child = fc.detach().ok_or_else(|| self.backend_err("lost firecracker child after restore"))?;
