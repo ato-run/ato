@@ -426,6 +426,9 @@ mod linux_impl {
         trace: Mutex<Vec<TraceEntry>>,
         // U4 (#857): pages prefetched proactively from the hotset profile.
         prefetch_count: AtomicU64,
+        // U5 (#858): a fatal serve error (CAS miss/corrupt) — Some(reason) means the
+        // page-server can no longer serve, so restore() fails closed fast.
+        failed: Mutex<Option<String>>,
     }
 
     pub(crate) struct PageServer {
@@ -649,8 +652,16 @@ mod linux_impl {
                     crate::bench::count("uffd.fault_events", 1);
                 }
                 Err(e) => {
-                    // A missed fault stalls the guest but never corrupts the host.
-                    eprintln!("UFFD page-server: serve_fault failed at {fault_page:#x}: {e}");
+                    // U5 (#858): a fatal serve error (CAS miss / corrupt chunk —
+                    // read_range fails closed on a hash mismatch) means this page can
+                    // NEVER be served. Record the failure and STOP — the guest hangs
+                    // on the unserved page, so restore()'s health wait fails fast
+                    // (instead of silently booting a VM on missing/corrupt memory).
+                    eprintln!("UFFD page-server: fatal serve_fault at {fault_page:#x}: {e}");
+                    if let Ok(mut f) = shared.failed.lock() {
+                        *f = Some(format!("serve_fault @ {fault_page:#x}: {e}"));
+                    }
+                    break;
                 }
             }
         }
@@ -680,6 +691,12 @@ mod linux_impl {
         /// U3: tag subsequent faults as post-health (call when `/health` passes).
         pub(crate) fn mark_health_reached(&self) {
             self.shared.health_reached.store(true, Ordering::SeqCst);
+        }
+
+        /// U5: `Some(reason)` if the page-server hit a fatal serve error (CAS
+        /// miss/corrupt) and can no longer serve — restore() must fail closed.
+        pub(crate) fn failed(&self) -> Option<String> {
+            self.shared.failed.lock().ok().and_then(|f| f.clone())
         }
 
         /// U3: snapshot the per-restore fault trace (for the `.hotset-trace.json`).
@@ -773,6 +790,9 @@ mod stub {
             false
         }
         pub(crate) fn mark_health_reached(&self) {}
+        pub(crate) fn failed(&self) -> Option<String> {
+            None
+        }
         pub(crate) fn trace(&self) -> super::HotsetTrace {
             super::HotsetTrace::default()
         }
