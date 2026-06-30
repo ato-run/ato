@@ -400,6 +400,63 @@ fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
     );
 }
 
+/// U6 (#859): the page-server reads memory chunks **through a remote CAS** on a local
+/// miss (fetch + cache local, then serve) — demand-only, so only the working set
+/// crosses the "network". Local store starts WITHOUT the memory chunks; the VM still
+/// reaches /health, and the local store re-gains only the faulted working set.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_remote_readthrough_reaches_health() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd remote read-through needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let mem = m.layers.memory.as_ref().expect("memory layer");
+
+    // Simulate a remote: copy the memory chunks to a separate store, then DELETE them
+    // from local. Local keeps rootfs/vmstate; memory must come via read-through.
+    let remote = CasStore::open(dir.path().join("remote")).unwrap();
+    let local_blobs = dir.path().join("cas").join("blobs").join("blake3");
+    for c in &mem.chunks {
+        let bytes = store.get_chunk(&c.hash).unwrap();
+        remote.put_chunk(&bytes).unwrap();
+        std::fs::remove_file(local_blobs.join(c.hash.hex())).unwrap();
+    }
+    let local_mem_before = mem.chunks.iter().filter(|c| store.has_chunk(&c.hash)).count();
+    assert_eq!(local_mem_before, 0, "memory chunks removed from local");
+
+    let overlay = dir.path().join("ov");
+    unsafe {
+        std::env::set_var("ATO_FC_UFFD", "cas");
+        std::env::set_var("ATO_FC_UFFD_REMOTE", dir.path().join("remote"));
+    }
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: overlay.clone(), host_runner_class: None });
+    unsafe {
+        std::env::remove_var("ATO_FC_UFFD");
+        std::env::remove_var("ATO_FC_UFFD_REMOTE");
+    }
+    let r = r.expect("restore (uffd cas + remote read-through)");
+
+    let rec = read_uffd_receipt(&overlay);
+    assert!(rec.vm_reaches_health, "remote read-through reaches health");
+    // Read-through proof: local re-gained the working-set memory chunks, but NOT all
+    // of them (demand-only — only the touched chunks crossed the "network").
+    let local_mem_after = mem.chunks.iter().filter(|c| store.has_chunk(&c.hash)).count();
+    assert!(local_mem_after > 0, "read-through cached working-set chunks locally");
+    assert!(local_mem_after < mem.chunks.len(), "demand-only: not the whole memory image was fetched");
+    eprintln!(
+        "### U6 read-through: local_mem_chunks {}/{} fetched, health_ms={:?}",
+        local_mem_after, mem.chunks.len(), rec.time_to_health_ms
+    );
+
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
 #[test]
 #[ignore]
 fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
