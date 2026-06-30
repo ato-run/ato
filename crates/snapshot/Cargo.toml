@@ -14,6 +14,11 @@ dist = false
 name = "snapshot"
 path = "src/lib.rs"
 
+# Dev/KVM-host latency benchmark tool (not part of the product CLI).
+[[bin]]
+name = "ready-state-bench"
+path = "src/bin/ready_state_bench.rs"
+
 [dependencies]
 anyhow = "1.0"
 blake3 = "1.5"
