@@ -7,6 +7,7 @@
 
 const ENABLE_VAR: &str = "ATO_READY_STATE_ENABLED";
 const BACKEND_VAR: &str = "ATO_SNAPSHOT_BACKEND";
+const FOREGROUND_VAR: &str = "ATO_READY_STATE_FOREGROUND";
 
 /// Parse a bool env value with the same accept-set as the capsule crate's
 /// `parse_bool_env` (`1/true/yes/on` → true, `0/false/no/off`/empty → false).
@@ -23,6 +24,17 @@ pub(crate) fn parse_bool_env(raw: &str) -> Option<bool> {
 /// truthy.
 pub(crate) fn ready_state_enabled() -> bool {
     std::env::var(ENABLE_VAR)
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(false)
+}
+
+/// Opt-in foreground serving (Phase 7.5b): `ATO_READY_STATE_FOREGROUND=1` makes
+/// `ato run` BLOCK while the Ready-State microVM serves and tear it down on
+/// Ctrl-C / guest exit, instead of the default #845 background register-and-return
+/// (where `ato stop` reaps it later). Off by default → behavior unchanged.
+pub(crate) fn foreground_serve_enabled() -> bool {
+    std::env::var(FOREGROUND_VAR)
         .ok()
         .and_then(|v| parse_bool_env(&v))
         .unwrap_or(false)
@@ -49,5 +61,24 @@ mod tests {
             assert_eq!(parse_bool_env(f), Some(false), "{f:?}");
         }
         assert_eq!(parse_bool_env("maybe"), None);
+    }
+
+    #[test]
+    fn foreground_serve_off_by_default_on_when_truthy() {
+        // SAFETY: single-threaded test body; var restored at the end.
+        let prev = std::env::var(FOREGROUND_VAR).ok();
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var(FOREGROUND_VAR, v),
+                None => std::env::remove_var(FOREGROUND_VAR),
+            }
+        };
+        set(None);
+        assert!(!foreground_serve_enabled(), "off by default");
+        set(Some("1"));
+        assert!(foreground_serve_enabled());
+        set(Some("0"));
+        assert!(!foreground_serve_enabled());
+        set(prev.as_deref());
     }
 }
