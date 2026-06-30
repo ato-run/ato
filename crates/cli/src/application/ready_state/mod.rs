@@ -5,12 +5,10 @@
 //! `cli/commands/build.rs` and `application/pipeline/phases/run.rs` respectively;
 //! everything here is additive and a legacy run never touches it.
 //!
-//! NOTE: this engine is fully unit-tested but the pipeline call sites
-//! (`build.rs` seal branch, `run.rs` Execute restore sub-mode) are wired in a
-//! dedicated follow-up so the change can be verified against a real `ato run`.
-//! Until then the items below are exercised only by their own tests, so the
-//! module carries `allow(dead_code)`.
-#![allow(dead_code)]
+//! The build seal branch is wired from `cli/commands/build.rs`
+//! (`seal_ready_state_if_enabled`) and the run restore sub-mode from
+//! `application/pipeline/phases/run.rs` (Execute phase), both behind
+//! `ATO_READY_STATE_ENABLED`; a legacy run never touches this.
 
 pub(crate) mod backend;
 pub(crate) mod build;
@@ -24,8 +22,70 @@ mod kvm_smoke;
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Result;
 use capsule::foundation::install_lifecycle::{RunnerClassFacts, RunnerClassId};
 use capsule::types::CapsuleManifest;
+
+/// The Ready-State artifact key for a capsule manifest: `blake3:<hex>` over the
+/// JCS-canonical manifest. **Both** the `ato build` seal branch and the `ato run`
+/// restore gate compute this the SAME way (this single helper) — if they diverged,
+/// the run would silently miss the sealed artifact and fall back to the cold path.
+pub(crate) fn capsule_manifest_hash(manifest: &toml::Value) -> Result<String> {
+    capsule::foundation::install_lifecycle::canonical_hash(manifest)
+}
+
+/// State root holding `ready-state/<hash>/{manifest.json,cas/}` — `~/.ato` (or the
+/// workspace tmp fallback). Shared by build (seal) and run (restore).
+pub(crate) fn state_root() -> PathBuf {
+    capsule::common::paths::ato_path_or_workspace_tmp(".")
+}
+
+/// Source `BuildLayers.rootfs` for the seal, per backend (developer-preview):
+///
+/// - **fake** (KVM-free, never boots): content-address the just-built `.capsule`
+///   artifact bytes — ties the sealed Ready-State artifact to the real build
+///   output and exercises the full CapsuleFS round-trip without `/dev/kvm`.
+/// - **firecracker** (needs a bootable ext4): read an env-supplied image
+///   (`ATO_FC_ROOTFS`, falling back to `ATO_FC_TEST_ROOTFS` for parity with the
+///   benchmarks/KVM smoke). Automated from-source rootfs construction is a
+///   follow-up; a missing image is a **clear error**, never a silent Fake seal.
+///
+/// `vmstate`/`memory` are left empty: the backend produces them (Fake synthesizes,
+/// Firecracker boots+snapshots).
+pub(crate) fn assemble_build_layers(
+    backend_id: &str,
+    artifact: Option<&Path>,
+) -> Result<snapshot::BuildLayers> {
+    let rootfs = if backend_id == "fake" {
+        let path = artifact
+            .ok_or_else(|| anyhow::anyhow!("Ready-State seal: the build produced no artifact to seal"))?;
+        std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("Ready-State seal: read build artifact {}: {e}", path.display()))?
+    } else {
+        // firecracker (qemu/kata never reach here — select_backend fails closed).
+        let path = std::env::var("ATO_FC_ROOTFS")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| std::env::var("ATO_FC_TEST_ROOTFS").ok().filter(|v| !v.is_empty()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Ready-State Firecracker build requires a bootable ext4 via ATO_FC_ROOTFS \
+                     (developer-preview); set it to a prebuilt rootfs image. Automated \
+                     from-source rootfs build is a follow-up."
+                )
+            })?;
+        std::fs::read(&path)
+            .map_err(|e| anyhow::anyhow!("Ready-State seal: read ATO_FC_ROOTFS {path}: {e}"))?
+    };
+    Ok(snapshot::BuildLayers {
+        rootfs,
+        runtime: None,
+        dependency: None,
+        app: None,
+        vmstate: Vec::new(),
+        memory: Vec::new(),
+    })
+}
 
 /// The Execute-phase sub-mode carrier: everything the run pipeline needs to
 /// restore instead of cold-spawn. Present only when the flag is on, the capsule
@@ -38,7 +98,10 @@ pub(crate) struct ReadyStateRunPlan {
     pub(crate) state_root: PathBuf,
     /// `blake3:<hex>` of the capsule manifest (the artifact key).
     pub(crate) capsule_manifest_hash: String,
-    /// Whether to run the post-resume sanitizer before exposing.
+    /// Whether to run the post-resume sanitizer before exposing. (The
+    /// developer-preview run gate does not yet apply host-side sanitizer steps —
+    /// a fast follow; for the Fake backend they are no-ops.)
+    #[allow(dead_code)]
     pub(crate) sanitize_after_restore: bool,
     /// This host's runner class (fed to the fail-closed restore gate).
     pub(crate) host_runner_class: Option<RunnerClassId>,
@@ -105,5 +168,54 @@ mode = "warm"
         let dir = tempfile::tempdir().unwrap();
         let plan = decide_ready_state_run(&eligible_manifest(), "blake3:x", dir.path()).unwrap();
         assert!(plan.is_none(), "flag off must mean legacy");
+    }
+
+    #[test]
+    fn capsule_manifest_hash_is_deterministic_and_prefixed() {
+        let m: toml::Value = toml::from_str("name='x'\nversion='1.0.0'").unwrap();
+        let h1 = capsule_manifest_hash(&m).unwrap();
+        assert_eq!(h1, capsule_manifest_hash(&m).unwrap(), "build/run must agree on the key");
+        assert!(h1.starts_with("blake3:"), "{h1}");
+    }
+
+    #[test]
+    fn assemble_build_layers_fake_seals_the_built_artifact_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let art = dir.path().join("app.capsule");
+        std::fs::write(&art, b"capsule-archive-bytes").unwrap();
+        let layers = assemble_build_layers("fake", Some(&art)).unwrap();
+        assert_eq!(layers.rootfs, b"capsule-archive-bytes");
+        assert!(layers.vmstate.is_empty() && layers.memory.is_empty());
+    }
+
+    #[test]
+    fn assemble_build_layers_fake_errors_without_artifact() {
+        assert!(assemble_build_layers("fake", None).is_err());
+    }
+
+    #[test]
+    fn assemble_build_layers_firecracker_requires_rootfs_env_no_silent_fake() {
+        // SAFETY: single-threaded test body; vars restored at the end.
+        let prev = (
+            std::env::var("ATO_FC_ROOTFS").ok(),
+            std::env::var("ATO_FC_TEST_ROOTFS").ok(),
+        );
+        unsafe {
+            std::env::remove_var("ATO_FC_ROOTFS");
+            std::env::remove_var("ATO_FC_TEST_ROOTFS");
+        }
+        let err = assemble_build_layers("firecracker", Some(Path::new("/ignored")))
+            .expect_err("firecracker without a rootfs env must fail closed");
+        assert!(err.to_string().contains("ATO_FC_ROOTFS"), "{err}");
+        unsafe {
+            match prev.0 {
+                Some(v) => std::env::set_var("ATO_FC_ROOTFS", v),
+                None => std::env::remove_var("ATO_FC_ROOTFS"),
+            }
+            match prev.1 {
+                Some(v) => std::env::set_var("ATO_FC_TEST_ROOTFS", v),
+                None => std::env::remove_var("ATO_FC_TEST_ROOTFS"),
+            }
+        }
     }
 }
