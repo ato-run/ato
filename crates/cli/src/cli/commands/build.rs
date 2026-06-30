@@ -640,6 +640,13 @@ fn seal_ready_state_if_enabled(
         ))?;
         return Ok(());
     }
+    // Sealing a binding-required capsule is allowed (the artifact is pre-bind &
+    // secret-free — no binding VALUES are ever injected/recorded); this guard
+    // documents that contract and rejects any future mode that would.
+    ready_state::bindings::ensure_no_unwired_runtime_bindings(
+        &manifest,
+        ready_state::bindings::BindingGuardMode::BuildSeal,
+    )?;
     let backend = ready_state::backend::select_backend()?;
     let hash = ready_state::capsule_manifest_hash(raw_manifest)?;
     let state_root = ready_state::state_root();
