@@ -91,6 +91,7 @@ pub(crate) fn assemble_build_layers(
 /// restore instead of cold-spawn. Present only when the flag is on, the capsule
 /// is Ready-State-eligible, and a sealed artifact exists — otherwise the run
 /// falls through to the legacy cold path.
+#[derive(Debug)]
 pub(crate) struct ReadyStateRunPlan {
     /// The sealed artifact to restore.
     pub(crate) manifest: snapshot::ReadyStateManifest,
@@ -107,9 +108,14 @@ pub(crate) struct ReadyStateRunPlan {
     pub(crate) host_runner_class: Option<RunnerClassId>,
 }
 
-/// Decide whether this run is a Ready-State restore. Returns `None` (→ legacy
-/// cold path) when the flag is off, the capsule is not Ready-State-eligible, or
-/// no sealed artifact exists for it.
+/// Decide whether this run is a Ready-State restore.
+///
+/// - flag **off** → `None` (legacy cold path, unchanged).
+/// - flag **on**, capsule **not** Ready-State-eligible → `None` (legacy).
+/// - flag **on**, eligible, **no sealed artifact** → **`Err`** (fail closed): the
+///   user explicitly enabled Ready-State as a validation mode, so a missing
+///   artifact must NOT silently degrade to a cold run.
+/// - flag **on**, eligible, artifact exists → `Some(plan)` (restore).
 pub(crate) fn decide_ready_state_run(
     manifest: &CapsuleManifest,
     capsule_manifest_hash: &str,
@@ -122,7 +128,11 @@ pub(crate) fn decide_ready_state_run(
         return Ok(None);
     }
     let Some(sealed) = store::load_manifest(state_root, capsule_manifest_hash)? else {
-        return Ok(None);
+        anyhow::bail!(
+            "Ready-State artifact not found for {capsule_manifest_hash}. Run `ato build` with \
+             ATO_READY_STATE_ENABLED=1 first, or unset ATO_READY_STATE_ENABLED to use the legacy \
+             cold path."
+        );
     };
     Ok(Some(ReadyStateRunPlan {
         manifest: sealed,
@@ -162,12 +172,71 @@ mode = "warm"
         .unwrap()
     }
 
+    fn non_eligible_manifest() -> CapsuleManifest {
+        // No `[snapshot]` section ⇒ not Ready-State-eligible.
+        CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+run = "python app.py"
+port = 8080
+"#,
+        )
+        .unwrap()
+    }
+
+    /// Seal a Fake artifact so `decide` can find it for the "exists" case.
+    fn seal_fake_artifact(root: &Path, hash: &str) {
+        let backend = snapshot::FakeSnapshotBackend::new();
+        let layers = snapshot::BuildLayers {
+            rootfs: b"rootfs-bytes".to_vec(),
+            runtime: None,
+            dependency: None,
+            app: Some(b"app-bytes".to_vec()),
+            vmstate: vec![1u8; 128],
+            memory: (0..2000u32).map(|i| (i % 256) as u8).collect(),
+        };
+        build::seal(root, hash.to_string(), &eligible_manifest(), layers, &backend).unwrap();
+    }
+
+    // `ATO_READY_STATE_ENABLED` is process-global, so ALL flag-dependent `decide`
+    // cases live in this one serial test (never split across parallel tests).
     #[test]
-    fn decide_returns_none_when_flag_off() {
-        // ATO_READY_STATE_ENABLED is unset in the test env.
+    fn decide_ready_state_run_matrix() {
+        let prev = std::env::var("ATO_READY_STATE_ENABLED").ok();
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var("ATO_READY_STATE_ENABLED", v),
+                None => std::env::remove_var("ATO_READY_STATE_ENABLED"),
+            }
+        };
         let dir = tempfile::tempdir().unwrap();
-        let plan = decide_ready_state_run(&eligible_manifest(), "blake3:x", dir.path()).unwrap();
-        assert!(plan.is_none(), "flag off must mean legacy");
+        let root = dir.path();
+
+        // flag OFF → None (legacy), even for an eligible capsule with no artifact.
+        set(None);
+        assert!(decide_ready_state_run(&eligible_manifest(), "blake3:x", root).unwrap().is_none());
+
+        // flag ON, NOT eligible → None (legacy).
+        set(Some("1"));
+        assert!(decide_ready_state_run(&non_eligible_manifest(), "blake3:x", root).unwrap().is_none());
+
+        // flag ON, eligible, NO artifact → Err (fail closed, no silent cold run).
+        let err = decide_ready_state_run(&eligible_manifest(), "blake3:missing", root).unwrap_err();
+        assert!(err.to_string().contains("Ready-State artifact not found"), "{err}");
+
+        // flag ON, eligible, artifact EXISTS → Some(plan).
+        let hash = "blake3:present";
+        seal_fake_artifact(root, hash);
+        assert!(decide_ready_state_run(&eligible_manifest(), hash, root).unwrap().is_some());
+
+        set(prev.as_deref());
     }
 
     #[test]
