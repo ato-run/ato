@@ -84,6 +84,8 @@ pub(crate) use linux_impl::{PageServer, PageServerHandle, PageSource};
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use super::{file_offset_for, page_align_down, region_for, Region, U1Receipt};
+    use capsulefs::{BlobManifest, CasStore, LazyBlobReader, MEMORY_PAGE_CHUNK_SIZE};
+    use std::collections::HashMap;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::net::UnixListener;
@@ -194,11 +196,61 @@ mod linux_impl {
         Zero,
         /// U1b: real pages copied from the `.mem` mmap via `UFFDIO_COPY`.
         MemFile(MemMap),
+        /// U2 (#855): serve pages lazily from local CAS — read the 2 MiB chunk
+        /// containing the fault (cached = fault-around), copy the requested page.
+        Cas(CasSource),
+    }
+
+    /// U2 CAS-backed page source: on a fault, read the containing 2 MiB memory chunk
+    /// from local CAS via `read_range` (one chunk covers many 4 KB faults — the
+    /// fault-around-2-MiB policy of #852) and cache it, then `UFFDIO_COPY` the page.
+    /// No full `.mem` materialization. `read_range` re-verifies chunk hashes
+    /// (fail-closed). The serve loop is single-threaded, so the cache mutex is
+    /// uncontended.
+    pub(crate) struct CasSource {
+        store: CasStore,
+        mem_blob: BlobManifest,
+        chunk_size: u64,
+        total_len: u64,
+        cache: std::sync::Mutex<HashMap<u64, Arc<Vec<u8>>>>,
+    }
+
+    impl CasSource {
+        fn chunk_start(&self, file_offset: u64) -> u64 {
+            (file_offset / self.chunk_size) * self.chunk_size
+        }
+        /// Get the (cached) 2 MiB chunk containing `file_offset`, reading it from CAS
+        /// on a miss.
+        fn chunk_for(&self, file_offset: u64) -> io::Result<Arc<Vec<u8>>> {
+            let start = self.chunk_start(file_offset);
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(c) = cache.get(&start) {
+                return Ok(Arc::clone(c));
+            }
+            let len = self.chunk_size.min(self.total_len.saturating_sub(start));
+            let bytes = LazyBlobReader::new(&self.store, &self.mem_blob)
+                .read_range(start, len)
+                .map_err(|e| io::Error::other(format!("cas read_range @{start}+{len}: {e}")))?;
+            let arc = Arc::new(bytes);
+            cache.insert(start, Arc::clone(&arc));
+            Ok(arc)
+        }
     }
 
     impl PageSource {
         pub(crate) fn mem_file(mem_path: &Path) -> io::Result<PageSource> {
             Ok(PageSource::MemFile(MemMap::open(mem_path)?))
+        }
+
+        pub(crate) fn cas(store: CasStore, mem_blob: BlobManifest) -> PageSource {
+            let total_len = mem_blob.total_len;
+            PageSource::Cas(CasSource {
+                store,
+                mem_blob,
+                chunk_size: MEMORY_PAGE_CHUNK_SIZE as u64,
+                total_len,
+                cache: std::sync::Mutex::new(HashMap::new()),
+            })
         }
 
         /// Serve one page fault; returns bytes served. `mode = 0` so the kernel
@@ -235,6 +287,25 @@ mod linux_impl {
                     };
                     // SAFETY: dst is a registered guest page; src..src+len lies within
                     // the read-only mmap (bounds-checked above).
+                    unsafe { libc::ioctl(uffd_fd, uffdio_copy_req(), &mut c) }
+                }
+                PageSource::Cas(cas) => {
+                    // Read (or reuse) the 2 MiB chunk containing the fault, then copy
+                    // the page from it. `chunk` (Arc) is held alive across the ioctl.
+                    let chunk = cas.chunk_for(file_offset)?;
+                    let page_in_chunk = (file_offset - cas.chunk_start(file_offset)) as usize;
+                    if page_in_chunk + page_size > chunk.len() {
+                        return Err(io::Error::other("fault past end of CAS memory chunk"));
+                    }
+                    let mut c = UffdioCopy {
+                        dst: fault_page,
+                        src: chunk.as_ptr() as u64 + page_in_chunk as u64,
+                        len: page_size as u64,
+                        mode: 0,
+                        copy: 0,
+                    };
+                    // SAFETY: dst is a registered guest page; src..src+len lies within
+                    // `chunk`, which outlives this ioctl call (bounds-checked above).
                     unsafe { libc::ioctl(uffd_fd, uffdio_copy_req(), &mut c) }
                 }
             };
@@ -519,6 +590,9 @@ mod stub {
     impl PageSource {
         pub(crate) fn mem_file(_mem_path: &Path) -> io::Result<PageSource> {
             Err(io::Error::other("UFFD page-server is Linux-only"))
+        }
+        pub(crate) fn cas(_store: capsulefs::CasStore, _mem_blob: capsulefs::BlobManifest) -> PageSource {
+            PageSource::Zero // unreachable: bind() fails closed on non-linux
         }
     }
     pub(crate) struct PageServer;

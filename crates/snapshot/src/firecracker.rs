@@ -408,20 +408,24 @@ fn verify_hash_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// U1 (#854) test-only gate: `ATO_FC_UFFD` selects the Uffd `mem_backend` for a
-/// restore instead of the default File backend. `zero` → serve kernel-zeroed pages
-/// (U1a plumbing); `mem`/`1` → serve real pages from the materialized `.mem`
-/// (U1b). Unset / `0` / `file` → File backend (default, unchanged). Exercised only
-/// by the `#[ignore]`d KVM smokes; never a product default.
+/// U1 (#854)/U2 (#855) test-only gate: `ATO_FC_UFFD` selects the Uffd `mem_backend`
+/// for a restore instead of the default File backend. `zero` → serve kernel-zeroed
+/// pages (U1a plumbing); `mem` → serve real pages from the materialized `.mem`
+/// (U1b); `cas`/`1` → serve pages lazily from local CAS WITHOUT materializing `.mem`
+/// (U2, fault-around 2 MiB). Unset / `0` / `file` → File backend (default,
+/// unchanged). Exercised only by the `#[ignore]`d KVM smokes; never a product
+/// default.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UffdMode {
     Zero,
     Mem,
+    Cas,
 }
 fn uffd_mode() -> Option<UffdMode> {
     match std::env::var("ATO_FC_UFFD").ok().as_deref() {
         Some("zero") => Some(UffdMode::Zero),
-        Some("mem") | Some("1") => Some(UffdMode::Mem),
+        Some("mem") => Some(UffdMode::Mem),
+        Some("cas") | Some("1") => Some(UffdMode::Cas),
         _ => None,
     }
 }
@@ -773,8 +777,16 @@ impl SnapshotBackend for FirecrackerBackend {
             let vmstate_path = self.cache_path("vmstate", vmstate, "vmstate");
             let rootfs_path = self.cache_path("rootfs", rootfs, "ext4");
             let rw_rootfs = !self.config.rootfs_read_only;
+            let uffd = uffd_mode();
 
-            if hotset_enabled() {
+            if uffd == Some(UffdMode::Cas) {
+                // U2 (#855): memory is served lazily from local CAS by the page-server
+                // (NO full .mem materialization) — materialize only vmstate + rootfs.
+                bench::time("restore.cache_vmstate", || self.ensure_cached(&vmstate_path, input.store, vmstate))?;
+                bench::time("restore.cache_rootfs", || {
+                    self.rehydrate_atomic(&rootfs_path, input.store, rootfs, rw_rootfs)
+                })?;
+            } else if hotset_enabled() {
                 // ── Phase 6A: memory-FIRST parallel rehydrate ───────────────────
                 // Overlap memory/rootfs/vmstate materialization so cold-cache
                 // restore approaches max(rootfs, memory) instead of their sum. All
@@ -825,12 +837,11 @@ impl SnapshotBackend for FirecrackerBackend {
 
             self.net_up()?;
 
-            // U1 (#854): when ATO_FC_UFFD is set, start the local page-server on a
-            // UDS BEFORE LoadSnapshot (Firecracker connects to it during load) and
-            // switch the mem_backend from File to Uffd. Default (unset) keeps the
-            // File path byte-for-byte. The .mem file is still materialized above —
-            // U1b serves real pages from it; U1 does not yet optimize the copy away.
-            let uffd = uffd_mode();
+            // U1 (#854)/U2 (#855): when ATO_FC_UFFD is set, start the local page-server
+            // on a UDS BEFORE LoadSnapshot (Firecracker connects to it during load) and
+            // switch the mem_backend from File to Uffd. Default (unset) keeps the File
+            // path byte-for-byte. `zero`/`mem` serve from the materialized .mem (U1);
+            // `cas` serves lazily from local CAS WITHOUT materializing .mem (U2).
             let sock = input.overlay_root.join(".page-server.sock");
             let mut page_handle: Option<crate::uffd_page_server::PageServerHandle> = None;
             if let Some(mode) = uffd {
@@ -838,6 +849,11 @@ impl SnapshotBackend for FirecrackerBackend {
                     UffdMode::Zero => crate::uffd_page_server::PageSource::Zero,
                     UffdMode::Mem => crate::uffd_page_server::PageSource::mem_file(&mem_path)
                         .map_err(|e| self.backend_err(format!("uffd mem source: {e}")))?,
+                    UffdMode::Cas => {
+                        let store = capsulefs::CasStore::open(input.store.root())
+                            .map_err(|e| self.backend_err(format!("uffd cas store: {e}")))?;
+                        crate::uffd_page_server::PageSource::cas(store, memory.clone())
+                    }
                 };
                 let server = crate::uffd_page_server::PageServer::bind(&sock, source)
                     .map_err(|e| self.backend_err(format!("uffd page-server bind: {e}")))?;
