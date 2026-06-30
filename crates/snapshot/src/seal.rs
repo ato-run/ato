@@ -141,6 +141,62 @@ fn store_opaque(
     Ok(blob)
 }
 
+/// The no-secret GATE over a set of layers, WITHOUT storing anything: declared
+/// markers on every provided layer + provider/env blocking on `app`/`dependency`.
+/// Fails closed (`SecretFoundInSnapshot` / `SecretScanFindings`). This is the
+/// single source of the gate policy — used both by [`preflight_gate`] (before
+/// Firecracker stores the rootfs / boots) and by [`seal_and_scan`]'s Phase 1, so
+/// the two backends cannot drift.
+pub fn gate_layers(
+    declared_layers: &[&[u8]],
+    app: &[u8],
+    dependency: &[u8],
+    markers: &[String],
+) -> Result<(), SnapshotError> {
+    let mut declared: Vec<String> = Vec::new();
+    for bytes in declared_layers {
+        for h in scanner::declared_hits_in(bytes, markers) {
+            if !declared.contains(&h) {
+                declared.push(h);
+            }
+        }
+    }
+    if !declared.is_empty() {
+        return Err(SnapshotError::SecretFoundInSnapshot(declared));
+    }
+    let blocking: Vec<SecretFinding> = scanner::scan_layer("app", app)
+        .into_iter()
+        .chain(scanner::scan_layer("dependency", dependency))
+        .filter(|f| matches!(f.kind, FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment))
+        .collect();
+    if !blocking.is_empty() {
+        return Err(SnapshotError::SecretScanFindings(blocking));
+    }
+    Ok(())
+}
+
+/// Preflight gate for the Firecracker build path: run the no-secret gate over the
+/// INPUT layers (rootfs/runtime/dependency/app — vmstate/memory don't exist until
+/// after boot+snapshot) BEFORE the rootfs is stored into CAS / the stable rootfs
+/// image is written / the VM is booted. A rejected build therefore never writes
+/// secret-bearing rootfs bytes to disk. The full six-layer gate still runs in
+/// [`seal_and_scan`] after the snapshot (catching vmstate/memory before they are
+/// stored).
+pub fn preflight_gate(
+    rootfs: &[u8],
+    runtime: Option<&[u8]>,
+    dependency: Option<&[u8]>,
+    app: Option<&[u8]>,
+    markers: &[String],
+) -> Result<(), SnapshotError> {
+    gate_layers(
+        &[rootfs, runtime.unwrap_or(&[]), dependency.unwrap_or(&[]), app.unwrap_or(&[])],
+        app.unwrap_or(&[]),
+        dependency.unwrap_or(&[]),
+        markers,
+    )
+}
+
 /// Store + scan all present layers under the layer-scoped no-secret policy.
 /// `rootfs_prestored` lets the Firecracker backend pass the rootfs blob it
 /// already stored (for the stable drive path) so it is not stored twice.
@@ -156,38 +212,24 @@ pub fn seal_and_scan(
     let app_bytes = layers.app.unwrap_or(&[]);
     let dep_bytes = layers.dependency.unwrap_or(&[]);
 
-    // ── Phase 1: GATE (no storing) ──────────────────────────────────────────
-    // declared markers on EVERY layer (full bytes); provider/env on app+dependency.
-    let mut declared: Vec<String> = Vec::new();
-    for bytes in [
-        layers.rootfs,
-        layers.runtime.unwrap_or(&[]),
-        dep_bytes,
+    // ── Phase 1: GATE (no storing) — shared with the Firecracker preflight ──
+    // declared markers on EVERY layer; provider/env on app+dependency.
+    gate_layers(
+        &[
+            layers.rootfs,
+            layers.runtime.unwrap_or(&[]),
+            dep_bytes,
+            app_bytes,
+            layers.vmstate,
+            layers.memory,
+        ],
         app_bytes,
-        layers.vmstate,
-        layers.memory,
-    ] {
-        for h in scanner::declared_hits_in(bytes, declared_markers) {
-            if !declared.contains(&h) {
-                declared.push(h);
-            }
-        }
-    }
-    if !declared.is_empty() {
-        return Err(SnapshotError::SecretFoundInSnapshot(declared));
-    }
-
+        dep_bytes,
+        declared_markers,
+    )?;
+    // app/dep findings (incl. advisory entropy) reused when storing them below.
     let app_findings = scanner::scan_layer("app", app_bytes);
     let dep_findings = scanner::scan_layer("dependency", dep_bytes);
-    let blocking: Vec<SecretFinding> = app_findings
-        .iter()
-        .chain(dep_findings.iter())
-        .filter(|f| matches!(f.kind, FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment))
-        .cloned()
-        .collect();
-    if !blocking.is_empty() {
-        return Err(SnapshotError::SecretScanFindings(blocking));
-    }
 
     // ── Phase 2: STORE + advisory scan ──────────────────────────────────────
     let cd = ChunkingKind::ContentDefined;
@@ -225,4 +267,44 @@ pub fn seal_and_scan(
         coverage: acc.coverage,
         sealed_bytes: acc.sealed_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROVIDER_IN_APP: &[u8] = b"token sk-proj-ABCDEFGHIJ1234567890abcdef end";
+
+    #[test]
+    fn preflight_passes_on_clean_layers() {
+        assert!(preflight_gate(b"clean rootfs", Some(b"runtime"), None, Some(b"app code"), &[]).is_ok());
+    }
+
+    #[test]
+    fn preflight_rejects_declared_marker_in_rootfs() {
+        let markers = vec!["TOPSECRET-VALUE".to_string()];
+        let err = preflight_gate(b"...embedded TOPSECRET-VALUE here...", None, None, None, &markers).unwrap_err();
+        assert!(matches!(err, SnapshotError::SecretFoundInSnapshot(_)), "{err:?}");
+    }
+
+    #[test]
+    fn preflight_rejects_provider_key_in_app() {
+        let err = preflight_gate(b"clean", None, None, Some(PROVIDER_IN_APP), &[]).unwrap_err();
+        assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "{err:?}");
+    }
+
+    #[test]
+    fn preflight_ignores_provider_key_in_rootfs() {
+        // provider/env in the opaque rootfs layer is ADVISORY, not a preflight block.
+        assert!(preflight_gate(PROVIDER_IN_APP, None, None, None, &[]).is_ok());
+    }
+
+    #[test]
+    fn gate_layers_matches_preflight_semantics() {
+        // declared on a non-app layer blocks; provider on app blocks; clean passes.
+        let m = vec!["XSECRET".to_string()];
+        assert!(gate_layers(&[b"has XSECRET", b""], b"", b"", &m).is_err());
+        assert!(gate_layers(&[b"a", b"b"], PROVIDER_IN_APP, b"", &[]).is_err());
+        assert!(gate_layers(&[b"a", b"b"], b"clean app", b"clean dep", &[]).is_ok());
+    }
 }
