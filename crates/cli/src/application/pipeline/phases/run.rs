@@ -3766,14 +3766,31 @@ where
             let handle =
                 ready_state::runtime_adapter::RestoredRuntimeHandle::new(session.clone());
             let metrics = handle.capture_metrics().await.map_err(anyhow::Error::new)?;
-            // Long-lived serving (Phase 7): the restored Firecracker child is
-            // already detached (reparents to init), so it KEEPS SERVING after this
-            // returns. Register it like a background process so `ato ps` lists it
-            // and a LATER fresh-process `ato stop` reaps it from the on-disk record
-            // (pid/tap/overlay), NOT the in-memory backend registry. NO teardown
-            // here. (Binding-required capsules already failed closed above; this
-            // session is no-binding.)
-            let serving_pid = session.vmm_pid.unwrap_or(std::process::id() as i32);
+            // Long-lived serving (Phase 7) requires a REAL serving VMM process.
+            // Only a backend that spawns one (Firecracker) sets `vmm_pid = Some`;
+            // a backend with no serving process (Fake / KVM-free) returns `None`.
+            // We must NOT register a `runtime="microvm"` ProcessInfo against the
+            // CLI's own pid or report "serving" when no serving process exists —
+            // that would claim a long-lived session that isn't real. Such backends
+            // stay on the verify-only path (restore → teardown → Ok), preserving
+            // the KVM-free developer-preview smoke without faking a serving VM.
+            let Some(serving_pid) = session.vmm_pid else {
+                tracing::info!(
+                    target: "ato::ready_state",
+                    backend = backend.id(),
+                    metadata = ?metrics.metadata,
+                    "READY-STATE: verified restore (backend '{}' has no serving process — not long-lived)",
+                    backend.id()
+                );
+                let _ = ready_state::restore::teardown(backend.as_ref(), session);
+                return Ok(());
+            };
+            // The restored Firecracker child is already detached (reparents to
+            // init), so it KEEPS SERVING after this returns. Register it like a
+            // background process so `ato ps` lists it and a LATER fresh-process
+            // `ato stop` reaps it from the on-disk record (pid/tap/overlay), NOT
+            // the in-memory backend registry. NO teardown here. (Binding-required
+            // capsules already failed closed above; this session is no-binding.)
             let id = format!("capsule-{serving_pid}");
             let now = SystemTime::now();
             let info = crate::runtime::process::ProcessInfo {
