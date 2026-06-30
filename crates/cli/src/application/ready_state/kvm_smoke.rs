@@ -51,10 +51,15 @@ fn fc_engine_smoke_build_restore_stop() {
         eprintln!("SKIP: /dev/kvm absent");
         return;
     }
-    let rootfs = match std::env::var("ATO_FC_TEST_ROOTFS") {
-        Ok(p) if !p.is_empty() => std::fs::read(p).expect("read ATO_FC_TEST_ROOTFS"),
-        _ => {
-            eprintln!("SKIP: ATO_FC_TEST_ROOTFS unset");
+    // Accept ATO_FC_ROOTFS (the CLI developer-preview var) or ATO_FC_TEST_ROOTFS.
+    let rootfs_path = std::env::var("ATO_FC_ROOTFS")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .or_else(|| std::env::var("ATO_FC_TEST_ROOTFS").ok().filter(|p| !p.is_empty()));
+    let rootfs = match rootfs_path {
+        Some(p) => std::fs::read(&p).expect("read ATO_FC_ROOTFS / ATO_FC_TEST_ROOTFS"),
+        None => {
+            eprintln!("SKIP: ATO_FC_ROOTFS / ATO_FC_TEST_ROOTFS unset");
             return;
         }
     };
