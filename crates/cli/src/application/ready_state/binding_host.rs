@@ -226,11 +226,19 @@ pub(crate) fn revoke_binding(
     }
 }
 
+/// PR D3 (#912): connect the guest-agent over vsock and stop-scrub. Used by `ato stop`
+/// to wipe the guest's tmpfs bindings BEFORE VM teardown. Best-effort — a connect
+/// failure is returned to the caller which logs it and proceeds with teardown.
+pub(crate) fn stop_scrub_over_vsock(vsock_uds: &std::path::Path) -> Result<()> {
+    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, 1025, std::time::Duration::from_secs(5))
+        .context("connect guest-agent for stop-scrub")?;
+    stop_scrub(&mut channel)
+}
+
 /// PR 5: stop-scrub — on `ato stop`, ask the agent to revoke + scrub **all** bindings
 /// (tmpfs wipe) BEFORE the host tears the VM/tap/overlay down. **Never re-seals.** This
 /// is best-effort: the VM teardown destroys the tmpfs regardless, so a channel error is
 /// logged, not fatal.
-#[allow(dead_code)] // wired into ato stop in PR 6
 pub(crate) fn stop_scrub(channel: &mut dyn AgentChannel) -> Result<()> {
     match channel.request(HostToAgent::Stop) {
         // The agent scrubs all and reports the (now-unbound) state back.
@@ -370,6 +378,14 @@ mod tests {
         // 4. stop-scrub wipes tmpfs.
         stop_scrub(&mut ch).unwrap();
         assert!(!dir.path().join("db_url").exists(), "tmpfs scrubbed after stop");
+    }
+
+    #[test]
+    fn stop_scrub_over_vsock_unreachable_returns_err_best_effort() {
+        // A missing/unreachable vsock UDS returns Err; the caller (ato stop) logs it
+        // and proceeds with teardown (the VM kill scrubs guest tmpfs regardless).
+        let err = stop_scrub_over_vsock(std::path::Path::new("/nonexistent/ato-vsock.sock"));
+        assert!(err.is_err(), "unreachable vsock ⇒ Err (best-effort)");
     }
 
     #[test]
