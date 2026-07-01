@@ -779,6 +779,7 @@ impl SnapshotBackend for FirecrackerBackend {
             // restored_bytes = the logical bytes the session is restored from
             // (independent of whether a cached layer was reused on disk).
             let restored_bytes = rootfs.total_len + vmstate.total_len + memory.total_len;
+            let restore_start = Instant::now(); // U8: restore_total_ms
 
             // mem + vmstate are immutable snapshot outputs → content-addressed
             // shared cache, rehydrated from CapsuleFS at most ONCE then reused
@@ -860,6 +861,9 @@ impl SnapshotBackend for FirecrackerBackend {
             // `cas` serves lazily from local CAS WITHOUT materializing .mem (U2).
             let sock = input.overlay_root.join(".page-server.sock");
             let mut page_handle: Option<crate::uffd_page_server::PageServerHandle> = None;
+            // U8 (#875): shared with the cas source so the receipt can report
+            // remote_chunks_fetched.
+            let remote_fetches = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             if let Some(mode) = uffd {
                 let source = match mode {
                     UffdMode::Zero => crate::uffd_page_server::PageSource::Zero,
@@ -874,7 +878,7 @@ impl SnapshotBackend for FirecrackerBackend {
                             .ok()
                             .filter(|v| !v.is_empty())
                             .and_then(|root| capsulefs::CasStore::open(root).ok());
-                        crate::uffd_page_server::PageSource::cas(store, memory.clone(), remote)
+                        crate::uffd_page_server::PageSource::cas(store, memory.clone(), remote, std::sync::Arc::clone(&remote_fetches))
                     }
                 };
                 let server = crate::uffd_page_server::PageServer::bind(&sock, source)
@@ -927,7 +931,26 @@ impl SnapshotBackend for FirecrackerBackend {
 
             // U1: snapshot a receipt + (U3) the per-restore fault trace for the smoke.
             if let Some(h) = &page_handle {
-                let r = h.receipt(time_to_health_ms.is_some(), time_to_health_ms);
+                let mut r = h.receipt(time_to_health_ms.is_some(), time_to_health_ms);
+                // U8 (#875): fill the restore-level context so the receipt is the
+                // stable, File-comparable schema.
+                r.backend = FIRECRACKER_BACKEND_ID.to_string();
+                r.mem_backend = "uffd".to_string();
+                r.source = match uffd {
+                    Some(UffdMode::Zero) => "zero".to_string(),
+                    Some(UffdMode::Mem) => "file".to_string(),
+                    Some(UffdMode::Cas) if remote_fetches.load(std::sync::atomic::Ordering::SeqCst) > 0 => "remote_cas".to_string(),
+                    _ => "local_cas".to_string(),
+                };
+                r.capsule_manifest_hash = input.manifest.capsule_manifest_hash.clone();
+                r.runner_class_id = input.manifest.runner_class_id.as_ref().map(|id| id.to_string());
+                r.memory_image_hash = memory.id().hex().to_string();
+                r.memory_bytes_total = memory.total_len;
+                // Mem mode mmaps the fully materialized .mem; cas/zero materialize nothing.
+                r.memory_bytes_materialized = if uffd == Some(UffdMode::Mem) { memory.total_len } else { 0 };
+                r.pages_total = memory.total_len.div_ceil(4096);
+                r.remote_chunks_fetched = remote_fetches.load(std::sync::atomic::Ordering::SeqCst);
+                r.restore_total_ms = Some(restore_start.elapsed().as_millis());
                 let _ = std::fs::write(
                     input.overlay_root.join(".uffd-receipt.json"),
                     serde_json::to_string_pretty(&r).unwrap_or_default(),
