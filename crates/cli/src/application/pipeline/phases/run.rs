@@ -3793,12 +3793,47 @@ where
             }
             let overlay = capsule::common::paths::ato_path_or_workspace_tmp("run")
                 .join(format!("ready-state-{}", std::process::id()));
+            // U11 (#878): opt-in local UFFD preview. No-binding capsules only (the
+            // binding guard above already failed closed otherwise); local CAS only;
+            // FAIL CLOSED on an unsupported host (never silently File-fallback when
+            // the preview was explicitly requested).
+            let uffd_preview = if ready_state::flags::uffd_preview_enabled() {
+                let caps = backend.probe();
+                if !caps.supports_uffd_mem_backend {
+                    anyhow::bail!(
+                        "UFFD preview (ATO_READY_STATE_UFFD_PREVIEW) requested but this host does \
+                         not support the UFFD mem_backend: {}. Unset it to use the File path.",
+                        caps.uffd_reason.as_deref().unwrap_or("unsupported")
+                    );
+                }
+                let has_mem = plan
+                    .manifest
+                    .layers
+                    .memory
+                    .as_ref()
+                    .and_then(|m| m.chunks.first())
+                    .map(|c| store.has_chunk(&c.hash))
+                    .unwrap_or(false);
+                if !has_mem {
+                    anyhow::bail!(
+                        "UFFD preview requires the memory image in the local CAS; it is not present."
+                    );
+                }
+                tracing::info!(
+                    target: "ato::ready_state",
+                    "READY-STATE: UFFD local preview engaged (no-binding capsule, local CAS demand)"
+                );
+                true
+            } else {
+                false
+            };
             let receipt = ready_state::restore::restore_and_expose(
                 backend.as_ref(),
                 &store,
                 plan.manifest,
                 overlay,
                 plan.host_runner_class,
+                uffd_preview,
             )?;
             let session = receipt.session;
             // Surface RuntimeMetadata::MicroVm through the restored-session handle.
