@@ -33,4 +33,6 @@ thiserror = "2.0"
 libc = "0.2"
 
 [dev-dependencies]
+protocol = { path = "../protocol" }
+serde_json = "1.0"
 tempfile = "3"
