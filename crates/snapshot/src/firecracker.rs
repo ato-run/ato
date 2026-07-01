@@ -1068,7 +1068,9 @@ impl SnapshotBackend for FirecrackerBackend {
             let session_id = format!("fc-{}-{}", manifest_short(&input.manifest), std::process::id());
             let child = fc.detach().ok_or_else(|| self.backend_err("lost firecracker child after restore"))?;
             let _ = std::fs::write(input.overlay_root.join(".fc-session.json"), json!({
-                "pid": child.id(), "tap": self.config.tap_dev, "session_id": session_id
+                "pid": child.id(), "tap": self.config.tap_dev, "session_id": session_id,
+                // L5 (#912): record the vsock UDS so a cross-process `ato stop` can unlink it.
+                "vsock_uds": vsock_uds.as_ref().map(|p| p.to_string_lossy().to_string())
             }).to_string());
             let session = RestoredSession {
                 session_id,
@@ -1124,6 +1126,17 @@ impl SnapshotBackend for FirecrackerBackend {
         // Tear down the RECORDED tap + its single-session lockfile (env-independent).
         let _ = Command::new("ip").args(["link", "del", tap]).status();
         let _ = std::fs::remove_file(self.config.work_root.join(format!("{tap}.lock")));
+        // L5 (#912): remove the Firecracker vsock host UDS so it does not linger after
+        // teardown (Firecracker does not unlink it on exit). The session carries it
+        // when this stop() came from restore; a cross-process `ato stop` recomputes the
+        // deterministic path from the recorded manifest hash.
+        if let Some(uds) = session
+            .vsock_uds
+            .clone()
+            .or_else(|| json_str(&meta, "vsock_uds").map(std::path::PathBuf::from))
+        {
+            let _ = std::fs::remove_file(&uds);
+        }
         let overlay_removed = session.overlay_root.exists() && std::fs::remove_dir_all(&session.overlay_root).is_ok();
         Ok(TeardownReceipt { session_id: session.session_id, overlay_removed })
     }
