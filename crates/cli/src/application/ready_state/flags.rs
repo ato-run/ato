@@ -11,6 +11,7 @@ const FOREGROUND_VAR: &str = "ATO_READY_STATE_FOREGROUND";
 const UFFD_DIAGNOSTICS_VAR: &str = "ATO_READY_STATE_UFFD_DIAGNOSTICS";
 const UFFD_PREVIEW_VAR: &str = "ATO_READY_STATE_UFFD_PREVIEW";
 const UFFD_AUTO_PREVIEW_VAR: &str = "ATO_READY_STATE_UFFD_AUTO_PREVIEW";
+const BINDINGS_PREVIEW_VAR: &str = "ATO_READY_STATE_BINDINGS_PREVIEW";
 
 /// Parse a bool env value with the same accept-set as the capsule crate's
 /// `parse_bool_env` (`1/true/yes/on` → true, `0/false/no/off`/empty → false).
@@ -72,6 +73,18 @@ pub(crate) fn uffd_preview_enabled() -> bool {
 /// default → the File path is unchanged.
 pub(crate) fn uffd_auto_preview_enabled() -> bool {
     std::env::var(UFFD_AUTO_PREVIEW_VAR)
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(false)
+}
+
+/// Phase 8a-RunGate (#912): opt-in **BindingLease run-gate preview**.
+/// `ATO_READY_STATE_BINDINGS_PREVIEW=1` lets a binding-required Ready-State capsule
+/// restore its secret-free snapshot, receive bindings over vsock, and expose traffic
+/// **only after bound-ready** — instead of the #837 pre-restore fail-closed. Off by
+/// default → binding-required capsules stay fail-closed exactly as today.
+pub(crate) fn bindings_preview_enabled() -> bool {
+    std::env::var(BINDINGS_PREVIEW_VAR)
         .ok()
         .and_then(|v| parse_bool_env(&v))
         .unwrap_or(false)
@@ -173,6 +186,25 @@ mod tests {
         assert!(uffd_auto_preview_enabled());
         set(Some("0"));
         assert!(!uffd_auto_preview_enabled());
+        set(prev.as_deref());
+    }
+
+    #[test]
+    fn bindings_preview_off_by_default_on_when_truthy() {
+        // SAFETY: single-threaded test body; var restored at the end.
+        let prev = std::env::var(BINDINGS_PREVIEW_VAR).ok();
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var(BINDINGS_PREVIEW_VAR, v),
+                None => std::env::remove_var(BINDINGS_PREVIEW_VAR),
+            }
+        };
+        set(None);
+        assert!(!bindings_preview_enabled(), "off by default");
+        set(Some("1"));
+        assert!(bindings_preview_enabled());
+        set(Some("0"));
+        assert!(!bindings_preview_enabled());
         set(prev.as_deref());
     }
 }
