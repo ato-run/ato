@@ -325,6 +325,7 @@ mod tests {
                 manifest: manifest.clone(),
                 overlay_root: overlay.clone(),
                 host_runner_class: None,
+                uffd_preview: false,
             })
             .expect("restore should succeed");
         assert_eq!(restore.session.guest_port, Some(8080));
@@ -402,6 +403,7 @@ mod tests {
                 manifest,
                 overlay_root: dir.path().join("ov"),
                 host_runner_class: Some(RunnerClassId::from_hash("blake3:class-B")),
+                uffd_preview: false,
             })
             .unwrap_err();
         assert!(matches!(err, SnapshotError::RunnerClassMismatch(_)));
@@ -426,6 +428,7 @@ mod tests {
                 manifest,
                 overlay_root: dir.path().join("ov"),
                 host_runner_class: None,
+                uffd_preview: false,
             })
             .unwrap_err();
         assert!(
@@ -451,6 +454,7 @@ mod tests {
             manifest,
             overlay_root: dir.path().join("ov"),
             host_runner_class: Some(class),
+                uffd_preview: false,
         });
         assert!(ok.is_ok());
     }
@@ -476,6 +480,7 @@ mod tests {
                 manifest,
                 overlay_root: dir.path().join("ov2"),
                 host_runner_class: None,
+                uffd_preview: false,
             })
             .unwrap();
         assert_eq!(restore.session.restored_bytes, expected_total);

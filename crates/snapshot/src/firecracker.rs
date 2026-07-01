@@ -794,7 +794,10 @@ impl SnapshotBackend for FirecrackerBackend {
             let vmstate_path = self.cache_path("vmstate", vmstate, "vmstate");
             let rootfs_path = self.cache_path("rootfs", rootfs, "ext4");
             let rw_rootfs = !self.config.rootfs_read_only;
-            let uffd = uffd_mode();
+            // U11 (#878): the product preview drives UFFD local-CAS demand via the
+            // input flag; the env gate (uffd_mode) remains for the test-only KVM
+            // smokes and takes effect only when the input flag is off.
+            let uffd = if input.uffd_preview { Some(UffdMode::Cas) } else { uffd_mode() };
 
             if uffd == Some(UffdMode::Cas) {
                 // U2 (#855): memory is served lazily from local CAS by the page-server
@@ -1077,7 +1080,7 @@ mod tests {
         let m = err_manifest();
         assert!(FirecrackerBackend::new().inspect(&store, &m).is_ok()); // inspect needs no KVM
         let backend = FirecrackerBackend::new();
-        let input = RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: None };
+        let input = RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: None, uffd_preview: false };
         assert!(matches!(backend.restore(input), Err(SnapshotError::Unsupported { .. })));
     }
 
