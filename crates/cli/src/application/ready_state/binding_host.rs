@@ -184,6 +184,46 @@ mod tests {
         assert!(!dir.path().join("api_key").exists(), "stop-scrub wiped api_key");
     }
 
+    /// PR 7: the **no-secret** end-to-end invariant proof (in-process). A full bound
+    /// lifecycle must leave the host artifacts secret-free and the tmpfs scrubbed:
+    /// the value reaches only the guest tmpfs (never a host receipt / lease dump / the
+    /// non-serializable lease), a bound session cannot be re-sealed, and stop-scrub
+    /// wipes tmpfs. (The live Firecracker+vsock hardware E2E is the remaining step.)
+    #[test]
+    fn no_secret_e2e_host_artifacts_stay_clean_and_tmpfs_is_scrubbed() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = "TOP-SECRET-DB-PASSWORD-42";
+        let l = BindingLease::issue(
+            BindingLeaseId::new("l1"),
+            BindingName::parse("db_url").unwrap(),
+            SecretValue::new(secret),
+            1_000,
+            60_000,
+        );
+        let mut ch = MockChannel {
+            session: BindingSession::new(vec![BindingName::parse("db_url").unwrap()], TmpfsBindingSink::new(dir.path())),
+            now_ms: 1_000,
+        };
+
+        // 1. Bind → secret lands ONLY on the guest tmpfs.
+        establish_bindings(&mut ch, std::slice::from_ref(&l), 2).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("db_url")).unwrap(), secret);
+
+        // 2. No host-side artifact carries the secret: the loggable receipt is
+        //    value-free, the lease Debug redacts, and the lease is not even Serialize.
+        let receipt = l.receipt(1_000);
+        assert!(!serde_json::to_string(&receipt).unwrap().contains(secret), "host receipt leaked the secret");
+        assert!(!format!("{l:?}").contains(secret), "lease Debug leaked the secret");
+        assert!(!format!("{receipt:?}").contains(secret));
+
+        // 3. A bound session may never be re-sealed.
+        assert!(ensure_pre_bind_before_seal(true).is_err());
+
+        // 4. stop-scrub wipes tmpfs.
+        stop_scrub(&mut ch).unwrap();
+        assert!(!dir.path().join("db_url").exists(), "tmpfs scrubbed after stop");
+    }
+
     #[test]
     fn sealing_a_bound_session_is_refused() {
         // Pre-bind boot ⇒ allowed (this is how every seal is produced).
