@@ -100,6 +100,13 @@ pub(crate) fn seal(
     ensure_gpu_not_in_snapshot(manifest.gpu_mode())
         .context("Ready-State build refused: GPU state is not snapshottable")?;
 
+    // Phase 8 hard invariant: a Ready-State seal is ALWAYS produced from a pre-bind
+    // boot — never from a bound running session (post-bind state is dirty). `ato build`
+    // boots fresh with no bindings attached, so this is `false` here; the guard makes
+    // the invariant explicit at the one place a seal is produced and fails closed if a
+    // future path ever tries to seal a bound session.
+    super::binding_host::ensure_pre_bind_before_seal(/* session_is_bound = */ false)?;
+
     let store = store::open_store(state_root, &capsule_manifest_hash)?;
     let runner_class = Some(RunnerClassFacts::from_host().id());
 
