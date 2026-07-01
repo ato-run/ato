@@ -11,6 +11,7 @@
 //! `ATO_READY_STATE_ENABLED`; a legacy run never touches this.
 
 pub(crate) mod backend;
+pub(crate) mod binding_host;
 pub(crate) mod bindings;
 pub(crate) mod build;
 pub(crate) mod diagnostics;
