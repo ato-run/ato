@@ -129,6 +129,7 @@ mod e2e_tests {
                 manifest: manifest.clone(),
                 overlay_root: dir.path().join("ov"),
                 host_runner_class: None,
+                uffd_preview: false,
             })
             .expect("restore");
         assert_eq!(restore.session.restored_bytes, manifest.total_layer_bytes());
