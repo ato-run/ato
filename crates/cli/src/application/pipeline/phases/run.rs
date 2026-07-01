@@ -3771,6 +3771,26 @@ where
             // (`RuntimeProcessRegistry::sweep_run_dir_orphans` → Class 4); no
             // separate sweep is wired here.
             let store = ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
+            // U10 (#877): opt-in mem_backend selection diagnostics — record what a
+            // selector WOULD choose, then restore via File EXACTLY as before. Pure
+            // observation; no behavior change.
+            if ready_state::flags::uffd_diagnostics_enabled() {
+                let caps = backend.probe();
+                let no_bindings = !ready_state::bindings::requires_runtime_bindings(&rs_manifest)
+                    .requires_bindings();
+                let run_dir = capsule::common::paths::ato_path_or_workspace_tmp("run");
+                let msg = ready_state::diagnostics::record(
+                    backend.id(),
+                    &caps,
+                    &plan.manifest,
+                    &store,
+                    no_bindings,
+                    &plan.capsule_manifest_hash,
+                    ready_state::flags::ready_state_enabled(),
+                    &run_dir,
+                );
+                let _ = request.reporter.notify(msg).await;
+            }
             let overlay = capsule::common::paths::ato_path_or_workspace_tmp("run")
                 .join(format!("ready-state-{}", std::process::id()));
             let receipt = ready_state::restore::restore_and_expose(
