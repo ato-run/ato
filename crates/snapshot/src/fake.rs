@@ -236,6 +236,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
             overlay_root: input.overlay_root,
             restored_bytes,
             vmm_pid: None, // Fake has no serving process.
+            vsock_uds: None,
         };
 
         Ok(RestoreReceipt {

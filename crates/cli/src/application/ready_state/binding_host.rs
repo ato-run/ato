@@ -6,15 +6,71 @@
 //! transport is a trait so this is testable in-process now; PR 7 supplies a real vsock
 //! channel. No-binding sessions have no leases, so the gate returns immediately.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use protocol::binding_control::{AgentToHost, HostToAgent};
 use protocol::binding_lease::BindingLease;
 
 /// The host's request/response channel to the guest-agent (vsock in production; an
 /// in-process mock in tests).
-#[allow(dead_code)] // wired into the run gate in PR 6
+#[allow(dead_code)] // wired into the run gate in PR C
 pub(crate) trait AgentChannel {
     fn request(&mut self, msg: HostToAgent) -> Result<AgentToHost>;
+}
+
+/// PR B (#912): the real host→guest-agent channel over Firecracker's vsock UDS.
+///
+/// Firecracker exposes a host Unix socket (`uds_path`); to reach a guest AF_VSOCK
+/// listener on `guest_port` the host connects to that UDS and sends `CONNECT
+/// <guest_port>\n`, expecting `OK <host_port>\n`, after which the stream carries the
+/// newline-delimited JSON control protocol to/from the guest-agent. All reads/writes
+/// are timeout-bounded; any protocol error fails closed.
+#[allow(dead_code)] // wired into the run gate in PR C
+pub(crate) struct FirecrackerAgentChannel {
+    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
+    writer: std::os::unix::net::UnixStream,
+}
+
+#[allow(dead_code)]
+impl FirecrackerAgentChannel {
+    /// Connect through the FC vsock UDS to the guest-agent on `guest_port`.
+    pub(crate) fn connect(
+        uds_path: &std::path::Path,
+        guest_port: u32,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(uds_path)
+            .with_context(|| format!("connect FC vsock UDS {}", uds_path.display()))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        // Firecracker host→guest CONNECT handshake.
+        write!(stream, "CONNECT {guest_port}\n")?;
+        stream.flush()?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        if !line.starts_with("OK") {
+            bail!("guest-agent vsock CONNECT rejected on port {guest_port}: {line:?}");
+        }
+        Ok(FirecrackerAgentChannel { reader, writer: stream })
+    }
+}
+
+impl AgentChannel for FirecrackerAgentChannel {
+    fn request(&mut self, msg: HostToAgent) -> Result<AgentToHost> {
+        use std::io::{BufRead, Write};
+        let json = serde_json::to_string(&msg)?;
+        writeln!(self.writer, "{json}")?;
+        self.writer.flush()?;
+        let mut line = String::new();
+        let n = self.reader.read_line(&mut line)?;
+        if n == 0 || line.trim().is_empty() {
+            bail!("guest-agent closed the vsock stream / empty response");
+        }
+        serde_json::from_str(&line).with_context(|| format!("parse agent response: {line:?}"))
+    }
 }
 
 /// Deliver every lease, then poll bound-ready up to `max_polls` times. Returns `Ok`

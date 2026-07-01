@@ -446,6 +446,24 @@ fn uffd_mode() -> Option<UffdMode> {
     }
 }
 
+/// Whether to attach a Firecracker vsock device (for the guest-agent binding channel).
+/// Off by default → the restore path is unchanged.
+fn vsock_enabled() -> bool {
+    matches!(std::env::var("ATO_FC_VSOCK").ok().as_deref(), Some("1" | "true" | "yes" | "on"))
+}
+
+/// The vsock host UDS for a capsule — **deterministic** so build (which bakes it into
+/// the snapshot) and restore (which re-creates it) agree on the same-host developer
+/// preview. Firecracker does not allow overriding the vsock uds at load, so the path is
+/// derived from the capsule hash, not the ephemeral overlay.
+fn vsock_uds_path(capsule_manifest_hash: &str) -> PathBuf {
+    let safe: String = capsule_manifest_hash
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    std::env::temp_dir().join("ato-vsock").join(format!("{safe}.sock"))
+}
+
 fn hotset_enabled() -> bool {
     std::env::var("ATO_READY_STATE_HOTSET")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -637,6 +655,20 @@ impl SnapshotBackend for FirecrackerBackend {
                 self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
             })?;
             self.configure_boot(&fc, &self.config.kernel_path, &rootfs_path, self.config.rootfs_read_only)?;
+            // Phase 8a-HW (#912): attach a vsock device BEFORE boot/snapshot so the
+            // guest-agent binding channel is captured in the snapshot. The uds_path is
+            // baked into the snapshot (FC forbids overriding it at load), so it is a
+            // deterministic per-capsule path both build and restore compute.
+            if vsock_enabled() {
+                let uds = vsock_uds_path(&input.capsule_manifest_hash);
+                if let Some(d) = uds.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
+                }
+                let _ = std::fs::remove_file(&uds);
+                fc.api(self, "PUT", "/vsock", Some(&json!({
+                    "guest_cid": 3, "uds_path": uds.to_string_lossy()
+                }).to_string()))?;
+            }
             bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
                 fc.api(self, "PUT", "/actions", Some(&json!({"action_type":"InstanceStart"}).to_string()))?;
                 self.wait_health(port, &path)?; // secret-free seal point
@@ -921,6 +953,18 @@ impl SnapshotBackend for FirecrackerBackend {
             let fc = bench::time("restore.start_fc", || {
                 self.start_fc(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"))
             })?;
+            // Phase 8a-HW (#912): the snapshot carries the vsock device with its baked
+            // uds_path; FC re-creates that socket on load, so its directory must exist.
+            let vsock_uds = if vsock_enabled() {
+                let uds = vsock_uds_path(&input.manifest.capsule_manifest_hash);
+                if let Some(d) = uds.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
+                }
+                let _ = std::fs::remove_file(&uds);
+                Some(uds)
+            } else {
+                None
+            };
             bench::time("restore.load_snapshot", || {
                 let mem_backend = if uffd.is_some() {
                     json!({"backend_type":"Uffd","backend_path": sock.to_string_lossy()})
@@ -1010,6 +1054,7 @@ impl SnapshotBackend for FirecrackerBackend {
                 overlay_root: input.overlay_root.clone(),
                 restored_bytes,
                 vmm_pid: Some(child.id() as i32),
+                vsock_uds,
             };
             Ok((session, child, page_handle))
         })();
