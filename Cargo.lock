@@ -1267,6 +1267,7 @@ dependencies = [
  "futures",
  "globset",
  "goblin",
+ "guest-agent",
  "hex",
  "hickory-resolver",
  "jsonschema",
@@ -2754,6 +2755,14 @@ dependencies = [
  "log",
  "plain",
  "scroll",
+]
+
+[[package]]
+name = "guest-agent"
+version = "0.1.0"
+dependencies = [
+ "protocol",
+ "tempfile",
 ]
 
 [[package]]
