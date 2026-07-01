@@ -39,6 +39,7 @@ pub mod mem_backend_selector;
 pub mod no_secret_scan;
 mod placement;
 mod qemu;
+pub mod rootfs_builder;
 mod scanner;
 mod uffd;
 mod uffd_page_server;
