@@ -818,3 +818,152 @@ fn fc_kvm_vsock_agent_connects_after_restore() {
     b.stop(r.session).expect("stop");
     assert_clean_teardown(&overlay);
 }
+
+// ── Phase 8a-HW PR C (#912): live BindingLease E2E + no-secret scan ─────────────────
+// Requires ATO_FC_BINDING_ROOTFS: a rootfs whose init launches ato-guest-agent in
+// vsock mode requiring "api_key", and a /health server returning 200 ONLY when
+// /run/ato/bindings/api_key exists+non-empty. The secret is delivered at RUNTIME over
+// vsock — it is NEVER in the rootfs/capsule (the seal stays pre-bind + secret-free).
+
+fn vsock_exchange(uds: &std::path::Path, port: u32, requests: &[String]) -> Vec<String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut s = std::os::unix::net::UnixStream::connect(uds).expect("connect vsock");
+    s.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+    s.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
+    write!(s, "CONNECT {port}\n").unwrap();
+    s.flush().unwrap();
+    let mut reader = BufReader::new(s.try_clone().unwrap());
+    let mut hs = String::new();
+    reader.read_line(&mut hs).unwrap();
+    assert!(hs.starts_with("OK"), "vsock CONNECT: {hs:?}");
+    let mut out = Vec::new();
+    for req in requests {
+        writeln!(s, "{req}").unwrap();
+        s.flush().unwrap();
+        let mut resp = String::new();
+        reader.read_line(&mut resp).unwrap();
+        out.push(resp.trim().to_string());
+    }
+    out
+}
+
+/// Recursively scan every file under `roots` for the raw `secret` bytes.
+fn scan_for_secret(roots: &[std::path::PathBuf], secret: &[u8]) -> Vec<String> {
+    fn walk(p: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if p.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(p) {
+                for e in rd.flatten() {
+                    walk(&e.path(), out);
+                }
+            }
+        } else {
+            out.push(p.to_path_buf());
+        }
+    }
+    let mut files = Vec::new();
+    for r in roots {
+        walk(r, &mut files);
+    }
+    let mut hits = Vec::new();
+    for f in files {
+        if let Ok(bytes) = std::fs::read(&f)
+            && bytes.windows(secret.len()).any(|w| w == secret)
+        {
+            hits.push(f.display().to_string());
+        }
+    }
+    hits
+}
+
+/// PR C: the full live path — a secret-backed capsule restores from a secret-free
+/// snapshot, receives its binding over vsock, becomes bound-ready, /health passes ONLY
+/// after binding, stop-scrubs, and the secret never touches any host artifact.
+#[test]
+#[ignore]
+fn fc_kvm_binding_lease_live_e2e() {
+    if !FirecrackerBackend::kvm_present() { eprintln!("SKIP: no kvm"); return; }
+    let rootfs = match std::env::var("ATO_FC_BINDING_ROOTFS") {
+        Ok(p) if !p.is_empty() => std::fs::read(p).expect("read ATO_FC_BINDING_ROOTFS"),
+        _ => { eprintln!("SKIP: ATO_FC_BINDING_ROOTFS not set"); return; }
+    };
+    let b = FirecrackerBackend::new();
+    if !b.probe().available { eprintln!("SKIP: fc unavailable"); return; }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let secret = "sk-LIVE-BINDING-SECRET-9f3a2b";
+
+    // 1-2. Build + seal PRE-BIND (secret-free). The BUILD readiness probe is `/ready`
+    // (always 200 once booted); the binding-required `/health` is gated on the binding
+    // which is absent pre-bind, so the snapshot is taken at boot-ready (unbound).
+    let input = BuildReadyStateInput {
+        store: &store,
+        capsule_manifest_hash: "blake3:fc-kvm-test".to_string(),
+        runner_class: None,
+        layers: BuildLayers { rootfs, runtime: None, dependency: None, app: None, vmstate: Vec::new(), memory: Vec::new() },
+        restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/ready".to_string()), expected_ready_ms: Some(5000) },
+        sanitizer_contract: SanitizerContract::default(),
+        declared_secret_markers: vec![],
+    };
+    // SAFETY: KVM suite runs --test-threads=1; var removed before returning.
+    unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };
+    let build = b.build_ready_state(input);
+    let m = match build { Ok(r) => r.manifest, Err(e) => { unsafe { std::env::remove_var("ATO_FC_VSOCK") }; panic!("build: {e}") } };
+    let manifest_json = serde_json::to_string(&m).unwrap();
+
+    // 3. Restore (traffic not yet meaningfully exposed — /health fails pre-bind).
+    let overlay = dir.path().join("ov");
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
+    unsafe { std::env::remove_var("ATO_FC_VSOCK") };
+    let r = r.expect("restore");
+    let uds = r.session.vsock_uds.clone().expect("vsock uds");
+    let port = r.session.guest_port.unwrap_or(8080);
+    let gip = FirecrackerConfig::default().guest_ip;
+
+    // 4-... pre-bind: /health must NOT be healthy, agent must NOT be bound-ready.
+    let pre = http_get(&gip, port, "/health");
+    assert!(!pre.contains("ok"), "pre-bind /health must fail (got {pre:?})");
+    let ready0 = vsock_exchange(&uds, 1025, &["{\"kind\":\"query_bound_ready\"}".into()]);
+    assert!(ready0[0].contains("\"ready\":false"), "pre-bind not bound-ready: {ready0:?}");
+
+    // 5. Deliver the BindingLease over vsock — the ONLY value-bearing message.
+    let lease = protocol::binding_lease::BindingLease::issue(
+        protocol::binding_lease::BindingLeaseId::new("lease-e2e"),
+        protocol::binding_lease::BindingName::parse("api_key").unwrap(),
+        protocol::binding_lease::SecretValue::new(secret),
+        0,
+        100_000_000_000_000,
+    );
+    let deliver = serde_json::to_string(&protocol::binding_control::HostToAgent::Deliver(lease.to_delivery())).unwrap();
+    let acks = vsock_exchange(&uds, 1025, &[deliver, "{\"kind\":\"query_bound_ready\"}".into()]);
+    assert!(acks[0].contains("\"kind\":\"ack\""), "deliver ack: {acks:?}");
+    assert!(acks[1].contains("\"ready\":true"), "bound-ready after delivery: {acks:?}");
+
+    // 6. Post-bind: /health passes (poll — the app reads the binding file per request).
+    let mut healthy = false;
+    for _ in 0..20 {
+        if http_get(&gip, port, "/health").contains("ok") { healthy = true; break; }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(healthy, "post-bind /health must reach ok");
+    eprintln!("### PRC-BOUND health=ok after binding delivery");
+
+    // 8. No-secret scan: the delivered secret must NOT appear in ANY host artifact —
+    // CAS, manifest, materialized rootfs/vmstate/mem, overlay.
+    let work = std::path::PathBuf::from(std::env::var("ATO_FC_WORK").unwrap_or_else(|_| "/tmp/ato-fc".into()));
+    let mut roots = vec![dir.path().join("cas"), work.clone(), overlay.clone()];
+    roots.retain(|p| p.exists());
+    let hits = scan_for_secret(&roots, secret.as_bytes());
+    assert!(hits.is_empty(), "SECRET LEAKED into host artifacts: {hits:?}");
+    assert!(!manifest_json.contains(secret), "secret in manifest JSON");
+    eprintln!("### PRC-NOSECRET host artifacts clean (scanned {} roots)", roots.len());
+
+    // 7. Stop-scrub over vsock, then teardown.
+    let scrub = vsock_exchange(&uds, 1025, &["{\"kind\":\"stop\"}".into()]);
+    eprintln!("### PRC-STOP scrub resp={scrub:?}");
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+    // Overlay gone ⇒ any tmpfs binding went with the VM; re-scan the surviving roots.
+    let after: Vec<std::path::PathBuf> = [dir.path().join("cas"), work].into_iter().filter(|p| p.exists()).collect();
+    assert!(scan_for_secret(&after, secret.as_bytes()).is_empty(), "secret in host artifacts after stop");
+    eprintln!("### PRC-E2E-DONE bound=true nosecret=true teardown=clean");
+}
