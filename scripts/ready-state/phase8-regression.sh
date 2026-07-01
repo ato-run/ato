@@ -41,14 +41,14 @@ run_test() {
 echo "[phase8-regression] live E2E …";      E2E=$(run_test fc_kvm_binding_lease_live_e2e)
 echo "[phase8-regression] negative paths …"; NEG=$(run_test fc_kvm_binding_negative_paths)
 
-# ── orphan check (after the runs) ──────────────────────────────────────────────
-sudo pkill -9 firecracker 2>/dev/null; sleep 1
-ORPH_FC=$(pgrep -af "firecracker --api-sock" 2>/dev/null | grep -c . || echo 0)
+# ── orphan check: count leaks BEFORE cleaning up (wc -l always yields a number) ──
+ORPH_FC=$(pgrep -af "firecracker --api-sock" 2>/dev/null | wc -l | tr -d ' ')
 ORPH_TAP=$(ip link show fctap0 >/dev/null 2>&1 && echo 1 || echo 0)
-ORPH_VSOCK=$(ls /tmp/ato-vsock/*.sock 2>/dev/null | grep -c . || echo 0)
-ORPH_OVERLAY=$(ls -d "$WORK" 2>/dev/null | grep -c . || echo 0)
+ORPH_VSOCK=$(ls /tmp/ato-vsock/*.sock 2>/dev/null | wc -l | tr -d ' ')
+ORPH_OVERLAY=0  # per-test overlays are tempdirs, asserted clean by the tests themselves
+sudo pkill -9 firecracker 2>/dev/null; sudo rm -rf /tmp/ato-vsock 2>/dev/null
 
-PASS=$([ "$E2E" = pass ] && [ "$NEG" = pass ] && [ "$ORPH_FC" = 0 ] && [ "$ORPH_TAP" = 0 ] && [ "$ORPH_VSOCK" = 0 ] && echo true || echo false)
+PASS=$([ "$E2E" = pass ] && [ "$NEG" = pass ] && [ "$ORPH_FC" -eq 0 ] && [ "$ORPH_TAP" -eq 0 ] && [ "$ORPH_VSOCK" -eq 0 ] && echo true || echo false)
 
 jq -n --arg e2e "$E2E" --arg neg "$NEG" --arg fcv "$FCV" --arg gk "$GK" --arg rootfs "$ROOTFS_ID" \
   --argjson kvm "$KVM" --argjson vhost "$VHOST" --arg kernel "$(uname -r)" \
