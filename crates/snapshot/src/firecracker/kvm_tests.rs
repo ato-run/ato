@@ -775,7 +775,7 @@ fn vsock_query_bound_ready(uds: &std::path::Path, port: u32) -> String {
     let mut s = std::os::unix::net::UnixStream::connect(uds).expect("connect vsock uds");
     s.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
     s.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
-    write!(s, "CONNECT {port}\n").unwrap();
+    writeln!(s, "CONNECT {port}").unwrap();
     s.flush().unwrap();
     let mut reader = BufReader::new(s.try_clone().unwrap());
     let mut line = String::new();
@@ -830,7 +830,7 @@ fn vsock_exchange(uds: &std::path::Path, port: u32, requests: &[String]) -> Vec<
     let mut s = std::os::unix::net::UnixStream::connect(uds).expect("connect vsock");
     s.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
     s.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
-    write!(s, "CONNECT {port}\n").unwrap();
+    writeln!(s, "CONNECT {port}").unwrap();
     s.flush().unwrap();
     let mut reader = BufReader::new(s.try_clone().unwrap());
     let mut hs = String::new();
@@ -847,32 +847,11 @@ fn vsock_exchange(uds: &std::path::Path, port: u32, requests: &[String]) -> Vec<
     out
 }
 
-/// Recursively scan every file under `roots` for the raw `secret` bytes.
+/// Scan every file under `roots` for the raw `secret` bytes, via the reusable L4
+/// scanner (`crate::no_secret_scan`). Returns the hit paths.
 fn scan_for_secret(roots: &[std::path::PathBuf], secret: &[u8]) -> Vec<String> {
-    fn walk(p: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        if p.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(p) {
-                for e in rd.flatten() {
-                    walk(&e.path(), out);
-                }
-            }
-        } else {
-            out.push(p.to_path_buf());
-        }
-    }
-    let mut files = Vec::new();
-    for r in roots {
-        walk(r, &mut files);
-    }
-    let mut hits = Vec::new();
-    for f in files {
-        if let Ok(bytes) = std::fs::read(&f)
-            && bytes.windows(secret.len()).any(|w| w == secret)
-        {
-            hits.push(f.display().to_string());
-        }
-    }
-    hits
+    let targets = crate::no_secret_scan::ScanTargets { extra: roots.to_vec(), ..Default::default() };
+    crate::no_secret_scan::scan(&targets, &[secret]).hits.into_iter().map(|h| h.path).collect()
 }
 
 /// PR C: the full live path — a secret-backed capsule restores from a secret-free
