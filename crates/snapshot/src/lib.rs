@@ -35,6 +35,7 @@ mod kata;
 mod scan_cache;
 mod seal;
 mod manifest;
+pub mod mem_backend_selector;
 mod placement;
 mod qemu;
 mod scanner;
