@@ -143,7 +143,7 @@ fn run_mode(
         if mode != "file-warm" { clear_mem_cache(); }
         let ov = dir.join(format!("ov-{mode}-{i}"));
         let t = Instant::now();
-        let r = backend.restore(RestoreReadyStateInput { store, manifest: manifest.clone(), overlay_root: ov.clone(), host_runner_class: None });
+        let r = backend.restore(RestoreReadyStateInput { store, manifest: manifest.clone(), overlay_root: ov.clone(), host_runner_class: None, uffd_preview: false });
         let total = t.elapsed().as_secs_f64() * 1000.0;
         match r {
             Ok(r) => {
@@ -207,7 +207,7 @@ fn main() {
     clear_mem_cache();
     let prof_ov = dir.join("ov-profile");
     let mut has_profile = false;
-    if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: prof_ov.clone(), host_runner_class: None }) {
+    if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: prof_ov.clone(), host_runner_class: None, uffd_preview: false }) {
         has_profile = build_hotset_profile(&prof_ov, &profile_path);
         let _ = backend.stop(r.session);
     }
@@ -229,7 +229,7 @@ fn main() {
         } else if mode == "file-warm" {
             // prime the cache once, then warm runs.
             clear_mem_cache();
-            if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: dir.join("ov-warm-prime"), host_runner_class: None }) { let _ = backend.stop(r.session); }
+            if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: dir.join("ov-warm-prime"), host_runner_class: None, uffd_preview: false }) { let _ = backend.stop(r.session); }
             run_mode(&backend, &store, &manifest, mode, args.iterations, &dir, None)
         } else {
             run_mode(&backend, &store, &manifest, mode, args.iterations, &dir, if has_profile { Some(profile_path.as_path()) } else { None })
