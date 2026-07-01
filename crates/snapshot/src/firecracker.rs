@@ -431,7 +431,7 @@ fn verify_hash_enabled() -> bool {
 /// (U2, fault-around 2 MiB). Unset / `0` / `file` → File backend (default,
 /// unchanged). Exercised only by the `#[ignore]`d KVM smokes; never a product
 /// default.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UffdMode {
     Zero,
     Mem,
@@ -1119,6 +1119,36 @@ mod tests {
         assert!(!hotset_enabled(), "PREFETCH=rootfs does not enable memory-first");
         set("ATO_READY_STATE_HOTSET", p1.as_deref());
         set("ATO_READY_STATE_PREFETCH", p2.as_deref());
+    }
+
+    /// U7 (#874): the UFFD gate is env-only and defaults to the File backend. With
+    /// `ATO_FC_UFFD` unset, `uffd_mode()` is `None` → restore() uses the File
+    /// `mem_backend` (the default path invariant). This is the guard that keeps the
+    /// spike from leaking into the product path.
+    #[test]
+    fn uffd_mode_is_env_only_and_defaults_to_file() {
+        // SAFETY: serial within this fn; var restored at the end.
+        let prev = std::env::var("ATO_FC_UFFD").ok();
+        let set = |v: Option<&str>| unsafe {
+            match v { Some(v) => std::env::set_var("ATO_FC_UFFD", v), None => std::env::remove_var("ATO_FC_UFFD") }
+        };
+        set(None);
+        assert_eq!(uffd_mode(), None, "unset ⇒ File backend (default path)");
+        set(Some("0"));
+        assert_eq!(uffd_mode(), None, "0 ⇒ File");
+        set(Some("file"));
+        assert_eq!(uffd_mode(), None, "file ⇒ File");
+        set(Some("zero"));
+        assert_eq!(uffd_mode(), Some(UffdMode::Zero));
+        set(Some("mem"));
+        assert_eq!(uffd_mode(), Some(UffdMode::Mem));
+        set(Some("cas"));
+        assert_eq!(uffd_mode(), Some(UffdMode::Cas));
+        set(Some("1"));
+        assert_eq!(uffd_mode(), Some(UffdMode::Cas));
+        set(Some("garbage"));
+        assert_eq!(uffd_mode(), None, "unknown token ⇒ File (fail safe to default)");
+        set(prev.as_deref());
     }
 
     #[test]
