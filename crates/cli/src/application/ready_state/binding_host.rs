@@ -9,6 +9,59 @@
 use anyhow::{Context, Result, bail};
 use protocol::binding_control::{AgentToHost, HostToAgent};
 use protocol::binding_lease::BindingLease;
+use serde::Serialize;
+
+/// Phase 8a-RunGate PR D1 (#912): the run-path binding-preview receipt. Records the
+/// decision + outcome for a binding-required Ready-State run — **names and statuses
+/// only, NEVER values** (the secret is delivered over vsock and lives only in guest
+/// tmpfs). D1 fills the decision fields (no live delivery); D2/D3 fill
+/// `binding_delivery_attempted` / `bound_ready` / `traffic_exposed_after_bound_ready`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BindingPreviewReceipt {
+    pub binding_preview_enabled: bool,
+    pub bindings_required: bool,
+    /// Declared binding NAMES only (never values).
+    pub binding_names: Vec<String>,
+    pub binding_delivery_attempted: bool,
+    pub bound_ready: bool,
+    pub traffic_exposed_after_bound_ready: bool,
+    pub binding_failure_reason: Option<String>,
+}
+
+impl BindingPreviewReceipt {
+    /// The D1 decision: is the preview enabled, does the capsule require bindings, and
+    /// which names — with delivery not yet attempted.
+    pub(crate) fn decide(preview_enabled: bool, required_names: Vec<String>) -> Self {
+        BindingPreviewReceipt {
+            binding_preview_enabled: preview_enabled,
+            bindings_required: !required_names.is_empty(),
+            binding_names: required_names,
+            binding_delivery_attempted: false,
+            bound_ready: false,
+            traffic_exposed_after_bound_ready: false,
+            binding_failure_reason: None,
+        }
+    }
+
+    /// Record the receipt: write `<out_dir>/binding-preview.json` (names only) + a
+    /// structured log line. Best-effort; never fails the run.
+    pub(crate) fn record(&self, out_dir: &std::path::Path) {
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::create_dir_all(out_dir);
+            let _ = std::fs::write(out_dir.join("binding-preview.json"), json);
+        }
+        tracing::info!(
+            target: "ato::ready_state",
+            preview = self.binding_preview_enabled,
+            bindings_required = self.bindings_required,
+            names = ?self.binding_names,
+            delivery_attempted = self.binding_delivery_attempted,
+            bound_ready = self.bound_ready,
+            reason = ?self.binding_failure_reason,
+            "READY-STATE binding preview"
+        );
+    }
+}
 
 /// The host's request/response channel to the guest-agent (vsock in production; an
 /// in-process mock in tests).
@@ -278,6 +331,22 @@ mod tests {
         // 4. stop-scrub wipes tmpfs.
         stop_scrub(&mut ch).unwrap();
         assert!(!dir.path().join("db_url").exists(), "tmpfs scrubbed after stop");
+    }
+
+    #[test]
+    fn binding_preview_receipt_records_names_only_never_values() {
+        let r = BindingPreviewReceipt::decide(true, vec!["api_key".into(), "db_url".into()]);
+        assert!(r.binding_preview_enabled && r.bindings_required);
+        assert_eq!(r.binding_names, vec!["api_key".to_string(), "db_url".to_string()]);
+        assert!(!r.binding_delivery_attempted && !r.bound_ready);
+        // no value fields exist on the receipt at all — serialize + confirm it is
+        // names/flags only.
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("binding_names") && json.contains("api_key"));
+        assert!(!json.contains("value"), "receipt must never carry a value: {json}");
+        // no-binding capsule ⇒ not required.
+        let none = BindingPreviewReceipt::decide(true, vec![]);
+        assert!(!none.bindings_required);
     }
 
     #[test]

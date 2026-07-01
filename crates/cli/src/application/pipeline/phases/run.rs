@@ -3757,6 +3757,18 @@ where
         let rs_hash = ready_state::capsule_manifest_hash(&rs_raw)?;
         let rs_root = ready_state::state_root();
         if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
+            // Phase 8a-RunGate PR D1 (#912): record the binding-preview decision (names
+            // only, never values). D1 is plumbing only — no live delivery, no change to
+            // the fail-closed behavior below; D2 wires bind-before-expose under the flag.
+            {
+                let req = ready_state::bindings::requires_runtime_bindings(&rs_manifest);
+                let names: Vec<String> = req.secrets.iter().chain(req.bindings.iter()).chain(req.external.iter()).cloned().collect();
+                let receipt = ready_state::binding_host::BindingPreviewReceipt::decide(
+                    ready_state::flags::bindings_preview_enabled(),
+                    names,
+                );
+                receipt.record(&capsule::common::paths::ato_path_or_workspace_tmp("run"));
+            }
             // Fail closed BEFORE any restore/expose if the capsule requires runtime
             // bindings (BindingLease injection is not wired yet — a restored session
             // would serve without its credentials). The artifact stays pre-bind /
