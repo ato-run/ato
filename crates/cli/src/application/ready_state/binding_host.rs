@@ -47,6 +47,23 @@ pub(crate) fn establish_bindings(
     bail!("bound-ready gate not satisfied; pending bindings: {last_pending:?}");
 }
 
+/// PR 6: the **"post-bind state is dirty"** hard invariant (contract §"Hard
+/// invariants"). Once ANY binding lease has been attached, the session/VM is **dirty**:
+/// its memory and tmpfs may carry the secret, so **no** post-bind snapshot / checkpoint
+/// / re-seal is ever allowed — a Ready-State seal must always come from a *pre-bind*
+/// boot. This guard fails closed on any such attempt. Bindings live only in the
+/// session; the on-disk artifact stays pre-bind + secret-free (#831/#834).
+pub(crate) fn ensure_pre_bind_before_seal(session_is_bound: bool) -> Result<()> {
+    if session_is_bound {
+        bail!(
+            "refusing to seal/snapshot a BOUND session: post-bind state is dirty (a lease may \
+             live in VM memory or tmpfs). A Ready-State seal must come from a pre-bind boot — \
+             never re-seal after binding."
+        );
+    }
+    Ok(())
+}
+
 /// PR 5: revoke a single lease by id — the agent scrubs that binding's tmpfs file
 /// immediately (e.g. a TTL that was not renewed). Returns the agent's `Scrubbed` ack.
 #[allow(dead_code)] // wired into lease renewal in a later PR
@@ -165,5 +182,15 @@ mod tests {
         stop_scrub(&mut ch).unwrap();
         assert!(!dir.path().join("db_url").exists(), "stop-scrub wiped db_url");
         assert!(!dir.path().join("api_key").exists(), "stop-scrub wiped api_key");
+    }
+
+    #[test]
+    fn sealing_a_bound_session_is_refused() {
+        // Pre-bind boot ⇒ allowed (this is how every seal is produced).
+        assert!(ensure_pre_bind_before_seal(false).is_ok());
+        // Bound session ⇒ refused (post-bind state is dirty, never re-seal).
+        let err = ensure_pre_bind_before_seal(true).unwrap_err().to_string();
+        assert!(err.contains("post-bind state is dirty"), "{err}");
+        assert!(err.to_lowercase().contains("never re-seal"), "{err}");
     }
 }
