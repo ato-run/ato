@@ -117,6 +117,13 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
         .filter(|c| !c.trim().is_empty())
         .ok_or("capsule default target has no run command")?;
     let build_cmd = target.build_command.clone().filter(|c| !c.trim().is_empty());
+    // Manifest commands must be single-line + NUL-free: they are embedded (single-quoted)
+    // into a generated Dockerfile/init, and a newline could break out of the quoting or the
+    // heredoc delimiter. A NUL can't survive the shell either. Fail closed.
+    reject_control_chars("run command", &start_cmd)?;
+    if let Some(b) = &build_cmd {
+        reject_control_chars("build command", b)?;
+    }
 
     // Runtime detection: prefer the explicit driver/language on the target, fall back to
     // the source probe. Only static web + node source + python source are supported (v1).
@@ -284,16 +291,40 @@ pub fn build_rootfs(source_dir: &Path, spec: &RootfsBuildSpec, out_ext4: &Path, 
     Ok(RootfsReceipt { spec: spec.clone(), rootfs_path: out_ext4.display().to_string(), rootfs_bytes })
 }
 
+/// Reject NUL bytes and line breaks in a manifest-derived command (v1 requires a single
+/// shell command). A newline could escape the single-quoting / heredoc delimiter.
+fn reject_control_chars(label: &str, cmd: &str) -> Result<(), String> {
+    if cmd.contains('\0') {
+        return Err(format!("{label} contains a NUL byte"));
+    }
+    if cmd.contains('\n') || cmd.contains('\r') {
+        return Err(format!("{label} contains a newline (v1 requires a single-line command)"));
+    }
+    Ok(())
+}
+
+/// Wrap `s` as a single POSIX-shell single-quoted argument (`abc'def` → `'abc'\''def'`),
+/// so a manifest-derived command is passed as ONE literal argument to `/bin/sh -lc`,
+/// never re-parsed. Combined with quoted heredocs, capsule commands can never be expanded
+/// by the builder-host shell.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// The bash pipeline that turns the app image into a read-only-bootable ext4. Assembles a
 /// Docker image (base + copy source + install + build), exports its filesystem, packs it
-/// into a fresh ext4, and installs an init that execs the capsule's start command (which
+/// into a fresh ext4, and installs an init that runs the capsule's start command (which
 /// serves the port + healthcheck). Kept as a reviewable string; env: ATO_SRC, ATO_OUT.
+///
+/// Security: the Dockerfile and init are written with **quoted** heredocs (`<<'DOCKER'`,
+/// `<<'INIT'`) so the builder-host shell performs NO expansion of their bodies, and the
+/// manifest-derived install/build/start commands are embedded as single-quoted arguments
+/// to `/bin/sh -lc`. So a capsule command containing `$(...)`/backticks runs only inside
+/// Docker's RUN (build) or the guest init (start) — never on the builder host.
 fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> String {
-    let install = spec.install_cmd.clone().unwrap_or_else(|| "true".into());
-    let build = spec.build_cmd.clone().unwrap_or_else(|| "true".into());
-    // The init execs the capsule start command as the whole userspace (like store_bench's
-    // rootfs). start_cmd serves both the app port and the healthcheck path.
-    let start = spec.start_cmd.replace('\'', "'\\''");
+    let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
+    let build_q = shell_single_quote(spec.build_cmd.as_deref().unwrap_or("true"));
+    let start_q = shell_single_quote(&spec.start_cmd);
     format!(
         r#"set -euo pipefail
 TAG="ato-rootfs-$$"
@@ -311,12 +342,13 @@ cleanup() {{
 }}
 trap cleanup EXIT
 cp -a "$ATO_SRC/." "$BUILD/"
-cat > "$BUILD/Dockerfile" <<DOCKER
+# QUOTED heredoc: no host expansion; commands run inside Docker RUN via sh -lc '<literal>'.
+cat > "$BUILD/Dockerfile" <<'DOCKER'
 FROM {base}
 WORKDIR /app
 COPY . /app
-RUN {install}
-RUN {build}
+RUN /bin/sh -lc {install_q}
+RUN /bin/sh -lc {build_q}
 DOCKER
 docker build -q -t "$TAG" "$BUILD" >/dev/null
 CID=$(docker create "$TAG")
@@ -325,9 +357,10 @@ docker export "$CID" | tar -x -C "$BUILD/rootfs"
 docker rm -f "$CID" >/dev/null; CID=""
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
-# (serves port {port} + healthcheck {hc}) and keep PID 1 alive.
+# (serves port {port} + healthcheck {hc}) and keep PID 1 alive. QUOTED heredoc: the
+# start command runs only in the GUEST via sh -lc '<literal>'.
 rm -f "$BUILD/rootfs/sbin/init"
-cat > "$BUILD/rootfs/sbin/init" <<INIT
+cat > "$BUILD/rootfs/sbin/init" <<'INIT'
 #!/bin/sh
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
@@ -338,7 +371,7 @@ mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
 cd /app
-( {start} ) >/tmp/app.log 2>&1 &
+/bin/sh -lc {start_q} >/tmp/app.log 2>&1 &
 while true; do sleep 1000; done
 INIT
 chmod +x "$BUILD/rootfs/sbin/init"
@@ -352,9 +385,9 @@ sync; umount "$MNT"
 # MNT/BUILD are removed by the EXIT trap (also on any failure above).
 "#,
         base = spec.base_image,
-        install = install,
-        build = build,
-        start = start,
+        install_q = install_q,
+        build_q = build_q,
+        start_q = start_q,
         port = spec.port,
         hc = spec.healthcheck,
         size = size_mib,
@@ -514,5 +547,43 @@ readiness_probe = { http_get = "/health" }
         let script = build_rootfs_script(&spec, 512);
         assert!(script.contains("trap cleanup EXIT"), "script must install an EXIT cleanup trap");
         assert!(script.contains("docker rm -f") && script.contains("docker rmi -f") && script.contains("umount"), "cleanup must reap container/image/mount");
+    }
+
+    #[test]
+    fn manifest_commands_cannot_expand_on_the_builder_host() {
+        // A malicious build/run command with a command substitution.
+        let evil = "echo $(touch /tmp/ato-host-pwned)";
+        let spec = RootfsBuildSpec {
+            runtime: RuntimeKind::Python,
+            base_image: "python:3.11-slim".into(),
+            install_cmd: Some("true".into()),
+            build_cmd: Some(evil.into()),
+            start_cmd: evil.into(),
+            port: 8080,
+            healthcheck: "/health".into(),
+        };
+        let script = build_rootfs_script(&spec, 512);
+        // Heredocs are QUOTED ⇒ the builder host performs no expansion of their bodies.
+        assert!(script.contains("<<'DOCKER'") && script.contains("<<'INIT'"), "heredocs must be quoted");
+        // The command appears as a single-quoted argument to sh -lc (Docker RUN + guest init),
+        // never as a bare host-shell token.
+        assert!(script.contains("RUN /bin/sh -lc 'echo $(touch /tmp/ato-host-pwned)'"), "build cmd must be a single-quoted Docker RUN arg");
+        assert!(script.contains("/bin/sh -lc 'echo $(touch /tmp/ato-host-pwned)' >/tmp/app.log"), "start cmd must be a single-quoted guest-init arg");
+        // And there is no UNquoted occurrence that the host would expand.
+        assert!(!script.contains("( echo $(touch"), "must not embed the command raw");
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quotes() {
+        assert_eq!(shell_single_quote("abc"), "'abc'");
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
+        // A closing-quote injection attempt stays inside one quoted argument.
+        assert_eq!(shell_single_quote("'; rm -rf /"), "''\\''; rm -rf /'");
+    }
+
+    #[test]
+    fn newline_or_nul_in_a_command_fails_closed() {
+        let nl = base_toml().replace("run = \"python3 app.py\"", "run = \"python3 app.py\\nrm -rf /\"");
+        assert!(derive_build_spec(&parse(&nl), &probe_python()).unwrap_err().contains("newline"));
     }
 }
