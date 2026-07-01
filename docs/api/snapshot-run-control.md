@@ -330,3 +330,24 @@ PWA) · E (#901 Desktop) · F (#902 snapshotization) · G (#903 E2E). D can buil
 against a stubbed API from day one. Recommended PR order: schema+read-model →
 enqueue → builder MVP → run-control MVP → managed restore → PWA UI → desktop →
 allowlist snapshotization → E2E smoke.
+
+## 11. Reconciliation with existing ato-api run infrastructure
+
+ato-api already owns a run model + control plane from the managed-cloud work.
+Snapshot-run **extends** it — it does **not** fork a parallel run system:
+
+- **`runs` table + `/v1/runs`** (existing) are reused. Snapshot-run adds *additive*
+  columns: `snapshot_id`, `selected_mem_backend`, `idempotency_key`, and the
+  desktop handoff fields (`handoff_url`, `desktop_session_id`, `unsupported_reason`).
+  The contract's `queued/dispatching/restoring/ready/failed/stopped` map onto the
+  existing `runs.status` vocabulary (extend the enum; don't replace it).
+- **Runner dispatch** reuses the existing `runners` / `runner-leases` / Cloud
+  Slots infrastructure — Track C adds **no** new dispatcher.
+- **Only new tables:** `capsule_snapshot_jobs` and `capsule_snapshots` (Ready-State
+  *sealed artifacts*). These are **distinct from `source_snapshots`** (source
+  materialization) — do not conflate the two.
+- The Store `capsules` listing gains *additive* read-model fields; the `capsules`
+  table is not forked.
+
+So §3/§6's `runs` shape describes the **columns snapshot-run relies on**, realized
+as additive columns on the existing `runs` table, not a new table.
