@@ -73,6 +73,7 @@ mod tests {
             overlay_root: std::path::PathBuf::from("/tmp/ov"),
             restored_bytes: 123,
             vmm_pid: None,
+            vsock_uds: None,
         }
     }
 

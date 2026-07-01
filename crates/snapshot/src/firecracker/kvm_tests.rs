@@ -765,3 +765,56 @@ fn http_req(ip: &str, port: u16, method: &str, path: &str, body: Option<&str>) -
     let _ = s.read_to_string(&mut resp);
     resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
 }
+
+// ── Phase 8a-HW PR B (#912): Firecracker vsock ↔ guest-agent connection smoke ──────
+// Requires ATO_FC_AGENT_ROOTFS: a rootfs that serves /health AND launches
+// ato-guest-agent in vsock mode at boot. Set ATO_FC_VSOCK=1 is done by the test.
+
+fn vsock_query_bound_ready(uds: &std::path::Path, port: u32) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let mut s = std::os::unix::net::UnixStream::connect(uds).expect("connect vsock uds");
+    s.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+    s.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
+    write!(s, "CONNECT {port}\n").unwrap();
+    s.flush().unwrap();
+    let mut reader = BufReader::new(s.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.starts_with("OK"), "vsock CONNECT handshake: {line:?}");
+    writeln!(s, "{{\"kind\":\"query_bound_ready\"}}").unwrap();
+    s.flush().unwrap();
+    let mut resp = String::new();
+    reader.read_line(&mut resp).unwrap();
+    resp
+}
+
+/// PR B connection smoke: a restored microVM's guest-agent is reachable over
+/// Firecracker vsock, and `QueryBoundReady` returns `ready=true` for a no-binding
+/// session. Proves the host↔guest-agent vsock path survives snapshot/restore.
+#[test]
+#[ignore]
+fn fc_kvm_vsock_agent_connects_after_restore() {
+    if !FirecrackerBackend::kvm_present() { eprintln!("SKIP: no kvm"); return; }
+    let rootfs = match std::env::var("ATO_FC_AGENT_ROOTFS") {
+        Ok(p) if !p.is_empty() => std::fs::read(p).expect("read ATO_FC_AGENT_ROOTFS"),
+        _ => { eprintln!("SKIP: ATO_FC_AGENT_ROOTFS not set"); return; }
+    };
+    let b = FirecrackerBackend::new();
+    if !b.probe().available { eprintln!("SKIP: fc unavailable"); return; }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    // SAFETY: KVM suite runs --test-threads=1; var removed before returning.
+    unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };
+    let build = b.build_ready_state(build_input(&store, rootfs, vec![]));
+    let m = match build { Ok(r) => r.manifest, Err(e) => { unsafe { std::env::remove_var("ATO_FC_VSOCK") }; panic!("build: {e}") } };
+    let overlay = dir.path().join("ov");
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
+    unsafe { std::env::remove_var("ATO_FC_VSOCK") };
+    let r = r.expect("restore (vsock)");
+    let uds = r.session.vsock_uds.clone().expect("restored session exposes vsock uds");
+    let resp = vsock_query_bound_ready(&uds, 1025);
+    eprintln!("### PRB-VSOCK resp={resp}");
+    assert!(resp.contains("\"ready\":true"), "no-binding session must be bound-ready: {resp}");
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
