@@ -3765,8 +3765,14 @@ where
             let binding_names: Vec<String> = binding_req.secrets.iter().chain(binding_req.bindings.iter()).chain(binding_req.external.iter()).cloned().collect();
             let binding_preview = ready_state::flags::bindings_preview_enabled();
             let binding_gate_active = binding_preview && !binding_names.is_empty();
-            ready_state::binding_host::BindingPreviewReceipt::decide(binding_preview, binding_names.clone())
-                .record(&capsule::common::paths::ato_path_or_workspace_tmp("run"));
+            {
+                let mut receipt = ready_state::binding_host::BindingPreviewReceipt::decide(binding_preview, binding_names.clone());
+                if binding_gate_active {
+                    use ready_state::secret_resolver::SecretResolver;
+                    receipt.resolver_kind = Some(ready_state::secret_resolver::EnvSecretResolver.kind().to_string());
+                }
+                receipt.record(&capsule::common::paths::ato_path_or_workspace_tmp("run"));
+            }
             if !binding_gate_active {
                 // flag off, OR no bindings required → unchanged: the #837 guard
                 // fail-closes any binding-required capsule before restore.
@@ -3919,7 +3925,7 @@ where
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    let leases = ready_state::binding_host::resolve_binding_leases(&binding_names, now_ms, 3_600_000)?;
+                    let leases = ready_state::binding_host::resolve_binding_leases(&ready_state::secret_resolver::EnvSecretResolver, &binding_names, now_ms, 3_600_000)?;
                     ready_state::binding_host::bind_before_expose(uds, &leases, std::time::Duration::from_secs(10))
                 })();
                 if let Err(e) = bind {
